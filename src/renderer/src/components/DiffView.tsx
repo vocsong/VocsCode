@@ -1,3 +1,4 @@
+/** Renders a unified diff with per-file revert and commit actions. */
 import React, { useMemo, useState } from 'react';
 import { parseUnifiedDiff, type DiffFile } from '../../../shared/diff-parse';
 import { Icon } from './ui';

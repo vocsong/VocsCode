@@ -1,3 +1,4 @@
+/** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type {
   ApprovalDecision,
   AppSettings,

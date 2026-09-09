@@ -1,3 +1,4 @@
+/** Settings screen: harness detection and install, runtimes, providers and API keys. */
 import React, { useEffect, useState } from 'react';
 import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig } from '../../../shared/types';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';

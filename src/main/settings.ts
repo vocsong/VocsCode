@@ -1,3 +1,4 @@
+/** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, ProviderConfig } from '../shared/types';
 import { readJson, writeJson } from './util/fs';

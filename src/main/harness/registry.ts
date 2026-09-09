@@ -1,3 +1,4 @@
+/** Maps a harness id to its adapter factory and to the model list that harness can reach. */
 import type { AppSettings, HarnessId, ModelInfo } from '../../shared/types';
 import { errorMessage } from '../util/async';
 import type { RuntimeResolver } from '../runtime';

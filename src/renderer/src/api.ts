@@ -1,3 +1,4 @@
+/** Thin typed wrapper over the preload bridge, plus platform helpers for shortcut labels. */
 import type { IpcChannel, IpcRequest, IpcResponse, PushPayloads } from '../../shared/ipc';
 
 export function invoke<K extends IpcChannel>(channel: K, request: IpcRequest<K>): Promise<IpcResponse<K>> {

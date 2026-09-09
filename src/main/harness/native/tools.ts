@@ -1,3 +1,4 @@
+/** Local tools for the native loop: bash, read, write, edit, glob and grep, each gated by the active permission mode. */
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -373,7 +374,7 @@ export async function grepTool(cwd: string, args: { pattern: string; path?: stri
     } catch {
       continue;
     }
-    if (content.includes(' ')) continue;
+    if (content.includes('\u0000')) continue;
     const lines = content.split('\n');
     for (let i = 0; i < lines.length; i++) {
       if (re.test(lines[i])) {

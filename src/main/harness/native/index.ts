@@ -1,3 +1,4 @@
+/** Built-in agent loop adapter: drives a provider directly and runs the local tool set, with approvals gated in-process. */
 import path from 'node:path';
 import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../../shared/types';
 import { errorMessage, shortId, truncate } from '../../util/async';

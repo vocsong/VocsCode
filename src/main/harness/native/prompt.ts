@@ -1,3 +1,4 @@
+/** System prompt assembly for the native loop, including any project instruction file it finds. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { detectShell } from './tools';

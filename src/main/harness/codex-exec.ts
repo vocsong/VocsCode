@@ -1,3 +1,4 @@
+/** Codex exec SDK adapter. It cannot ask for approval, so the sandbox mode is the only boundary; prefer the app-server adapter for interactive work. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Codex, type ModelReasoningEffort, type SandboxMode, type Thread, type ThreadEvent, type ThreadItem, type UserInput as CodexInput } from '@openai/codex-sdk';

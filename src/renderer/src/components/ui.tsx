@@ -1,3 +1,4 @@
+/** Shared presentational primitives: icons, buttons, badges, dropdowns, modals and toggles. */
 import React, { useEffect, useRef, useState } from 'react';
 
 const ICONS: Record<string, string> = {

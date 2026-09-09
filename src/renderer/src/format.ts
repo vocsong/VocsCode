@@ -1,3 +1,4 @@
+/** Display formatters for relative time, cost, token counts, durations and paths. */
 export function relTime(ts: number): string {
   const diff = Date.now() - ts;
   const s = Math.round(diff / 1000);

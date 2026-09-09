@@ -1,3 +1,4 @@
+/** contextBridge surface: exposes the typed harness API to the sandboxed renderer as window.harness. */
 import { contextBridge, ipcRenderer } from 'electron';
 import type { VocsCodeApi } from '../shared/ipc';
 
