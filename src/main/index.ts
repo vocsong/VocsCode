@@ -137,7 +137,9 @@ function createWindow(settings: SettingsStore): void {
   const saveBounds = () => {
     if (win.isDestroyed() || win.isMinimized()) return;
     const b = win.getBounds();
-    void settings.update({ windowBounds: { x: b.x, y: b.y, width: b.width, height: b.height } });
+    settings
+      .update({ windowBounds: { x: b.x, y: b.y, width: b.width, height: b.height } })
+      .catch((e) => log('warn', `could not save window bounds: ${e instanceof Error ? e.message : String(e)}`));
   };
   win.on('resize', debounce(saveBounds, 500));
   win.on('move', debounce(saveBounds, 500));
