@@ -1,3 +1,4 @@
+/** Owns sessions: transcripts, approvals, goals, worktrees, and resuming a session after a restart. */
 import path from 'node:path';
 import type {
   ApprovalDecision,

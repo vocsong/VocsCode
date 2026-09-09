@@ -1,3 +1,4 @@
+/** Electron entry point: app lifecycle, window creation, logging, and the headless debug hooks documented in the README. */
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Notification, app, nativeTheme, shell } from 'electron';

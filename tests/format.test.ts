@@ -4,9 +4,9 @@ import { quoteWin } from '../src/main/harness/spawn';
 
 describe('renderer format helpers', () => {
   it('basename handles Windows and POSIX separators', () => {
-    expect(basename('C:\\Users\\vocs\\code\\Vocs Code')).toBe('Vocs Code');
-    expect(basename('C:\\Users\\vocs\\code\\Vocs Code\\')).toBe('Vocs Code');
-    expect(basename('/home/vocs/code/proj')).toBe('proj');
+    expect(basename('C:\\Users\\alice\\code\\Vocs Code')).toBe('Vocs Code');
+    expect(basename('C:\\Users\\alice\\code\\Vocs Code\\')).toBe('Vocs Code');
+    expect(basename('/home/alice/code/proj')).toBe('proj');
     expect(basename('proj')).toBe('proj');
   });
   it('formats cost and tokens', () => {

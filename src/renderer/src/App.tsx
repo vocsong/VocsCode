@@ -1,3 +1,4 @@
+/** Top-level layout: sidebar, transcript, composer and the right-hand panel. */
 import React, { useEffect } from 'react';
 import { invoke } from './api';
 import { useActiveSession, useStore } from './store';

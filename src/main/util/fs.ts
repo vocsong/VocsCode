@@ -1,3 +1,4 @@
+/** Filesystem helpers shared by the main process: JSON and JSONL persistence, and path containment checks. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 

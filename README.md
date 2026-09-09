@@ -28,13 +28,24 @@ Added on top: every feature above works **across all harnesses** through one nor
   - Pi: `npm i -g @earendil-works/pi-coding-agent` (or Settings → Harnesses → Install).
   - DeepSeek Harness: `npm i -g @deepseek-ai/dsh`, or let the app run it through `npx`.
 
+## Getting started
+
+```bash
+git clone https://github.com/vocsong/Vocs-Code.git
+cd Vocs-Code
+npm install
+npm run dev
+```
+
+The app starts with no harness configured. Open **Settings -> Harnesses** to see which runtimes were detected, install the missing ones, and add an API key for any provider you want to reach directly. Keys are stored per provider in the OS keychain, never in this repository.
+
 ## Develop
 
 ```bash
 npm install
 npm run dev          # electron-vite dev server with HMR
 npm run typecheck    # main + renderer
-npm test             # unit tests (vitest)
+npm test             # offline suites: unit + format + review-fixes (21 tests, no network)
 npm run build        # bundles to out/
 npm run dist:win     # NSIS installer in dist/
 ```
@@ -55,7 +66,33 @@ HARNESS_E2E=1 npx vitest run tests/e2e.approval.test.ts
 
 Screenshots from the e2e runs land in `tests/artifacts/`. `npm run dist:win` produces `dist/Vocs-Code-<version>-win-x64.exe` (NSIS) plus `dist/win-unpacked/`.
 
-Debug hooks for headless runs: `VOCS_CODE_USER_DATA` (isolate state), `VOCS_CODE_SCREENSHOT=path.png`, `VOCS_CODE_AUTOQUIT=ms`, `VOCS_CODE_DEBUG=1` (forward renderer console to stdout).
+## Environment variables
+
+None of these are required to run the app; they exist for headless runs and the test suites.
+
+| Variable | Read by | Effect |
+| --- | --- | --- |
+| `VOCS_CODE_USER_DATA` | main process | Overrides Electron's userData directory, so a run gets isolated settings, sessions and keychain entries. |
+| `VOCS_CODE_DEBUG` | main process | `1` forwards renderer console output to stdout and keeps debug-level logs in a packaged build. |
+| `VOCS_CODE_SCREENSHOT` | main process | Writes a PNG of the window to this path once the UI has settled, then continues running. |
+| `VOCS_CODE_SCREENSHOT_DELAY` | main process | Milliseconds to wait before that screenshot. Defaults to `2500`. |
+| `VOCS_CODE_AUTOQUIT` | main process | Quits the app after this many milliseconds. Used to bound headless runs. |
+| `VOCS_CODE_PERMISSION_MODE` | pi extension | Initial permission mode handed to `resources/pi/vocs-code-approvals.ts`. Set by the app when it spawns pi. |
+| `VOCS_CODE_MODE_FILE` | pi extension | Path the extension re-reads before each approval, so mode changes mid-session take effect. Set by the app. |
+| `VOCS_CODE` | child harnesses | Set to `1` so a spawned agent can tell it is running inside this app. |
+
+Test-only switches:
+
+| Variable | Effect |
+| --- | --- |
+| `HARNESS_SMOKE=1` | Opts into `tests/smoke.live.test.ts`, which drives real runtimes. Without it the suite skips. |
+| `HARNESS_SMOKE_ONLY` | Comma-separated harness ids to exercise, for example `codex,pi,native`. |
+| `HARNESS_SMOKE_ACP_AGENT` | ACP agent preset to test. Defaults to `dsh`. |
+| `HARNESS_SMOKE_VERBOSE` | Prints every harness event during the smoke run. |
+| `HARNESS_E2E=1` | Opts into the Playwright suites, which launch the built app from `out/`. |
+| `HARNESS_E2E_HARNESS` | Which harness the e2e session uses, for example `native`. |
+
+The live suites need the corresponding runtime installed and logged in, and they spend real API credit.
 
 ## Architecture
 
@@ -69,11 +106,18 @@ src/main
     pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
     acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
+  models/         provider clients and model discovery, with offline catalogs and pricing
+  util/           fs and async helpers shared by the adapters (no Electron imports)
   session-manager.ts  sessions, transcripts, approvals, goals, worktrees
   runtime.ts      binary discovery (PATH, app runtime dir, bundled), doctor, installer
-  git.ts / shell.ts / secrets.ts / settings.ts / store.ts / ipc.ts / index.ts
+  secrets.ts      API keys encrypted at rest via Electron safeStorage
+  git.ts / shell.ts / settings.ts / store.ts / ipc.ts / index.ts
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
+  components/     sidebar, transcript, composer, diff view, settings, command palette
+  store.ts        session state; api.ts wraps the preload bridge
+resources/pi      the approvals extension loaded into pi at spawn time
+tests             unit + format + review-fixes run offline; smoke and e2e are opt-in
 ```
 
 Permission modes map per harness:
@@ -100,3 +144,7 @@ Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping c
 - Custom Codex model providers are passed as thread config overrides and were not verified against a live OpenAI-compatible endpoint.
 - ACP agents expose models only after the session starts; pick the model from the header once the agent is up.
 - The Terminal panel runs one-shot commands (no PTY).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

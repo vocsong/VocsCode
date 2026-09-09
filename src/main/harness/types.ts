@@ -1,3 +1,4 @@
+/** The adapter contract every harness implements, plus the dangerous-command patterns they all gate on. */
 import type {
   ApprovalDecision,
   ApprovalRequest,

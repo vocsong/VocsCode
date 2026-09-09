@@ -1,3 +1,4 @@
+/** Session list grouped by project, with live status badges per harness. */
 import React, { useMemo, useState } from 'react';
 import type { SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';

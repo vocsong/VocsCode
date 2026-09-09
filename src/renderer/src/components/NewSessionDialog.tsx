@@ -1,3 +1,4 @@
+/** New session dialog: project directory, harness, model, permission mode and worktree isolation. */
 import React, { useEffect, useMemo, useState } from 'react';
 import type { EffortLevel, HarnessId, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';

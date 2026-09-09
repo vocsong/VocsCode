@@ -1,3 +1,4 @@
+/** zustand store for session state, panel selection and toasts. Selectors must return stable references. */
 import { create } from 'zustand';
 import type { AppSettings, HarnessAvailability, HarnessId, ModelInfo, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
 import { invoke, on } from './api';

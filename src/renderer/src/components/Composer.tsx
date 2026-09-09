@@ -1,3 +1,4 @@
+/** Prompt input: slash commands, @file mentions, and steer-vs-queue while a turn is running. */
 import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';

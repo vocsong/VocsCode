@@ -1,3 +1,4 @@
+/** Command palette for slash commands and quick navigation. */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '../api';
 import { useStore } from '../store';

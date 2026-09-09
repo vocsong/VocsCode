@@ -1,3 +1,4 @@
+/** Markdown rendering for transcript messages, sanitized before it reaches the DOM. */
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 
