@@ -22,10 +22,12 @@ export async function readJson<T>(file: string, fallback: T): Promise<T> {
   }
 }
 
-/** Atomic JSON write: write to temp then rename. */
+let tmpCounter = 0;
+
+/** Atomic JSON write: write to temp then rename. Temp names are unique even for concurrent writes. */
 export async function writeJson(file: string, data: unknown): Promise<void> {
   await ensureDir(path.dirname(file));
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${file}.${process.pid}.${Date.now()}.${(tmpCounter = (tmpCounter + 1) % 1_000_000)}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
   await fs.rename(tmp, file);
 }

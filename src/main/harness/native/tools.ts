@@ -5,6 +5,7 @@ import { createTwoFilesPatch } from 'diff';
 import type { FileChange } from '../../../shared/types';
 import { which } from '../../runtime';
 import { truncate } from '../../util/async';
+import { killTree } from '../spawn';
 
 export interface NativeToolDef {
   name: string;
@@ -148,8 +149,12 @@ export function globToRegExp(glob: string): RegExp {
     if (c === '*') {
       if (glob[i + 1] === '*') {
         i++;
-        if (glob[i + 1] === '/') i++;
-        re += '(?:.*/)?';
+        if (i === glob.length - 1) {
+          re += '.*'; // trailing ** matches everything below
+        } else {
+          if (glob[i + 1] === '/') i++;
+          re += '(?:.*/)?';
+        }
       } else re += '[^/]*';
     } else if (c === '?') re += '[^/]';
     else if (c === '.') re += '\\.';
@@ -207,11 +212,11 @@ export async function runBash(cwd: string, command: string, timeoutMs: number, s
     child.stderr.on('data', push);
     const timer = setTimeout(() => {
       killed = true;
-      child.kill();
+      killTree(child);
     }, Math.min(Math.max(timeoutMs, 1000), 600_000));
     const onAbort = () => {
       killed = true;
-      child.kill();
+      killTree(child);
     };
     signal.addEventListener('abort', onAbort, { once: true });
     child.on('error', (e) => {

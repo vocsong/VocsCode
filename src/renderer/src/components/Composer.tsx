@@ -188,13 +188,23 @@ export function Composer({ session }: { session: SessionMeta }) {
       return;
     }
     if (e.key === 'Escape') {
-      if (busy) void invoke('sessions:interrupt', { id: session.id });
+      if (busy && !text) void invoke('sessions:interrupt', { id: session.id });
       return;
     }
-    if (e.key === 'ArrowUp' && !text && history.length) {
+    // Input history: ArrowUp walks back through earlier prompts, ArrowDown returns toward the draft.
+    const browsing = histIdx >= 0 && text === history[histIdx];
+    if (e.key === 'ArrowUp' && history.length && (!text || browsing)) {
+      e.preventDefault();
       const i = Math.min(histIdx + 1, history.length - 1);
       setHistIdx(i);
       setText(history[i]);
+      return;
+    }
+    if (e.key === 'ArrowDown' && browsing) {
+      e.preventDefault();
+      const i = histIdx - 1;
+      setHistIdx(i);
+      setText(i >= 0 ? history[i] : '');
     }
   };
 

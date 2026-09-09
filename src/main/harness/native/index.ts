@@ -56,7 +56,11 @@ export class NativeAdapter implements HarnessAdapter {
     this.started = true;
     const meta = this.ctx.session();
     const saved = await this.ctx.readJson<PersistedHistory>(HISTORY_FILE);
-    if (saved?.messages) this.history = saved.messages;
+    if (saved?.messages) {
+      this.history = saved.messages;
+      // A crash or kill mid-tool-run can leave tool calls without results, which every provider rejects.
+      if (this.repairDanglingToolCalls('The app was closed before this tool finished.')) await this.persist();
+    }
     this.model = meta.activeModel ?? meta.config.model ?? this.defaultModel();
     this.effort = this.ctx.effort();
     if (this.model) this.ctx.updateMeta({ activeModel: this.model });
@@ -186,7 +190,14 @@ export class NativeAdapter implements HarnessAdapter {
         if (info?.contextWindow) this.totals.contextWindow = info.contextWindow;
         this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
 
-        this.history.push({ role: 'assistant', text: result.text, reasoning: result.reasoning || undefined, toolCalls: result.toolCalls });
+        this.history.push({
+          role: 'assistant',
+          text: result.text,
+          reasoning: result.reasoning || undefined,
+          toolCalls: result.toolCalls,
+          anthropicContent: isAnthropicProvider(provider) ? result.rawContent : undefined,
+          anthropicModel: isAnthropicProvider(provider) ? model.model : undefined
+        });
         await this.persist();
         if (!result.toolCalls.length) break;
 
@@ -206,6 +217,8 @@ export class NativeAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'error', text: error } });
       }
     } finally {
+      // Every tool_use must be answered before the next request, even after an interrupt or error.
+      this.repairDanglingToolCalls(status === 'interrupted' ? 'Interrupted by the user before this tool ran.' : 'The tool did not run because the turn failed.');
       this.totals.turns += 1;
       this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
       this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - startedAt, costUsd: turnCost, usage: turnUsage, error } });
@@ -323,6 +336,23 @@ export class NativeAdapter implements HarnessAdapter {
     await this.ctx.writeJson(HISTORY_FILE, { version: 1, messages: this.history } satisfies PersistedHistory);
   }
 
+  /** Appends synthetic error results for tool calls that never received one. Returns true if anything changed. */
+  private repairDanglingToolCalls(reason: string): boolean {
+    let changed = false;
+    for (let i = 0; i < this.history.length; i++) {
+      const m = this.history[i];
+      if (m.role !== 'assistant' || !m.toolCalls.length) continue;
+      const answered = new Set<string>();
+      let j = i + 1;
+      for (; j < this.history.length && this.history[j].role === 'tool'; j++) answered.add((this.history[j] as { toolCallId: string }).toolCallId);
+      const missing = m.toolCalls.filter((tc) => !answered.has(tc.id));
+      if (!missing.length) continue;
+      this.history.splice(j, 0, ...missing.map((tc) => ({ role: 'tool' as const, toolCallId: tc.id, name: tc.name, content: reason, isError: true })));
+      changed = true;
+    }
+    return changed;
+  }
+
   async interrupt(): Promise<void> {
     this.abort?.abort();
   }
@@ -342,10 +372,14 @@ export class NativeAdapter implements HarnessAdapter {
   }
 
   async compact(): Promise<void> {
-    // Keep the last 12 messages verbatim and summarize the rest into a single note.
+    // Keep the last ~12 messages verbatim (cut only at a user message so tool_use/tool_result pairs stay
+    // together) and summarize the rest into a single note.
     if (this.history.length <= 14) return;
-    const keep = this.history.slice(-12);
-    const dropped = this.history.slice(0, -12);
+    let cut = this.history.length - 12;
+    while (cut > 0 && this.history[cut].role !== 'user') cut--;
+    if (cut <= 1) return;
+    const keep = this.history.slice(cut);
+    const dropped = this.history.slice(0, cut);
     const summary = dropped
       .map((m) => (m.role === 'user' ? `User: ${truncate(m.text, 300, '…')}` : m.role === 'assistant' ? `Assistant: ${truncate(m.text, 300, '…')}${m.toolCalls.length ? ` [${m.toolCalls.map((t) => t.name).join(', ')}]` : ''}` : `Tool ${m.name}: ${truncate(m.content, 120, '…')}`))
       .join('\n');

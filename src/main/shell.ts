@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { detectShell } from './harness/native/tools';
+import { killTree } from './harness/spawn';
 import { shortId } from './util/async';
 
 export interface ShellRun {
@@ -34,7 +35,7 @@ export class ShellRunner {
     const r = this.runs.get(runId);
     if (!r) return;
     try {
-      r.child.kill();
+      killTree(r.child); // the shell's children (npm, node, …) must die with it
     } catch {
       /* ignore */
     }

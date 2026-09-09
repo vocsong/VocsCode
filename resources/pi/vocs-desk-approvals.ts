@@ -7,12 +7,14 @@
  * payload prefixed with VDESK_APPROVAL:: which the desktop app renders as an
  * approval card.
  *
- * Modes (VOCS_DESK_PERMISSION_MODE):
+ * Modes (VOCS_DESK_PERMISSION_MODE, re-read from VOCS_DESK_MODE_FILE before each call):
  *   ask          -> confirm bash/edit/write
- *   accept-edits -> confirm bash only
+ *   accept-edits -> confirm bash only (and edits outside the project)
  *   plan         -> block bash/edit/write
- *   auto         -> confirm only dangerous shell commands
+ *   auto         -> confirm only dangerous shell commands and edits outside the project
  *   full-auto    -> never ask
+ *
+ * A dangerous command always prompts below full access, even after "Allow for session".
  */
 
 type Mode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-auto';
@@ -32,6 +34,7 @@ interface UiLike {
 interface CtxLike {
   ui: UiLike;
   hasUI?: boolean;
+  cwd?: string;
 }
 
 interface PiLike {
@@ -41,39 +44,61 @@ interface PiLike {
 const MARKER = 'VDESK_APPROVAL::';
 const MUTATING = new Set(['bash', 'edit', 'write']);
 const EDITS = new Set(['edit', 'write']);
+const MODES: Mode[] = ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'];
 
+/** Keep in sync with DANGEROUS_COMMAND_PATTERNS in src/main/harness/types.ts. */
 const DANGEROUS: RegExp[] = [
   /\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\b/i,
+  /\brm\s+-rf?\s+[\/~]/i,
   /\bgit\s+push\b.*(--force|-f)\b/i,
   /\bgit\s+reset\s+--hard\b/i,
   /\bgit\s+clean\s+-[a-z]*f/i,
+  /\bgit\s+checkout\s+--\s+\./i,
   /\bmkfs\b|\bdd\s+if=/i,
   /\b(shutdown|reboot|halt)\b/i,
   /\bformat\s+[a-z]:/i,
+  /\bdel\s+\/[sq]/i,
   /\bRemove-Item\b.*-Recurse/i,
-  /\bnpm\s+publish\b|\bpnpm\s+publish\b/i,
+  /\bnpm\s+publish\b|\bpnpm\s+publish\b|\byarn\s+publish\b/i,
   /\bcurl\b.*\|\s*(ba)?sh\b/i,
-  /\b(sudo|doas)\b/i
+  /\bchmod\s+-R\s+777\b/i,
+  /\b(sudo|doas)\b/i,
+  /:\(\)\s*\{\s*:\|:&\s*\};:/
 ];
 
-function readMode(): Mode {
+function isDangerous(command: string): boolean {
+  return DANGEROUS.some((re) => re.test(command));
+}
+
+function readModeFromEnv(): Mode {
   const m = (process.env.VOCS_DESK_PERMISSION_MODE ?? 'ask') as Mode;
-  return ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'].includes(m) ? m : 'ask';
+  return MODES.includes(m) ? m : 'ask';
+}
+
+function isOutsideCwd(cwd: string | undefined, target: unknown): boolean {
+  if (!cwd || typeof target !== 'string' || !target) return false;
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const isAbs = /^([a-z]:)?\//i.test(target.replace(/\\/g, '/'));
+  if (!isAbs) return target.replace(/\\/g, '/').split('/').includes('..');
+  const t = norm(target);
+  const c = norm(cwd);
+  return !(t === c || t.startsWith(c + '/'));
 }
 
 export default function vocsDeskApprovals(pi: PiLike): void {
-  let mode: Mode = readMode();
+  let mode: Mode = readModeFromEnv();
   const sessionAllowed = new Set<string>();
-
-  // The host may push a mode change as a raw stdin line; pi reports unknown commands as
-  // parse errors, so we also poll the environment file the host writes (best effort).
   const modeFile = process.env.VOCS_DESK_MODE_FILE;
+
   const refreshMode = async () => {
     if (!modeFile) return;
     try {
       const fs = await import('node:fs/promises');
       const txt = (await fs.readFile(modeFile, 'utf8')).trim() as Mode;
-      if (['ask', 'accept-edits', 'plan', 'auto', 'full-auto'].includes(txt)) mode = txt;
+      if (MODES.includes(txt)) {
+        if (txt !== mode) sessionAllowed.clear(); // grants do not survive a mode change
+        mode = txt;
+      }
     } catch {
       /* ignore */
     }
@@ -88,15 +113,17 @@ export default function vocsDeskApprovals(pi: PiLike): void {
       return { block: true, reason: 'Plan mode is active in Vocs-Desk: no file edits or shell commands. Describe the plan instead.' };
     }
     const command = typeof event.input?.command === 'string' ? (event.input.command as string) : undefined;
-    if (mode === 'auto') {
-      if (!(command && DANGEROUS.some((re) => re.test(command)))) return undefined;
+    const dangerous = !!command && isDangerous(command);
+    const outside = EDITS.has(tool) && isOutsideCwd(ctx.cwd ?? process.cwd(), event.input?.path);
+    if (!dangerous && !outside) {
+      if (mode === 'auto') return undefined;
+      if (mode === 'accept-edits' && EDITS.has(tool)) return undefined;
+      if (sessionAllowed.has(tool)) return undefined;
     }
-    if (mode === 'accept-edits' && EDITS.has(tool)) return undefined;
-    if (sessionAllowed.has(tool)) return undefined;
     if (!ctx.ui || typeof ctx.ui.select !== 'function') return undefined;
 
     const summary = command ?? (typeof event.input?.path === 'string' ? (event.input.path as string) : '');
-    const payload = JSON.stringify({ tool, input: trimInput(event.input), summary });
+    const payload = JSON.stringify({ tool, input: trimInput(event.input), summary: outside ? `${summary} (outside the project directory)` : summary });
     const choice = await ctx.ui.select(MARKER + payload, ['Allow once', 'Allow for session', 'Deny']);
     if (choice === 'Allow once') return undefined;
     if (choice === 'Allow for session') {

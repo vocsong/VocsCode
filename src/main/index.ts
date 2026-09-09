@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Notification, app, nativeTheme, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
@@ -145,11 +145,15 @@ function createWindow(settings: SettingsStore): void {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
+  // The renderer is a single page: any navigation away from it (including relative file links
+  // from rendered markdown) would leave the app unusable, so block everything but the page itself.
+  const indexUrl = pathToFileURL(path.join(here, '../renderer/index.html')).href;
   win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://') && !url.startsWith(process.env.ELECTRON_RENDERER_URL ?? 'http://localhost')) {
-      e.preventDefault();
-      void shell.openExternal(url);
-    }
+    const target = url.split('#')[0];
+    const allowed = isDev ? url.startsWith(process.env.ELECTRON_RENDERER_URL as string) : target === indexUrl;
+    if (allowed) return;
+    e.preventDefault();
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
   });
 
   if (isDev || process.env.VOCS_DESK_DEBUG) {

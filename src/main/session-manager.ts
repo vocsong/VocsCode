@@ -50,7 +50,7 @@ const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
 
 export class SessionManager {
   private active = new Map<string, ActiveSession>();
-  private persistTimer: NodeJS.Timeout | null = null;
+  private persistTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
@@ -70,13 +70,24 @@ export class SessionManager {
     this.deps.pushSessions(this.list());
   }
 
+  /** Debounced per session; a persist never resurrects a session deleted in the meantime. */
   private schedulePersist(meta: SessionMeta): void {
     meta.updatedAt = Date.now();
-    if (this.persistTimer) clearTimeout(this.persistTimer);
-    this.persistTimer = setTimeout(() => {
-      this.persistTimer = null;
-      void this.deps.store.upsert(meta);
-    }, 300);
+    const prev = this.persistTimers.get(meta.id);
+    if (prev) clearTimeout(prev);
+    this.persistTimers.set(
+      meta.id,
+      setTimeout(() => {
+        this.persistTimers.delete(meta.id);
+        if (this.deps.store.get(meta.id)) void this.deps.store.upsert(meta);
+      }, 300)
+    );
+  }
+
+  private cancelPersist(id: string): void {
+    const t = this.persistTimers.get(id);
+    if (t) clearTimeout(t);
+    this.persistTimers.delete(id);
   }
 
   async create(req: CreateSessionRequest): Promise<SessionMeta> {
@@ -137,6 +148,7 @@ export class SessionManager {
   async delete(id: string, removeWt = false): Promise<void> {
     const meta = this.get(id);
     await this.stop(id);
+    this.cancelPersist(id);
     if (meta?.worktreeBranch && removeWt) {
       try {
         await removeWorktree(meta.config.projectRoot, meta.cwd);
@@ -260,23 +272,34 @@ export class SessionManager {
     await active.adapter.send(input);
   }
 
+  /** Denies every pending approval and records the decision on its transcript card. */
+  private cancelApprovals(id: string, active: ActiveSession, note: string): void {
+    for (const [reqId, d] of [...active.approvals]) {
+      const decision: ApprovalDecision = { optionId: 'deny', note };
+      active.approvals.delete(reqId);
+      d.resolve(decision);
+      const item = active.liveItems.get(reqId);
+      if (item && item.kind === 'approval') {
+        item.decision = decision;
+        item.decidedAt = Date.now();
+        this.emit(id, { type: 'item.upsert', item: { ...item } });
+      }
+      this.emit(id, { type: 'approval.resolved', requestId: reqId, decision });
+    }
+  }
+
   async interrupt(id: string): Promise<void> {
     const active = this.active.get(id);
     if (!active) return;
-    // Cancel pending approvals as denied.
-    for (const [reqId, d] of active.approvals) {
-      d.resolve({ optionId: 'deny', note: 'Interrupted' });
-      active.approvals.delete(reqId);
-      this.emit(id, { type: 'approval.resolved', requestId: reqId, decision: { optionId: 'deny', note: 'Interrupted' } });
-    }
+    this.cancelApprovals(id, active, 'Interrupted');
     await active.adapter.interrupt();
   }
 
   async stop(id: string): Promise<void> {
     const active = this.active.get(id);
     if (!active) return;
+    this.cancelApprovals(id, active, 'Session stopped');
     this.active.delete(id);
-    for (const d of active.approvals.values()) d.resolve({ optionId: 'deny', note: 'Session stopped' });
     await this.flushLive(id, active);
     try {
       await active.adapter.dispose();
@@ -446,7 +469,13 @@ export class SessionManager {
           if (event.fatal) {
             meta.status = 'error';
             meta.statusDetail = event.message;
-            this.active.delete(sessionId);
+            meta.queued = 0;
+            if (active) {
+              // Tear the adapter down cleanly so no approval waits forever and streamed items are saved.
+              this.active.delete(sessionId);
+              this.cancelApprovals(sessionId, active, 'Harness failed');
+              void this.flushLive(sessionId, active).then(() => active.adapter.dispose()).catch((e) => this.deps.log('warn', `dispose after fatal error failed: ${errorMessage(e)}`));
+            }
           }
           this.schedulePersist(meta);
           this.pushSessions();
@@ -570,7 +599,9 @@ export class SessionManager {
       statusDetail: undefined,
       queued: 0,
       harnessRef: {},
-      goal: undefined
+      goal: undefined,
+      // The fork shares the directory but does not own the original's worktree (deleting it must not remove that).
+      worktreeBranch: undefined
     };
     // Carry harness state where the harness supports it.
     if (src.config.harness === 'claude' && src.harnessRef.claudeSessionId) meta.harnessRef = { claudeSessionId: src.harnessRef.claudeSessionId, forkOnResume: true } as HarnessRef;

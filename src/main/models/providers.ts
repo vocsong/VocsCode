@@ -12,7 +12,8 @@ export async function resolveProviderApiKey(provider: ProviderConfig, getSecret:
   return undefined;
 }
 
-const NON_CHAT = /(embed|embedding|whisper|tts|dall-e|image|moderation|realtime|transcribe|audio|rerank|search-preview|-instruct$|babbage|davinci|guard)/i;
+// Note: "-instruct" models are chat-capable on most OpenAI-compatible hosts, so they stay listed.
+const NON_CHAT = /(embed|embedding|whisper|tts|dall-e|image|moderation|realtime|transcribe|audio|rerank|search-preview|babbage|davinci|guard)/i;
 
 export function fallbackModels(provider: ProviderConfig): ModelInfo[] {
   return (STATIC_MODELS_BY_PROVIDER[provider.id] ?? []).map((m) => ({ ...m, provider: provider.id }));
