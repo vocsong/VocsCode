@@ -25,12 +25,53 @@ export async function readJson<T>(file: string, fallback: T): Promise<T> {
 
 let tmpCounter = 0;
 
-/** Atomic JSON write: write to temp then rename. Temp names are unique even for concurrent writes. */
-export async function writeJson(file: string, data: unknown): Promise<void> {
+/** Windows reports these while another handle still has the target open, and they clear on their own. */
+const TRANSIENT_RENAME_ERRORS = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(from, to);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? '';
+      if (attempt >= 5 || !TRANSIENT_RENAME_ERRORS.has(code)) throw e;
+      await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+    }
+  }
+}
+
+async function writeJsonOnce(file: string, data: unknown): Promise<void> {
   await ensureDir(path.dirname(file));
   const tmp = `${file}.${process.pid}.${Date.now()}.${(tmpCounter = (tmpCounter + 1) % 1_000_000)}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
-  await fs.rename(tmp, file);
+  try {
+    await renameWithRetry(tmp, file);
+  } catch (e) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw e;
+  }
+}
+
+/** In-flight write per file, so two callers never rename onto the same target at once. */
+const writeChain = new Map<string, Promise<void>>();
+
+/**
+ * Atomic JSON write: write to a unique temp file, then rename over the target. Writes to the same
+ * path are serialized rather than racing, because on Windows two concurrent renames onto one target
+ * make the loser fail with EPERM. The rename is also retried for transient locks (antivirus, indexer).
+ */
+export async function writeJson(file: string, data: unknown): Promise<void> {
+  const run = (writeChain.get(file) ?? Promise.resolve()).then(
+    () => writeJsonOnce(file, data),
+    () => writeJsonOnce(file, data)
+  );
+  writeChain.set(file, run);
+  try {
+    await run;
+  } finally {
+    if (writeChain.get(file) === run) writeChain.delete(file);
+  }
 }
 
 export async function appendLine(file: string, line: string): Promise<void> {

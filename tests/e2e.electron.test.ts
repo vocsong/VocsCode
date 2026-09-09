@@ -129,4 +129,32 @@ async function runScenario(win: Page, project: string): Promise<void> {
   expect(rows).toBe(1);
   const reply = await win.locator('.msg-assistant .md').first().innerText();
   expect(reply.trim()).toMatch(/^PONG[.!]?$/i);
+
+  // Layout must stay inside the viewport at the smallest window the app allows (minHeight 600,
+  // so the web contents are smaller still). body is overflow:hidden, so anything that pushes the
+  // document taller than the viewport becomes unreachable rather than scrollable.
+  const OVERFLOW_PROBE = `(() => {
+    const d = document.documentElement;
+    const clipped = [];
+    for (const el of document.querySelectorAll('.app, .main, .sidebar, .panel, .settings, .settings-nav')) {
+      const oy = getComputedStyle(el).overflowY;
+      const over = el.scrollHeight - el.clientHeight;
+      if (over > 2 && oy !== 'auto' && oy !== 'scroll') clipped.push(el.className + ' +' + over + 'px');
+    }
+    return { docOverflow: d.scrollHeight - d.clientHeight, clipped };
+  })()`;
+  for (const size of [
+    { width: 960, height: 600 },
+    { width: 1100, height: 620 }
+  ]) {
+    await win.setViewportSize(size);
+    await win.waitForTimeout(300);
+    for (const view of ['.sidebar-link:has-text("Settings")', '.brand']) {
+      await win.click(view).catch(() => undefined);
+      await win.waitForTimeout(300);
+      const r = (await win.evaluate(OVERFLOW_PROBE)) as { docOverflow: number; clipped: string[] };
+      expect(`${size.width}x${size.height} ${view} docOverflow=${r.docOverflow}`).toContain('docOverflow=0');
+      expect(r.clipped).toEqual([]);
+    }
+  }
 }
