@@ -85,7 +85,7 @@ export interface SessionConfig {
   model?: ModelRef;
   effort?: EffortLevel;
   permissionMode: PermissionMode;
-  /** Run in an isolated git worktree under .vocs-desk/worktrees. */
+  /** Run in an isolated git worktree under .vocs-code/worktrees. */
   useWorktree?: boolean;
   /** ACP agent preset id (for harness 'acp'). */
   acpAgent?: string;

@@ -119,7 +119,7 @@ export class AcpAdapter implements HarnessAdapter {
       this.conn.initialize({
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false },
-        clientInfo: { name: 'vocs-desk', title: 'Vocs-Desk', version: '0.1.0' }
+        clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' }
       } as unknown as acp.InitializeRequest),
       120_000,
       `${preset.name} initialize`

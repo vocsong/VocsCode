@@ -17,7 +17,7 @@ import { AsyncQueue, errorMessage, shortId, truncate } from '../util/async';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
 import type { HarnessAdapter, HarnessContext } from './types';
 
-const APP_ID = 'vocs-desk/0.1.0';
+const APP_ID = 'vocs-code/0.1.0';
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const READ_ONLY_TOOLS = new Set([
   'Read',

@@ -1,13 +1,13 @@
 /**
- * Vocs-Desk approvals extension for pi (loaded with `pi -e <this file>`).
+ * Vocs Code approvals extension for pi (loaded with `pi -e <this file>`).
  *
  * pi has no built-in permission prompts, so this extension gates mutating tools
- * (bash, edit, write) according to the Vocs-Desk permission mode and asks the
+ * (bash, edit, write) according to the Vocs Code permission mode and asks the
  * host through the RPC extension-UI channel. The `select` title carries a JSON
- * payload prefixed with VDESK_APPROVAL:: which the desktop app renders as an
+ * payload prefixed with VCODE_APPROVAL:: which the desktop app renders as an
  * approval card.
  *
- * Modes (VOCS_DESK_PERMISSION_MODE, re-read from VOCS_DESK_MODE_FILE before each call):
+ * Modes (VOCS_CODE_PERMISSION_MODE, re-read from VOCS_CODE_MODE_FILE before each call):
  *   ask          -> confirm bash/edit/write
  *   accept-edits -> confirm bash only (and edits outside the project)
  *   plan         -> block bash/edit/write
@@ -41,7 +41,7 @@ interface PiLike {
   on(event: string, handler: (event: ToolCallEventLike, ctx: CtxLike) => Promise<unknown> | unknown): void;
 }
 
-const MARKER = 'VDESK_APPROVAL::';
+const MARKER = 'VCODE_APPROVAL::';
 const MUTATING = new Set(['bash', 'edit', 'write']);
 const EDITS = new Set(['edit', 'write']);
 const MODES: Mode[] = ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'];
@@ -71,7 +71,7 @@ function isDangerous(command: string): boolean {
 }
 
 function readModeFromEnv(): Mode {
-  const m = (process.env.VOCS_DESK_PERMISSION_MODE ?? 'ask') as Mode;
+  const m = (process.env.VOCS_CODE_PERMISSION_MODE ?? 'ask') as Mode;
   return MODES.includes(m) ? m : 'ask';
 }
 
@@ -85,10 +85,10 @@ function isOutsideCwd(cwd: string | undefined, target: unknown): boolean {
   return !(t === c || t.startsWith(c + '/'));
 }
 
-export default function vocsDeskApprovals(pi: PiLike): void {
+export default function vocsCodeApprovals(pi: PiLike): void {
   let mode: Mode = readModeFromEnv();
   const sessionAllowed = new Set<string>();
-  const modeFile = process.env.VOCS_DESK_MODE_FILE;
+  const modeFile = process.env.VOCS_CODE_MODE_FILE;
 
   const refreshMode = async () => {
     if (!modeFile) return;
@@ -110,7 +110,7 @@ export default function vocsDeskApprovals(pi: PiLike): void {
     if (!MUTATING.has(tool)) return undefined;
     if (mode === 'full-auto') return undefined;
     if (mode === 'plan') {
-      return { block: true, reason: 'Plan mode is active in Vocs-Desk: no file edits or shell commands. Describe the plan instead.' };
+      return { block: true, reason: 'Plan mode is active in Vocs Code: no file edits or shell commands. Describe the plan instead.' };
     }
     const command = typeof event.input?.command === 'string' ? (event.input.command as string) : undefined;
     const dangerous = !!command && isDangerous(command);
@@ -130,7 +130,7 @@ export default function vocsDeskApprovals(pi: PiLike): void {
       sessionAllowed.add(tool);
       return undefined;
     }
-    return { block: true, reason: 'The user declined this action in Vocs-Desk.' };
+    return { block: true, reason: 'The user declined this action in Vocs Code.' };
   });
 }
 

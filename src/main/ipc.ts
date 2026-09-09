@@ -267,7 +267,7 @@ export function registerIpc(deps: IpcDeps): void {
     const q = query.toLowerCase();
     const max = limit ?? 30;
     const out: string[] = [];
-    const skip = new Set(['node_modules', '.git', 'dist', 'out', 'build', '.next', '.venv', 'venv', 'target', '.vocs-desk']);
+    const skip = new Set(['node_modules', '.git', 'dist', 'out', 'build', '.next', '.venv', 'venv', 'target', '.vocs-code']);
     const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
       if (out.length >= max || depth > 8) return;
       let entries: import('node:fs').Dirent[];

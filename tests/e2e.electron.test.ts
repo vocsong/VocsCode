@@ -38,7 +38,7 @@ function escapeRe(s: string): string {
 
 describe.runIf(enabled)('electron e2e', () => {
   it(`creates a ${harness} session through the UI and gets a reply`, async () => {
-    const tmp = path.join(os.tmpdir(), `vocs-desk-e2e-${Date.now()}`);
+    const tmp = path.join(os.tmpdir(), `vocs-code-e2e-${Date.now()}`);
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
     await fs.mkdir(userData, { recursive: true });
@@ -61,8 +61,8 @@ describe.runIf(enabled)('electron e2e', () => {
       if (k === 'ELECTRON_RUN_AS_NODE' || k === 'ANTHROPIC_BASE_URL' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
       env[k] = v;
     }
-    env.VOCS_DESK_USER_DATA = userData;
-    env.VOCS_DESK_DEBUG = '1';
+    env.VOCS_CODE_USER_DATA = userData;
+    env.VOCS_CODE_DEBUG = '1';
 
     app = await electron.launch({ executablePath: require('electron') as string, args: [path.join(root, 'out', 'main', 'index.js')], env, timeout: 60_000 });
     const mainLog: string[] = [];

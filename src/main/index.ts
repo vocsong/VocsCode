@@ -17,7 +17,7 @@ let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
 
 function log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
-  if (level === 'debug' && !isDev && !process.env.VOCS_DESK_DEBUG) return;
+  if (level === 'debug' && !isDev && !process.env.VOCS_CODE_DEBUG) return;
   const line = `[${new Date().toISOString()}] ${level.toUpperCase()} ${message}`;
   if (level === 'error') console.error(line);
   else if (level === 'warn') console.warn(line);
@@ -41,8 +41,8 @@ if (!app.requestSingleInstanceLock()) {
 
 async function main(): Promise<void> {
   // Test hooks: isolate user data and optionally quit after a delay.
-  if (process.env.VOCS_DESK_USER_DATA) app.setPath('userData', process.env.VOCS_DESK_USER_DATA);
-  if (process.env.VOCS_DESK_AUTOQUIT) setTimeout(() => app.quit(), Number(process.env.VOCS_DESK_AUTOQUIT));
+  if (process.env.VOCS_CODE_USER_DATA) app.setPath('userData', process.env.VOCS_CODE_USER_DATA);
+  if (process.env.VOCS_CODE_AUTOQUIT) setTimeout(() => app.quit(), Number(process.env.VOCS_CODE_AUTOQUIT));
   const userData = app.getPath('userData');
   const settings = new SettingsStore(userData);
   await settings.load();
@@ -116,7 +116,7 @@ function createWindow(settings: SettingsStore): void {
     ...bounds,
     minWidth: 960,
     minHeight: 600,
-    title: 'Vocs-Desk',
+    title: 'Vocs Code',
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#111318' : '#f7f7f8',
     autoHideMenuBar: true,
     show: false,
@@ -156,24 +156,24 @@ function createWindow(settings: SettingsStore): void {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
   });
 
-  if (isDev || process.env.VOCS_DESK_DEBUG) {
+  if (isDev || process.env.VOCS_CODE_DEBUG) {
     win.webContents.on('console-message', (event) => {
       const { level, message, lineNumber, sourceId } = event as unknown as { level: string | number; message: string; lineNumber: number; sourceId: string };
       const lvl = level === 'error' || level === 3 ? 'error' : level === 'warning' || level === 2 ? 'warn' : 'debug';
       log(lvl, `[renderer] ${message} (${sourceId}:${lineNumber})`);
     });
   }
-  if (process.env.VOCS_DESK_SCREENSHOT) {
+  if (process.env.VOCS_CODE_SCREENSHOT) {
     win.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
         try {
           const img = await win.webContents.capturePage();
-          await import('node:fs/promises').then((fs) => fs.writeFile(process.env.VOCS_DESK_SCREENSHOT as string, img.toPNG()));
-          log('info', `screenshot written to ${process.env.VOCS_DESK_SCREENSHOT}`);
+          await import('node:fs/promises').then((fs) => fs.writeFile(process.env.VOCS_CODE_SCREENSHOT as string, img.toPNG()));
+          log('info', `screenshot written to ${process.env.VOCS_CODE_SCREENSHOT}`);
         } catch (e) {
           log('error', `screenshot failed: ${String(e)}`);
         }
-      }, Number(process.env.VOCS_DESK_SCREENSHOT_DELAY ?? 2500));
+      }, Number(process.env.VOCS_CODE_SCREENSHOT_DELAY ?? 2500));
     });
   }
 

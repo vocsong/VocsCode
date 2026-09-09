@@ -20,7 +20,7 @@ const only = (process.env.HARNESS_SMOKE_ONLY ?? '').split(',').map((s) => s.trim
 const want = (id: string) => enabled && (only.length === 0 || only.includes(id));
 
 const appRoot = path.resolve(__dirname, '..');
-const tmpRoot = path.join(os.tmpdir(), `vocs-desk-smoke-${Date.now()}`);
+const tmpRoot = path.join(os.tmpdir(), `vocs-code-smoke-${Date.now()}`);
 const cleanups: (() => Promise<void>)[] = [];
 
 afterAll(async () => {
@@ -199,10 +199,10 @@ describe('live harness smoke', () => {
     const adapter = createAdapter('native', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
-    await adapter.send({ text: 'Create a file named hello.txt containing the text "hello from vocs desk" using the write_file tool, then read it back with read_file and confirm. Reply DONE at the end.' });
+    await adapter.send({ text: 'Create a file named hello.txt containing the text "hello from vocs code" using the write_file tool, then read it back with read_file and confirm. Reply DONE at the end.' });
     await waitTurn(170_000);
     const content = await fs.readFile(path.join(meta.cwd, 'hello.txt'), 'utf8');
-    expect(content).toMatch(/hello from vocs desk/);
+    expect(content).toMatch(/hello from vocs code/);
     expect([...items.values()].some((i) => i.kind === 'approval' || (i.kind === 'tool' && i.name === 'write_file'))).toBe(true);
   });
 });

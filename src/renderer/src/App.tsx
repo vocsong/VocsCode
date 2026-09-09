@@ -78,7 +78,7 @@ export function App() {
   if (!booted || !settings) {
     return (
       <div className="boot">
-        <Spinner size={20} /> Loading Vocs-Desk…
+        <Spinner size={20} /> Loading Vocs Code…
       </div>
     );
   }
@@ -97,7 +97,7 @@ export function App() {
           </>
         ) : (
           <div className="main-empty">
-            <EmptyState icon="sparkles" title="Welcome to Vocs-Desk">
+            <EmptyState icon="sparkles" title="Welcome to Vocs Code">
               <p>One desktop for every coding agent. Pick a harness per session — Claude Agent SDK, Codex, Pi, DeepSeek Harness or any ACP agent, or the built-in loop — and any model it can reach.</p>
               <div className="row gap8 center">
                 <Button variant="primary" icon="plus" onClick={() => useStore.getState().openNewSession(true)}>

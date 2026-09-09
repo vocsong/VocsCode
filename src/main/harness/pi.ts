@@ -7,7 +7,7 @@ import { killTree, spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 
-export const PI_APPROVAL_MARKER = 'VDESK_APPROVAL::';
+export const PI_APPROVAL_MARKER = 'VCODE_APPROVAL::';
 
 /** Env var names pi understands for each of our provider ids. */
 const PI_ENV_KEYS: Record<string, string> = {
@@ -86,7 +86,7 @@ export class PiAdapter implements HarnessAdapter {
     const s = this.ctx.settings();
     const bin = this.ctx.runtime.resolve('pi');
     if (!bin) throw new Error('pi is not installed. Run `npm install -g @earendil-works/pi-coding-agent` or set the path in Settings.');
-    const ext = this.ctx.runtime.resource('pi', 'vocs-desk-approvals.ts');
+    const ext = this.ctx.runtime.resource('pi', 'vocs-code-approvals.ts');
     const sessionDir = path.join(this.ctx.sessionDir, 'pi');
     await fs.mkdir(sessionDir, { recursive: true });
 
@@ -103,7 +103,7 @@ export class PiAdapter implements HarnessAdapter {
 
     this.modeFile = path.join(sessionDir, 'permission-mode.txt');
     await fs.writeFile(this.modeFile, this.ctx.permissionMode(), 'utf8');
-    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_DESK_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_DESK_MODE_FILE: this.modeFile, VOCS_DESK: '1' };
+    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE: '1' };
     for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
       if (!env[envKey]) {
         const key = await this.ctx.getApiKey(pid);

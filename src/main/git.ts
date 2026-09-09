@@ -134,17 +134,17 @@ export function slugify(s: string): string {
     .slice(0, 40) || 'session';
 }
 
-/** Creates an isolated worktree under <root>/.vocs-desk/worktrees/<slug> on a new branch. */
+/** Creates an isolated worktree under <root>/.vocs-code/worktrees/<slug> on a new branch. */
 export async function createWorktree(projectRoot: string, slug: string): Promise<{ path: string; branch: string }> {
   const root = await gitRoot(projectRoot);
   if (!root) throw new Error('Worktrees require a git repository.');
-  const base = path.join(root, '.vocs-desk', 'worktrees');
+  const base = path.join(root, '.vocs-code', 'worktrees');
   await fs.mkdir(base, { recursive: true });
   // Keep the app folder out of git status.
   try {
     const exclude = path.join(root, '.git', 'info', 'exclude');
     const cur = (await exists(exclude)) ? await fs.readFile(exclude, 'utf8') : '';
-    if (!cur.includes('.vocs-desk/')) await fs.appendFile(exclude, `${cur.endsWith('\n') || !cur ? '' : '\n'}.vocs-desk/\n`);
+    if (!cur.includes('.vocs-code/')) await fs.appendFile(exclude, `${cur.endsWith('\n') || !cur ? '' : '\n'}.vocs-code/\n`);
   } catch {
     /* ignore */
   }

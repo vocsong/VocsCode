@@ -233,7 +233,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
   return (
     <div className="settings-section">
       <h2>Harnesses</h2>
-      <p className="muted">Each harness is a separate agent runtime. Vocs-Desk detects binaries on PATH, in its private runtime folder, or bundled with the app.</p>
+      <p className="muted">Each harness is a separate agent runtime. Vocs Code detects binaries on PATH, in its private runtime folder, or bundled with the app.</p>
       <div className="harness-table">
         {HARNESSES.map((h) => {
           const av = availability[h.id];
@@ -369,7 +369,7 @@ function About() {
     <div className="settings-section">
       <h2>About</h2>
       <p>
-        <strong>Vocs-Desk</strong> {info?.version} · Electron {report?.electron} · Node {report?.node} · {report?.platform}
+        <strong>Vocs Code</strong> {info?.version} · Electron {report?.electron} · Node {report?.node} · {report?.platform}
       </p>
       <p className="muted small mono">{info?.userData}</p>
       <h3>Doctor</h3>
