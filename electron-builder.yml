@@ -1,0 +1,33 @@
+appId: dev.vocs.vocsdesk
+productName: Vocs-Desk
+copyright: Copyright © 2026 Vocs
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**
+  - package.json
+  - "!**/*.map"
+extraResources:
+  - from: resources/pi
+    to: pi
+asarUnpack:
+  - node_modules/@anthropic-ai/**
+  - node_modules/@openai/**
+npmRebuild: false
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Vocs-Desk
+mac:
+  target: [dmg]
+  category: public.app-category.developer-tools
+linux:
+  target: [AppImage]
+  category: Development

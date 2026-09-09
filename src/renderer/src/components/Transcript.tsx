@@ -1,0 +1,260 @@
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
+import type { ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
+import { invoke } from '../api';
+import { fmtCost, fmtDuration, fmtTokens } from '../format';
+import { installMarkdownHandlers, renderMarkdown } from '../markdown';
+import { useStore } from '../store';
+import { DiffView } from './DiffView';
+import { Badge, Button, Icon, Spinner } from './ui';
+
+/** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
+const EMPTY: never[] = [];
+
+export function Transcript({ session }: { session: SessionMeta }) {
+  const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
+  const loaded = useStore((s) => s.loaded[session.id]);
+  const showThinking = useStore((s) => s.showThinking);
+  const ref = useRef<HTMLDivElement>(null);
+  const [stick, setStick] = useState(true);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    return installMarkdownHandlers(el, (url) => void invoke('app:openExternal', { url }));
+  }, []);
+
+  useEffect(() => {
+    if (stick && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [items, stick]);
+
+  const onScroll = () => {
+    const el = ref.current;
+    if (!el) return;
+    setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+  };
+
+  const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
+
+  return (
+    <div className="transcript-wrap">
+      <div className="transcript" ref={ref} onScroll={onScroll}>
+        {!loaded && <div className="transcript-loading"><Spinner /> Loading…</div>}
+        {loaded && items.length === 0 && (
+          <div className="transcript-empty">
+            <Icon name="sparkles" size={28} />
+            <p>Send a message to start. Type <code>/</code> for commands, <code>@</code> to mention files, paste images to attach them.</p>
+          </div>
+        )}
+        {items.map((item) => (
+          <Item key={item.id} item={item} sessionId={session.id} showThinking={showThinking} />
+        ))}
+        {(session.status === 'running' || session.status === 'starting') && (
+          <div className="working">
+            <Spinner size={12} /> {session.status === 'starting' ? session.statusDetail ?? 'Starting…' : 'Working…'}
+          </div>
+        )}
+      </div>
+      {!stick && (
+        <button type="button" className="jump-bottom" onClick={() => { setStick(true); if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }}>
+          <Icon name="chevron" size={14} /> {pendingApprovals ? `${pendingApprovals} approval pending` : 'Jump to latest'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+const Item = memo(function Item({ item, sessionId, showThinking }: { item: TranscriptItem; sessionId: string; showThinking: boolean }) {
+  switch (item.kind) {
+    case 'user':
+      return <UserMessage item={item} />;
+    case 'assistant':
+      return <AssistantMessage item={item} showThinking={showThinking} />;
+    case 'tool':
+      return <ToolCard item={item} />;
+    case 'approval':
+      return <ApprovalCard item={item} sessionId={sessionId} />;
+    case 'info':
+      return (
+        <div className={`info-line info-${item.level}`}>
+          <Icon name={item.level === 'error' ? 'alert' : item.level === 'warn' ? 'alert' : 'info'} size={13} /> <span>{item.text}</span>
+        </div>
+      );
+    case 'turn':
+      return (
+        <div className={`turn-footer turn-${item.status}`}>
+          <span>{item.status === 'completed' ? 'Turn complete' : item.status === 'interrupted' ? 'Interrupted' : `Failed${item.error ? `: ${item.error}` : ''}`}</span>
+          {item.durationMs ? <span>· {fmtDuration(item.durationMs)}</span> : null}
+          {item.usage && (item.usage.inputTokens || item.usage.outputTokens) ? <span>· {fmtTokens(item.usage.inputTokens)} in / {fmtTokens(item.usage.outputTokens)} out</span> : null}
+          {item.costUsd ? <span>· {fmtCost(item.costUsd)}</span> : null}
+        </div>
+      );
+    case 'plan':
+      return (
+        <div className="plan-card">
+          <div className="plan-title"><Icon name="target" size={13} /> Plan</div>
+          <ul>
+            {item.entries.map((e, i) => (
+              <li key={i} className={`plan-${e.status}`}>
+                <span className="plan-check">{e.status === 'completed' ? '✓' : e.status === 'in_progress' ? '›' : '○'}</span> {e.content}
+              </li>
+            ))}
+          </ul>
+        </div>
+      );
+    default:
+      return null;
+  }
+});
+
+function UserMessage({ item }: { item: Extract<TranscriptItem, { kind: 'user' }> }) {
+  return (
+    <div className="msg msg-user">
+      <div className="msg-bubble">
+        {item.queuedAs && item.queuedAs !== 'now' && <Badge tone="blue">{item.queuedAs}</Badge>}
+        <div className="msg-text">{item.text}</div>
+        {item.images?.length ? (
+          <div className="msg-images">
+            {item.images.map((im, i) => (
+              <img key={i} src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'attachment'} />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function AssistantMessage({ item, showThinking }: { item: Extract<TranscriptItem, { kind: 'assistant' }>; showThinking: boolean }) {
+  const [open, setOpen] = useState(false);
+  const html = useMemo(() => renderMarkdown(item.text), [item.text]);
+  if (!item.text && !item.thinking) return null;
+  const onlyThinking = !item.text && !!item.thinking;
+  return (
+    <div className={`msg msg-assistant ${item.phase === 'plan' ? 'msg-plan' : ''} ${item.phase === 'commentary' ? 'msg-commentary' : ''}`}>
+      {item.thinking && showThinking && (
+        <div className={`thinking ${open || onlyThinking ? 'open' : ''}`}>
+          <button type="button" className="thinking-toggle" onClick={() => setOpen((o) => !o)}>
+            <Icon name="brain" size={13} /> {item.streaming && onlyThinking ? 'Thinking…' : 'Thinking'} <Icon name={open || onlyThinking ? 'chevron' : 'chevronRight'} size={12} />
+          </button>
+          {(open || onlyThinking) && <div className="thinking-body">{item.thinking}</div>}
+        </div>
+      )}
+      {item.text && <div className={`md ${item.streaming ? 'streaming' : ''}`} dangerouslySetInnerHTML={{ __html: html }} />}
+      {item.phase === 'plan' && <Badge tone="purple">plan</Badge>}
+    </div>
+  );
+}
+
+const HINT_ICON: Record<string, string> = { execute: 'terminal', edit: 'edit', read: 'file', search: 'search', fetch: 'external', think: 'brain', mcp: 'bolt', agent: 'fork', other: 'bolt' };
+
+function ToolCard({ item }: { item: Extract<TranscriptItem, { kind: 'tool' }> }) {
+  const [open, setOpen] = useState(false);
+  const hasBody = !!item.output || !!(item.changes && item.changes.length) || item.input !== undefined;
+  const statusTone = item.status === 'running' ? 'blue' : item.status === 'error' ? 'red' : item.status === 'declined' ? 'amber' : 'green';
+  return (
+    <div className={`tool-card tool-${item.status} ${item.parentId ? 'tool-nested' : ''}`}>
+      <button type="button" className="tool-head" onClick={() => hasBody && setOpen((o) => !o)}>
+        <Icon name={HINT_ICON[item.hint ?? 'other']} size={14} className="tool-icon" />
+        <span className="tool-name">{item.title ?? item.name}</span>
+        {item.summary && <span className="tool-summary mono" title={item.summary}>{item.summary}</span>}
+        <span className="spacer" />
+        {item.changes?.length ? <span className="tool-changes">{item.changes.length} file{item.changes.length === 1 ? '' : 's'}</span> : null}
+        {item.status === 'running' ? <Spinner size={12} /> : <Badge tone={statusTone}>{item.status === 'done' ? (item.exitCode !== undefined && item.exitCode !== null ? `exit ${item.exitCode}` : 'done') : item.status}</Badge>}
+        {item.durationMs ? <span className="muted small">{fmtDuration(item.durationMs)}</span> : null}
+        {hasBody && <Icon name={open ? 'chevron' : 'chevronRight'} size={12} />}
+      </button>
+      {(open || (item.status === 'running' && item.hint === 'execute' && item.output)) && (
+        <div className="tool-body">
+          {open && item.input !== undefined && item.hint !== 'execute' && (
+            <pre className="tool-input mono">{typeof item.input === 'string' ? item.input : JSON.stringify(item.input, null, 2).slice(0, 4000)}</pre>
+          )}
+          {item.changes?.some((c) => c.diff) && <DiffView diff={item.changes.filter((c) => c.diff).map((c) => c.diff!).join('\n')} compact />}
+          {item.output && <pre className="tool-output mono">{item.output.length > 12_000 && !open ? item.output.slice(-12_000) : item.output}</pre>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem, { kind: 'approval' }>; sessionId: string }) {
+  const req = item.request;
+  const [note, setNote] = useState('');
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [editedCommand, setEditedCommand] = useState<string | null>(null);
+  const decided = !!item.decision;
+  const respond = (optionId: string) => {
+    const decision: { optionId: string; note?: string; answers?: Record<string, string>; updatedInput?: unknown } = { optionId, note: note.trim() || undefined };
+    if (req.questions?.length) decision.answers = answers;
+    if (editedCommand !== null && editedCommand !== req.command && req.input && typeof req.input === 'object') decision.updatedInput = { ...(req.input as Record<string, unknown>), command: editedCommand };
+    void invoke('approvals:respond', { sessionId, requestId: req.id, decision });
+  };
+  return (
+    <div className={`approval ${decided ? 'decided' : 'pending'}`}>
+      <div className="approval-head">
+        <Icon name="shield" size={14} />
+        <span className="approval-title">{req.title}</span>
+        <Badge tone="neutral">{req.harness}</Badge>
+        {decided && <Badge tone={/deny|reject|cancel/.test(item.decision!.optionId) ? 'red' : 'green'}>{labelFor(req, item.decision!.optionId)}</Badge>}
+      </div>
+      {req.description && <div className="approval-desc">{req.description}</div>}
+      {req.command !== undefined && (
+        decided ? (
+          <pre className="approval-cmd mono">{req.command}</pre>
+        ) : (
+          <textarea className="approval-cmd mono editable" value={editedCommand ?? req.command} onChange={(e) => setEditedCommand(e.target.value)} rows={Math.min(6, (req.command.match(/\n/g)?.length ?? 0) + 1)} spellCheck={false} />
+        )
+      )}
+      {req.cwd && req.command !== undefined && <div className="approval-cwd muted small">in {req.cwd}</div>}
+      {req.changes?.length ? <ChangesPreview changes={req.changes} /> : null}
+      {req.questions?.map((q) => (
+        <div key={q.id} className="approval-question">
+          {q.header && <div className="approval-qhead">{q.header}</div>}
+          <div className="approval-qtext">{q.question}</div>
+          {q.options?.length ? (
+            <div className="approval-qopts">
+              {q.options.map((o) => (
+                <button key={o.label} type="button" className={`chip ${answers[q.id] === o.label ? 'active' : ''}`} disabled={decided} onClick={() => setAnswers({ ...answers, [q.id]: o.label })} title={o.description}>
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {(q.allowOther || !q.options?.length) && !decided && (
+            <input type={q.secret ? 'password' : 'text'} placeholder="Type an answer" value={answers[q.id] && !q.options?.some((o) => o.label === answers[q.id]) ? answers[q.id] : ''} onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })} />
+          )}
+          {decided && item.decision?.answers?.[q.id] && <div className="approval-answer">→ {item.decision.answers[q.id]}</div>}
+        </div>
+      ))}
+      {!decided && (
+        <div className="approval-actions">
+          {req.options.map((o) => (
+            <Button key={o.id} variant={o.kind === 'allow' ? 'primary' : o.kind === 'allow_session' || o.kind === 'allow_always' ? 'default' : 'ghost'} size="sm" onClick={() => respond(o.id)} title={o.description}>
+              {o.label}
+            </Button>
+          ))}
+          <input className="approval-note" placeholder="Optional note for the agent (sent when denying)" value={note} onChange={(e) => setNote(e.target.value)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function labelFor(req: ApprovalRequest, optionId: string): string {
+  return req.options.find((o) => o.id === optionId)?.label ?? optionId;
+}
+
+function ChangesPreview({ changes }: { changes: FileChange[] }) {
+  const withDiff = changes.filter((c) => c.diff);
+  return (
+    <div className="approval-changes">
+      <div className="approval-files">
+        {changes.map((c) => (
+          <span key={c.path} className={`file-chip kind-${c.kind}`}>
+            {c.kind === 'add' ? '+' : c.kind === 'delete' ? '−' : '~'} {c.path}
+          </span>
+        ))}
+      </div>
+      {withDiff.length > 0 && <DiffView diff={withDiff.map((c) => c.diff!).join('\n')} compact />}
+    </div>
+  );
+}

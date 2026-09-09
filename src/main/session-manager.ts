@@ -1,0 +1,625 @@
+import path from 'node:path';
+import type {
+  ApprovalDecision,
+  ApprovalRequest,
+  AppSettings,
+  CreateSessionRequest,
+  EffortLevel,
+  GoalState,
+  HarnessRef,
+  ModelRef,
+  PermissionMode,
+  SessionEvent,
+  SessionEventEnvelope,
+  SessionMeta,
+  TranscriptItem,
+  UserInput
+} from '../shared/types';
+import { HARNESS_BY_ID } from '../shared/harness-meta';
+import { createAdapter } from './harness/registry';
+import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
+import { createWorktree, gitRoot, removeWorktree, slugify } from './git';
+import { emptyUsage } from './models/static-models';
+import type { RuntimeResolver } from './runtime';
+import type { SettingsStore } from './settings';
+import type { SessionStore } from './store';
+import { deferred, errorMessage, shortId, type Deferred } from './util/async';
+import { readJson, writeJson } from './util/fs';
+
+export interface SessionManagerDeps {
+  store: SessionStore;
+  settings: SettingsStore;
+  runtime: RuntimeResolver;
+  getSecret: (providerId: string) => Promise<string | undefined>;
+  pushEvent: (env: SessionEventEnvelope) => void;
+  pushSessions: (sessions: SessionMeta[]) => void;
+  notify: (sessionId: string, title: string, body: string) => void;
+  log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
+}
+
+interface ActiveSession {
+  adapter: HarnessAdapter;
+  approvals: Map<string, Deferred<ApprovalDecision>>;
+  liveItems: Map<string, TranscriptItem>;
+  dirty: Set<string>;
+  lastAssistantText: string;
+  starting: Promise<void> | null;
+}
+
+const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
+
+export class SessionManager {
+  private active = new Map<string, ActiveSession>();
+  private persistTimer: NodeJS.Timeout | null = null;
+
+  constructor(private readonly deps: SessionManagerDeps) {}
+
+  list(): SessionMeta[] {
+    return this.deps.store.list();
+  }
+
+  get(id: string): SessionMeta | undefined {
+    return this.deps.store.get(id);
+  }
+
+  private settings(): AppSettings {
+    return this.deps.settings.get();
+  }
+
+  private pushSessions(): void {
+    this.deps.pushSessions(this.list());
+  }
+
+  private schedulePersist(meta: SessionMeta): void {
+    meta.updatedAt = Date.now();
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.deps.store.upsert(meta);
+    }, 300);
+  }
+
+  async create(req: CreateSessionRequest): Promise<SessionMeta> {
+    const id = shortId('s_');
+    const cfg = req.config;
+    let cwd = cfg.projectRoot;
+    let worktreeBranch: string | undefined;
+    if (cfg.useWorktree) {
+      const wt = await createWorktree(cfg.projectRoot, slugify(req.title || req.initialPrompt || id));
+      cwd = wt.path;
+      worktreeBranch = wt.branch;
+    }
+    const s = this.settings();
+    const title = req.title?.trim() || (req.initialPrompt ? req.initialPrompt.trim().split('\n')[0].slice(0, 60) : 'New session');
+    const meta: SessionMeta = {
+      id,
+      title,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      config: { ...cfg, model: cfg.model ?? s.defaultModelByHarness[cfg.harness] },
+      cwd,
+      worktreeBranch,
+      status: 'idle',
+      harnessRef: {},
+      usage: emptyUsage(),
+      activeModel: cfg.model ?? s.defaultModelByHarness[cfg.harness],
+      activeEffort: cfg.effort,
+      queued: 0
+    };
+    if (req.goal?.trim()) {
+      meta.goal = {
+        objective: req.goal.trim(),
+        status: 'active',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        iterations: 0,
+        maxIterations: s.goalDefaults.maxIterations,
+        autoContinue: s.goalDefaults.autoContinue
+      };
+    }
+    await this.deps.store.upsert(meta);
+    const recent = [cfg.projectRoot, ...s.recentProjects.filter((p) => p !== cfg.projectRoot)].slice(0, 12);
+    await this.deps.settings.update({ recentProjects: recent });
+    this.pushSessions();
+    if (req.initialPrompt?.trim()) {
+      const prompt = meta.goal ? `${req.initialPrompt.trim()}\n\nActive goal: ${meta.goal.objective}` : req.initialPrompt.trim();
+      void this.send(id, { text: prompt }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+    } else if (meta.goal) {
+      void this.send(id, { text: this.goalKickoffPrompt(meta.goal) }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+    }
+    return meta;
+  }
+
+  private goalKickoffPrompt(goal: GoalState): string {
+    return `You have a persistent goal for this session:\n\n${goal.objective}\n\nWork toward it autonomously. When you believe it is fully achieved and verified, run a completion audit (restate deliverables, map each requirement to concrete evidence, note gaps) and end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line. If anything is missing, keep working instead of declaring completion.`;
+  }
+
+  async delete(id: string, removeWt = false): Promise<void> {
+    const meta = this.get(id);
+    await this.stop(id);
+    if (meta?.worktreeBranch && removeWt) {
+      try {
+        await removeWorktree(meta.config.projectRoot, meta.cwd);
+      } catch (e) {
+        this.deps.log('warn', `worktree removal failed: ${errorMessage(e)}`);
+      }
+    }
+    await this.deps.store.remove(id);
+    this.pushSessions();
+  }
+
+  async patch(id: string, patch: Partial<SessionMeta>): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    Object.assign(meta, patch, { updatedAt: Date.now() });
+    await this.deps.store.upsert(meta);
+    this.pushSessions();
+    return meta;
+  }
+
+  transcript(id: string): Promise<TranscriptItem[]> {
+    return this.deps.store.readTranscript(id).then((items) => {
+      const live = this.active.get(id)?.liveItems;
+      if (!live) return items;
+      // Overlay in-memory streaming state.
+      const map = new Map(items.map((i) => [i.id, i]));
+      for (const [k, v] of live) map.set(k, v);
+      const order = [...items.map((i) => i.id), ...[...live.keys()].filter((k) => !items.some((i) => i.id === k))];
+      return order.map((k) => map.get(k) as TranscriptItem);
+    });
+  }
+
+  private buildContext(meta: SessionMeta, id: string): HarnessContext {
+    const store = this.deps.store;
+    const sessionDir = store.sessionDir(id);
+    return {
+      sessionId: id,
+      session: () => this.get(id) ?? meta,
+      settings: () => this.settings(),
+      runtime: this.deps.runtime,
+      sessionDir,
+      permissionMode: () => (this.get(id) ?? meta).config.permissionMode,
+      effort: () => (this.get(id) ?? meta).activeEffort ?? (this.get(id) ?? meta).config.effort ?? this.settings().defaultEffort,
+      getApiKey: (providerId) => this.deps.getSecret(providerId),
+      emit: (event) => this.emit(id, event),
+      requestApproval: (draft) => this.requestApproval(id, draft),
+      updateRef: (patch: Partial<HarnessRef>) => {
+        const m = this.get(id);
+        if (!m) return;
+        m.harnessRef = { ...m.harnessRef, ...patch };
+        this.schedulePersist(m);
+      },
+      updateMeta: (patch) => {
+        const m = this.get(id);
+        if (!m) return;
+        Object.assign(m, patch);
+        this.schedulePersist(m);
+        this.pushSessions();
+      },
+      log: (level, message) => this.deps.log(level, `[${id}] ${message}`),
+      readJson: (name) => readJson(path.join(sessionDir, name), null),
+      writeJson: (name, data) => writeJson(path.join(sessionDir, name), data)
+    };
+  }
+
+  private async ensureActive(id: string): Promise<ActiveSession> {
+    const existing = this.active.get(id);
+    if (existing) {
+      if (existing.starting) await existing.starting;
+      return existing;
+    }
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    const ctx = this.buildContext(meta, id);
+    const adapter = createAdapter(meta.config.harness, ctx);
+    const active: ActiveSession = { adapter, approvals: new Map(), liveItems: new Map(), dirty: new Set(), lastAssistantText: '', starting: null };
+    this.active.set(id, active);
+    meta.status = 'starting';
+    meta.statusDetail = `Starting ${HARNESS_BY_ID[meta.config.harness].name}…`;
+    this.pushSessions();
+    active.starting = adapter
+      .start()
+      .then(() => {
+        active.starting = null;
+        const m = this.get(id);
+        if (m && m.status === 'starting') {
+          m.status = 'idle';
+          m.statusDetail = undefined;
+          this.pushSessions();
+        }
+      })
+      .catch((e) => {
+        active.starting = null;
+        this.active.delete(id);
+        const m = this.get(id);
+        if (m) {
+          m.status = 'error';
+          m.lastError = errorMessage(e);
+          m.statusDetail = m.lastError;
+          this.schedulePersist(m);
+          this.pushSessions();
+        }
+        this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'error', text: `Failed to start harness: ${errorMessage(e)}` } });
+        throw e;
+      });
+    await active.starting;
+    return active;
+  }
+
+  async send(id: string, input: UserInput): Promise<void> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    const userItem: TranscriptItem = { id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text, images: input.images, queuedAs: input.mode };
+    this.emit(id, { type: 'item.upsert', item: userItem });
+    if (meta.title === 'New session' && input.text.trim()) {
+      meta.title = input.text.trim().split('\n')[0].slice(0, 60);
+      this.schedulePersist(meta);
+      this.pushSessions();
+    }
+    const active = await this.ensureActive(id);
+    await active.adapter.send(input);
+  }
+
+  async interrupt(id: string): Promise<void> {
+    const active = this.active.get(id);
+    if (!active) return;
+    // Cancel pending approvals as denied.
+    for (const [reqId, d] of active.approvals) {
+      d.resolve({ optionId: 'deny', note: 'Interrupted' });
+      active.approvals.delete(reqId);
+      this.emit(id, { type: 'approval.resolved', requestId: reqId, decision: { optionId: 'deny', note: 'Interrupted' } });
+    }
+    await active.adapter.interrupt();
+  }
+
+  async stop(id: string): Promise<void> {
+    const active = this.active.get(id);
+    if (!active) return;
+    this.active.delete(id);
+    for (const d of active.approvals.values()) d.resolve({ optionId: 'deny', note: 'Session stopped' });
+    await this.flushLive(id, active);
+    try {
+      await active.adapter.dispose();
+    } catch (e) {
+      this.deps.log('warn', `dispose failed: ${errorMessage(e)}`);
+    }
+    const meta = this.get(id);
+    if (meta) {
+      meta.status = 'idle';
+      meta.statusDetail = undefined;
+      meta.queued = 0;
+      await this.deps.store.upsert(meta);
+      this.pushSessions();
+    }
+  }
+
+  async stopAll(): Promise<void> {
+    await Promise.all([...this.active.keys()].map((id) => this.stop(id)));
+  }
+
+  async setModel(id: string, model: ModelRef): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    meta.config.model = model;
+    meta.activeModel = model;
+    const active = this.active.get(id);
+    if (active) await active.adapter.setModel(model);
+    await this.deps.store.upsert(meta);
+    this.pushSessions();
+    return meta;
+  }
+
+  async setEffort(id: string, effort: EffortLevel): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    meta.config.effort = effort;
+    meta.activeEffort = effort;
+    const active = this.active.get(id);
+    if (active) await active.adapter.setEffort(effort);
+    await this.deps.store.upsert(meta);
+    this.pushSessions();
+    return meta;
+  }
+
+  async setPermissionMode(id: string, mode: PermissionMode): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    meta.config.permissionMode = mode;
+    const active = this.active.get(id);
+    if (active) await active.adapter.setPermissionMode(mode);
+    await this.deps.store.upsert(meta);
+    this.pushSessions();
+    this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Permission mode set to ${mode}.` } });
+    return meta;
+  }
+
+  async compact(id: string): Promise<{ ok: boolean; detail?: string }> {
+    const active = this.active.get(id);
+    if (!active) return { ok: false, detail: 'Session is not running.' };
+    if (!active.adapter.compact) return { ok: false, detail: 'This harness does not support compaction.' };
+    await active.adapter.compact();
+    return { ok: true };
+  }
+
+  async clearTranscript(id: string): Promise<void> {
+    const active = this.active.get(id);
+    if (active) active.liveItems.clear();
+    await this.deps.store.rewriteTranscript(id, []);
+  }
+
+  async respondApproval(sessionId: string, requestId: string, decision: ApprovalDecision): Promise<void> {
+    const active = this.active.get(sessionId);
+    const d = active?.approvals.get(requestId);
+    if (!active || !d) return;
+    active.approvals.delete(requestId);
+    d.resolve(decision);
+    const item = active.liveItems.get(requestId);
+    if (item && item.kind === 'approval') {
+      item.decision = decision;
+      item.decidedAt = Date.now();
+      this.emit(sessionId, { type: 'item.upsert', item: { ...item } });
+    }
+    this.emit(sessionId, { type: 'approval.resolved', requestId, decision });
+    const meta = this.get(sessionId);
+    if (meta && active.approvals.size === 0 && meta.status === 'awaiting') {
+      meta.status = 'running';
+      meta.statusDetail = undefined;
+      this.pushSessions();
+    }
+  }
+
+  private requestApproval(sessionId: string, draft: ApprovalDraft): Promise<ApprovalDecision> {
+    const active = this.active.get(sessionId);
+    const meta = this.get(sessionId);
+    if (!active || !meta) return Promise.resolve({ optionId: 'deny', note: 'Session gone' });
+    const request: ApprovalRequest = { ...draft, id: shortId('ap_'), sessionId, harness: meta.config.harness, createdAt: Date.now() };
+    const d = deferred<ApprovalDecision>();
+    active.approvals.set(request.id, d);
+    this.emit(sessionId, { type: 'item.upsert', item: { id: request.id, kind: 'approval', ts: Date.now(), request } });
+    this.emit(sessionId, { type: 'approval.request', request });
+    meta.status = 'awaiting';
+    meta.statusDetail = request.title;
+    this.pushSessions();
+    this.deps.notify(sessionId, `${meta.title}: approval needed`, request.command ?? request.title);
+    return d.promise;
+  }
+
+  /** Central event sink: persists transcript, updates meta, forwards to renderer, drives goals. */
+  private emit(sessionId: string, event: SessionEvent): void {
+    const meta = this.get(sessionId);
+    const active = this.active.get(sessionId);
+    switch (event.type) {
+      case 'item.upsert': {
+        const item = event.item;
+        if (active) {
+          active.liveItems.set(item.id, item);
+          active.dirty.add(item.id);
+          if (item.kind === 'assistant' && item.text) active.lastAssistantText = item.text;
+        }
+        const streaming = item.kind === 'assistant' && item.streaming;
+        if (!streaming || !active) void this.deps.store.appendTranscript(sessionId, item);
+        if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
+        break;
+      }
+      case 'item.delta': {
+        const item = active?.liveItems.get(event.id);
+        if (item) {
+          if (item.kind === 'assistant') {
+            if (event.textDelta) item.text += event.textDelta;
+            if (event.thinkingDelta) item.thinking = (item.thinking ?? '') + event.thinkingDelta;
+          } else if (item.kind === 'tool' && event.outputDelta) item.output = (item.output ?? '') + event.outputDelta;
+          active?.dirty.add(event.id);
+        }
+        break;
+      }
+      case 'status': {
+        if (meta) {
+          if (event.status === 'idle' && active && active.approvals.size) break; // still awaiting
+          meta.status = event.status;
+          meta.statusDetail = event.detail;
+          if (event.status === 'idle' || event.status === 'stopped' || event.status === 'error') {
+            if (active) void this.flushLive(sessionId, active);
+            if (event.status === 'stopped') this.active.delete(sessionId);
+          }
+          this.schedulePersist(meta);
+          this.pushSessions();
+        }
+        break;
+      }
+      case 'usage':
+        if (meta) {
+          meta.usage = event.totals;
+          this.schedulePersist(meta);
+          this.pushSessions();
+        }
+        break;
+      case 'meta':
+        if (meta) {
+          Object.assign(meta, event.patch);
+          this.schedulePersist(meta);
+          this.pushSessions();
+        }
+        break;
+      case 'error':
+        if (meta) {
+          meta.lastError = event.message;
+          if (event.fatal) {
+            meta.status = 'error';
+            meta.statusDetail = event.message;
+            this.active.delete(sessionId);
+          }
+          this.schedulePersist(meta);
+          this.pushSessions();
+        }
+        void this.deps.store.appendTranscript(sessionId, { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'error', text: event.message });
+        break;
+      default:
+        break;
+    }
+    this.deps.pushEvent({ sessionId, event, ts: Date.now() });
+  }
+
+  private async flushLive(sessionId: string, active: ActiveSession): Promise<void> {
+    for (const id of [...active.dirty]) {
+      const item = active.liveItems.get(id);
+      if (!item) continue;
+      if (item.kind === 'assistant' && item.streaming) continue;
+      await this.deps.store.appendTranscript(sessionId, item);
+      active.dirty.delete(id);
+    }
+  }
+
+  private onTurnFinished(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>): void {
+    const active = this.active.get(meta.id);
+    if (this.settings().notifications && turn.status !== 'interrupted') {
+      this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);
+    }
+    const goal = meta.goal;
+    if (!goal || goal.status !== 'active' || !active) return;
+    if (turn.status !== 'completed') return;
+    const text = active.lastAssistantText;
+    if (text.includes(GOAL_COMPLETE_TOKEN)) {
+      goal.status = 'complete';
+      goal.updatedAt = Date.now();
+      this.schedulePersist(meta);
+      this.pushSessions();
+      this.emit(meta.id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Goal marked complete after ${goal.iterations} continuation${goal.iterations === 1 ? '' : 's'}.` } });
+      this.deps.notify(meta.id, meta.title, 'Goal complete');
+      return;
+    }
+    if (!goal.autoContinue) return;
+    if (goal.iterations >= goal.maxIterations) {
+      goal.status = 'paused';
+      goal.updatedAt = Date.now();
+      this.schedulePersist(meta);
+      this.pushSessions();
+      this.emit(meta.id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'warn', text: `Goal paused: reached the ${goal.maxIterations}-iteration guard. Resume it from the Goal panel.` } });
+      return;
+    }
+    goal.iterations += 1;
+    goal.updatedAt = Date.now();
+    this.schedulePersist(meta);
+    const prompt = `Goal check-in ${goal.iterations}/${goal.maxIterations}. The active goal is:\n\n${goal.objective}\n\nReview what has been done so far, verify against real evidence, and continue working toward the goal. If it is now fully achieved, end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line after a brief completion audit. Otherwise keep going without asking for permission to continue.`;
+    setTimeout(() => {
+      const m = this.get(meta.id);
+      if (!m || m.goal?.status !== 'active' || m.status === 'running' || m.status === 'awaiting') return;
+      void this.send(meta.id, { text: prompt }).catch((e) => this.deps.log('warn', `goal continue failed: ${errorMessage(e)}`));
+    }, 1500);
+  }
+
+  async goal(id: string, action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update', opts: { objective?: string; autoContinue?: boolean; maxIterations?: number }): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    const s = this.settings();
+    switch (action) {
+      case 'set': {
+        meta.goal = {
+          objective: opts.objective?.trim() || meta.goal?.objective || '',
+          status: 'active',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          iterations: 0,
+          maxIterations: opts.maxIterations ?? s.goalDefaults.maxIterations,
+          autoContinue: opts.autoContinue ?? s.goalDefaults.autoContinue
+        };
+        this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Goal set: ${meta.goal.objective}` } });
+        if (meta.status === 'idle') void this.send(id, { text: this.goalKickoffPrompt(meta.goal) });
+        break;
+      }
+      case 'pause':
+        if (meta.goal) meta.goal.status = 'paused';
+        break;
+      case 'resume':
+        if (meta.goal) {
+          meta.goal.status = 'active';
+          if (meta.status === 'idle') void this.send(id, { text: `Resuming the goal: ${meta.goal.objective}\nContinue where you left off.` });
+        }
+        break;
+      case 'clear':
+        meta.goal = undefined;
+        break;
+      case 'complete':
+        if (meta.goal) meta.goal.status = 'complete';
+        break;
+      case 'update':
+        if (meta.goal) {
+          if (opts.autoContinue !== undefined) meta.goal.autoContinue = opts.autoContinue;
+          if (opts.maxIterations !== undefined) meta.goal.maxIterations = opts.maxIterations;
+          if (opts.objective !== undefined) meta.goal.objective = opts.objective;
+        }
+        break;
+    }
+    if (meta.goal) meta.goal.updatedAt = Date.now();
+    await this.deps.store.upsert(meta);
+    this.pushSessions();
+    return meta;
+  }
+
+  async fork(id: string): Promise<SessionMeta | null> {
+    const src = this.get(id);
+    if (!src) return null;
+    const items = await this.transcript(id);
+    const nid = shortId('s_');
+    const meta: SessionMeta = {
+      ...structuredClone(src),
+      id: nid,
+      title: `${src.title} (fork)`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      status: 'idle',
+      statusDetail: undefined,
+      queued: 0,
+      harnessRef: {},
+      goal: undefined
+    };
+    // Carry harness state where the harness supports it.
+    if (src.config.harness === 'claude' && src.harnessRef.claudeSessionId) meta.harnessRef = { claudeSessionId: src.harnessRef.claudeSessionId, forkOnResume: true } as HarnessRef;
+    if (src.config.harness === 'native') {
+      const hist = await this.deps.store.readNativeHistory(id);
+      if (hist) await this.deps.store.writeNativeHistory(nid, hist);
+      meta.harnessRef = { nativeHistory: true };
+    }
+    await this.deps.store.upsert(meta);
+    await this.deps.store.rewriteTranscript(nid, items.filter((i) => !(i.kind === 'approval' && !i.decision)));
+    this.pushSessions();
+    return meta;
+  }
+
+  async exportMarkdown(id: string): Promise<string> {
+    const meta = this.get(id);
+    const items = await this.transcript(id);
+    const lines: string[] = [`# ${meta?.title ?? 'Session'}`, '', `- Harness: ${meta?.config.harness}`, `- Model: ${meta?.activeModel ? `${meta.activeModel.provider}/${meta.activeModel.model}` : 'default'}`, `- Directory: ${meta?.cwd}`, `- Cost: $${(meta?.usage.costUsd ?? 0).toFixed(4)}`, ''];
+    for (const it of items) {
+      switch (it.kind) {
+        case 'user':
+          lines.push(`## User`, '', it.text, '');
+          break;
+        case 'assistant':
+          if (it.thinking) lines.push(`<details><summary>Thinking</summary>\n\n${it.thinking}\n\n</details>`, '');
+          if (it.text) lines.push(`## Assistant${it.model ? ` (${it.model})` : ''}`, '', it.text, '');
+          break;
+        case 'tool':
+          lines.push(`### Tool: ${it.name} — ${it.summary ?? ''}`, '', '```', (it.output ?? '').slice(0, 20_000), '```', '');
+          if (it.changes) for (const c of it.changes) if (c.diff) lines.push('```diff', c.diff, '```', '');
+          break;
+        case 'approval':
+          lines.push(`> Approval: ${it.request.title} → ${it.decision?.optionId ?? 'pending'}`, '');
+          break;
+        case 'info':
+          lines.push(`> ${it.level}: ${it.text}`, '');
+          break;
+        case 'turn':
+          lines.push(`---`, `_Turn ${it.status}${it.durationMs ? ` in ${(it.durationMs / 1000).toFixed(1)}s` : ''}${it.costUsd ? `, $${it.costUsd.toFixed(4)}` : ''}_`, '');
+          break;
+        case 'plan':
+          lines.push('### Plan', ...it.entries.map((e) => `- [${e.status === 'completed' ? 'x' : ' '}] ${e.content}`), '');
+          break;
+      }
+    }
+    return lines.join('\n');
+  }
+
+  async projectRootFor(cwd: string): Promise<string | null> {
+    return gitRoot(cwd);
+  }
+}
