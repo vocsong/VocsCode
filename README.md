@@ -1,4 +1,4 @@
-# Vocs-Desk
+# Vocs Code
 
 One desktop app for every coding agent. Pick the **harness** per session and any **model** it can reach.
 
@@ -53,9 +53,9 @@ npm run build && HARNESS_E2E=1 HARNESS_E2E_HARNESS=native npx vitest run tests/e
 HARNESS_E2E=1 npx vitest run tests/e2e.approval.test.ts
 ```
 
-Screenshots from the e2e runs land in `tests/artifacts/`. `npm run dist:win` produces `dist/Vocs-Desk-<version>-win-x64.exe` (NSIS) plus `dist/win-unpacked/`.
+Screenshots from the e2e runs land in `tests/artifacts/`. `npm run dist:win` produces `dist/Vocs-Code-<version>-win-x64.exe` (NSIS) plus `dist/win-unpacked/`.
 
-Debug hooks for headless runs: `VOCS_DESK_USER_DATA` (isolate state), `VOCS_DESK_SCREENSHOT=path.png`, `VOCS_DESK_AUTOQUIT=ms`, `VOCS_DESK_DEBUG=1` (forward renderer console to stdout).
+Debug hooks for headless runs: `VOCS_CODE_USER_DATA` (isolate state), `VOCS_CODE_SCREENSHOT=path.png`, `VOCS_CODE_AUTOQUIT=ms`, `VOCS_CODE_DEBUG=1` (forward renderer console to stdout).
 
 ## Architecture
 
@@ -66,7 +66,7 @@ src/main
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
     codex-app-server.ts + jsonrpc.ts   Codex app-server client (thread/turn/item notifications, approval requests)
     codex-exec.ts SDK fallback
-    pi.ts         pi RPC protocol; resources/pi/vocs-desk-approvals.ts is the extension that adds approvals
+    pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
     acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
   session-manager.ts  sessions, transcripts, approvals, goals, worktrees

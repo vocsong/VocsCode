@@ -1,8 +1,8 @@
-import type { VocsDeskApi } from '../../shared/ipc';
+import type { VocsCodeApi } from '../../shared/ipc';
 
 declare global {
   interface Window {
-    harness: VocsDeskApi;
+    harness: VocsCodeApi;
   }
 }
 

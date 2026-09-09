@@ -1,6 +1,6 @@
 {
-  "name": "vocs-desk",
-  "productName": "Vocs-Desk",
+  "name": "vocs-code",
+  "productName": "Vocs Code",
   "version": "0.1.0",
   "description": "Multi-harness, model-agnostic desktop app for coding agents: Claude Agent SDK, Codex, Pi, DeepSeek Harness, and a native loop.",
   "main": "./out/main/index.js",

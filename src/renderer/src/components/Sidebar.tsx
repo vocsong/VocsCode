@@ -51,7 +51,7 @@ export function Sidebar() {
       <div className="sidebar-top">
         <div className="brand">
           <Icon name="sparkles" size={18} />
-          <span>Vocs-Desk</span>
+          <span>Vocs Code</span>
         </div>
         <Button variant="primary" size="sm" icon="plus" onClick={() => openNew(true)} title="New session (Ctrl+N)">
           New

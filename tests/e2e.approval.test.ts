@@ -22,7 +22,7 @@ afterAll(async () => {
 
 describe.runIf(enabled)('electron e2e: approvals', () => {
   it('shows an approval card in Ask mode and applies the change after Allow', async () => {
-    const tmp = path.join(os.tmpdir(), `vocs-desk-e2e-approval-${Date.now()}`);
+    const tmp = path.join(os.tmpdir(), `vocs-code-e2e-approval-${Date.now()}`);
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
     await fs.mkdir(userData, { recursive: true });
@@ -32,7 +32,7 @@ describe.runIf(enabled)('electron e2e: approvals', () => {
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== 'ELECTRON_RUN_AS_NODE' && k !== 'ANTHROPIC_BASE_URL' && k !== 'CLAUDECODE' && !k.startsWith('CLAUDE_CODE_')) env[k] = v;
-    env.VOCS_DESK_USER_DATA = userData;
+    env.VOCS_CODE_USER_DATA = userData;
 
     app = await electron.launch({ executablePath: require('electron') as string, args: [path.join(root, 'out', 'main', 'index.js')], env, timeout: 60_000 });
     const win = await app.firstWindow();
@@ -48,7 +48,7 @@ describe.runIf(enabled)('electron e2e: approvals', () => {
     await modelSelect.selectOption(process.env.DEEPSEEK_API_KEY ? 'deepseek::deepseek-v4-flash' : 'openai::gpt-5.4-mini');
     // Permissions select is the third select in the right column (model, effort, permissions).
     await right.locator('select').nth(2).selectOption('ask');
-    await win.fill('textarea[placeholder="What should the agent do?"]', 'Use the write_file tool to create a file named approved.txt containing exactly: approved by vocs desk. Do not run any other tool. Then reply DONE.');
+    await win.fill('textarea[placeholder="What should the agent do?"]', 'Use the write_file tool to create a file named approved.txt containing exactly: approved by vocs code. Do not run any other tool. Then reply DONE.');
     await win.click('button:has-text("Start session")');
 
     // The approval card must appear and the file must NOT exist yet.
@@ -62,7 +62,7 @@ describe.runIf(enabled)('electron e2e: approvals', () => {
     await win.waitForSelector('.approval.decided', { timeout: 30_000 });
     await win.waitForSelector('.turn-footer', { timeout: 170_000 });
     const content = await fs.readFile(path.join(project, 'approved.txt'), 'utf8');
-    expect(content).toMatch(/approved by vocs desk/i);
+    expect(content).toMatch(/approved by vocs code/i);
 
     // Tool card recorded the change; Changes panel shows the new file.
     expect(await win.locator('.tool-card').count()).toBeGreaterThanOrEqual(1);

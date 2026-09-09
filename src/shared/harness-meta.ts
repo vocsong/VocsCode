@@ -130,7 +130,7 @@ export const HARNESSES: HarnessDescriptor[] = [
     id: 'native',
     name: 'Native loop',
     tagline: 'Built-in agent, bring any API key',
-    vendor: 'Vocs-Desk',
+    vendor: 'Vocs Code',
     description:
       'A lightweight agent loop implemented in the app with bash, read, write, edit, glob and grep tools. Talks directly to Anthropic or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, Ollama, LM Studio, Groq, xAI, Mistral, Gemini).',
     capabilities: {

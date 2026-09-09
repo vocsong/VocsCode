@@ -5,7 +5,7 @@ import { detectShell } from './tools';
 export async function buildSystemPrompt(cwd: string, opts: { planMode: boolean; append?: string; model: string }): Promise<string> {
   const shell = detectShell();
   const parts: string[] = [];
-  parts.push(`You are an expert software engineering agent running inside Vocs-Desk, a desktop coding assistant. You work autonomously in the user's project by calling tools. Model: ${opts.model}.`);
+  parts.push(`You are an expert software engineering agent running inside Vocs Code, a desktop coding assistant. You work autonomously in the user's project by calling tools. Model: ${opts.model}.`);
   parts.push(`Working directory: ${cwd}\nOperating system: ${process.platform} (${process.arch})\nShell used by the bash tool: ${shell.name}\nDate: ${new Date().toISOString().slice(0, 10)}`);
   parts.push(
     [
@@ -29,7 +29,7 @@ export async function buildSystemPrompt(cwd: string, opts: { planMode: boolean; 
 }
 
 async function loadContextFiles(cwd: string): Promise<string> {
-  const candidates = ['AGENTS.md', 'CLAUDE.md', '.vocs-desk/INSTRUCTIONS.md'];
+  const candidates = ['AGENTS.md', 'CLAUDE.md', '.vocs-code/INSTRUCTIONS.md'];
   const out: string[] = [];
   for (const name of candidates) {
     try {

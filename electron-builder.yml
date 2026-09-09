@@ -1,5 +1,5 @@
-appId: dev.vocs.vocsdesk
-productName: Vocs-Desk
+appId: dev.vocs.vocscode
+productName: Vocs Code
 copyright: Copyright © 2026 Vocs
 directories:
   output: dist
@@ -19,12 +19,12 @@ win:
   target:
     - target: nsis
       arch: [x64]
-  artifactName: ${productName}-${version}-win-${arch}.${ext}
+  artifactName: Vocs-Code-${version}-win-${arch}.${ext}
 nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  shortcutName: Vocs-Desk
+  shortcutName: Vocs Code
 mac:
   target: [dmg]
   category: public.app-category.developer-tools

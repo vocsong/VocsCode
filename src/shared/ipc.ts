@@ -111,7 +111,7 @@ export type PushPayloads = {
 };
 
 /** The API exposed on window.harness by the preload script. */
-export interface VocsDeskApi {
+export interface VocsCodeApi {
   invoke<K extends IpcChannel>(channel: K, request: IpcRequest<K>): Promise<IpcResponse<K>>;
   on<K extends keyof PushPayloads>(channel: K, listener: (payload: PushPayloads[K]) => void): () => void;
   platform: string;

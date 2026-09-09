@@ -134,7 +134,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
 
     await withTimeout(
       this.rpc.request('initialize', {
-        clientInfo: { name: 'vocs-desk', title: 'Vocs-Desk', version: '0.1.0' },
+        clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' },
         capabilities: { experimentalApi: true, requestAttestation: false }
       }),
       30_000,
@@ -645,7 +645,7 @@ export async function listCodexModels(codexPath: string): Promise<ModelInfo[]> {
   const child = spawnTool(codexPath, ['app-server']);
   const rpc = new JsonRpcStdioClient(child);
   try {
-    await withTimeout(rpc.request('initialize', { clientInfo: { name: 'vocs-desk', title: 'Vocs-Desk', version: '0.1.0' }, capabilities: { experimentalApi: false, requestAttestation: false } }), 20_000, 'initialize');
+    await withTimeout(rpc.request('initialize', { clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' }, capabilities: { experimentalApi: false, requestAttestation: false } }), 20_000, 'initialize');
     const res = await withTimeout(rpc.request<{ data: CodexModel[] }>('model/list', { limit: 100 }), 20_000, 'model/list');
     return res.data.map((m) => codexModelToInfo(m));
   } finally {

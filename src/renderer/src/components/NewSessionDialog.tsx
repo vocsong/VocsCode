@@ -226,7 +226,7 @@ export function NewSessionDialog() {
           <div className="field-hint">{PERMISSION_MODE_LABELS[mode].description}</div>
           {!descriptor.capabilities.approvals && mode !== 'plan' && <div className="callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
 
-          <Toggle checked={useWorktree} onChange={setUseWorktree} label={<span>Isolate in a git worktree <span className="muted">(new branch under .vocs-desk/worktrees)</span></span>} />
+          <Toggle checked={useWorktree} onChange={setUseWorktree} label={<span>Isolate in a git worktree <span className="muted">(new branch under .vocs-code/worktrees)</span></span>} />
 
           <Field label="First prompt (optional)">
             <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="What should the agent do?" />

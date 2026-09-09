@@ -134,7 +134,7 @@ export interface ToolExecResult {
   changes?: FileChange[];
 }
 
-const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', '.venv', 'venv', '__pycache__', 'target', '.vocs-desk']);
+const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', '.venv', 'venv', '__pycache__', 'target', '.vocs-code']);
 const MAX_OUTPUT = 30_000;
 
 export function resolveInCwd(cwd: string, p: string | undefined): string {
