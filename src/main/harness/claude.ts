@@ -14,7 +14,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { AsyncQueue, errorMessage, shortId, truncate } from '../util/async';
-import { gateAction, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
+import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
 import type { HarnessAdapter, HarnessContext } from './types';
 
 const APP_ID = 'vocs-desk/0.1.0';
@@ -186,7 +186,10 @@ export class ClaudeAdapter implements HarnessAdapter {
 
     if (toolName === 'AskUserQuestion') return this.askUserQuestion(input);
 
-    const verdict = gateAction(mode, { mutating, isEdit, command, sessionAllowed: this.sessionAllowed.has(toolName) });
+    const cwd = this.ctx.session().cwd;
+    const editTarget = isEdit ? String((input as Record<string, unknown>).file_path ?? (input as Record<string, unknown>).notebook_path ?? '') : '';
+    const outsideWorkspace = isEdit && isOutsideWorkspace(cwd, editTarget || undefined, path);
+    const verdict = gateAction(mode, { mutating, isEdit, command, sessionAllowed: this.sessionAllowed.has(toolName), outsideWorkspace });
     if (verdict === 'allow') return { behavior: 'allow', updatedInput: input };
     if (verdict === 'deny') return { behavior: 'deny', message: PLAN_MODE_DENIAL };
 
@@ -196,16 +199,18 @@ export class ClaudeAdapter implements HarnessAdapter {
       title: command ? 'Run command?' : isEdit ? `Allow ${toolName}?` : `Allow ${toolName}?`,
       toolName,
       command,
-      cwd: this.ctx.session().cwd,
+      cwd,
       input,
       changes,
-      description: command ? undefined : summarizeInput(toolName, input),
+      description: command ? undefined : outsideWorkspace ? `${summarizeInput(toolName, input)} (outside the project directory)` : summarizeInput(toolName, input),
       options: OPTIONS_ALLOW_DENY
     });
     if (decision.optionId === 'allow') return { behavior: 'allow', updatedInput: (decision.updatedInput as Record<string, unknown>) ?? input };
     if (decision.optionId === 'allow_session') {
       this.sessionAllowed.add(toolName);
-      return { behavior: 'allow', updatedInput: input, updatedPermissions: suggestions };
+      // Keep the grant in the CLI's session memory only; never persist it to settings files.
+      const sessionOnly = suggestions?.map((s) => ({ ...s, destination: 'session' as const }));
+      return { behavior: 'allow', updatedInput: input, updatedPermissions: sessionOnly };
     }
     return { behavior: 'deny', message: decision.note?.trim() || 'The user declined this action.' };
   };

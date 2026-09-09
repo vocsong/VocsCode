@@ -8,6 +8,7 @@ import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, ModelInfo
 import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
 import { which } from '../runtime';
 import { isDangerousCommand, type HarnessAdapter, type HarnessContext } from './types';
+import { isOutsideWorkspace } from './permissions';
 import { killTree, spawnTool } from './spawn';
 
 interface ConfigOptionLike {
@@ -233,7 +234,7 @@ export class AcpAdapter implements HarnessAdapter {
         const o = options.find((x) => x.kind === k);
         if (o) return o.optionId;
       }
-      return options[0]?.optionId;
+      return undefined;
     };
     const mode = this.ctx.permissionMode();
     const kind = tc.kind ?? 'other';
@@ -241,14 +242,28 @@ export class AcpAdapter implements HarnessAdapter {
     const isRead = kind === 'read' || kind === 'search' || kind === 'fetch' || kind === 'think';
     const raw = (tc.rawInput ?? {}) as Record<string, unknown>;
     const command = typeof raw.command === 'string' ? raw.command : Array.isArray(raw.command) ? raw.command.join(' ') : undefined;
+    const dangerous = !!command && isDangerousCommand(command);
+    const cwd = this.ctx.session().cwd;
+    const outsideWorkspace = (tc.locations ?? []).some((l) => isOutsideWorkspace(cwd, l.path, path));
 
     const selected = (optionId: string): acp.RequestPermissionResponse => ({ outcome: { outcome: 'selected', optionId } });
-    if (isRead) return selected(pick(['allow_once', 'allow_always']) ?? options[0].optionId);
-    if (mode === 'plan') return selected(pick(['reject_once', 'reject_always']) ?? options[0].optionId);
+    const cancelled: acp.RequestPermissionResponse = { outcome: { outcome: 'cancelled' } };
+    const allow = () => {
+      const id = pick(['allow_once', 'allow_always']);
+      return id ? selected(id) : cancelled;
+    };
+    const reject = () => {
+      const id = pick(['reject_once', 'reject_always']);
+      return id ? selected(id) : cancelled; // no reject option → cancel rather than accidentally allow
+    };
+    if (isRead) return allow();
+    if (mode === 'plan') return reject();
     if (mode === 'full-auto') return selected(pick(['allow_always', 'allow_once']) ?? options[0].optionId);
-    if (mode === 'auto' && !(command && isDangerousCommand(command))) return selected(pick(['allow_once', 'allow_always']) ?? options[0].optionId);
-    if (mode === 'accept-edits' && isEdit) return selected(pick(['allow_once', 'allow_always']) ?? options[0].optionId);
-    if (this.sessionAllowedKinds.has(kind)) return selected(pick(['allow_once', 'allow_always']) ?? options[0].optionId);
+    if (!dangerous && !outsideWorkspace) {
+      if (mode === 'auto') return allow();
+      if (mode === 'accept-edits' && isEdit) return allow();
+      if (this.sessionAllowedKinds.has(kind)) return allow();
+    }
 
     const ourOptions: ApprovalOption[] = options.map((o) => ({
       id: o.optionId,
@@ -259,9 +274,10 @@ export class AcpAdapter implements HarnessAdapter {
     const decision = await this.ctx.requestApproval({
       kind: command ? 'command' : isEdit ? 'file_change' : 'tool',
       title: tc.title ?? `Allow ${kind}?`,
+      description: outsideWorkspace ? 'Touches paths outside the project directory.' : undefined,
       toolName: kind,
       command,
-      cwd: this.ctx.session().cwd,
+      cwd,
       input: tc.rawInput,
       changes: changes?.length ? changes : tc.locations?.length ? tc.locations.map((l) => ({ path: l.path, kind: 'update' as const })) : undefined,
       toolItemId: tc.toolCallId,

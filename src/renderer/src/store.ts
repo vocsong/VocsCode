@@ -64,6 +64,15 @@ let toastCounter = 0;
 /** Batches streaming deltas so the UI re-renders at most a few dozen times per second. */
 const pendingDeltas: SessionEventEnvelope[] = [];
 let flushScheduled = false;
+/** IPC listeners are registered once per page, even if React StrictMode runs boot() twice. */
+let subscribed = false;
+
+function dropPendingDeltas(sessionId: string, itemId?: string): void {
+  for (let i = pendingDeltas.length - 1; i >= 0; i--) {
+    const d = pendingDeltas[i];
+    if (d.sessionId === sessionId && (itemId === undefined || (d.event.type === 'item.delta' && d.event.id === itemId))) pendingDeltas.splice(i, 1);
+  }
+}
 
 export const useStore = create<State>((set, get) => ({
   booted: false,
@@ -88,12 +97,15 @@ export const useStore = create<State>((set, get) => ({
   async boot() {
     const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
     set({ settings, sessions, booted: true });
+    if (!subscribed) {
+      subscribed = true;
+      on('push:sessionsChanged', (list) => get().setSessions(list));
+      on('push:settingsChanged', (s) => get().setSettings(s));
+      on('push:sessionEvent', (env) => get().applyEvent(env));
+      on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId));
+    }
     const first = sessions.find((s) => !s.archived);
     if (first) await get().setActive(first.id);
-    on('push:sessionsChanged', (list) => get().setSessions(list));
-    on('push:settingsChanged', (s) => get().setSettings(s));
-    on('push:sessionEvent', (env) => get().applyEvent(env));
-    on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId));
     void get().refreshAvailability();
   },
 
@@ -105,6 +117,8 @@ export const useStore = create<State>((set, get) => ({
   async loadTranscript(id) {
     if (get().loaded[id]) return;
     const items = await invoke('sessions:transcript', { id });
+    // The snapshot already contains any streamed text; deltas still queued for it would duplicate.
+    dropPendingDeltas(id);
     set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
   },
 
@@ -142,12 +156,23 @@ export const useStore = create<State>((set, get) => ({
       return;
     }
     switch (event.type) {
+      case 'approval.resolved': {
+        set((s) => {
+          const list = s.transcripts[sessionId];
+          if (!list) return {};
+          const idx = list.findIndex((i) => i.id === event.requestId);
+          if (idx < 0 || list[idx].kind !== 'approval') return {};
+          const cur = list[idx] as Extract<TranscriptItem, { kind: 'approval' }>;
+          if (cur.decision) return {};
+          const next = [...list];
+          next[idx] = { ...cur, decision: event.decision, decidedAt: Date.now() };
+          return { transcripts: { ...s.transcripts, [sessionId]: next } };
+        });
+        break;
+      }
       case 'item.upsert': {
         // The upsert carries the item's full state; drop deltas still waiting in the batch for it.
-        for (let i = pendingDeltas.length - 1; i >= 0; i--) {
-          const d = pendingDeltas[i];
-          if (d.sessionId === sessionId && d.event.type === 'item.delta' && d.event.id === event.item.id) pendingDeltas.splice(i, 1);
-        }
+        dropPendingDeltas(sessionId, event.item.id);
         set((s) => {
           const list = [...(s.transcripts[sessionId] ?? [])];
           const idx = list.findIndex((i) => i.id === event.item.id);

@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
@@ -78,7 +79,10 @@ export function registerIpc(deps: IpcDeps): void {
     try {
       if (process.platform === 'win32') {
         const wt = which('wt');
-        const child = wt ? spawnTool(wt, ['-d', cwd], { detached: true, stdio: 'ignore' }) : spawnTool(process.env.ComSpec || 'cmd.exe', ['/c', 'start', 'cmd', '/K', `cd /d "${cwd}"`], { detached: true, stdio: 'ignore' });
+        // `start "" /D <dir> cmd.exe` opens a console already in the project directory.
+        const child = wt
+          ? spawnTool(wt, ['-d', cwd], { detached: true, stdio: 'ignore' })
+          : spawn(process.env.ComSpec || 'cmd.exe', ['/c', `start "" /D "${cwd}" cmd.exe`], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true, windowsHide: false });
         child.unref();
       } else if (process.platform === 'darwin') {
         const child = spawnTool('open', ['-a', 'Terminal', cwd], { detached: true, stdio: 'ignore' });

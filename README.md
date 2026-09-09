@@ -80,11 +80,13 @@ Permission modes map per harness:
 
 | Mode | Claude | Codex | Pi (extension) | ACP client policy | Native |
 | --- | --- | --- | --- | --- | --- |
-| Ask | `default` + prompt | `on-request`, workspace-write | confirm bash/edit/write | prompt | prompt |
-| Accept edits | `acceptEdits` | auto-accept file changes | confirm bash only | allow edit kinds | allow edits |
+| Ask | `default` + prompt | `untrusted` (every non-read-only command asks), workspace-write | confirm bash/edit/write | prompt | prompt |
+| Accept edits | `acceptEdits` | `untrusted`, auto-accept in-workspace file changes | confirm bash only | allow in-workspace edits | allow edits |
 | Plan | `plan` | read-only sandbox, decline writes | block mutations | reject mutations | read-only tools |
-| Auto | `default` + auto-allow safe | workspace-write with network | confirm dangerous only | allow unless dangerous | allow unless dangerous |
+| Auto | `default` + auto-allow safe | `on-request`, workspace-write with network | confirm dangerous only | allow unless dangerous | allow unless dangerous |
 | Full access | `bypassPermissions` | `never` + danger-full-access | never ask | allow always | allow |
+
+Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping curl into a shell, …) and any write outside the project directory always prompt below Full access, even after "Allow for session".
 
 ## Security notes
 

@@ -59,7 +59,14 @@ export function App() {
           e.preventDefault();
           void st.setActive(target.id);
         }
-      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.paletteOpen && st.activeId && (document.activeElement?.tagName !== 'TEXTAREA' || !(document.activeElement as HTMLTextAreaElement).value)) {
+      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.paletteOpen && st.activeId) {
+        // Escape interrupts the agent only when nothing else would consume it: no open menu, dialog or
+        // popover, and focus is on the page body or an empty composer.
+        if (document.querySelector('.dropdown-menu, .modal, .popover, .session-rename')) return;
+        const el = document.activeElement as HTMLElement | null;
+        const onBody = !el || el === document.body;
+        const onEmptyComposer = el?.tagName === 'TEXTAREA' && el.closest('.composer') !== null && !(el as HTMLTextAreaElement).value;
+        if (!onBody && !onEmptyComposer) return;
         const s = st.sessions.find((x) => x.id === st.activeId);
         if (s && (s.status === 'running' || s.status === 'awaiting')) void invoke('sessions:interrupt', { id: s.id });
       }

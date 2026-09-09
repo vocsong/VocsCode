@@ -51,16 +51,19 @@ type ThreadItem =
   | { type: 'collabAgentToolCall'; id: string; tool: string; [k: string]: unknown }
   | { type: string; id: string; [k: string]: unknown };
 
+/**
+ * Codex approval policies: `untrusted` asks for every command except known read-only ones
+ * (what our Ask / Accept-edits modes promise), `on-request` asks only when the sandboxed run
+ * needs escalation (our Auto), `never` for full access.
+ */
 function approvalPolicyFor(mode: PermissionMode): AskForApproval {
   switch (mode) {
     case 'full-auto':
       return 'never';
-    case 'plan':
-      return 'on-request';
     case 'auto':
       return 'on-request';
     default:
-      return 'on-request';
+      return 'untrusted';
   }
 }
 
@@ -92,7 +95,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   private effort: EffortLevel | undefined;
   private items = new Map<string, TranscriptItem>();
   private fileChangeItems = new Map<string, FileChange[]>();
-  private sessionAllowedCommands = false;
+  /** Exact command lines the user approved "for session"; Codex keeps its own per-command memory too. */
+  private sessionAllowedCommands = new Set<string>();
   private queue: UserInput[] = [];
   private totals: UsageTotals;
   private turnStartedAt = 0;
@@ -299,7 +303,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const n = p as { itemId: string; command?: string | null; cwd?: string | null; reason?: string | null; proposedExecpolicyAmendment?: unknown };
       const command = n.command ?? '(command)';
       const mode = this.ctx.permissionMode();
-      const verdict = gateAction(mode, { mutating: true, isEdit: false, command, sessionAllowed: this.sessionAllowedCommands });
+      const verdict = gateAction(mode, { mutating: true, isEdit: false, command, sessionAllowed: this.sessionAllowedCommands.has(command) });
       if (mode === 'plan') return { decision: 'decline' };
       if (verdict === 'allow') return { decision: 'accept' };
       const decision = await this.ctx.requestApproval({
@@ -313,7 +317,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       });
       if (decision.optionId === 'allow') return { decision: 'accept' };
       if (decision.optionId === 'allow_session') {
-        this.sessionAllowedCommands = true;
+        this.sessionAllowedCommands.add(command);
         return { decision: 'acceptForSession' };
       }
       return { decision: 'decline' };
@@ -322,7 +326,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const n = p as { itemId: string; reason?: string | null; grantRoot?: string | null };
       const mode = this.ctx.permissionMode();
       if (mode === 'plan') return { decision: 'decline' };
-      if (mode === 'accept-edits' || mode === 'auto' || mode === 'full-auto') return { decision: 'accept' };
+      // A grantRoot request means the patch writes outside the sandboxed workspace: always ask below full access.
+      if (mode === 'full-auto' || ((mode === 'accept-edits' || mode === 'auto') && !n.grantRoot)) return { decision: 'accept' };
       const changes = this.fileChangeItems.get(n.itemId);
       const decision = await this.ctx.requestApproval({
         kind: 'file_change',
@@ -360,11 +365,11 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const command = Array.isArray(n.command) ? n.command.join(' ') : (n.command ?? '(command)');
       const mode = this.ctx.permissionMode();
       if (mode === 'plan') return { decision: { denied: { rejection: 'Plan mode' } } };
-      if (gateAction(mode, { mutating: true, isEdit: false, command, sessionAllowed: this.sessionAllowedCommands }) === 'allow') return { decision: 'approved' };
+      if (gateAction(mode, { mutating: true, isEdit: false, command, sessionAllowed: this.sessionAllowedCommands.has(command) }) === 'allow') return { decision: 'approved' };
       const d = await this.ctx.requestApproval({ kind: 'command', title: 'Codex wants to run a command', command, cwd: n.cwd, description: n.reason, options: OPTIONS_ALLOW_DENY });
       if (d.optionId === 'allow') return { decision: 'approved' };
       if (d.optionId === 'allow_session') {
-        this.sessionAllowedCommands = true;
+        this.sessionAllowedCommands.add(command);
         return { decision: 'approved_for_session' };
       }
       return { decision: { denied: { rejection: d.note || 'User declined' } } };
@@ -582,8 +587,11 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     this.ctx.updateMeta({ activeEffort: effort });
   }
 
-  async setPermissionMode(): Promise<void> {
+  async setPermissionMode(mode: PermissionMode): Promise<void> {
     this.modeOverridePending = true;
+    // Session grants made under a looser mode must not carry into a stricter one.
+    this.sessionAllowedCommands.clear();
+    if (this._busy) this.info(`Permission mode "${mode}" applies to Codex from the next turn; the running turn keeps its current sandbox.`, 'warn');
   }
 
   async compact(): Promise<void> {

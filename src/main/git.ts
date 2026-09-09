@@ -148,9 +148,11 @@ export async function createWorktree(projectRoot: string, slug: string): Promise
   } catch {
     /* ignore */
   }
+  // Pick a name whose directory AND branch are both free (a removed worktree leaves its branch behind).
+  const branchExists = async (b: string) => (await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${b}`])).code === 0;
   let name = slug;
   let i = 1;
-  while (await exists(path.join(base, name))) name = `${slug}-${++i}`;
+  while ((await exists(path.join(base, name))) || (await branchExists(`harness/${name}`))) name = `${slug}-${++i}`;
   const wtPath = path.join(base, name);
   const branch = `harness/${name}`;
   const r = await git(root, ['worktree', 'add', '-b', branch, wtPath], 60_000);

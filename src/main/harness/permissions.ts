@@ -22,15 +22,27 @@ export type GateVerdict = 'allow' | 'deny' | 'ask';
  */
 export function gateAction(
   mode: PermissionMode,
-  action: { mutating: boolean; isEdit: boolean; command?: string; sessionAllowed?: boolean }
+  action: { mutating: boolean; isEdit: boolean; command?: string; sessionAllowed?: boolean; outsideWorkspace?: boolean }
 ): GateVerdict {
   if (!action.mutating) return 'allow';
   if (mode === 'plan') return 'deny';
   if (mode === 'full-auto') return 'allow';
+  // Below full access, a dangerous command always prompts, even after "allow for session",
+  // and so does any write that leaves the project directory.
+  if (action.command && isDangerousCommand(action.command)) return 'ask';
+  if (action.outsideWorkspace) return 'ask';
   if (action.sessionAllowed) return 'allow';
-  if (mode === 'auto') return action.command && isDangerousCommand(action.command) ? 'ask' : 'allow';
+  if (mode === 'auto') return 'allow';
   if (mode === 'accept-edits') return action.isEdit ? 'allow' : 'ask';
   return 'ask';
+}
+
+/** True when `target` (absolute or relative to cwd) resolves outside cwd. */
+export function isOutsideWorkspace(cwd: string, target: string | undefined, pathMod: { resolve: (...p: string[]) => string; relative: (a: string, b: string) => string; isAbsolute: (p: string) => boolean }): boolean {
+  if (!target) return false;
+  const abs = pathMod.resolve(cwd, target);
+  const rel = pathMod.relative(pathMod.resolve(cwd), abs);
+  return rel.startsWith('..') || pathMod.isAbsolute(rel);
 }
 
 export function commandApproval(command: string, cwd?: string, extra?: Partial<ApprovalDraft>): ApprovalDraft {
