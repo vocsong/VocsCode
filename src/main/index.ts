@@ -15,6 +15,13 @@ import { TerminalManager } from './terminal';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged && !!process.env.ELECTRON_RENDERER_URL;
+const APP_NAME = 'Vocs Code';
+const APP_ID = 'dev.vocs.vocscode';
+
+// Electron uses its own name and AppUserModelId in development unless the host sets them explicitly.
+// Set both before acquiring the single-instance lock so the taskbar uses the packaged identity too.
+app.setName(APP_NAME);
+if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
 
 let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
@@ -121,10 +128,10 @@ async function main(): Promise<void> {
   // application menu because the system requires one for the app menu and standard shortcuts.
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
-  createWindow(settings);
+  createWindow(settings, appRoot);
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings);
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot);
   });
   app.on('window-all-closed', () => {
     app.quit();
@@ -136,6 +143,13 @@ async function main(): Promise<void> {
     e.preventDefault();
     Promise.race([Promise.all([sessions?.stopAll(), terminals?.shutdown()]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
   });
+}
+
+/** Resolve the same icon in development and in the packaged app's extra resources. */
+function appIconPath(appRoot: string): string {
+  const iconName = process.platform === 'win32' ? 'vocs-code.ico' : 'vocs-code.png';
+  const iconRoot = app.isPackaged ? path.join(process.resourcesPath, 'icons') : path.join(appRoot, 'resources', 'icons');
+  return path.join(iconRoot, iconName);
 }
 
 /** Title bar height in CSS pixels; must match --titlebar in styles.css. */
@@ -161,14 +175,16 @@ function applyChrome(): void {
   }
 }
 
-function createWindow(settings: SettingsStore): void {
+function createWindow(settings: SettingsStore, appRoot: string): void {
   const s = settings.get();
   const bounds = s.windowBounds ?? { width: 1440, height: 900 };
+  const icon = appIconPath(appRoot);
   const win = new BrowserWindow({
     ...bounds,
     minWidth: 960,
     minHeight: 600,
-    title: 'Vocs Code',
+    title: APP_NAME,
+    icon,
     backgroundColor: chrome().color,
     // Frameless with an in-app title bar (sidebar toggle, history, menu bar). On Windows/Linux the
     // overlay keeps the native caption buttons — and with them snap layouts and double-click maximize.
@@ -186,6 +202,9 @@ function createWindow(settings: SettingsStore): void {
       spellcheck: true
     }
   });
+  if (process.platform === 'win32') {
+    win.setAppDetails({ appId: APP_ID, appIconPath: icon });
+  }
   mainWindow = win;
   win.once('ready-to-show', () => win.show());
   win.on('closed', () => {
