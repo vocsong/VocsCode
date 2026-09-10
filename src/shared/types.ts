@@ -130,6 +130,33 @@ export interface UsageDay {
   turns: number;
   /** Cumulative completed-turn wall time in ms. */
   durationMs: number;
+  /** Completed tool calls recorded this day. */
+  toolCalls: number;
+}
+
+/** Tool-call rollup per tool name. */
+export interface ToolUsage {
+  calls: number;
+  errors: number;
+  declined: number;
+  durationMs: number;
+}
+
+export interface ToolUsageRow extends ToolUsage {
+  name: string;
+}
+
+/** File-change counts by change kind, aggregated across tool calls. */
+export interface FileUsage {
+  adds: number;
+  updates: number;
+  deletes: number;
+  renames: number;
+}
+
+export interface FileUsageRow extends FileUsage {
+  path: string;
+  total: number;
 }
 
 /** Per-session usage snapshot; kept in the analytics store even after the session is deleted. */
@@ -143,6 +170,8 @@ export interface UsageSessionRecord {
   createdAt: number;
   updatedAt: number;
   usage: UsageTotals;
+  /** Completed tool calls recorded for this session. */
+  toolCalls: number;
 }
 
 /** Usage rollup for one dimension (harness, model, project). */
@@ -150,6 +179,7 @@ export interface UsageBucket {
   key: string;
   label: string;
   usage: UsageTotals;
+  toolCalls: number;
   sessions: number;
 }
 
@@ -166,6 +196,10 @@ export interface AnalyticsSummary {
   byHarness: UsageBucket[];
   byModel: UsageBucket[];
   byProject: UsageBucket[];
+  /** All-time tool-call totals and per-tool/per-file breakdowns, sorted by volume. */
+  toolTotals: ToolUsage;
+  tools: ToolUsageRow[];
+  files: FileUsageRow[];
   /** Sessions sorted by spend, highest first. */
   sessions: UsageSessionRecord[];
   sessionCount: number;
