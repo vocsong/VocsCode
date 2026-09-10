@@ -119,7 +119,6 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
   };
   return (
     <div className={`session-row ${active ? 'active' : ''}`} onClick={onSelect} onDoubleClick={startRename}>
-      <StatusLabel status={s.status} />
       <div className="session-main">
         {renaming ? (
           <input
