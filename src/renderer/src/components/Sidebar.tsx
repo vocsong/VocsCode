@@ -23,6 +23,7 @@ export function harnessShort(id: string): string {
 
 export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
+  const settings = useStore((s) => s.settings);
   const activeId = useStore((s) => s.activeId);
   const setActive = useStore((s) => s.setActive);
   const startNewSession = useStore((s) => s.startNewSession);
@@ -40,10 +41,20 @@ export function Sidebar() {
       const key = s.config.projectRoot;
       byProject.set(key, [...(byProject.get(key) ?? []), s]);
     }
-    return [...byProject.entries()]
+    const groups = [...byProject.entries()]
       .map(([root, list]) => ({ root, list: list.sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updatedAt - a.updatedAt) }))
       .sort((a, b) => Math.max(...b.list.map((x) => x.updatedAt)) - Math.max(...a.list.map((x) => x.updatedAt)));
-  }, [sessions, query, showArchived]);
+    if (!showArchived) {
+      // A folder whose last active session was archived or deleted stays listed so a new
+      // session can still be added to it; empty folders sort alphabetically at the bottom.
+      const empties = (settings?.folders ?? [])
+        .filter((root) => !byProject.has(root) && (!q || root.toLowerCase().includes(q)))
+        .sort((a, b) => basename(a).localeCompare(basename(b)))
+        .map((root) => ({ root, list: [] as SessionMeta[] }));
+      groups.push(...empties);
+    }
+    return groups;
+  }, [sessions, settings, query, showArchived]);
 
   const awaiting = sessions.filter((s) => s.status === 'awaiting').length;
   const running = sessions.filter((s) => s.status === 'running').length;
@@ -65,7 +76,7 @@ export function Sidebar() {
       </div>
       {(awaiting > 0 || running > 0) && (
         <div className="sidebar-summary">
-          {awaiting > 0 && <Badge tone="amber">{awaiting} awaiting approval</Badge>}
+          {awaiting > 0 && <Badge tone="red">{awaiting} awaiting approval</Badge>}
           {running > 0 && <Badge tone="blue">{running} running</Badge>}
         </div>
       )}
@@ -95,6 +106,9 @@ export function Sidebar() {
       <div className="sidebar-bottom">
         <button type="button" className={`sidebar-link ${showArchived ? 'active' : ''}`} onClick={() => setShowArchived((v) => !v)}>
           <Icon name="clock" size={14} /> {showArchived ? 'Show active' : 'Archived'}
+        </button>
+        <button type="button" className={`sidebar-link ${view === 'analytics' ? 'active' : ''}`} onClick={() => setView('analytics')}>
+          <Icon name="chart" size={14} /> Analytics
         </button>
         <button type="button" className={`sidebar-link ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
           <Icon name="settings" size={14} /> Settings
@@ -147,7 +161,7 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
           {s.activeModel && <span className="session-model" title={`${s.activeModel.provider}/${s.activeModel.model}`}>{s.activeModel.model}</span>}
           <span className="session-time">{relTime(s.updatedAt)}</span>
           {s.usage.costUsd > 0 && <span className="session-cost">{fmtCost(s.usage.costUsd)}</span>}
-          {s.worktreeBranch && <Icon name="branch" size={11} className="muted" />}
+          {s.worktreeBranch && <Icon name="branch" size={12} className="session-worktree" title={`Worktree · ${s.worktreeBranch}`} />}
           {(s.queued ?? 0) > 0 && <span className="session-queued">+{s.queued}</span>}
         </div>
       </div>

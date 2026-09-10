@@ -12,7 +12,7 @@ export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-au
 
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
-export type SessionStatus = 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped';
+export type SessionStatus = 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped' | 'pr' | 'merged';
 
 export interface ModelInfo {
   /** Provider-scoped identifier used in API calls. */
@@ -117,6 +117,94 @@ export interface UsageTotals {
   contextWindow?: number;
   /** Tokens currently in the context window, when the harness reports it. */
   contextTokens?: number;
+}
+
+/** Aggregated usage for one UTC day, as accumulated by the analytics store. */
+export interface UsageDay {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  costUsd: number;
+  turns: number;
+  /** Cumulative completed-turn wall time in ms. */
+  durationMs: number;
+  /** Completed tool calls recorded this day. */
+  toolCalls: number;
+}
+
+/** Tool-call rollup per tool name. */
+export interface ToolUsage {
+  calls: number;
+  errors: number;
+  declined: number;
+  durationMs: number;
+}
+
+export interface ToolUsageRow extends ToolUsage {
+  name: string;
+}
+
+/** File-change counts by change kind, aggregated across tool calls. */
+export interface FileUsage {
+  adds: number;
+  updates: number;
+  deletes: number;
+  renames: number;
+}
+
+export interface FileUsageRow extends FileUsage {
+  path: string;
+  total: number;
+}
+
+/** Per-session usage snapshot; kept in the analytics store even after the session is deleted. */
+export interface UsageSessionRecord {
+  id: string;
+  title: string;
+  harness: HarnessId;
+  provider?: string;
+  model?: string;
+  projectRoot: string;
+  createdAt: number;
+  updatedAt: number;
+  usage: UsageTotals;
+  /** Completed tool calls recorded for this session. */
+  toolCalls: number;
+}
+
+/** Usage rollup for one dimension (harness, model, project). */
+export interface UsageBucket {
+  key: string;
+  label: string;
+  usage: UsageTotals;
+  toolCalls: number;
+  sessions: number;
+}
+
+export interface AnalyticsDayPoint {
+  date: string;
+  usage: UsageDay;
+}
+
+export interface AnalyticsSummary {
+  /** All-time totals across every recorded session, including deleted ones. */
+  totals: UsageTotals;
+  /** UTC days, ascending, filtered to the requested range. */
+  days: AnalyticsDayPoint[];
+  byHarness: UsageBucket[];
+  byModel: UsageBucket[];
+  byProject: UsageBucket[];
+  /** All-time tool-call totals and per-tool/per-file breakdowns, sorted by volume. */
+  toolTotals: ToolUsage;
+  tools: ToolUsageRow[];
+  files: FileUsageRow[];
+  /** Sessions sorted by spend, highest first. */
+  sessions: UsageSessionRecord[];
+  sessionCount: number;
+  activeDays: number;
+  firstDay?: string;
 }
 
 export interface HarnessRef {
@@ -416,6 +504,8 @@ export interface AppSettings {
   sidebarWidth: number;
   panelWidth: number;
   recentProjects: string[];
+  /** Project folders that stay in the sidebar even when they have no sessions left. */
+  folders: string[];
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
 }
@@ -436,6 +526,17 @@ export interface GitSummary {
   files: GitFileStatus[];
   ahead?: number;
   behind?: number;
+}
+
+export interface GitBranchInfo {
+  name: string;
+  current: boolean;
+}
+
+export interface GitWorktreeInfo {
+  path: string;
+  branch?: string;
+  detached: boolean;
 }
 
 export interface FsEntry {

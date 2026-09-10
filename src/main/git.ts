@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
-import type { GitFileStatus, GitSummary } from '../shared/types';
+import type { GitBranchInfo, GitFileStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import { runCapture, which } from './runtime';
 import { exists } from './util/fs';
@@ -67,6 +67,58 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
     }
   }
   return { isRepo: true, root, branch: branch.stdout.trim() || undefined, files, ahead, behind };
+}
+
+/** PR/merge state of a session's branch, shown in the sidebar status labels. */
+export interface BranchGitState {
+  pr: boolean;
+  merged: boolean;
+}
+
+const BASE_BRANCHES = ['develop', 'master', 'main'];
+
+/**
+ * Classifies a session branch: open PR ('pr') or already merged into a base branch
+ * ('merged'). Uses `gh` when available (also catches squash merges); otherwise falls
+ * back to merge-commit ancestry, and to remote tracking (a fully pushed branch means
+ * the PR was opened in this workflow).
+ */
+export async function branchGitState(cwd: string, branch: string): Promise<BranchGitState> {
+  const root = await gitRoot(cwd);
+  if (!root) return { pr: false, merged: false };
+  const state: BranchGitState = { pr: false, merged: false };
+  const gh = which('gh');
+  if (gh) {
+    const r = await runCapture(gh, ['pr', 'list', '--head', branch, '--state', 'all', '--limit', '10', '--json', 'state'], {
+      cwd: root,
+      timeoutMs: 15_000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    });
+    if (r.code === 0) {
+      try {
+        const prs = JSON.parse(r.stdout) as { state: string }[];
+        if (prs.some((p) => p.state === 'MERGED')) return { pr: false, merged: true };
+        if (prs.some((p) => p.state === 'OPEN')) state.pr = true;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  if (state.pr) return state;
+  // Merge commits put the branch tip on a base branch; squash merges need gh above.
+  for (const base of BASE_BRANCHES) {
+    const r = await git(root, ['merge-base', '--is-ancestor', branch, base]);
+    if (r.code === 0) return { pr: state.pr, merged: true };
+  }
+  if (!gh) {
+    // Without gh, a fully pushed branch stands in for "PR created".
+    const remote = await git(root, ['rev-parse', '--verify', '--quiet', `origin/${branch}`]);
+    if (remote.code === 0) {
+      const ahead = await git(root, ['rev-list', '--count', `origin/${branch}..${branch}`]);
+      if (ahead.code === 0 && ahead.stdout.trim() === '0') state.pr = true;
+    }
+  }
+  return state;
 }
 
 export async function gitDiff(cwd: string, file?: string, staged = false): Promise<string> {
@@ -180,6 +232,48 @@ export async function gitMergePr(cwd: string, base?: string): Promise<PrResult> 
   const merge = await gh(cwd, ['pr', 'merge', head, '--merge']);
   if (merge.code !== 0) return { ok: false, output: (merge.stderr || merge.stdout).trim() || 'gh pr merge failed' };
   return { ok: true, url: pr.url, output: (merge.stdout + merge.stderr).trim() || `Merged into ${pr.baseRefName ?? base ?? 'base'}` };
+}
+
+export async function gitBranches(cwd: string): Promise<{ current?: string; branches: GitBranchInfo[] }> {
+  const r = await git(cwd, ['branch', '--list', '--no-color']);
+  if (r.code !== 0) return { branches: [] };
+  const branches: GitBranchInfo[] = [];
+  let current: string | undefined;
+  for (const line of r.stdout.split('\n')) {
+    if (!line.trim()) continue;
+    const isCurrent = line.startsWith('*');
+    const name = line.replace(/^\*\s*/, '').trim();
+    branches.push({ name, current: isCurrent });
+    if (isCurrent) current = name;
+  }
+  return { current, branches };
+}
+
+export async function gitWorktrees(cwd: string): Promise<{ current: string; worktrees: GitWorktreeInfo[] }> {
+  const current = path.resolve(cwd);
+  const r = await git(cwd, ['worktree', 'list', '--porcelain']);
+  if (r.code !== 0) return { current, worktrees: [] };
+  const worktrees: GitWorktreeInfo[] = [];
+  let entry: GitWorktreeInfo | null = null;
+  for (const line of r.stdout.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      if (entry) worktrees.push(entry);
+      // Git may print POSIX-style separators; normalize so comparisons with session cwd match.
+      entry = { path: path.resolve(line.slice('worktree '.length).trim()), detached: false };
+    } else if (entry && line.startsWith('branch ')) {
+      entry.branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '');
+    } else if (line === 'detached') {
+      entry!.detached = true;
+    }
+  }
+  if (entry) worktrees.push(entry);
+  return { current, worktrees };
+}
+
+export async function gitCheckout(cwd: string, branch: string): Promise<{ ok: boolean; error?: string }> {
+  if (!/^[\w][\w./-]*$/.test(branch)) return { ok: false, error: 'Invalid branch name' };
+  const r = await git(cwd, ['checkout', branch], 60_000);
+  return { ok: r.code === 0, error: (r.stderr || r.stdout).trim() || undefined };
 }
 
 export function slugify(s: string): string {

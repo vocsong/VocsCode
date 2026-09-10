@@ -8,7 +8,8 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitCommit, gitCreatePr, gitDiff, gitMergePr, gitRevertFile, gitStageAll, gitSummary } from './git';
+import { gitBranches, gitCheckout, gitCommit, gitCreatePr, gitDiff, gitMergePr, gitRevertFile, gitStageAll, gitSummary, gitWorktrees } from './git';
+import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
@@ -27,6 +28,7 @@ export interface IpcDeps {
   sessions: SessionManager;
   terminals: TerminalManager;
   runtime: RuntimeResolver;
+  analytics: AnalyticsStore;
   getWindow: () => BrowserWindow | null;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }
@@ -277,9 +279,12 @@ export function registerIpc(deps: IpcDeps): void {
     return { path: res.filePath };
   });
   handle('sessions:fork', ({ id }) => sessions.fork(id));
+  handle('sessions:moveTo', ({ id, cwd }) => sessions.moveTo(id, cwd));
   handle('sessions:goal', ({ id, action, objective, autoContinue, maxIterations }) => sessions.goal(id, action, { objective, autoContinue, maxIterations }));
 
   handle('approvals:respond', ({ sessionId, requestId, decision }) => sessions.respondApproval(sessionId, requestId, decision));
+
+  handle('analytics:summary', (req) => deps.analytics.summary(req && typeof req === 'object' ? req.days ?? 30 : 30));
 
   const cwdOf = (sessionId: string) => {
     const m = sessions.get(sessionId);
@@ -293,6 +298,9 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));
   handle('git:pr', ({ sessionId, base }) => gitCreatePr(cwdOf(sessionId), base));
   handle('git:merge', ({ sessionId, base }) => gitMergePr(cwdOf(sessionId), base));
+  handle('git:branches', ({ sessionId }) => gitBranches(cwdOf(sessionId)));
+  handle('git:worktrees', ({ sessionId }) => gitWorktrees(cwdOf(sessionId)));
+  handle('git:checkout', ({ sessionId, branch }) => gitCheckout(cwdOf(sessionId), branch));
 
   handle('fs:list', async ({ sessionId, relPath }) => {
     const root = cwdOf(sessionId);

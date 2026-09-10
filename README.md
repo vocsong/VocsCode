@@ -37,6 +37,8 @@ npm install
 npm run dev
 ```
 
+If `npm run dev` fails with missing modules (`electron-vite`, `typescript`, …), your environment sets `NODE_ENV=production`, which makes a plain `npm install` skip devDependencies — run `npm install --include=dev` instead.
+
 The app starts with no harness configured. Open **Settings -> Harnesses** to see which runtimes were detected, install the missing ones, and add an API key for any provider you want to reach directly. Keys are stored per provider in the OS keychain, never in this repository.
 
 ## Develop
