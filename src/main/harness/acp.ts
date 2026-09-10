@@ -74,6 +74,20 @@ export class AcpAdapter implements HarnessAdapter {
     return preset;
   }
 
+  private killChild(): void {
+    const child = this.child;
+    this.conn = null;
+    this.child = null;
+    if (child) {
+      try {
+        child.stdin?.end();
+      } catch {
+        /* ignore */
+      }
+      setTimeout(() => killTree(child), 2000);
+    }
+  }
+
   async start(): Promise<void> {
     const meta = this.ctx.session();
     const preset = this.resolvePreset();
@@ -86,6 +100,7 @@ export class AcpAdapter implements HarnessAdapter {
       }
     }
     let command = preset.command;
+    let args = preset.args;
     const explicit = (this.ctx.settings().binaries as Record<string, string | undefined>)[command];
     if (explicit) command = explicit;
     else {
@@ -96,11 +111,11 @@ export class AcpAdapter implements HarnessAdapter {
         const npx = which('npx');
         if (npx) {
           command = npx;
-          preset.args = ['-y', '@deepseek-ai/dsh', ...preset.args];
+          args = ['-y', '@deepseek-ai/dsh', ...preset.args];
         }
       }
     }
-    const child = spawnTool(command, preset.args, { cwd: meta.cwd, env });
+    const child = spawnTool(command, args, { cwd: meta.cwd, env });
     this.child = child;
     child.stderr?.on('data', (d: Buffer) => this.ctx.log('debug', `[acp:${preset.id}] ${d.toString().trimEnd()}`));
     child.on('close', (code) => {
@@ -110,45 +125,53 @@ export class AcpAdapter implements HarnessAdapter {
     child.on('error', (e) => this.ctx.emit({ type: 'error', message: `${preset.name} failed to start: ${errorMessage(e)}`, fatal: true }));
     if (!child.stdin || !child.stdout) throw new Error('ACP agent has no stdio');
 
-    const output = Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>;
-    const input = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>;
-    const stream = acp.ndJsonStream(output, input);
-    this.conn = new acp.ClientSideConnection(() => this.clientHandlers(), stream);
+    if (!child.stdin || !child.stdout) throw new Error('ACP agent has no stdio');
 
-    const init = await withTimeout(
-      this.conn.initialize({
-        protocolVersion: acp.PROTOCOL_VERSION,
-        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false },
-        clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' }
-      } as unknown as acp.InitializeRequest),
-      120_000,
-      `${preset.name} initialize`
-    );
-    this.caps = (init.agentCapabilities ?? {}) as Record<string, unknown>;
+    try {
+      const output = Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>;
+      const input = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>;
+      const stream = acp.ndJsonStream(output, input);
+      this.conn = new acp.ClientSideConnection(() => this.clientHandlers(), stream);
 
-    const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { resume?: unknown; list?: unknown };
-    let res: { sessionId?: string; configOptions?: unknown[] | null; modes?: unknown } | null = null;
-    if (meta.harnessRef.acpSessionId && sessionCaps.resume) {
-      try {
-        const r = await withTimeout(this.conn.resumeSession({ sessionId: meta.harnessRef.acpSessionId, cwd: meta.cwd, mcpServers: [] } as acp.ResumeSessionRequest), 120_000, 'session/resume');
-        res = { sessionId: meta.harnessRef.acpSessionId, configOptions: r.configOptions ?? null, modes: r.modes };
-      } catch (e) {
-        this.info(`Could not resume ACP session (${errorMessage(e)}); starting a new one.`, 'warn');
+      const init = await withTimeout(
+        this.conn.initialize({
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false },
+          clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' }
+        } as unknown as acp.InitializeRequest),
+        120_000,
+        `${preset.name} initialize`
+      );
+      this.caps = (init.agentCapabilities ?? {}) as Record<string, unknown>;
+
+      const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { resume?: unknown; list?: unknown };
+      let res: { sessionId?: string; configOptions?: unknown[] | null; modes?: unknown } | null = null;
+      if (meta.harnessRef.acpSessionId && sessionCaps.resume) {
+        try {
+          const r = await withTimeout(this.conn.resumeSession({ sessionId: meta.harnessRef.acpSessionId, cwd: meta.cwd, mcpServers: [] } as acp.ResumeSessionRequest), 120_000, 'session/resume');
+          res = { sessionId: meta.harnessRef.acpSessionId, configOptions: r.configOptions ?? null, modes: r.modes };
+        } catch (e) {
+          this.info(`Could not resume ACP session (${errorMessage(e)}); starting a new one.`, 'warn');
+        }
       }
-    }
-    if (!res) {
-      const r = await withTimeout(this.conn.newSession({ cwd: meta.cwd, mcpServers: [] }), 180_000, 'session/new');
-      res = { sessionId: r.sessionId, configOptions: r.configOptions ?? null, modes: r.modes };
-    }
-    this.sessionId = res.sessionId ?? null;
-    if (this.sessionId) this.ctx.updateRef({ acpSessionId: this.sessionId });
-    this.configOptions = (res.configOptions ?? []) as ConfigOptionLike[];
-    this.publishModels();
+      if (!res) {
+        const r = await withTimeout(this.conn.newSession({ cwd: meta.cwd, mcpServers: [] }), 180_000, 'session/new');
+        res = { sessionId: r.sessionId, configOptions: r.configOptions ?? null, modes: r.modes };
+      }
+      this.sessionId = res.sessionId ?? null;
+      if (this.sessionId) this.ctx.updateRef({ acpSessionId: this.sessionId });
+      this.configOptions = (res.configOptions ?? []) as ConfigOptionLike[];
+      this.publishModels();
 
-    // Apply the configured model / effort if the agent exposes them.
-    if (meta.config.model?.model) await this.setModel(meta.config.model).catch((e) => this.ctx.log('warn', `setModel: ${errorMessage(e)}`));
-    const effort = this.ctx.effort();
-    if (effort) await this.setEffort(effort).catch(() => undefined);
+      // Apply the configured model / effort if the agent exposes them.
+      if (meta.config.model?.model) await this.setModel(meta.config.model).catch((e) => this.ctx.log('warn', `setModel: ${errorMessage(e)}`));
+      const effort = this.ctx.effort();
+      if (effort) await this.setEffort(effort).catch(() => undefined);
+    } catch (e) {
+      // Handshake failed: tear the agent down so it cannot linger holding injected API keys.
+      this.killChild();
+      throw e;
+    }
     this.ctx.emit({ type: 'status', status: 'idle' });
   }
 
@@ -200,7 +223,8 @@ export class AcpAdapter implements HarnessAdapter {
         const abs = path.isAbsolute(p.path) ? p.path : path.join(cwd(), p.path);
         const mode = this.ctx.permissionMode();
         if (mode === 'plan') throw new Error('Plan mode: writes are disabled');
-        if (mode === 'ask') {
+        const outside = isOutsideWorkspace(cwd(), abs, path);
+        if (mode === 'ask' || (outside && mode !== 'full-auto')) {
           let before = '';
           try {
             before = await fs.readFile(abs, 'utf8');
@@ -258,7 +282,10 @@ export class AcpAdapter implements HarnessAdapter {
     };
     if (isRead) return allow();
     if (mode === 'plan') return reject();
-    if (mode === 'full-auto') return selected(pick(['allow_always', 'allow_once']) ?? options[0].optionId);
+    if (mode === 'full-auto') {
+      const id = pick(['allow_always', 'allow_once']);
+      return id ? selected(id) : cancelled;
+    }
     if (!dangerous && !outsideWorkspace) {
       if (mode === 'auto') return allow();
       if (mode === 'accept-edits' && isEdit) return allow();
@@ -498,21 +525,13 @@ export class AcpAdapter implements HarnessAdapter {
 
   async dispose(): Promise<void> {
     const conn = this.conn;
-    const child = this.child;
     this.conn = null;
     this.child = null;
     if (conn && this.sessionId) {
       const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { close?: unknown };
       if (sessionCaps.close) await withTimeout(conn.closeSession({ sessionId: this.sessionId } as acp.CloseSessionRequest), 5000, 'session/close').catch(() => undefined);
     }
-    if (child) {
-      try {
-        child.stdin?.end();
-      } catch {
-        /* ignore */
-      }
-      setTimeout(() => killTree(child), 2000);
-    }
+    this.killChild();
   }
 }
 

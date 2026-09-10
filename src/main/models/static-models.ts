@@ -58,9 +58,17 @@ export function findPricing(provider: string, model: string, extra: ModelInfo[] 
   const pool = [...extra, ...(STATIC_MODELS_BY_PROVIDER[provider] ?? []), ...OPENAI_STATIC_MODELS, ...ANTHROPIC_STATIC_MODELS, ...DEEPSEEK_STATIC_MODELS];
   const exact = pool.find((x) => x.id === model && x.pricing);
   if (exact) return exact.pricing;
-  // OpenRouter-style ids (vendor/model) or dated snapshots.
+  // OpenRouter-style ids (vendor/model) or dated snapshots. A prefix only counts when the live
+  // id continues with a separator: 'gpt-5.4-2025-08-07' matches 'gpt-5.4', but a short live id
+  // like 'gpt-5' must not be priced with a longer catalog entry such as 'gpt-5.6-luna'.
   const bare = model.split('/').pop() ?? model;
-  const fuzzy = pool.find((x) => x.pricing && (bare.startsWith(x.id) || x.id.startsWith(bare)));
+  const bareExact = pool.find((x) => x.id === bare && x.pricing);
+  if (bareExact) return bareExact.pricing;
+  const fuzzy = pool.find((x) => {
+    if (!x.pricing) return false;
+    if (!bare.startsWith(x.id) || bare.length <= x.id.length) return false;
+    return /^[-._/]$/.test(bare[x.id.length] ?? '');
+  });
   return fuzzy?.pricing;
 }
 

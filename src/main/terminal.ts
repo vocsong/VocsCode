@@ -215,7 +215,14 @@ export class TerminalManager {
     const id = shortId('t_');
     const info: TerminalInfo = { id, sessionId, title: shell.name, shell: shell.kind, shellName: shell.name, cwd, createdAt: Date.now() };
     const t = this.newTerm(info, opts.cols ?? 80, opts.rows ?? 24);
-    this.spawnInto(t, shell);
+    try {
+      this.spawnInto(t, shell);
+    } catch (e) {
+      // The tab was never inserted into the map: dispose its screen and addons before propagating.
+      for (const d of t.disposables) d.dispose();
+      t.screen.dispose();
+      throw e;
+    }
     this.terms.set(id, t);
     this.pushList();
     return { ...info };
@@ -262,11 +269,14 @@ export class TerminalManager {
   }
 
   input(id: string, data: string): void {
-    this.must(id).pty?.write(data);
+    const t = this.terms.get(id);
+    if (!t) return; // the tab closed; a late renderer call must not reject
+    t.pty?.write(data);
   }
 
   resize(id: string, cols: number, rows: number): void {
-    const t = this.must(id);
+    const t = this.terms.get(id);
+    if (!t) return;
     cols = Math.max(2, Math.floor(cols));
     rows = Math.max(1, Math.floor(rows));
     if (cols === t.cols && rows === t.rows) return;

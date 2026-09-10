@@ -55,7 +55,8 @@ function parseArgs(raw: unknown): Record<string, unknown> {
     try {
       return JSON.parse(raw || '{}') as Record<string, unknown>;
     } catch {
-      return { _raw: raw };
+      // Distinguishable marker so executeTool can fail the call instead of running it with empty args.
+      return { __parseError: raw };
     }
   }
   return {};

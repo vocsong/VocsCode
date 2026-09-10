@@ -218,9 +218,11 @@ function create(id: string, host: HTMLElement): Instance {
   }
   const inst: Instance = { id, term, fit, search, element, state: 'attaching', pending: [], ackPending: 0, ackTimer: null, observer: null, disposables: [] };
   inst.disposables.push(
-    term.onData((data) => void invoke('terminal:input', { terminalId: id, data })),
+    // Fire-and-forget: a tab can close between the keystroke and the IPC round-trip, so rejections
+    // (main's must(id) throwing) are swallowed instead of becoming unhandled rejections.
+    term.onData((data) => invoke('terminal:input', { terminalId: id, data }).catch(() => undefined)),
     term.onResize(({ cols, rows }) => {
-      if (inst.state === 'live') void invoke('terminal:resize', { terminalId: id, cols, rows });
+      if (inst.state === 'live') invoke('terminal:resize', { terminalId: id, cols, rows }).catch(() => undefined);
     })
   );
   term.attachCustomKeyEventHandler((e) => keyHandler(inst, e));

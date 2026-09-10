@@ -25,11 +25,12 @@ export function renderMarkdown(md: string): string {
   } catch {
     html = `<pre>${escapeHtml(md)}</pre>`;
   }
-  // Only web/mail links survive sanitisation; relative, file: and custom-scheme hrefs are stripped.
+  // Only web links survive sanitisation; relative, file:, mailto: and custom-scheme hrefs are
+  // stripped, matching the main-process app:openExternal handler which only opens http(s).
   const clean = DOMPurify.sanitize(html, {
     ADD_ATTR: ['target', 'data-copy'],
     FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'input'],
-    ALLOWED_URI_REGEXP: /^(?:https?|mailto):/i
+    ALLOWED_URI_REGEXP: /^https?:\/\//i
   });
   if (cache.size > 500) cache.clear();
   cache.set(md, clean);
@@ -38,7 +39,7 @@ export function renderMarkdown(md: string): string {
 
 /**
  * Delegated handlers for copy buttons and links inside rendered markdown.
- * Every anchor click is intercepted: http(s)/mailto links open in the system browser, anything else
+ * Every anchor click is intercepted: http(s) links open in the system browser, anything else
  * is ignored so the app window never navigates away from the renderer page.
  */
 export function installMarkdownHandlers(root: HTMLElement, openExternal: (url: string) => void): () => void {
@@ -59,7 +60,7 @@ export function installMarkdownHandlers(root: HTMLElement, openExternal: (url: s
     if (!a) return;
     e.preventDefault();
     const href = a.getAttribute('href') ?? '';
-    if (/^(https?:\/\/|mailto:)/i.test(href)) openExternal(href);
+    if (/^https?:\/\//i.test(href)) openExternal(href);
   };
   const onAuxClick = (e: MouseEvent) => {
     if ((e.target as HTMLElement).closest('a')) e.preventDefault();
