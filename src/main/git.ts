@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
-import type { GitBranchInfo, GitFileStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
+import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import { runCapture, which } from './runtime';
 import { exists } from './util/fs';
@@ -282,6 +282,101 @@ export async function gitCheckout(cwd: string, branch: string): Promise<{ ok: bo
   if (!/^[\w][\w./-]*$/.test(branch)) return { ok: false, error: 'Invalid branch name' };
   const r = await git(cwd, ['checkout', branch], 60_000);
   return { ok: r.code === 0, error: (r.stderr || r.stdout).trim() || undefined };
+}
+
+/** Picks the diff base for the Branches panel: develop, else master/main, else the only branch. */
+export function pickBase(names: string[]): string {
+  const set = new Set(names);
+  return BASE_BRANCHES.find((b) => set.has(b)) ?? names[0] ?? 'master';
+}
+
+/** Parses `%(upstream:track)` output like "[ahead 1]", "[behind 2]" or "[gone]". */
+export function parseUpstreamTrack(track: string): { ahead?: number; behind?: number; gone?: boolean } {
+  const t = track.trim();
+  if (!t) return {};
+  if (t.includes('gone')) return { gone: true };
+  const ahead = Number(t.match(/ahead (\d+)/)?.[1]);
+  const behind = Number(t.match(/behind (\d+)/)?.[1]);
+  return {
+    ...(Number.isFinite(ahead) && ahead > 0 ? { ahead } : {}),
+    ...(Number.isFinite(behind) && behind > 0 ? { behind } : {})
+  };
+}
+
+/** GitHub-style branch overview for the Branches panel: age, ahead/behind vs base, merged state, worktree binding. */
+export async function gitBranchesOverview(cwd: string): Promise<GitBranchOverview> {
+  const root = await gitRoot(cwd);
+  if (!root) return { isRepo: false, branches: [], worktrees: [] };
+  const [wt, refs] = await Promise.all([
+    gitWorktrees(cwd),
+    git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)'])
+  ]);
+  const names = refs.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean);
+  const base = pickBase(names);
+  const wtByBranch = new Map(wt.worktrees.filter((w) => w.branch).map((w) => [w.branch!, w.path]));
+  const branches = await Promise.all(
+    refs.stdout
+      .split('\n')
+      .filter(Boolean)
+      .map(async (line) => {
+        const [name, date, subject, upstream, track] = line.split('\t');
+        const counts =
+          name === base
+            ? undefined
+            : await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
+                const m = r.stdout.trim().match(/^(\d+)\s+(\d+)$/);
+                return m ? { behind: Number(m[1]), ahead: Number(m[2]) } : undefined;
+              });
+        const merged =
+          name === base
+            ? false
+            : (await git(root, ['merge-base', '--is-ancestor', name, base])).code === 0;
+        const up = parseUpstreamTrack(track ?? '');
+        const item: GitBranchOverviewItem = {
+          name,
+          current: Boolean(wt.worktrees.find((w) => w.branch === name && path.resolve(w.path) === wt.current)),
+          isBase: name === base,
+          lastCommitAt: date ? Number(date) * 1000 : undefined,
+          lastCommitSubject: subject || undefined,
+          merged,
+          upstream: upstream?.trim() || undefined,
+          ...counts,
+          ...(up.ahead !== undefined ? { upstreamAhead: up.ahead } : {}),
+          ...(up.behind !== undefined ? { upstreamBehind: up.behind } : {}),
+          ...(wtByBranch.has(name) ? { worktreePath: wtByBranch.get(name) } : {})
+        };
+        return item;
+      })
+  );
+  // Newest work first, base branch pinned to top like GitHub's default-branch row.
+  branches.sort((a, b) => Number(b.isBase) - Number(a.isBase) || (b.lastCommitAt ?? 0) - (a.lastCommitAt ?? 0));
+  return { isRepo: true, base, branches, worktrees: wt.worktrees };
+}
+
+export async function gitDeleteBranch(cwd: string, branch: string, force: boolean): Promise<{ ok: boolean; error?: string }> {
+  const root = await gitRoot(cwd);
+  if (!root) return { ok: false, error: 'Not a git repository' };
+  if (!/^[\w][\w./-]*$/.test(branch)) return { ok: false, error: 'Invalid branch name' };
+  const r = await git(root, ['branch', force ? '-D' : '-d', branch]);
+  return { ok: r.code === 0, error: (r.stderr || r.stdout).trim() || undefined };
+}
+
+/** Drops administrative entries for worktrees whose directories were deleted by hand. */
+export async function gitPruneWorktrees(cwd: string): Promise<{ ok: boolean; output: string }> {
+  const root = await gitRoot(cwd);
+  if (!root) return { ok: false, output: 'Not a git repository' };
+  const r = await git(root, ['worktree', 'prune', '-v']);
+  return { ok: r.code === 0, output: (r.stderr || r.stdout).trim() };
+}
+
+/** Refreshes remote tracking and drops remote refs whose branch was deleted upstream. */
+export async function gitFetchPrune(cwd: string): Promise<{ ok: boolean; output: string }> {
+  const root = await gitRoot(cwd);
+  if (!root) return { ok: false, output: 'Not a git repository' };
+  const remotes = await git(root, ['remote']);
+  if (!remotes.stdout.trim()) return { ok: true, output: 'No remote configured.' };
+  const r = await git(root, ['fetch', '--prune'], 120_000);
+  return { ok: r.code === 0, output: (r.stderr || r.stdout).trim() || 'Up to date.' };
 }
 
 export function slugify(s: string): string {

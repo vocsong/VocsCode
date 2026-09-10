@@ -8,7 +8,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitCheckout, gitCommit, gitCreatePr, gitDiff, gitMergePr, gitRevertFile, gitStageAll, gitSummary, gitWorktrees } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitMergePr, gitPruneWorktrees, gitRevertFile, gitStageAll, gitSummary, gitWorktrees, removeWorktree } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
@@ -331,6 +331,23 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:branches', ({ sessionId }) => gitBranches(cwdOf(sessionId)));
   handle('git:worktrees', ({ sessionId }) => gitWorktrees(cwdOf(sessionId)));
   handle('git:checkout', ({ sessionId, branch }) => gitCheckout(cwdOf(sessionId), branch));
+  handle('git:branchesOverview', ({ sessionId }) => gitBranchesOverview(cwdOf(sessionId)));
+  handle('git:deleteBranch', ({ sessionId, branch, force }) => gitDeleteBranch(cwdOf(sessionId), branch, !!force));
+  // Only registered worktrees may be removed; `path` must match one git reports so the
+  // renderer cannot ask for an arbitrary directory deletion.
+  handle('git:removeWorktree', async ({ sessionId, path: p }) => {
+    const target = path.resolve(p);
+    const { worktrees } = await gitWorktrees(cwdOf(sessionId));
+    if (!worktrees.some((w) => w.path === target)) return { ok: false, error: 'Not a registered worktree' };
+    try {
+      await removeWorktree(cwdOf(sessionId), target);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errorMessage(e) };
+    }
+  });
+  handle('git:pruneWorktrees', ({ sessionId }) => gitPruneWorktrees(cwdOf(sessionId)));
+  handle('git:fetchPrune', ({ sessionId }) => gitFetchPrune(cwdOf(sessionId)));
 
   handle('fs:list', async ({ sessionId, relPath }) => {
     const root = cwdOf(sessionId);

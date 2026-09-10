@@ -8,6 +8,7 @@ import type {
   EffortLevel,
   FsEntry,
   GitBranchInfo,
+  GitBranchOverview,
   GitSummary,
   GitWorktreeInfo,
   HarnessAvailability,
@@ -109,6 +110,12 @@ export interface IpcContract {
   'git:branches': [{ sessionId: string }, { current?: string; branches: GitBranchInfo[] }];
   'git:worktrees': [{ sessionId: string }, { current: string; worktrees: GitWorktreeInfo[] }];
   'git:checkout': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
+  /** Branches-panel housekeeping: per-branch age, ahead/behind, merged state and worktree binding. */
+  'git:branchesOverview': [{ sessionId: string }, GitBranchOverview];
+  'git:deleteBranch': [{ sessionId: string; branch: string; force?: boolean }, { ok: boolean; error?: string }];
+  'git:removeWorktree': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
+  'git:pruneWorktrees': [{ sessionId: string }, { ok: boolean; output: string }];
+  'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];
