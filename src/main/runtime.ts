@@ -242,7 +242,8 @@ export class RuntimeResolver {
         const bin = this.resolve('pi');
         if (!bin) return { available: false, detail: 'pi not found on PATH.', installHint: 'npm install -g @earendil-works/pi-coding-agent' };
         const v = await runCapture(bin.path, ['--version'], { timeoutMs: 20_000 });
-        return { available: v.code === 0, version: v.stdout.trim() || undefined, binaryPath: bin.path, authenticated: 'unknown' };
+        const authenticated = await piHasCredentials();
+        return { available: v.code === 0, version: v.stdout.trim() || undefined, binaryPath: bin.path, authenticated };
       }
       case 'acp': {
         const dsh = this.resolve('dsh');
@@ -295,4 +296,25 @@ export async function claudeHasCredentials(): Promise<boolean> {
   const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
   const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(home, '.claude');
   return exists(path.join(configDir, '.credentials.json'));
+}
+
+/** pi keeps provider logins in <agent dir>/auth.json; PI_CODING_AGENT_DIR overrides ~/.pi/agent. */
+export async function piHasCredentials(): Promise<boolean> {
+  if (process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY) return true;
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+  const envDir = process.env.PI_CODING_AGENT_DIR?.trim();
+  const agentDir = envDir ? expandTilde(envDir, home) : path.join(home, '.pi', 'agent');
+  try {
+    const raw = await fs.readFile(path.join(agentDir, 'auth.json'), 'utf8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.values(parsed).some((v) => v != null && (typeof v !== 'object' || Object.keys(v as object).length > 0));
+  } catch {
+    return false;
+  }
+}
+
+function expandTilde(p: string, home: string): string {
+  if (p === '~') return home;
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(home, p.slice(2));
+  return p;
 }

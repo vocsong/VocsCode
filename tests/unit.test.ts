@@ -15,6 +15,7 @@ import { normalizeSettings, defaultSettings } from '../src/main/settings';
 import type { SettingsStore } from '../src/main/settings';
 import { SessionManager } from '../src/main/session-manager';
 import type { RuntimeResolver } from '../src/main/runtime';
+import { piHasCredentials } from '../src/main/runtime';
 import { estimateCostUsd, findPricing } from '../src/main/models/static-models';
 import { piModelToInfo } from '../src/main/harness/pi';
 import type { AnalyticsStore } from '../src/main/analytics';
@@ -583,5 +584,44 @@ describe('renderer dialogs', () => {
       });
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('pi credential detection', () => {
+  const savedEnv = { ...process.env };
+  const dirs: string[] = [];
+
+  const withAgentDir = async (auth: string | null) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-auth-'));
+    dirs.push(dir);
+    process.env.PI_CODING_AGENT_DIR = dir;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    if (auth !== null) await fs.writeFile(path.join(dir, 'auth.json'), auth);
+    return piHasCredentials();
+  };
+
+  afterAll(async () => {
+    process.env = savedEnv;
+    for (const dir of dirs) await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('detects a stored login in auth.json', async () => {
+    expect(await withAgentDir(JSON.stringify({ anthropic: { type: 'oauth', token: 'x' } }))).toBe(true);
+  });
+
+  it('treats an empty auth.json as not logged in', async () => {
+    expect(await withAgentDir('{}')).toBe(false);
+  });
+
+  it('falls back to env API keys', async () => {
+    expect(await withAgentDir('{}')).toBe(false);
+    process.env.ANTHROPIC_API_KEY = 'sk-test';
+    expect(await piHasCredentials()).toBe(true);
+  });
+
+  it('handles a missing auth.json', async () => {
+    expect(await withAgentDir(null)).toBe(false);
   });
 });
