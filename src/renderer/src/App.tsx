@@ -13,6 +13,7 @@ import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
 import { Button, EmptyState, Icon, Kbd, Spinner } from './components/ui';
 import { createTerminal } from './terminal/host';
+import { applyTheme } from './theme';
 
 export function App() {
   const booted = useStore((s) => s.booted);
@@ -31,9 +32,7 @@ export function App() {
   }, [boot]);
 
   useEffect(() => {
-    const theme = settings?.theme ?? 'system';
-    if (theme === 'system') document.documentElement.removeAttribute('data-theme');
-    else document.documentElement.setAttribute('data-theme', theme);
+    applyTheme(settings?.theme ?? 'system');
   }, [settings?.theme]);
 
   useEffect(() => {

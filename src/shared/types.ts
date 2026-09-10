@@ -3,6 +3,7 @@
  * Keep this file free of Node/Electron/DOM imports.
  */
 import type { TerminalSettings } from './terminal';
+import type { ThemeId } from './themes';
 
 export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'pi' | 'acp' | 'native';
 
@@ -375,7 +376,7 @@ export interface HarnessDescriptor {
 
 export interface AppSettings {
   version: 1;
-  theme: 'system' | 'light' | 'dark';
+  theme: ThemeId;
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
   defaultEffort?: EffortLevel;
