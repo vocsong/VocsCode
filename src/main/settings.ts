@@ -1,6 +1,7 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, ProviderConfig } from '../shared/types';
+import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { readJson, writeJson } from './util/fs';
 
 export const BUILTIN_ACP_AGENTS: AcpAgentPreset[] = [
@@ -184,7 +185,8 @@ export function defaultSettings(): AppSettings {
     sidebarWidth: 280,
     panelWidth: 420,
     recentProjects: [],
-    goalDefaults: { autoContinue: true, maxIterations: 25 }
+    goalDefaults: { autoContinue: true, maxIterations: 25 },
+    terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] }
   };
 }
 
@@ -200,6 +202,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     codex: { ...d.codex, ...(stored.codex ?? {}) },
     pi: { ...d.pi, ...(stored.pi ?? {}) },
     goalDefaults: { ...d.goalDefaults, ...(stored.goalDefaults ?? {}) },
+    terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
     providers: [],
     acpAgents: []

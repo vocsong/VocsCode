@@ -1853,43 +1853,160 @@ body.resizing {
   height: 100%;
   background: var(--accent);
 }
+/* Terminal panel: tab strip, find/rename bars and the xterm mount. xterm paints its own screen
+   from the theme (see terminal/host.ts); the chrome around it uses the panel tokens. */
 .term {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
 }
-.term-out {
-  flex: 1;
-  overflow: auto;
-  padding: 10px;
-  background: var(--bg-sunken);
+.term-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex-shrink: 0;
 }
-.term-block {
-  margin-bottom: 8px;
+.term-tabs::-webkit-scrollbar {
+  display: none;
 }
-.term-cmd {
-  color: var(--accent);
-  font-weight: 600;
+.term-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  padding: 4px 6px 4px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.term-out pre {
-  margin: 2px 0;
-  white-space: pre-wrap;
-  word-break: break-word;
+.term-tab:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
 }
-.term-exit {
+.term-tab.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.term-tab.exited .term-tab-title {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.term-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.term-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  opacity: 0;
+}
+.term-tab:hover .term-tab-close,
+.term-tab.active .term-tab-close {
+  opacity: 0.7;
+}
+.term-tab-close:hover {
+  background: var(--bg-active);
+  opacity: 1;
+}
+.term-new {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.term-new .term-new-more {
+  margin-left: -6px;
+  padding-left: 2px;
+  padding-right: 2px;
+}
+/* The directory the active shell reports (OSC 7 / 9;9), else where it started. */
+.term-cwd {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--fg-faint);
   font-size: 11px;
+  padding: 0 4px;
+  flex-shrink: 1;
 }
-.term-exit.bad {
-  color: var(--red);
+.term-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sunken);
 }
-.term-in {
+.term-view {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 0 4px 8px;
+}
+.term-view .term-xterm,
+.term-view .xterm {
+  height: 100%;
+}
+/* xterm.css paints the viewport black; the sub-row remainder under the last line must match the theme. */
+.term-view .xterm .xterm-viewport {
+  background-color: var(--bg-sunken) !important;
+}
+.term-exit-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px;
+  padding: 6px 10px;
   border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 12px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+.term-find,
+.term-rename {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  flex-shrink: 0;
+}
+.term-find input,
+.term-rename input {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.term-find input.no-hit {
+  border-color: var(--red);
+}
+.term-find-opt {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.term-find-opt.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 /* New session dialog */
