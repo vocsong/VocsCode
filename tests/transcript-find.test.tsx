@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 import { describe, expect, it } from 'vitest';
-import { search } from '../src/renderer/src/components/TranscriptFind';
+import { fireEvent, render } from '@testing-library/react';
+import { TranscriptFind, search } from '../src/renderer/src/components/TranscriptFind';
 
 function html(s: string): HTMLElement {
   const div = document.createElement('div');
@@ -32,5 +33,32 @@ describe('transcript find search', () => {
 
   it('returns no matches for an empty query', () => {
     expect(search(html('<div>abc</div>'), '')).toEqual([]);
+  });
+});
+
+describe('transcript find bar mount', () => {
+  it('does not touch the highlight registry incorrectly when mounted closed', () => {
+    // Repro for the blank-screen crash: the registry is CSS.highlights itself, not an object wrapping it.
+    const registry = new Map<string, unknown>();
+    (globalThis as unknown as { CSS: unknown }).CSS = { highlights: registry };
+    (globalThis as unknown as { Highlight: unknown }).Highlight = class {};
+    const container = { current: html('<div>needle</div>') };
+    expect(() => render(<TranscriptFind open={false} onClose={() => undefined} container={container} revision={0} />)).not.toThrow();
+  });
+
+  it('registers a highlight for the matches when open', () => {
+    const registry = new Map<string, unknown>();
+    (globalThis as unknown as { CSS: unknown }).CSS = { highlights: registry };
+    (globalThis as unknown as { Highlight: unknown }).Highlight = class {
+      ranges: Range[];
+      constructor(...ranges: Range[]) {
+        this.ranges = ranges;
+      }
+    };
+    Element.prototype.scrollIntoView = () => undefined; // jsdom has no layout
+    const container = { current: html('<div>needle needle</div>') };
+    const { getByPlaceholderText } = render(<TranscriptFind open onClose={() => undefined} container={container} revision={0} />);
+    fireEvent.change(getByPlaceholderText('Find in messages'), { target: { value: 'needle' } });
+    expect((registry.get('transcript-find-match') as { ranges: Range[] }).ranges.length).toBe(2);
   });
 });
