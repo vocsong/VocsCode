@@ -124,25 +124,32 @@ export function Composer({ session }: { session: SessionMeta }) {
   const send = async (mode: 'now' | 'steer' | 'queue' = 'now') => {
     const t = text.trim();
     if (!t && !images.length) return;
+    // Clears the draft and every popover/filter state derived from it. setText is programmatic here,
+    // so onChange never fires — without this the stale mention/slash state keeps its key handling
+    // alive and swallows ArrowUp/ArrowDown, breaking input history right after a send.
+    const clearDraft = () => {
+      setText('');
+      setMention(null);
+      setSlash(null);
+      setHistIdx(-1);
+    };
     // Known commands are cleared right away so long-running ones (/pr, /merge…) do not leave the
     // composer looking frozen; their progress and outcome appear as info lines in the transcript.
     if (t.startsWith('/') && SLASH_COMMANDS.some((c) => c.name === t.slice(1).split(/\s+/)[0])) {
-      setText('');
+      clearDraft();
       void runSlash(t).catch((e) => toast(String((e as Error).message ?? e), 'error'));
       return;
     }
     if (t.startsWith('!')) {
       const command = t.slice(1).trim();
       setHistory((h) => [t, ...h.filter((x) => x !== t)].slice(0, 50));
-      setHistIdx(-1);
-      setText('');
+      clearDraft();
       if (command) await runShell(command);
       else toast('Type a command after ! — for example !git status', 'info');
       return;
     }
     setHistory((h) => [t, ...h.filter((x) => x !== t)].slice(0, 50));
-    setHistIdx(-1);
-    setText('');
+    clearDraft();
     setImages([]);
     try {
       await invoke('sessions:send', { id: session.id, input: { text: t, images: images.length ? images : undefined, mode: busy ? mode : 'now' } });
