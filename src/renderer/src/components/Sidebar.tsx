@@ -107,6 +107,9 @@ export function Sidebar() {
         <button type="button" className={`sidebar-link ${showArchived ? 'active' : ''}`} onClick={() => setShowArchived((v) => !v)}>
           <Icon name="clock" size={14} /> {showArchived ? 'Show active' : 'Archived'}
         </button>
+        <button type="button" className={`sidebar-link ${view === 'analytics' ? 'active' : ''}`} onClick={() => setView('analytics')}>
+          <Icon name="chart" size={14} /> Analytics
+        </button>
         <button type="button" className={`sidebar-link ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
           <Icon name="settings" size={14} /> Settings
         </button>
