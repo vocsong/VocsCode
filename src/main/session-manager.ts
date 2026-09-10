@@ -487,8 +487,10 @@ export class SessionManager {
               }
             }
             this.schedulePersist(meta);
-            this.pushSessions();
           }
+          // Status events are the live source of truth for the sidebar. Terminal statuses also
+          // persist above, but every transition must be published immediately.
+          this.pushSessions();
         }
         break;
       }
