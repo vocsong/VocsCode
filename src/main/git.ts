@@ -66,6 +66,58 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
   return { isRepo: true, root, branch: branch.stdout.trim() || undefined, files, ahead, behind };
 }
 
+/** PR/merge state of a session's branch, shown in the sidebar status labels. */
+export interface BranchGitState {
+  pr: boolean;
+  merged: boolean;
+}
+
+const BASE_BRANCHES = ['develop', 'master', 'main'];
+
+/**
+ * Classifies a session branch: open PR ('pr') or already merged into a base branch
+ * ('merged'). Uses `gh` when available (also catches squash merges); otherwise falls
+ * back to merge-commit ancestry, and to remote tracking (a fully pushed branch means
+ * the PR was opened in this workflow).
+ */
+export async function branchGitState(cwd: string, branch: string): Promise<BranchGitState> {
+  const root = await gitRoot(cwd);
+  if (!root) return { pr: false, merged: false };
+  const state: BranchGitState = { pr: false, merged: false };
+  const gh = which('gh');
+  if (gh) {
+    const r = await runCapture(gh, ['pr', 'list', '--head', branch, '--state', 'all', '--limit', '10', '--json', 'state'], {
+      cwd: root,
+      timeoutMs: 15_000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    });
+    if (r.code === 0) {
+      try {
+        const prs = JSON.parse(r.stdout) as { state: string }[];
+        if (prs.some((p) => p.state === 'MERGED')) return { pr: false, merged: true };
+        if (prs.some((p) => p.state === 'OPEN')) state.pr = true;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  if (state.pr) return state;
+  // Merge commits put the branch tip on a base branch; squash merges need gh above.
+  for (const base of BASE_BRANCHES) {
+    const r = await git(root, ['merge-base', '--is-ancestor', branch, base]);
+    if (r.code === 0) return { pr: state.pr, merged: true };
+  }
+  if (!gh) {
+    // Without gh, a fully pushed branch stands in for "PR created".
+    const remote = await git(root, ['rev-parse', '--verify', '--quiet', `origin/${branch}`]);
+    if (remote.code === 0) {
+      const ahead = await git(root, ['rev-list', '--count', `origin/${branch}..${branch}`]);
+      if (ahead.code === 0 && ahead.stdout.trim() === '0') state.pr = true;
+    }
+  }
+  return state;
+}
+
 export async function gitDiff(cwd: string, file?: string, staged = false): Promise<string> {
   const root = await gitRoot(cwd);
   if (!root) return '';

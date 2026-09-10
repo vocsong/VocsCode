@@ -188,6 +188,8 @@ const STATUS_LABELS: Record<string, string> = {
   starting: 'Starting',
   running: 'Working',
   awaiting: 'Pending',
+  pr: 'PR',
+  merged: 'Merged',
   error: 'Error',
   stopped: 'Stopped',
 };

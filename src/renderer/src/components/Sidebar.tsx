@@ -65,7 +65,7 @@ export function Sidebar() {
       </div>
       {(awaiting > 0 || running > 0) && (
         <div className="sidebar-summary">
-          {awaiting > 0 && <Badge tone="amber">{awaiting} awaiting approval</Badge>}
+          {awaiting > 0 && <Badge tone="red">{awaiting} awaiting approval</Badge>}
           {running > 0 && <Badge tone="blue">{running} running</Badge>}
         </div>
       )}
