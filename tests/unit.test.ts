@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { promises as fs } from 'node:fs';
@@ -19,9 +20,10 @@ import { piModelToInfo } from '../src/main/harness/pi';
 import { codexModelToInfo } from '../src/main/harness/codex-app-server';
 import { applyModelOverrides, modelOverrideKey, parseModelOverrideKey, pruneModelOverrides } from '../src/shared/model-overrides';
 import { HARNESSES } from '../src/shared/harness-meta';
-import type { ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { AppSettings, ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
+import { gitBranches, gitCheckout, gitWorktrees } from '../src/main/git';
 
 // Stub Electron's safeStorage so SecretStore is testable in plain node. Mutable flag lets the
 // unavailable-encryption fallback path be exercised without re-declaring the mock.
@@ -276,6 +278,14 @@ describe('model capability overrides', () => {
     // Settings written before this feature existed have no such key.
     expect(normalizeSettings({ theme: 'dark' }).favoriteModels).toEqual([]);
   });
+
+  it('normalizes sidebar folders to non-empty path strings', () => {
+    expect(defaultSettings().folders).toEqual([]);
+    const s = normalizeSettings({ folders: ['G:/proj/a', '', 42, 'G:/proj/b'] as never });
+    expect(s.folders).toEqual(['G:/proj/a', 'G:/proj/b']);
+    // Settings written before this feature existed have no such key.
+    expect(normalizeSettings({ theme: 'dark' }).folders).toEqual([]);
+  });
 });
 
 describe('SecretStore', () => {
@@ -328,6 +338,35 @@ describe('SecretStore', () => {
     const again = new SecretStore(dir);
     await again.load();
     expect(again.has('anthropic')).toBe(false);
+  });
+});
+
+describe('SessionManager folder tracking', () => {
+  it('registers a project folder on create so it survives its last session being archived or deleted', async () => {
+    const stored = defaultSettings();
+    const settings = {
+      get: () => stored,
+      update: async (patch: Partial<AppSettings>) => {
+        Object.assign(stored, patch);
+      }
+    } as unknown as SettingsStore;
+    const store = { list: () => [], get: () => undefined, upsert: async () => undefined } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings,
+      runtime: undefined as unknown as RuntimeResolver,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    const cfg = { harness: 'native', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as const;
+    await manager.create({ config: { ...cfg } });
+    expect(stored.folders).toEqual(['G:/proj/a']);
+    // Creating another session in the same folder must not duplicate the entry.
+    await manager.create({ config: { ...cfg } });
+    expect(stored.folders).toEqual(['G:/proj/a']);
   });
 });
 
@@ -415,5 +454,48 @@ describe('SessionStore round-trip', () => {
     await again.load();
     expect(again.get('sess_2')).toBeUndefined();
     expect(await again.readTranscript('sess_2')).toEqual([]);
+  });
+});
+
+describe('git branch/worktree plumbing', () => {
+  const tmpRoot = path.join(os.tmpdir(), `vocs-code-git-test-${Date.now()}-${process.pid}`);
+  const repo = path.join(tmpRoot, 'repo');
+  const wtDir = path.join(tmpRoot, 'wt');
+
+  const g = (...args: string[]) =>
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], {
+      cwd: repo,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    });
+
+  afterAll(async () => {
+    await fs.rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('lists branches and checks out another branch', async () => {
+    await fs.mkdir(repo, { recursive: true });
+    execFileSync('git', ['init'], { cwd: repo });
+    g('commit', '--allow-empty', '-m', 'init');
+    g('branch', 'feature');
+    const { current, branches } = await gitBranches(repo);
+    expect(branches.map((b) => b.name).sort()).toEqual(expect.arrayContaining(['feature']));
+    const head = branches.find((b) => b.current)!;
+    expect(current).toBe(head.name);
+    expect(await gitCheckout(repo, '-evil')).toMatchObject({ ok: false });
+    expect(await gitCheckout(repo, 'feature')).toMatchObject({ ok: true });
+    expect((await gitBranches(repo)).current).toBe('feature');
+  });
+
+  it('lists worktrees with branches and marks the session cwd', async () => {
+    g('checkout', '-'); // back to the default branch
+    g('worktree', 'add', wtDir, '-b', 'wtbranch');
+    const { current, worktrees } = await gitWorktrees(repo);
+    expect(current).toBe(path.resolve(repo));
+    expect(worktrees.map((w) => w.branch)).toContain('wtbranch');
+    const wt = worktrees.find((w) => w.path === path.resolve(wtDir));
+    expect(wt).toMatchObject({ branch: 'wtbranch', detached: false });
+    // From inside the worktree, that worktree is "current".
+    const fromWt = await gitWorktrees(wtDir);
+    expect(fromWt.current).toBe(path.resolve(wtDir));
   });
 });
