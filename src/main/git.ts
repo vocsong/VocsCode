@@ -310,9 +310,9 @@ export async function createWorktree(projectRoot: string, slug: string): Promise
   const branchExists = async (b: string) => (await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${b}`])).code === 0;
   let name = slug;
   let i = 1;
-  while ((await exists(path.join(base, name))) || (await branchExists(`harness/${name}`))) name = `${slug}-${++i}`;
+  while ((await exists(path.join(base, name))) || (await branchExists(`vocscode/${name}`))) name = `${slug}-${++i}`;
   const wtPath = path.join(base, name);
-  const branch = `harness/${name}`;
+  const branch = `vocscode/${name}`;
   const r = await git(root, ['worktree', 'add', '-b', branch, wtPath], 60_000);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
   return { path: wtPath, branch };
