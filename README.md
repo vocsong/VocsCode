@@ -17,7 +17,7 @@ From the **Codex app**: threads grouped by project, isolated git worktrees per s
 
 From the **Claude Code desktop app**: multi-session sidebar with live status, permission modes (Ask / Accept edits / Plan / Auto / Full access), live model and effort switching, cost and context tracking, a side panel with Changes / Files and a real [terminal](#terminal), slash commands and `@file` mentions, notifications when a turn needs you.
 
-Added on top: every feature above works **across all harnesses** through one normalized event model, API keys live in the OS keychain (`safeStorage`), sessions resume after restart (Claude `resume`, Codex `thread/resume`, pi session files, ACP `session/resume`, native history), and a **Doctor** page shows which runtimes are installed and logged in.
+Added on top: every feature above works **across all harnesses** through one normalized event model, API keys live in the OS keychain (`safeStorage`), sessions resume after restart (Claude `resume`, Codex `thread/resume`, pi session files, ACP `session/resume`, native history), a **Doctor** page shows which runtimes are installed and logged in, and there are thirteen [themes](#themes) — four of them navy, one animated.
 
 ## Requirements
 
@@ -64,6 +64,8 @@ npm run build && HARNESS_E2E=1 HARNESS_E2E_HARNESS=native npx vitest run tests/e
 HARNESS_E2E=1 npx vitest run tests/e2e.approval.test.ts
 # Text-only-model warning and the capability override. Needs no API key and makes no network call.
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
+# Every theme through the picker in the real app: distinct palettes, a recolored terminal, Nebula animating
+npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:themes
 # Terminal through the UI: type into a real PTY, reload the renderer, close and exit tabs (no API key needed)
 HARNESS_E2E=1 npx vitest run tests/e2e.terminal.test.ts
 # The same flow against the packaged app, which proves node-pty loads from the unpacked asar
@@ -102,6 +104,27 @@ Test-only switches:
 
 The live suites need the corresponding runtime installed and logged in, and they spend real API credit.
 
+## Themes
+
+Thirteen themes: **System**, **Light** and **Dark**, plus ten palettes grouped by family in the **View** menu and in the swatch picker under *Settings → General*.
+
+| Family | Theme | |
+| --- | --- | --- |
+| Navy | **Midnight Navy** | deep classic navy, azure accent |
+| | **Abyss** | navy pushed to near-black, high contrast, aqua accent |
+| | **Blueprint** | navy ink on blue-tinted drafting paper — the light side of navy |
+| | **Admiral** | navy hull, parchment text, brass fittings |
+| Futuristic | **Nebula** | navy-indigo with neon cyan and magenta — animated |
+| Light | **Solarium** | warm sand paper, burnt-orange accent |
+| | **Blossom** | pale rose paper, plum accent |
+| Dark | **Evergreen** | dark conifer greens, mint accent |
+| | **Graphite** | achromatic — no hue in the chrome, only in status colors |
+| | **Ember** | charred warm dark, ember-orange accent |
+
+**Nebula** is the animated one: a drifting aurora and a sliding holographic grid behind frosted, translucent chrome, gradient sweeps across the wordmark and primary buttons, a light bar travelling along the title bar's edge, and glow on status lights, the selected session and focus rings. All of its motion stops under `prefers-reduced-motion`.
+
+A theme is data rather than a stylesheet. `src/shared/themes.ts` holds one palette of twenty tokens per theme and everything reads from it: the renderer's custom properties (emitted by `themeCss()`), the OS-drawn caption buttons and window background in the main process, the terminal's sixteen ANSI slots (`src/shared/ansi.ts` derives them per theme, so program output matches the UI), and the settings swatches. Tinted washes such as `--accent-soft` are `color-mix`ed once in `styles.css`, so a palette only declares base hues. Adding a theme means adding one entry — `tests/themes.test.ts` then holds it to the same bar as the others: every token present, WCAG AA body text, readable status hues, and a palette visibly distinct from all its siblings. Only Light and Dark are hand-authored in `styles.css`, so a complete palette exists before any script runs.
+
 ## Terminal
 
 The Terminal tab in the side panel is a full terminal, not a command runner. Each tab is a pseudo-terminal (ConPTY on Windows, `forkpty` elsewhere, via a prebuilt `node-pty`) rendered by xterm.js, so interactive programs, prompts, colors, progress bars, `vim`/`less`/REPLs, Ctrl+C and your shell profile all behave as they would in Windows Terminal or iTerm.
@@ -118,7 +141,7 @@ Packaging: `@lydell/node-pty` ships N-API prebuilds per platform as optional dep
 ## Architecture
 
 ```
-src/shared        types, IPC contract, harness metadata, diff parser (no runtime deps)
+src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette (no runtime deps)
 src/main
   harness/        one adapter per harness → normalized SessionEvent stream
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
@@ -138,6 +161,7 @@ src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
   terminal/       xterm.js instances kept alive outside React (host.ts)
+  theme.ts        injects the data-driven palettes and applies the active theme to <html>
   store.ts        session state; api.ts wraps the preload bridge
 resources/pi      the approvals extension loaded into pi at spawn time
 tests             unit + format + review-fixes run offline; smoke and e2e are opt-in

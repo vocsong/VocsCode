@@ -13,8 +13,11 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { DEFAULT_TERMINAL_SETTINGS, type ShellKind, type TerminalInfo, type TerminalSettings } from '../../../shared/terminal';
+import { isDarkTheme } from '../../../shared/themes';
+import { ansiFromTokens, parseHex, withAlpha, type AnsiPalette } from '../../../shared/ansi';
 import { invoke, isMac, on, platform } from '../api';
 import { useStore } from '../store';
+import { activeTheme, systemPrefersDark } from '../theme';
 
 interface Instance {
   id: string;
@@ -355,52 +358,30 @@ function cssVar(name: string): string {
 }
 
 function isDark(): boolean {
-  const t = document.documentElement.getAttribute('data-theme');
-  return t === 'dark' || (t !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  return isDarkTheme(activeTheme(), systemPrefersDark());
 }
 
-function withAlpha(hex: string, a: number): string {
-  const m = /^#([0-9a-f]{6})$/i.exec(hex);
-  return m ? `#${m[1]}${Math.round(a * 255).toString(16).padStart(2, '0')}` : hex;
+/** Reads a theme token, falling back when the property is missing or not a plain hex color. */
+function token(name: string, fallback: string): string {
+  const v = cssVar(name);
+  return parseHex(v) ? v : fallback;
 }
 
-/** ANSI palettes built from the app's own tokens (red/green/amber/blue/purple) so output matches the UI. */
-const DARK_ANSI: Partial<ITheme> = {
-  black: '#1c1f26',
-  red: '#ff6b6e',
-  green: '#3ecf7a',
-  yellow: '#f0b44c',
-  blue: '#6ea0ff',
-  magenta: '#c084fc',
-  cyan: '#4dd0e1',
-  white: '#c9ccd3',
-  brightBlack: '#6b7280',
-  brightRed: '#ff8b8d',
-  brightGreen: '#6ee7a0',
-  brightYellow: '#f7cb7a',
-  brightBlue: '#93b8ff',
-  brightMagenta: '#d8b4fe',
-  brightCyan: '#80e4f0',
-  brightWhite: '#f3f4f6'
-};
-const LIGHT_ANSI: Partial<ITheme> = {
-  black: '#1c1c1f',
-  red: '#d13438',
-  green: '#1f9d55',
-  yellow: '#b26a00',
-  blue: '#2f6fed',
-  magenta: '#8a4fd3',
-  cyan: '#0f8a99',
-  white: '#a3a7ae',
-  brightBlack: '#6b6f76',
-  brightRed: '#e5484d',
-  brightGreen: '#2bb673',
-  brightYellow: '#c27a10',
-  brightBlue: '#5b8def',
-  brightMagenta: '#a06be0',
-  brightCyan: '#22a5b5',
-  brightWhite: '#ffffff'
-};
+/** The active theme's ANSI palette, so program output matches the UI in every theme. */
+function ansi(dark: boolean): AnsiPalette {
+  return ansiFromTokens(dark, {
+    fg: token('--fg', dark ? '#e6e7ea' : '#1c1c1f'),
+    bgElev: token('--bg-elev', dark ? '#191c23' : '#ffffff'),
+    fgMuted: token('--fg-muted', dark ? '#9aa0aa' : '#6b6f76'),
+    fgFaint: token('--fg-faint', dark ? '#6b7280' : '#9a9ea6'),
+    red: token('--red', dark ? '#ff6b6e' : '#d13438'),
+    green: token('--green', dark ? '#3ecf7a' : '#1f9d55'),
+    amber: token('--amber', dark ? '#f0b44c' : '#c27a10'),
+    blue: token('--blue', dark ? '#6ea0ff' : '#2f6fed'),
+    purple: token('--purple', dark ? '#c084fc' : '#8a4fd3'),
+    cyan: token('--cyan', dark ? '#4dd0e1' : '#0f8a99')
+  });
+}
 
 export function theme(): ITheme {
   const dark = isDark();
@@ -408,10 +389,10 @@ export function theme(): ITheme {
   const bg = cssVar('--bg-sunken') || (dark ? '#0d0f13' : '#efeff1');
   const fg = cssVar('--fg') || (dark ? '#e6e7ea' : '#1c1c1f');
   return {
-    ...(dark ? DARK_ANSI : LIGHT_ANSI),
+    ...ansi(dark),
     background: bg,
     foreground: fg,
-    cursor: fg,
+    cursor: accent,
     cursorAccent: bg,
     selectionBackground: withAlpha(accent, dark ? 0.35 : 0.28),
     selectionInactiveBackground: withAlpha(accent, 0.18)
