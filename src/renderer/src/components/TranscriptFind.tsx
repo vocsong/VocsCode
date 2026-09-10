@@ -5,7 +5,8 @@ import { Icon } from './ui';
 const MATCH_HL = 'transcript-find-match';
 const CURRENT_HL = 'transcript-find-current';
 
-type HighlightRegistry = { highlights: Map<string, unknown> };
+/** The `CSS.highlights` registry itself — a maplike of highlight name -> Highlight. */
+type HighlightRegistry = { set(name: string, highlight: unknown): void; delete(name: string): void };
 
 /** One match, possibly spanning several adjacent text nodes (e.g. across bold spans). */
 type Match = Range[];
@@ -74,11 +75,11 @@ export function TranscriptFind({ open, onClose, container, revision }: { open: b
     const found = query ? search(root, query) : [];
     setMatches(found);
     setActive((a) => (found.length ? Math.min(a, found.length - 1) : 0));
-    if (found.length) hl.highlights.set(MATCH_HL, new Highlight(...found.flat()));
-    else hl.highlights.delete(MATCH_HL);
+    if (found.length) hl.set(MATCH_HL, new Highlight(...found.flat()));
+    else hl.delete(MATCH_HL);
     return () => {
-      hl.highlights.delete(MATCH_HL);
-      hl.highlights.delete(CURRENT_HL);
+      hl.delete(MATCH_HL);
+      hl.delete(CURRENT_HL);
     };
   }, [open, query, container, revision]);
 
@@ -88,10 +89,10 @@ export function TranscriptFind({ open, onClose, container, revision }: { open: b
     if (!hl) return;
     const current = matches[active];
     if (!current) {
-      hl.highlights.delete(CURRENT_HL);
+      hl.delete(CURRENT_HL);
       return;
     }
-    hl.highlights.set(CURRENT_HL, new Highlight(...current));
+    hl.set(CURRENT_HL, new Highlight(...current));
     current[0].startContainer.parentElement?.scrollIntoView({ block: 'center' });
   }, [active, matches]);
 
