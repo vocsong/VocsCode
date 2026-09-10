@@ -20,7 +20,7 @@ import { piModelToInfo } from '../src/main/harness/pi';
 import { codexModelToInfo } from '../src/main/harness/codex-app-server';
 import { applyModelOverrides, modelOverrideKey, parseModelOverrideKey, pruneModelOverrides } from '../src/shared/model-overrides';
 import { HARNESSES } from '../src/shared/harness-meta';
-import type { ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { AppSettings, ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
 import { gitBranches, gitCheckout, gitWorktrees } from '../src/main/git';
@@ -278,6 +278,14 @@ describe('model capability overrides', () => {
     // Settings written before this feature existed have no such key.
     expect(normalizeSettings({ theme: 'dark' }).favoriteModels).toEqual([]);
   });
+
+  it('normalizes sidebar folders to non-empty path strings', () => {
+    expect(defaultSettings().folders).toEqual([]);
+    const s = normalizeSettings({ folders: ['G:/proj/a', '', 42, 'G:/proj/b'] as never });
+    expect(s.folders).toEqual(['G:/proj/a', 'G:/proj/b']);
+    // Settings written before this feature existed have no such key.
+    expect(normalizeSettings({ theme: 'dark' }).folders).toEqual([]);
+  });
 });
 
 describe('SecretStore', () => {
@@ -330,6 +338,35 @@ describe('SecretStore', () => {
     const again = new SecretStore(dir);
     await again.load();
     expect(again.has('anthropic')).toBe(false);
+  });
+});
+
+describe('SessionManager folder tracking', () => {
+  it('registers a project folder on create so it survives its last session being archived or deleted', async () => {
+    const stored = defaultSettings();
+    const settings = {
+      get: () => stored,
+      update: async (patch: Partial<AppSettings>) => {
+        Object.assign(stored, patch);
+      }
+    } as unknown as SettingsStore;
+    const store = { list: () => [], get: () => undefined, upsert: async () => undefined } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings,
+      runtime: undefined as unknown as RuntimeResolver,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    const cfg = { harness: 'native', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as const;
+    await manager.create({ config: { ...cfg } });
+    expect(stored.folders).toEqual(['G:/proj/a']);
+    // Creating another session in the same folder must not duplicate the entry.
+    await manager.create({ config: { ...cfg } });
+    expect(stored.folders).toEqual(['G:/proj/a']);
   });
 });
 

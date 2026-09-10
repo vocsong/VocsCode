@@ -4,11 +4,9 @@ import type { EffortLevel, ImageAttachment, PermissionMode, SessionMeta } from '
 import { HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { fmtCost, fmtTokens } from '../format';
+import { useSessionModels } from '../models';
 import { useStore } from '../store';
 import { Button, Icon, Kbd } from './ui';
-
-/** Stable fallback so the zustand selector never returns a fresh array (React #185 infinite loop). */
-const EMPTY_MODELS: never[] = [];
 
 export function Composer({ session }: { session: SessionMeta }) {
   const [text, setText] = useState('');
@@ -24,7 +22,7 @@ export function Composer({ session }: { session: SessionMeta }) {
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
   const harness = HARNESS_BY_ID[session.config.harness];
   const caps = harness.capabilities;
-  const models = useStore((s) => s.models[session.id] ?? EMPTY_MODELS);
+  const { models } = useSessionModels(session);
   const currentModel = session.activeModel ?? session.config.model;
   const currentInfo = models.find((m) => currentModel && m.id === currentModel.model && m.provider === currentModel.provider);
 

@@ -5,6 +5,8 @@ import { gateAction, isOutsideWorkspace } from '../src/main/harness/permissions'
 import { globToRegExp } from '../src/main/harness/native/tools';
 import { parseUnifiedDiff } from '../src/shared/diff-parse';
 import { isDangerousCommand } from '../src/main/harness/types';
+import { pickSessionModels } from '../src/renderer/src/models';
+import type { HarnessId, ModelInfo, SessionMeta } from '../src/shared/types';
 
 describe('dangerous command detection', () => {
   const dangerous: string[] = [
@@ -142,5 +144,67 @@ describe('title bar separator', () => {
     const rule = styles.split('\n.titlebar {')[1].split('}')[0].replace(/\/\*[\s\S]*?\*\//g, '');
     expect(rule).not.toMatch(/border-bottom/);
     expect(rule).toMatch(/box-shadow: 0 1px 0 var\(--border\)/);
+  });
+});
+
+describe('model list for a session whose harness has not started', () => {
+  const session = (id: string, harness: HarnessId): SessionMeta =>
+    ({ id, config: { harness } }) as SessionMeta;
+
+  it('falls back to the harness catalog, then prefers what the harness reports', () => {
+    const catalogModel: ModelInfo = { id: 'gpt-5.6-luna', provider: 'openai', displayName: 'gpt-5.6-luna' };
+    const reportedModel: ModelInfo = { id: 'gpt-5.6-pro', provider: 'openai', displayName: 'gpt-5.6-pro' };
+    const catalog = { models: [catalogModel], loading: false };
+
+    // No catalog entry yet: the fetch is still in flight, so the picker shows a spinner, not "empty".
+    expect(pickSessionModels(undefined, undefined)).toMatchObject({ models: [], loading: true });
+    // Catalog only — the state a brand-new session is in before its first message.
+    expect(pickSessionModels(undefined, catalog).models).toEqual([catalogModel]);
+    expect(pickSessionModels([], catalog).models).toEqual([catalogModel]);
+    // Once the harness publishes its own list it wins, catalog or not.
+    expect(pickSessionModels([reportedModel], catalog)).toEqual({ models: [reportedModel], loading: false });
+    // An error is carried through so the picker can explain itself (e.g. ACP before session start).
+    expect(pickSessionModels(undefined, { models: [], loading: false, error: 'nope' }).error).toBe('nope');
+  });
+
+  it('fetches each harness catalog once and drops it when the model overrides change', async () => {
+    const calls: string[] = [];
+    const models: ModelInfo[] = [{ id: 'claude-opus-5', provider: 'anthropic', displayName: 'Opus 5' }];
+    (globalThis as { window?: unknown }).window = {
+      harness: {
+        platform: 'win32',
+        invoke: (channel: string, req: { harness: HarnessId }) => {
+          calls.push(`${channel}:${req.harness}`);
+          return Promise.resolve({ models });
+        },
+        on: () => () => undefined
+      }
+    };
+    const { useStore } = await import('../src/renderer/src/store');
+    // boot() seeds settings directly; setSettings only sees pushes that follow it.
+    useStore.setState({ settings: { modelOverrides: {} } as never, modelCatalog: {} });
+
+    await useStore.getState().ensureModelCatalog('claude');
+    await useStore.getState().ensureModelCatalog('claude');
+    expect(calls).toEqual(['harness:models:claude']);
+    expect(useStore.getState().modelCatalog.claude).toEqual({ models, error: undefined, loading: false });
+
+    // Overrides are applied when the catalog is fetched, so a change to them has to invalidate it.
+    useStore.getState().setSettings({ modelOverrides: { 'anthropic::claude-opus-5': { supportsImages: true } } } as never);
+    expect(useStore.getState().modelCatalog.claude).toBeUndefined();
+    await useStore.getState().ensureModelCatalog('claude');
+    expect(calls).toEqual(['harness:models:claude', 'harness:models:claude']);
+
+    // An unrelated settings change must not throw the catalog away.
+    useStore.getState().setSettings({ modelOverrides: { 'anthropic::claude-opus-5': { supportsImages: true } }, defaultEffort: 'high' } as never);
+    expect(useStore.getState().modelCatalog.claude).toBeDefined();
+  });
+
+  it('forgets a deleted session’s model list', async () => {
+    const { useStore } = await import('../src/renderer/src/store');
+    const kept = session('s_keep', 'claude');
+    useStore.setState({ sessions: [kept], models: { s_keep: [], s_gone: [] }, transcripts: {}, loaded: {}, activeTerminal: {} });
+    useStore.getState().setSessions([kept]);
+    expect(Object.keys(useStore.getState().models)).toEqual(['s_keep']);
   });
 });

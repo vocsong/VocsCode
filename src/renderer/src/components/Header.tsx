@@ -3,13 +3,11 @@ import type { EffortLevel, GitBranchInfo, GitWorktreeInfo, ModelInfo, Permission
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, fmtTokens } from '../format';
+import { useSessionModels } from '../models';
 import { useStore } from '../store';
 import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
 import { ModelPicker } from './ModelPicker';
 import { harnessShort } from './Sidebar';
-
-/** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
-const EMPTY: never[] = [];
 
 /** Branch & worktree switcher shown when clicking the branch label in the header. */
 function BranchWorktreeMenu({ session, close }: { session: SessionMeta; close: () => void }) {
@@ -83,7 +81,7 @@ function pathEquals(a: string, b: string): boolean {
 }
 
 export function Header({ session }: { session: SessionMeta }) {
-  const models = useStore((s) => s.models[session.id] ?? EMPTY);
+  const { models, loading: modelsLoading, error: modelsError } = useSessionModels(session);
   const panelOpen = useStore((s) => s.panelOpen);
   const togglePanel = useStore((s) => s.togglePanel);
   const toast = useStore((s) => s.toast);
@@ -145,11 +143,13 @@ export function Header({ session }: { session: SessionMeta }) {
           {(close) => (
             <ModelPicker
               models={models}
+              loading={modelsLoading}
+              error={modelsError}
               selected={current}
               emptyText={
-                models.length === 0 && !h.capabilities.liveModelSwitch
-                  ? 'No model list yet (this harness cannot switch models live).'
-                  : 'No model list yet.'
+                h.capabilities.liveModelSwitch
+                  ? 'No models available.'
+                  : 'No models available (this harness cannot switch models live).'
               }
               onSelect={(m) => {
                 close();
