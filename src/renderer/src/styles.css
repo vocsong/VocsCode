@@ -517,8 +517,14 @@ h4 {
   animation: pulse 1.2s ease-in-out infinite;
 }
 .status-awaiting {
-  background: var(--amber);
+  background: var(--red);
   animation: pulse 0.8s ease-in-out infinite;
+}
+.status-pr {
+  background: var(--amber);
+}
+.status-merged {
+  background: var(--green);
 }
 .status-error {
   background: var(--red);
@@ -966,9 +972,17 @@ h4 {
   animation: status-fade 1.2s ease-in-out infinite;
 }
 .session-status.status-awaiting {
+  color: var(--red);
+  background: var(--red-soft);
+  animation: status-fade 0.8s ease-in-out infinite;
+}
+.session-status.status-pr {
   color: var(--amber);
   background: var(--amber-soft);
-  animation: status-fade 0.8s ease-in-out infinite;
+}
+.session-status.status-merged {
+  color: var(--green);
+  background: var(--green-soft);
 }
 .session-status.status-error {
   color: var(--red);
