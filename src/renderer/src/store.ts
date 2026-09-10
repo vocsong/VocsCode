@@ -1,6 +1,7 @@
 /** zustand store for session state, panel selection and toasts. Selectors must return stable references. */
 import { create } from 'zustand';
 import type { AppSettings, HarnessAvailability, HarnessId, ModelInfo, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
+import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
 export type PanelTab = 'changes' | 'files' | 'goal' | 'usage' | 'terminal';
@@ -18,14 +19,6 @@ export interface Toast {
   text: string;
 }
 
-export interface TerminalLine {
-  runId: string;
-  text: string;
-  done?: boolean;
-  exitCode?: number | null;
-  command?: string;
-}
-
 interface State {
   booted: boolean;
   settings: AppSettings | null;
@@ -35,7 +28,15 @@ interface State {
   loaded: Record<string, boolean>;
   models: Record<string, ModelInfo[]>;
   availability: Partial<Record<HarnessId, HarnessAvailability>>;
-  terminal: Record<string, TerminalLine[]>;
+  /** Every session's terminals, as the main process reports them; the xterm instances live in terminal/host.ts. */
+  terminals: TerminalInfo[];
+  terminalsLoaded: boolean;
+  /** Selected terminal tab per session. */
+  activeTerminal: Record<string, string>;
+  /** Bumped to move keyboard focus into the active terminal. */
+  terminalFocusNonce: number;
+  /** Text another part of the UI wants appended to the composer draft (e.g. terminal output). */
+  composerInsert: { text: string; nonce: number } | null;
   view: View;
   sidebarOpen: boolean;
   panelOpen: boolean;
@@ -67,7 +68,11 @@ interface State {
   dismissToast(id: string): void;
   refreshAvailability(): Promise<void>;
   clearTranscriptLocal(id: string): void;
-  appendTerminal(sessionId: string, line: TerminalLine): void;
+  setTerminals(list: TerminalInfo[]): void;
+  setActiveTerminal(sessionId: string, terminalId: string): void;
+  focusTerminal(): void;
+  insertIntoComposer(text: string): void;
+  clearComposerInsert(): void;
 }
 
 let toastCounter = 0;
@@ -121,7 +126,11 @@ export const useStore = create<State>((set, get) => ({
   loaded: {},
   models: {},
   availability: {},
-  terminal: {},
+  terminals: [],
+  terminalsLoaded: false,
+  activeTerminal: {},
+  terminalFocusNonce: 0,
+  composerInsert: null,
   view: 'chat',
   sidebarOpen: true,
   panelOpen: true,
@@ -135,14 +144,15 @@ export const useStore = create<State>((set, get) => ({
   historyIndex: -1,
 
   async boot() {
-    const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
-    set({ settings, sessions, booted: true });
+    const [settings, sessions, terminals] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined), invoke('terminal:list', undefined)]);
+    set({ settings, sessions, terminals, terminalsLoaded: true, booted: true });
     if (!subscribed) {
       subscribed = true;
       on('push:sessionsChanged', (list) => get().setSessions(list));
       on('push:settingsChanged', (s) => get().setSettings(s));
       on('push:sessionEvent', (env) => get().applyEvent(env));
       on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId));
+      on('push:terminalsChanged', (list) => get().setTerminals(list));
     }
     const first = sessions.find((s) => !s.archived);
     if (first) await get().setActive(first.id);
@@ -242,16 +252,6 @@ export const useStore = create<State>((set, get) => ({
       case 'error':
         get().toast(event.message, 'error');
         break;
-      case 'shell.output':
-        set((s) => {
-          const lines = [...(s.terminal[sessionId] ?? [])];
-          const idx = lines.findIndex((l) => l.runId === event.runId);
-          if (idx >= 0) lines[idx] = { ...lines[idx], text: lines[idx].text + event.chunk, done: event.done ?? lines[idx].done, exitCode: event.exitCode ?? lines[idx].exitCode };
-          else lines.push({ runId: event.runId, text: event.chunk, done: event.done, exitCode: event.exitCode });
-          return { terminal: { ...s.terminal, [sessionId]: lines } };
-        });
-        if (event.done) set((s) => ({ changesVersion: s.changesVersion + 1 }));
-        break;
       case 'status':
         if (event.status === 'idle') set((s) => ({ changesVersion: s.changesVersion + 1 }));
         break;
@@ -307,8 +307,20 @@ export const useStore = create<State>((set, get) => ({
   clearTranscriptLocal(id) {
     set((s) => ({ transcripts: { ...s.transcripts, [id]: [] } }));
   },
-  appendTerminal(sessionId, line) {
-    set((s) => ({ terminal: { ...s.terminal, [sessionId]: [...(s.terminal[sessionId] ?? []), line] } }));
+  setTerminals(terminals) {
+    set({ terminals, terminalsLoaded: true });
+  },
+  setActiveTerminal(sessionId, terminalId) {
+    set((s) => (s.activeTerminal[sessionId] === terminalId ? {} : { activeTerminal: { ...s.activeTerminal, [sessionId]: terminalId } }));
+  },
+  focusTerminal() {
+    set((s) => ({ terminalFocusNonce: s.terminalFocusNonce + 1 }));
+  },
+  insertIntoComposer(text) {
+    set((s) => ({ composerInsert: { text, nonce: (s.composerInsert?.nonce ?? 0) + 1 } }));
+  },
+  clearComposerInsert() {
+    set({ composerInsert: null });
   }
 }));
 

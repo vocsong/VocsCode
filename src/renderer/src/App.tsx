@@ -12,6 +12,7 @@ import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
 import { Button, EmptyState, Icon, Kbd, Spinner } from './components/ui';
+import { createTerminal } from './terminal/host';
 
 export function App() {
   const booted = useStore((s) => s.booted);
@@ -66,6 +67,15 @@ export function App() {
         if (target) {
           e.preventDefault();
           void st.setActive(target.id);
+        }
+      } else if (mod && e.code === 'Backquote' && st.activeId && st.view === 'chat') {
+        // Ctrl+` toggles focus between the terminal and the composer; Ctrl+Shift+` opens a new terminal.
+        e.preventDefault();
+        if (e.shiftKey) void createTerminal(st.activeId);
+        else if (st.panelOpen && st.panelTab === 'terminal' && document.activeElement?.closest('.term-view')) document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus();
+        else {
+          st.setPanelTab('terminal');
+          st.focusTerminal();
         }
       } else if (e.key === 'Escape' && !st.newSessionOpen && !st.paletteOpen && st.activeId) {
         // Escape interrupts the agent only when nothing else would consume it: no open menu, dialog or

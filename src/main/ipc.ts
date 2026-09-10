@@ -5,7 +5,7 @@ import path from 'node:path';
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
 import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { PUSH_CHANNELS } from '../shared/ipc';
-import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, SessionEventEnvelope } from '../shared/types';
+import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
 import { gitCommit, gitDiff, gitRevertFile, gitStageAll, gitSummary } from './git';
@@ -16,7 +16,7 @@ import { which } from './runtime';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import type { SettingsStore } from './settings';
-import { ShellRunner } from './shell';
+import type { TerminalManager } from './terminal';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
 
@@ -24,6 +24,7 @@ export interface IpcDeps {
   settings: SettingsStore;
   secrets: SecretStore;
   sessions: SessionManager;
+  terminals: TerminalManager;
   runtime: RuntimeResolver;
   getWindow: () => BrowserWindow | null;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
@@ -39,8 +40,7 @@ export function pushToRenderer(win: BrowserWindow | null, channel: string, paylo
 }
 
 export function registerIpc(deps: IpcDeps): void {
-  const { settings, secrets, sessions, runtime } = deps;
-  const shellRunner = new ShellRunner();
+  const { settings, secrets, sessions, terminals, runtime } = deps;
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
 
   handle('app:info', () => ({ version: app.getVersion(), platform: process.platform, userData: app.getPath('userData'), isPackaged: app.isPackaged }));
@@ -244,7 +244,11 @@ export function registerIpc(deps: IpcDeps): void {
   handle('sessions:create', (req) => sessions.create(req));
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
-  handle('sessions:delete', ({ id, removeWorktree }) => sessions.delete(id, removeWorktree));
+  handle('sessions:delete', async ({ id, removeWorktree }) => {
+    // Shells hold their cwd open; take them down before the worktree is removed.
+    await terminals.closeForSession(id);
+    await sessions.delete(id, removeWorktree);
+  });
   handle('sessions:rename', ({ id, title }) => sessions.patch(id, { title }));
   handle('sessions:archive', ({ id, archived }) => sessions.patch(id, { archived }));
   handle('sessions:pin', ({ id, pinned }) => sessions.patch(id, { pinned }));
@@ -337,17 +341,19 @@ export function registerIpc(deps: IpcDeps): void {
     return { content: buf.subarray(0, limit).toString('utf8'), truncated: buf.length > limit };
   });
 
-  handle('shell:run', ({ sessionId, command }) => {
-    const cwd = cwdOf(sessionId);
-    const runId = shellRunner.run(sessionId, cwd, command, (rid, chunk, done, exitCode) => {
-      const env: SessionEventEnvelope = { sessionId, event: { type: 'shell.output', runId: rid, chunk, done, exitCode }, ts: Date.now() };
-      pushToRenderer(deps.getWindow(), PUSH_CHANNELS.sessionEvent, env);
-    });
-    return { runId };
-  });
-  handle('shell:kill', ({ runId }) => shellRunner.kill(runId));
-
-  app.on('before-quit', () => shellRunner.killAll());
+  handle('terminal:list', () => terminals.list());
+  handle('terminal:shells', () => terminals.shells());
+  handle('terminal:create', ({ sessionId, shell, cols, rows }) => terminals.create(sessionId, { shell, cols, rows }));
+  handle('terminal:attach', ({ terminalId, cols, rows }) => terminals.attach(terminalId, cols, rows));
+  handle('terminal:detach', ({ terminalId }) => terminals.detach(terminalId));
+  handle('terminal:input', ({ terminalId, data }) => terminals.input(terminalId, data));
+  handle('terminal:resize', ({ terminalId, cols, rows }) => terminals.resize(terminalId, cols, rows));
+  handle('terminal:ack', ({ terminalId, chars }) => terminals.ack(terminalId, chars));
+  handle('terminal:kill', ({ terminalId }) => terminals.kill(terminalId));
+  handle('terminal:restart', ({ terminalId }) => terminals.restart(terminalId));
+  handle('terminal:close', ({ terminalId }) => terminals.close(terminalId));
+  handle('terminal:clear', ({ terminalId }) => terminals.clear(terminalId));
+  handle('terminal:rename', ({ terminalId, title }) => terminals.rename(terminalId, title));
 }
 
 function fuzzyMatch(hay: string, needle: string): boolean {
