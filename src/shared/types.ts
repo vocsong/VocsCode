@@ -381,6 +381,8 @@ export interface AppSettings {
   defaultPermissionMode: PermissionMode;
   defaultEffort?: EffortLevel;
   defaultModelByHarness: Partial<Record<HarnessId, ModelRef>>;
+  /** Starred models, always listed first in the model pickers. */
+  favoriteModels: ModelRef[];
   notifications: boolean;
   soundOnApproval: boolean;
   /** Explicit binary paths (empty = auto-detect). */
