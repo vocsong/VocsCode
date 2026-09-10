@@ -433,14 +433,14 @@ export function Composer({ session }: { session: SessionMeta }) {
           ) : busy ? (
             <>
               {caps.queue && (
-                <Button size="sm" variant="ghost" onClick={() => void send('queue')} title="Send after the current turn">
+                <Button size="sm" onClick={() => void send('queue')} title="Send after the current turn">
                   Queue
                 </Button>
               )}
               <Button size="sm" variant="primary" icon={caps.steer ? 'arrowUp' : 'clock'} onClick={() => void send(caps.steer ? 'steer' : 'queue')} title={caps.steer ? 'Steer now' : 'Queue'}>
                 {caps.steer ? 'Steer' : 'Queue'}
               </Button>
-              <Button size="sm" variant="danger" icon="stop" onClick={() => void invoke('sessions:interrupt', { id: session.id })} title="Interrupt (Esc)" />
+              <Button size="sm" variant="danger" icon="stop" className="btn-icon" onClick={() => void invoke('sessions:interrupt', { id: session.id })} title="Interrupt (Esc)" />
             </>
           ) : (
             <Button size="sm" variant="primary" icon="send" onClick={() => void send()} disabled={!text.trim() && !images.length}>
