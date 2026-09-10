@@ -14,13 +14,14 @@ import type {
   SessionEvent,
   SessionEventEnvelope,
   SessionMeta,
+  SessionStatus,
   TranscriptItem,
   UserInput
 } from '../shared/types';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
-import { createWorktree, gitRoot, removeWorktree, slugify, worktreeInfo } from './git';
+import { branchGitState, createWorktree, gitRoot, removeWorktree, slugify, worktreeInfo, type BranchGitState } from './git';
 import { emptyUsage } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
@@ -56,13 +57,27 @@ interface ActiveSession {
 const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
 
 export class SessionManager {
+  /** How often a session parked on 'pr' re-checks whether its branch was merged. */
+  private static readonly GIT_STATE_RECHECK_MS = 120_000;
+
   private active = new Map<string, ActiveSession>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
+  private gitStateTimers = new Map<string, NodeJS.Timeout>();
+  /** Sessions whose restored git state was re-checked once after boot. */
+  private gitStateChecked = new Set<string>();
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
   list(): SessionMeta[] {
-    return this.deps.store.list();
+    const list = this.deps.store.list();
+    // Sessions restored while parked on a PR resume polling for their merge.
+    for (const s of list) {
+      if (s.status === 'pr' && !this.gitStateChecked.has(s.id)) {
+        this.gitStateChecked.add(s.id);
+        this.scheduleGitStateCheck(s.id);
+      }
+    }
+    return list;
   }
 
   get(id: string): SessionMeta | undefined {
@@ -95,6 +110,47 @@ export class SessionManager {
     const t = this.persistTimers.get(id);
     if (t) clearTimeout(t);
     this.persistTimers.delete(id);
+  }
+
+  /** Schedules a PR/merge status check shortly after a turn ends in an isolated worktree. */
+  private scheduleGitStateCheck(id: string, delayMs = 4_000): void {
+    const prev = this.gitStateTimers.get(id);
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      this.gitStateTimers.delete(id);
+      void this.checkGitState(id, true);
+    }, delayMs);
+    timer.unref?.();
+    this.gitStateTimers.set(id, timer);
+  }
+
+  /** Reflects the session branch's PR/merge state in the sidebar status label. */
+  private async checkGitState(id: string, recheck: boolean): Promise<void> {
+    const meta = this.get(id);
+    if (!meta || !meta.worktreeBranch) return;
+    if (!this.gitStateCheckable(meta.status)) return;
+    let state: BranchGitState;
+    try {
+      state = await branchGitState(meta.cwd, meta.worktreeBranch);
+    } catch (e) {
+      this.deps.log('warn', `pr/merge status check failed: ${errorMessage(e)}`);
+      return;
+    }
+    // The check can take seconds over the network; the session may have moved on.
+    if (!this.gitStateCheckable(meta.status)) return;
+    const next: SessionStatus = state.merged ? 'merged' : state.pr ? 'pr' : 'idle';
+    if (meta.status === next || meta.status === 'merged' || meta.status === 'error' || meta.status === 'stopped') return;
+    meta.status = next;
+    meta.statusDetail = undefined;
+    this.schedulePersist(meta);
+    this.pushSessions();
+    // Parked on 'pr': keep polling so the label flips to 'merged' once it lands.
+    if (next === 'pr' && recheck) this.scheduleGitStateCheck(id, SessionManager.GIT_STATE_RECHECK_MS);
+  }
+
+  /** Only idle/pr sessions take a label update; live or already-final statuses are left alone. */
+  private gitStateCheckable(status: SessionStatus): boolean {
+    return status === 'idle' || status === 'pr' || status === 'merged';
   }
 
   /** Persists every debounced meta update immediately (used on quit so trailing edits are not lost). */
@@ -498,6 +554,7 @@ export class SessionManager {
           // Status events are the live source of truth for the sidebar. Terminal statuses also
           // persist above, but every transition must be published immediately.
           this.pushSessions();
+          if (event.status === 'idle') this.scheduleGitStateCheck(meta.id);
         }
         break;
       }
