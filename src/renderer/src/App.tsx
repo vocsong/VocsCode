@@ -42,7 +42,7 @@ export function App() {
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === 'n') {
         e.preventDefault();
-        st.openNewSession(true);
+        void st.startNewSession();
       } else if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         st.openPalette(!st.paletteOpen);
@@ -123,7 +123,7 @@ export function App() {
               <EmptyState icon="sparkles" title="Welcome to Vocs Code">
                 <p>One desktop for every coding agent. Pick a harness per session — Claude Agent SDK, Codex, Pi, DeepSeek Harness or any ACP agent, or the built-in loop — and any model it can reach.</p>
                 <div className="row gap8 center">
-                  <Button variant="primary" icon="plus" onClick={() => useStore.getState().openNewSession(true)}>
+                  <Button variant="primary" icon="plus" onClick={() => void useStore.getState().startNewSession()}>
                     New session
                   </Button>
                   <Button icon="settings" onClick={() => useStore.getState().setView('settings')}>

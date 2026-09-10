@@ -783,6 +783,29 @@ h4 {
   color: var(--fg-faint);
   font-weight: 600;
 }
+.project-new-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
+}
+.project-group:hover .project-new-btn,
+.project-new-btn:focus-visible {
+  opacity: 1;
+}
+.project-new-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
 .session-row {
   display: flex;
   align-items: center;
@@ -2035,6 +2058,17 @@ body.resizing {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
+}
+.ns-root {
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Trim long paths from the start (keep the leaf folder visible) while rendering the text itself LTR. */
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
 }
 .harness-cards {
   display: grid;

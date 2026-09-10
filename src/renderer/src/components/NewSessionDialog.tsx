@@ -3,7 +3,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import type { EffortLevel, HarnessId, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
-import { basename } from '../format';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Modal, Spinner, Toggle } from './ui';
 
@@ -15,7 +14,9 @@ export function NewSessionDialog() {
   const toast = useStore((s) => s.toast);
   const activeSession = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
 
-  const [projectRoot, setProjectRoot] = useState(activeSession?.config.projectRoot ?? settings.recentProjects[0] ?? '');
+  // The folder is chosen before the dialog opens (sidebar button or per-folder +); the dialog only
+  // configures harness, model and options for that folder.
+  const projectRoot = useStore((s) => s.newSessionRoot) ?? activeSession?.config.projectRoot ?? '';
   const [harness, setHarness] = useState<HarnessId>(settings.defaultHarness);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -45,8 +46,9 @@ export function NewSessionDialog() {
     let cancelled = false;
     setModels([]);
     setModelsError(undefined);
-    setModelsLoading(true);
+    setModelsLoading(!projectRoot);
     setModel(settings.defaultModelByHarness[harness]);
+    if (!projectRoot) return;
     invoke('harness:models', { harness, acpAgent, projectRoot })
       .then((r) => {
         if (cancelled) return;
@@ -72,11 +74,6 @@ export function NewSessionDialog() {
 
   const selectedModel = models.find((m) => model && m.id === model.model && m.provider === model.provider);
   const effortOptions = selectedModel?.supportedEfforts?.length ? selectedModel.supportedEfforts : [...EFFORT_LEVELS];
-
-  const pickFolder = async () => {
-    const r = await invoke('app:pickFolder', { defaultPath: projectRoot || undefined });
-    if (r.path) setProjectRoot(r.path);
-  };
 
   const create = async () => {
     if (!projectRoot) {
@@ -134,20 +131,9 @@ export function NewSessionDialog() {
         <section className="ns-col">
           <Field label="Project folder">
             <div className="row gap8">
-              <input value={projectRoot} onChange={(e) => setProjectRoot(e.target.value)} placeholder="C:\path\to\repo" />
-              <Button icon="folder" onClick={pickFolder}>
-                Browse
-              </Button>
+              <Icon name="folder" size={14} />
+              <span className="ns-root" title={projectRoot}>{projectRoot || 'No folder selected'}</span>
             </div>
-            {settings.recentProjects.length > 0 && (
-              <div className="chips">
-                {settings.recentProjects.slice(0, 6).map((p) => (
-                  <button key={p} type="button" className={`chip ${p === projectRoot ? 'active' : ''}`} onClick={() => setProjectRoot(p)} title={p}>
-                    {basename(p)}
-                  </button>
-                ))}
-              </div>
-            )}
           </Field>
 
           <Field label="Harness">
