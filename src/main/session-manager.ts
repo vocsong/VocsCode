@@ -21,7 +21,7 @@ import type {
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
-import { branchGitState, createWorktree, gitRoot, removeWorktree, slugify, worktreeInfo, type BranchGitState } from './git';
+import { branchGitState, createWorktree, gitRoot, removeWorktree, restoreWorktree, slugify, worktreeInfo, type BranchGitState } from './git';
 import { emptyUsage } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
@@ -256,6 +256,26 @@ export class SessionManager {
     await this.deps.store.upsert(meta);
     this.pushSessions();
     return meta;
+  }
+
+  /** Archives a session; with `removeWt` it also deletes the worktree (the branch is kept so unarchive can restore it). */
+  async setArchived(id: string, archived: boolean, removeWt = false): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (archived && removeWt && meta.worktreeBranch) {
+      await this.stop(id);
+      // Non-force: a worktree with uncommitted changes is refused, and the error reaches the renderer's toast.
+      await removeWorktree(meta.config.projectRoot, meta.cwd, { force: false });
+    }
+    if (!archived && meta.worktreeBranch) {
+      // The worktree may have been removed while archived; recreate it so the session can start again.
+      try {
+        await restoreWorktree(meta.config.projectRoot, meta.cwd, meta.worktreeBranch);
+      } catch (e) {
+        this.deps.log('warn', `worktree restore failed: ${errorMessage(e)}`);
+      }
+    }
+    return this.patch(id, { archived });
   }
 
   transcript(id: string): Promise<TranscriptItem[]> {
