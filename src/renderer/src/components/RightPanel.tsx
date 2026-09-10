@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { FsEntry, GitSummary, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
 import { fmtCost, fmtDuration, fmtTokens } from '../format';
 import { useStore, type PanelTab } from '../store';
 import { DiffView } from './DiffView';
 import { Resizer } from './Resizer';
+import { TerminalPanel } from './TerminalPanel';
 import { Badge, Button, EmptyState, Field, Icon, Spinner, Toggle } from './ui';
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
@@ -39,7 +40,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
         {tab === 'files' && <FilesTab session={session} />}
         {tab === 'goal' && <GoalTab session={session} />}
         {tab === 'usage' && <UsageTab session={session} />}
-        {tab === 'terminal' && <TerminalTab session={session} />}
+        {tab === 'terminal' && <TerminalPanel session={session} />}
       </div>
       <Resizer target="panel" />
     </aside>
@@ -298,46 +299,6 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="stat">
       <div className="stat-value">{value}</div>
       <div className="stat-label">{label}</div>
-    </div>
-  );
-}
-
-function TerminalTab({ session }: { session: SessionMeta }) {
-  const lines = useStore((s) => s.terminal[session.id] ?? EMPTY);
-  const appendTerminal = useStore((s) => s.appendTerminal);
-  const [cmd, setCmd] = useState('');
-  const [running, setRunning] = useState<string | null>(null);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-    const last = lines[lines.length - 1];
-    if (last?.done && running === last.runId) setRunning(null);
-  }, [lines, running]);
-  const run = async () => {
-    const c = cmd.trim();
-    if (!c) return;
-    setCmd('');
-    const { runId } = await invoke('shell:run', { sessionId: session.id, command: c });
-    appendTerminal(session.id, { runId, text: '', command: c });
-    setRunning(runId);
-  };
-  return (
-    <div className="term">
-      <div className="term-out mono" ref={ref}>
-        {lines.length === 0 && <div className="muted">Run project commands here. Output is not shared with the agent; use the chat for that.</div>}
-        {lines.map((l) => (
-          <div key={l.runId} className="term-block">
-            {l.command && <div className="term-cmd">$ {l.command}</div>}
-            <pre>{l.text}</pre>
-            {l.done && <div className={`term-exit ${l.exitCode ? 'bad' : ''}`}>exit {l.exitCode ?? '?'}</div>}
-          </div>
-        ))}
-      </div>
-      <div className="term-in">
-        <span className="mono muted">$</span>
-        <input className="mono" value={cmd} onChange={(e) => setCmd(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void run()} placeholder={`command in ${session.cwd.split(/[\\/]/).pop()}`} spellCheck={false} />
-        {running ? <Button size="sm" variant="danger" icon="stop" onClick={() => void invoke('shell:kill', { runId: running })} /> : <Button size="sm" variant="primary" icon="play" onClick={() => void run()} />}
-      </div>
     </div>
   );
 }

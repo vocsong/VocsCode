@@ -18,6 +18,7 @@ import type {
   TranscriptItem,
   UserInput
 } from './types';
+import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 
 /**
  * Request/response contract for ipcRenderer.invoke channels.
@@ -94,8 +95,21 @@ export interface IpcContract {
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];
   'fs:read': [{ sessionId: string; path: string; maxBytes?: number }, { content: string; truncated: boolean }];
 
-  'shell:run': [{ sessionId: string; command: string }, { runId: string }];
-  'shell:kill': [{ runId: string }, void];
+  'terminal:list': [void, TerminalInfo[]];
+  'terminal:shells': [void, ShellOption[]];
+  'terminal:create': [{ sessionId: string; shell?: ShellKind; cols?: number; rows?: number }, TerminalInfo];
+  /** Start showing a terminal: the screen as it is now plus the seq of the last chunk it contains. */
+  'terminal:attach': [{ terminalId: string; cols: number; rows: number }, { snapshot: string; seq: number; info: TerminalInfo }];
+  'terminal:detach': [{ terminalId: string }, void];
+  'terminal:input': [{ terminalId: string; data: string }, void];
+  'terminal:resize': [{ terminalId: string; cols: number; rows: number }, void];
+  /** Renderer consumed `chars` of output; lets main resume a PTY it paused for flow control. */
+  'terminal:ack': [{ terminalId: string; chars: number }, void];
+  'terminal:kill': [{ terminalId: string }, void];
+  'terminal:restart': [{ terminalId: string }, TerminalInfo];
+  'terminal:close': [{ terminalId: string }, void];
+  'terminal:clear': [{ terminalId: string }, void];
+  'terminal:rename': [{ terminalId: string; title: string }, TerminalInfo];
 }
 
 export type IpcChannel = keyof IpcContract;
@@ -107,7 +121,9 @@ export const PUSH_CHANNELS = {
   sessionEvent: 'push:sessionEvent',
   sessionsChanged: 'push:sessionsChanged',
   settingsChanged: 'push:settingsChanged',
-  focusSession: 'push:focusSession'
+  focusSession: 'push:focusSession',
+  terminalData: 'push:terminalData',
+  terminalsChanged: 'push:terminalsChanged'
 } as const;
 
 export type PushPayloads = {
@@ -115,6 +131,9 @@ export type PushPayloads = {
   'push:sessionsChanged': SessionMeta[];
   'push:settingsChanged': AppSettings;
   'push:focusSession': { sessionId: string };
+  /** Raw PTY output for one terminal; `seq` orders it against an attach snapshot. */
+  'push:terminalData': { terminalId: string; seq: number; data: string };
+  'push:terminalsChanged': TerminalInfo[];
 };
 
 /** The API exposed on window.harness by the preload script. */
