@@ -7,6 +7,9 @@ import { fmtCost, fmtTokens } from '../format';
 import { useStore } from '../store';
 import { Button, Icon, Kbd } from './ui';
 
+/** Stable fallback so the zustand selector never returns a fresh array (React #185 infinite loop). */
+const EMPTY_MODELS: never[] = [];
+
 export function Composer({ session }: { session: SessionMeta }) {
   const [text, setText] = useState('');
   const [images, setImages] = useState<ImageAttachment[]>([]);
@@ -17,7 +20,32 @@ export function Composer({ session }: { session: SessionMeta }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const toast = useStore((s) => s.toast);
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
-  const caps = HARNESS_BY_ID[session.config.harness].capabilities;
+  const harness = HARNESS_BY_ID[session.config.harness];
+  const caps = harness.capabilities;
+  const models = useStore((s) => s.models[session.id] ?? EMPTY_MODELS);
+  const currentModel = session.activeModel ?? session.config.model;
+  const currentInfo = models.find((m) => currentModel && m.id === currentModel.model && m.provider === currentModel.provider);
+
+  // Only warn when the catalog is explicit. An unknown capability (undefined) is not a claim.
+  const visionWarning =
+    currentModel && currentInfo?.supportsImages === false
+      ? {
+          model: currentInfo.displayName,
+          detail: caps.dropsUnsupportedImages
+            ? `${harness.name} strips the attachment before it reaches the model, so an override here alone will not help — its own model catalog has to list image input too.`
+            : 'The provider may reject the request or silently ignore the image.'
+        }
+      : null;
+
+  const markVisionCapable = async () => {
+    if (!currentModel) return;
+    try {
+      await invoke('models:setOverride', { provider: currentModel.provider, model: currentModel.model, supportsImages: true });
+      toast(`${currentInfo?.displayName ?? currentModel.model} is now treated as vision-capable. Undo it under Settings → Providers.`, 'success');
+    } catch (e) {
+      toast(`Could not save the override: ${(e as Error).message}`, 'error');
+    }
+  };
 
   useEffect(() => {
     const el = ref.current;
@@ -265,16 +293,30 @@ export function Composer({ session }: { session: SessionMeta }) {
         </div>
       )}
       {images.length > 0 && (
-        <div className="attachments">
-          {images.map((im, i) => (
-            <div key={i} className="attachment">
-              <img src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'image'} />
-              <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove">
-                <Icon name="x" size={12} />
-              </button>
+        <>
+          {visionWarning && (
+            <div className="composer-warn">
+              <Icon name="alert" size={14} />
+              <span>
+                <strong>{visionWarning.model}</strong> is listed as text-only. {visionWarning.detail}
+              </span>
+              <span className="spacer" />
+              <Button size="sm" variant="ghost" onClick={() => void markVisionCapable()} title="Record an override in Settings → Providers so this model is treated as vision-capable">
+                It does accept images
+              </Button>
             </div>
-          ))}
-        </div>
+          )}
+          <div className="attachments">
+            {images.map((im, i) => (
+              <div key={i} className="attachment">
+                <img src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'image'} />
+                <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove">
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
       )}
       <div className="composer-box">
         <textarea
