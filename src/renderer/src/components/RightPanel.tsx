@@ -3,6 +3,7 @@ import type { FsEntry, GitSummary, SessionMeta, TranscriptItem } from '../../../
 import { invoke } from '../api';
 import { fmtCost, fmtDuration, fmtTokens } from '../format';
 import { useStore, type PanelTab } from '../store';
+import { BranchesTab } from './BranchesTab';
 import { DiffView } from './DiffView';
 import { Resizer } from './Resizer';
 import { TerminalPanel } from './TerminalPanel';
@@ -14,6 +15,7 @@ const EMPTY: never[] = [];
 const TABS: { id: PanelTab; label: string; icon: string }[] = [
   { id: 'changes', label: 'Changes', icon: 'diff' },
   { id: 'files', label: 'Files', icon: 'folder' },
+  { id: 'branches', label: 'Branches', icon: 'branch' },
   { id: 'goal', label: 'Goal', icon: 'target' },
   { id: 'usage', label: 'Usage', icon: 'chart' },
   { id: 'terminal', label: 'Terminal', icon: 'terminal' }
@@ -38,6 +40,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
       <div className="panel-body">
         {tab === 'changes' && <ChangesTab session={session} />}
         {tab === 'files' && <FilesTab session={session} />}
+        {tab === 'branches' && <BranchesTab session={session} />}
         {tab === 'goal' && <GoalTab session={session} />}
         {tab === 'usage' && <UsageTab session={session} />}
         {tab === 'terminal' && <TerminalPanel session={session} />}
