@@ -4,9 +4,10 @@ import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConf
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
-import { invoke } from '../api';
+import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
 import { invoke, isMac, platform } from '../api';
 import { useStore } from '../store';
+import { systemPrefersDark } from '../theme';
 import { Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
 
 type Section = 'general' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'about';
@@ -50,17 +51,56 @@ export function SettingsView() {
   );
 }
 
+/** Swatch grid for the theme catalogue, grouped by family. */
+function ThemePicker({ value, onChange }: { value: ThemeId; onChange: (id: ThemeId) => void }) {
+  const systemDark = systemPrefersDark();
+  return (
+    <div className="theme-picker">
+      {GROUP_ORDER.map((group) => {
+        const themes = THEMES.filter((t) => t.group === group);
+        if (!themes.length) return null;
+        return (
+          <div key={group}>
+            <div className="theme-family">{GROUP_LABELS[group]}</div>
+            <div className="theme-grid">
+              {themes.map((t) => {
+                const [base, raised, accent] = swatchFor(t.id, systemDark);
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    className={`theme-card${value === t.id ? ' active' : ''}`}
+                    title={t.description}
+                    aria-pressed={value === t.id}
+                    onClick={() => onChange(t.id)}
+                  >
+                    <span className="theme-swatch" style={{ background: base, borderColor: raised }}>
+                      <span className="theme-swatch-bar" style={{ background: raised }} />
+                      <span className="theme-swatch-dot" style={{ background: accent }} />
+                    </span>
+                    <span className="theme-card-name">
+                      {t.name}
+                      {t.animated && <Icon name="sparkles" size={11} />}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function General({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   return (
     <div className="settings-section">
       <h2>General</h2>
-      <Field label="Theme">
-        <select value={settings.theme} onChange={(e) => update({ theme: e.target.value as AppSettings['theme'] })}>
-          <option value="system">System</option>
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-        </select>
-      </Field>
+      <div className="field">
+        <span className="field-label">Theme</span>
+        <ThemePicker value={settings.theme} onChange={(theme) => update({ theme })} />
+      </div>
       <Field label="Default harness">
         <select value={settings.defaultHarness} onChange={(e) => update({ defaultHarness: e.target.value as HarnessId })}>
           {HARNESSES.map((h) => (
