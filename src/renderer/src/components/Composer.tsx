@@ -76,10 +76,21 @@ export function Composer({ session }: { session: SessionMeta }) {
 
   useEffect(() => {
     if (!mention) return;
+    // Debounced so typing does not fire an uncancellable full-tree walk per keystroke; results are
+    // cleared while a search is in flight instead of seeding the popover with the previous query's.
+    setMention((m) => (m ? { ...m, results: [], index: 0 } : m));
+    const query = mention.query;
     let cancelled = false;
-    invoke('fs:search', { sessionId: session.id, query: mention.query, limit: 12 }).then((results) => !cancelled && setMention((m) => (m ? { ...m, results, index: 0 } : m)));
+    const timer = setTimeout(() => {
+      invoke('fs:search', { sessionId: session.id, query, limit: 12 })
+        .then((results) => {
+          if (!cancelled) setMention((m) => (m && m.query === query ? { ...m, results, index: 0 } : m));
+        })
+        .catch(() => undefined);
+    }, 150);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [mention?.query, session.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -174,7 +185,7 @@ export function Composer({ session }: { session: SessionMeta }) {
       case 'open':
         if (arg === 'editor') await invoke('app:openInEditor', { path: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
         else if (arg === 'terminal') await invoke('app:openTerminal', { cwd: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
-        else await invoke('app:openPath', { path: session.cwd });
+        else await invoke('app:openPath', { path: session.cwd, sessionId: session.id });
         return true;
       case 'worktree':
         toast(session.worktreeBranch ? `Worktree ${session.cwd} on branch ${session.worktreeBranch}` : 'This session runs directly in the project folder.', 'info');

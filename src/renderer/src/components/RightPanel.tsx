@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FsEntry, GitSummary, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
 import { fmtCost, fmtDuration, fmtTokens } from '../format';
@@ -55,20 +55,31 @@ function ChangesTab({ session }: { session: SessionMeta }) {
   const [diff, setDiff] = useState('');
   const [loading, setLoading] = useState(false);
   const [commitMsg, setCommitMsg] = useState('');
+  /** The session this component instance currently belongs to; async writes compare against it. */
+  const liveId = useRef(session.id);
 
   const refresh = async () => {
+    const sid = session.id;
     setLoading(true);
     try {
-      const s = await invoke('git:summary', { sessionId: session.id });
+      const s = await invoke('git:summary', { sessionId: sid });
+      if (liveId.current !== sid) return;
       setSummary(s);
-      const d = await invoke('git:diff', { sessionId: session.id, path: selected ?? undefined });
+      const d = await invoke('git:diff', { sessionId: sid, path: selected ?? undefined });
+      if (liveId.current !== sid) return;
       setDiff(d.diff);
     } catch (e) {
-      toast(String((e as Error).message ?? e), 'error');
+      if (liveId.current === sid) toast(String((e as Error).message ?? e), 'error');
     } finally {
-      setLoading(false);
+      if (liveId.current === sid) setLoading(false);
     }
   };
+  useEffect(() => {
+    liveId.current = session.id;
+    setSelected(null);
+    setDiff('');
+    setSummary(null);
+  }, [session.id]);
   useEffect(() => {
     void refresh();
   }, [session.id, version, selected]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -148,10 +159,27 @@ function FilesTab({ session }: { session: SessionMeta }) {
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [preview, setPreview] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
   const toast = useStore((s) => s.toast);
+  /** The session this component instance currently belongs to; responses from other sessions are dropped. */
+  const liveId = useRef(session.id);
   useEffect(() => {
-    invoke('fs:list', { sessionId: session.id, relPath: path || undefined })
-      .then(setEntries)
-      .catch((e) => toast(String(e.message ?? e), 'error'));
+    liveId.current = session.id;
+    setPath('');
+    setEntries([]);
+    setPreview(null);
+  }, [session.id]);
+  useEffect(() => {
+    const sid = session.id;
+    let stale = false;
+    invoke('fs:list', { sessionId: sid, relPath: path || undefined })
+      .then((list) => {
+        if (!stale && liveId.current === sid) setEntries(list);
+      })
+      .catch((e) => {
+        if (!stale && liveId.current === sid) toast(String(e.message ?? e), 'error');
+      });
+    return () => {
+      stale = true;
+    };
   }, [session.id, path]); // eslint-disable-line react-hooks/exhaustive-deps
   const crumbs = path.split(/[\\/]/).filter(Boolean);
   return (

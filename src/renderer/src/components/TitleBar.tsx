@@ -134,7 +134,7 @@ function FileMenu({ close }: { close: () => void }) {
         Export transcript…
       </MenuItem>
       <Sep />
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openPath', { path: session.cwd }))}>
+      <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openPath', { path: session.cwd, sessionId: session.id }))}>
         Reveal project folder
       </MenuItem>
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openInEditor', { path: session.cwd }).then(fail))}>

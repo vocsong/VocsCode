@@ -115,7 +115,7 @@ export function App() {
             <>
               <Header session={session} />
               <Transcript session={session} />
-              <Composer session={session} />
+              <Composer key={session.id} session={session} />
             </>
           ) : (
             <div className="main-empty">

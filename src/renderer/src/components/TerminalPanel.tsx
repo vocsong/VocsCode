@@ -28,8 +28,16 @@ export function TerminalPanel({ session }: { session: SessionMeta }) {
 
   // Opening the tab (or switching sessions under it) with no terminal starts a shell, like an
   // editor's terminal panel. Closing the last tab leaves the empty state instead of respawning.
+  // The in-flight mark is set synchronously so React StrictMode's remount (effect → cleanup →
+  // effect on the same tick) does not start a second PTY for the same session.
+  const creatingRef = useRef<string | null>(null);
   useEffect(() => {
-    if (loaded && terminals.length === 0) void host.createTerminal(session.id);
+    if (!loaded || terminals.length > 0) return;
+    if (creatingRef.current === session.id) return;
+    creatingRef.current = session.id;
+    void host.createTerminal(session.id).finally(() => {
+      if (creatingRef.current === session.id) creatingRef.current = null;
+    });
   }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {

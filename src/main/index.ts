@@ -134,14 +134,17 @@ async function main(): Promise<void> {
     if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot);
   });
   app.on('window-all-closed', () => {
-    app.quit();
+    // macOS convention: stay resident so the 'activate' dock handler can reopen a window.
+    if (process.platform !== 'darwin') app.quit();
   });
   let quitting = false;
   app.on('before-quit', (e) => {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
-    Promise.race([Promise.all([sessions?.stopAll(), terminals?.shutdown()]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
+    // Drain debounced session-meta persists after the sessions themselves are stopped.
+    const drainSessions = sessions ? sessions.stopAll().then(() => sessions?.flushPendingPersists()) : Promise.resolve();
+    Promise.race([Promise.all([drainSessions, terminals?.shutdown()]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
   });
 }
 
