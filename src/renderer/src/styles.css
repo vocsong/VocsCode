@@ -408,6 +408,15 @@ h4 {
   border-color: transparent;
   color: var(--red);
 }
+.btn-danger:hover {
+  background: color-mix(in srgb, var(--red) 26%, transparent);
+}
+.btn-icon {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  justify-content: center;
+}
 .link-btn {
   background: none;
   border: none;
