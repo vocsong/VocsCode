@@ -148,7 +148,9 @@ export class SessionManager {
     }
     await this.deps.store.upsert(meta);
     const recent = [cfg.projectRoot, ...s.recentProjects.filter((p) => p !== cfg.projectRoot)].slice(0, 12);
-    await this.deps.settings.update({ recentProjects: recent });
+    // The folder keeps its sidebar entry even after its last session is archived or deleted.
+    const folders = s.folders.includes(cfg.projectRoot) ? s.folders : [...s.folders, cfg.projectRoot];
+    await this.deps.settings.update({ recentProjects: recent, folders });
     this.pushSessions();
     if (req.initialPrompt?.trim()) {
       const prompt = meta.goal ? `${req.initialPrompt.trim()}\n\nActive goal: ${meta.goal.objective}` : req.initialPrompt.trim();
