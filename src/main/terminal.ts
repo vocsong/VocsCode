@@ -191,6 +191,8 @@ interface Term {
   attached: boolean;
   unacked: number;
   paused: boolean;
+  /** Input that arrived before a restored tab's shell started; flushed into the PTY at spawn. */
+  pendingInput: string[];
   disposables: { dispose(): void }[];
 }
 
@@ -271,7 +273,8 @@ export class TerminalManager {
   input(id: string, data: string): void {
     const t = this.terms.get(id);
     if (!t) return; // the tab closed; a late renderer call must not reject
-    t.pty?.write(data);
+    if (t.pty) t.pty.write(data);
+    else if (t.info.restored) t.pendingInput.push(data); // no shell yet: it starts on first attach
   }
 
   resize(id: string, cols: number, rows: number): void {
@@ -428,7 +431,7 @@ export class TerminalManager {
     const screen = new HeadlessTerminal({ cols, rows, scrollback: this.deps.settings().scrollback, allowProposedApi: true });
     const serializer = new SerializeAddon();
     screen.loadAddon(serializer);
-    const t: Term = { info, pty: null, shellFile: '', gen: 0, screen, serializer, cols, rows, seq: 0, attached: false, unacked: 0, paused: false, disposables: [] };
+    const t: Term = { info, pty: null, shellFile: '', gen: 0, screen, serializer, cols, rows, seq: 0, attached: false, unacked: 0, paused: false, pendingInput: [], disposables: [] };
     t.disposables.push(
       screen.onTitleChange((raw) => {
         if (t.info.customTitle) return;
@@ -491,6 +494,12 @@ export class TerminalManager {
       this.feed(t, `\r\n\x1b[2m[process exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}]\x1b[0m\r\n`);
       this.pushList();
     });
+    // Type-ahead: input meant for a restored tab is written as soon as its shell exists.
+    if (t.pendingInput.length) {
+      const queued = t.pendingInput.join('');
+      t.pendingInput.length = 0;
+      proc.write(queued);
+    }
   }
 
   private feed(t: Term, data: string): void {

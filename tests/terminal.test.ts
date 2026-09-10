@@ -255,6 +255,21 @@ describe('TerminalManager (fake pty)', () => {
     expect(existsSync(path.join(dir, 't_gone.json'))).toBe(false);
   });
 
+  it('types queued input into a restored tab the moment its shell starts', async () => {
+    const dir = await tmpDir();
+    const first = manager([fakePty()], dir);
+    const t = first.m.create('s1');
+    await first.m.persist();
+
+    const spawned = fakePty();
+    const second = manager([spawned], dir);
+    await second.m.load();
+    second.m.input(t.id, 'git status\r'); // the restored tab has no process yet
+    expect(spawned.calls).not.toContain('write:git status\r');
+    await second.m.attach(t.id, 80, 24);
+    expect(spawned.calls).toContain('write:git status\r');
+  });
+
   it('closes a session\'s terminals together', async () => {
     const { m } = manager([fakePty(), fakePty()], await tmpDir());
     m.create('s1');

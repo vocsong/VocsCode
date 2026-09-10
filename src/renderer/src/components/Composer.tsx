@@ -6,6 +6,7 @@ import { invoke } from '../api';
 import { fmtCost, fmtTokens } from '../format';
 import { useSessionModels } from '../models';
 import { useStore } from '../store';
+import * as host from '../terminal/host';
 import { Button, Icon, Kbd } from './ui';
 
 export function Composer({ session }: { session: SessionMeta }) {
@@ -20,6 +21,8 @@ export function Composer({ session }: { session: SessionMeta }) {
   const composerInsert = useStore((s) => s.composerInsert);
   const clearComposerInsert = useStore((s) => s.clearComposerInsert);
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
+  /** `!cmd` runs locally in the terminal; the Run button replaces send/steer/queue while it is typed. */
+  const shellDraft = text.trimStart().startsWith('!');
   const harness = HARNESS_BY_ID[session.config.harness];
   const caps = harness.capabilities;
   const { models } = useSessionModels(session);
@@ -94,11 +97,44 @@ export function Composer({ session }: { session: SessionMeta }) {
 
   const slashMatches = slash ? SLASH_COMMANDS.filter((c) => c.name.startsWith(slash.query.toLowerCase())) : [];
 
+  /** Runs `!` draft in the session's shell: switch to the Terminal tab and type it in. Nothing reaches the harness. */
+  const runShell = async (command: string) => {
+    const store = useStore.getState();
+    const mine = store.terminals.filter((t) => t.sessionId === session.id);
+    const active = store.activeTerminal[session.id];
+    let terminalId = mine.some((t) => t.id === active) ? active : mine[mine.length - 1]?.id;
+    if (terminalId) {
+      store.setActiveTerminal(session.id, terminalId);
+      store.setPanelTab('terminal');
+      store.focusTerminal();
+    } else {
+      const info = await host.createTerminal(session.id); // opens the tab and toasts on failure
+      if (!info) return;
+      terminalId = info.id;
+    }
+    // Every line runs, as if the draft had been pasted into the shell.
+    const data = command.replace(/\r?\n/g, '\r') + '\r';
+    try {
+      await invoke('terminal:input', { terminalId, data });
+    } catch (e) {
+      toast(`Could not run the command: ${String((e as Error).message ?? e)}`, 'error');
+    }
+  };
+
   const send = async (mode: 'now' | 'steer' | 'queue' = 'now') => {
     const t = text.trim();
     if (!t && !images.length) return;
     if (t.startsWith('/') && (await runSlash(t))) {
       setText('');
+      return;
+    }
+    if (t.startsWith('!')) {
+      const command = t.slice(1).trim();
+      setHistory((h) => [t, ...h.filter((x) => x !== t)].slice(0, 50));
+      setHistIdx(-1);
+      setText('');
+      if (command) await runShell(command);
+      else toast('Type a command after ! — for example !git status', 'info');
       return;
     }
     setHistory((h) => [t, ...h.filter((x) => x !== t)].slice(0, 50));
@@ -119,7 +155,7 @@ export function Composer({ session }: { session: SessionMeta }) {
     const store = useStore.getState();
     switch (cmd) {
       case 'help':
-        toast(`Commands: ${SLASH_COMMANDS.map((c) => '/' + c.name).join(' ')} · Enter send · Shift+Enter newline · Esc stop · Ctrl+K palette`, 'info');
+        toast(`Commands: ${SLASH_COMMANDS.map((c) => '/' + c.name).join(' ')} · Enter send · Shift+Enter newline · Esc stop · ! shell · Ctrl+K palette`, 'info');
         return true;
       case 'model': {
         if (!arg) {
@@ -364,7 +400,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… (/ commands, @ files, paste images)'}
+          placeholder={busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… (/ commands, @ files, ! shell, paste images)'}
           rows={1}
           spellCheck
         />
@@ -373,7 +409,11 @@ export function Composer({ session }: { session: SessionMeta }) {
             <Icon name="image" size={16} />
             <input type="file" accept="image/*" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
           </label>
-          {busy ? (
+          {shellDraft ? (
+            <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
+              Run
+            </Button>
+          ) : busy ? (
             <>
               {caps.queue && (
                 <Button size="sm" variant="ghost" onClick={() => void send('queue')} title="Send after the current turn">
@@ -393,7 +433,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         </div>
       </div>
       <div className="composer-hint muted small">
-        <Kbd>Enter</Kbd> send · <Kbd>Shift+Enter</Kbd> newline · <Kbd>Esc</Kbd> stop · <Kbd>@</Kbd> files · <Kbd>/</Kbd> commands
+        <Kbd>Enter</Kbd> send · <Kbd>Shift+Enter</Kbd> newline · <Kbd>Esc</Kbd> stop · <Kbd>@</Kbd> files · <Kbd>/</Kbd> commands · <Kbd>!</Kbd> shell
         {(session.queued ?? 0) > 0 && <span className="queued-hint"> · {session.queued} queued</span>}
       </div>
     </div>
