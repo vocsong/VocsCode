@@ -4,7 +4,6 @@ import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConf
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
-import { invoke } from '../api';
 import { invoke, isMac, platform } from '../api';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
