@@ -124,7 +124,7 @@ function FileMenu({ close }: { close: () => void }) {
 
   return (
     <>
-      <MenuItem hint={`${modKey}+N`} onClick={run(() => st.openNewSession(true))}>
+      <MenuItem hint={`${modKey}+N`} onClick={run(() => void st.startNewSession())}>
         New session
       </MenuItem>
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)))}>

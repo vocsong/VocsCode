@@ -25,7 +25,7 @@ export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const activeId = useStore((s) => s.activeId);
   const setActive = useStore((s) => s.setActive);
-  const openNew = useStore((s) => s.openNewSession);
+  const startNewSession = useStore((s) => s.startNewSession);
   const setView = useStore((s) => s.setView);
   const view = useStore((s) => s.view);
   const toast = useStore((s) => s.toast);
@@ -55,8 +55,8 @@ export function Sidebar() {
           <Icon name="sparkles" size={18} />
           <span>Vocs Code</span>
         </div>
-        <Button variant="primary" size="sm" icon="plus" onClick={() => openNew(true)} title="New session (Ctrl+N)">
-          New
+        <Button variant="primary" size="sm" icon="folder" onClick={() => void startNewSession()} title="New folder (Ctrl+N)">
+          New folder
         </Button>
       </div>
       <div className="sidebar-search">
@@ -76,6 +76,15 @@ export function Sidebar() {
             <div className="project-header" title={g.root}>
               <Icon name="folder" size={13} />
               <span>{basename(g.root)}</span>
+              <button
+                type="button"
+                className="project-new-btn"
+                title={`New session in ${basename(g.root)}`}
+                aria-label={`New session in ${basename(g.root)}`}
+                onClick={() => void startNewSession(g.root)}
+              >
+                <Icon name="plus" size={13} />
+              </button>
             </div>
             {g.list.map((s) => (
               <SessionRow key={s.id} session={s} active={s.id === activeId && view === 'chat'} onSelect={() => void setActive(s.id)} toast={toast} />
