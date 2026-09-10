@@ -28,6 +28,7 @@ export function CommandPalette() {
     const base: Cmd[] = [
       { id: 'new', label: 'New session', hint: 'Ctrl+N', icon: 'plus', run: () => void st.startNewSession() },
       { id: 'settings', label: 'Open settings', hint: 'Ctrl+,', icon: 'settings', run: () => st.setView('settings') },
+      { id: 'analytics', label: 'Open analytics dashboard', icon: 'chart', run: () => st.setView('analytics') },
       { id: 'panel', label: 'Toggle side panel', hint: 'Ctrl+J', icon: 'layout', run: () => st.togglePanel() },
       { id: 'sidebar', label: 'Toggle sidebar', hint: 'Ctrl+B', icon: 'sidebar', run: () => st.toggleSidebar() },
       { id: 'changes', label: 'Show changes', icon: 'diff', run: () => st.setPanelTab('changes') },
