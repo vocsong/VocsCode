@@ -1539,6 +1539,27 @@ h4 {
   display: flex;
   gap: 8px;
 }
+.composer-warn {
+  max-width: 920px;
+  margin: 0 auto 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--amber);
+  background: var(--amber-soft);
+  color: var(--amber);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.composer-warn svg {
+  flex: none;
+}
+.override-row {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
 .attachment {
   position: relative;
 }

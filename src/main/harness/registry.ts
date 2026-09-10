@@ -1,5 +1,6 @@
 /** Maps a harness id to its adapter factory and to the model list that harness can reach. */
 import type { AppSettings, HarnessId, ModelInfo } from '../../shared/types';
+import { applyModelOverrides } from '../../shared/model-overrides';
 import { errorMessage } from '../util/async';
 import type { RuntimeResolver } from '../runtime';
 import { ANTHROPIC_STATIC_MODELS, CODEX_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
@@ -30,6 +31,17 @@ export function createAdapter(id: HarnessId, ctx: HarnessContext): HarnessAdapte
 
 /** Models offered in the New Session dialog before any process exists. */
 export async function listHarnessModels(opts: {
+  harness: HarnessId;
+  settings: AppSettings;
+  runtime: RuntimeResolver;
+  getApiKey: (id: string) => Promise<string | undefined>;
+  log?: (m: string) => void;
+}): Promise<{ models: ModelInfo[]; error?: string }> {
+  const res = await listHarnessModelsRaw(opts);
+  return { ...res, models: applyModelOverrides(res.models, opts.settings.modelOverrides) };
+}
+
+async function listHarnessModelsRaw(opts: {
   harness: HarnessId;
   settings: AppSettings;
   runtime: RuntimeResolver;

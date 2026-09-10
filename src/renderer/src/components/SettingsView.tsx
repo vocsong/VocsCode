@@ -3,6 +3,8 @@ import React, { useEffect, useState } from 'react';
 import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
+import { parseModelOverrideKey } from '../../../shared/model-overrides';
+import { invoke } from '../api';
 import { invoke, isMac, platform } from '../api';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
@@ -295,7 +297,70 @@ function Providers({ settings }: { settings: AppSettings }) {
           Add OpenAI-compatible provider
         </Button>
       )}
+      <ModelOverrides settings={settings} />
     </div>
+  );
+}
+
+/**
+ * Capability corrections. Each harness derives `supportsImages` from a different and sometimes
+ * wrong source, so the user gets the last word on a per-model basis.
+ */
+function ModelOverrides({ settings }: { settings: AppSettings }) {
+  const toast = useStore((s) => s.toast);
+  const [draft, setDraft] = useState({ provider: '', model: '', supportsImages: true });
+  const entries = Object.entries(settings.modelOverrides ?? {});
+
+  const set = async (provider: string, model: string, supportsImages: boolean | null) => {
+    try {
+      await invoke('models:setOverride', { provider, model, supportsImages });
+    } catch (e) {
+      toast(`Could not save the override: ${(e as Error).message}`, 'error');
+    }
+  };
+
+  return (
+    <>
+      <h3>Model capability overrides</h3>
+      <p className="muted">
+        Harnesses advertise which models accept images, and they get it wrong — a hand-written entry in a harness catalog, a stale model list, or a name-based guess for an
+        OpenAI-compatible endpoint. An override corrects one model here. It changes what this app believes and warns about; it cannot stop a harness that strips attachments
+        on its own (Pi does, from <code>~/.pi/agent/models.json</code>).
+      </p>
+      {entries.length === 0 && <p className="muted small">No overrides. Attach an image to a model listed as text-only and the composer offers to add one.</p>}
+      {entries.map(([key, o]) => {
+        const { provider, model } = parseModelOverrideKey(key);
+        return (
+          <div key={key} className="row gap8 override-row">
+            <code className="small">{key}</code>
+            <Badge tone={o.supportsImages ? 'green' : 'neutral'}>{o.supportsImages ? 'accepts images' : 'text only'}</Badge>
+            <span className="spacer" />
+            <Button size="sm" variant="ghost" onClick={() => void set(provider, model, !o.supportsImages)}>
+              Flip
+            </Button>
+            <Button size="sm" variant="ghost" icon="trash" title="Remove override" onClick={() => void set(provider, model, null)} />
+          </div>
+        );
+      })}
+      <div className="row gap8">
+        <input placeholder="provider (e.g. deepseek)" value={draft.provider} onChange={(e) => setDraft({ ...draft, provider: e.target.value.trim() })} />
+        <input placeholder="model id" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value.trim() })} />
+        <select value={draft.supportsImages ? 'yes' : 'no'} onChange={(e) => setDraft({ ...draft, supportsImages: e.target.value === 'yes' })}>
+          <option value="yes">accepts images</option>
+          <option value="no">text only</option>
+        </select>
+        <Button
+          size="sm"
+          disabled={!draft.provider || !draft.model}
+          onClick={async () => {
+            await set(draft.provider, draft.model, draft.supportsImages);
+            setDraft({ provider: '', model: '', supportsImages: true });
+          }}
+        >
+          Add
+        </Button>
+      </div>
+    </>
   );
 }
 

@@ -29,6 +29,13 @@ export interface ModelInfo {
   /** USD per 1M tokens, when known. */
   pricing?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
   isDefault?: boolean;
+  /** Set when a user override in settings replaced what the harness reported. */
+  overridden?: boolean;
+}
+
+/** A user correction to one model's advertised capabilities (see shared/model-overrides.ts). */
+export interface ModelOverride {
+  supportsImages?: boolean;
 }
 
 export interface ModelRef {
@@ -338,6 +345,14 @@ export interface HarnessCapabilities {
   liveModelSwitch: boolean;
   effort: boolean;
   images: boolean;
+  /**
+   * Whether the harness itself strips image attachments when its own catalog says the selected
+   * model is text-only. Pi does this silently (it substitutes a placeholder in the prompt), so a
+   * capability override in this app cannot make the image reach the model — the harness catalog
+   * has to be corrected too. Everywhere else the attachment is passed through and the provider
+   * decides.
+   */
+  dropsUnsupportedImages: boolean;
   resume: boolean;
   fork: boolean;
   plan: boolean;
@@ -392,6 +407,8 @@ export interface AppSettings {
   };
   acpAgents: AcpAgentPreset[];
   providers: ProviderConfig[];
+  /** Capability corrections keyed by `provider/model`; see shared/model-overrides.ts. */
+  modelOverrides: Record<string, ModelOverride>;
   windowBounds?: { x?: number; y?: number; width: number; height: number };
   sidebarWidth: number;
   panelWidth: number;

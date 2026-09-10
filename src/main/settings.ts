@@ -1,6 +1,7 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, ProviderConfig } from '../shared/types';
+import { pruneModelOverrides } from '../shared/model-overrides';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { readJson, writeJson } from './util/fs';
 
@@ -182,6 +183,7 @@ export function defaultSettings(): AppSettings {
     pi: { extraArgs: [] },
     acpAgents: BUILTIN_ACP_AGENTS.map((a) => ({ ...a })),
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
+    modelOverrides: {},
     sidebarWidth: 280,
     panelWidth: 420,
     recentProjects: [],
@@ -204,6 +206,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     goalDefaults: { ...d.goalDefaults, ...(stored.goalDefaults ?? {}) },
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
+    modelOverrides: pruneModelOverrides(stored.modelOverrides),
     providers: [],
     acpAgents: []
   };

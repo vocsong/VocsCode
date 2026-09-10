@@ -10,6 +10,14 @@ import { harnessShort } from './Sidebar';
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
 const EMPTY: never[] = [];
 
+/** Price per 1M tokens, plus a marker when a settings override replaced the harness's own metadata. */
+function modelHint(m: ModelInfo): string | undefined {
+  const parts: string[] = [];
+  if (m.pricing) parts.push(`$${m.pricing.input}/$${m.pricing.output}`);
+  if (m.overridden) parts.push(m.supportsImages ? 'images: on' : 'images: off');
+  return parts.length ? parts.join(' · ') : undefined;
+}
+
 export function Header({ session }: { session: SessionMeta }) {
   const models = useStore((s) => s.models[session.id] ?? EMPTY);
   const panelOpen = useStore((s) => s.panelOpen);
@@ -79,7 +87,7 @@ export function Header({ session }: { session: SessionMeta }) {
                 <div key={provider}>
                   <div className="menu-group">{provider}</div>
                   {list.map((m) => (
-                    <MenuItem key={`${m.provider}/${m.id}`} active={current?.model === m.id && current?.provider === m.provider} hint={m.pricing ? `$${m.pricing.input}/$${m.pricing.output}` : undefined} onClick={() => { close(); void setModel(m); }}>
+                    <MenuItem key={`${m.provider}/${m.id}`} active={current?.model === m.id && current?.provider === m.provider} hint={modelHint(m)} onClick={() => { close(); void setModel(m); }}>
                       {m.displayName}
                     </MenuItem>
                   ))}

@@ -7,6 +7,7 @@ import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
+import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
 import { gitCommit, gitDiff, gitRevertFile, gitStageAll, gitSummary } from './git';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
@@ -159,7 +160,10 @@ export function registerIpc(deps: IpcDeps): void {
     return next;
   }
 
-  handle('providers:list', () => settings.get().providers.map((p) => ({ ...p, hasApiKey: secrets.has(p.id), models: p.models.length ? p.models : fallbackModels(p) })));
+  handle('providers:list', () => {
+    const s = settings.get();
+    return s.providers.map((p) => ({ ...p, hasApiKey: secrets.has(p.id), models: applyModelOverrides(p.models.length ? p.models : fallbackModels(p), s.modelOverrides) }));
+  });
   handle('providers:save', async (provider) => {
     const s = settings.get();
     const idx = s.providers.findIndex((p) => p.id === provider.id);
@@ -187,9 +191,9 @@ export function registerIpc(deps: IpcDeps): void {
       const providers = s.providers.map((x) => (x.id === id ? { ...x, models, modelsUpdatedAt: Date.now() } : x));
       const next = await settings.update({ providers });
       pushToRenderer(deps.getWindow(), PUSH_CHANNELS.settingsChanged, next);
-      return { models };
+      return { models: applyModelOverrides(models, next.modelOverrides) };
     } catch (e) {
-      return { models: fallbackModels(p), error: errorMessage(e) };
+      return { models: applyModelOverrides(fallbackModels(p), s.modelOverrides), error: errorMessage(e) };
     }
   });
   handle('providers:test', async ({ id }) => {
@@ -198,6 +202,18 @@ export function registerIpc(deps: IpcDeps): void {
     const key = await resolveProviderApiKey(p, (pid) => secrets.get(pid));
     if (!key && !['ollama', 'lmstudio'].includes(p.kind)) return { ok: false, detail: `No API key stored and ${p.envKey ?? 'no env var'} is not set.` };
     return testProvider(p, key);
+  });
+  handle('models:setOverride', async ({ provider, model, supportsImages }) => {
+    const s = settings.get();
+    const key = modelOverrideKey(provider, model);
+    const modelOverrides = { ...s.modelOverrides };
+    if (supportsImages === null) delete modelOverrides[key];
+    else modelOverrides[key] = { ...modelOverrides[key], supportsImages };
+    const next = await settings.update({ modelOverrides });
+    pushToRenderer(deps.getWindow(), PUSH_CHANNELS.settingsChanged, next);
+    // Running sessions already have a model list; re-publish it so the change lands without a restart.
+    sessions.republishModels();
+    return next.modelOverrides;
   });
 
   handle('harness:availability', async (req) => {
