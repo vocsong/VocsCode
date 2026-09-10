@@ -161,7 +161,12 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
           {s.activeModel && <span className="session-model" title={`${s.activeModel.provider}/${s.activeModel.model}`}>{s.activeModel.model}</span>}
           <span className="session-time">{relTime(s.updatedAt)}</span>
           {s.usage.costUsd > 0 && <span className="session-cost">{fmtCost(s.usage.costUsd)}</span>}
-          {s.worktreeBranch && <Icon name="branch" size={12} className="session-worktree" title={`Worktree · ${s.worktreeBranch}`} />}
+          {s.worktreeBranch && (
+            <span className="session-worktree" title={`Worktree · ${s.worktreeBranch}`}>
+              <Icon name="branch" size={12} />
+              <span className="session-worktree-name">{s.worktreeBranch}</span>
+            </span>
+          )}
           {(s.queued ?? 0) > 0 && <span className="session-queued">+{s.queued}</span>}
         </div>
       </div>
