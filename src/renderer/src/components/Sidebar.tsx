@@ -6,7 +6,7 @@ import { invoke } from '../api';
 import { basename, fmtCost, relTime } from '../format';
 import { useStore } from '../store';
 import { Resizer } from './Resizer';
-import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
+import { Badge, Button, Dropdown, Icon, MenuItem, StatusLabel } from './ui';
 
 const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
   claude: 'amber',
@@ -106,7 +106,6 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
   };
   return (
     <div className={`session-row ${active ? 'active' : ''}`} onClick={onSelect} onDoubleClick={() => setRenaming(true)}>
-      <StatusDot status={s.status} />
       <div className="session-main">
         {renaming ? (
           <input
@@ -138,6 +137,7 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
           {(s.queued ?? 0) > 0 && <span className="session-queued">+{s.queued}</span>}
         </div>
       </div>
+      <StatusLabel status={s.status} />
       <div onClick={(e) => e.stopPropagation()}>
         <Dropdown align="right" width={220} trigger={() => <button type="button" className="row-menu-btn" aria-label="Session menu"><Icon name="more" size={14} /></button>}>
           {(close) => (

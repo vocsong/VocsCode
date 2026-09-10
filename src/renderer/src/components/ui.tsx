@@ -181,6 +181,23 @@ export function StatusDot({ status }: { status: string }) {
   return <span className={`status-dot status-${status}`} title={status} />;
 }
 
+const STATUS_LABELS: Record<string, string> = {
+  idle: 'Idle',
+  starting: 'Starting',
+  running: 'Working',
+  awaiting: 'Pending',
+  error: 'Error',
+  stopped: 'Stopped',
+};
+
+export function StatusLabel({ status }: { status: string }) {
+  return (
+    <span className={`session-status status-${status}`} title={status}>
+      {STATUS_LABELS[status] ?? status}
+    </span>
+  );
+}
+
 export function Kbd({ children }: { children: React.ReactNode }) {
   return <kbd className="kbd">{children}</kbd>;
 }
