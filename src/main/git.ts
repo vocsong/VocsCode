@@ -105,10 +105,18 @@ export async function branchGitState(cwd: string, branch: string): Promise<Branc
     }
   }
   if (state.pr) return state;
-  // Merge commits put the branch tip on a base branch; squash merges need gh above.
-  for (const base of BASE_BRANCHES) {
-    const r = await git(root, ['merge-base', '--is-ancestor', branch, base]);
-    if (r.code === 0) return { pr: state.pr, merged: true };
+  // A merge commit on a base branch whose second parent is the branch tip means the
+  // branch really landed; a fresh branch sitting at the base tip must not count.
+  // Squash merges need gh above.
+  const tip = await git(root, ['rev-parse', '--verify', branch]);
+  const tipHash = tip.code === 0 ? tip.stdout.trim() : '';
+  if (tipHash) {
+    for (const base of BASE_BRANCHES) {
+      const r = await git(root, ['log', base, '--merges', '--format=%P', '-n', '200']);
+      if (r.code === 0 && r.stdout.split('\n').some((line) => line.trim().split(/\s+/)[1] === tipHash)) {
+        return { pr: state.pr, merged: true };
+      }
+    }
   }
   if (!gh) {
     // Without gh, a fully pushed branch stands in for "PR created".
