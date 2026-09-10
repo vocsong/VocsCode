@@ -10,12 +10,14 @@ import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
 import { SettingsStore } from './settings';
 import { SessionStore } from './store';
+import { TerminalManager } from './terminal';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged && !!process.env.ELECTRON_RENDERER_URL;
 
 let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
+let terminals: TerminalManager | null = null;
 
 function log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
   if (level === 'debug' && !isDev && !process.env.VOCS_CODE_DEBUG) return;
@@ -86,10 +88,22 @@ async function main(): Promise<void> {
     log
   });
 
-  registerIpc({ settings, secrets, sessions, runtime, getWindow: () => mainWindow, log });
+  const sessionsRef = sessions;
+  terminals = new TerminalManager({
+    dir: path.join(userData, 'terminals'),
+    settings: () => settings.get().terminal,
+    version: app.getVersion(),
+    cwdOf: (id) => sessionsRef.get(id)?.cwd,
+    push: (channel, payload) => pushToRenderer(mainWindow, channel, payload),
+    log
+  });
+  await terminals.load();
+
+  registerIpc({ settings, secrets, sessions, terminals, runtime, getWindow: () => mainWindow, log });
 
   settings.onChange((s) => {
     nativeTheme.themeSource = s.theme;
+    terminals?.updateSettings(s.terminal);
   });
   nativeTheme.themeSource = settings.get().theme;
 
@@ -124,7 +138,7 @@ async function main(): Promise<void> {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
-    Promise.race([sessions?.stopAll(), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
+    Promise.race([Promise.all([sessions?.stopAll(), terminals?.shutdown()]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
   });
 }
 
@@ -176,6 +190,9 @@ function createWindow(settings: SettingsStore): void {
   };
   win.on('resize', debounce(saveBounds, 500));
   win.on('move', debounce(saveBounds, 500));
+
+  // A reload drops every xterm instance; stop streaming to it and let paused shells run until it re-attaches.
+  win.webContents.on('did-start-loading', () => terminals?.detachAll());
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);

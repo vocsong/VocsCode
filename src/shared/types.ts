@@ -2,6 +2,7 @@
  * Shared domain types used by the main process, preload, and renderer.
  * Keep this file free of Node/Electron/DOM imports.
  */
+import type { TerminalSettings } from './terminal';
 
 export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'pi' | 'acp' | 'native';
 
@@ -310,8 +311,7 @@ export type SessionEvent =
   | { type: 'meta'; patch: Partial<SessionMeta> }
   | { type: 'error'; message: string; fatal?: boolean }
   | { type: 'models'; models: ModelInfo[] }
-  | { type: 'log'; level: 'debug' | 'info' | 'warn' | 'error'; message: string }
-  | { type: 'shell.output'; runId: string; chunk: string; done?: boolean; exitCode?: number | null };
+  | { type: 'log'; level: 'debug' | 'info' | 'warn' | 'error'; message: string };
 
 export interface SessionEventEnvelope {
   sessionId: string;
@@ -397,6 +397,7 @@ export interface AppSettings {
   panelWidth: number;
   recentProjects: string[];
   goalDefaults: { autoContinue: boolean; maxIterations: number };
+  terminal: TerminalSettings;
 }
 
 export interface GitFileStatus {
@@ -438,10 +439,5 @@ export interface CreateSessionRequest {
   title?: string;
   initialPrompt?: string;
   goal?: string;
-}
-
-export interface ShellRunRequest {
-  sessionId: string;
-  command: string;
 }
 
