@@ -13,6 +13,13 @@ export interface NavEntry {
   sessionId: string | null;
 }
 
+/** A harness's model list fetched without a running session, so a not-yet-started session still has models. */
+export interface ModelCatalogEntry {
+  models: ModelInfo[];
+  loading: boolean;
+  error?: string;
+}
+
 export interface Toast {
   id: string;
   kind: 'info' | 'success' | 'error';
@@ -27,6 +34,8 @@ interface State {
   transcripts: Record<string, TranscriptItem[]>;
   loaded: Record<string, boolean>;
   models: Record<string, ModelInfo[]>;
+  /** Per-harness catalog, keyed by harness id, used until that session's process reports its own list. */
+  modelCatalog: Partial<Record<HarnessId, ModelCatalogEntry>>;
   availability: Partial<Record<HarnessId, HarnessAvailability>>;
   /** Every session's terminals, as the main process reports them; the xterm instances live in terminal/host.ts. */
   terminals: TerminalInfo[];
@@ -71,6 +80,8 @@ interface State {
   toast(text: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
   refreshAvailability(): Promise<void>;
+  /** Fetches one harness's model catalog, at most once per harness until the model overrides change. */
+  ensureModelCatalog(harness: HarnessId): Promise<void>;
   clearTranscriptLocal(id: string): void;
   setTerminals(list: TerminalInfo[]): void;
   setActiveTerminal(sessionId: string, terminalId: string): void;
@@ -129,6 +140,7 @@ export const useStore = create<State>((set, get) => ({
   transcripts: {},
   loaded: {},
   models: {},
+  modelCatalog: {},
   availability: {},
   terminals: [],
   terminalsLoaded: false,
@@ -273,7 +285,11 @@ export const useStore = create<State>((set, get) => ({
   },
 
   setSettings(settings) {
-    set({ settings });
+    set((s) => {
+      // Overrides are baked in when the catalog is fetched, so a change to them invalidates it.
+      const stale = !!s.settings && JSON.stringify(s.settings.modelOverrides) !== JSON.stringify(settings.modelOverrides);
+      return stale ? { settings, modelCatalog: {} } : { settings };
+    });
   },
   setSessions(sessions) {
     set((s) => {
@@ -282,18 +298,21 @@ export const useStore = create<State>((set, get) => ({
       for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.loaded)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
       if (removed.size === 0) return { sessions };
       const transcripts = { ...s.transcripts };
       const loaded = { ...s.loaded };
       const activeTerminal = { ...s.activeTerminal };
+      const models = { ...s.models };
       for (const id of removed) {
         delete transcripts[id];
         delete loaded[id];
         delete activeTerminal[id];
+        delete models[id];
       }
       // A removed session cannot stay active; drop it and let the caller pick a new one.
       const activeId = s.activeId && ids.has(s.activeId) ? s.activeId : null;
-      return { sessions, transcripts, loaded, activeTerminal, activeId };
+      return { sessions, transcripts, loaded, activeTerminal, models, activeId };
     });
   },
   setView(view) {
@@ -340,6 +359,19 @@ export const useStore = create<State>((set, get) => ({
       set({ availability });
     } catch {
       /* ignore */
+    }
+  },
+
+  async ensureModelCatalog(harness) {
+    // Present means fetched, failed or in flight: one round trip per harness, not per session.
+    if (get().modelCatalog[harness]) return;
+    const put = (entry: ModelCatalogEntry) => set((s) => ({ modelCatalog: { ...s.modelCatalog, [harness]: entry } }));
+    put({ models: [], loading: true });
+    try {
+      const r = await invoke('harness:models', { harness });
+      put({ models: r.models, error: r.error, loading: false });
+    } catch (e) {
+      put({ models: [], error: (e as Error).message, loading: false });
     }
   },
   clearTranscriptLocal(id) {

@@ -7,7 +7,9 @@ import type {
   DoctorReport,
   EffortLevel,
   FsEntry,
+  GitBranchInfo,
   GitSummary,
+  GitWorktreeInfo,
   HarnessAvailability,
   HarnessId,
   ModelInfo,
@@ -83,6 +85,7 @@ export interface IpcContract {
   'sessions:clearTranscript': [{ id: string }, void];
   'sessions:export': [{ id: string }, { path: string | null }];
   'sessions:fork': [{ id: string }, SessionMeta | null];
+  'sessions:moveTo': [{ id: string; cwd: string }, SessionMeta];
   'sessions:goal': [
     { id: string; action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update'; objective?: string; autoContinue?: boolean; maxIterations?: number },
     SessionMeta
@@ -97,6 +100,9 @@ export interface IpcContract {
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:stageAll': [{ sessionId: string }, { ok: boolean; error?: string }];
   'git:commit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];
+  'git:branches': [{ sessionId: string }, { current?: string; branches: GitBranchInfo[] }];
+  'git:worktrees': [{ sessionId: string }, { current: string; worktrees: GitWorktreeInfo[] }];
+  'git:checkout': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];

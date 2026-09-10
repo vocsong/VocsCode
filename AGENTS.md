@@ -4,14 +4,14 @@ Working agreements for agents in this repo: how to verify, what to touch, what t
 
 ## Working style
 
-- **Run to done.** Take a task from understanding through edit, verification (below), and a local commit on the current `claude/<slug>` branch. Report when finished; don't stop for approval mid-task unless there's a real fork in the road (ambiguous requirement, destructive action, new dependency).
+- **Run to done.** Take a task from understanding through edit, verification (below), and a local commit on the current agent branch (see Git history). Report when finished; don't stop for approval mid-task unless there's a real fork in the road (ambiguous requirement, destructive action, new dependency).
 - **Verification bar.** Every change must pass `npm run typecheck`, `npm test`, and `npm run build` before the commit. A change that touches a harness adapter (`src/main/harness/**`) additionally runs that harness's opt-in suite — `tests/smoke.live.test.ts` (via `HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=<id>`) or the matching e2e. These need the runtime installed and logged in and spend real credit. If the runtime is unavailable, say so in the report rather than skipping silently; never stub a live suite into passing.
 - **Stay in scope.** Surgical by default: change only what the task needs. Trivial adjacent problems are fair game to fix inline (a typo, an obvious bug, a missing type in a file you are already editing). Anything larger — a refactor, a rename, an unrelated fix — goes in the report as a note, not the diff.
 - **Dependencies.** Never add a runtime dependency without asking first. Dev-only tooling and new source files are fine when the task needs them.
 - **UI is open.** No mandated reuse rule: build new components and patterns when they are the better fit. The primitives in `components/ui.tsx` and the CSS variables in `styles.css` are available, not required. A UI library is still a runtime dependency — ask first (see Dependencies).
-- **Git history.** Rebase or force-push your own `claude/<slug>` branch freely. Never rewrite `develop` or `master` history, and never force-push a branch you did not create (the permission gate still prompts for force-push below Full access).
+- **Git history.** Work on your own agent branch (`<agent>/<slug>`, e.g. `pi/<slug>`). Rebase or force-push your own agent branch freely. Never rewrite `develop` or `master` history, and never force-push a branch you did not create (the permission gate still prompts for force-push below Full access).
 - **Report tight.** The final write-up — and the PR description — is bullets: files touched, what changed and why, the exact verification run, and anything noted but not fixed. No process narration.
-- **Deliver a PR.** After the local commit, push the `claude/<slug>` branch and open a PR into `develop`. Never merge it yourself unless the user explicitly instructs it; `develop` is the integration branch and you review.
+- **Deliver a PR.** After the local commit, push the agent branch and open a PR into `develop`. Never merge it yourself unless the user explicitly instructs it; `develop` is the integration branch and you review.
 
 ## Commands
 
