@@ -124,8 +124,11 @@ export function Composer({ session }: { session: SessionMeta }) {
   const send = async (mode: 'now' | 'steer' | 'queue' = 'now') => {
     const t = text.trim();
     if (!t && !images.length) return;
-    if (t.startsWith('/') && (await runSlash(t))) {
+    // Known commands are cleared right away so long-running ones (/pr, /merge…) do not leave the
+    // composer looking frozen; their progress and outcome appear as info lines in the transcript.
+    if (t.startsWith('/') && SLASH_COMMANDS.some((c) => c.name === t.slice(1).split(/\s+/)[0])) {
       setText('');
+      void runSlash(t).catch((e) => toast(String((e as Error).message ?? e), 'error'));
       return;
     }
     if (t.startsWith('!')) {
@@ -200,8 +203,10 @@ export function Composer({ session }: { session: SessionMeta }) {
         store.setPanelTab('usage');
         return true;
       case 'compact': {
+        const noteId = `local-compact-${session.id}`;
+        store.setLocalInfo(session.id, noteId, 'Compacting context…', { pending: true });
         const r = await invoke('sessions:compact', { id: session.id });
-        toast(r.ok ? 'Compaction requested' : r.detail ?? 'Not supported', r.ok ? 'success' : 'error');
+        store.setLocalInfo(session.id, noteId, r.ok ? 'Context compacted' : r.detail ?? 'Not supported', { level: r.ok ? 'info' : 'error' });
         return true;
       }
       case 'clear':
@@ -229,13 +234,18 @@ export function Composer({ session }: { session: SessionMeta }) {
           toast('Usage: /pr <base branch> — pushes this branch and opens a PR into it.', 'error');
           return true;
         }
+        // Push + gh pr create can take tens of seconds; report progress in the transcript, not just a final toast.
+        const noteId = `local-pr-${session.id}`;
+        store.setLocalInfo(session.id, noteId, `Pushing this branch and opening a PR into ${arg}…`, { pending: true });
         const pr = await invoke('git:pr', { sessionId: session.id, base: arg }).catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }));
-        toast(pr.url ? `PR opened: ${pr.url}` : pr.output ?? 'Failed', pr.ok ? 'success' : 'error');
+        store.setLocalInfo(session.id, noteId, pr.ok ? `PR opened: ${pr.url ?? arg}` : pr.output ?? 'Failed to open the PR', { level: pr.ok ? 'info' : 'error' });
         return true;
       }
       case 'merge': {
+        const noteId = `local-merge-${session.id}`;
+        store.setLocalInfo(session.id, noteId, 'Merging the open PR for this branch…', { pending: true });
         const merged = await invoke('git:merge', { sessionId: session.id, base: arg || undefined }).catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }));
-        toast(merged.url ? `Merged: ${merged.url}` : merged.output ?? 'Failed', merged.ok ? 'success' : 'error');
+        store.setLocalInfo(session.id, noteId, merged.ok ? `Merged: ${merged.url ?? 'PR merged'}` : merged.output ?? 'Failed to merge the PR', { level: merged.ok ? 'info' : 'error' });
         return true;
       }
       case 'stop':

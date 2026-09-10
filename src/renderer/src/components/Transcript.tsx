@@ -76,7 +76,7 @@ const Item = memo(function Item({ item, sessionId, showThinking }: { item: Trans
     case 'info':
       return (
         <div className={`info-line info-${item.level}`}>
-          <Icon name={item.level === 'error' ? 'alert' : item.level === 'warn' ? 'alert' : 'info'} size={13} /> <span>{item.text}</span>
+          {item.pending ? <Spinner size={13} /> : <Icon name={item.level === 'error' ? 'alert' : item.level === 'warn' ? 'alert' : 'info'} size={13} />} <span>{item.text}</span>
         </div>
       );
     case 'turn':
