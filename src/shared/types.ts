@@ -12,7 +12,7 @@ export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-au
 
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
-export type SessionStatus = 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped';
+export type SessionStatus = 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped' | 'pr' | 'merged';
 
 export interface ModelInfo {
   /** Provider-scoped identifier used in API calls. */
