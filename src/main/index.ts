@@ -1,5 +1,6 @@
 /** Electron entry point: app lifecycle, window creation, logging, and the headless debug hooks documented in the README. */
 import { spawn } from 'node:child_process';
+import { readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, shell } from 'electron';
@@ -187,6 +188,42 @@ function registerAppUserModelId(appRoot: string): void {
     });
     // Best effort: a missing or blocked reg.exe only costs the menu title, nothing else.
     child.on('error', () => {});
+  }
+  reconcileDevShortcut(appRoot);
+}
+
+/** The shell resolves an AUMID's display name from a matching Start Menu shortcut before the registry,
+ *  so in development we keep a correctly named 'Vocs Code' shortcut and drop stale ones (e.g. a leftover
+ *  'Electron.lnk' from an earlier dev run) that would make the taskbar menu say 'Electron'. NSIS owns the
+ *  shortcut once packaged, so this only runs unpackaged. */
+function reconcileDevShortcut(appRoot: string): void {
+  if (app.isPackaged) return;
+  const menu = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+  const exe = process.execPath.toLowerCase();
+  try {
+    for (const entry of readdirSync(menu)) {
+      if (!entry.toLowerCase().endsWith('.lnk') || entry === `${APP_NAME}.lnk`) continue;
+      const file = path.join(menu, entry);
+      try {
+        const lnk = shell.readShortcutLink(file);
+        if (lnk.appUserModelId === APP_ID && lnk.target.toLowerCase() === exe) rmSync(file, { force: true });
+      } catch {
+        // Not one of our shortcuts (or unreadable); leave it alone.
+      }
+    }
+  } catch {
+    // No Start Menu directory; nothing to reconcile.
+  }
+  try {
+    shell.writeShortcutLink(path.join(menu, `${APP_NAME}.lnk`), 'replace', {
+      target: process.execPath,
+      cwd: appRoot,
+      description: APP_NAME,
+      icon: appIconPath(appRoot),
+      appUserModelId: APP_ID
+    });
+  } catch {
+    // Best effort: without the shortcut the registry DisplayName above still names the taskbar menu.
   }
 }
 
