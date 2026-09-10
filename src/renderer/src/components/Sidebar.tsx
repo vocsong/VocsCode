@@ -181,6 +181,28 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
               <MenuItem onClick={() => { close(); void invoke('app:openPath', { path: s.cwd, sessionId: s.id }); }}>Open folder</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:stop', { id: s.id }); }} disabled={s.status === 'idle' || s.status === 'stopped'}>Stop process</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:archive', { id: s.id, archived: !s.archived }); }}>{s.archived ? 'Unarchive' : 'Archive'}</MenuItem>
+              {s.worktreeBranch && !s.archived && (
+                <MenuItem
+                  onClick={async () => {
+                    close();
+                    const ok = await askConfirm({
+                      title: `Remove the worktree for "${s.title}"?`,
+                      body: `The worktree folder is deleted; uncommitted changes block this. The branch ${s.worktreeBranch} is kept — unarchiving recreates the worktree.`,
+                      confirmLabel: 'Archive & remove',
+                      danger: true
+                    });
+                    if (!ok) return;
+                    try {
+                      await invoke('sessions:archive', { id: s.id, archived: true, removeWorktree: true });
+                      toast('Worktree removed; the branch is kept', 'success');
+                    } catch (e) {
+                      toast(e instanceof Error ? e.message : String(e), 'error');
+                    }
+                  }}
+                >
+                  Archive & remove worktree
+                </MenuItem>
+              )}
               <MenuItem
                 danger
                 onClick={async () => {
