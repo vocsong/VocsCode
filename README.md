@@ -64,6 +64,8 @@ npm run build && HARNESS_E2E=1 HARNESS_E2E_HARNESS=native npx vitest run tests/e
 HARNESS_E2E=1 npx vitest run tests/e2e.approval.test.ts
 # Terminal through the UI: type into a real PTY, reload the renderer, close and exit tabs (no API key needed)
 HARNESS_E2E=1 npx vitest run tests/e2e.terminal.test.ts
+# The same flow against the packaged app, which proves node-pty loads from the unpacked asar
+npm run dist:dir && HARNESS_E2E=1 HARNESS_E2E_EXE="$PWD/dist/win-unpacked/Vocs Code.exe" npx vitest run tests/e2e.terminal.test.ts
 ```
 
 Screenshots from the e2e runs land in `tests/artifacts/`. `npm run dist:win` produces `dist/Vocs-Code-<version>-win-x64.exe` (NSIS) plus `dist/win-unpacked/`.
@@ -93,6 +95,7 @@ Test-only switches:
 | `HARNESS_SMOKE_VERBOSE` | Prints every harness event during the smoke run. |
 | `HARNESS_E2E=1` | Opts into the Playwright suites, which launch the built app from `out/`. |
 | `HARNESS_E2E_HARNESS` | Which harness the e2e session uses, for example `native`. |
+| `HARNESS_E2E_EXE` | Path to a packaged binary (`dist/win-unpacked/Vocs Code.exe`); the terminal e2e drives it instead of `out/`. |
 
 The live suites need the corresponding runtime installed and logged in, and they spend real API credit.
 

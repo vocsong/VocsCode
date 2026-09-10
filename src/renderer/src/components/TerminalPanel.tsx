@@ -117,6 +117,9 @@ export function TerminalPanel({ session }: { session: SessionMeta }) {
         <span className="spacer" />
         {active && (
           <>
+            <span className="term-cwd mono" title={`${active.shellName} in ${active.cwd}`}>
+              {baseName(active.cwd)}
+            </span>
             <Button variant="ghost" size="sm" icon="search" title={`Find (${isMac ? '⌘' : 'Ctrl'}+F)`} aria-label="Find" onClick={() => setFinding((f) => !f)} />
             <Button variant="ghost" size="sm" icon="sparkles" title="Send the selection, or the recent output, to the agent" aria-label="Send output to agent" onClick={sendToAgent} />
             <Dropdown align="right" trigger={() => <Button variant="ghost" size="sm" icon="more" aria-label="Terminal menu" />}>

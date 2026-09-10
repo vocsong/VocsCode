@@ -3,6 +3,8 @@
  * API key is needed), opens the Terminal tab, types a command into the real PTY and checks that it
  * ran in the project directory; then opens a second tab, reloads the renderer (the shells must
  * survive), closes a tab and exits a shell. Requires `npm run build`. Gated by HARNESS_E2E=1.
+ * Set HARNESS_E2E_EXE to a packaged binary (dist/win-unpacked/Vocs Code.exe) to run the same flow
+ * against the electron-builder output, which proves node-pty loads from the unpacked asar.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -48,7 +50,14 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
     env.VOCS_CODE_USER_DATA = userData;
     env.VOCS_CODE_DEBUG = '1';
 
-    app = await electron.launch({ executablePath: require('electron') as string, args: [path.join(root, 'out', 'main', 'index.js')], env, timeout: 60_000 });
+    const packaged = process.env.HARNESS_E2E_EXE;
+    app = await electron.launch({
+      executablePath: packaged || (require('electron') as string),
+      // The single-instance lock is taken before VOCS_CODE_USER_DATA applies; the Chromium switch isolates a packaged run.
+      args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js')],
+      env,
+      timeout: 60_000
+    });
     const mainLog: string[] = [];
     app.process().stdout?.on('data', (d: Buffer) => mainLog.push(d.toString()));
     app.process().stderr?.on('data', (d: Buffer) => mainLog.push(d.toString()));
@@ -85,6 +94,12 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       // Windows PowerShell redirects as UTF-16LE with a BOM; strip the NULs so the match is shell-agnostic.
       expect(marker.replace(/\0|﻿|�/g, '')).toMatch(/ok/);
       await win.screenshot({ path: path.join(shots, 'e2e-07-terminal.png') });
+
+      // The tab strip shows the shell's directory; "send to agent" drops the screen into the composer.
+      expect(await win.locator('.term-cwd').innerText()).toBe('project');
+      await win.click('button[aria-label="Send output to agent"]');
+      await expect.poll(async () => win.locator('.composer textarea').inputValue(), { timeout: 10_000 }).toMatch(/Terminal output \(.*\):\n```\n[\s\S]*vocs-marker\.txt[\s\S]*\n```/);
+      await win.fill('.composer textarea', ''); // leave the composer as we found it
 
       // A second tab, then a renderer reload: the shells live in main and come back.
       await win.click('.term-new button[aria-label="New terminal"]');
