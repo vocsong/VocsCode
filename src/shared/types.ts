@@ -328,7 +328,15 @@ export type TranscriptItem =
       decision?: ApprovalDecision;
       decidedAt?: number;
     }
-  | { id: string; kind: 'info'; ts: number; level: 'info' | 'warn' | 'error'; text: string }
+  | {
+      id: string;
+      kind: 'info';
+      ts: number;
+      level: 'info' | 'warn' | 'error';
+      text: string;
+      /** Set while a renderer-local operation (e.g. /pr) is still running; shows a spinner. */
+      pending?: boolean;
+    }
   | {
       id: string;
       kind: 'turn';
