@@ -127,7 +127,9 @@ function UserMessage({ item }: { item: Extract<TranscriptItem, { kind: 'user' }>
 function AssistantMessage({ item, showThinking }: { item: Extract<TranscriptItem, { kind: 'assistant' }>; showThinking: boolean }) {
   const [open, setOpen] = useState(false);
   const html = useMemo(() => renderMarkdown(item.text), [item.text]);
-  if (!item.text && !item.thinking) return null;
+  // With thinking hidden a thinking-only item has nothing left to show; rendering it anyway would
+  // leave an empty row in the transcript.
+  if (!item.text && !(item.thinking && showThinking)) return null;
   const onlyThinking = !item.text && !!item.thinking;
   return (
     <div className={`msg msg-assistant ${item.phase === 'plan' ? 'msg-plan' : ''} ${item.phase === 'commentary' ? 'msg-commentary' : ''}`}>

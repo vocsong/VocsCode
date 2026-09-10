@@ -14,7 +14,6 @@ export function Header({ session }: { session: SessionMeta }) {
   const models = useStore((s) => s.models[session.id] ?? EMPTY);
   const panelOpen = useStore((s) => s.panelOpen);
   const togglePanel = useStore((s) => s.togglePanel);
-  const toggleSidebar = useStore((s) => s.toggleSidebar);
   const toast = useStore((s) => s.toast);
   const showThinking = useStore((s) => s.showThinking);
   const toggleThinking = useStore((s) => s.toggleThinking);
@@ -51,7 +50,6 @@ export function Header({ session }: { session: SessionMeta }) {
 
   return (
     <header className="header">
-      <Button variant="ghost" size="sm" icon="sidebar" onClick={toggleSidebar} title="Toggle sidebar (Ctrl+B)" />
       <div className="header-title">
         <StatusDot status={session.status} />
         <span className="header-name" title={session.title}>

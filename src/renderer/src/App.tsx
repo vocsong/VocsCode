@@ -9,6 +9,7 @@ import { NewSessionDialog } from './components/NewSessionDialog';
 import { RightPanel } from './components/RightPanel';
 import { SettingsView } from './components/SettingsView';
 import { Sidebar } from './components/Sidebar';
+import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
 import { Button, EmptyState, Icon, Kbd, Spinner } from './components/ui';
 
@@ -50,6 +51,12 @@ export function App() {
       } else if (mod && e.key.toLowerCase() === 'j') {
         e.preventDefault();
         st.togglePanel();
+      } else if ((e.altKey && e.key === 'ArrowLeft') || (mod && e.key === '[')) {
+        e.preventDefault();
+        void st.navBack();
+      } else if ((e.altKey && e.key === 'ArrowRight') || (mod && e.key === ']')) {
+        e.preventDefault();
+        void st.navForward();
       } else if (mod && e.key === ',') {
         e.preventDefault();
         st.setView(st.view === 'settings' ? 'chat' : 'settings');
@@ -78,44 +85,50 @@ export function App() {
 
   if (!booted || !settings) {
     return (
-      <div className="boot">
-        <Spinner size={20} /> Loading Vocs Code…
+      <div className="shell">
+        <TitleBar />
+        <div className="boot">
+          <Spinner size={20} /> Loading Vocs Code…
+        </div>
       </div>
     );
   }
 
   return (
-    <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px` }}>
-      {sidebarOpen && <Sidebar />}
-      <main className="main">
-        {view === 'settings' ? (
-          <SettingsView />
-        ) : session ? (
-          <>
-            <Header session={session} />
-            <Transcript session={session} />
-            <Composer session={session} />
-          </>
-        ) : (
-          <div className="main-empty">
-            <EmptyState icon="sparkles" title="Welcome to Vocs Code">
-              <p>One desktop for every coding agent. Pick a harness per session — Claude Agent SDK, Codex, Pi, DeepSeek Harness or any ACP agent, or the built-in loop — and any model it can reach.</p>
-              <div className="row gap8 center">
-                <Button variant="primary" icon="plus" onClick={() => useStore.getState().openNewSession(true)}>
-                  New session
-                </Button>
-                <Button icon="settings" onClick={() => useStore.getState().setView('settings')}>
-                  Settings
-                </Button>
-              </div>
-              <p className="muted small">
-                <Kbd>Ctrl+N</Kbd> new · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
-              </p>
-            </EmptyState>
-          </div>
-        )}
-      </main>
-      {panelOpen && session && view === 'chat' && <RightPanel session={session} />}
+    <div className="shell">
+      <TitleBar />
+      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px` }}>
+        {sidebarOpen && <Sidebar />}
+        <main className="main">
+          {view === 'settings' ? (
+            <SettingsView />
+          ) : session ? (
+            <>
+              <Header session={session} />
+              <Transcript session={session} />
+              <Composer session={session} />
+            </>
+          ) : (
+            <div className="main-empty">
+              <EmptyState icon="sparkles" title="Welcome to Vocs Code">
+                <p>One desktop for every coding agent. Pick a harness per session — Claude Agent SDK, Codex, Pi, DeepSeek Harness or any ACP agent, or the built-in loop — and any model it can reach.</p>
+                <div className="row gap8 center">
+                  <Button variant="primary" icon="plus" onClick={() => useStore.getState().openNewSession(true)}>
+                    New session
+                  </Button>
+                  <Button icon="settings" onClick={() => useStore.getState().setView('settings')}>
+                    Settings
+                  </Button>
+                </div>
+                <p className="muted small">
+                  <Kbd>Ctrl+N</Kbd> new · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
+                </p>
+              </EmptyState>
+            </div>
+          )}
+        </main>
+        {panelOpen && session && view === 'chat' && <RightPanel session={session} />}
+      </div>
       {newSessionOpen && <NewSessionDialog />}
       {paletteOpen && <CommandPalette />}
       <div className="toasts">

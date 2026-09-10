@@ -1,7 +1,7 @@
 /** Electron entry point: app lifecycle, window creation, logging, and the headless debug hooks documented in the README. */
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { BrowserWindow, Notification, app, nativeTheme, shell } from 'electron';
+import { BrowserWindow, Menu, Notification, app, nativeTheme, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { registerIpc, pushToRenderer } from './ipc';
@@ -93,6 +93,24 @@ async function main(): Promise<void> {
   });
   nativeTheme.themeSource = settings.get().theme;
 
+  // The window is frameless with an in-app title bar; on Windows/Linux the OS still paints the caption
+  // buttons over it, so their colors have to follow the theme.
+  nativeTheme.on('updated', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.setBackgroundColor(chrome().color);
+    if (process.platform !== 'darwin') {
+      try {
+        mainWindow.setTitleBarOverlay(chrome());
+      } catch {
+        // Older/unsupported platforms simply keep the colors they were created with.
+      }
+    }
+  });
+
+  // No native menu bar: File/Edit/View/Help live in the custom title bar. macOS keeps its
+  // application menu because the system requires one for the app menu and standard shortcuts.
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
+
   createWindow(settings);
 
   app.on('activate', () => {
@@ -110,6 +128,15 @@ async function main(): Promise<void> {
   });
 }
 
+/** Title bar height in CSS pixels; must match --titlebar in styles.css. */
+const TITLEBAR_HEIGHT = 36;
+
+/** Caption colors for the frameless title bar, matching the renderer's --bg-elev / --fg tokens. */
+function chrome(): { color: string; symbolColor: string; height: number } {
+  const dark = nativeTheme.shouldUseDarkColors;
+  return { color: dark ? '#191c23' : '#ffffff', symbolColor: dark ? '#e6e7ea' : '#1c1c1f', height: TITLEBAR_HEIGHT };
+}
+
 function createWindow(settings: SettingsStore): void {
   const s = settings.get();
   const bounds = s.windowBounds ?? { width: 1440, height: 900 };
@@ -118,7 +145,13 @@ function createWindow(settings: SettingsStore): void {
     minWidth: 960,
     minHeight: 600,
     title: 'Vocs Code',
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#111318' : '#f7f7f8',
+    backgroundColor: chrome().color,
+    // Frameless with an in-app title bar (sidebar toggle, history, menu bar). On Windows/Linux the
+    // overlay keeps the native caption buttons — and with them snap layouts and double-click maximize.
+    titleBarStyle: 'hidden',
+    ...(process.platform === 'darwin'
+      ? { trafficLightPosition: { x: 12, y: (TITLEBAR_HEIGHT - 14) / 2 } }
+      : { titleBarOverlay: chrome() }),
     autoHideMenuBar: true,
     show: false,
     webPreferences: {

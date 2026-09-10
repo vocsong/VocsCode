@@ -31,6 +31,8 @@
   --radius-sm: 6px;
   --sidebar: 280px;
   --panel: 420px;
+  /** Must match TITLEBAR_HEIGHT in src/main/index.ts. */
+  --titlebar: 36px;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
@@ -205,11 +207,17 @@ h4 {
 }
 
 /* Layout */
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
 .app {
   display: grid;
   grid-template-columns: var(--sidebar) minmax(0, 1fr) var(--panel);
   grid-template-rows: minmax(0, 1fr);
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .app.no-sidebar {
   grid-template-columns: minmax(0, 1fr) var(--panel);
@@ -228,12 +236,106 @@ h4 {
   background: var(--bg);
 }
 .boot {
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
   color: var(--fg-muted);
+}
+
+/* Title bar (frameless window chrome) */
+.titlebar {
+  position: relative;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  flex: 0 0 var(--titlebar);
+  height: var(--titlebar);
+  padding-left: 6px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+  /* The whole bar drags the window; interactive children opt out below. */
+  -webkit-app-region: drag;
+}
+/* macOS draws its traffic lights inside the bar, so the controls start after them. */
+.titlebar-mac {
+  padding-left: 78px;
+}
+.titlebar-lead {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+.titlebar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.titlebar-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.titlebar-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.titlebar-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Keeps clear of the native caption buttons on Windows/Linux; collapses to 0 without an overlay. */
+.titlebar-tail {
+  flex: 0 0 calc(100vw - env(titlebar-area-width, 100vw) - env(titlebar-area-x, 0px));
+}
+
+/* Menu bar */
+.menubar {
+  display: flex;
+  align-items: center;
+  margin-left: 6px;
+}
+.menubar-item {
+  position: relative;
+}
+.menubar-btn {
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  padding: 4px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.menubar-btn:hover,
+.menubar-btn.open {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.menubar-panel {
+  top: calc(100% + 2px);
+  -webkit-app-region: no-drag;
+}
+.menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
 }
 
 /* Buttons */
@@ -614,6 +716,7 @@ h4 {
 
 /* Sidebar */
 .sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   background: var(--bg-sunken);
@@ -902,6 +1005,10 @@ h4 {
   max-width: 920px;
   width: 100%;
   margin: 0 auto;
+  /* The transcript is a scrolling flex column: without this, items whose min-height resolves to 0
+     (anything with `overflow: hidden`, e.g. tool cards) get shrunk to their borders once the
+     transcript overflows, leaving stray hairlines instead of cards. */
+  flex-shrink: 0;
 }
 .transcript-loading,
 .transcript-empty {
@@ -1488,12 +1595,52 @@ h4 {
 
 /* Right panel */
 .panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--border);
   background: var(--bg-elev);
   min-width: 0;
   min-height: 0;
+}
+
+/* Pane resize handles: a wide hit area straddling the pane's edge, with a hairline that lights up. */
+.resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  z-index: 20;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.resizer-sidebar {
+  right: -3px;
+}
+.resizer-panel {
+  left: -3px;
+}
+.resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 3px;
+  border-radius: 3px;
+  background: transparent;
+  transition: background 0.12s;
+}
+.resizer:hover::after,
+.resizer:focus-visible::after,
+.resizer.dragging::after {
+  background: var(--accent);
+}
+/* While dragging, keep the resize cursor and stop the pointer from selecting text it passes over. */
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 .panel-tabs {
   display: flex;

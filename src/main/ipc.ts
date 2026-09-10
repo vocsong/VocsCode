@@ -109,6 +109,31 @@ export function registerIpc(deps: IpcDeps): void {
     if (Notification.isSupported()) new Notification({ title, body }).show();
   });
 
+  handle('window:toggleFullScreen', () => {
+    const win = deps.getWindow();
+    win?.setFullScreen(!win.isFullScreen());
+  });
+  handle('window:reload', () => {
+    deps.getWindow()?.webContents.reload();
+  });
+  handle('window:toggleDevTools', () => {
+    deps.getWindow()?.webContents.toggleDevTools();
+  });
+  handle('window:zoom', ({ direction }) => {
+    const wc = deps.getWindow()?.webContents;
+    if (!wc) return { zoomFactor: 1 };
+    const next = direction === 'reset' ? 1 : Math.min(2, Math.max(0.6, wc.getZoomFactor() + (direction === 'in' ? 0.1 : -0.1)));
+    wc.setZoomFactor(next);
+    return { zoomFactor: wc.getZoomFactor() };
+  });
+  // The renderer has no native menu on Windows/Linux, so the Edit menu drives WebContents directly.
+  handle('window:edit', ({ command }) => {
+    const wc = deps.getWindow()?.webContents;
+    if (!wc) return;
+    if (command === 'selectAll') wc.selectAll();
+    else wc[command]();
+  });
+
   handle('settings:get', () => settings.get());
   handle('settings:update', async (patch) => {
     const next = await settings.update(patch);

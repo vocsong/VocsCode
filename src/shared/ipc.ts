@@ -33,6 +33,12 @@ export interface IpcContract {
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];
   'app:notify': [{ title: string; body: string }, void];
 
+  'window:toggleFullScreen': [void, void];
+  'window:reload': [void, void];
+  'window:toggleDevTools': [void, void];
+  'window:zoom': [{ direction: 'in' | 'out' | 'reset' }, { zoomFactor: number }];
+  'window:edit': [{ command: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll' }, void];
+
   'settings:get': [void, AppSettings];
   'settings:update': [Partial<AppSettings>, AppSettings];
 
