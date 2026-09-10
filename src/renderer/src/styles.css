@@ -1931,6 +1931,17 @@ body.resizing {
   padding-left: 2px;
   padding-right: 2px;
 }
+/* The directory the active shell reports (OSC 7 / 9;9), else where it started. */
+.term-cwd {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-faint);
+  font-size: 11px;
+  padding: 0 4px;
+  flex-shrink: 1;
+}
 .term-body {
   position: relative;
   flex: 1;
