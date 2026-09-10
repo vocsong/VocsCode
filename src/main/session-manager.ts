@@ -226,8 +226,10 @@ export class SessionManager {
 
   async delete(id: string, removeWt = false): Promise<void> {
     const meta = this.get(id);
+    const t0 = Date.now();
     await this.stop(id);
     this.cancelPersist(id);
+    const tStop = Date.now();
     if (meta?.worktreeBranch && removeWt) {
       try {
         await removeWorktree(meta.config.projectRoot, meta.cwd);
@@ -235,8 +237,11 @@ export class SessionManager {
         this.deps.log('warn', `worktree removal failed: ${errorMessage(e)}`);
       }
     }
+    const tWorktree = Date.now();
     await this.deps.store.remove(id);
+    const tStore = Date.now();
     this.pushSessions();
+    if (tStore - t0 >= 1000) this.deps.log('warn', `slow session delete ${id}: stop ${tStop - t0}ms, worktree ${tWorktree - tStop}ms, store ${tStore - tWorktree}ms`);
   }
 
   async patch(id: string, patch: Partial<SessionMeta>): Promise<SessionMeta> {

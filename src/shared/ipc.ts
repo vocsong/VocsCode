@@ -37,6 +37,8 @@ export interface IpcContract {
   'app:openTerminal': [{ cwd: string }, { ok: boolean; error?: string }];
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];
   'app:notify': [{ title: string; body: string }, void];
+  /** A renderer stall (long task, delayed input, timer drift) recorded in the main log. */
+  'app:diag': [{ kind: 'longtask' | 'input-delay' | 'loop-lag'; ms: number; detail?: string }, void];
 
   'window:toggleFullScreen': [void, void];
   'window:reload': [void, void];
