@@ -42,6 +42,8 @@ interface State {
   panelOpen: boolean;
   panelTab: PanelTab;
   newSessionOpen: boolean;
+  /** Project folder the new session dialog is targeting; null until a folder is picked. */
+  newSessionRoot: string | null;
   paletteOpen: boolean;
   showThinking: boolean;
   toasts: Toast[];
@@ -62,6 +64,8 @@ interface State {
   togglePanel(open?: boolean): void;
   setPanelTab(t: PanelTab): void;
   openNewSession(open: boolean): void;
+  /** Opens the new session dialog for a folder; without one, asks the user to pick a project folder first. */
+  startNewSession(root?: string | null): Promise<void>;
   openPalette(open: boolean): void;
   toggleThinking(): void;
   toast(text: string, kind?: Toast['kind']): void;
@@ -136,6 +140,7 @@ export const useStore = create<State>((set, get) => ({
   panelOpen: true,
   panelTab: 'changes',
   newSessionOpen: false,
+  newSessionRoot: null,
   paletteOpen: false,
   showThinking: true,
   toasts: [],
@@ -306,6 +311,14 @@ export const useStore = create<State>((set, get) => ({
   },
   openNewSession(newSessionOpen) {
     set({ newSessionOpen });
+  },
+  async startNewSession(root) {
+    if (!root) {
+      const r = await invoke('app:pickFolder', { defaultPath: get().settings?.recentProjects[0] });
+      if (!r.path) return;
+      root = r.path;
+    }
+    set({ newSessionOpen: true, newSessionRoot: root });
   },
   openPalette(paletteOpen) {
     set({ paletteOpen });

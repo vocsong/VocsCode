@@ -26,7 +26,7 @@ export function CommandPalette() {
   const cmds = useMemo<Cmd[]>(() => {
     const st = useStore.getState();
     const base: Cmd[] = [
-      { id: 'new', label: 'New session', hint: 'Ctrl+N', icon: 'plus', run: () => st.openNewSession(true) },
+      { id: 'new', label: 'New session', hint: 'Ctrl+N', icon: 'plus', run: () => void st.startNewSession() },
       { id: 'settings', label: 'Open settings', hint: 'Ctrl+,', icon: 'settings', run: () => st.setView('settings') },
       { id: 'panel', label: 'Toggle side panel', hint: 'Ctrl+J', icon: 'layout', run: () => st.togglePanel() },
       { id: 'sidebar', label: 'Toggle sidebar', hint: 'Ctrl+B', icon: 'sidebar', run: () => st.toggleSidebar() },

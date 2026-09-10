@@ -6,7 +6,7 @@ import { invoke } from '../api';
 import { basename, fmtCost, relTime } from '../format';
 import { useStore } from '../store';
 import { Resizer } from './Resizer';
-import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
+import { Badge, Button, Dropdown, Icon, MenuItem, StatusLabel } from './ui';
 
 const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
   claude: 'amber',
@@ -25,7 +25,7 @@ export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const activeId = useStore((s) => s.activeId);
   const setActive = useStore((s) => s.setActive);
-  const openNew = useStore((s) => s.openNewSession);
+  const startNewSession = useStore((s) => s.startNewSession);
   const setView = useStore((s) => s.setView);
   const view = useStore((s) => s.view);
   const toast = useStore((s) => s.toast);
@@ -55,8 +55,8 @@ export function Sidebar() {
           <Icon name="sparkles" size={18} />
           <span>Vocs Code</span>
         </div>
-        <Button variant="primary" size="sm" icon="plus" onClick={() => openNew(true)} title="New session (Ctrl+N)">
-          New
+        <Button variant="primary" size="sm" icon="folder" onClick={() => void startNewSession()} title="New folder (Ctrl+N)">
+          New folder
         </Button>
       </div>
       <div className="sidebar-search">
@@ -76,6 +76,15 @@ export function Sidebar() {
             <div className="project-header" title={g.root}>
               <Icon name="folder" size={13} />
               <span>{basename(g.root)}</span>
+              <button
+                type="button"
+                className="project-new-btn"
+                title={`New session in ${basename(g.root)}`}
+                aria-label={`New session in ${basename(g.root)}`}
+                onClick={() => void startNewSession(g.root)}
+              >
+                <Icon name="plus" size={13} />
+              </button>
             </div>
             {g.list.map((s) => (
               <SessionRow key={s.id} session={s} active={s.id === activeId && view === 'chat'} onSelect={() => void setActive(s.id)} toast={toast} />
@@ -100,18 +109,23 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(s.title);
   const h = HARNESS_BY_ID[s.config.harness];
+  const startRename = () => {
+    setTitle(s.title);
+    setRenaming(true);
+  };
   const commit = async () => {
     setRenaming(false);
     if (title.trim() && title !== s.title) await invoke('sessions:rename', { id: s.id, title: title.trim() });
   };
   return (
-    <div className={`session-row ${active ? 'active' : ''}`} onClick={onSelect} onDoubleClick={() => setRenaming(true)}>
-      <StatusDot status={s.status} />
+    <div className={`session-row ${active ? 'active' : ''}`} onClick={onSelect} onDoubleClick={startRename}>
+      <StatusLabel status={s.status} />
       <div className="session-main">
         {renaming ? (
           <input
             className="session-rename"
             autoFocus
+            onFocus={(e) => e.currentTarget.select()}
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             onBlur={commit}
@@ -124,7 +138,7 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
         ) : (
           <div className="session-title">
             {s.pinned && <Icon name="pin" size={11} />}
-            <span>{s.title}</span>
+            <span title="Click to rename" onClick={() => startRename()}>{s.title}</span>
           </div>
         )}
         <div className="session-meta">
@@ -138,11 +152,12 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
           {(s.queued ?? 0) > 0 && <span className="session-queued">+{s.queued}</span>}
         </div>
       </div>
+      <StatusLabel status={s.status} />
       <div onClick={(e) => e.stopPropagation()}>
         <Dropdown align="right" width={220} trigger={() => <button type="button" className="row-menu-btn" aria-label="Session menu"><Icon name="more" size={14} /></button>}>
           {(close) => (
             <>
-              <MenuItem onClick={() => { close(); setRenaming(true); }}>Rename</MenuItem>
+              <MenuItem onClick={() => { close(); startRename(); }}>Rename</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }); }}>{s.pinned ? 'Unpin' : 'Pin'}</MenuItem>
               <MenuItem onClick={async () => { close(); const f = await invoke('sessions:fork', { id: s.id }); if (f) toast('Forked session created', 'success'); }}>Fork</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('app:openPath', { path: s.cwd, sessionId: s.id }); }}>Open folder</MenuItem>

@@ -1,22 +1,15 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { EffortLevel, ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, fmtTokens } from '../format';
 import { useStore } from '../store';
 import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
+import { ModelPicker } from './ModelPicker';
 import { harnessShort } from './Sidebar';
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
 const EMPTY: never[] = [];
-
-/** Price per 1M tokens, plus a marker when a settings override replaced the harness's own metadata. */
-function modelHint(m: ModelInfo): string | undefined {
-  const parts: string[] = [];
-  if (m.pricing) parts.push(`$${m.pricing.input}/$${m.pricing.output}`);
-  if (m.overridden) parts.push(m.supportsImages ? 'images: on' : 'images: off');
-  return parts.length ? parts.join(' · ') : undefined;
-}
 
 export function Header({ session }: { session: SessionMeta }) {
   const models = useStore((s) => s.models[session.id] ?? EMPTY);
@@ -34,12 +27,6 @@ export function Header({ session }: { session: SessionMeta }) {
       .then((g) => setBranch(g.branch))
       .catch(() => setBranch(undefined));
   }, [session.id, changesVersion]);
-
-  const grouped = useMemo(() => {
-    const g = new Map<string, ModelInfo[]>();
-    for (const m of models) g.set(m.provider, [...(g.get(m.provider) ?? EMPTY), m]);
-    return [...g.entries()];
-  }, [models]);
 
   const current = session.activeModel ?? session.config.model;
   const currentInfo = models.find((m) => current && m.id === current.model && m.provider === current.provider);
@@ -79,21 +66,21 @@ export function Header({ session }: { session: SessionMeta }) {
       </div>
 
       <div className="header-controls">
-        <Dropdown align="right" width={360} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {current?.model ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
+        <Dropdown align="right" width={380} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {current?.model ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
           {(close) => (
-            <div className="menu-scroll">
-              {grouped.length === 0 && <div className="menu-empty">No model list yet{h.capabilities.liveModelSwitch ? '' : ' (this harness cannot switch models live)'}.</div>}
-              {grouped.map(([provider, list]) => (
-                <div key={provider}>
-                  <div className="menu-group">{provider}</div>
-                  {list.map((m) => (
-                    <MenuItem key={`${m.provider}/${m.id}`} active={current?.model === m.id && current?.provider === m.provider} hint={modelHint(m)} onClick={() => { close(); void setModel(m); }}>
-                      {m.displayName}
-                    </MenuItem>
-                  ))}
-                </div>
-              ))}
-            </div>
+            <ModelPicker
+              models={models}
+              selected={current}
+              emptyText={
+                models.length === 0 && !h.capabilities.liveModelSwitch
+                  ? 'No model list yet (this harness cannot switch models live).'
+                  : 'No model list yet.'
+              }
+              onSelect={(m) => {
+                close();
+                if (m) void setModel(m);
+              }}
+            />
           )}
         </Dropdown>
 

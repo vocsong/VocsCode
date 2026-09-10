@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
+import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
 import { registerIpc, pushToRenderer } from './ipc';
 import { RuntimeResolver } from './runtime';
 import { SecretStore } from './secrets';
@@ -14,6 +15,13 @@ import { TerminalManager } from './terminal';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged && !!process.env.ELECTRON_RENDERER_URL;
+const APP_NAME = 'Vocs Code';
+const APP_ID = 'dev.vocs.vocscode';
+
+// Electron uses its own name and AppUserModelId in development unless the host sets them explicitly.
+// Set both before acquiring the single-instance lock so the taskbar uses the packaged identity too.
+app.setName(APP_NAME);
+if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
 
 let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
@@ -102,33 +110,28 @@ async function main(): Promise<void> {
   registerIpc({ settings, secrets, sessions, terminals, runtime, getWindow: () => mainWindow, log });
 
   settings.onChange((s) => {
-    nativeTheme.themeSource = s.theme;
+    currentTheme = s.theme;
+    nativeTheme.themeSource = themeSourceFor(s.theme);
+    // Two themes can share one themeSource (Midnight and Abyss are both 'dark'), so nativeTheme
+    // may stay silent on a switch — repaint the caption from the theme id directly.
+    applyChrome();
     terminals?.updateSettings(s.terminal);
   });
-  nativeTheme.themeSource = settings.get().theme;
+  currentTheme = settings.get().theme;
+  nativeTheme.themeSource = themeSourceFor(currentTheme);
 
   // The window is frameless with an in-app title bar; on Windows/Linux the OS still paints the caption
   // buttons over it, so their colors have to follow the theme.
-  nativeTheme.on('updated', () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    mainWindow.setBackgroundColor(chrome().color);
-    if (process.platform !== 'darwin') {
-      try {
-        mainWindow.setTitleBarOverlay(chrome());
-      } catch {
-        // Older/unsupported platforms simply keep the colors they were created with.
-      }
-    }
-  });
+  nativeTheme.on('updated', applyChrome);
 
   // No native menu bar: File/Edit/View/Help live in the custom title bar. macOS keeps its
   // application menu because the system requires one for the app menu and standard shortcuts.
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
-  createWindow(settings);
+  createWindow(settings, appRoot);
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings);
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot);
   });
   app.on('window-all-closed', () => {
     // macOS convention: stay resident so the 'activate' dock handler can reopen a window.
@@ -145,23 +148,46 @@ async function main(): Promise<void> {
   });
 }
 
+/** Resolve the same icon in development and in the packaged app's extra resources. */
+function appIconPath(appRoot: string): string {
+  const iconName = process.platform === 'win32' ? 'vocs-code.ico' : 'vocs-code.png';
+  const iconRoot = app.isPackaged ? path.join(process.resourcesPath, 'icons') : path.join(appRoot, 'resources', 'icons');
+  return path.join(iconRoot, iconName);
+}
+
 /** Title bar height in CSS pixels; must match --titlebar in styles.css. */
 const TITLEBAR_HEIGHT = 36;
 
+/** The active theme id, so the native caption can follow themes the OS knows nothing about. */
+let currentTheme: ThemeId = 'system';
+
 /** Caption colors for the frameless title bar, matching the renderer's --bg-elev / --fg tokens. */
 function chrome(): { color: string; symbolColor: string; height: number } {
-  const dark = nativeTheme.shouldUseDarkColors;
-  return { color: dark ? '#191c23' : '#ffffff', symbolColor: dark ? '#e6e7ea' : '#1c1c1f', height: TITLEBAR_HEIGHT };
+  return { ...chromeFor(currentTheme, nativeTheme.shouldUseDarkColors), height: TITLEBAR_HEIGHT };
 }
 
-function createWindow(settings: SettingsStore): void {
+/** Repaints the window background and the OS-drawn caption buttons for the active theme. */
+function applyChrome(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setBackgroundColor(chrome().color);
+  if (process.platform === 'darwin') return;
+  try {
+    mainWindow.setTitleBarOverlay(chrome());
+  } catch {
+    // Older/unsupported platforms simply keep the colors they were created with.
+  }
+}
+
+function createWindow(settings: SettingsStore, appRoot: string): void {
   const s = settings.get();
   const bounds = s.windowBounds ?? { width: 1440, height: 900 };
+  const icon = appIconPath(appRoot);
   const win = new BrowserWindow({
     ...bounds,
     minWidth: 960,
     minHeight: 600,
-    title: 'Vocs Code',
+    title: APP_NAME,
+    icon,
     backgroundColor: chrome().color,
     // Frameless with an in-app title bar (sidebar toggle, history, menu bar). On Windows/Linux the
     // overlay keeps the native caption buttons — and with them snap layouts and double-click maximize.
@@ -179,6 +205,9 @@ function createWindow(settings: SettingsStore): void {
       spellcheck: true
     }
   });
+  if (process.platform === 'win32') {
+    win.setAppDetails({ appId: APP_ID, appIconPath: icon });
+  }
   mainWindow = win;
   win.once('ready-to-show', () => win.show());
   win.on('closed', () => {
