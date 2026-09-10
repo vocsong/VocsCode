@@ -1045,10 +1045,13 @@ h4 {
   padding: 4px;
   border-radius: 4px;
   cursor: pointer;
-  opacity: 0;
+  opacity: 0.9;
+  flex-shrink: 0;
 }
-.session-row:hover .row-menu-btn {
+.session-row:hover .row-menu-btn,
+.row-menu-btn:focus-visible {
   opacity: 1;
+  color: var(--fg);
 }
 .row-menu-btn:hover {
   background: var(--bg-active);
