@@ -1281,6 +1281,66 @@ h4 {
   gap: 6px;
   align-items: center;
 }
+/* Transcript find bar (Ctrl+F) */
+.find-bar {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 4px 6px;
+  color: var(--fg-muted);
+}
+.find-bar input {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  width: 200px;
+  padding: 3px 2px;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+.find-bar input:focus {
+  border: none;
+  box-shadow: none;
+}
+.find-count {
+  font-size: 11px;
+  color: var(--fg-muted);
+  min-width: 44px;
+  text-align: center;
+  white-space: nowrap;
+}
+.find-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 3px;
+}
+.find-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.find-btn .rot-up {
+  transform: rotate(180deg);
+}
+::highlight(transcript-find-match) {
+  background: rgba(255, 200, 0, 0.45);
+}
+::highlight(transcript-find-current) {
+  background: rgba(255, 122, 0, 0.6);
+}
 .msg-user {
   display: flex;
   justify-content: flex-end;
