@@ -100,18 +100,23 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(s.title);
   const h = HARNESS_BY_ID[s.config.harness];
+  const startRename = () => {
+    setTitle(s.title);
+    setRenaming(true);
+  };
   const commit = async () => {
     setRenaming(false);
     if (title.trim() && title !== s.title) await invoke('sessions:rename', { id: s.id, title: title.trim() });
   };
   return (
-    <div className={`session-row ${active ? 'active' : ''}`} onClick={onSelect} onDoubleClick={() => setRenaming(true)}>
+    <div className={`session-row ${active ? 'active' : ''}`} onClick={onSelect} onDoubleClick={startRename}>
       <StatusDot status={s.status} />
       <div className="session-main">
         {renaming ? (
           <input
             className="session-rename"
             autoFocus
+            onFocus={(e) => e.currentTarget.select()}
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             onBlur={commit}
@@ -124,7 +129,7 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
         ) : (
           <div className="session-title">
             {s.pinned && <Icon name="pin" size={11} />}
-            <span>{s.title}</span>
+            <span title="Click to rename" onClick={() => startRename()}>{s.title}</span>
           </div>
         )}
         <div className="session-meta">
@@ -142,7 +147,7 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
         <Dropdown align="right" width={220} trigger={() => <button type="button" className="row-menu-btn" aria-label="Session menu"><Icon name="more" size={14} /></button>}>
           {(close) => (
             <>
-              <MenuItem onClick={() => { close(); setRenaming(true); }}>Rename</MenuItem>
+              <MenuItem onClick={() => { close(); startRename(); }}>Rename</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }); }}>{s.pinned ? 'Unpin' : 'Pin'}</MenuItem>
               <MenuItem onClick={async () => { close(); const f = await invoke('sessions:fork', { id: s.id }); if (f) toast('Forked session created', 'success'); }}>Fork</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('app:openPath', { path: s.cwd }); }}>Open folder</MenuItem>
