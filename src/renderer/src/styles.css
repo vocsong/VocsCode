@@ -1055,16 +1055,18 @@ h4 {
 .row-menu-btn {
   border: none;
   background: none;
-  color: var(--fg-muted);
-  padding: 4px;
+  color: var(--fg);
+  padding: 5px;
   border-radius: 4px;
   cursor: pointer;
-  opacity: 0.9;
+  opacity: 1;
   flex-shrink: 0;
+}
+.row-menu-btn .icon {
+  stroke-width: 2.8;
 }
 .session-row:hover .row-menu-btn,
 .row-menu-btn:focus-visible {
-  opacity: 1;
   color: var(--fg);
 }
 .row-menu-btn:hover {
