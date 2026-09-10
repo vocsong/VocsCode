@@ -547,6 +547,34 @@ export interface GitWorktreeInfo {
   detached: boolean;
 }
 
+/** One local branch in the Branches panel's GitHub-style overview. */
+export interface GitBranchOverviewItem {
+  name: string;
+  current: boolean;
+  /** The branch the panel diffs everything against (develop/master/main). */
+  isBase: boolean;
+  lastCommitAt?: number;
+  lastCommitSubject?: string;
+  /** Commits on this branch that the base branch does not have. */
+  ahead?: number;
+  /** Commits on the base branch that this branch does not have. */
+  behind?: number;
+  /** Ancestor of the base branch — safe to delete without losing work. */
+  merged: boolean;
+  upstream?: string;
+  upstreamAhead?: number;
+  upstreamBehind?: number;
+  /** Set when the branch is checked out in a worktree. */
+  worktreePath?: string;
+}
+
+export interface GitBranchOverview {
+  isRepo: boolean;
+  base?: string;
+  branches: GitBranchOverviewItem[];
+  worktrees: GitWorktreeInfo[];
+}
+
 export interface FsEntry {
   name: string;
   path: string;
