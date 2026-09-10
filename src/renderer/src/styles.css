@@ -635,6 +635,98 @@ h4 {
   overflow: auto;
 }
 
+/* Model picker (searchable list with star favorites) */
+.model-picker {
+  display: flex;
+  flex-direction: column;
+}
+.mp-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+}
+.mp-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  color: var(--fg);
+  outline: none;
+  padding: 2px 0;
+  font-size: 13px;
+}
+.mp-clear {
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  display: flex;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+}
+.mp-clear:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+.mp-list {
+  max-height: 320px;
+  overflow: auto;
+}
+.mp-row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+.mp-row:hover {
+  background: var(--bg-hover);
+}
+.mp-row.active .mp-name {
+  color: var(--accent);
+}
+.mp-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 6px 4px 6px 8px;
+  cursor: pointer;
+  color: inherit;
+}
+.mp-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-star {
+  border: none;
+  background: none;
+  color: var(--fg-faint);
+  cursor: pointer;
+  display: flex;
+  padding: 4px 8px;
+  flex: none;
+}
+.mp-star:hover {
+  color: var(--amber);
+}
+.mp-star.on {
+  color: var(--amber);
+}
+.mp-star.on .icon {
+  fill: currentColor;
+}
+
 /* Modal */
 .modal-backdrop {
   position: fixed;
