@@ -6,6 +6,12 @@ import { invoke, on } from './api';
 export type PanelTab = 'changes' | 'files' | 'goal' | 'usage' | 'terminal';
 export type View = 'chat' | 'settings';
 
+/** One entry of the title bar's back/forward history. */
+export interface NavEntry {
+  view: View;
+  sessionId: string | null;
+}
+
 export interface Toast {
   id: string;
   kind: 'info' | 'success' | 'error';
@@ -39,6 +45,8 @@ interface State {
   showThinking: boolean;
   toasts: Toast[];
   changesVersion: number;
+  history: NavEntry[];
+  historyIndex: number;
 
   boot(): Promise<void>;
   setActive(id: string | null): Promise<void>;
@@ -47,6 +55,8 @@ interface State {
   setSettings(s: AppSettings): void;
   setSessions(list: SessionMeta[]): void;
   setView(v: View): void;
+  navBack(): Promise<void>;
+  navForward(): Promise<void>;
   toggleSidebar(): void;
   togglePanel(open?: boolean): void;
   setPanelTab(t: PanelTab): void;
@@ -75,6 +85,33 @@ function dropPendingDeltas(sessionId: string, itemId?: string): void {
   }
 }
 
+/** Set while back/forward is replaying an entry, so the replay does not push new history. */
+let navigating = false;
+
+type Setter = (partial: Partial<State> | ((s: State) => Partial<State>)) => void;
+type Getter = () => State;
+
+function pushHistory(set: Setter, get: Getter, entry: NavEntry): void {
+  if (navigating) return;
+  const { history, historyIndex } = get();
+  const current = history[historyIndex];
+  if (current && current.view === entry.view && current.sessionId === entry.sessionId) return;
+  // A new destination truncates anything ahead, exactly like a browser.
+  const next = [...history.slice(0, historyIndex + 1), entry].slice(-50);
+  set({ history: next, historyIndex: next.length - 1 });
+}
+
+async function applyNav(set: Setter, get: Getter, entry: NavEntry, index: number): Promise<void> {
+  navigating = true;
+  set({ historyIndex: index });
+  try {
+    if (entry.sessionId !== get().activeId) await get().setActive(entry.sessionId);
+    set({ view: entry.view });
+  } finally {
+    navigating = false;
+  }
+}
+
 export const useStore = create<State>((set, get) => ({
   booted: false,
   settings: null,
@@ -94,6 +131,8 @@ export const useStore = create<State>((set, get) => ({
   showThinking: true,
   toasts: [],
   changesVersion: 0,
+  history: [],
+  historyIndex: -1,
 
   async boot() {
     const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
@@ -112,7 +151,20 @@ export const useStore = create<State>((set, get) => ({
 
   async setActive(id) {
     set({ activeId: id, view: 'chat' });
+    pushHistory(set, get, { view: 'chat', sessionId: id });
     if (id) await get().loadTranscript(id);
+  },
+
+  async navBack() {
+    const { history, historyIndex } = get();
+    if (historyIndex <= 0) return;
+    await applyNav(set, get, history[historyIndex - 1], historyIndex - 1);
+  },
+
+  async navForward() {
+    const { history, historyIndex } = get();
+    if (historyIndex >= history.length - 1) return;
+    await applyNav(set, get, history[historyIndex + 1], historyIndex + 1);
   },
 
   async loadTranscript(id) {
@@ -216,6 +268,7 @@ export const useStore = create<State>((set, get) => ({
   },
   setView(view) {
     set({ view });
+    pushHistory(set, get, { view, sessionId: get().activeId });
   },
   toggleSidebar() {
     set((s) => ({ sidebarOpen: !s.sidebarOpen }));

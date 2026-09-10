@@ -38,6 +38,8 @@ const ICONS: Record<string, string> = {
   layout: 'M3 5h18v14H3zM15 5v14',
   sidebar: 'M3 5h18v14H3zM9 5v14',
   arrowUp: 'M12 19V5M5 12l7-7 7 7',
+  arrowLeft: 'M19 12H5M12 19l-7-7 7-7',
+  arrowRight: 'M5 12h14M12 5l7 7-7 7',
   clock: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2',
   alert: 'M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
   info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01',

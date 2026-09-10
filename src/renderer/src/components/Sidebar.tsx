@@ -5,6 +5,7 @@ import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, relTime } from '../format';
 import { useStore } from '../store';
+import { Resizer } from './Resizer';
 import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
 
 const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
@@ -90,6 +91,7 @@ export function Sidebar() {
           <Icon name="settings" size={14} /> Settings
         </button>
       </div>
+      <Resizer target="sidebar" />
     </aside>
   );
 }

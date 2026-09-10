@@ -4,6 +4,7 @@ import { invoke } from '../api';
 import { fmtCost, fmtDuration, fmtTokens } from '../format';
 import { useStore, type PanelTab } from '../store';
 import { DiffView } from './DiffView';
+import { Resizer } from './Resizer';
 import { Badge, Button, EmptyState, Field, Icon, Spinner, Toggle } from './ui';
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
@@ -40,6 +41,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
         {tab === 'usage' && <UsageTab session={session} />}
         {tab === 'terminal' && <TerminalTab session={session} />}
       </div>
+      <Resizer target="panel" />
     </aside>
   );
 }
