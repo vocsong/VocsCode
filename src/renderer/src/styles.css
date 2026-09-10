@@ -1120,7 +1120,8 @@ h4 {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.header-path:hover {
+.header-path:hover,
+.header-path.open {
   background: var(--bg-hover);
 }
 .header-status {

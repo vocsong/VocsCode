@@ -440,6 +440,17 @@ export interface GitSummary {
   behind?: number;
 }
 
+export interface GitBranchInfo {
+  name: string;
+  current: boolean;
+}
+
+export interface GitWorktreeInfo {
+  path: string;
+  branch?: string;
+  detached: boolean;
+}
+
 export interface FsEntry {
   name: string;
   path: string;

@@ -20,7 +20,7 @@ import type {
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
-import { createWorktree, gitRoot, removeWorktree, slugify } from './git';
+import { createWorktree, gitRoot, removeWorktree, slugify, worktreeInfo } from './git';
 import { emptyUsage } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
@@ -633,6 +633,41 @@ export class SessionManager {
     if (meta.goal) meta.goal.updatedAt = Date.now();
     await this.deps.store.upsert(meta);
     this.pushSessions();
+    return meta;
+  }
+
+  /**
+   * Relocates a session to another directory (worktree switch). A running harness is stopped;
+   * provider resume state is tied to the old directory, so it is dropped (the app transcript stays).
+   */
+  async moveTo(id: string, cwd: string): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (!path.isAbsolute(cwd)) throw new Error('Worktree path must be absolute');
+    if (path.resolve(meta.cwd) === path.resolve(cwd)) return meta;
+    const wasRunning = !!this.active.get(id);
+    if (wasRunning) await this.stop(id);
+    meta.cwd = cwd;
+    const info = await worktreeInfo(cwd).catch(() => null);
+    const managedBase = meta.config.projectRoot
+      ? path.join(path.resolve(meta.config.projectRoot), '.vocs-code', 'worktrees') + path.sep
+      : null;
+    const managed = !!managedBase && cwd.startsWith(managedBase);
+    meta.worktreeBranch = managed ? info?.branch : undefined;
+    // Keep `nativeHistory` (stored in the session dir, cwd-independent); drop provider session ids.
+    const ref = { ...meta.harnessRef };
+    delete ref.claudeSessionId;
+    delete ref.codexThreadId;
+    delete ref.piSessionFile;
+    delete ref.acpSessionId;
+    delete ref.forkOnResume;
+    meta.harnessRef = ref;
+    await this.deps.store.upsert(meta);
+    this.pushSessions();
+    this.emit(id, {
+      type: 'item.upsert',
+      item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Session moved to ${cwd}${wasRunning ? ' — the harness restarts on the next message.' : '.'}` }
+    });
     return meta;
   }
 
