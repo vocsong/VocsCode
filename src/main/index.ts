@@ -6,8 +6,10 @@ import { BrowserWindow, Menu, Notification, app, nativeTheme, shell } from 'elec
 import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
-import { registerIpc, pushToRenderer } from './ipc';
 import { AnalyticsStore } from './analytics';
+import { watchEventLoop } from './diag';
+import { registerIpc, pushToRenderer } from './ipc';
+import { createLogger, type Logger } from './log';
 import { RuntimeResolver } from './runtime';
 import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
@@ -32,13 +34,14 @@ let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
 let terminals: TerminalManager | null = null;
 
-function log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
+/** Console-only until userData is known (see main()), then also a rotating file under logs/. */
+let log: Logger = (level, message) => {
   if (level === 'debug' && !isDev && !process.env.VOCS_CODE_DEBUG) return;
   const line = `[${new Date().toISOString()}] ${level.toUpperCase()} ${message}`;
   if (level === 'error') console.error(line);
   else if (level === 'warn') console.warn(line);
   else console.log(line);
-}
+};
 
 if (!app.requestSingleInstanceLock()) {
   log('warn', 'another Vocs Code instance is already running for this user-data directory; quitting');
@@ -60,6 +63,11 @@ async function main(): Promise<void> {
   // Test hooks: optionally quit after a delay. (The user-data override is applied before the lock above.)
   if (process.env.VOCS_CODE_AUTOQUIT) setTimeout(() => app.quit(), Number(process.env.VOCS_CODE_AUTOQUIT));
   const userData = app.getPath('userData');
+  const logger = createLogger(path.join(userData, 'logs'), isDev || !!process.env.VOCS_CODE_DEBUG);
+  log = logger.log;
+  log('info', `Vocs Code ${app.getVersion()} starting (electron ${process.versions.electron}, ${process.platform} ${process.arch})`);
+  // A blocked main process is a window that takes no input; leave a trace when that happens.
+  watchEventLoop((level, message) => log(level, message));
   const settings = new SettingsStore(userData);
   await settings.load();
   const secrets = new SecretStore(userData);
