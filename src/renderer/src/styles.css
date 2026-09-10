@@ -2808,14 +2808,47 @@ body.resizing {
   flex-direction: column;
   gap: 6px;
 }
+/* Content taller than the viewport must scroll, not squash (charts have overflow, so their
+   automatic minimum size is 0 — without this the daily trend collapses to a sliver). */
+.analytics-body > * {
+  flex-shrink: 0;
+}
 .analytics-body h4 {
   margin: 14px 0 6px;
 }
 .analytics-stats {
   grid-template-columns: repeat(5, 1fr);
 }
-.analytics-metric-toggle {
-  margin-bottom: 6px;
+.day-chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.analytics-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 28px;
+  align-items: start;
+  margin-top: 4px;
+}
+.analytics-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.analytics-col h4 {
+  margin-top: 14px;
+}
+@media (max-width: 1000px) {
+  .analytics-cols {
+    grid-template-columns: 1fr;
+  }
+  .analytics-stats {
+    grid-template-columns: repeat(3, 1fr);
+  }
 }
 .segmented {
   display: inline-flex;
@@ -2843,8 +2876,8 @@ body.resizing {
   display: flex;
   align-items: flex-end;
   gap: 3px;
-  height: 120px;
-  padding: 8px 4px 2px;
+  height: 170px;
+  padding: 10px 6px 2px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-sunken);
@@ -2865,6 +2898,13 @@ body.resizing {
   min-height: 2px;
   border-radius: 2px 2px 0 0;
   background: var(--accent);
+  opacity: 0.9;
+}
+.day-bar:hover {
+  opacity: 1;
+}
+.day-bar.zero {
+  background: var(--border);
 }
 .day-bar-label {
   font-size: 9px;
@@ -2882,8 +2922,8 @@ body.resizing {
   gap: 10px;
 }
 .breakdown-label {
-  width: 160px;
-  min-width: 160px;
+  width: 190px;
+  min-width: 190px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
