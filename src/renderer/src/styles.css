@@ -1001,6 +1001,13 @@ h4 {
 .session-title span {
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: text;
+  border-radius: 3px;
+}
+.session-row:hover .session-title span {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--fg-muted);
 }
 .session-meta {
   display: flex;
