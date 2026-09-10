@@ -233,6 +233,7 @@ export async function gitMergePr(cwd: string, base?: string): Promise<PrResult> 
   } catch {
     return { ok: false, output: 'Could not read PR details.' };
   }
+  if (pr.state === 'MERGED') return { ok: true, url: pr.url, output: `PR is MERGED (already merged): ${pr.url ?? ''}`.trim() };
   if (pr.state !== 'OPEN') return { ok: false, output: pr.url ? `PR is ${pr.state ?? 'unknown'}: ${pr.url}` : `No open PR for ${head}` };
   if (base && pr.baseRefName && pr.baseRefName !== base) {
     return { ok: false, output: `That PR targets ${pr.baseRefName}, not ${base}: ${pr.url ?? ''}`.trim() };
