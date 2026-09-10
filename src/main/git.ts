@@ -233,6 +233,7 @@ export async function gitMergePr(cwd: string, base?: string): Promise<PrResult> 
   } catch {
     return { ok: false, output: 'Could not read PR details.' };
   }
+  if (pr.state === 'MERGED') return { ok: true, url: pr.url, output: `PR is MERGED (already merged): ${pr.url ?? ''}`.trim() };
   if (pr.state !== 'OPEN') return { ok: false, output: pr.url ? `PR is ${pr.state ?? 'unknown'}: ${pr.url}` : `No open PR for ${head}` };
   if (base && pr.baseRefName && pr.baseRefName !== base) {
     return { ok: false, output: `That PR targets ${pr.baseRefName}, not ${base}: ${pr.url ?? ''}`.trim() };
@@ -413,11 +414,25 @@ export async function createWorktree(projectRoot: string, slug: string): Promise
   return { path: wtPath, branch };
 }
 
-export async function removeWorktree(projectRoot: string, wtPath: string): Promise<void> {
+export async function removeWorktree(projectRoot: string, wtPath: string, opts: { force?: boolean } = {}): Promise<void> {
   const root = await gitRoot(projectRoot);
   if (!root) return;
-  await git(root, ['worktree', 'remove', '--force', wtPath], 60_000);
+  const force = opts.force ?? true;
+  // Without --force git refuses a worktree holding uncommitted changes; callers decide whether to surface that.
+  const r = await git(root, force ? ['worktree', 'remove', '--force', wtPath] : ['worktree', 'remove', wtPath], 60_000);
+  if (r.code !== 0) throw new Error(`git worktree remove failed: ${r.stderr || r.stdout}`);
   await git(root, ['worktree', 'prune']);
+}
+
+/** Re-creates a worktree at `wtPath` for an existing branch (used when an archived session is unarchived). */
+export async function restoreWorktree(projectRoot: string, wtPath: string, branch: string): Promise<void> {
+  const root = await gitRoot(projectRoot);
+  if (!root) return;
+  const branchExists = (await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
+  if (!branchExists) throw new Error(`Branch ${branch} no longer exists.`);
+  if (await exists(wtPath)) return;
+  const r = await git(root, ['worktree', 'add', wtPath, branch], 60_000);
+  if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
 }
 
 export async function worktreeInfo(cwd: string): Promise<{ branch?: string; mainRoot?: string } | null> {

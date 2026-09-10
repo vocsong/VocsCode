@@ -15,7 +15,7 @@ const GH_SH = [
   "  'pr create') echo 'https://example.com/acme/repo/pull/7' ;;",
   '  \'pr view\')',
   '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
-  '    echo "{\\"state\\":\\"OPEN\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"baseRefName\\":\\"$GH_BASE\\"}" ;;',
+  '    echo "{\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"baseRefName\\":\\"$GH_BASE\\"}" ;;',
   'esac',
   'exit 0'
 ].join('\n');
@@ -24,10 +24,9 @@ const GH_CMD = [
   '@echo off',
   'echo %*>>"%GH_LOG%"',
   'if /i "%~1"=="pr" if /i "%~2"=="create" echo https://example.com/acme/repo/pull/7',
-  'if /i "%~1"=="pr" if /i "%~2"=="view" (',
-  '  if not "%GH_VIEW_FAIL%"=="" exit /b 1',
-  '  echo {"state":"OPEN","url":"https://example.com/acme/repo/pull/7","baseRefName":"%GH_BASE%"}',
-  ')',
+  'if /i "%~1"=="pr" if /i "%~2"=="view" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
+  'if "%GH_STATE%"=="" set "GH_STATE=OPEN"',
+  'if /i "%~1"=="pr" if /i "%~2"=="view" echo {"state":"%GH_STATE%","url":"https://example.com/acme/repo/pull/7","baseRefName":"%GH_BASE%"}',
   'exit /b 0'
 ].join('\r\n');
 
@@ -65,7 +64,7 @@ describe('git PR flow (/pr, /merge)', () => {
     await git(['commit', '-m', 'feature'], repo);
 
     oldPath = process.env.PATH ?? '';
-    oldEnv = { GH_LOG: process.env.GH_LOG, GH_BASE: process.env.GH_BASE, GH_VIEW_FAIL: process.env.GH_VIEW_FAIL };
+    oldEnv = { GH_LOG: process.env.GH_LOG, GH_BASE: process.env.GH_BASE, GH_STATE: process.env.GH_STATE, GH_VIEW_FAIL: process.env.GH_VIEW_FAIL };
     process.env.PATH = `${bin}${path.delimiter}${oldPath}`;
     process.env.GH_LOG = path.join(tmp, 'gh.log');
     await fs.writeFile(process.env.GH_LOG, '');
@@ -123,6 +122,18 @@ describe('git PR flow (/pr, /merge)', () => {
 
     const anyBase = await gitMergePr(repo);
     expect(anyBase.ok).toBe(true);
+  });
+
+  it('treats an already-merged PR as a success, not an error', async () => {
+    process.env.GH_STATE = 'MERGED';
+    try {
+      const r = await gitMergePr(repo, 'develop');
+      expect(r.ok).toBe(true);
+      expect(r.output).toContain('MERGED');
+    } finally {
+      if (oldEnv.GH_STATE === undefined) delete process.env.GH_STATE;
+      else process.env.GH_STATE = oldEnv.GH_STATE;
+    }
   });
 
   it('reports a missing PR', async () => {

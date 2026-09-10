@@ -25,7 +25,7 @@ import { HARNESSES } from '../src/shared/harness-meta';
 import type { AppSettings, ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
-import { branchGitState, gitBranches, gitCheckout, gitWorktrees } from '../src/main/git';
+import { branchGitState, gitBranches, gitCheckout, gitWorktrees, removeWorktree, restoreWorktree } from '../src/main/git';
 import { createLogger } from '../src/main/log';
 import { timed, watchEventLoop } from '../src/main/diag';
 
@@ -557,6 +557,25 @@ describe('git branch/worktree plumbing', () => {
     // From inside the worktree, that worktree is "current".
     const fromWt = await gitWorktrees(wtDir);
     expect(fromWt.current).toBe(path.resolve(wtDir));
+  });
+
+  it('removes a worktree and restores it from its branch', async () => {
+    const wt2 = path.join(tmpRoot, 'wt-cycle');
+    g('worktree', 'add', wt2, '-b', 'wtcycle');
+    // Uncommitted changes block a non-force removal (the archive flow surfaces this to the user).
+    await fs.writeFile(path.join(wt2, 'dirty.txt'), 'x');
+    await expect(removeWorktree(repo, wt2, { force: false })).rejects.toThrow();
+    await fs.rm(path.join(wt2, 'dirty.txt'));
+    await removeWorktree(repo, wt2, { force: false });
+    await expect(fs.stat(wt2)).rejects.toMatchObject({ code: 'ENOENT' });
+    // The branch survives the worktree removal, so a restore can recreate it at the same path.
+    expect((await gitBranches(repo)).branches.map((b) => b.name)).toContain('wtcycle');
+    await restoreWorktree(repo, wt2, 'wtcycle');
+    expect((await gitWorktrees(repo)).worktrees.map((w) => w.branch)).toContain('wtcycle');
+    // A branch with its worktree still checked out cannot be deleted; remove the worktree first.
+    await removeWorktree(repo, wt2, { force: false });
+    g('branch', '-D', 'wtcycle');
+    await expect(restoreWorktree(repo, wt2, 'wtcycle')).rejects.toThrow(/no longer exists/);
   });
 });
 
