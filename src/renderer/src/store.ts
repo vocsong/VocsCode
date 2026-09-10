@@ -83,6 +83,8 @@ interface State {
   /** Fetches one harness's model catalog, at most once per harness until the model overrides change. */
   ensureModelCatalog(harness: HarnessId): Promise<void>;
   clearTranscriptLocal(id: string): void;
+  /** Upserts a renderer-local info line in a session's transcript; null text removes it. Not persisted by the main process. */
+  setLocalInfo(sessionId: string, id: string, text: string | null, opts?: { level?: 'info' | 'warn' | 'error'; pending?: boolean }): void;
   setTerminals(list: TerminalInfo[]): void;
   setActiveTerminal(sessionId: string, terminalId: string): void;
   focusTerminal(): void;
@@ -376,6 +378,28 @@ export const useStore = create<State>((set, get) => ({
   },
   clearTranscriptLocal(id) {
     set((s) => ({ transcripts: { ...s.transcripts, [id]: [] } }));
+  },
+  setLocalInfo(sessionId, id, text, opts) {
+    set((s) => {
+      const list = s.transcripts[sessionId] ?? [];
+      const idx = list.findIndex((i) => i.id === id);
+      if (text === null) {
+        if (idx < 0) return {};
+        return { transcripts: { ...s.transcripts, [sessionId]: list.filter((i) => i.id !== id) } };
+      }
+      const item: TranscriptItem = {
+        id,
+        kind: 'info',
+        ts: idx >= 0 ? list[idx].ts : Date.now(),
+        level: opts?.level ?? 'info',
+        text,
+        pending: opts?.pending
+      };
+      const next = [...list];
+      if (idx >= 0) next[idx] = item;
+      else next.push(item);
+      return { transcripts: { ...s.transcripts, [sessionId]: next } };
+    });
   },
   setTerminals(terminals) {
     set({ terminals, terminalsLoaded: true });
