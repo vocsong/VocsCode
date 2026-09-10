@@ -11,12 +11,15 @@ import { JsonRpcStdioClient } from '../src/main/harness/jsonrpc';
 import { gateAction } from '../src/main/harness/permissions';
 import { isDangerousCommand } from '../src/main/harness/types';
 import { normalizeSettings, defaultSettings } from '../src/main/settings';
+import type { SettingsStore } from '../src/main/settings';
+import { SessionManager } from '../src/main/session-manager';
+import type { RuntimeResolver } from '../src/main/runtime';
 import { estimateCostUsd, findPricing } from '../src/main/models/static-models';
 import { piModelToInfo } from '../src/main/harness/pi';
 import { codexModelToInfo } from '../src/main/harness/codex-app-server';
 import { applyModelOverrides, modelOverrideKey, parseModelOverrideKey, pruneModelOverrides } from '../src/shared/model-overrides';
 import { HARNESSES } from '../src/shared/harness-meta';
-import type { ModelInfo, SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
 
@@ -345,6 +348,32 @@ describe('SessionStore round-trip', () => {
     harnessRef: {},
     usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
     queued: 3
+  });
+
+  it('publishes live running status to session list listeners', () => {
+    const session = meta('status_session');
+    const published: SessionMeta[][] = [];
+    const store = {
+      list: () => [session],
+      get: (id: string) => (id === session.id ? session : undefined)
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: (list) => published.push(list),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+
+    (manager as unknown as { emit: (id: string, event: SessionEvent) => void }).emit(session.id, { type: 'status', status: 'running', detail: 'Working' });
+
+    expect(session.status).toBe('running');
+    expect(session.statusDetail).toBe('Working');
+    expect(published).toHaveLength(1);
+    expect(published[0][0]).toMatchObject({ id: session.id, status: 'running', statusDetail: 'Working' });
   });
 
   it('persists session meta and transcripts that a fresh store over the same directory reads back', async () => {
