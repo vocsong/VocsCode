@@ -1,4 +1,4 @@
-/** Git plumbing behind the Changes panel: status and diff summaries, per-file revert, staging, commits, and isolated worktrees. */
+/** Git plumbing behind the Changes panel: status and diff summaries, per-file revert, staging, commits, and isolated worktrees plus the /pr and /merge GitHub flow. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
@@ -8,6 +8,9 @@ import { runCapture, which } from './runtime';
 import { exists } from './util/fs';
 
 const gitBin = () => which('git') ?? 'git';
+const ghBin = () => which('gh');
+
+const PR_URL = /https:\/\/[^\s/"]+\/[^\s]+\/pull\/\d+/;
 
 async function git(cwd: string, args: string[], timeoutMs = 20_000): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return runCapture(gitBin(), args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } });
@@ -128,6 +131,55 @@ export async function gitCommit(cwd: string, message: string): Promise<{ ok: boo
   await git(cwd, ['add', '-A']);
   const r = await git(cwd, ['commit', '-m', message]);
   return { ok: r.code === 0, output: (r.stdout + r.stderr).trim() };
+}
+
+type PrResult = { ok: boolean; url?: string; output?: string };
+
+const noGh = (): PrResult => ({ ok: false, output: 'GitHub CLI (gh) is required — install it and run `gh auth login`.' });
+
+async function gh(cwd: string, args: string[], timeoutMs = 120_000): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return runCapture(ghBin() ?? 'gh', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+}
+
+const prUrlIn = (out: string): string | undefined => out.match(PR_URL)?.[0];
+
+/** Pushes the current branch and opens a PR into `base` (gh). Refuses dirty trees so the PR is complete. */
+export async function gitCreatePr(cwd: string, base: string): Promise<PrResult> {
+  if (!(await gitRoot(cwd))) return { ok: false, output: 'Not a git repository' };
+  if (!ghBin()) return noGh();
+  const head = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+  if (!head || head === 'HEAD') return { ok: false, output: 'Detached HEAD — check out a branch first.' };
+  if (head === base) return { ok: false, output: `${base} is already the current branch — /pr takes the branch to merge into.` };
+  const dirty = await git(cwd, ['status', '--porcelain=v1']);
+  if (dirty.stdout.trim()) return { ok: false, output: 'Uncommitted changes — commit them first (Changes panel or /diff).' };
+  const push = await git(cwd, ['push', '-u', 'origin', head], 120_000);
+  if (push.code !== 0) return { ok: false, output: (push.stderr || push.stdout).trim() || 'git push failed' };
+  const r = await gh(cwd, ['pr', 'create', '--base', base, '--head', head, '--fill']);
+  const out = (r.stdout + r.stderr).trim();
+  if (r.code !== 0) return { ok: false, output: out || 'gh pr create failed' };
+  return { ok: true, url: prUrlIn(out), output: out };
+}
+
+/** Merges the open PR whose head is the current branch; `base`, when given, is checked against the PR's target. */
+export async function gitMergePr(cwd: string, base?: string): Promise<PrResult> {
+  if (!(await gitRoot(cwd))) return { ok: false, output: 'Not a git repository' };
+  if (!ghBin()) return noGh();
+  const head = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+  const view = await gh(cwd, ['pr', 'view', head, '--json', 'state,url,baseRefName'], 30_000);
+  if (view.code !== 0) return { ok: false, output: (view.stdout + view.stderr).trim() || `No open PR for ${head}` };
+  let pr: { state?: string; url?: string; baseRefName?: string };
+  try {
+    pr = JSON.parse(view.stdout.trim());
+  } catch {
+    return { ok: false, output: 'Could not read PR details.' };
+  }
+  if (pr.state !== 'OPEN') return { ok: false, output: pr.url ? `PR is ${pr.state ?? 'unknown'}: ${pr.url}` : `No open PR for ${head}` };
+  if (base && pr.baseRefName && pr.baseRefName !== base) {
+    return { ok: false, output: `That PR targets ${pr.baseRefName}, not ${base}: ${pr.url ?? ''}`.trim() };
+  }
+  const merge = await gh(cwd, ['pr', 'merge', head, '--merge']);
+  if (merge.code !== 0) return { ok: false, output: (merge.stderr || merge.stdout).trim() || 'gh pr merge failed' };
+  return { ok: true, url: pr.url, output: (merge.stdout + merge.stderr).trim() || `Merged into ${pr.baseRefName ?? base ?? 'base'}` };
 }
 
 export function slugify(s: string): string {
