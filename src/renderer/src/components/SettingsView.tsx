@@ -260,6 +260,7 @@ function Providers({ settings }: { settings: AppSettings }) {
     <div className="settings-section">
       <h2>Providers & API keys</h2>
       <p className="muted">Keys are encrypted with the OS keychain (DPAPI on Windows) and only sent to the provider you configure. Harnesses that bring their own login (Claude Code, Codex, pi, dsh) keep using it; keys here are a fallback and power the native loop.</p>
+      <HarnessLogins />
       {settings.providers.map((p) => (
         <div key={p.id} className={`provider-card ${p.enabled ? '' : 'disabled'}`}>
           <div className="provider-head">
@@ -338,6 +339,57 @@ function Providers({ settings }: { settings: AppSettings }) {
         </Button>
       )}
       <ModelOverrides settings={settings} />
+    </div>
+  );
+}
+
+/** Login state for harnesses that bring their own credentials, shown next to the key vault. */
+function HarnessLogins() {
+  const availability = useStore((s) => s.availability);
+  const refresh = useStore((s) => s.refreshAvailability);
+  const [refreshing, setRefreshing] = useState(false);
+  const credHome: Partial<Record<HarnessId, string>> = { claude: '~/.claude', codex: '~/.codex', pi: '~/.pi/agent' };
+  const refreshNow = async () => {
+    setRefreshing(true);
+    await refresh();
+    setRefreshing(false);
+  };
+  return (
+    <div className="provider-card">
+      <div className="provider-head">
+        <span className="provider-name">Harness logins</span>
+        <span className="spacer" />
+        <Button size="sm" variant="ghost" icon="refresh" onClick={() => void refreshNow()}>
+          {refreshing ? <Spinner /> : 'Refresh'}
+        </Button>
+      </div>
+      <div className="provider-body">
+        {(['claude', 'codex', 'pi'] as HarnessId[]).map((id) => {
+          const h = HARNESSES.find((x) => x.id === id)!;
+          const av = availability[id];
+          return (
+            <div key={id} className="row gap8" style={{ alignItems: 'center' }}>
+              <strong>{h.name}</strong>
+              {!av ? (
+                <Spinner size={11} />
+              ) : !av.available ? (
+                <Badge tone="red">not installed</Badge>
+              ) : av.authenticated === true ? (
+                <Badge tone="green">logged in</Badge>
+              ) : av.authenticated === false ? (
+                <Badge tone="amber">not logged in</Badge>
+              ) : (
+                <Badge tone="neutral">login unknown</Badge>
+              )}
+              <span className="muted small">
+                {av?.version ? `${av.version} · ` : ''}
+                uses its own credentials from {credHome[id]}
+              </span>
+            </div>
+          );
+        })}
+        <p className="muted small">Log in from a terminal with <code>claude</code>, <code>codex login</code> or <code>pi</code>; these sessions then reuse that login. API keys below are only used for the native loop and as a fallback.</p>
+      </div>
     </div>
   );
 }
