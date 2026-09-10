@@ -8,6 +8,7 @@ import type {
   EffortLevel,
   GoalState,
   HarnessRef,
+  ModelInfo,
   ModelRef,
   PermissionMode,
   SessionEvent,
@@ -21,6 +22,7 @@ import { createAdapter } from './harness/registry';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { createWorktree, gitRoot, removeWorktree, slugify } from './git';
 import { emptyUsage } from './models/static-models';
+import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
 import type { SettingsStore } from './settings';
 import type { SessionStore } from './store';
@@ -45,6 +47,8 @@ interface ActiveSession {
   dirty: Set<string>;
   lastAssistantText: string;
   starting: Promise<void> | null;
+  /** Last list the harness reported, before user overrides, so it can be re-published. */
+  models: ModelInfo[] | null;
 }
 
 const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
@@ -225,7 +229,7 @@ export class SessionManager {
     if (!meta) throw new Error('Session not found');
     const ctx = this.buildContext(meta, id);
     const adapter = createAdapter(meta.config.harness, ctx);
-    const active: ActiveSession = { adapter, approvals: new Map(), liveItems: new Map(), dirty: new Set(), lastAssistantText: '', starting: null };
+    const active: ActiveSession = { adapter, approvals: new Map(), liveItems: new Map(), dirty: new Set(), lastAssistantText: '', starting: null, models: null };
     this.active.set(id, active);
     meta.status = 'starting';
     meta.statusDetail = `Starting ${HARNESS_BY_ID[meta.config.harness].name}…`;
@@ -321,6 +325,14 @@ export class SessionManager {
     await Promise.all([...this.active.keys()].map((id) => this.stop(id)));
   }
 
+  /**
+   * Re-sends each running session's cached model list so a capability override applies without
+   * restarting the harness. Cheap: no harness round-trip, only the overrides are re-evaluated.
+   */
+  republishModels(): void {
+    for (const [id, active] of this.active) if (active.models) this.emit(id, { type: 'models', models: active.models });
+  }
+
   async setModel(id: string, model: ModelRef): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
@@ -410,6 +422,12 @@ export class SessionManager {
 
   /** Central event sink: persists transcript, updates meta, forwards to renderer, drives goals. */
   private emit(sessionId: string, event: SessionEvent): void {
+    // Harness-reported capabilities pass through the user's corrections before anything sees them.
+    if (event.type === 'models') {
+      const live = this.active.get(sessionId);
+      if (live) live.models = event.models;
+      event = { ...event, models: applyModelOverrides(event.models, this.deps.settings.get().modelOverrides) };
+    }
     const meta = this.get(sessionId);
     const active = this.active.get(sessionId);
     switch (event.type) {
