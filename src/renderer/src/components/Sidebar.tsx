@@ -167,7 +167,7 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
       </div>
       <StatusLabel status={s.status} />
       <div onClick={(e) => e.stopPropagation()}>
-        <Dropdown align="right" width={220} trigger={() => <button type="button" className="row-menu-btn" aria-label="Session menu"><Icon name="more" size={14} /></button>}>
+        <Dropdown align="right" width={220} trigger={() => <button type="button" className="row-menu-btn" aria-label="Session menu"><Icon name="more" size={18} /></button>}>
           {(close) => (
             <>
               <MenuItem onClick={() => { close(); startRename(); }}>Rename</MenuItem>
