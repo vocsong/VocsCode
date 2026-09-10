@@ -210,5 +210,7 @@ export const SLASH_COMMANDS: { name: string; description: string; args?: string 
   { name: 'export', description: 'Export transcript as Markdown' },
   { name: 'open', description: 'Open the project in your editor or file manager', args: 'editor|folder|terminal' },
   { name: 'worktree', description: 'Show worktree information for this session' },
+  { name: 'pr', description: 'Push this branch and open a GitHub PR into a base branch (needs gh)', args: '<branch>' },
+  { name: 'merge', description: 'Merge the open PR for this branch (needs gh)', args: '<branch>' },
   { name: 'stop', description: 'Interrupt the current turn' }
 ];

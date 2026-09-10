@@ -8,8 +8,8 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
+import { gitBranches, gitCheckout, gitCommit, gitCreatePr, gitDiff, gitMergePr, gitRevertFile, gitStageAll, gitSummary, gitWorktrees } from './git';
 import type { AnalyticsStore } from './analytics';
-import { gitBranches, gitCheckout, gitCommit, gitDiff, gitRevertFile, gitStageAll, gitSummary, gitWorktrees } from './git';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
@@ -296,6 +296,8 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
   handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));
+  handle('git:pr', ({ sessionId, base }) => gitCreatePr(cwdOf(sessionId), base));
+  handle('git:merge', ({ sessionId, base }) => gitMergePr(cwdOf(sessionId), base));
   handle('git:branches', ({ sessionId }) => gitBranches(cwdOf(sessionId)));
   handle('git:worktrees', ({ sessionId }) => gitWorktrees(cwdOf(sessionId)));
   handle('git:checkout', ({ sessionId, branch }) => gitCheckout(cwdOf(sessionId), branch));
