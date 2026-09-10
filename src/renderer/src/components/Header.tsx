@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { EffortLevel, GitBranchInfo, GitWorktreeInfo, ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
@@ -9,16 +10,52 @@ import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
 import { ModelPicker } from './ModelPicker';
 import { harnessShort } from './Sidebar';
 
-/** Branch & worktree switcher shown when clicking the branch label in the header. */
-function BranchWorktreeMenu({ session, close }: { session: SessionMeta; close: () => void }) {
+/**
+ * Branch & worktree switcher shown when clicking the branch label in the header.
+ * Renders through a portal: `.header-title` has `overflow: hidden`, which would clip an
+ * absolutely-positioned menu inside the header.
+ */
+function BranchWorktreeMenu({ session, branch }: { session: SessionMeta; branch: string }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
   const [branches, setBranches] = useState<GitBranchInfo[] | null>(null);
   const [worktrees, setWorktrees] = useState<GitWorktreeInfo[] | null>(null);
   const toast = useStore((s) => s.toast);
 
   useEffect(() => {
+    if (!open || branches !== null) return;
     invoke('git:branches', { sessionId: session.id }).then((r) => setBranches(r.branches)).catch(() => setBranches([]));
     invoke('git:worktrees', { sessionId: session.id }).then((r) => setWorktrees(r.worktrees)).catch(() => setWorktrees([]));
-  }, [session.id]);
+  }, [open, session.id, branches, worktrees]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!btnRef.current?.parentElement?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const toggle = () => {
+    const el = btnRef.current;
+    if (el && !open) {
+      const r = el.getBoundingClientRect();
+      // Keep the 280px menu inside the window.
+      setPos({ left: Math.min(r.left, window.innerWidth - 292), top: r.bottom + 4 });
+    }
+    setOpen((o) => !o);
+  };
+
+  const close = () => setOpen(false);
 
   const refresh = () => useStore.setState((s) => ({ changesVersion: s.changesVersion + 1 }));
 
@@ -48,30 +85,60 @@ function BranchWorktreeMenu({ session, close }: { session: SessionMeta; close: (
     }
   };
 
-  if (branches === null || worktrees === null) return <div className="menu-empty muted">Loading…</div>;
-  if (branches.length === 0) return <div className="menu-empty muted">Not a git repository</div>;
+  const menu = (() => {
+    if (!open || !pos) return null;
+    if (branches === null || worktrees === null) return <div className="menu-empty muted">Loading…</div>;
+    if (branches.length === 0) return <div className="menu-empty muted">Not a git repository</div>;
+    return (
+      <>
+        <div className="menu-group">Branch</div>
+        {branches.map((b) => (
+          <MenuItem key={b.name} active={b.current} disabled={b.current} onClick={() => void checkout(b.name)}>
+            {b.name}
+          </MenuItem>
+        ))}
+        {worktrees.length > 1 && (
+          <>
+            <div className="menu-group">Worktrees</div>
+            {worktrees.map((w) => {
+              const here = pathEquals(w.path, session.cwd);
+              return (
+                <MenuItem key={w.path} active={here} disabled={here} hint={basename(w.path)} onClick={() => void moveTo(w)}>
+                  {w.branch ?? '(detached)'}
+                </MenuItem>
+              );
+            })}
+          </>
+        )}
+      </>
+    );
+  })();
+
   return (
     <>
-      <div className="menu-group">Branch</div>
-      {branches.map((b) => (
-        <MenuItem key={b.name} active={b.current} disabled={b.current} onClick={() => void checkout(b.name)}>
-          {b.name}
-        </MenuItem>
-      ))}
-      {worktrees.length > 1 && (
-        <>
-          <div className="menu-group">Worktrees</div>
-          {worktrees.map((w) => {
-            const here = pathEquals(w.path, session.cwd);
-            return (
-              <MenuItem key={w.path} active={here} disabled={here} hint={basename(w.path)} onClick={() => void moveTo(w)}>
-                {w.branch ?? '(detached)'}
-              </MenuItem>
-            );
-          })}
-        </>
-      )}
+      <button ref={btnRef} type="button" className={`header-path ${open ? 'open' : ''}`} title={`Branch ${branch} — click to switch branch or worktree`} onClick={toggle}>
+        <Icon name="branch" size={12} /> {branch}
+      </button>
+      {open && pos && menu && <PortalMenu pos={pos} onClose={close}>{menu}</PortalMenu>}
     </>
+  );
+}
+
+/** Fixed-position dropdown menu outside the clipped header, closed by any outside click. */
+function PortalMenu({ pos, onClose, children }: { pos: { left: number; top: number }; onClose: () => void; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [onClose]);
+  return createPortal(
+    <div ref={ref} className="dropdown-menu" style={{ position: 'fixed', left: pos.left, top: pos.top, width: 280, zIndex: 200 }}>
+      {children}
+    </div>,
+    document.body
   );
 }
 
@@ -126,15 +193,7 @@ export function Header({ session }: { session: SessionMeta }) {
         <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
           <Icon name="folder" size={12} /> {basename(session.cwd)}
         </button>
-        {branch && (
-          <Dropdown align="left" width={280} trigger={(open) => (
-            <button type="button" className={`header-path ${open ? 'open' : ''}`} title={`Branch ${branch} — click to switch branch or worktree`}>
-              <Icon name="branch" size={12} /> {branch}
-            </button>
-          )}>
-            {(close) => <BranchWorktreeMenu session={session} close={close} />}
-          </Dropdown>
-        )}
+        {branch && <BranchWorktreeMenu session={session} branch={branch} />}
         {session.statusDetail && busy && <span className="header-status muted">{session.statusDetail}</span>}
       </div>
 
