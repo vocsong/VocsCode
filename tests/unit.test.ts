@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { promises as fs } from 'node:fs';
@@ -22,6 +23,7 @@ import { HARNESSES } from '../src/shared/harness-meta';
 import type { ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
+import { gitBranches, gitCheckout, gitWorktrees } from '../src/main/git';
 
 // Stub Electron's safeStorage so SecretStore is testable in plain node. Mutable flag lets the
 // unavailable-encryption fallback path be exercised without re-declaring the mock.
@@ -415,5 +417,48 @@ describe('SessionStore round-trip', () => {
     await again.load();
     expect(again.get('sess_2')).toBeUndefined();
     expect(await again.readTranscript('sess_2')).toEqual([]);
+  });
+});
+
+describe('git branch/worktree plumbing', () => {
+  const tmpRoot = path.join(os.tmpdir(), `vocs-code-git-test-${Date.now()}-${process.pid}`);
+  const repo = path.join(tmpRoot, 'repo');
+  const wtDir = path.join(tmpRoot, 'wt');
+
+  const g = (...args: string[]) =>
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], {
+      cwd: repo,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    });
+
+  afterAll(async () => {
+    await fs.rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('lists branches and checks out another branch', async () => {
+    await fs.mkdir(repo, { recursive: true });
+    execFileSync('git', ['init'], { cwd: repo });
+    g('commit', '--allow-empty', '-m', 'init');
+    g('branch', 'feature');
+    const { current, branches } = await gitBranches(repo);
+    expect(branches.map((b) => b.name).sort()).toEqual(expect.arrayContaining(['feature']));
+    const head = branches.find((b) => b.current)!;
+    expect(current).toBe(head.name);
+    expect(await gitCheckout(repo, '-evil')).toMatchObject({ ok: false });
+    expect(await gitCheckout(repo, 'feature')).toMatchObject({ ok: true });
+    expect((await gitBranches(repo)).current).toBe('feature');
+  });
+
+  it('lists worktrees with branches and marks the session cwd', async () => {
+    g('checkout', '-'); // back to the default branch
+    g('worktree', 'add', wtDir, '-b', 'wtbranch');
+    const { current, worktrees } = await gitWorktrees(repo);
+    expect(current).toBe(path.resolve(repo));
+    expect(worktrees.map((w) => w.branch)).toContain('wtbranch');
+    const wt = worktrees.find((w) => w.path === path.resolve(wtDir));
+    expect(wt).toMatchObject({ branch: 'wtbranch', detached: false });
+    // From inside the worktree, that worktree is "current".
+    const fromWt = await gitWorktrees(wtDir);
+    expect(fromWt.current).toBe(path.resolve(wtDir));
   });
 });

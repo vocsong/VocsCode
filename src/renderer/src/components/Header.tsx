@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import type { EffortLevel, ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
+import type { EffortLevel, GitBranchInfo, GitWorktreeInfo, ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, fmtTokens } from '../format';
@@ -10,6 +10,77 @@ import { harnessShort } from './Sidebar';
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
 const EMPTY: never[] = [];
+
+/** Branch & worktree switcher shown when clicking the branch label in the header. */
+function BranchWorktreeMenu({ session, close }: { session: SessionMeta; close: () => void }) {
+  const [branches, setBranches] = useState<GitBranchInfo[] | null>(null);
+  const [worktrees, setWorktrees] = useState<GitWorktreeInfo[] | null>(null);
+  const toast = useStore((s) => s.toast);
+
+  useEffect(() => {
+    invoke('git:branches', { sessionId: session.id }).then((r) => setBranches(r.branches)).catch(() => setBranches([]));
+    invoke('git:worktrees', { sessionId: session.id }).then((r) => setWorktrees(r.worktrees)).catch(() => setWorktrees([]));
+  }, [session.id]);
+
+  const refresh = () => useStore.setState((s) => ({ changesVersion: s.changesVersion + 1 }));
+
+  const checkout = async (name: string) => {
+    close();
+    try {
+      const r = await invoke('git:checkout', { sessionId: session.id, branch: name });
+      if (r.ok) {
+        toast(`Switched to ${name}`, 'success');
+        refresh();
+      } else {
+        toast(r.error ?? 'Checkout failed', 'error');
+      }
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    }
+  };
+
+  const moveTo = async (wt: GitWorktreeInfo) => {
+    close();
+    try {
+      await invoke('sessions:moveTo', { id: session.id, cwd: wt.path });
+      toast(`Now working in ${basename(wt.path)}`, 'success');
+      refresh();
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    }
+  };
+
+  if (branches === null || worktrees === null) return <div className="menu-empty muted">Loading…</div>;
+  if (branches.length === 0) return <div className="menu-empty muted">Not a git repository</div>;
+  return (
+    <>
+      <div className="menu-group">Branch</div>
+      {branches.map((b) => (
+        <MenuItem key={b.name} active={b.current} disabled={b.current} onClick={() => void checkout(b.name)}>
+          {b.name}
+        </MenuItem>
+      ))}
+      {worktrees.length > 1 && (
+        <>
+          <div className="menu-group">Worktrees</div>
+          {worktrees.map((w) => {
+            const here = pathEquals(w.path, session.cwd);
+            return (
+              <MenuItem key={w.path} active={here} disabled={here} hint={basename(w.path)} onClick={() => void moveTo(w)}>
+                {w.branch ?? '(detached)'}
+              </MenuItem>
+            );
+          })}
+        </>
+      )}
+    </>
+  );
+}
+
+function pathEquals(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/[/\\]+$/, '');
+  return norm(a).toLowerCase() === norm(b).toLowerCase();
+}
 
 export function Header({ session }: { session: SessionMeta }) {
   const models = useStore((s) => s.models[session.id] ?? EMPTY);
@@ -56,12 +127,16 @@ export function Header({ session }: { session: SessionMeta }) {
         </Badge>
         <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
           <Icon name="folder" size={12} /> {basename(session.cwd)}
-          {branch && (
-            <>
-              <Icon name="branch" size={12} /> {branch}
-            </>
-          )}
         </button>
+        {branch && (
+          <Dropdown align="left" width={280} trigger={(open) => (
+            <button type="button" className={`header-path ${open ? 'open' : ''}`} title={`Branch ${branch} — click to switch branch or worktree`}>
+              <Icon name="branch" size={12} /> {branch}
+            </button>
+          )}>
+            {(close) => <BranchWorktreeMenu session={session} close={close} />}
+          </Dropdown>
+        )}
         {session.statusDetail && busy && <span className="header-status muted">{session.statusDetail}</span>}
       </div>
 
