@@ -190,6 +190,20 @@ export function Composer({ session }: { session: SessionMeta }) {
       case 'worktree':
         toast(session.worktreeBranch ? `Worktree ${session.cwd} on branch ${session.worktreeBranch}` : 'This session runs directly in the project folder.', 'info');
         return true;
+      case 'pr': {
+        if (!arg) {
+          toast('Usage: /pr <base branch> — pushes this branch and opens a PR into it.', 'error');
+          return true;
+        }
+        const pr = await invoke('git:pr', { sessionId: session.id, base: arg }).catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }));
+        toast(pr.url ? `PR opened: ${pr.url}` : pr.output ?? 'Failed', pr.ok ? 'success' : 'error');
+        return true;
+      }
+      case 'merge': {
+        const merged = await invoke('git:merge', { sessionId: session.id, base: arg || undefined }).catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }));
+        toast(merged.url ? `Merged: ${merged.url}` : merged.output ?? 'Failed', merged.ok ? 'success' : 'error');
+        return true;
+      }
       case 'stop':
         await invoke('sessions:interrupt', { id: session.id });
         return true;

@@ -8,7 +8,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitCommit, gitDiff, gitRevertFile, gitStageAll, gitSummary } from './git';
+import { gitCommit, gitCreatePr, gitDiff, gitMergePr, gitRevertFile, gitStageAll, gitSummary } from './git';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
@@ -291,6 +291,8 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
   handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));
+  handle('git:pr', ({ sessionId, base }) => gitCreatePr(cwdOf(sessionId), base));
+  handle('git:merge', ({ sessionId, base }) => gitMergePr(cwdOf(sessionId), base));
 
   handle('fs:list', async ({ sessionId, relPath }) => {
     const root = cwdOf(sessionId);

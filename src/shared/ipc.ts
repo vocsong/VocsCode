@@ -94,6 +94,10 @@ export interface IpcContract {
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:stageAll': [{ sessionId: string }, { ok: boolean; error?: string }];
   'git:commit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];
+  /** Pushes the session's branch and opens a GitHub PR into `base` (needs gh). */
+  'git:pr': [{ sessionId: string; base: string }, { ok: boolean; url?: string; output?: string }];
+  /** Merges the open PR for the session's branch; `base`, when given, must match the PR's target. */
+  'git:merge': [{ sessionId: string; base?: string }, { ok: boolean; url?: string; output?: string }];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];
