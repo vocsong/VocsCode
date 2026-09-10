@@ -13,6 +13,7 @@ import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
 import { Button, EmptyState, Icon, Kbd, Spinner } from './components/ui';
 import { createTerminal } from './terminal/host';
+import { applyTheme } from './theme';
 
 export function App() {
   const booted = useStore((s) => s.booted);
@@ -31,9 +32,7 @@ export function App() {
   }, [boot]);
 
   useEffect(() => {
-    const theme = settings?.theme ?? 'system';
-    if (theme === 'system') document.documentElement.removeAttribute('data-theme');
-    else document.documentElement.setAttribute('data-theme', theme);
+    applyTheme(settings?.theme ?? 'system');
   }, [settings?.theme]);
 
   useEffect(() => {
@@ -42,7 +41,7 @@ export function App() {
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === 'n') {
         e.preventDefault();
-        st.openNewSession(true);
+        void st.startNewSession();
       } else if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         st.openPalette(!st.paletteOpen);
@@ -123,7 +122,7 @@ export function App() {
               <EmptyState icon="sparkles" title="Welcome to Vocs Code">
                 <p>One desktop for every coding agent. Pick a harness per session — Claude Agent SDK, Codex, Pi, DeepSeek Harness or any ACP agent, or the built-in loop — and any model it can reach.</p>
                 <div className="row gap8 center">
-                  <Button variant="primary" icon="plus" onClick={() => useStore.getState().openNewSession(true)}>
+                  <Button variant="primary" icon="plus" onClick={() => void useStore.getState().startNewSession()}>
                     New session
                   </Button>
                   <Button icon="settings" onClick={() => useStore.getState().setView('settings')}>

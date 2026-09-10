@@ -58,6 +58,8 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       env,
       timeout: 60_000
     });
+    expect(await app.evaluate(({ app: electronApp }) => electronApp.getName())).toBe('Vocs Code');
+    expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle())).toBe('Vocs Code');
     const mainLog: string[] = [];
     app.process().stdout?.on('data', (d: Buffer) => mainLog.push(d.toString()));
     app.process().stderr?.on('data', (d: Buffer) => mainLog.push(d.toString()));
