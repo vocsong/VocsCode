@@ -46,23 +46,34 @@ const MUTATING = new Set(['bash', 'edit', 'write']);
 const EDITS = new Set(['edit', 'write']);
 const MODES: Mode[] = ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'];
 
-/** Keep in sync with DANGEROUS_COMMAND_PATTERNS in src/main/harness/types.ts. */
+// Best-effort detection of obviously destructive shell commands; not exhaustive.
+// Verbatim copy of DANGEROUS_COMMAND_PATTERNS in src/main/harness/types.ts — keep the two in sync.
 const DANGEROUS: RegExp[] = [
-  /\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\b/i,
-  /\brm\s+-rf?\s+[\/~]/i,
-  /\bgit\s+push\b.*(--force|-f)\b/i,
+  // rm: recursive + force flags in any arrangement, or a recursive flag aimed at an absolute root target
+  /\brm\s+(?=(?:-\S+\s+)*(?:-[a-z]*r[a-z]*\b|--recursive\b))(?=(?:-\S+\s+)*(?:-[a-z]*f[a-z]*\b|--force\b))/i,
+  /\brm\s+(?:-\S+\s+)*-[a-z]*r[a-z]*\b(?:\s+-\S+)*\s+[\/~]/i,
+  // dd reading from or writing to a device node
+  /\bmkfs\b|\bdd\s+(?:\S+\s+)*(?:if|of)=\/dev\//i,
+  // chmod 777 with a recursive flag, in any order
+  /\bchmod\s+(?=(?:\S+\s+)*(?:-[a-z]*r[a-z]*\b|--recursive\b))(?=(?:\S+\s+)*777)/i,
+  // git force-push: --force, -f or a +-prefixed refspec, allowing global git options before push
+  /\bgit(?:\s+-{1,2}\S+(?:\s+"[^"]*"|\s+\S+)?)*\s+push\b(?=\s)[^|;&]*?(?:--force\b|\s-f\b|\s\+\S)/i,
   /\bgit\s+reset\s+--hard\b/i,
-  /\bgit\s+clean\s+-[a-z]*f/i,
+  // any -f-containing flag cluster in any position
+  /\bgit\s+clean\s+(?:-\S+\s+)*-[a-z]*f/i,
   /\bgit\s+checkout\s+--\s+\./i,
-  /\bmkfs\b|\bdd\s+if=/i,
   /\b(shutdown|reboot|halt)\b/i,
-  /\bformat\s+[a-z]:/i,
-  /\bdel\s+\/[sq]/i,
-  /\bRemove-Item\b.*-Recurse/i,
+  /\bformat(?:\.com)?\s+[a-z]:/i,
+  // Windows del/rd/rmdir with recursive-quiet flags in any order
+  /\bdel\s+(?:\/[a-z]+\s+)*\/[sq]/i,
+  /\b(?:rd|rmdir)\s+(?:\/[a-z]+\s+)*\/s/i,
+  // Remove-Item and its aliases with a recurse flag
+  /\b(?:remove-item|ri)\s+(?:\S+\s+)*(?:-recurse\b|-[a-z]*r\b)/i,
   /\bnpm\s+publish\b|\bpnpm\s+publish\b|\byarn\s+publish\b/i,
   /\bcurl\b.*\|\s*(ba)?sh\b/i,
-  /\bchmod\s+-R\s+777\b/i,
   /\b(sudo|doas)\b/i,
+  // arbitrary encoded payloads
+  /\b(?:powershell|pwsh)(?:\.exe)?\s+(?:\S+\s+)*(?:-encodedcommand\b|-enc\b|-e\b)/i,
   /:\(\)\s*\{\s*:\|:&\s*\};:/
 ];
 

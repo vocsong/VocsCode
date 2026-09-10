@@ -95,6 +95,19 @@ export class SessionManager {
     this.persistTimers.delete(id);
   }
 
+  /** Persists every debounced meta update immediately (used on quit so trailing edits are not lost). */
+  async flushPendingPersists(): Promise<void> {
+    const entries = [...this.persistTimers];
+    this.persistTimers.clear();
+    await Promise.all(
+      entries.map(([id, t]) => {
+        clearTimeout(t);
+        const meta = this.deps.store.get(id);
+        return meta ? this.deps.store.upsert(meta).catch(() => undefined) : Promise.resolve();
+      })
+    );
+  }
+
   async create(req: CreateSessionRequest): Promise<SessionMeta> {
     const id = shortId('s_');
     const cfg = req.config;
@@ -248,6 +261,9 @@ export class SessionManager {
       .catch((e) => {
         active.starting = null;
         this.active.delete(id);
+        // Start failed after spawn: dispose the adapter so no harness child process is orphaned
+        // (pi/acp start() have no self-cleaning handshake either).
+        active.adapter.dispose().catch((de) => this.deps.log('warn', `dispose after failed start: ${errorMessage(de)}`));
         const m = this.get(id);
         if (m) {
           m.status = 'error';
@@ -439,7 +455,7 @@ export class SessionManager {
           if (item.kind === 'assistant' && item.text) active.lastAssistantText = item.text;
         }
         const streaming = item.kind === 'assistant' && item.streaming;
-        if (!streaming || !active) void this.deps.store.appendTranscript(sessionId, item);
+        if (!streaming || !active) this.appendTranscript(sessionId, item);
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
         break;
       }
@@ -460,11 +476,19 @@ export class SessionManager {
           meta.status = event.status;
           meta.statusDetail = event.detail;
           if (event.status === 'idle' || event.status === 'stopped' || event.status === 'error') {
-            if (active) void this.flushLive(sessionId, active);
-            if (event.status === 'stopped') this.active.delete(sessionId);
+            if (active) {
+              void this.flushLive(sessionId, active).catch((e) => this.deps.log('warn', `live flush failed: ${errorMessage(e)}`));
+              if (event.status === 'stopped') {
+                // The harness exited on its own: pending approvals would hang forever and the
+                // adapter must be disposed, mirroring the fatal-error path.
+                this.active.delete(sessionId);
+                this.cancelApprovals(sessionId, active, 'Harness stopped');
+                active.adapter.dispose().catch((e) => this.deps.log('warn', `dispose after harness stop failed: ${errorMessage(e)}`));
+              }
+            }
+            this.schedulePersist(meta);
+            this.pushSessions();
           }
-          this.schedulePersist(meta);
-          this.pushSessions();
         }
         break;
       }
@@ -499,12 +523,17 @@ export class SessionManager {
           this.schedulePersist(meta);
           this.pushSessions();
         }
-        void this.deps.store.appendTranscript(sessionId, { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'error', text: event.message });
+        this.appendTranscript(sessionId, { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'error', text: event.message });
         break;
       default:
         break;
     }
     this.deps.pushEvent({ sessionId, event, ts: Date.now() });
+  }
+
+  /** Transcript appends must never reject into the void; log a warning instead. */
+  private appendTranscript(sessionId: string, item: TranscriptItem): void {
+    this.deps.store.appendTranscript(sessionId, item).catch((e) => this.deps.log('warn', `transcript append failed: ${errorMessage(e)}`));
   }
 
   private async flushLive(sessionId: string, active: ActiveSession): Promise<void> {
@@ -571,7 +600,7 @@ export class SessionManager {
           autoContinue: opts.autoContinue ?? s.goalDefaults.autoContinue
         };
         this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Goal set: ${meta.goal.objective}` } });
-        if (meta.status === 'idle') void this.send(id, { text: this.goalKickoffPrompt(meta.goal) });
+        if (meta.status === 'idle') void this.send(id, { text: this.goalKickoffPrompt(meta.goal) }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
         break;
       }
       case 'pause':
@@ -580,7 +609,7 @@ export class SessionManager {
       case 'resume':
         if (meta.goal) {
           meta.goal.status = 'active';
-          if (meta.status === 'idle') void this.send(id, { text: `Resuming the goal: ${meta.goal.objective}\nContinue where you left off.` });
+          if (meta.status === 'idle') void this.send(id, { text: `Resuming the goal: ${meta.goal.objective}\nContinue where you left off.` }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
         }
         break;
       case 'clear':

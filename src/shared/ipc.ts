@@ -29,7 +29,7 @@ export interface IpcContract {
   'app:info': [void, { version: string; platform: string; userData: string; isPackaged: boolean }];
   'app:doctor': [void, DoctorReport];
   'app:openExternal': [{ url: string }, void];
-  'app:openPath': [{ path: string }, void];
+  'app:openPath': [{ path: string; sessionId: string }, void];
   'app:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
   'app:openTerminal': [{ cwd: string }, { ok: boolean; error?: string }];
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];

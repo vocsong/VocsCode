@@ -2,7 +2,7 @@ import { promises as fs, statSync } from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import type { AppSettings, HarnessAvailability, HarnessId } from '../shared/types';
-import { spawnTool } from './harness/spawn';
+import { killTree, spawnTool } from './harness/spawn';
 import { exists } from './util/fs';
 
 /**
@@ -63,34 +63,41 @@ export function runCapture(
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    let timeout: NodeJS.Timeout | undefined;
+    const settle = (r: { code: number | null; stdout: string; stderr: string }) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      resolve(r);
+    };
     let child;
     try {
       child = spawnTool(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env });
     } catch (e) {
-      resolve({ code: null, stdout: '', stderr: String(e) });
+      settle({ code: null, stdout: '', stderr: String(e) });
       return;
     }
     if (!child.stdout || !child.stderr || !child.stdin) {
-      resolve({ code: null, stdout: '', stderr: 'no stdio' });
+      settle({ code: null, stdout: '', stderr: 'no stdio' });
       return;
     }
-    const t = setTimeout(() => {
+    timeout = setTimeout(() => {
       try {
-        child.kill();
+        killTree(child);
       } catch {
         /* ignore */
       }
+      // Grandchildren can inherit the pipes and keep stdio open (cmd.exe-wrapped shims on
+      // Windows); settle anyway so callers never hang on a killed child.
+      settle({ code: null, stdout, stderr: `${stderr}\ntimed out after ${opts.timeoutMs ?? 15_000}ms` });
     }, opts.timeoutMs ?? 15_000);
     child.stdout.on('data', (d) => (stdout += d.toString()));
     child.stderr.on('data', (d) => (stderr += d.toString()));
-    child.on('error', (e) => {
-      clearTimeout(t);
-      resolve({ code: null, stdout, stderr: stderr + String(e) });
-    });
-    child.on('close', (code) => {
-      clearTimeout(t);
-      resolve({ code, stdout, stderr });
-    });
+    child.on('error', (e) => settle({ code: null, stdout, stderr: stderr + String(e) }));
+    child.on('close', (code) => settle({ code, stdout, stderr }));
+    // A dead pipe must not surface as an uncaught exception.
+    child.stdin.on('error', () => undefined);
     if (opts.input !== undefined) child.stdin.end(opts.input);
     else child.stdin.end();
   });

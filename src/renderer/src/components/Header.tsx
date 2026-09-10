@@ -67,7 +67,7 @@ export function Header({ session }: { session: SessionMeta }) {
           {harnessShort(session.config.harness)}
           {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
         </Badge>
-        <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd })}>
+        <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
           <Icon name="folder" size={12} /> {basename(session.cwd)}
           {branch && (
             <>

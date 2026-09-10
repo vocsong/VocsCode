@@ -207,7 +207,14 @@ export const useStore = create<State>((set, get) => ({
               if (item.kind === 'assistant') {
                 if (ev.textDelta) item.text += ev.textDelta;
                 if (ev.thinkingDelta) item.thinking = (item.thinking ?? '') + ev.thinkingDelta;
-              } else if (item.kind === 'tool' && ev.outputDelta) item.output = (item.output ?? '') + ev.outputDelta;
+              } else if (item.kind === 'tool' && ev.outputDelta) {
+                // Cap accumulated tool output so unbounded streamed deltas cannot balloon memory.
+                const cur = item.output ?? '';
+                if (cur.length < 30_000) {
+                  const next = cur + ev.outputDelta;
+                  item.output = next.length > 30_000 ? `${next.slice(0, 30_000)}\n[output truncated]` : next;
+                }
+              }
               list[idx] = item;
               touched.set(d.sessionId, list);
             }
@@ -264,7 +271,25 @@ export const useStore = create<State>((set, get) => ({
     set({ settings });
   },
   setSessions(sessions) {
-    set({ sessions });
+    set((s) => {
+      const ids = new Set(sessions.map((x) => x.id));
+      const removed = new Set<string>();
+      for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.loaded)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
+      if (removed.size === 0) return { sessions };
+      const transcripts = { ...s.transcripts };
+      const loaded = { ...s.loaded };
+      const activeTerminal = { ...s.activeTerminal };
+      for (const id of removed) {
+        delete transcripts[id];
+        delete loaded[id];
+        delete activeTerminal[id];
+      }
+      // A removed session cannot stay active; drop it and let the caller pick a new one.
+      const activeId = s.activeId && ids.has(s.activeId) ? s.activeId : null;
+      return { sessions, transcripts, loaded, activeTerminal, activeId };
+    });
   },
   setView(view) {
     set({ view });

