@@ -356,6 +356,7 @@ describe('SessionManager folder tracking', () => {
       store,
       settings,
       runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
       getSecret: async () => undefined,
       pushEvent: vi.fn(),
       pushSessions: vi.fn(),
