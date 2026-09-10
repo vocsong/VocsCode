@@ -24,9 +24,15 @@ import { HARNESSES } from '../src/shared/harness-meta';
 import type { AppSettings, ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
-import { gitBranches, gitCheckout, gitWorktrees } from '../src/main/git';
+import { branchGitState, gitBranches, gitCheckout, gitWorktrees } from '../src/main/git';
 import { createLogger } from '../src/main/log';
 import { timed, watchEventLoop } from '../src/main/diag';
+
+// branchGitState is stubbed so PR-state refresh tests stay offline; every other git export stays real.
+vi.mock('../src/main/git', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  branchGitState: vi.fn(async (): Promise<{ pr: boolean; merged: boolean }> => ({ pr: false, merged: false }))
+}));
 
 // Stub Electron's safeStorage so SecretStore is testable in plain node. Mutable flag lets the
 // unavailable-encryption fallback path be exercised without re-declaring the mock.
@@ -371,6 +377,54 @@ describe('SessionManager folder tracking', () => {
     // Creating another session in the same folder must not duplicate the entry.
     await manager.create({ config: { ...cfg } });
     expect(stored.folders).toEqual(['G:/proj/a']);
+  });
+});
+
+describe('SessionManager PR state refresh', () => {
+  it('flips a pr session to merged when refreshGitState runs after /merge', async () => {
+    vi.useFakeTimers();
+    const session: SessionMeta = {
+      id: 'pr_session',
+      title: 'pr session',
+      createdAt: 1_000,
+      updatedAt: 2_000,
+      config: { harness: 'native', projectRoot: 'G:/proj/pr', permissionMode: 'auto' },
+      cwd: 'G:/proj/pr/.vocs-code/worktrees/wt',
+      worktreeBranch: 'harness/pr-session',
+      status: 'pr',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    const upsert = vi.fn();
+    const published: SessionMeta[][] = [];
+    const store = {
+      list: () => [session],
+      get: (id: string) => (id === session.id ? session : undefined),
+      upsert
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: (list) => published.push(list),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: true });
+    try {
+      manager.refreshGitState(session.id);
+      expect(session.status).toBe('pr'); // not flipped synchronously
+      await vi.advanceTimersByTimeAsync(2_000); // 1s check delay + the 300ms debounced persist
+      expect(session.status).toBe('merged');
+      expect(published.length).toBeGreaterThan(0);
+      expect(upsert).toHaveBeenCalled();
+    } finally {
+      vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: false });
+      vi.useRealTimers();
+    }
   });
 });
 

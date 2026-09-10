@@ -317,8 +317,17 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
   handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));
-  handle('git:pr', ({ sessionId, base }) => gitCreatePr(cwdOf(sessionId), base));
-  handle('git:merge', ({ sessionId, base }) => gitMergePr(cwdOf(sessionId), base));
+  // Local /pr and /merge run outside a turn, so nothing else triggers the sidebar's PR state check.
+  handle('git:pr', async ({ sessionId, base }) => {
+    const r = await gitCreatePr(cwdOf(sessionId), base);
+    if (r.ok) sessions.refreshGitState(sessionId);
+    return r;
+  });
+  handle('git:merge', async ({ sessionId, base }) => {
+    const r = await gitMergePr(cwdOf(sessionId), base);
+    if (r.ok) sessions.refreshGitState(sessionId);
+    return r;
+  });
   handle('git:branches', ({ sessionId }) => gitBranches(cwdOf(sessionId)));
   handle('git:worktrees', ({ sessionId }) => gitWorktrees(cwdOf(sessionId)));
   handle('git:checkout', ({ sessionId, branch }) => gitCheckout(cwdOf(sessionId), branch));
