@@ -154,6 +154,75 @@ export function Modal({ title, onClose, children, width = 720, footer }: { title
   );
 }
 
+export interface ConfirmOptions {
+  title: string;
+  body?: React.ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  /** Styles the confirming button as destructive. */
+  danger?: boolean;
+}
+
+type PendingConfirm = ConfirmOptions & { resolve: (ok: boolean) => void };
+
+let confirmHost: ((p: PendingConfirm | null) => void) | null = null;
+let confirmOpen = false;
+
+/**
+ * Replaces window.confirm, which must never be used here: Electron answers it with a native message
+ * box that disables the whole window until it is dismissed, so a dialog the user does not notice
+ * looks exactly like a frozen app — no clicks, no typing, no dropdowns.
+ */
+export function askConfirm(options: ConfirmOptions): Promise<boolean> {
+  if (!confirmHost || confirmOpen) return Promise.resolve(false);
+  confirmOpen = true;
+  return new Promise<boolean>((resolve) => {
+    confirmHost?.({
+      ...options,
+      resolve: (ok) => {
+        confirmOpen = false;
+        resolve(ok);
+      }
+    });
+  });
+}
+
+/** Mounted once by App; renders whatever askConfirm is currently waiting on. */
+export function ConfirmHost() {
+  const [pending, setPending] = useState<PendingConfirm | null>(null);
+  useEffect(() => {
+    confirmHost = setPending;
+    return () => {
+      confirmHost = null;
+    };
+  }, []);
+  if (!pending) return null;
+  const answer = (ok: boolean) => {
+    setPending(null);
+    pending.resolve(ok);
+  };
+  return (
+    <Modal
+      title={pending.title}
+      width={460}
+      onClose={() => answer(false)}
+      footer={
+        <>
+          <span className="spacer" />
+          <Button size="sm" onClick={() => answer(false)}>
+            {pending.cancelLabel ?? 'Cancel'}
+          </Button>
+          <Button size="sm" variant={pending.danger ? 'danger' : 'primary'} autoFocus onClick={() => answer(true)}>
+            {pending.confirmLabel ?? 'Confirm'}
+          </Button>
+        </>
+      }
+    >
+      {pending.body ?? null}
+    </Modal>
+  );
+}
+
 export function Field({ label, hint, children, inline }: { label: React.ReactNode; hint?: React.ReactNode; children: React.ReactNode; inline?: boolean }) {
   return (
     <label className={`field ${inline ? 'field-inline' : ''}`}>

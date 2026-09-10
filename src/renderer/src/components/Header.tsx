@@ -6,7 +6,7 @@ import { invoke } from '../api';
 import { basename, fmtCost, fmtTokens } from '../format';
 import { useSessionModels } from '../models';
 import { useStore } from '../store';
-import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
+import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
 import { ModelPicker } from './ModelPicker';
 import { harnessShort } from './Sidebar';
 
@@ -264,7 +264,17 @@ export function Header({ session }: { session: SessionMeta }) {
               <MenuItem onClick={() => { close(); void invoke('sessions:fork', { id: session.id }).then((f) => f && useStore.getState().setActive(f.id)); }}>Fork session</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('app:openInEditor', { path: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error')); }}>Open in editor</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('app:openTerminal', { cwd: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error')); }}>Open terminal here</MenuItem>
-              <MenuItem onClick={() => { close(); if (confirm('Clear the visible transcript? Harness state is kept.')) { void invoke('sessions:clearTranscript', { id: session.id }); useStore.getState().clearTranscriptLocal(session.id); } }}>Clear transcript</MenuItem>
+              <MenuItem
+                onClick={async () => {
+                  close();
+                  const ok = await askConfirm({ title: 'Clear the visible transcript?', body: 'The harness keeps its own state; only what you see here is removed.', confirmLabel: 'Clear' });
+                  if (!ok) return;
+                  void invoke('sessions:clearTranscript', { id: session.id });
+                  useStore.getState().clearTranscriptLocal(session.id);
+                }}
+              >
+                Clear transcript
+              </MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:stop', { id: session.id }); }} disabled={session.status === 'idle' && !busy}>Stop harness process</MenuItem>
             </>
           )}

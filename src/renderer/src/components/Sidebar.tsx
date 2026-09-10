@@ -6,7 +6,7 @@ import { invoke } from '../api';
 import { basename, fmtCost, relTime } from '../format';
 import { useStore } from '../store';
 import { Resizer } from './Resizer';
-import { Badge, Button, Dropdown, Icon, MenuItem, StatusLabel } from './ui';
+import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, StatusLabel } from './ui';
 
 const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
   claude: 'amber',
@@ -176,7 +176,23 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
               <MenuItem onClick={() => { close(); void invoke('app:openPath', { path: s.cwd, sessionId: s.id }); }}>Open folder</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:stop', { id: s.id }); }} disabled={s.status === 'idle' || s.status === 'stopped'}>Stop process</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:archive', { id: s.id, archived: !s.archived }); }}>{s.archived ? 'Unarchive' : 'Archive'}</MenuItem>
-              <MenuItem danger onClick={() => { close(); if (confirm(`Delete session "${s.title}"?${s.worktreeBranch ? '\n\nIts worktree will also be removed.' : ''}`)) void invoke('sessions:delete', { id: s.id, removeWorktree: !!s.worktreeBranch }); }}>Delete</MenuItem>
+              <MenuItem
+                danger
+                onClick={async () => {
+                  close();
+                  const ok = await askConfirm({
+                    title: `Delete session "${s.title}"?`,
+                    body: s.worktreeBranch
+                      ? `Its worktree and the branch ${s.worktreeBranch} are removed with it.`
+                      : 'Its transcript is removed. This cannot be undone.',
+                    confirmLabel: 'Delete',
+                    danger: true
+                  });
+                  if (ok) void invoke('sessions:delete', { id: s.id, removeWorktree: !!s.worktreeBranch });
+                }}
+              >
+                Delete
+              </MenuItem>
             </>
           )}
         </Dropdown>

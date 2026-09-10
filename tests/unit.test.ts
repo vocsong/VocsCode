@@ -553,3 +553,35 @@ describe('diagnostics', () => {
     expect(lines[0]).toMatch(/^warn slow slow op: \d+ms$/);
   });
 });
+
+describe('renderer dialogs', () => {
+  // Electron answers window.confirm/alert/prompt with a native message box that disables the whole
+  // window until it is dismissed. A dialog the user does not notice is indistinguishable from a
+  // frozen app: no clicks, no typing, no dropdowns, and nothing in the logs. Use askConfirm instead.
+  const NATIVE_CALL = /(^|[^A-Za-z0-9_.$])(confirm|alert|prompt)[(]/;
+  const VIA_WINDOW = /window[.](confirm|alert|prompt)[(]/;
+
+  it('never calls a native window dialog', async () => {
+    const root = path.resolve(__dirname, '..', 'src', 'renderer', 'src');
+    const files: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) await walk(full);
+        else if (e.name.endsWith('.ts') || e.name.endsWith('.tsx')) files.push(full);
+      }
+    };
+    await walk(root);
+    expect(files.length).toBeGreaterThan(10);
+
+    const offenders: string[] = [];
+    for (const file of files) {
+      const lines = (await fs.readFile(file, 'utf8')).split('\n');
+      lines.forEach((line, i) => {
+        const flat = line.split(' ').join('');
+        if (NATIVE_CALL.test(flat) || VIA_WINDOW.test(flat)) offenders.push(`${path.basename(file)}:${i + 1} ${line.trim()}`);
+      });
+    }
+    expect(offenders).toEqual([]);
+  });
+});

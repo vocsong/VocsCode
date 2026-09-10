@@ -12,7 +12,7 @@ import { SettingsView } from './components/SettingsView';
 import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
-import { Button, EmptyState, Icon, Kbd, Spinner } from './components/ui';
+import { Button, ConfirmHost, EmptyState, Icon, Kbd, Spinner } from './components/ui';
 import { createTerminal } from './terminal/host';
 import { applyTheme } from './theme';
 
@@ -143,6 +143,7 @@ export function App() {
       </div>
       {newSessionOpen && <NewSessionDialog />}
       {paletteOpen && <CommandPalette />}
+      <ConfirmHost />
       <div className="toasts">
         {toasts.map((t) => (
           <div key={t.id} className={`toast toast-${t.kind}`} onClick={() => useStore.getState().dismissToast(t.id)}>
