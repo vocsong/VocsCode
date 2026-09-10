@@ -17,8 +17,10 @@ function gitReply(args: string[], res: { code: number; stdout?: string; stderr?:
   runCapture.mockImplementation((cmd: string, args2: string[]) => replies.get(`${cmd} ${JSON.stringify(args2)}`) ?? { code: 1, stdout: '', stderr: 'unexpected call' });
 }
 
-/** The three merge-base probes branchGitState makes against base branches. */
-const mergeBase = (base: string) => ['merge-base', '--is-ancestor', 'work', base];
+const TIP = 'abc123';
+
+/** The per-base merge-commit scans branchGitState makes when gh is unavailable. */
+const mergeScan = (base: string) => ['log', base, '--merges', '--format=%P', '-n', '200'];
 
 describe('branchGitState', () => {
   beforeEach(() => {
@@ -35,13 +37,31 @@ describe('branchGitState', () => {
 
   it('marks a branch whose merge commit landed on a base branch as merged', async () => {
     gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
-    gitReply(mergeBase('develop'), { code: 0 });
+    gitReply(['rev-parse', '--verify', 'work'], { code: 0, stdout: `${TIP}\n` });
+    gitReply(mergeScan('develop'), { code: 0, stdout: `deadbeef ${TIP}\n` });
     expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: true });
+  });
+
+  it('does not mark a fresh branch sitting at the base tip as merged', async () => {
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    gitReply(['rev-parse', '--verify', 'work'], { code: 0, stdout: `${TIP}\n` });
+    for (const base of ['develop', 'master', 'main']) gitReply(mergeScan(base), { code: 0, stdout: '' });
+    gitReply(['rev-parse', '--verify', '--quiet', 'origin/work'], { code: 1 });
+    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false });
+  });
+
+  it('does not mark a branch merely behind a base branch as merged', async () => {
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    gitReply(['rev-parse', '--verify', 'work'], { code: 0, stdout: `${TIP}\n` });
+    for (const base of ['develop', 'master', 'main']) gitReply(mergeScan(base), { code: 0, stdout: 'aaa bbb\n' });
+    gitReply(['rev-parse', '--verify', '--quiet', 'origin/work'], { code: 1 });
+    expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false });
   });
 
   it('falls back to remote tracking for a pushed branch when gh is missing', async () => {
     gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
-    for (const base of ['develop', 'master', 'main']) gitReply(mergeBase(base), { code: 1 });
+    gitReply(['rev-parse', '--verify', 'work'], { code: 0, stdout: `${TIP}\n` });
+    for (const base of ['develop', 'master', 'main']) gitReply(mergeScan(base), { code: 0, stdout: '' });
     gitReply(['rev-parse', '--verify', '--quiet', 'origin/work'], { code: 0 });
     gitReply(['rev-list', '--count', 'origin/work..work'], { code: 0, stdout: '0\n' });
     expect(await branchGitState('/repo', 'work')).toEqual({ pr: true, merged: false });
@@ -49,7 +69,8 @@ describe('branchGitState', () => {
 
   it('treats local-only commits as neither PR nor merged', async () => {
     gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
-    for (const base of ['develop', 'master', 'main']) gitReply(mergeBase(base), { code: 1 });
+    gitReply(['rev-parse', '--verify', 'work'], { code: 0, stdout: `${TIP}\n` });
+    for (const base of ['develop', 'master', 'main']) gitReply(mergeScan(base), { code: 1 });
     gitReply(['rev-parse', '--verify', '--quiet', 'origin/work'], { code: 1 });
     expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: false });
   });
