@@ -43,6 +43,8 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
     await fs.mkdir(userData, { recursive: true });
     await fs.mkdir(project, { recursive: true });
     await fs.writeFile(path.join(project, 'README.md'), '# terminal project\n');
+    // Seed the sidebar's folder list so the project has a new-session button without the native folder picker.
+    await fs.writeFile(path.join(userData, 'settings.json'), JSON.stringify({ folders: [project], recentProjects: [project] }));
     await fs.mkdir(shots, { recursive: true });
 
     const env: Record<string, string> = {};
@@ -74,14 +76,19 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
 
     try {
       // A session with no prompt: nothing is sent to a harness, so this runs without any API key.
-      await win.click('.sidebar-top button:has-text("New")');
+      await win.click('.project-new-btn');
       await win.waitForSelector('.modal');
-      await win.fill('.ns-grid input[placeholder*="repo"]', project);
       await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
 
-      // Opening the tab spawns a shell; xterm mounts with its hidden textarea.
+      // A `!` draft with no terminal yet opens one and runs the command there; the agent is not involved.
+      await win.fill('.composer textarea', '!echo first-bang > first-bang.txt');
+      await win.press('.composer textarea', 'Enter');
+      const firstBang = await waitForFile(path.join(project, 'first-bang.txt'), 20_000);
+      expect(firstBang.replace(/\0|﻿|�/g, '')).toMatch(/first-bang/);
+
+      // The Terminal tab now shows that shell; xterm mounts with its hidden textarea.
       await win.click('.panel-tab:has-text("Terminal")');
       await win.waitForSelector('.term-tab', { timeout: 20_000 });
       await win.waitForSelector('.term-view .xterm .xterm-helper-textarea', { timeout: 20_000 });
@@ -102,6 +109,14 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.click('button[aria-label="Send output to agent"]');
       await expect.poll(async () => win.locator('.composer textarea').inputValue(), { timeout: 10_000 }).toMatch(/Terminal output \(.*\):\n```\n[\s\S]*vocs-marker\.txt[\s\S]*\n```/);
       await win.fill('.composer textarea', ''); // leave the composer as we found it
+
+      // A draft starting with ! runs in the session's terminal instead of going to the agent.
+      await win.fill('.composer textarea', '!echo bang-ok > bang-marker.txt');
+      await win.press('.composer textarea', 'Enter');
+      const bang = await waitForFile(path.join(project, 'bang-marker.txt'), 20_000);
+      expect(bang.replace(/\0|﻿|�/g, '')).toMatch(/bang-ok/);
+      await expect.poll(async () => win.locator('.composer textarea').inputValue(), { timeout: 10_000 }).toBe('');
+      expect(await win.locator('.term-tab').count()).toBe(1); // reused the open terminal rather than spawning one
 
       // A second tab, then a renderer reload: the shells live in main and come back.
       await win.click('.term-new button[aria-label="New terminal"]');
