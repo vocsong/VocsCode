@@ -64,7 +64,7 @@ async function main(): Promise<void> {
   const store = new SessionStore(userData);
   await store.load();
   const analytics = new AnalyticsStore(userData, { log });
-  await analytics.load(store.list());
+  await analytics.load(store.list(), (id) => store.readTranscript(id));
 
   // out/main/index.js → two levels up is the app root both in development and inside app.asar.
   // (app.getAppPath() returns out/main when launched as `electron out/main/index.js`.)

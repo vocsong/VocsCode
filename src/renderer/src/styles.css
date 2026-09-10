@@ -2909,3 +2909,6 @@ body.resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.tool-usage-row .breakdown-bar {
+  flex: 0 1 200px;
+}

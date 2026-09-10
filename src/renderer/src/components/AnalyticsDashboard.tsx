@@ -15,7 +15,7 @@ const RANGES: [Range, string][] = [
   [0, 'All']
 ];
 
-type Metric = 'cost' | 'tokens';
+type Metric = 'cost' | 'tokens' | 'calls';
 
 export function AnalyticsDashboard() {
   const setView = useStore((s) => s.setView);
@@ -61,9 +61,10 @@ export function AnalyticsDashboard() {
         costUsd: acc.costUsd + d.usage.costUsd,
         turns: acc.turns + d.usage.turns,
         durationMs: acc.durationMs + d.usage.durationMs,
+        toolCalls: acc.toolCalls + d.usage.toolCalls,
         tokens: acc.tokens + d.usage.inputTokens + d.usage.outputTokens + d.usage.cacheReadTokens + d.usage.cacheWriteTokens
       }),
-      { costUsd: 0, turns: 0, durationMs: 0, tokens: 0 }
+      { costUsd: 0, turns: 0, durationMs: 0, toolCalls: 0, tokens: 0 }
     );
     return {
       ...usage,
@@ -106,11 +107,13 @@ export function AnalyticsDashboard() {
               <Stat label={`Cost · last ${rangeLabel(range)}`} value={fmtCost(rangeStats.costUsd)} />
               <Stat label="Sessions" value={String(summary.sessionCount)} />
               <Stat label="Turns" value={String(rangeStats.turns)} />
+              <Stat label="Tool calls" value={String(rangeStats.toolCalls)} />
               <Stat label="Avg cost / turn" value={fmtCost(rangeStats.avgTurnUsd)} />
               <Stat label="Avg turn duration" value={fmtDuration(rangeStats.avgTurnMs)} />
               <Stat label="Input tokens" value={fmtTokens(summary.totals.inputTokens)} />
               <Stat label="Output tokens" value={fmtTokens(summary.totals.outputTokens)} />
               <Stat label="Cache tokens" value={fmtTokens(summary.totals.cacheReadTokens + summary.totals.cacheWriteTokens)} />
+              <Stat label="Tools all-time" value={String(summary.toolTotals.calls)} sub={summary.toolTotals.errors ? `${summary.toolTotals.errors} errors · ${summary.toolTotals.declined} declined` : undefined} />
               <Stat label="Active days" value={String(summary.activeDays)} />
             </div>
 
@@ -124,6 +127,9 @@ export function AnalyticsDashboard() {
                 <button type="button" className={`segment ${metric === 'tokens' ? 'active' : ''}`} onClick={() => setMetric('tokens')}>
                   Tokens
                 </button>
+                <button type="button" className={`segment ${metric === 'calls' ? 'active' : ''}`} onClick={() => setMetric('calls')}>
+                  Tool calls
+                </button>
               </div>
             </div>
             <DayChart days={summary.days} metric={metric} />
@@ -132,6 +138,12 @@ export function AnalyticsDashboard() {
             <Breakdown title="By harness" buckets={summary.byHarness} />
             <Breakdown title="By model" buckets={summary.byModel} formatLabel={(b) => b.label} />
             <Breakdown title="By project" buckets={summary.byProject} formatLabel={(b) => basename(b.label)} />
+
+            <h4>Tool calls</h4>
+            <ToolTable tools={summary.tools} totals={summary.toolTotals} />
+
+            <h4>Files changed</h4>
+            <FileTable files={summary.files} />
 
             <h4>Sessions</h4>
             <SessionTable summary={summary} />
@@ -146,17 +158,20 @@ function rangeLabel(range: Range): string {
   return range === 0 ? 'all time' : `${range} days`;
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="stat">
       <div className="stat-value">{value}</div>
       <div className="stat-label">{label}</div>
+      {sub && <div className="stat-label">{sub}</div>}
     </div>
   );
 }
 
 function DayChart({ days, metric }: { days: AnalyticsSummary['days']; metric: Metric }) {
-  const values = days.map((d) => (metric === 'cost' ? d.usage.costUsd : d.usage.inputTokens + d.usage.outputTokens + d.usage.cacheReadTokens + d.usage.cacheWriteTokens));
+  const values = days.map((d) =>
+    metric === 'cost' ? d.usage.costUsd : metric === 'calls' ? d.usage.toolCalls : d.usage.inputTokens + d.usage.outputTokens + d.usage.cacheReadTokens + d.usage.cacheWriteTokens
+  );
   const max = Math.max(0.0001, ...values);
   if (days.length === 0) return <div className="muted small">No usage recorded in this range yet.</div>;
   return (
@@ -165,7 +180,7 @@ function DayChart({ days, metric }: { days: AnalyticsSummary['days']; metric: Me
         <div
           key={d.date}
           className="day-bar-col"
-          title={`${d.date} · ${fmtCost(d.usage.costUsd)} · ${fmtTokens(d.usage.inputTokens + d.usage.outputTokens + d.usage.cacheReadTokens + d.usage.cacheWriteTokens)} tokens · ${d.usage.turns} turns`}
+          title={`${d.date} · ${fmtCost(d.usage.costUsd)} · ${fmtTokens(d.usage.inputTokens + d.usage.outputTokens + d.usage.cacheReadTokens + d.usage.cacheWriteTokens)} tokens · ${d.usage.turns} turns · ${d.usage.toolCalls} tool calls`}
         >
           <div className="day-bar" style={{ height: `${Math.max(2, (values[i] / max) * 100)}%` }} />
           <div className="day-bar-label">{d.date.slice(8)}</div>
@@ -189,7 +204,7 @@ function Breakdown({ title, buckets, formatLabel }: { title: string; buckets: Us
               <span style={{ width: `${Math.max(2, (b.usage.costUsd / max) * 100)}%` }} />
             </span>
             <span className="mono">{fmtCost(b.usage.costUsd)}</span>
-            <span className="muted small mono">{fmtTokens(b.usage.inputTokens + b.usage.outputTokens)} · {b.sessions} session{b.sessions === 1 ? '' : 's'}</span>
+            <span className="muted small mono">{fmtTokens(b.usage.inputTokens + b.usage.outputTokens)} · {b.toolCalls} calls · {b.sessions} session{b.sessions === 1 ? '' : 's'}</span>
           </div>
         ))}
       </div>
@@ -218,10 +233,64 @@ function SessionTable({ summary }: { summary: AnalyticsSummary }) {
             <span className="mono">{fmtCost(s.usage.costUsd)}</span>
             <span className="muted small mono">{fmtTokens(s.usage.inputTokens + s.usage.outputTokens)} in/out</span>
             <span className="muted small mono">{s.usage.turns} turns</span>
+            <span className="muted small mono">{s.toolCalls} calls</span>
           </div>
         );
       })}
       {summary.sessions.length > 50 && <div className="muted small">Showing top 50 of {summary.sessions.length} sessions by cost.</div>}
+    </div>
+  );
+}
+
+function ToolTable({ tools, totals }: { tools: AnalyticsSummary['tools']; totals: AnalyticsSummary['toolTotals'] }) {
+  if (tools.length === 0) return <div className="muted small">No tool calls recorded yet.</div>;
+  const max = Math.max(0.0001, ...tools.map((t) => t.calls));
+  return (
+    <>
+      <div className="muted small">
+        {totals.calls} call{totals.calls === 1 ? '' : 's'} · {totals.errors} error{totals.errors === 1 ? '' : 's'} · {totals.declined} declined · avg {fmtDuration(totals.durationMs / Math.max(1, totals.calls))}
+      </div>
+      <div className="session-usage-list">
+        {tools.map((t) => (
+          <div key={t.name} className="session-usage-row tool-usage-row">
+            <div className="session-usage-main">
+              <span className="session-usage-title mono">{t.name}</span>
+              <span className="muted small">
+                avg {fmtDuration(t.durationMs / Math.max(1, t.calls))}
+                {t.errors ? ` · ${t.errors} error${t.errors === 1 ? '' : 's'}` : ''}
+                {t.declined ? ` · ${t.declined} declined` : ''}
+              </span>
+            </div>
+            <span className="breakdown-bar">
+              <span style={{ width: `${Math.max(2, (t.calls / max) * 100)}%` }} />
+            </span>
+            <span className="mono">{t.calls}×</span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function FileTable({ files }: { files: AnalyticsSummary['files'] }) {
+  if (files.length === 0) return <div className="muted small">No file changes recorded yet.</div>;
+  return (
+    <div className="session-usage-list">
+      {files.slice(0, 25).map((f) => (
+        <div key={f.path} className="session-usage-row tool-usage-row" title={f.path}>
+          <div className="session-usage-main">
+            <span className="session-usage-title mono" title={f.path}>{f.path}</span>
+            <span className="muted small">
+              {f.updates > 0 && `${f.updates} modified`}
+              {f.adds > 0 && `${f.updates > 0 ? ' · ' : ''}${f.adds} added`}
+              {f.deletes > 0 && `${f.updates + f.adds > 0 ? ' · ' : ''}${f.deletes} deleted`}
+              {f.renames > 0 && `${f.updates + f.adds + f.deletes > 0 ? ' · ' : ''}${f.renames} renamed`}
+            </span>
+          </div>
+          <span className="mono">{f.total}×</span>
+        </div>
+      ))}
+      {files.length > 25 && <div className="muted small">Showing top 25 of {files.length} files by change count.</div>}
     </div>
   );
 }

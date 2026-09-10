@@ -460,6 +460,8 @@ export class SessionManager {
         const streaming = item.kind === 'assistant' && item.streaming;
         if (!streaming || !active) this.appendTranscript(sessionId, item);
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
+        // Tool calls are recorded once, when they leave the running state.
+        if (item.kind === 'tool' && item.status !== 'running') this.deps.analytics.recordToolCall(sessionId, item);
         break;
       }
       case 'item.delta': {
