@@ -1,4 +1,5 @@
 /** Electron entry point: app lifecycle, window creation, logging, and the headless debug hooks documented in the README. */
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, shell } from 'electron';
@@ -65,6 +66,7 @@ async function main(): Promise<void> {
   // out/main/index.js → two levels up is the app root both in development and inside app.asar.
   // (app.getAppPath() returns out/main when launched as `electron out/main/index.js`.)
   const appRoot = path.resolve(here, '..', '..');
+  registerAppUserModelId(appRoot);
   const runtime = new RuntimeResolver(
     {
       appRuntimeDir: path.join(userData, 'runtime'),
@@ -153,6 +155,24 @@ function appIconPath(appRoot: string): string {
   const iconName = process.platform === 'win32' ? 'vocs-code.ico' : 'vocs-code.png';
   const iconRoot = app.isPackaged ? path.join(process.resourcesPath, 'icons') : path.join(appRoot, 'resources', 'icons');
   return path.join(iconRoot, iconName);
+}
+
+/** Write the AUMID's DisplayName/IconUri so the Windows taskbar menu shows the product name, not 'Electron'. */
+function registerAppUserModelId(appRoot: string): void {
+  if (process.platform !== 'win32') return;
+  const key = `HKCU\\Software\\Classes\\AppUserModelId\\${APP_ID}`;
+  const values: Array<[string, string]> = [
+    ['DisplayName', APP_NAME],
+    ['IconUri', appIconPath(appRoot)]
+  ];
+  for (const [name, data] of values) {
+    const child = spawn('reg', ['add', key, '/f', '/v', name, '/t', 'REG_SZ', '/d', data], {
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    // Best effort: a missing or blocked reg.exe only costs the menu title, nothing else.
+    child.on('error', () => {});
+  }
 }
 
 /** Title bar height in CSS pixels; must match --titlebar in styles.css. */
