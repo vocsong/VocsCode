@@ -7,6 +7,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
 import { registerIpc, pushToRenderer } from './ipc';
+import { AnalyticsStore } from './analytics';
 import { RuntimeResolver } from './runtime';
 import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
@@ -65,6 +66,8 @@ async function main(): Promise<void> {
   await secrets.load();
   const store = new SessionStore(userData);
   await store.load();
+  const analytics = new AnalyticsStore(userData, { log });
+  await analytics.load(store.list(), (id) => store.readTranscript(id));
 
   // out/main/index.js → two levels up is the app root both in development and inside app.asar.
   // (app.getAppPath() returns out/main when launched as `electron out/main/index.js`.)
@@ -83,6 +86,7 @@ async function main(): Promise<void> {
     store,
     settings,
     runtime,
+    analytics,
     getSecret: (id) => secrets.get(id),
     pushEvent: (env: SessionEventEnvelope) => pushToRenderer(mainWindow, PUSH_CHANNELS.sessionEvent, env),
     pushSessions: (list: SessionMeta[]) => pushToRenderer(mainWindow, PUSH_CHANNELS.sessionsChanged, list),
@@ -112,7 +116,7 @@ async function main(): Promise<void> {
   });
   await terminals.load();
 
-  registerIpc({ settings, secrets, sessions, terminals, runtime, getWindow: () => mainWindow, log });
+  registerIpc({ settings, secrets, sessions, terminals, runtime, analytics, getWindow: () => mainWindow, log });
 
   settings.onChange((s) => {
     currentTheme = s.theme;
@@ -148,7 +152,7 @@ async function main(): Promise<void> {
     quitting = true;
     e.preventDefault();
     // Drain debounced session-meta persists after the sessions themselves are stopped.
-    const drainSessions = sessions ? sessions.stopAll().then(() => sessions?.flushPendingPersists()) : Promise.resolve();
+    const drainSessions = sessions ? sessions.stopAll().then(() => sessions?.flushPendingPersists()).then(() => analytics.flush()) : Promise.resolve();
     Promise.race([Promise.all([drainSessions, terminals?.shutdown()]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
   });
 }
