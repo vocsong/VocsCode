@@ -25,6 +25,8 @@ import type { AppSettings, ModelInfo, SessionEvent, SessionMeta, TranscriptItem 
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
 import { gitBranches, gitCheckout, gitWorktrees } from '../src/main/git';
+import { createLogger } from '../src/main/log';
+import { timed, watchEventLoop } from '../src/main/diag';
 
 // Stub Electron's safeStorage so SecretStore is testable in plain node. Mutable flag lets the
 // unavailable-encryption fallback path be exercised without re-declaring the mock.
@@ -500,5 +502,54 @@ describe('git branch/worktree plumbing', () => {
     // From inside the worktree, that worktree is "current".
     const fromWt = await gitWorktrees(wtDir);
     expect(fromWt.current).toBe(path.resolve(wtDir));
+  });
+});
+
+describe('diagnostics', () => {
+  const diagRoot = path.join(os.tmpdir(), `vocs-diag-${Date.now()}`);
+  afterAll(async () => {
+    await fs.rm(diagRoot, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  it('writes every level to the log file and gates debug behind the flag', async () => {
+    const dir = path.join(diagRoot, 'logs-quiet');
+    const quiet = createLogger(dir, false);
+    quiet.log('debug', 'hidden');
+    quiet.log('info', 'shown');
+    quiet.log('warn', 'careful');
+    await new Promise((r) => setTimeout(r, 50));
+    const text = await fs.readFile(path.join(dir, 'main.log'), 'utf8');
+    expect(quiet.file).toBe(path.join(dir, 'main.log'));
+    expect(text).not.toContain('hidden');
+    expect(text).toContain('INFO shown');
+    expect(text).toContain('WARN careful');
+
+    const loud = createLogger(path.join(diagRoot, 'logs-debug'), true);
+    loud.log('debug', 'visible');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await fs.readFile(path.join(diagRoot, 'logs-debug', 'main.log'), 'utf8')).toContain('DEBUG visible');
+  });
+
+  it('reports an event loop stall and stays quiet while the loop is free', async () => {
+    const lines: string[] = [];
+    const w = watchEventLoop((level, message) => lines.push(`${level} ${message}`), 10, 60);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(lines).toHaveLength(0);
+    const until = Date.now() + 150;
+    while (Date.now() < until) {
+      /* block the loop the way a synchronous main-process call would */
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    w.stop();
+    expect(lines.some((l) => l.startsWith('warn') && /main event loop stalled \d+ms/.test(l))).toBe(true);
+  });
+
+  it('timed logs only past the threshold and passes the value through', async () => {
+    const lines: string[] = [];
+    const log = (level: 'debug' | 'info' | 'warn' | 'error', message: string) => lines.push(`${level} ${message}`);
+    expect(await timed(log, 'fast op', 1000, () => 7)).toBe(7);
+    expect(lines).toHaveLength(0);
+    await timed(log, 'slow op', 10, () => new Promise((r) => setTimeout(r, 40)));
+    expect(lines[0]).toMatch(/^warn slow slow op: \d+ms$/);
   });
 });

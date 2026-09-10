@@ -76,6 +76,25 @@ npm run dist:dir && HARNESS_E2E=1 HARNESS_E2E_EXE="$PWD/dist/win-unpacked/Vocs C
 
 Screenshots from the e2e runs land in `tests/artifacts/`. `npm run dist:win` produces `dist/Vocs-Code-<version>-win-x64.exe` (NSIS) plus `dist/win-unpacked/`.
 
+## Logs
+
+The main process writes every line it logs to `<userData>/logs/main.log` (2 MB, one rotated
+`main.log.1` behind it) as well as the console:
+
+| Platform | Path |
+| --- | --- |
+| Windows | `%APPDATA%\Vocs Code\logs\main.log` |
+| macOS | `~/Library/Application Support/Vocs Code/logs/main.log` |
+| Linux | `~/.config/Vocs Code/logs/main.log` |
+
+Warnings worth grepping for when the window stops responding:
+
+- `main event loop stalled <n>ms` — the main process blocked, which is the same thing as a window
+  that dispatches no clicks or keystrokes. The line before it usually names the cause.
+- `renderer longtask|input-delay|loop-lag <n>ms` — the renderer blocked instead: one script task ran
+  too long (typically an unbounded render), so input queued behind it.
+- `slow ipc <channel>: <n>ms` — one IPC handler held the main process that long.
+
 ## Environment variables
 
 None of these are required to run the app; they exist for headless runs and the test suites.
