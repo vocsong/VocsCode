@@ -26,6 +26,7 @@ import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
 import type { SettingsStore } from './settings';
 import type { SessionStore } from './store';
+import type { AnalyticsStore } from './analytics';
 import { deferred, errorMessage, shortId, type Deferred } from './util/async';
 import { readJson, writeJson } from './util/fs';
 
@@ -33,6 +34,7 @@ export interface SessionManagerDeps {
   store: SessionStore;
   settings: SettingsStore;
   runtime: RuntimeResolver;
+  analytics: AnalyticsStore;
   getSecret: (providerId: string) => Promise<string | undefined>;
   pushEvent: (env: SessionEventEnvelope) => void;
   pushSessions: (sessions: SessionMeta[]) => void;
@@ -147,6 +149,7 @@ export class SessionManager {
       };
     }
     await this.deps.store.upsert(meta);
+    this.deps.analytics.touchSession(meta);
     const recent = [cfg.projectRoot, ...s.recentProjects.filter((p) => p !== cfg.projectRoot)].slice(0, 12);
     await this.deps.settings.update({ recentProjects: recent });
     this.pushSessions();
@@ -497,6 +500,7 @@ export class SessionManager {
       case 'usage':
         if (meta) {
           meta.usage = event.totals;
+          this.deps.analytics.recordUsage(meta, event.totals);
           this.schedulePersist(meta);
           this.pushSessions();
         }
@@ -549,6 +553,7 @@ export class SessionManager {
   }
 
   private onTurnFinished(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>): void {
+    if (turn.status === 'completed') this.deps.analytics.recordTurn(meta, turn.durationMs ?? 0);
     const active = this.active.get(meta.id);
     if (this.settings().notifications && turn.status !== 'interrupted') {
       this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);

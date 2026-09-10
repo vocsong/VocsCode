@@ -8,6 +8,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
+import type { AnalyticsStore } from './analytics';
 import { gitCommit, gitDiff, gitRevertFile, gitStageAll, gitSummary } from './git';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
@@ -27,6 +28,7 @@ export interface IpcDeps {
   sessions: SessionManager;
   terminals: TerminalManager;
   runtime: RuntimeResolver;
+  analytics: AnalyticsStore;
   getWindow: () => BrowserWindow | null;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }
@@ -280,6 +282,8 @@ export function registerIpc(deps: IpcDeps): void {
   handle('sessions:goal', ({ id, action, objective, autoContinue, maxIterations }) => sessions.goal(id, action, { objective, autoContinue, maxIterations }));
 
   handle('approvals:respond', ({ sessionId, requestId, decision }) => sessions.respondApproval(sessionId, requestId, decision));
+
+  handle('analytics:summary', (req) => deps.analytics.summary(req && typeof req === 'object' ? req.days ?? 30 : 30));
 
   const cwdOf = (sessionId: string) => {
     const m = sessions.get(sessionId);
