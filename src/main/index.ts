@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
+import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
 import { registerIpc, pushToRenderer } from './ipc';
 import { RuntimeResolver } from './runtime';
 import { SecretStore } from './secrets';
@@ -102,24 +103,19 @@ async function main(): Promise<void> {
   registerIpc({ settings, secrets, sessions, terminals, runtime, getWindow: () => mainWindow, log });
 
   settings.onChange((s) => {
-    nativeTheme.themeSource = s.theme;
+    currentTheme = s.theme;
+    nativeTheme.themeSource = themeSourceFor(s.theme);
+    // Two themes can share one themeSource (Midnight and Abyss are both 'dark'), so nativeTheme
+    // may stay silent on a switch — repaint the caption from the theme id directly.
+    applyChrome();
     terminals?.updateSettings(s.terminal);
   });
-  nativeTheme.themeSource = settings.get().theme;
+  currentTheme = settings.get().theme;
+  nativeTheme.themeSource = themeSourceFor(currentTheme);
 
   // The window is frameless with an in-app title bar; on Windows/Linux the OS still paints the caption
   // buttons over it, so their colors have to follow the theme.
-  nativeTheme.on('updated', () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    mainWindow.setBackgroundColor(chrome().color);
-    if (process.platform !== 'darwin') {
-      try {
-        mainWindow.setTitleBarOverlay(chrome());
-      } catch {
-        // Older/unsupported platforms simply keep the colors they were created with.
-      }
-    }
-  });
+  nativeTheme.on('updated', applyChrome);
 
   // No native menu bar: File/Edit/View/Help live in the custom title bar. macOS keeps its
   // application menu because the system requires one for the app menu and standard shortcuts.
@@ -145,10 +141,24 @@ async function main(): Promise<void> {
 /** Title bar height in CSS pixels; must match --titlebar in styles.css. */
 const TITLEBAR_HEIGHT = 36;
 
+/** The active theme id, so the native caption can follow themes the OS knows nothing about. */
+let currentTheme: ThemeId = 'system';
+
 /** Caption colors for the frameless title bar, matching the renderer's --bg-elev / --fg tokens. */
 function chrome(): { color: string; symbolColor: string; height: number } {
-  const dark = nativeTheme.shouldUseDarkColors;
-  return { color: dark ? '#191c23' : '#ffffff', symbolColor: dark ? '#e6e7ea' : '#1c1c1f', height: TITLEBAR_HEIGHT };
+  return { ...chromeFor(currentTheme, nativeTheme.shouldUseDarkColors), height: TITLEBAR_HEIGHT };
+}
+
+/** Repaints the window background and the OS-drawn caption buttons for the active theme. */
+function applyChrome(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setBackgroundColor(chrome().color);
+  if (process.platform === 'darwin') return;
+  try {
+    mainWindow.setTitleBarOverlay(chrome());
+  } catch {
+    // Older/unsupported platforms simply keep the colors they were created with.
+  }
 }
 
 function createWindow(settings: SettingsStore): void {
