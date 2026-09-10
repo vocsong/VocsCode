@@ -857,6 +857,9 @@ h4 {
   font-weight: 700;
   font-size: 14px;
 }
+.brand > .icon {
+  color: var(--accent);
+}
 .sidebar-search {
   display: flex;
   align-items: center;

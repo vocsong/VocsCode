@@ -52,7 +52,7 @@ export function Sidebar() {
     <aside className="sidebar">
       <div className="sidebar-top">
         <div className="brand">
-          <Icon name="sparkles" size={18} />
+          <Icon name="logo" size={18} />
           <span>Vocs Code</span>
         </div>
         <Button variant="primary" size="sm" icon="folder" onClick={() => void startNewSession()} title="New folder (Ctrl+N)">
@@ -119,7 +119,6 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
   };
   return (
     <div className={`session-row ${active ? 'active' : ''}`} onClick={onSelect} onDoubleClick={startRename}>
-      <StatusLabel status={s.status} />
       <div className="session-main">
         {renaming ? (
           <input
