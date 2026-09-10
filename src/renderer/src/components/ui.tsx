@@ -44,7 +44,8 @@ const ICONS: Record<string, string> = {
   alert: 'M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
   info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01',
   compact: 'M4 14h16M4 10h16M12 3l3 3-3 3M12 21l3-3-3-3',
-  download: 'M12 3v12M6 11l6 6 6-6M4 21h16'
+  download: 'M12 3v12M6 11l6 6 6-6M4 21h16',
+  star: 'M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5-5.9-3.2-5.9 3.2 1.2-6.5L2.5 9.4l6.6-.9z'
 };
 
 export function Icon({ name, size = 16, className }: { name: keyof typeof ICONS | string; size?: number; className?: string }) {

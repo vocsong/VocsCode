@@ -1,6 +1,6 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
-import type { AcpAgentPreset, AppSettings, ProviderConfig } from '../shared/types';
+import type { AcpAgentPreset, AppSettings, ModelRef, ProviderConfig } from '../shared/types';
 import { pruneModelOverrides } from '../shared/model-overrides';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
@@ -176,6 +176,7 @@ export function defaultSettings(): AppSettings {
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
     defaultModelByHarness: {},
+    favoriteModels: [],
     notifications: true,
     soundOnApproval: false,
     binaries: {},
@@ -209,6 +210,9 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     goalDefaults: { ...d.goalDefaults, ...(stored.goalDefaults ?? {}) },
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
+    favoriteModels: Array.isArray(stored.favoriteModels)
+      ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
+      : [],
     modelOverrides: pruneModelOverrides(stored.modelOverrides),
     providers: [],
     acpAgents: []
