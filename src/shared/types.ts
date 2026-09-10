@@ -416,6 +416,8 @@ export interface AppSettings {
   sidebarWidth: number;
   panelWidth: number;
   recentProjects: string[];
+  /** Project folders that stay in the sidebar even when they have no sessions left. */
+  folders: string[];
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
 }
