@@ -189,6 +189,7 @@ export function defaultSettings(): AppSettings {
     sidebarWidth: 280,
     panelWidth: 420,
     recentProjects: [],
+    folders: [],
     goalDefaults: { autoContinue: true, maxIterations: 25 },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] }
   };
@@ -210,6 +211,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     goalDefaults: { ...d.goalDefaults, ...(stored.goalDefaults ?? {}) },
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
+    folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     favoriteModels: Array.isArray(stored.favoriteModels)
       ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
       : [],

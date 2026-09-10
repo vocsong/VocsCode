@@ -1,12 +1,15 @@
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type {
+  AnalyticsSummary,
   ApprovalDecision,
   AppSettings,
   CreateSessionRequest,
   DoctorReport,
   EffortLevel,
   FsEntry,
+  GitBranchInfo,
   GitSummary,
+  GitWorktreeInfo,
   HarnessAvailability,
   HarnessId,
   ModelInfo,
@@ -82,10 +85,13 @@ export interface IpcContract {
   'sessions:clearTranscript': [{ id: string }, void];
   'sessions:export': [{ id: string }, { path: string | null }];
   'sessions:fork': [{ id: string }, SessionMeta | null];
+  'sessions:moveTo': [{ id: string; cwd: string }, SessionMeta];
   'sessions:goal': [
     { id: string; action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update'; objective?: string; autoContinue?: boolean; maxIterations?: number },
     SessionMeta
   ];
+
+  'analytics:summary': [{ days?: number } | void, AnalyticsSummary];
 
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 
@@ -98,6 +104,9 @@ export interface IpcContract {
   'git:pr': [{ sessionId: string; base: string }, { ok: boolean; url?: string; output?: string }];
   /** Merges the open PR for the session's branch; `base`, when given, must match the PR's target. */
   'git:merge': [{ sessionId: string; base?: string }, { ok: boolean; url?: string; output?: string }];
+  'git:branches': [{ sessionId: string }, { current?: string; branches: GitBranchInfo[] }];
+  'git:worktrees': [{ sessionId: string }, { current: string; worktrees: GitWorktreeInfo[] }];
+  'git:checkout': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];

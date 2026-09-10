@@ -7,6 +7,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
 import { registerIpc, pushToRenderer } from './ipc';
+import { AnalyticsStore } from './analytics';
 import { RuntimeResolver } from './runtime';
 import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
@@ -23,6 +24,9 @@ const APP_ID = 'dev.vocs.vocscode';
 // Set both before acquiring the single-instance lock so the taskbar uses the packaged identity too.
 app.setName(APP_NAME);
 if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
+// Isolate user data before the lock: the lock is keyed on userData, so an isolated run
+// (tests, a second checkout) must not collide with an instance using the default directory.
+if (process.env.VOCS_CODE_USER_DATA) app.setPath('userData', process.env.VOCS_CODE_USER_DATA);
 
 let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
@@ -37,6 +41,7 @@ function log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void 
 }
 
 if (!app.requestSingleInstanceLock()) {
+  log('warn', 'another Vocs Code instance is already running for this user-data directory; quitting');
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -52,8 +57,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function main(): Promise<void> {
-  // Test hooks: isolate user data and optionally quit after a delay.
-  if (process.env.VOCS_CODE_USER_DATA) app.setPath('userData', process.env.VOCS_CODE_USER_DATA);
+  // Test hooks: optionally quit after a delay. (The user-data override is applied before the lock above.)
   if (process.env.VOCS_CODE_AUTOQUIT) setTimeout(() => app.quit(), Number(process.env.VOCS_CODE_AUTOQUIT));
   const userData = app.getPath('userData');
   const settings = new SettingsStore(userData);
@@ -62,6 +66,8 @@ async function main(): Promise<void> {
   await secrets.load();
   const store = new SessionStore(userData);
   await store.load();
+  const analytics = new AnalyticsStore(userData, { log });
+  await analytics.load(store.list(), (id) => store.readTranscript(id));
 
   // out/main/index.js → two levels up is the app root both in development and inside app.asar.
   // (app.getAppPath() returns out/main when launched as `electron out/main/index.js`.)
@@ -80,6 +86,7 @@ async function main(): Promise<void> {
     store,
     settings,
     runtime,
+    analytics,
     getSecret: (id) => secrets.get(id),
     pushEvent: (env: SessionEventEnvelope) => pushToRenderer(mainWindow, PUSH_CHANNELS.sessionEvent, env),
     pushSessions: (list: SessionMeta[]) => pushToRenderer(mainWindow, PUSH_CHANNELS.sessionsChanged, list),
@@ -109,7 +116,7 @@ async function main(): Promise<void> {
   });
   await terminals.load();
 
-  registerIpc({ settings, secrets, sessions, terminals, runtime, getWindow: () => mainWindow, log });
+  registerIpc({ settings, secrets, sessions, terminals, runtime, analytics, getWindow: () => mainWindow, log });
 
   settings.onChange((s) => {
     currentTheme = s.theme;
@@ -145,7 +152,7 @@ async function main(): Promise<void> {
     quitting = true;
     e.preventDefault();
     // Drain debounced session-meta persists after the sessions themselves are stopped.
-    const drainSessions = sessions ? sessions.stopAll().then(() => sessions?.flushPendingPersists()) : Promise.resolve();
+    const drainSessions = sessions ? sessions.stopAll().then(() => sessions?.flushPendingPersists()).then(() => analytics.flush()) : Promise.resolve();
     Promise.race([Promise.all([drainSessions, terminals?.shutdown()]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
   });
 }

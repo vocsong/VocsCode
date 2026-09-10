@@ -49,9 +49,10 @@ const ICONS: Record<string, string> = {
   star: 'M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5-5.9-3.2-5.9 3.2 1.2-6.5L2.5 9.4l6.6-.9z'
 };
 
-export function Icon({ name, size = 16, className }: { name: keyof typeof ICONS | string; size?: number; className?: string }) {
+export function Icon({ name, size = 16, className, title }: { name: keyof typeof ICONS | string; size?: number; className?: string; title?: string }) {
   return (
-    <svg className={`icon ${className ?? ''}`} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg className={`icon ${className ?? ''}`} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden={title ? undefined : true}>
+      {title && <title>{title}</title>}
       <path d={ICONS[name] ?? ICONS.info} />
     </svg>
   );
@@ -188,6 +189,8 @@ const STATUS_LABELS: Record<string, string> = {
   starting: 'Starting',
   running: 'Working',
   awaiting: 'Pending',
+  pr: 'PR',
+  merged: 'Merged',
   error: 'Error',
   stopped: 'Stopped',
 };

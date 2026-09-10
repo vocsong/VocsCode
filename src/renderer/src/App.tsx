@@ -2,6 +2,7 @@
 import React, { useEffect } from 'react';
 import { invoke } from './api';
 import { useActiveSession, useStore } from './store';
+import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { CommandPalette } from './components/CommandPalette';
 import { Composer } from './components/Composer';
 import { Header } from './components/Header';
@@ -111,6 +112,8 @@ export function App() {
         <main className="main">
           {view === 'settings' ? (
             <SettingsView />
+          ) : view === 'analytics' ? (
+            <AnalyticsDashboard />
           ) : session ? (
             <>
               <Header session={session} />
