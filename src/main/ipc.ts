@@ -8,7 +8,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitCommit, gitDiff, gitRevertFile, gitStageAll, gitSummary } from './git';
+import { gitBranches, gitCheckout, gitCommit, gitDiff, gitRevertFile, gitStageAll, gitSummary, gitWorktrees } from './git';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
@@ -277,6 +277,7 @@ export function registerIpc(deps: IpcDeps): void {
     return { path: res.filePath };
   });
   handle('sessions:fork', ({ id }) => sessions.fork(id));
+  handle('sessions:moveTo', ({ id, cwd }) => sessions.moveTo(id, cwd));
   handle('sessions:goal', ({ id, action, objective, autoContinue, maxIterations }) => sessions.goal(id, action, { objective, autoContinue, maxIterations }));
 
   handle('approvals:respond', ({ sessionId, requestId, decision }) => sessions.respondApproval(sessionId, requestId, decision));
@@ -291,6 +292,9 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
   handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));
+  handle('git:branches', ({ sessionId }) => gitBranches(cwdOf(sessionId)));
+  handle('git:worktrees', ({ sessionId }) => gitWorktrees(cwdOf(sessionId)));
+  handle('git:checkout', ({ sessionId, branch }) => gitCheckout(cwdOf(sessionId), branch));
 
   handle('fs:list', async ({ sessionId, relPath }) => {
     const root = cwdOf(sessionId);

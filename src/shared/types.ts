@@ -416,6 +416,8 @@ export interface AppSettings {
   sidebarWidth: number;
   panelWidth: number;
   recentProjects: string[];
+  /** Project folders that stay in the sidebar even when they have no sessions left. */
+  folders: string[];
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
 }
@@ -436,6 +438,17 @@ export interface GitSummary {
   files: GitFileStatus[];
   ahead?: number;
   behind?: number;
+}
+
+export interface GitBranchInfo {
+  name: string;
+  current: boolean;
+}
+
+export interface GitWorktreeInfo {
+  path: string;
+  branch?: string;
+  detached: boolean;
 }
 
 export interface FsEntry {
