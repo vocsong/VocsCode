@@ -1,6 +1,9 @@
+import os from 'node:os';
+import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { promises as fs } from 'node:fs';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { AsyncQueue, LineSplitter } from '../src/main/util/async';
 import { globToRegExp } from '../src/main/harness/native/tools';
 import { parseUnifiedDiff } from '../src/shared/diff-parse';
@@ -13,7 +16,23 @@ import { piModelToInfo } from '../src/main/harness/pi';
 import { codexModelToInfo } from '../src/main/harness/codex-app-server';
 import { applyModelOverrides, modelOverrideKey, parseModelOverrideKey, pruneModelOverrides } from '../src/shared/model-overrides';
 import { HARNESSES } from '../src/shared/harness-meta';
-import type { ModelInfo } from '../src/shared/types';
+import type { ModelInfo, SessionMeta, TranscriptItem } from '../src/shared/types';
+import { SecretStore } from '../src/main/secrets';
+import { SessionStore } from '../src/main/store';
+
+// Stub Electron's safeStorage so SecretStore is testable in plain node. Mutable flag lets the
+// unavailable-encryption fallback path be exercised without re-declaring the mock.
+const safeStorageMock = vi.hoisted(() => ({
+  encryptionAvailable: true,
+  isEncryptionAvailable: () => safeStorageMock.encryptionAvailable,
+  encryptString: (s: string) => Buffer.concat([Buffer.from('enc|'), Buffer.from(s, 'utf8')]),
+  decryptString: (b: Buffer) => {
+    const raw = b.toString('utf8');
+    if (!raw.startsWith('enc|')) throw new Error('not encrypted with this key');
+    return raw.slice(4);
+  }
+}));
+vi.mock('electron', () => ({ safeStorage: safeStorageMock }));
 
 describe('LineSplitter', () => {
   it('splits on LF only and strips CR', () => {
@@ -22,6 +41,20 @@ describe('LineSplitter', () => {
     s.push('{"a":1}\r\n{"b":"x y"}\n{"c"');
     s.push(':3}\n');
     expect(lines).toEqual(['{"a":1}', '{"b":"x y"}', '{"c":3}']);
+  });
+});
+
+describe('LineSplitter UTF-8 handling', () => {
+  it('reassembles a multi-byte codepoint split across two Buffer chunks', () => {
+    const lines: string[] = [];
+    const s = new LineSplitter((l) => lines.push(l));
+    // U+1F600 is four UTF-8 bytes (F0 9F 98 80); split it mid-codepoint between two chunks.
+    const full = Buffer.from('"emoji: \uD83D\uDE00"\n', 'utf8');
+    s.push(full.subarray(0, 9));
+    s.push(full.subarray(9));
+    s.flush();
+    expect(lines).toEqual(['"emoji: \uD83D\uDE00"']);
+    expect(lines[0]).not.toContain('\uFFFD');
   });
 });
 
@@ -225,5 +258,119 @@ describe('model capability overrides', () => {
     expect(dropping).toEqual(['pi']);
     // Every harness still accepts attachments from the composer.
     expect(HARNESSES.every((h) => h.capabilities.images)).toBe(true);
+  });
+});
+
+describe('SecretStore', () => {
+  const tmpRoot = path.join(os.tmpdir(), `vocs-code-secrets-test-${Date.now()}-${process.pid}`);
+  afterAll(async () => {
+    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  it('round-trips a key through the fake safeStorage as enc: base64', async () => {
+    safeStorageMock.encryptionAvailable = true;
+    const dir = path.join(tmpRoot, 'enc');
+    const store = new SecretStore(dir);
+    await store.load();
+    await store.set('deepseek', '  sk-test-123  ');
+    expect(store.has('deepseek')).toBe(true);
+    // Value is trimmed, encrypted (not plaintext) and decrypts back via the fake.
+    const raw = JSON.parse(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8')) as Record<string, string>;
+    expect(raw.deepseek.startsWith('enc:')).toBe(true);
+    expect(raw.deepseek).not.toContain('sk-test-123');
+    expect(await store.get('deepseek')).toBe('sk-test-123');
+  });
+
+  it('falls back to b64: obfuscation when OS encryption is unavailable', async () => {
+    safeStorageMock.encryptionAvailable = false;
+    try {
+      const dir = path.join(tmpRoot, 'b64');
+      const store = new SecretStore(dir);
+      await store.load();
+      await store.set('openai', 'sk-fallback');
+      const raw = JSON.parse(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8')) as Record<string, string>;
+      expect(raw.openai.startsWith('b64:')).toBe(true);
+      expect(raw.openai).not.toContain('sk-fallback');
+      expect(await store.get('openai')).toBe('sk-fallback');
+    } finally {
+      safeStorageMock.encryptionAvailable = true;
+    }
+  });
+
+  it('clears a key and treats an empty set as a clear', async () => {
+    const dir = path.join(tmpRoot, 'clear');
+    const store = new SecretStore(dir);
+    await store.load();
+    await store.set('anthropic', 'sk-a');
+    await store.clear('anthropic');
+    expect(store.has('anthropic')).toBe(false);
+    expect(await store.get('anthropic')).toBeUndefined();
+    await store.set('anthropic', '   ');
+    expect(store.has('anthropic')).toBe(false);
+    // Cleared state is persisted.
+    const again = new SecretStore(dir);
+    await again.load();
+    expect(again.has('anthropic')).toBe(false);
+  });
+});
+
+describe('SessionStore round-trip', () => {
+  const tmpRoot = path.join(os.tmpdir(), `vocs-code-store-test-${Date.now()}-${process.pid}`);
+  afterAll(async () => {
+    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  const meta = (id: string, status: SessionMeta['status'] = 'idle'): SessionMeta => ({
+    id,
+    title: `session ${id}`,
+    createdAt: 1_000,
+    updatedAt: 2_000,
+    config: { harness: 'native', projectRoot: tmpRoot, permissionMode: 'auto' },
+    cwd: tmpRoot,
+    status,
+    harnessRef: {},
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
+    queued: 3
+  });
+
+  it('persists session meta and transcripts that a fresh store over the same directory reads back', async () => {
+    const first = new SessionStore(tmpRoot);
+    await first.load();
+    const m = meta('sess_1', 'running');
+    await first.upsert(m);
+    await first.appendTranscript('sess_1', { id: 'i1', kind: 'user', ts: 1, text: 'hello' } as TranscriptItem);
+    await first.appendTranscript('sess_1', { id: 'i2', kind: 'user', ts: 2, text: 'again' } as TranscriptItem);
+    await first.appendTranscript('sess_1', { id: 'i1', kind: 'user', ts: 1, text: 'hello edited' } as TranscriptItem);
+
+    // A brand-new store instance over the same userData directory survives the "restart".
+    const second = new SessionStore(tmpRoot);
+    const loaded = await second.load();
+    expect(loaded.map((s) => s.id)).toContain('sess_1');
+    const restored = second.get('sess_1');
+    expect(restored?.title).toBe('session sess_1');
+    expect(restored?.config.harness).toBe('native');
+    // A session that was running when the app closed is downgraded to idle with an empty queue.
+    expect(restored?.status).toBe('idle');
+    expect(restored?.queued).toBe(0);
+
+    const items = await second.readTranscript('sess_1');
+    expect(items).toHaveLength(2);
+    expect(items[0].id).toBe('i1');
+    // Last write wins per id, first-occurrence order preserved.
+    expect(items[0]).toMatchObject({ kind: 'user', text: 'hello edited' });
+    expect(items[1].id).toBe('i2');
+  });
+
+  it('remove deletes the meta entry and the transcript directory', async () => {
+    const store = new SessionStore(tmpRoot);
+    await store.load();
+    await store.upsert(meta('sess_2'));
+    await store.appendTranscript('sess_2', { id: 'j1', kind: 'user', ts: 1, text: 'x' } as TranscriptItem);
+    await store.remove('sess_2');
+    expect(store.get('sess_2')).toBeUndefined();
+    const again = new SessionStore(tmpRoot);
+    await again.load();
+    expect(again.get('sess_2')).toBeUndefined();
+    expect(await again.readTranscript('sess_2')).toEqual([]);
   });
 });

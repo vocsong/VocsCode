@@ -175,11 +175,11 @@ describe('live harness smoke', () => {
     expect(assistantText(items)).toMatch(/PONG/i);
   });
 
-  it.runIf(want('native'))('native loop answers a prompt through an OpenAI-compatible provider', async () => {
+  it.runIf(want('native'))('native loop answers a prompt through an OpenAI-compatible provider', async (t) => {
     const provider = process.env.DEEPSEEK_API_KEY ? 'deepseek' : process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : null;
     if (!provider) {
       console.warn('native smoke skipped: no provider API key in env');
-      return;
+      return t.skip();
     }
     const model = provider === 'deepseek' ? 'deepseek-v4-flash' : provider === 'openai' ? 'gpt-5.4-mini' : 'claude-sonnet-5';
     const { ctx, items, waitTurn } = await makeCtx('native', { model: { provider, model } });
@@ -191,9 +191,9 @@ describe('live harness smoke', () => {
     expect(assistantText(items)).toMatch(/PONG/i);
   });
 
-  it.runIf(want('native-tools'))('native loop uses tools with approvals', async () => {
+  it.runIf(want('native-tools'))('native loop uses tools with approvals', async (t) => {
     const provider = process.env.DEEPSEEK_API_KEY ? 'deepseek' : process.env.OPENAI_API_KEY ? 'openai' : null;
-    if (!provider) return;
+    if (!provider) return t.skip();
     const model = provider === 'deepseek' ? 'deepseek-v4-flash' : 'gpt-5.4-mini';
     const { ctx, items, waitTurn, meta } = await makeCtx('native', { model: { provider, model }, permissionMode: 'ask' });
     const adapter = createAdapter('native', ctx);

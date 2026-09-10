@@ -45,7 +45,7 @@ The app starts with no harness configured. Open **Settings -> Harnesses** to see
 npm install
 npm run dev          # electron-vite dev server with HMR
 npm run typecheck    # main + renderer
-npm test             # offline suites: unit + format + review-fixes + terminal (37 tests, no network)
+npm test             # offline suites: unit, format, review-fixes, terminal (no network)
 npm run build        # bundles to out/
 npm run dist:win     # NSIS installer in dist/
 ```

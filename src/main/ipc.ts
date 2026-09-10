@@ -9,6 +9,7 @@ import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
 import { gitCommit, gitDiff, gitRevertFile, gitStageAll, gitSummary } from './git';
+import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import type { RuntimeResolver } from './runtime';
@@ -60,7 +61,10 @@ export function registerIpc(deps: IpcDeps): void {
   handle('app:openExternal', async ({ url }) => {
     if (/^https?:\/\//i.test(url)) await shell.openExternal(url);
   });
-  handle('app:openPath', async ({ path: p }) => {
+  // Only open paths scoped to the session: a compromised renderer must not launch arbitrary files.
+  handle('app:openPath', async ({ sessionId, path: p }) => {
+    const m = sessions.get(sessionId);
+    if (!m || isOutsideWorkspace(m.cwd, p, path)) return;
     await shell.openPath(p);
   });
   handle('app:openInEditor', async ({ path: p, line }) => {
@@ -335,9 +339,10 @@ export function registerIpc(deps: IpcDeps): void {
   });
   handle('fs:read', async ({ sessionId, path: p, maxBytes }) => {
     const root = cwdOf(sessionId);
-    const abs = path.isAbsolute(p) ? p : path.join(root, p);
+    if (isOutsideWorkspace(root, p, path)) return { content: '', truncated: false };
+    const abs = path.resolve(root, p);
     const buf = await fs.readFile(abs);
-    const limit = maxBytes ?? 400_000;
+    const limit = Math.min(Math.max(0, maxBytes ?? 400_000), 2_000_000);
     return { content: buf.subarray(0, limit).toString('utf8'), truncated: buf.length > limit };
   });
 

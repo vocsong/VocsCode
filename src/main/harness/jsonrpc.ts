@@ -54,6 +54,13 @@ export class JsonRpcStdioClient {
       for (const [, p] of this.pending) p.d.reject(e);
       this.pending.clear();
     });
+    // stdin is a separate EventEmitter; a write to a dead pipe (EPIPE) after the child exits
+    // would otherwise be an uncaught exception that kills the process.
+    child.stdin?.on('error', (e) => {
+      this.closed = true;
+      for (const [, p] of this.pending) p.d.reject(e);
+      this.pending.clear();
+    });
   }
 
   private write(msg: Record<string, unknown>): void {

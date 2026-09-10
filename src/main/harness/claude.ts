@@ -209,9 +209,10 @@ export class ClaudeAdapter implements HarnessAdapter {
     if (decision.optionId === 'allow') return { behavior: 'allow', updatedInput: (decision.updatedInput as Record<string, unknown>) ?? input };
     if (decision.optionId === 'allow_session') {
       this.sessionAllowed.add(toolName);
-      // Keep the grant in the CLI's session memory only; never persist it to settings files.
-      const sessionOnly = suggestions?.map((s) => ({ ...s, destination: 'session' as const }));
-      return { behavior: 'allow', updatedInput: input, updatedPermissions: sessionOnly };
+      // Keep the grant in-process only. Returning the SDK's suggestions would install a CLI-side
+      // session rule that skips canUseTool for later calls, bypassing the host-side dangerous
+      // command and outside-workspace checks in gateAction.
+      return { behavior: 'allow', updatedInput: input };
     }
     return { behavior: 'deny', message: decision.note?.trim() || 'The user declined this action.' };
   };
@@ -336,7 +337,10 @@ export class ClaudeAdapter implements HarnessAdapter {
             this.modelsEmitted = true;
             q.supportedModels()
               .then((models) => this.ctx.emit({ type: 'models', models: models.map(toModelInfo) }))
-              .catch(() => undefined);
+              .catch(() => {
+                // Retry on the next init so the model picker is not permanently empty.
+                this.modelsEmitted = false;
+              });
           }
         } else if (msg.subtype === 'compact_boundary' || (msg as { subtype?: string }).subtype === 'status') {
           const m = msg as { subtype: string; compact_result?: string };
@@ -432,14 +436,17 @@ export class ClaudeAdapter implements HarnessAdapter {
         }
         const turnCost = Math.max(0, (msg.total_cost_usd ?? 0) - this.lastCost);
         this.lastCost = msg.total_cost_usd ?? this.lastCost;
-        const isError = msg.subtype !== 'success';
+        const turnMsg = msg as { is_error?: boolean; terminal_reason?: string };
+        const isError = turnMsg.is_error || msg.subtype !== 'success';
+        const interrupted = turnMsg.terminal_reason === 'aborted_streaming' || turnMsg.terminal_reason === 'aborted_tools';
+        const status = interrupted ? 'interrupted' : isError ? 'failed' : 'completed';
         this.ctx.emit({
           type: 'item.upsert',
           item: {
             id: shortId('turn_'),
             kind: 'turn',
             ts: Date.now(),
-            status: isError ? 'failed' : 'completed',
+            status,
             durationMs: msg.duration_ms ?? Date.now() - this.turnStartedAt,
             costUsd: turnCost,
             usage,
@@ -520,6 +527,8 @@ export class ClaudeAdapter implements HarnessAdapter {
       return;
     }
     await this.q?.setPermissionMode(toSdkMode(mode));
+    // Per-tool session grants do not survive a mode change.
+    this.sessionAllowed.clear();
   }
 
   async compact(): Promise<void> {

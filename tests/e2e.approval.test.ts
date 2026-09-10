@@ -10,7 +10,9 @@ import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication } from 'playwright-core';
 
-const enabled = process.env.HARNESS_E2E === '1' && !!(process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY);
+const wantE2E = process.env.HARNESS_E2E === '1';
+const hasProviderKey = !!(process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY);
+const enabled = wantE2E && hasProviderKey;
 const root = path.resolve(__dirname, '..');
 const require = createRequire(import.meta.url);
 const shots = path.join(root, 'tests', 'artifacts');
@@ -18,6 +20,13 @@ let app: ElectronApplication | null = null;
 
 afterAll(async () => {
   await app?.close().catch(() => undefined);
+});
+
+// A HARNESS_E2E=1 run without a provider key must fail loudly, not exit green having tested nothing.
+describe.runIf(wantE2E && !hasProviderKey)('electron e2e: approvals (misconfigured)', () => {
+  it('requires DEEPSEEK_API_KEY or OPENAI_API_KEY', () => {
+    throw new Error('HARNESS_E2E=1 but no provider API key found. Set DEEPSEEK_API_KEY or OPENAI_API_KEY before running tests/e2e.approval.test.ts.');
+  });
 });
 
 describe.runIf(enabled)('electron e2e: approvals', () => {

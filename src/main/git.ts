@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
 import type { GitFileStatus, GitSummary } from '../shared/types';
+import { isOutsideWorkspace } from './harness/permissions';
 import { runCapture, which } from './runtime';
 import { exists } from './util/fs';
 
@@ -69,6 +70,7 @@ export async function gitDiff(cwd: string, file?: string, staged = false): Promi
   const root = await gitRoot(cwd);
   if (!root) return '';
   if (file) {
+    if (isOutsideWorkspace(root, file, path)) return 'Path outside workspace';
     const abs = path.join(root, file);
     const tracked = await git(cwd, ['ls-files', '--error-unmatch', '--', file]);
     if (tracked.code !== 0) {
@@ -103,6 +105,7 @@ export async function gitDiff(cwd: string, file?: string, staged = false): Promi
 export async function gitRevertFile(cwd: string, file: string): Promise<{ ok: boolean; error?: string }> {
   const root = await gitRoot(cwd);
   if (!root) return { ok: false, error: 'Not a git repository' };
+  if (isOutsideWorkspace(root, file, path)) return { ok: false, error: 'Path outside workspace' };
   const tracked = await git(cwd, ['ls-files', '--error-unmatch', '--', file]);
   if (tracked.code !== 0) {
     try {

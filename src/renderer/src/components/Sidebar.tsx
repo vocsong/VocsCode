@@ -145,7 +145,7 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
               <MenuItem onClick={() => { close(); setRenaming(true); }}>Rename</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }); }}>{s.pinned ? 'Unpin' : 'Pin'}</MenuItem>
               <MenuItem onClick={async () => { close(); const f = await invoke('sessions:fork', { id: s.id }); if (f) toast('Forked session created', 'success'); }}>Fork</MenuItem>
-              <MenuItem onClick={() => { close(); void invoke('app:openPath', { path: s.cwd }); }}>Open folder</MenuItem>
+              <MenuItem onClick={() => { close(); void invoke('app:openPath', { path: s.cwd, sessionId: s.id }); }}>Open folder</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:stop', { id: s.id }); }} disabled={s.status === 'idle' || s.status === 'stopped'}>Stop process</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:archive', { id: s.id, archived: !s.archived }); }}>{s.archived ? 'Unarchive' : 'Archive'}</MenuItem>
               <MenuItem danger onClick={() => { close(); if (confirm(`Delete session "${s.title}"?${s.worktreeBranch ? '\n\nIts worktree will also be removed.' : ''}`)) void invoke('sessions:delete', { id: s.id, removeWorktree: !!s.worktreeBranch }); }}>Delete</MenuItem>

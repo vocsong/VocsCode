@@ -210,13 +210,14 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     providers: [],
     acpAgents: []
   };
-  const storedProviders = stored.providers ?? [];
+  // Wrong-shaped arrays in settings.json must not break boot: coerce to arrays before use.
+  const storedProviders = Array.isArray(stored.providers) ? stored.providers : [];
   for (const bp of BUILTIN_PROVIDERS) {
     const s = storedProviders.find((p) => p.id === bp.id);
     merged.providers.push(s ? { ...bp, ...s, builtin: true } : { ...bp, models: [] });
   }
   for (const s of storedProviders) if (!BUILTIN_PROVIDERS.some((bp) => bp.id === s.id)) merged.providers.push({ ...s, builtin: false });
-  const storedAgents = stored.acpAgents ?? [];
+  const storedAgents = Array.isArray(stored.acpAgents) ? stored.acpAgents : [];
   for (const ba of BUILTIN_ACP_AGENTS) {
     const s = storedAgents.find((a) => a.id === ba.id);
     merged.acpAgents.push(s ? { ...ba, ...s, builtin: true } : { ...ba });
