@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
-import type { GitFileStatus, GitSummary } from '../shared/types';
+import type { GitBranchInfo, GitFileStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import { runCapture, which } from './runtime';
 import { exists } from './util/fs';
@@ -128,6 +128,48 @@ export async function gitCommit(cwd: string, message: string): Promise<{ ok: boo
   await git(cwd, ['add', '-A']);
   const r = await git(cwd, ['commit', '-m', message]);
   return { ok: r.code === 0, output: (r.stdout + r.stderr).trim() };
+}
+
+export async function gitBranches(cwd: string): Promise<{ current?: string; branches: GitBranchInfo[] }> {
+  const r = await git(cwd, ['branch', '--list', '--no-color']);
+  if (r.code !== 0) return { branches: [] };
+  const branches: GitBranchInfo[] = [];
+  let current: string | undefined;
+  for (const line of r.stdout.split('\n')) {
+    if (!line.trim()) continue;
+    const isCurrent = line.startsWith('*');
+    const name = line.replace(/^\*\s*/, '').trim();
+    branches.push({ name, current: isCurrent });
+    if (isCurrent) current = name;
+  }
+  return { current, branches };
+}
+
+export async function gitWorktrees(cwd: string): Promise<{ current: string; worktrees: GitWorktreeInfo[] }> {
+  const current = path.resolve(cwd);
+  const r = await git(cwd, ['worktree', 'list', '--porcelain']);
+  if (r.code !== 0) return { current, worktrees: [] };
+  const worktrees: GitWorktreeInfo[] = [];
+  let entry: GitWorktreeInfo | null = null;
+  for (const line of r.stdout.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      if (entry) worktrees.push(entry);
+      // Git may print POSIX-style separators; normalize so comparisons with session cwd match.
+      entry = { path: path.resolve(line.slice('worktree '.length).trim()), detached: false };
+    } else if (entry && line.startsWith('branch ')) {
+      entry.branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '');
+    } else if (line === 'detached') {
+      entry!.detached = true;
+    }
+  }
+  if (entry) worktrees.push(entry);
+  return { current, worktrees };
+}
+
+export async function gitCheckout(cwd: string, branch: string): Promise<{ ok: boolean; error?: string }> {
+  if (!/^[\w][\w./-]*$/.test(branch)) return { ok: false, error: 'Invalid branch name' };
+  const r = await git(cwd, ['checkout', branch], 60_000);
+  return { ok: r.code === 0, error: (r.stderr || r.stdout).trim() || undefined };
 }
 
 export function slugify(s: string): string {
