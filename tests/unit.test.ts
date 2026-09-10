@@ -226,4 +226,18 @@ describe('model capability overrides', () => {
     // Every harness still accepts attachments from the composer.
     expect(HARNESSES.every((h) => h.capabilities.images)).toBe(true);
   });
+
+  it('normalizes favoriteModels to valid model refs', () => {
+    expect(defaultSettings().favoriteModels).toEqual([]);
+    const s = normalizeSettings({
+      favoriteModels: [
+        { provider: 'openrouter', model: 'openai/gpt-4o' },
+        { provider: 'openrouter' },
+        'openrouter::junk'
+      ] as never
+    });
+    expect(s.favoriteModels).toEqual([{ provider: 'openrouter', model: 'openai/gpt-4o' }]);
+    // Settings written before this feature existed have no such key.
+    expect(normalizeSettings({ theme: 'dark' }).favoriteModels).toEqual([]);
+  });
 });
