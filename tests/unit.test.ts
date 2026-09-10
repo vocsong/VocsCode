@@ -16,6 +16,7 @@ import { SessionManager } from '../src/main/session-manager';
 import type { RuntimeResolver } from '../src/main/runtime';
 import { estimateCostUsd, findPricing } from '../src/main/models/static-models';
 import { piModelToInfo } from '../src/main/harness/pi';
+import type { AnalyticsStore } from '../src/main/analytics';
 import { codexModelToInfo } from '../src/main/harness/codex-app-server';
 import { applyModelOverrides, modelOverrideKey, parseModelOverrideKey, pruneModelOverrides } from '../src/shared/model-overrides';
 import { HARNESSES } from '../src/shared/harness-meta';
@@ -361,6 +362,7 @@ describe('SessionStore round-trip', () => {
       store,
       settings: { get: () => defaultSettings() } as unknown as SettingsStore,
       runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn() } as unknown as AnalyticsStore,
       getSecret: async () => undefined,
       pushEvent: vi.fn(),
       pushSessions: (list) => published.push(list),

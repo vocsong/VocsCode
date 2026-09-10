@@ -1,5 +1,6 @@
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type {
+  AnalyticsSummary,
   ApprovalDecision,
   AppSettings,
   CreateSessionRequest,
@@ -86,6 +87,8 @@ export interface IpcContract {
     { id: string; action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update'; objective?: string; autoContinue?: boolean; maxIterations?: number },
     SessionMeta
   ];
+
+  'analytics:summary': [{ days?: number } | void, AnalyticsSummary];
 
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 
