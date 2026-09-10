@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, ProviderConfig } from '../shared/types';
 import { pruneModelOverrides } from '../shared/model-overrides';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
+import { isThemeId } from '../shared/themes';
 import { readJson, writeJson } from './util/fs';
 
 export const BUILTIN_ACP_AGENTS: AcpAgentPreset[] = [
@@ -199,6 +200,8 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
   const merged: AppSettings = {
     ...d,
     ...stored,
+    // A theme removed from the catalogue (or hand-edited into settings.json) falls back to 'system'.
+    theme: isThemeId(stored.theme) ? stored.theme : d.theme,
     binaries: { ...d.binaries, ...(stored.binaries ?? {}) },
     claude: { ...d.claude, ...(stored.claude ?? {}) },
     codex: { ...d.codex, ...(stored.codex ?? {}) },
