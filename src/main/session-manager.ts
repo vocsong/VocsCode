@@ -124,6 +124,11 @@ export class SessionManager {
     this.gitStateTimers.set(id, timer);
   }
 
+  /** Re-runs the PR/merge state check after a local /pr or /merge completes outside a turn. */
+  refreshGitState(id: string): void {
+    this.scheduleGitStateCheck(id, 1_000);
+  }
+
   /** Reflects the session branch's PR/merge state in the sidebar status label. */
   private async checkGitState(id: string, recheck: boolean): Promise<void> {
     const meta = this.get(id);
