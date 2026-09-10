@@ -16,6 +16,7 @@ import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvide
 import type { RuntimeResolver } from './runtime';
 import { which } from './runtime';
 import type { SecretStore } from './secrets';
+import type { Logger } from './log';
 import type { SessionManager } from './session-manager';
 import type { SettingsStore } from './settings';
 import type { TerminalManager } from './terminal';
@@ -33,8 +34,21 @@ export interface IpcDeps {
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }
 
+/** Set by registerIpc so handler timing can be logged without threading deps through every call. */
+let ipcLog: Logger = () => undefined;
+/** A handler holding the main process this long has already frozen the window; say so. */
+const SLOW_IPC_MS = 1000;
+
 function handle<K extends IpcChannel>(channel: K, fn: (req: IpcRequest<K>) => Promise<IpcResponse<K>> | IpcResponse<K>): void {
-  ipcMain.handle(channel, async (_e, req: IpcRequest<K>) => fn(req));
+  ipcMain.handle(channel, async (_e, req: IpcRequest<K>) => {
+    const t0 = Date.now();
+    try {
+      return await fn(req);
+    } finally {
+      const ms = Date.now() - t0;
+      if (ms >= SLOW_IPC_MS) ipcLog('warn', `slow ipc ${channel}: ${ms}ms`);
+    }
+  });
 }
 
 export function pushToRenderer(win: BrowserWindow | null, channel: string, payload: unknown): void {
@@ -44,6 +58,7 @@ export function pushToRenderer(win: BrowserWindow | null, channel: string, paylo
 
 export function registerIpc(deps: IpcDeps): void {
   const { settings, secrets, sessions, terminals, runtime } = deps;
+  ipcLog = deps.log;
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
 
   handle('app:info', () => ({ version: app.getVersion(), platform: process.platform, userData: app.getPath('userData'), isPackaged: app.isPackaged }));
@@ -110,6 +125,9 @@ export function registerIpc(deps: IpcDeps): void {
     const win = deps.getWindow();
     const res = await dialog.showOpenDialog(win ?? (undefined as unknown as BrowserWindow), { properties: ['openDirectory', 'createDirectory'], defaultPath });
     return { path: res.canceled ? null : res.filePaths[0] ?? null };
+  });
+  handle('app:diag', ({ kind, ms, detail }) => {
+    deps.log('warn', `renderer ${kind} ${ms}ms${detail ? ` (${detail})` : ''}`);
   });
   handle('app:notify', async ({ title, body }) => {
     const { Notification } = await import('electron');
@@ -252,8 +270,11 @@ export function registerIpc(deps: IpcDeps): void {
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
   handle('sessions:delete', async ({ id, removeWorktree }) => {
     // Shells hold their cwd open; take them down before the worktree is removed.
+    const t0 = Date.now();
     await terminals.closeForSession(id);
+    const t1 = Date.now();
     await sessions.delete(id, removeWorktree);
+    if (Date.now() - t0 >= SLOW_IPC_MS) deps.log('warn', `slow delete ${id}: terminals ${t1 - t0}ms, session ${Date.now() - t1}ms`);
   });
   handle('sessions:rename', ({ id, title }) => sessions.patch(id, { title }));
   handle('sessions:archive', ({ id, archived }) => sessions.patch(id, { archived }));
