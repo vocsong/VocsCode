@@ -11,6 +11,9 @@ import { normalizeSettings, defaultSettings } from '../src/main/settings';
 import { estimateCostUsd, findPricing } from '../src/main/models/static-models';
 import { piModelToInfo } from '../src/main/harness/pi';
 import { codexModelToInfo } from '../src/main/harness/codex-app-server';
+import { applyModelOverrides, modelOverrideKey, parseModelOverrideKey, pruneModelOverrides } from '../src/shared/model-overrides';
+import { HARNESSES } from '../src/shared/harness-meta';
+import type { ModelInfo } from '../src/shared/types';
 
 describe('LineSplitter', () => {
   it('splits on LF only and strips CR', () => {
@@ -171,5 +174,56 @@ describe('model mapping', () => {
     expect(m.id).toBe('gpt-5.5');
     expect(m.supportsImages).toBe(true);
     expect(m.pricing?.input).toBe(5);
+  });
+});
+
+describe('model capability overrides', () => {
+  const models: ModelInfo[] = [
+    { id: 'deepseek-v4.1-flash-expires-on-0910', provider: 'deepseek', displayName: 'DeepSeek V4.1 Flash', supportsImages: false },
+    { id: 'claude-opus-5', provider: 'anthropic', displayName: 'Claude Opus 5', supportsImages: true }
+  ];
+
+  it('keys by provider and keeps slashes in the model id', () => {
+    const key = modelOverrideKey('openrouter', 'openai/gpt-5.4');
+    expect(key).toBe('openrouter/openai/gpt-5.4');
+    expect(parseModelOverrideKey(key)).toEqual({ provider: 'openrouter', model: 'openai/gpt-5.4' });
+  });
+
+  it('applies only to the matching model and flags it as overridden', () => {
+    const out = applyModelOverrides(models, { 'deepseek/deepseek-v4.1-flash-expires-on-0910': { supportsImages: true } });
+    expect(out[0].supportsImages).toBe(true);
+    expect(out[0].overridden).toBe(true);
+    expect(out[1]).toBe(models[1]);
+  });
+
+  it('can also mark a model as text-only', () => {
+    const out = applyModelOverrides(models, { 'anthropic/claude-opus-5': { supportsImages: false } });
+    expect(out[1].supportsImages).toBe(false);
+  });
+
+  it('is a no-op without overrides, and ignores ones for other providers', () => {
+    expect(applyModelOverrides(models, undefined)).toBe(models);
+    expect(applyModelOverrides(models, {})).toBe(models);
+    // Same model slug, different provider: must not match.
+    expect(applyModelOverrides(models, { 'openrouter/claude-opus-5': { supportsImages: false } })[1].supportsImages).toBe(true);
+  });
+
+  it('prunes entries that no longer carry a value', () => {
+    expect(pruneModelOverrides({ 'a/b': {}, 'c/d': { supportsImages: false } })).toEqual({ 'c/d': { supportsImages: false } });
+  });
+
+  it('survives a settings round-trip and drops empty entries', () => {
+    expect(defaultSettings().modelOverrides).toEqual({});
+    const s = normalizeSettings({ modelOverrides: { 'deepseek/x': { supportsImages: true }, 'deepseek/y': {} } });
+    expect(s.modelOverrides).toEqual({ 'deepseek/x': { supportsImages: true } });
+    // Settings written before this feature existed have no such key.
+    expect(normalizeSettings({ theme: 'dark' }).modelOverrides).toEqual({});
+  });
+
+  it('marks pi as the only harness that strips images itself', () => {
+    const dropping = HARNESSES.filter((h) => h.capabilities.dropsUnsupportedImages).map((h) => h.id);
+    expect(dropping).toEqual(['pi']);
+    // Every harness still accepts attachments from the composer.
+    expect(HARNESSES.every((h) => h.capabilities.images)).toBe(true);
   });
 });

@@ -29,6 +29,7 @@
     "dist:dir": "electron-vite build && electron-builder --dir --config electron-builder.yml",
     "test:unit": "vitest run tests/unit.test.ts tests/format.test.ts tests/review-fixes.test.ts tests/terminal.test.ts",
     "test:e2e": "vitest run tests/e2e.electron.test.ts",
+    "test:e2e:ui": "vitest run tests/e2e.vision.test.ts",
     "test:e2e:terminal": "vitest run tests/e2e.terminal.test.ts",
     "test:smoke": "vitest run tests/smoke.live.test.ts"
   },

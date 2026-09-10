@@ -62,6 +62,8 @@ HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=acp HARNESS_SMOKE_ACP_AGENT=claude-agent-acp 
 npm run build && HARNESS_E2E=1 HARNESS_E2E_HARNESS=native npx vitest run tests/e2e.electron.test.ts
 # Approval flow through the UI (Ask mode → approval card → Allow once → file written)
 HARNESS_E2E=1 npx vitest run tests/e2e.approval.test.ts
+# Text-only-model warning and the capability override. Needs no API key and makes no network call.
+npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
 # Terminal through the UI: type into a real PTY, reload the renderer, close and exit tabs (no API key needed)
 HARNESS_E2E=1 npx vitest run tests/e2e.terminal.test.ts
 # The same flow against the packaged app, which proves node-pty loads from the unpacked asar
@@ -95,6 +97,7 @@ Test-only switches:
 | `HARNESS_SMOKE_VERBOSE` | Prints every harness event during the smoke run. |
 | `HARNESS_E2E=1` | Opts into the Playwright suites, which launch the built app from `out/`. |
 | `HARNESS_E2E_HARNESS` | Which harness the e2e session uses, for example `native`. |
+| `VOCS_CODE_E2E_UI=1` | Opts into `tests/e2e.vision.test.ts`. Runs with every provider key stripped from the environment, so it never reaches a provider. |
 | `HARNESS_E2E_EXE` | Path to a packaged binary (`dist/win-unpacked/Vocs Code.exe`); the terminal e2e drives it instead of `out/`. |
 
 The live suites need the corresponding runtime installed and logged in, and they spend real API credit.

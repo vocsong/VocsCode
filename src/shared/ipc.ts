@@ -10,6 +10,7 @@ import type {
   HarnessAvailability,
   HarnessId,
   ModelInfo,
+  ModelOverride,
   ModelRef,
   PermissionMode,
   ProviderConfig,
@@ -52,6 +53,9 @@ export interface IpcContract {
   'providers:delete': [{ id: string }, ProviderConfig[]];
   'providers:refreshModels': [{ id: string }, { models: ModelInfo[]; error?: string }];
   'providers:test': [{ id: string }, { ok: boolean; detail: string }];
+
+  /** Corrects one model's advertised capabilities; `null` clears that field's override. */
+  'models:setOverride': [{ provider: string; model: string; supportsImages: boolean | null }, Record<string, ModelOverride>];
 
   'harness:availability': [{ id?: HarnessId } | void, Partial<Record<HarnessId, HarnessAvailability>>];
   'harness:models': [
