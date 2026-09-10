@@ -1,7 +1,7 @@
 /** Renders a unified diff with per-file revert and commit actions. */
 import React, { useMemo, useState } from 'react';
 import { parseUnifiedDiff, type DiffFile } from '../../../shared/diff-parse';
-import { Icon } from './ui';
+import { askConfirm, Icon } from './ui';
 
 export { parseUnifiedDiff };
 
@@ -33,9 +33,10 @@ function DiffFileView({ file, compact, onRevert, defaultOpen }: { file: DiffFile
           <button
             type="button"
             className="link-btn small"
-            onClick={(e) => {
+            onClick={async (e) => {
               e.stopPropagation();
-              if (confirm(`Revert changes to ${name}?`)) onRevert(name);
+              const ok = await askConfirm({ title: `Revert changes to ${name}?`, body: 'The file goes back to its committed state.', confirmLabel: 'Revert', danger: true });
+              if (ok) onRevert(name);
             }}
           >
             Revert
