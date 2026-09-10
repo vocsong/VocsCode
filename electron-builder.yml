@@ -14,6 +14,9 @@ extraResources:
 asarUnpack:
   - node_modules/@anthropic-ai/**
   - node_modules/@openai/**
+  # node-pty's prebuilt N-API binaries (and ConPTY's DLLs) must be real files, not asar entries.
+  - node_modules/@lydell/**
+# Every native dependency ships prebuilt (@lydell/node-pty); nothing needs a compiler at install time.
 npmRebuild: false
 win:
   target:

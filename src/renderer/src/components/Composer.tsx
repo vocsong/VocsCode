@@ -19,6 +19,8 @@ export function Composer({ session }: { session: SessionMeta }) {
   const [histIdx, setHistIdx] = useState(-1);
   const ref = useRef<HTMLTextAreaElement>(null);
   const toast = useStore((s) => s.toast);
+  const composerInsert = useStore((s) => s.composerInsert);
+  const clearComposerInsert = useStore((s) => s.clearComposerInsert);
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
   const harness = HARNESS_BY_ID[session.config.harness];
   const caps = harness.capabilities;
@@ -57,6 +59,20 @@ export function Composer({ session }: { session: SessionMeta }) {
   useEffect(() => {
     ref.current?.focus();
   }, [session.id]);
+
+  // Text handed over from elsewhere (the terminal's "send to agent") lands below the current draft.
+  useEffect(() => {
+    if (!composerInsert) return;
+    const insert = composerInsert.text;
+    setText((t) => (t.trim() ? `${t.replace(/\s+$/, '')}\n\n${insert}` : insert));
+    clearComposerInsert();
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+  }, [composerInsert, clearComposerInsert]);
 
   useEffect(() => {
     if (!mention) return;
