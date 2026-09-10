@@ -1,11 +1,11 @@
 /** New session dialog: project directory, harness, model, permission mode and worktree isolation. */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { EffortLevel, HarnessId, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
-import { basename } from '../format';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Modal, Spinner, Toggle } from './ui';
+import { ModelPicker } from './ModelPicker';
 
 export function NewSessionDialog() {
   const settings = useStore((s) => s.settings)!;
@@ -15,7 +15,9 @@ export function NewSessionDialog() {
   const toast = useStore((s) => s.toast);
   const activeSession = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
 
-  const [projectRoot, setProjectRoot] = useState(activeSession?.config.projectRoot ?? settings.recentProjects[0] ?? '');
+  // The folder is chosen before the dialog opens (sidebar button or per-folder +); the dialog only
+  // configures harness, model and options for that folder.
+  const projectRoot = useStore((s) => s.newSessionRoot) ?? activeSession?.config.projectRoot ?? '';
   const [harness, setHarness] = useState<HarnessId>(settings.defaultHarness);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -45,8 +47,9 @@ export function NewSessionDialog() {
     let cancelled = false;
     setModels([]);
     setModelsError(undefined);
-    setModelsLoading(true);
+    setModelsLoading(!projectRoot);
     setModel(settings.defaultModelByHarness[harness]);
+    if (!projectRoot) return;
     invoke('harness:models', { harness, acpAgent, projectRoot })
       .then((r) => {
         if (cancelled) return;
@@ -64,19 +67,8 @@ export function NewSessionDialog() {
     };
   }, [harness, acpAgent]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const grouped = useMemo(() => {
-    const g = new Map<string, ModelInfo[]>();
-    for (const m of models) g.set(m.provider, [...(g.get(m.provider) ?? []), m]);
-    return [...g.entries()];
-  }, [models]);
-
   const selectedModel = models.find((m) => model && m.id === model.model && m.provider === model.provider);
   const effortOptions = selectedModel?.supportedEfforts?.length ? selectedModel.supportedEfforts : [...EFFORT_LEVELS];
-
-  const pickFolder = async () => {
-    const r = await invoke('app:pickFolder', { defaultPath: projectRoot || undefined });
-    if (r.path) setProjectRoot(r.path);
-  };
 
   const create = async () => {
     if (!projectRoot) {
@@ -134,20 +126,9 @@ export function NewSessionDialog() {
         <section className="ns-col">
           <Field label="Project folder">
             <div className="row gap8">
-              <input value={projectRoot} onChange={(e) => setProjectRoot(e.target.value)} placeholder="C:\path\to\repo" />
-              <Button icon="folder" onClick={pickFolder}>
-                Browse
-              </Button>
+              <Icon name="folder" size={14} />
+              <span className="ns-root" title={projectRoot}>{projectRoot || 'No folder selected'}</span>
             </div>
-            {settings.recentProjects.length > 0 && (
-              <div className="chips">
-                {settings.recentProjects.slice(0, 6).map((p) => (
-                  <button key={p} type="button" className={`chip ${p === projectRoot ? 'active' : ''}`} onClick={() => setProjectRoot(p)} title={p}>
-                    {basename(p)}
-                  </button>
-                ))}
-              </div>
-            )}
           </Field>
 
           <Field label="Harness">
@@ -189,19 +170,14 @@ export function NewSessionDialog() {
 
         <section className="ns-col">
           <Field label={<span className="row gap6">Model {modelsLoading && <Spinner size={11} />}</span>} hint={modelsError}>
-            <select value={model ? `${model.provider}::${model.model}` : ''} onChange={(e) => { const [p, ...rest] = e.target.value.split('::'); setModel(e.target.value ? { provider: p, model: rest.join('::') } : undefined); }}>
-              <option value="">{harness === 'acp' ? 'Agent default (choose after start)' : 'Harness default'}</option>
-              {grouped.map(([provider, list]) => (
-                <optgroup key={provider} label={provider}>
-                  {list.map((m) => (
-                    <option key={`${m.provider}::${m.id}`} value={`${m.provider}::${m.id}`}>
-                      {m.displayName}
-                      {m.pricing ? ` · $${m.pricing.input}/$${m.pricing.output}` : ''}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
+            <ModelPicker
+              models={models}
+              loading={modelsLoading}
+              error={modelsError}
+              selected={model}
+              clearOption={{ label: harness === 'acp' ? 'Agent default (choose after start)' : 'Harness default' }}
+              onSelect={(m) => setModel(m ? { provider: m.provider, model: m.id } : undefined)}
+            />
           </Field>
           <div className="row gap12">
             <Field label="Reasoning effort">

@@ -11,7 +11,7 @@ Working agreements for agents in this repo: how to verify, what to touch, what t
 - **UI is open.** No mandated reuse rule: build new components and patterns when they are the better fit. The primitives in `components/ui.tsx` and the CSS variables in `styles.css` are available, not required. A UI library is still a runtime dependency — ask first (see Dependencies).
 - **Git history.** Rebase or force-push your own `claude/<slug>` branch freely. Never rewrite `develop` or `master` history, and never force-push a branch you did not create (the permission gate still prompts for force-push below Full access).
 - **Report tight.** The final write-up — and the PR description — is bullets: files touched, what changed and why, the exact verification run, and anything noted but not fixed. No process narration.
-- **Deliver a PR.** After the local commit, push the `claude/<slug>` branch and open a PR into `develop`. Never merge it yourself; `develop` is the integration branch and you review.
+- **Deliver a PR.** After the local commit, push the `claude/<slug>` branch and open a PR into `develop`. Never merge it yourself unless the user explicitly instructs it; `develop` is the integration branch and you review.
 
 ## Commands
 
