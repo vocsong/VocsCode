@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { invoke, isMac, modKey } from '../api';
 import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
+import { GROUP_LABELS, GROUP_ORDER, THEMES } from '../../../shared/themes';
 import { Icon, MenuItem } from './ui';
 
 const REPO = 'https://github.com/vocsong/Vocs-Code';
@@ -123,7 +124,7 @@ function FileMenu({ close }: { close: () => void }) {
 
   return (
     <>
-      <MenuItem hint={`${modKey}+N`} onClick={run(() => st.openNewSession(true))}>
+      <MenuItem hint={`${modKey}+N`} onClick={run(() => void st.startNewSession())}>
         New session
       </MenuItem>
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)))}>
@@ -228,13 +229,6 @@ function ViewMenu({ close }: { close: () => void }) {
         Thinking
       </MenuItem>
       <Sep />
-      <div className="menu-group">Theme</div>
-      {(['system', 'light', 'dark'] as const).map((t) => (
-        <MenuItem key={t} active={theme === t} onClick={run(() => void invoke('settings:update', { theme: t }).then((s) => st.setSettings(s)))}>
-          {t[0].toUpperCase() + t.slice(1)}
-        </MenuItem>
-      ))}
-      <Sep />
       <MenuItem hint={`${modKey}++`} onClick={run(() => void invoke('window:zoom', { direction: 'in' }))}>
         Zoom in
       </MenuItem>
@@ -252,6 +246,22 @@ function ViewMenu({ close }: { close: () => void }) {
       <MenuItem hint={isMac ? '⌥⌘I' : 'Ctrl+Shift+I'} onClick={run(() => void invoke('window:toggleDevTools', undefined))}>
         Developer tools
       </MenuItem>
+      {/* Last, because the catalogue is long and this panel scrolls. */}
+      <Sep />
+      {GROUP_ORDER.map((group) => (
+        <React.Fragment key={group}>
+          <div className="menu-group">{group === 'core' ? 'Theme' : `Theme — ${GROUP_LABELS[group]}`}</div>
+          {THEMES.filter((t) => t.group === group).map((t) => (
+            <MenuItem
+              key={t.id}
+              active={theme === t.id}
+              onClick={run(() => void invoke('settings:update', { theme: t.id }).then((s) => st.setSettings(s)))}
+            >
+              {t.name}
+            </MenuItem>
+          ))}
+        </React.Fragment>
+      ))}
     </>
   );
 }
