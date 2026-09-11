@@ -21,6 +21,11 @@ export function harnessShort(id: string): string {
   return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
 }
 
+/** Icon choices for folder headers (names from the renderer icon set). */
+const FOLDER_ICONS = ['folder', 'bolt', 'brain', 'shield', 'star', 'sparkles', 'target', 'branch', 'terminal', 'chart', 'play', 'file'] as const;
+/** Swatch palette for folder headers. */
+const FOLDER_COLORS = ['#5b9bf8', '#22d3ee', '#34d399', '#84cc16', '#fbbf24', '#fb923c', '#f87171', '#f472b6', '#a78bfa', '#94a3b8'] as const;
+
 export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const settings = useStore((s) => s.settings);
@@ -56,6 +61,8 @@ export function Sidebar() {
     return groups;
   }, [sessions, settings, query, showArchived]);
 
+  const folderStyles = settings?.folderStyles ?? {};
+
   const awaiting = sessions.filter((s) => s.status === 'awaiting').length;
   const running = sessions.filter((s) => s.status === 'running').length;
 
@@ -85,8 +92,13 @@ export function Sidebar() {
         {groups.map((g) => (
           <div key={g.root} className="project-group">
             <div className="project-header" title={g.root}>
-              <Icon name="folder" size={13} />
-              <span>{basename(g.root)}</span>
+              <FolderStyleButton root={g.root} style={folderStyles[g.root]} onPick={(patch) => {
+                const next = { ...folderStyles };
+                if (patch) next[g.root] = { ...next[g.root], ...patch };
+                else delete next[g.root];
+                void invoke('settings:update', { folderStyles: next });
+              }} />
+              <span className="project-title" style={folderStyles[g.root]?.color ? { color: folderStyles[g.root].color } : undefined}>{basename(g.root)}</span>
               <button
                 type="button"
                 className="project-new-btn"
@@ -225,5 +237,59 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
         </Dropdown>
       </div>
     </div>
+  );
+}
+
+/** Folder icon button opening a popover to pick the folder's icon and color. */
+function FolderStyleButton({ root, style, onPick }: { root: string; style?: { color?: string; icon?: string }; onPick: (patch?: { color?: string; icon?: string }) => void }) {
+  const name = basename(root);
+  return (
+    <Dropdown align="left" width={216} trigger={() => (
+      <button
+        type="button"
+        className="project-icon-btn"
+        style={style?.color ? { color: style.color } : undefined}
+        title={`Customize ${name}`}
+        aria-label={`Customize ${name}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Icon name={style?.icon ?? 'folder'} size={13} />
+      </button>
+    )}>
+      {() => (
+        <div className="folder-style-picker">
+          <div className="picker-label">Icon</div>
+          <div className="picker-grid">
+            {FOLDER_ICONS.map((n) => (
+              <button
+                key={n}
+                type="button"
+                className={`picker-opt ${style?.icon === n ? 'active' : ''}`}
+                title={n}
+                aria-label={`Icon ${n}`}
+                onClick={() => onPick({ icon: n })}
+              >
+                <Icon name={n} size={14} />
+              </button>
+            ))}
+          </div>
+          <div className="picker-label">Color</div>
+          <div className="picker-grid">
+            {FOLDER_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                className={`picker-swatch ${style?.color === c ? 'active' : ''}`}
+                style={{ background: c }}
+                title={c}
+                aria-label={`Color ${c}`}
+                onClick={() => onPick({ color: c })}
+              />
+            ))}
+          </div>
+          <MenuItem onClick={() => onPick(undefined)}>Reset to default</MenuItem>
+        </div>
+      )}
+    </Dropdown>
   );
 }
