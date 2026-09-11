@@ -949,6 +949,25 @@ h4 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.project-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 45%;
+  color: var(--fg-muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.project-branch svg {
+  flex-shrink: 0;
+}
+.project-branch > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .folder-style-picker {
   padding: 6px;
 }
@@ -2342,6 +2361,40 @@ body.resizing {
   padding: 6px 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
+.pr-cols,
+.pr-row {
+  grid-template-columns: minmax(0, 1fr) 96px 84px 110px 56px;
+}
+.pr-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+.pr-title .pr-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.pr-title .pr-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-title .pr-refs {
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-pulled {
+  color: var(--fg-muted);
+  font-size: 11px;
+  margin-left: 4px;
+}
 .branch-row:hover {
   background: var(--bg-hover);
 }
@@ -2422,6 +2475,15 @@ body.resizing {
   padding: 10px;
   overflow: auto;
   flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.file-preview .file-md {
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
 }
 .stat-grid {
   display: grid;

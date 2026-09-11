@@ -34,6 +34,29 @@ export function fmtDuration(ms: number | undefined): string {
   return `${m}m ${Math.round(s - m * 60)}s`;
 }
 
+/**
+ * Output speed as `12.3 tok/s`, or '' when either side of the sample is missing. Wall time
+ * includes tool execution, so this is the effective speed of a turn, not the raw decode rate.
+ */
+export function fmtRate(tokens: number | undefined, ms: number | undefined): string {
+  if (!tokens || !ms || tokens <= 0 || ms <= 0) return '';
+  const tps = (tokens / ms) * 1000;
+  return `${tps >= 100 ? tps.toFixed(0) : tps.toFixed(1)} tok/s`;
+}
+
+/** Sums the output tokens and wall time of turns that reported both, for a session-level speed. */
+export function speedOfTurns(turns: { status: string; durationMs?: number; usage?: { outputTokens?: number } }[]): { tokens: number; ms: number } {
+  const acc = { tokens: 0, ms: 0 };
+  for (const t of turns) {
+    const tokens = t.usage?.outputTokens ?? 0;
+    const ms = t.durationMs ?? 0;
+    if (t.status !== 'completed' || tokens <= 0 || ms <= 0) continue;
+    acc.tokens += tokens;
+    acc.ms += ms;
+  }
+  return acc;
+}
+
 /** Last path segment for both Windows and POSIX separators. */
 export function basename(p: string): string {
   const parts = p.replace(/[\\/]+$/, '').split(/[\\/]/);
