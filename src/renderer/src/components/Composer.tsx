@@ -241,18 +241,29 @@ export function Composer({ session }: { session: SessionMeta }) {
           toast('Usage: /pr <base branch> — pushes this branch and opens a PR into it.', 'error');
           return true;
         }
-        // Push + gh pr create can take tens of seconds; report progress in the transcript, not just a final toast.
+        // Push + gh pr create can take tens of seconds; show progress here, then let the main
+        // process's persistent transcript note carry the outcome (it survives a restart).
         const noteId = `local-pr-${session.id}`;
         store.setLocalInfo(session.id, noteId, `Pushing this branch and opening a PR into ${arg}…`, { pending: true });
-        const pr = await invoke('git:pr', { sessionId: session.id, base: arg }).catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }));
-        store.setLocalInfo(session.id, noteId, pr.ok ? `PR opened: ${pr.url ?? arg}` : pr.output ?? 'Failed to open the PR', { level: pr.ok ? 'info' : 'error' });
+        try {
+          await invoke('git:pr', { sessionId: session.id, base: arg });
+        } catch (e) {
+          store.setLocalInfo(session.id, noteId, `Failed to open the PR: ${String((e as Error).message ?? e)}`, { level: 'error' });
+          return true;
+        }
+        store.setLocalInfo(session.id, noteId, null);
         return true;
       }
       case 'merge': {
         const noteId = `local-merge-${session.id}`;
         store.setLocalInfo(session.id, noteId, 'Merging the open PR for this branch…', { pending: true });
-        const merged = await invoke('git:merge', { sessionId: session.id, base: arg || undefined }).catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }));
-        store.setLocalInfo(session.id, noteId, merged.ok ? `Merged: ${merged.url ?? 'PR merged'}` : merged.output ?? 'Failed to merge the PR', { level: merged.ok ? 'info' : 'error' });
+        try {
+          await invoke('git:merge', { sessionId: session.id, base: arg || undefined });
+        } catch (e) {
+          store.setLocalInfo(session.id, noteId, `Failed to merge the PR: ${String((e as Error).message ?? e)}`, { level: 'error' });
+          return true;
+        }
+        store.setLocalInfo(session.id, noteId, null);
         return true;
       }
       case 'stop':

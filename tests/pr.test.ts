@@ -1,10 +1,10 @@
-/** /pr and /merge git plumbing: exercised against a real git repo with a fake `gh` on PATH. */
+/** /pr, /merge, per-branch PR actions and branch updates: exercised against a real git repo with a fake `gh` on PATH. */
 import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { gitCreatePr, gitMergePr } from '../src/main/git';
+import { gitCreatePr, gitMergePr, gitPrMap, gitUpdateBranch, worktreeAddForBranch } from '../src/main/git';
 
 const isWin = process.platform === 'win32';
 
@@ -16,6 +16,8 @@ const GH_SH = [
   '  \'pr view\')',
   '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
   '    echo "{\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"baseRefName\\":\\"$GH_BASE\\"}" ;;',
+  '  \'pr list\')',
+  '    echo "[{\\"number\\":7,\\"headRefName\\":\\"harness/test\\",\\"state\\":\\"OPEN\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"title\\":\\"Test PR\\"}]" ;;',
   'esac',
   'exit 0'
 ].join('\n');
@@ -27,6 +29,7 @@ const GH_CMD = [
   'if /i "%~1"=="pr" if /i "%~2"=="view" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
   'if "%GH_STATE%"=="" set "GH_STATE=OPEN"',
   'if /i "%~1"=="pr" if /i "%~2"=="view" echo {"state":"%GH_STATE%","url":"https://example.com/acme/repo/pull/7","baseRefName":"%GH_BASE%"}',
+  'if /i "%~1"=="pr" if /i "%~2"=="list" echo [{"number":7,"headRefName":"harness/test","state":"OPEN","url":"https://example.com/acme/repo/pull/7","title":"Test PR"}]',
   'exit /b 0'
 ].join('\r\n');
 
@@ -97,6 +100,19 @@ describe('git PR flow (/pr, /merge)', () => {
     expect(r.output).toContain('already the current branch');
   });
 
+  it('refuses PRing the base branch itself', async () => {
+    await git(['branch', 'develop'], repo);
+    const r = await gitCreatePr(repo, 'develop', 'develop');
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain('base branch itself');
+  });
+
+  it('refuses an unknown head branch', async () => {
+    const r = await gitCreatePr(repo, 'develop', 'no/such/branch');
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain('does not exist locally');
+  });
+
   it('refuses outside a repository', async () => {
     const r = await gitCreatePr(tmp, 'develop');
     expect(r).toEqual({ ok: false, output: 'Not a git repository' });
@@ -109,6 +125,31 @@ describe('git PR flow (/pr, /merge)', () => {
     const log = await ghLog();
     expect(log).toContain('pr create --base develop --head harness/test --fill');
     expect(await git(['ls-remote', '--heads', path.join(tmp, 'origin.git'), 'harness/test'])).toContain('harness/test');
+  });
+
+  it('opens a PR for another branch without checking it out (dirty tree does not block)', async () => {
+    await git(['branch', 'feature/other'], repo);
+    await fs.writeFile(path.join(repo, 'a.txt'), 'dirty\n');
+    const r = await gitCreatePr(repo, 'develop', 'feature/other');
+    expect(r.ok).toBe(true);
+    const log = await ghLog();
+    expect(log).toContain('pr create --base develop --head feature/other --fill');
+    expect(await git(['ls-remote', '--heads', path.join(tmp, 'origin.git'), 'feature/other'])).toContain('feature/other');
+    await git(['checkout', '--', 'a.txt'], repo);
+  });
+
+  it('merges the open PR of another branch without checkout', async () => {
+    const r = await gitMergePr(repo, 'develop', 'feature/other');
+    expect(r.ok).toBe(true);
+    const log = await ghLog();
+    expect(log).toContain('pr view feature/other');
+    expect(log).toContain('pr merge feature/other --merge');
+  });
+
+  it('maps branches to their PRs', async () => {
+    const m = await gitPrMap(repo);
+    expect(m.prs?.['harness/test']).toEqual({ number: 7, state: 'OPEN', url: 'https://example.com/acme/repo/pull/7', title: 'Test PR' });
+    expect(m.prs?.['feature/other']).toBeUndefined();
   });
 
   it('merges the open PR and checks the requested base', async () => {
@@ -144,5 +185,50 @@ describe('git PR flow (/pr, /merge)', () => {
     } finally {
       delete process.env.GH_VIEW_FAIL;
     }
+  });
+
+  it('creates a worktree for an existing branch', async () => {
+    await git(['branch', 'wt/branch'], repo);
+    const wt = await worktreeAddForBranch(repo, 'wt/branch');
+    expect(wt.branch).toBe('wt/branch');
+    expect(wt.path).toContain('.vocs-code');
+    await fs.rm(wt.path, { recursive: true, force: true });
+    await git(['worktree', 'prune'], repo);
+    await git(['branch', '-D', 'wt/branch'], repo);
+  });
+
+  it('updates a branch that is not checked out anywhere', async () => {
+    await git(['branch', 'f1'], repo);
+    await git(['push', 'origin', 'f1'], repo);
+    const clone = path.join(tmp, 'clone');
+    await fs.mkdir(clone, { recursive: true });
+    await git(['clone', path.join(tmp, 'origin.git'), clone]);
+    await git(['config', 'user.email', 'test@example.com'], clone);
+    await git(['config', 'user.name', 'Test'], clone);
+    await git(['checkout', 'f1'], clone);
+    await fs.writeFile(path.join(clone, 'c.txt'), 'c\n');
+    await git(['add', '-A'], clone);
+    await git(['commit', '-m', 'remote work'], clone);
+    await git(['push', 'origin', 'f1'], clone);
+    const r = await gitUpdateBranch(repo, 'f1');
+    expect(r.ok).toBe(true);
+    expect(await git(['rev-parse', 'f1'], repo)).toBe(await git(['rev-parse', 'origin/f1'], repo));
+  });
+
+  it('refuses a non-fast-forward update of a branch ref', async () => {
+    // A parentless commit on f1 diverges from origin/f1, so fetching into the ref is refused.
+    const tree = (await git(['rev-parse', 'master^{tree}'], repo)).trim();
+    const sha = (await git(['commit-tree', tree, '-m', 'divergent'], repo)).trim();
+    await git(['update-ref', 'refs/heads/f1', sha], repo);
+    const r = await gitUpdateBranch(repo, 'f1');
+    expect(r.ok).toBe(false);
+  });
+
+  it('refuses to update a branch whose worktree is dirty', async () => {
+    await fs.writeFile(path.join(repo, 'd.txt'), 'dirty\n');
+    const r = await gitUpdateBranch(repo, 'harness/test');
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('Uncommitted');
+    await fs.rm(path.join(repo, 'd.txt'), { force: true });
   });
 });
