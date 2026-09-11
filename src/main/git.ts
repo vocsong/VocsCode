@@ -710,6 +710,11 @@ export async function worktreeAddForBranch(projectRoot: string, branch: string):
 export async function removeWorktree(projectRoot: string, wtPath: string, opts: { force?: boolean } = {}): Promise<void> {
   const root = await gitRoot(projectRoot);
   if (!root) return;
+  // A folder deleted outside the app has nothing to protect; prune the stale registration instead of failing.
+  if (!(await exists(wtPath))) {
+    await git(root, ['worktree', 'prune']);
+    return;
+  }
   const force = opts.force ?? true;
   // Without --force git refuses a worktree holding uncommitted changes; callers decide whether to surface that.
   const r = await git(root, force ? ['worktree', 'remove', '--force', wtPath] : ['worktree', 'remove', wtPath], 60_000);
@@ -724,6 +729,8 @@ export async function restoreWorktree(projectRoot: string, wtPath: string, branc
   const branchExists = (await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
   if (!branchExists) throw new Error(`Branch ${branch} no longer exists.`);
   if (await exists(wtPath)) return;
+  // The folder may have been deleted externally, leaving a registration that blocks `worktree add`.
+  await git(root, ['worktree', 'prune']);
   const r = await git(root, ['worktree', 'add', wtPath, branch], 60_000);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
 }
