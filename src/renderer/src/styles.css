@@ -2248,6 +2248,7 @@ body.resizing {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  container-type: inline-size;
 }
 .branches-head {
   display: flex;
@@ -2339,7 +2340,7 @@ body.resizing {
 }
 .branches-cols {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 84px 110px 56px;
+  grid-template-columns: minmax(0, 1fr) 84px 84px minmax(112px, 128px) 136px;
   gap: 8px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
@@ -2355,7 +2356,7 @@ body.resizing {
 }
 .branch-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 84px 110px 56px;
+  grid-template-columns: minmax(0, 1fr) 84px 84px minmax(112px, 128px) 136px;
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
@@ -2363,7 +2364,7 @@ body.resizing {
 }
 .pr-cols,
 .pr-row {
-  grid-template-columns: minmax(0, 1fr) 96px 84px 110px 56px;
+  grid-template-columns: minmax(0, 1fr) 96px 84px minmax(112px, 128px) 72px;
 }
 .pr-title {
   display: flex;
@@ -2427,11 +2428,58 @@ body.resizing {
   min-width: 0;
   overflow: hidden;
 }
+/* The badge keeps its shape; trailing text (synced / arrows) shrinks with an ellipsis. */
+.branch-status .badge {
+  flex-shrink: 0;
+}
+.branch-status .small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .branch-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 2px;
+  min-width: 0;
+}
+
+/* Narrow panel: two-line rows — name + meta + behind/ahead, then status + actions —
+   so nothing overlaps or clips. The column header is meaningless here. */
+@container (max-width: 619.9px) {
+  .branches-cols {
+    display: none;
+  }
+  .branch-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      'name meta num'
+      'status status actions';
+    row-gap: 3px;
+    padding: 7px 10px;
+  }
+  .branch-row > :nth-child(1) {
+    grid-area: name;
+  }
+  .branch-row > :nth-child(2) {
+    grid-area: meta;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .branch-row > :nth-child(3) {
+    grid-area: num;
+  }
+  .branch-row > :nth-child(4) {
+    grid-area: status;
+  }
+  .branch-row > :nth-child(5) {
+    grid-area: actions;
+  }
 }
 .num {
   text-align: right;
