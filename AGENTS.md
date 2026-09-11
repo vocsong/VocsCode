@@ -11,7 +11,7 @@ Working agreements for agents in this repo: how to verify, what to touch, what t
 - **UI is open.** No mandated reuse rule: build new components and patterns when they are the better fit. The primitives in `components/ui.tsx` and the CSS variables in `styles.css` are available, not required. A UI library is still a runtime dependency — ask first (see Dependencies).
 - **Git history.** Work on your own agent branch (`<agent>/<slug>`, e.g. `pi/<slug>`). Rebase or force-push your own agent branch freely. Never rewrite `develop` or `master` history, and never force-push a branch you did not create (the permission gate still prompts for force-push below Full access).
 - **Report tight.** The final write-up — and the PR description — is bullets: files touched, what changed and why, the exact verification run, and anything noted but not fixed. No process narration.
-- **Deliver a PR.** After the local commit, push the agent branch and open a PR into `develop`. Never merge it yourself unless the user explicitly instructs it; `develop` is the integration branch and you review.
+- **Deliver a PR — and merge it.** After the local commit, push the agent branch and open a PR into `develop`. By default, merge the PR yourself once verification passes (`develop` is the integration branch). Skip merging only when the user explicitly says to hold the PR for review, or when the change needs further consideration before it lands (touching permission gating or secrets handling, skipping a required verification run, an ambiguous requirement the user hasn't confirmed, or a destructive action). When you don't merge, say so in the report and why, and leave the PR open for review.
 
 ## Commands
 
