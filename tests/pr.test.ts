@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { gitCreatePr, gitMergePr, gitPrMap, gitUpdateBranch, worktreeAddForBranch } from '../src/main/git';
+import { gitCreatePr, gitMergePr, gitPrMap, gitPullRequests, gitUpdateBranch, worktreeAddForBranch } from '../src/main/git';
 
 const isWin = process.platform === 'win32';
 
@@ -153,6 +153,34 @@ describe('git PR flow (/pr, /merge)', () => {
     const m = await gitPrMap(repo);
     expect(m.prs?.['harness/test']).toEqual({ number: 7, state: 'OPEN', url: 'https://example.com/acme/repo/pull/7', title: 'Test PR' });
     expect(m.prs?.['feature/other']).toBeUndefined();
+  });
+
+  it('pulls the repo-wide PR list for the Git panel', async () => {
+    const before = Date.now();
+    const list = await gitPullRequests(repo);
+    expect(list.ghMissing).toBeUndefined();
+    expect(list.error).toBeUndefined();
+    expect(list.fetchedAt).toBeGreaterThanOrEqual(before);
+    expect(list.prs).toEqual([
+      { number: 7, title: 'Test PR', state: 'OPEN', headRefName: 'harness/test', baseRefName: 'develop', url: 'https://example.com/acme/repo/pull/7' }
+    ]);
+  });
+
+  it('reports gh failing to list PRs in its own words', async () => {
+    process.env.GH_VIEW_FAIL = '1';
+    try {
+      const list = await gitPullRequests(repo);
+      expect(list.prs).toEqual([]);
+      expect(list.error).toBeTruthy();
+    } finally {
+      delete process.env.GH_VIEW_FAIL;
+    }
+  });
+
+  it('reports a missing repository instead of calling gh', async () => {
+    const list = await gitPullRequests(tmp);
+    expect(list.prs).toEqual([]);
+    expect(list.error).toBe('Not a git repository');
   });
 
   it('merges the open PR for the current branch and checks the requested base', async () => {
