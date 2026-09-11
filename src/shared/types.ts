@@ -202,8 +202,8 @@ export interface UsageBucket {
 export interface ModelRateRow {
   key: string;
   label: string;
-  /** Effective blended cost per 1,000 tokens (input + output + cache), or undefined when no tokens were measured. */
-  usdPerKToken?: number;
+  /** Effective blended cost per 1,000,000 tokens (input + output + cache), or undefined when no tokens were measured. */
+  usdPerMTok?: number;
   /** Effective cost per model call (one turn), or undefined when no turns were measured. */
   usdPerCall?: number;
   /** All-time spend attributed to the model. */
@@ -229,7 +229,7 @@ export interface AnalyticsSummary {
   byHarness: UsageBucket[];
   byModel: UsageBucket[];
   byProject: UsageBucket[];
-  /** Effective $/1k tokens and $/call per model, sorted by spend. */
+  /** Effective $/M tokens and $/call per model, sorted by spend. */
   modelRates: ModelRateRow[];
   /** All-time tool-call totals and per-tool/per-file breakdowns, sorted by volume. */
   toolTotals: ToolUsage;
