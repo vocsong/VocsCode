@@ -23,6 +23,7 @@ import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
+import { tokensPerSecond, turnSpeed } from './analytics';
 import { emptyUsage } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
@@ -708,7 +709,7 @@ export class SessionManager {
   }
 
   private onTurnFinished(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>): void {
-    if (turn.status === 'completed') this.deps.analytics.recordTurn(meta, turn.durationMs ?? 0);
+    this.deps.analytics.recordTurn(meta, turn);
     const active = this.active.get(meta.id);
     if (this.settings().notifications && turn.status !== 'interrupted') {
       this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);
@@ -885,7 +886,7 @@ export class SessionManager {
           lines.push(`> ${it.level}: ${it.text}`, '');
           break;
         case 'turn':
-          lines.push(`---`, `_Turn ${it.status}${it.durationMs ? ` in ${(it.durationMs / 1000).toFixed(1)}s` : ''}${it.costUsd ? `, $${it.costUsd.toFixed(4)}` : ''}_`, '');
+          lines.push(`---`, `_Turn ${it.status}${it.durationMs ? ` in ${(it.durationMs / 1000).toFixed(1)}s` : ''}${speedLabel(it)}${it.costUsd ? `, $${it.costUsd.toFixed(4)}` : ''}_`, '');
           break;
         case 'plan':
           lines.push('### Plan', ...it.entries.map((e) => `- [${e.status === 'completed' ? 'x' : ' '}] ${e.content}`), '');
@@ -898,4 +899,10 @@ export class SessionManager {
   async projectRootFor(cwd: string): Promise<string | null> {
     return gitRoot(cwd);
   }
+}
+
+/** `, 12.3 tok/s` for the markdown export, or '' when the turn has no speed sample. */
+function speedLabel(turn: Extract<TranscriptItem, { kind: 'turn' }>): string {
+  const tps = tokensPerSecond(turnSpeed(turn) ?? undefined);
+  return tps ? `, ${tps.toFixed(1)} tok/s` : '';
 }
