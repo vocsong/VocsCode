@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '../api';
 import { useStore } from '../store';
+import { createTerminal } from '../terminal/host';
 import { Icon } from './ui';
 import { harnessShort } from './Sidebar';
 
@@ -25,17 +26,19 @@ export function CommandPalette() {
   const cmds = useMemo<Cmd[]>(() => {
     const st = useStore.getState();
     const base: Cmd[] = [
-      { id: 'new', label: 'New session', hint: 'Ctrl+N', icon: 'plus', run: () => st.openNewSession(true) },
+      { id: 'new', label: 'New session', hint: 'Ctrl+N', icon: 'plus', run: () => void st.startNewSession() },
       { id: 'settings', label: 'Open settings', hint: 'Ctrl+,', icon: 'settings', run: () => st.setView('settings') },
+      { id: 'analytics', label: 'Open analytics dashboard', icon: 'chart', run: () => st.setView('analytics') },
       { id: 'panel', label: 'Toggle side panel', hint: 'Ctrl+J', icon: 'layout', run: () => st.togglePanel() },
       { id: 'sidebar', label: 'Toggle sidebar', hint: 'Ctrl+B', icon: 'sidebar', run: () => st.toggleSidebar() },
       { id: 'changes', label: 'Show changes', icon: 'diff', run: () => st.setPanelTab('changes') },
       { id: 'goal', label: 'Show goal', icon: 'target', run: () => st.setPanelTab('goal') },
-      { id: 'terminal', label: 'Show terminal', icon: 'terminal', run: () => st.setPanelTab('terminal') },
+      { id: 'terminal', label: 'Show terminal', hint: 'Ctrl+`', icon: 'terminal', run: () => { st.setPanelTab('terminal'); st.focusTerminal(); } },
       { id: 'thinking', label: 'Toggle thinking visibility', icon: 'brain', run: () => st.toggleThinking() }
     ];
     if (activeId) {
       base.push(
+        { id: 'new-terminal', label: 'New terminal', hint: 'Ctrl+Shift+`', icon: 'terminal', run: () => void createTerminal(activeId) },
         { id: 'stop', label: 'Interrupt current turn', hint: 'Esc', icon: 'stop', run: () => void invoke('sessions:interrupt', { id: activeId }) },
         { id: 'export', label: 'Export transcript as Markdown', icon: 'download', run: () => void invoke('sessions:export', { id: activeId }) },
         { id: 'fork', label: 'Fork session', icon: 'fork', run: () => void invoke('sessions:fork', { id: activeId }).then((f) => f && st.setActive(f.id)) },

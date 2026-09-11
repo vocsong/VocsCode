@@ -75,11 +75,10 @@ export class CodexExecAdapter implements HarnessAdapter {
     this.thread = meta.harnessRef.codexThreadId ? this.codex!.resumeThread(meta.harnessRef.codexThreadId, opts) : this.codex!.startThread(opts);
     return this.thread;
   }
-
   async send(input: UserInput): Promise<void> {
     if (!this.codex) await this.start();
     if (this._busy) throw new Error('Codex exec runs one turn at a time; wait for the current turn to finish.');
-    const thread = this.ensureThread();
+    let thread = this.ensureThread();
     const parts: CodexInput[] = [];
     if (input.text) parts.push({ type: 'text', text: input.text });
     for (const img of input.images ?? []) {
@@ -95,9 +94,18 @@ export class CodexExecAdapter implements HarnessAdapter {
     this.ctx.emit({ type: 'status', status: 'running' });
     void (async () => {
       try {
-        const { events } = await thread.runStreamed(parts, { signal: this.abort!.signal });
-        for await (const ev of events) this.handle(ev);
-        if (thread.id) this.ctx.updateRef({ codexThreadId: thread.id });
+        try {
+          await this.streamTurn(thread, parts, startedAt);
+        } catch (e) {
+          if (this.abort?.signal.aborted || thread !== this.thread || !this.ctx.session().harnessRef.codexThreadId) throw e;
+          // A refused/stale resume must not leave the broken thread cached: drop it (and the
+          // stored thread id) and retry once with a fresh thread.
+          this.thread = null;
+          this.ctx.updateRef({ codexThreadId: undefined });
+          this.ctx.log('warn', `codex resume failed (${errorMessage(e)}); retrying with a new thread.`);
+          thread = this.ensureThread();
+          await this.streamTurn(thread, parts, startedAt);
+        }
       } catch (e) {
         const aborted = this.abort?.signal.aborted;
         this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: aborted ? 'interrupted' : 'failed', durationMs: Date.now() - startedAt, error: aborted ? undefined : errorMessage(e) } });
@@ -107,6 +115,12 @@ export class CodexExecAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'status', status: 'idle' });
       }
     })();
+  }
+
+  private async streamTurn(thread: Thread, parts: CodexInput[], startedAt: number): Promise<void> {
+    const { events } = await thread.runStreamed(parts, { signal: this.abort!.signal });
+    for await (const ev of events) this.handle(ev);
+    if (thread.id) this.ctx.updateRef({ codexThreadId: thread.id });
   }
 
   private handle(ev: ThreadEvent): void {

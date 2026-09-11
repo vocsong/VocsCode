@@ -4,7 +4,9 @@ import type { EffortLevel, ImageAttachment, PermissionMode, SessionMeta } from '
 import { HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { fmtCost, fmtTokens } from '../format';
+import { useSessionModels } from '../models';
 import { useStore } from '../store';
+import * as host from '../terminal/host';
 import { Button, Icon, Kbd } from './ui';
 
 export function Composer({ session }: { session: SessionMeta }) {
@@ -16,8 +18,37 @@ export function Composer({ session }: { session: SessionMeta }) {
   const [histIdx, setHistIdx] = useState(-1);
   const ref = useRef<HTMLTextAreaElement>(null);
   const toast = useStore((s) => s.toast);
+  const composerInsert = useStore((s) => s.composerInsert);
+  const clearComposerInsert = useStore((s) => s.clearComposerInsert);
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
-  const caps = HARNESS_BY_ID[session.config.harness].capabilities;
+  /** `!cmd` runs locally in the terminal; the Run button replaces send/steer/queue while it is typed. */
+  const shellDraft = text.trimStart().startsWith('!');
+  const harness = HARNESS_BY_ID[session.config.harness];
+  const caps = harness.capabilities;
+  const { models } = useSessionModels(session);
+  const currentModel = session.activeModel ?? session.config.model;
+  const currentInfo = models.find((m) => currentModel && m.id === currentModel.model && m.provider === currentModel.provider);
+
+  // Only warn when the catalog is explicit. An unknown capability (undefined) is not a claim.
+  const visionWarning =
+    currentModel && currentInfo?.supportsImages === false
+      ? {
+          model: currentInfo.displayName,
+          detail: caps.dropsUnsupportedImages
+            ? `${harness.name} strips the attachment before it reaches the model, so an override here alone will not help — its own model catalog has to list image input too.`
+            : 'The provider may reject the request or silently ignore the image.'
+        }
+      : null;
+
+  const markVisionCapable = async () => {
+    if (!currentModel) return;
+    try {
+      await invoke('models:setOverride', { provider: currentModel.provider, model: currentModel.model, supportsImages: true });
+      toast(`${currentInfo?.displayName ?? currentModel.model} is now treated as vision-capable. Undo it under Settings → Providers.`, 'success');
+    } catch (e) {
+      toast(`Could not save the override: ${(e as Error).message}`, 'error');
+    }
+  };
 
   useEffect(() => {
     const el = ref.current;
@@ -30,27 +61,95 @@ export function Composer({ session }: { session: SessionMeta }) {
     ref.current?.focus();
   }, [session.id]);
 
+  // Text handed over from elsewhere (the terminal's "send to agent") lands below the current draft.
+  useEffect(() => {
+    if (!composerInsert) return;
+    const insert = composerInsert.text;
+    setText((t) => (t.trim() ? `${t.replace(/\s+$/, '')}\n\n${insert}` : insert));
+    clearComposerInsert();
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+  }, [composerInsert, clearComposerInsert]);
+
   useEffect(() => {
     if (!mention) return;
+    // Debounced so typing does not fire an uncancellable full-tree walk per keystroke; results are
+    // cleared while a search is in flight instead of seeding the popover with the previous query's.
+    setMention((m) => (m ? { ...m, results: [], index: 0 } : m));
+    const query = mention.query;
     let cancelled = false;
-    invoke('fs:search', { sessionId: session.id, query: mention.query, limit: 12 }).then((results) => !cancelled && setMention((m) => (m ? { ...m, results, index: 0 } : m)));
+    const timer = setTimeout(() => {
+      invoke('fs:search', { sessionId: session.id, query, limit: 12 })
+        .then((results) => {
+          if (!cancelled) setMention((m) => (m && m.query === query ? { ...m, results, index: 0 } : m));
+        })
+        .catch(() => undefined);
+    }, 150);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [mention?.query, session.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const slashMatches = slash ? SLASH_COMMANDS.filter((c) => c.name.startsWith(slash.query.toLowerCase())) : [];
 
+  /** Runs `!` draft in the session's shell: switch to the Terminal tab and type it in. Nothing reaches the harness. */
+  const runShell = async (command: string) => {
+    const store = useStore.getState();
+    const mine = store.terminals.filter((t) => t.sessionId === session.id);
+    const active = store.activeTerminal[session.id];
+    let terminalId = mine.some((t) => t.id === active) ? active : mine[mine.length - 1]?.id;
+    if (terminalId) {
+      store.setActiveTerminal(session.id, terminalId);
+      store.setPanelTab('terminal');
+      store.focusTerminal();
+    } else {
+      const info = await host.createTerminal(session.id); // opens the tab and toasts on failure
+      if (!info) return;
+      terminalId = info.id;
+    }
+    // Every line runs, as if the draft had been pasted into the shell.
+    const data = command.replace(/\r?\n/g, '\r') + '\r';
+    try {
+      await invoke('terminal:input', { terminalId, data });
+    } catch (e) {
+      toast(`Could not run the command: ${String((e as Error).message ?? e)}`, 'error');
+    }
+  };
+
   const send = async (mode: 'now' | 'steer' | 'queue' = 'now') => {
     const t = text.trim();
     if (!t && !images.length) return;
-    if (t.startsWith('/') && (await runSlash(t))) {
+    // Clears the draft and every popover/filter state derived from it. setText is programmatic here,
+    // so onChange never fires — without this the stale mention/slash state keeps its key handling
+    // alive and swallows ArrowUp/ArrowDown, breaking input history right after a send.
+    const clearDraft = () => {
       setText('');
+      setMention(null);
+      setSlash(null);
+      setHistIdx(-1);
+    };
+    // Known commands are cleared right away so long-running ones (/pr, /merge…) do not leave the
+    // composer looking frozen; their progress and outcome appear as info lines in the transcript.
+    if (t.startsWith('/') && SLASH_COMMANDS.some((c) => c.name === t.slice(1).split(/\s+/)[0])) {
+      clearDraft();
+      void runSlash(t).catch((e) => toast(String((e as Error).message ?? e), 'error'));
+      return;
+    }
+    if (t.startsWith('!')) {
+      const command = t.slice(1).trim();
+      setHistory((h) => [t, ...h.filter((x) => x !== t)].slice(0, 50));
+      clearDraft();
+      if (command) await runShell(command);
+      else toast('Type a command after ! — for example !git status', 'info');
       return;
     }
     setHistory((h) => [t, ...h.filter((x) => x !== t)].slice(0, 50));
-    setHistIdx(-1);
-    setText('');
+    clearDraft();
     setImages([]);
     try {
       await invoke('sessions:send', { id: session.id, input: { text: t, images: images.length ? images : undefined, mode: busy ? mode : 'now' } });
@@ -66,7 +165,7 @@ export function Composer({ session }: { session: SessionMeta }) {
     const store = useStore.getState();
     switch (cmd) {
       case 'help':
-        toast(`Commands: ${SLASH_COMMANDS.map((c) => '/' + c.name).join(' ')} · Enter send · Shift+Enter newline · Esc stop · Ctrl+K palette`, 'info');
+        toast(`Commands: ${SLASH_COMMANDS.map((c) => '/' + c.name).join(' ')} · Enter send · Shift+Enter newline · Esc stop · ! shell · Ctrl+K palette`, 'info');
         return true;
       case 'model': {
         if (!arg) {
@@ -111,8 +210,10 @@ export function Composer({ session }: { session: SessionMeta }) {
         store.setPanelTab('usage');
         return true;
       case 'compact': {
+        const noteId = `local-compact-${session.id}`;
+        store.setLocalInfo(session.id, noteId, 'Compacting context…', { pending: true });
         const r = await invoke('sessions:compact', { id: session.id });
-        toast(r.ok ? 'Compaction requested' : r.detail ?? 'Not supported', r.ok ? 'success' : 'error');
+        store.setLocalInfo(session.id, noteId, r.ok ? 'Context compacted' : r.detail ?? 'Not supported', { level: r.ok ? 'info' : 'error' });
         return true;
       }
       case 'clear':
@@ -130,11 +231,30 @@ export function Composer({ session }: { session: SessionMeta }) {
       case 'open':
         if (arg === 'editor') await invoke('app:openInEditor', { path: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
         else if (arg === 'terminal') await invoke('app:openTerminal', { cwd: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
-        else await invoke('app:openPath', { path: session.cwd });
+        else await invoke('app:openPath', { path: session.cwd, sessionId: session.id });
         return true;
       case 'worktree':
         toast(session.worktreeBranch ? `Worktree ${session.cwd} on branch ${session.worktreeBranch}` : 'This session runs directly in the project folder.', 'info');
         return true;
+      case 'pr': {
+        if (!arg) {
+          toast('Usage: /pr <base branch> — pushes this branch and opens a PR into it.', 'error');
+          return true;
+        }
+        // Push + gh pr create can take tens of seconds; report progress in the transcript, not just a final toast.
+        const noteId = `local-pr-${session.id}`;
+        store.setLocalInfo(session.id, noteId, `Pushing this branch and opening a PR into ${arg}…`, { pending: true });
+        const pr = await invoke('git:pr', { sessionId: session.id, base: arg }).catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }));
+        store.setLocalInfo(session.id, noteId, pr.ok ? `PR opened: ${pr.url ?? arg}` : pr.output ?? 'Failed to open the PR', { level: pr.ok ? 'info' : 'error' });
+        return true;
+      }
+      case 'merge': {
+        const noteId = `local-merge-${session.id}`;
+        store.setLocalInfo(session.id, noteId, 'Merging the open PR for this branch…', { pending: true });
+        const merged = await invoke('git:merge', { sessionId: session.id, base: arg || undefined }).catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }));
+        store.setLocalInfo(session.id, noteId, merged.ok ? `Merged: ${merged.url ?? 'PR merged'}` : merged.output ?? 'Failed to merge the PR', { level: merged.ok ? 'info' : 'error' });
+        return true;
+      }
       case 'stop':
         await invoke('sessions:interrupt', { id: session.id });
         return true;
@@ -265,16 +385,30 @@ export function Composer({ session }: { session: SessionMeta }) {
         </div>
       )}
       {images.length > 0 && (
-        <div className="attachments">
-          {images.map((im, i) => (
-            <div key={i} className="attachment">
-              <img src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'image'} />
-              <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove">
-                <Icon name="x" size={12} />
-              </button>
+        <>
+          {visionWarning && (
+            <div className="composer-warn">
+              <Icon name="alert" size={14} />
+              <span>
+                <strong>{visionWarning.model}</strong> is listed as text-only. {visionWarning.detail}
+              </span>
+              <span className="spacer" />
+              <Button size="sm" variant="ghost" onClick={() => void markVisionCapable()} title="Record an override in Settings → Providers so this model is treated as vision-capable">
+                It does accept images
+              </Button>
             </div>
-          ))}
-        </div>
+          )}
+          <div className="attachments">
+            {images.map((im, i) => (
+              <div key={i} className="attachment">
+                <img src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'image'} />
+                <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove">
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
       )}
       <div className="composer-box">
         <textarea
@@ -283,7 +417,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… (/ commands, @ files, paste images)'}
+          placeholder={busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… (/ commands, @ files, ! shell, paste images)'}
           rows={1}
           spellCheck
         />
@@ -292,17 +426,21 @@ export function Composer({ session }: { session: SessionMeta }) {
             <Icon name="image" size={16} />
             <input type="file" accept="image/*" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
           </label>
-          {busy ? (
+          {shellDraft ? (
+            <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
+              Run
+            </Button>
+          ) : busy ? (
             <>
               {caps.queue && (
-                <Button size="sm" variant="ghost" onClick={() => void send('queue')} title="Send after the current turn">
+                <Button size="sm" onClick={() => void send('queue')} title="Send after the current turn">
                   Queue
                 </Button>
               )}
               <Button size="sm" variant="primary" icon={caps.steer ? 'arrowUp' : 'clock'} onClick={() => void send(caps.steer ? 'steer' : 'queue')} title={caps.steer ? 'Steer now' : 'Queue'}>
                 {caps.steer ? 'Steer' : 'Queue'}
               </Button>
-              <Button size="sm" variant="danger" icon="stop" onClick={() => void invoke('sessions:interrupt', { id: session.id })} title="Interrupt (Esc)" />
+              <Button size="sm" variant="danger" icon="stop" className="btn-icon" onClick={() => void invoke('sessions:interrupt', { id: session.id })} title="Interrupt (Esc)" />
             </>
           ) : (
             <Button size="sm" variant="primary" icon="send" onClick={() => void send()} disabled={!text.trim() && !images.length}>
@@ -312,7 +450,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         </div>
       </div>
       <div className="composer-hint muted small">
-        <Kbd>Enter</Kbd> send · <Kbd>Shift+Enter</Kbd> newline · <Kbd>Esc</Kbd> stop · <Kbd>@</Kbd> files · <Kbd>/</Kbd> commands
+        <Kbd>Enter</Kbd> send · <Kbd>Shift+Enter</Kbd> newline · <Kbd>Esc</Kbd> stop · <Kbd>@</Kbd> files · <Kbd>/</Kbd> commands · <Kbd>!</Kbd> shell
         {(session.queued ?? 0) > 0 && <span className="queued-hint"> · {session.queued} queued</span>}
       </div>
     </div>

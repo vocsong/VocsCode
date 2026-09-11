@@ -478,7 +478,14 @@ export class PiAdapter implements HarnessAdapter {
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
     // The approvals extension re-reads this file before every tool call.
-    if (this.modeFile) await fs.writeFile(this.modeFile, mode, 'utf8').catch(() => undefined);
+    if (!this.modeFile) return;
+    try {
+      await fs.writeFile(this.modeFile, mode, 'utf8');
+    } catch (e) {
+      // Surface the failure: silently keeping the old mode active would grant or withhold
+      // permissions behind the user's back.
+      this.ctx.log('warn', `failed to write permission mode file: ${errorMessage(e)}`);
+    }
   }
 
   async compact(): Promise<void> {

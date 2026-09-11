@@ -8,22 +8,26 @@ import type {
   EffortLevel,
   GoalState,
   HarnessRef,
+  ModelInfo,
   ModelRef,
   PermissionMode,
   SessionEvent,
   SessionEventEnvelope,
   SessionMeta,
+  SessionStatus,
   TranscriptItem,
   UserInput
 } from '../shared/types';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
-import { createWorktree, gitRoot, removeWorktree, slugify } from './git';
+import { branchGitState, createWorktree, gitRoot, removeWorktree, restoreWorktree, slugify, worktreeInfo, type BranchGitState } from './git';
 import { emptyUsage } from './models/static-models';
+import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
 import type { SettingsStore } from './settings';
 import type { SessionStore } from './store';
+import type { AnalyticsStore } from './analytics';
 import { deferred, errorMessage, shortId, type Deferred } from './util/async';
 import { readJson, writeJson } from './util/fs';
 
@@ -31,6 +35,7 @@ export interface SessionManagerDeps {
   store: SessionStore;
   settings: SettingsStore;
   runtime: RuntimeResolver;
+  analytics: AnalyticsStore;
   getSecret: (providerId: string) => Promise<string | undefined>;
   pushEvent: (env: SessionEventEnvelope) => void;
   pushSessions: (sessions: SessionMeta[]) => void;
@@ -45,18 +50,34 @@ interface ActiveSession {
   dirty: Set<string>;
   lastAssistantText: string;
   starting: Promise<void> | null;
+  /** Last list the harness reported, before user overrides, so it can be re-published. */
+  models: ModelInfo[] | null;
 }
 
 const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
 
 export class SessionManager {
+  /** How often a session parked on 'pr' re-checks whether its branch was merged. */
+  private static readonly GIT_STATE_RECHECK_MS = 120_000;
+
   private active = new Map<string, ActiveSession>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
+  private gitStateTimers = new Map<string, NodeJS.Timeout>();
+  /** Sessions whose restored git state was re-checked once after boot. */
+  private gitStateChecked = new Set<string>();
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
   list(): SessionMeta[] {
-    return this.deps.store.list();
+    const list = this.deps.store.list();
+    // Sessions restored while parked on a PR resume polling for their merge.
+    for (const s of list) {
+      if (s.status === 'pr' && !this.gitStateChecked.has(s.id)) {
+        this.gitStateChecked.add(s.id);
+        this.scheduleGitStateCheck(s.id);
+      }
+    }
+    return list;
   }
 
   get(id: string): SessionMeta | undefined {
@@ -89,6 +110,65 @@ export class SessionManager {
     const t = this.persistTimers.get(id);
     if (t) clearTimeout(t);
     this.persistTimers.delete(id);
+  }
+
+  /** Schedules a PR/merge status check shortly after a turn ends in an isolated worktree. */
+  private scheduleGitStateCheck(id: string, delayMs = 4_000): void {
+    const prev = this.gitStateTimers.get(id);
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      this.gitStateTimers.delete(id);
+      void this.checkGitState(id, true);
+    }, delayMs);
+    timer.unref?.();
+    this.gitStateTimers.set(id, timer);
+  }
+
+  /** Re-runs the PR/merge state check after a local /pr or /merge completes outside a turn. */
+  refreshGitState(id: string): void {
+    this.scheduleGitStateCheck(id, 1_000);
+  }
+
+  /** Reflects the session branch's PR/merge state in the sidebar status label. */
+  private async checkGitState(id: string, recheck: boolean): Promise<void> {
+    const meta = this.get(id);
+    if (!meta || !meta.worktreeBranch) return;
+    if (!this.gitStateCheckable(meta.status)) return;
+    let state: BranchGitState;
+    try {
+      state = await branchGitState(meta.cwd, meta.worktreeBranch);
+    } catch (e) {
+      this.deps.log('warn', `pr/merge status check failed: ${errorMessage(e)}`);
+      return;
+    }
+    // The check can take seconds over the network; the session may have moved on.
+    if (!this.gitStateCheckable(meta.status)) return;
+    const next: SessionStatus = state.merged ? 'merged' : state.pr ? 'pr' : 'idle';
+    if (meta.status === next || meta.status === 'merged' || meta.status === 'error' || meta.status === 'stopped') return;
+    meta.status = next;
+    meta.statusDetail = undefined;
+    this.schedulePersist(meta);
+    this.pushSessions();
+    // Parked on 'pr': keep polling so the label flips to 'merged' once it lands.
+    if (next === 'pr' && recheck) this.scheduleGitStateCheck(id, SessionManager.GIT_STATE_RECHECK_MS);
+  }
+
+  /** Only idle/pr sessions take a label update; live or already-final statuses are left alone. */
+  private gitStateCheckable(status: SessionStatus): boolean {
+    return status === 'idle' || status === 'pr' || status === 'merged';
+  }
+
+  /** Persists every debounced meta update immediately (used on quit so trailing edits are not lost). */
+  async flushPendingPersists(): Promise<void> {
+    const entries = [...this.persistTimers];
+    this.persistTimers.clear();
+    await Promise.all(
+      entries.map(([id, t]) => {
+        clearTimeout(t);
+        const meta = this.deps.store.get(id);
+        return meta ? this.deps.store.upsert(meta).catch(() => undefined) : Promise.resolve();
+      })
+    );
   }
 
   async create(req: CreateSessionRequest): Promise<SessionMeta> {
@@ -130,8 +210,11 @@ export class SessionManager {
       };
     }
     await this.deps.store.upsert(meta);
+    this.deps.analytics.touchSession(meta);
     const recent = [cfg.projectRoot, ...s.recentProjects.filter((p) => p !== cfg.projectRoot)].slice(0, 12);
-    await this.deps.settings.update({ recentProjects: recent });
+    // The folder keeps its sidebar entry even after its last session is archived or deleted.
+    const folders = s.folders.includes(cfg.projectRoot) ? s.folders : [...s.folders, cfg.projectRoot];
+    await this.deps.settings.update({ recentProjects: recent, folders });
     this.pushSessions();
     if (req.initialPrompt?.trim()) {
       const prompt = meta.goal ? `${req.initialPrompt.trim()}\n\nActive goal: ${meta.goal.objective}` : req.initialPrompt.trim();
@@ -148,8 +231,10 @@ export class SessionManager {
 
   async delete(id: string, removeWt = false): Promise<void> {
     const meta = this.get(id);
+    const t0 = Date.now();
     await this.stop(id);
     this.cancelPersist(id);
+    const tStop = Date.now();
     if (meta?.worktreeBranch && removeWt) {
       try {
         await removeWorktree(meta.config.projectRoot, meta.cwd);
@@ -157,8 +242,11 @@ export class SessionManager {
         this.deps.log('warn', `worktree removal failed: ${errorMessage(e)}`);
       }
     }
+    const tWorktree = Date.now();
     await this.deps.store.remove(id);
+    const tStore = Date.now();
     this.pushSessions();
+    if (tStore - t0 >= 1000) this.deps.log('warn', `slow session delete ${id}: stop ${tStop - t0}ms, worktree ${tWorktree - tStop}ms, store ${tStore - tWorktree}ms`);
   }
 
   async patch(id: string, patch: Partial<SessionMeta>): Promise<SessionMeta> {
@@ -168,6 +256,26 @@ export class SessionManager {
     await this.deps.store.upsert(meta);
     this.pushSessions();
     return meta;
+  }
+
+  /** Archives a session; with `removeWt` it also deletes the worktree (the branch is kept so unarchive can restore it). */
+  async setArchived(id: string, archived: boolean, removeWt = false): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (archived && removeWt && meta.worktreeBranch) {
+      await this.stop(id);
+      // Non-force: a worktree with uncommitted changes is refused, and the error reaches the renderer's toast.
+      await removeWorktree(meta.config.projectRoot, meta.cwd, { force: false });
+    }
+    if (!archived && meta.worktreeBranch) {
+      // The worktree may have been removed while archived; recreate it so the session can start again.
+      try {
+        await restoreWorktree(meta.config.projectRoot, meta.cwd, meta.worktreeBranch);
+      } catch (e) {
+        this.deps.log('warn', `worktree restore failed: ${errorMessage(e)}`);
+      }
+    }
+    return this.patch(id, { archived });
   }
 
   transcript(id: string): Promise<TranscriptItem[]> {
@@ -225,7 +333,7 @@ export class SessionManager {
     if (!meta) throw new Error('Session not found');
     const ctx = this.buildContext(meta, id);
     const adapter = createAdapter(meta.config.harness, ctx);
-    const active: ActiveSession = { adapter, approvals: new Map(), liveItems: new Map(), dirty: new Set(), lastAssistantText: '', starting: null };
+    const active: ActiveSession = { adapter, approvals: new Map(), liveItems: new Map(), dirty: new Set(), lastAssistantText: '', starting: null, models: null };
     this.active.set(id, active);
     meta.status = 'starting';
     meta.statusDetail = `Starting ${HARNESS_BY_ID[meta.config.harness].name}…`;
@@ -244,6 +352,9 @@ export class SessionManager {
       .catch((e) => {
         active.starting = null;
         this.active.delete(id);
+        // Start failed after spawn: dispose the adapter so no harness child process is orphaned
+        // (pi/acp start() have no self-cleaning handshake either).
+        active.adapter.dispose().catch((de) => this.deps.log('warn', `dispose after failed start: ${errorMessage(de)}`));
         const m = this.get(id);
         if (m) {
           m.status = 'error';
@@ -319,6 +430,14 @@ export class SessionManager {
 
   async stopAll(): Promise<void> {
     await Promise.all([...this.active.keys()].map((id) => this.stop(id)));
+  }
+
+  /**
+   * Re-sends each running session's cached model list so a capability override applies without
+   * restarting the harness. Cheap: no harness round-trip, only the overrides are re-evaluated.
+   */
+  republishModels(): void {
+    for (const [id, active] of this.active) if (active.models) this.emit(id, { type: 'models', models: active.models });
   }
 
   async setModel(id: string, model: ModelRef): Promise<SessionMeta> {
@@ -410,6 +529,12 @@ export class SessionManager {
 
   /** Central event sink: persists transcript, updates meta, forwards to renderer, drives goals. */
   private emit(sessionId: string, event: SessionEvent): void {
+    // Harness-reported capabilities pass through the user's corrections before anything sees them.
+    if (event.type === 'models') {
+      const live = this.active.get(sessionId);
+      if (live) live.models = event.models;
+      event = { ...event, models: applyModelOverrides(event.models, this.deps.settings.get().modelOverrides) };
+    }
     const meta = this.get(sessionId);
     const active = this.active.get(sessionId);
     switch (event.type) {
@@ -421,8 +546,10 @@ export class SessionManager {
           if (item.kind === 'assistant' && item.text) active.lastAssistantText = item.text;
         }
         const streaming = item.kind === 'assistant' && item.streaming;
-        if (!streaming || !active) void this.deps.store.appendTranscript(sessionId, item);
+        if (!streaming || !active) this.appendTranscript(sessionId, item);
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
+        // Tool calls are recorded once, when they leave the running state.
+        if (item.kind === 'tool' && item.status !== 'running') this.deps.analytics.recordToolCall(sessionId, item);
         break;
       }
       case 'item.delta': {
@@ -442,17 +569,29 @@ export class SessionManager {
           meta.status = event.status;
           meta.statusDetail = event.detail;
           if (event.status === 'idle' || event.status === 'stopped' || event.status === 'error') {
-            if (active) void this.flushLive(sessionId, active);
-            if (event.status === 'stopped') this.active.delete(sessionId);
+            if (active) {
+              void this.flushLive(sessionId, active).catch((e) => this.deps.log('warn', `live flush failed: ${errorMessage(e)}`));
+              if (event.status === 'stopped') {
+                // The harness exited on its own: pending approvals would hang forever and the
+                // adapter must be disposed, mirroring the fatal-error path.
+                this.active.delete(sessionId);
+                this.cancelApprovals(sessionId, active, 'Harness stopped');
+                active.adapter.dispose().catch((e) => this.deps.log('warn', `dispose after harness stop failed: ${errorMessage(e)}`));
+              }
+            }
+            this.schedulePersist(meta);
           }
-          this.schedulePersist(meta);
+          // Status events are the live source of truth for the sidebar. Terminal statuses also
+          // persist above, but every transition must be published immediately.
           this.pushSessions();
+          if (event.status === 'idle') this.scheduleGitStateCheck(meta.id);
         }
         break;
       }
       case 'usage':
         if (meta) {
           meta.usage = event.totals;
+          this.deps.analytics.recordUsage(meta, event.totals);
           this.schedulePersist(meta);
           this.pushSessions();
         }
@@ -481,12 +620,17 @@ export class SessionManager {
           this.schedulePersist(meta);
           this.pushSessions();
         }
-        void this.deps.store.appendTranscript(sessionId, { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'error', text: event.message });
+        this.appendTranscript(sessionId, { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'error', text: event.message });
         break;
       default:
         break;
     }
     this.deps.pushEvent({ sessionId, event, ts: Date.now() });
+  }
+
+  /** Transcript appends must never reject into the void; log a warning instead. */
+  private appendTranscript(sessionId: string, item: TranscriptItem): void {
+    this.deps.store.appendTranscript(sessionId, item).catch((e) => this.deps.log('warn', `transcript append failed: ${errorMessage(e)}`));
   }
 
   private async flushLive(sessionId: string, active: ActiveSession): Promise<void> {
@@ -500,6 +644,7 @@ export class SessionManager {
   }
 
   private onTurnFinished(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>): void {
+    if (turn.status === 'completed') this.deps.analytics.recordTurn(meta, turn.durationMs ?? 0);
     const active = this.active.get(meta.id);
     if (this.settings().notifications && turn.status !== 'interrupted') {
       this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);
@@ -553,7 +698,7 @@ export class SessionManager {
           autoContinue: opts.autoContinue ?? s.goalDefaults.autoContinue
         };
         this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Goal set: ${meta.goal.objective}` } });
-        if (meta.status === 'idle') void this.send(id, { text: this.goalKickoffPrompt(meta.goal) });
+        if (meta.status === 'idle') void this.send(id, { text: this.goalKickoffPrompt(meta.goal) }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
         break;
       }
       case 'pause':
@@ -562,7 +707,7 @@ export class SessionManager {
       case 'resume':
         if (meta.goal) {
           meta.goal.status = 'active';
-          if (meta.status === 'idle') void this.send(id, { text: `Resuming the goal: ${meta.goal.objective}\nContinue where you left off.` });
+          if (meta.status === 'idle') void this.send(id, { text: `Resuming the goal: ${meta.goal.objective}\nContinue where you left off.` }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
         }
         break;
       case 'clear':
@@ -582,6 +727,41 @@ export class SessionManager {
     if (meta.goal) meta.goal.updatedAt = Date.now();
     await this.deps.store.upsert(meta);
     this.pushSessions();
+    return meta;
+  }
+
+  /**
+   * Relocates a session to another directory (worktree switch). A running harness is stopped;
+   * provider resume state is tied to the old directory, so it is dropped (the app transcript stays).
+   */
+  async moveTo(id: string, cwd: string): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (!path.isAbsolute(cwd)) throw new Error('Worktree path must be absolute');
+    if (path.resolve(meta.cwd) === path.resolve(cwd)) return meta;
+    const wasRunning = !!this.active.get(id);
+    if (wasRunning) await this.stop(id);
+    meta.cwd = cwd;
+    const info = await worktreeInfo(cwd).catch(() => null);
+    const managedBase = meta.config.projectRoot
+      ? path.join(path.resolve(meta.config.projectRoot), '.vocs-code', 'worktrees') + path.sep
+      : null;
+    const managed = !!managedBase && cwd.startsWith(managedBase);
+    meta.worktreeBranch = managed ? info?.branch : undefined;
+    // Keep `nativeHistory` (stored in the session dir, cwd-independent); drop provider session ids.
+    const ref = { ...meta.harnessRef };
+    delete ref.claudeSessionId;
+    delete ref.codexThreadId;
+    delete ref.piSessionFile;
+    delete ref.acpSessionId;
+    delete ref.forkOnResume;
+    meta.harnessRef = ref;
+    await this.deps.store.upsert(meta);
+    this.pushSessions();
+    this.emit(id, {
+      type: 'item.upsert',
+      item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Session moved to ${cwd}${wasRunning ? ' — the harness restarts on the next message.' : '.'}` }
+    });
     return meta;
   }
 

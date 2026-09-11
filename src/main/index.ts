@@ -1,31 +1,51 @@
 /** Electron entry point: app lifecycle, window creation, logging, and the headless debug hooks documented in the README. */
+import { spawn } from 'node:child_process';
+import { readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
+import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
+import { AnalyticsStore } from './analytics';
+import { watchEventLoop } from './diag';
 import { registerIpc, pushToRenderer } from './ipc';
+import { createLogger, type Logger } from './log';
 import { RuntimeResolver } from './runtime';
 import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
 import { SettingsStore } from './settings';
 import { SessionStore } from './store';
+import { TerminalManager } from './terminal';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged && !!process.env.ELECTRON_RENDERER_URL;
+const APP_NAME = 'Vocs Code';
+const APP_ID = 'dev.vocs.vocscode';
+
+// Electron uses its own name and AppUserModelId in development unless the host sets them explicitly.
+// Set both before acquiring the single-instance lock so the taskbar uses the packaged identity too.
+app.setName(APP_NAME);
+if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
+// Isolate user data before the lock: the lock is keyed on userData, so an isolated run
+// (tests, a second checkout) must not collide with an instance using the default directory.
+if (process.env.VOCS_CODE_USER_DATA) app.setPath('userData', process.env.VOCS_CODE_USER_DATA);
 
 let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
+let terminals: TerminalManager | null = null;
 
-function log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
+/** Console-only until userData is known (see main()), then also a rotating file under logs/. */
+let log: Logger = (level, message) => {
   if (level === 'debug' && !isDev && !process.env.VOCS_CODE_DEBUG) return;
   const line = `[${new Date().toISOString()}] ${level.toUpperCase()} ${message}`;
   if (level === 'error') console.error(line);
   else if (level === 'warn') console.warn(line);
   else console.log(line);
-}
+};
 
 if (!app.requestSingleInstanceLock()) {
+  log('warn', 'another Vocs Code instance is already running for this user-data directory; quitting');
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -41,20 +61,27 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function main(): Promise<void> {
-  // Test hooks: isolate user data and optionally quit after a delay.
-  if (process.env.VOCS_CODE_USER_DATA) app.setPath('userData', process.env.VOCS_CODE_USER_DATA);
+  // Test hooks: optionally quit after a delay. (The user-data override is applied before the lock above.)
   if (process.env.VOCS_CODE_AUTOQUIT) setTimeout(() => app.quit(), Number(process.env.VOCS_CODE_AUTOQUIT));
   const userData = app.getPath('userData');
+  const logger = createLogger(path.join(userData, 'logs'), isDev || !!process.env.VOCS_CODE_DEBUG);
+  log = logger.log;
+  log('info', `Vocs Code ${app.getVersion()} starting (electron ${process.versions.electron}, ${process.platform} ${process.arch})`);
+  // A blocked main process is a window that takes no input; leave a trace when that happens.
+  watchEventLoop((level, message) => log(level, message));
   const settings = new SettingsStore(userData);
   await settings.load();
   const secrets = new SecretStore(userData);
   await secrets.load();
   const store = new SessionStore(userData);
   await store.load();
+  const analytics = new AnalyticsStore(userData, { log });
+  await analytics.load(store.list(), (id) => store.readTranscript(id));
 
   // out/main/index.js → two levels up is the app root both in development and inside app.asar.
   // (app.getAppPath() returns out/main when launched as `electron out/main/index.js`.)
   const appRoot = path.resolve(here, '..', '..');
+  registerAppUserModelId(appRoot);
   const runtime = new RuntimeResolver(
     {
       appRuntimeDir: path.join(userData, 'runtime'),
@@ -68,6 +95,7 @@ async function main(): Promise<void> {
     store,
     settings,
     runtime,
+    analytics,
     getSecret: (id) => secrets.get(id),
     pushEvent: (env: SessionEventEnvelope) => pushToRenderer(mainWindow, PUSH_CHANNELS.sessionEvent, env),
     pushSessions: (list: SessionMeta[]) => pushToRenderer(mainWindow, PUSH_CHANNELS.sessionsChanged, list),
@@ -86,65 +114,152 @@ async function main(): Promise<void> {
     log
   });
 
-  registerIpc({ settings, secrets, sessions, runtime, getWindow: () => mainWindow, log });
+  const sessionsRef = sessions;
+  terminals = new TerminalManager({
+    dir: path.join(userData, 'terminals'),
+    settings: () => settings.get().terminal,
+    version: app.getVersion(),
+    cwdOf: (id) => sessionsRef.get(id)?.cwd,
+    push: (channel, payload) => pushToRenderer(mainWindow, channel, payload),
+    log
+  });
+  await terminals.load();
+
+  registerIpc({ settings, secrets, sessions, terminals, runtime, analytics, getWindow: () => mainWindow, log });
 
   settings.onChange((s) => {
-    nativeTheme.themeSource = s.theme;
+    currentTheme = s.theme;
+    nativeTheme.themeSource = themeSourceFor(s.theme);
+    // Two themes can share one themeSource (Midnight and Abyss are both 'dark'), so nativeTheme
+    // may stay silent on a switch — repaint the caption from the theme id directly.
+    applyChrome();
+    terminals?.updateSettings(s.terminal);
   });
-  nativeTheme.themeSource = settings.get().theme;
+  currentTheme = settings.get().theme;
+  nativeTheme.themeSource = themeSourceFor(currentTheme);
 
   // The window is frameless with an in-app title bar; on Windows/Linux the OS still paints the caption
   // buttons over it, so their colors have to follow the theme.
-  nativeTheme.on('updated', () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    mainWindow.setBackgroundColor(chrome().color);
-    if (process.platform !== 'darwin') {
-      try {
-        mainWindow.setTitleBarOverlay(chrome());
-      } catch {
-        // Older/unsupported platforms simply keep the colors they were created with.
-      }
-    }
-  });
+  nativeTheme.on('updated', applyChrome);
 
   // No native menu bar: File/Edit/View/Help live in the custom title bar. macOS keeps its
   // application menu because the system requires one for the app menu and standard shortcuts.
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
-  createWindow(settings);
+  createWindow(settings, appRoot);
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings);
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot);
   });
   app.on('window-all-closed', () => {
-    app.quit();
+    // macOS convention: stay resident so the 'activate' dock handler can reopen a window.
+    if (process.platform !== 'darwin') app.quit();
   });
   let quitting = false;
   app.on('before-quit', (e) => {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
-    Promise.race([sessions?.stopAll(), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
+    // Drain debounced session-meta persists after the sessions themselves are stopped.
+    const drainSessions = sessions ? sessions.stopAll().then(() => sessions?.flushPendingPersists()).then(() => analytics.flush()) : Promise.resolve();
+    Promise.race([Promise.all([drainSessions, terminals?.shutdown()]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
   });
+}
+
+/** Resolve the same icon in development and in the packaged app's extra resources. */
+function appIconPath(appRoot: string): string {
+  const iconName = process.platform === 'win32' ? 'vocs-code.ico' : 'vocs-code.png';
+  const iconRoot = app.isPackaged ? path.join(process.resourcesPath, 'icons') : path.join(appRoot, 'resources', 'icons');
+  return path.join(iconRoot, iconName);
+}
+
+/** Write the AUMID's DisplayName/IconUri so the Windows taskbar menu shows the product name, not 'Electron'. */
+function registerAppUserModelId(appRoot: string): void {
+  if (process.platform !== 'win32') return;
+  const key = `HKCU\\Software\\Classes\\AppUserModelId\\${APP_ID}`;
+  const values: Array<[string, string]> = [
+    ['DisplayName', APP_NAME],
+    ['IconUri', appIconPath(appRoot)]
+  ];
+  for (const [name, data] of values) {
+    const child = spawn('reg', ['add', key, '/f', '/v', name, '/t', 'REG_SZ', '/d', data], {
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    // Best effort: a missing or blocked reg.exe only costs the menu title, nothing else.
+    child.on('error', () => {});
+  }
+  reconcileDevShortcut(appRoot);
+}
+
+/** The shell resolves an AUMID's display name from a matching Start Menu shortcut before the registry,
+ *  so in development we keep a correctly named 'Vocs Code' shortcut and drop stale ones (e.g. a leftover
+ *  'Electron.lnk' from an earlier dev run) that would make the taskbar menu say 'Electron'. NSIS owns the
+ *  shortcut once packaged, so this only runs unpackaged. */
+function reconcileDevShortcut(appRoot: string): void {
+  if (app.isPackaged) return;
+  const menu = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+  const exe = process.execPath.toLowerCase();
+  try {
+    for (const entry of readdirSync(menu)) {
+      if (!entry.toLowerCase().endsWith('.lnk') || entry === `${APP_NAME}.lnk`) continue;
+      const file = path.join(menu, entry);
+      try {
+        const lnk = shell.readShortcutLink(file);
+        if (lnk.appUserModelId === APP_ID && lnk.target.toLowerCase() === exe) rmSync(file, { force: true });
+      } catch {
+        // Not one of our shortcuts (or unreadable); leave it alone.
+      }
+    }
+  } catch {
+    // No Start Menu directory; nothing to reconcile.
+  }
+  try {
+    shell.writeShortcutLink(path.join(menu, `${APP_NAME}.lnk`), 'replace', {
+      target: process.execPath,
+      cwd: appRoot,
+      description: APP_NAME,
+      icon: appIconPath(appRoot),
+      appUserModelId: APP_ID
+    });
+  } catch {
+    // Best effort: without the shortcut the registry DisplayName above still names the taskbar menu.
+  }
 }
 
 /** Title bar height in CSS pixels; must match --titlebar in styles.css. */
 const TITLEBAR_HEIGHT = 36;
 
+/** The active theme id, so the native caption can follow themes the OS knows nothing about. */
+let currentTheme: ThemeId = 'system';
+
 /** Caption colors for the frameless title bar, matching the renderer's --bg-elev / --fg tokens. */
 function chrome(): { color: string; symbolColor: string; height: number } {
-  const dark = nativeTheme.shouldUseDarkColors;
-  return { color: dark ? '#191c23' : '#ffffff', symbolColor: dark ? '#e6e7ea' : '#1c1c1f', height: TITLEBAR_HEIGHT };
+  return { ...chromeFor(currentTheme, nativeTheme.shouldUseDarkColors), height: TITLEBAR_HEIGHT };
 }
 
-function createWindow(settings: SettingsStore): void {
+/** Repaints the window background and the OS-drawn caption buttons for the active theme. */
+function applyChrome(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setBackgroundColor(chrome().color);
+  if (process.platform === 'darwin') return;
+  try {
+    mainWindow.setTitleBarOverlay(chrome());
+  } catch {
+    // Older/unsupported platforms simply keep the colors they were created with.
+  }
+}
+
+function createWindow(settings: SettingsStore, appRoot: string): void {
   const s = settings.get();
   const bounds = s.windowBounds ?? { width: 1440, height: 900 };
+  const icon = appIconPath(appRoot);
   const win = new BrowserWindow({
     ...bounds,
     minWidth: 960,
     minHeight: 600,
-    title: 'Vocs Code',
+    title: APP_NAME,
+    icon,
     backgroundColor: chrome().color,
     // Frameless with an in-app title bar (sidebar toggle, history, menu bar). On Windows/Linux the
     // overlay keeps the native caption buttons — and with them snap layouts and double-click maximize.
@@ -162,6 +277,9 @@ function createWindow(settings: SettingsStore): void {
       spellcheck: true
     }
   });
+  if (process.platform === 'win32') {
+    win.setAppDetails({ appId: APP_ID, appIconPath: icon });
+  }
   mainWindow = win;
   win.once('ready-to-show', () => win.show());
   win.on('closed', () => {
@@ -176,6 +294,9 @@ function createWindow(settings: SettingsStore): void {
   };
   win.on('resize', debounce(saveBounds, 500));
   win.on('move', debounce(saveBounds, 500));
+
+  // A reload drops every xterm instance; stop streaming to it and let paused shells run until it re-attaches.
+  win.webContents.on('did-start-loading', () => terminals?.detachAll());
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);

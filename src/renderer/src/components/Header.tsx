@@ -1,19 +1,20 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { EffortLevel, ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, fmtTokens } from '../format';
+import { useSessionModels } from '../models';
 import { useStore } from '../store';
-import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
+import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
+import { ModelPicker } from './ModelPicker';
 import { harnessShort } from './Sidebar';
 
-/** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
-const EMPTY: never[] = [];
 
 export function Header({ session }: { session: SessionMeta }) {
-  const models = useStore((s) => s.models[session.id] ?? EMPTY);
+  const { models, loading: modelsLoading, error: modelsError } = useSessionModels(session);
   const panelOpen = useStore((s) => s.panelOpen);
   const togglePanel = useStore((s) => s.togglePanel);
+  const setPanelTab = useStore((s) => s.setPanelTab);
   const toast = useStore((s) => s.toast);
   const showThinking = useStore((s) => s.showThinking);
   const toggleThinking = useStore((s) => s.toggleThinking);
@@ -26,12 +27,6 @@ export function Header({ session }: { session: SessionMeta }) {
       .then((g) => setBranch(g.branch))
       .catch(() => setBranch(undefined));
   }, [session.id, changesVersion]);
-
-  const grouped = useMemo(() => {
-    const g = new Map<string, ModelInfo[]>();
-    for (const m of models) g.set(m.provider, [...(g.get(m.provider) ?? EMPTY), m]);
-    return [...g.entries()];
-  }, [models]);
 
   const current = session.activeModel ?? session.config.model;
   const currentInfo = models.find((m) => current && m.id === current.model && m.provider === current.provider);
@@ -59,33 +54,35 @@ export function Header({ session }: { session: SessionMeta }) {
           {harnessShort(session.config.harness)}
           {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
         </Badge>
-        <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd })}>
+        <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
           <Icon name="folder" size={12} /> {basename(session.cwd)}
-          {branch && (
-            <>
-              <Icon name="branch" size={12} /> {branch}
-            </>
-          )}
         </button>
+        {branch && (
+          <button type="button" className="header-path" title={`Branch ${branch} — open the branches panel`} onClick={() => setPanelTab('branches')}>
+            <Icon name="branch" size={12} /> {branch}
+          </button>
+        )}
         {session.statusDetail && busy && <span className="header-status muted">{session.statusDetail}</span>}
       </div>
 
       <div className="header-controls">
-        <Dropdown align="right" width={360} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {current?.model ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
+        <Dropdown align="right" width={380} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {current?.model ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
           {(close) => (
-            <div className="menu-scroll">
-              {grouped.length === 0 && <div className="menu-empty">No model list yet{h.capabilities.liveModelSwitch ? '' : ' (this harness cannot switch models live)'}.</div>}
-              {grouped.map(([provider, list]) => (
-                <div key={provider}>
-                  <div className="menu-group">{provider}</div>
-                  {list.map((m) => (
-                    <MenuItem key={`${m.provider}/${m.id}`} active={current?.model === m.id && current?.provider === m.provider} hint={m.pricing ? `$${m.pricing.input}/$${m.pricing.output}` : undefined} onClick={() => { close(); void setModel(m); }}>
-                      {m.displayName}
-                    </MenuItem>
-                  ))}
-                </div>
-              ))}
-            </div>
+            <ModelPicker
+              models={models}
+              loading={modelsLoading}
+              error={modelsError}
+              selected={current}
+              emptyText={
+                h.capabilities.liveModelSwitch
+                  ? 'No models available.'
+                  : 'No models available (this harness cannot switch models live).'
+              }
+              onSelect={(m) => {
+                close();
+                if (m) void setModel(m);
+              }}
+            />
           )}
         </Dropdown>
 
@@ -135,7 +132,17 @@ export function Header({ session }: { session: SessionMeta }) {
               <MenuItem onClick={() => { close(); void invoke('sessions:fork', { id: session.id }).then((f) => f && useStore.getState().setActive(f.id)); }}>Fork session</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('app:openInEditor', { path: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error')); }}>Open in editor</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('app:openTerminal', { cwd: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error')); }}>Open terminal here</MenuItem>
-              <MenuItem onClick={() => { close(); if (confirm('Clear the visible transcript? Harness state is kept.')) { void invoke('sessions:clearTranscript', { id: session.id }); useStore.getState().clearTranscriptLocal(session.id); } }}>Clear transcript</MenuItem>
+              <MenuItem
+                onClick={async () => {
+                  close();
+                  const ok = await askConfirm({ title: 'Clear the visible transcript?', body: 'The harness keeps its own state; only what you see here is removed.', confirmLabel: 'Clear' });
+                  if (!ok) return;
+                  void invoke('sessions:clearTranscript', { id: session.id });
+                  useStore.getState().clearTranscriptLocal(session.id);
+                }}
+              >
+                Clear transcript
+              </MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:stop', { id: session.id }); }} disabled={session.status === 'idle' && !busy}>Stop harness process</MenuItem>
             </>
           )}

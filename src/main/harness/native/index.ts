@@ -4,7 +4,7 @@ import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, ProviderConfig, 
 import { errorMessage, shortId, truncate } from '../../util/async';
 import { estimateCostUsd, findPricing, STATIC_MODELS_BY_PROVIDER } from '../../models/static-models';
 import { resolveProviderApiKey } from '../../models/providers';
-import { gateAction, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from '../permissions';
+import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from '../permissions';
 import type { HarnessAdapter, HarnessContext } from '../types';
 import { anthropicStep, isAnthropicProvider, openaiStep, type NativeMessage, type StepResult } from './drivers';
 import { buildSystemPrompt } from './prompt';
@@ -17,9 +17,9 @@ import {
   previewEdit,
   previewWrite,
   readFileTool,
-  resolveInCwd,
   runBash,
   writeFileTool,
+  MAX_OUTPUT,
   type ToolExecResult
 } from './tools';
 
@@ -225,7 +225,11 @@ export class NativeAdapter implements HarnessAdapter {
       this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - startedAt, costUsd: turnCost, usage: turnUsage, error } });
       this._busy = false;
       this.abort = null;
-      await this.persist();
+      try {
+        await this.persist();
+      } catch (e) {
+        this.ctx.log('warn', `native: persist failed: ${errorMessage(e)}`);
+      }
       this.ctx.emit({ type: 'status', status: 'idle' });
       const next = this.queue.shift();
       this.ctx.updateMeta({ queued: this.queue.length + this.steer.length });
@@ -258,13 +262,17 @@ export class NativeAdapter implements HarnessAdapter {
       this.ctx.emit({ type: 'item.upsert', item: { ...item } });
       return res;
     };
+    const parseError = (args as { __parseError?: unknown }).__parseError;
+    if (typeof parseError === 'string') {
+      return finish({ output: `Tool-call arguments failed to parse; the tool did not run. Raw arguments: ${truncate(parseError, 500, '…')}`, isError: true });
+    }
     if (!def) return finish({ output: `Unknown tool: ${call.name}`, isError: true });
 
     // Permission gate
     if (def.mutating) {
       const mode: PermissionMode = this.ctx.permissionMode();
       const command = typeof args.command === 'string' ? (args.command as string) : undefined;
-      const outsideCwd = def.isEdit && typeof args.path === 'string' && !resolveInCwd(cwd, args.path as string).startsWith(path.resolve(cwd));
+      const outsideCwd = def.isEdit && typeof args.path === 'string' && isOutsideWorkspace(cwd, args.path as string, path);
       let verdict = gateAction(mode, { mutating: true, isEdit: def.isEdit, command, sessionAllowed: this.sessionAllowed.has(call.name) });
       if (outsideCwd && mode !== 'full-auto' && verdict === 'allow') verdict = 'ask';
       if (verdict === 'deny') {
@@ -309,8 +317,15 @@ export class NativeAdapter implements HarnessAdapter {
         case 'bash':
           return finish(
             await runBash(cwd, String(args.command ?? ''), Number(args.timeout_ms ?? 120_000), signal, (chunk) => {
-              item.output = (item.output ?? '') + chunk;
-              this.ctx.emit({ type: 'item.delta', id: item.id, outputDelta: chunk });
+              const streamed = item.output ?? '';
+              if (streamed.length >= MAX_OUTPUT) return;
+              const capped = chunk.slice(0, MAX_OUTPUT - streamed.length);
+              item.output = streamed + capped;
+              this.ctx.emit({ type: 'item.delta', id: item.id, outputDelta: capped });
+              if (capped.length < chunk.length) {
+                item.output += '\n[output truncated]';
+                this.ctx.emit({ type: 'item.delta', id: item.id, outputDelta: '\n[output truncated]' });
+              }
             })
           );
         case 'read_file':
@@ -370,6 +385,8 @@ export class NativeAdapter implements HarnessAdapter {
 
   async setPermissionMode(): Promise<void> {
     /* read live from ctx */
+    // Tightening the mode must not keep earlier session-wide grants alive.
+    this.sessionAllowed.clear();
   }
 
   async compact(): Promise<void> {

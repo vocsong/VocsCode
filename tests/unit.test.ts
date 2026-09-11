@@ -1,6 +1,10 @@
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { promises as fs } from 'node:fs';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { AsyncQueue, LineSplitter } from '../src/main/util/async';
 import { globToRegExp } from '../src/main/harness/native/tools';
 import { parseUnifiedDiff } from '../src/shared/diff-parse';
@@ -8,9 +12,42 @@ import { JsonRpcStdioClient } from '../src/main/harness/jsonrpc';
 import { gateAction } from '../src/main/harness/permissions';
 import { isDangerousCommand } from '../src/main/harness/types';
 import { normalizeSettings, defaultSettings } from '../src/main/settings';
+import type { SettingsStore } from '../src/main/settings';
+import { SessionManager } from '../src/main/session-manager';
+import type { RuntimeResolver } from '../src/main/runtime';
+import { piHasCredentials } from '../src/main/runtime';
 import { estimateCostUsd, findPricing } from '../src/main/models/static-models';
 import { piModelToInfo } from '../src/main/harness/pi';
+import type { AnalyticsStore } from '../src/main/analytics';
 import { codexModelToInfo } from '../src/main/harness/codex-app-server';
+import { applyModelOverrides, modelOverrideKey, parseModelOverrideKey, pruneModelOverrides } from '../src/shared/model-overrides';
+import { HARNESSES } from '../src/shared/harness-meta';
+import type { AppSettings, ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
+import { SecretStore } from '../src/main/secrets';
+import { SessionStore } from '../src/main/store';
+import { branchGitState, gitBranches, gitCheckout, gitWorktrees, removeWorktree, restoreWorktree } from '../src/main/git';
+import { createLogger } from '../src/main/log';
+import { timed, watchEventLoop } from '../src/main/diag';
+
+// branchGitState is stubbed so PR-state refresh tests stay offline; every other git export stays real.
+vi.mock('../src/main/git', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  branchGitState: vi.fn(async (): Promise<{ pr: boolean; merged: boolean }> => ({ pr: false, merged: false }))
+}));
+
+// Stub Electron's safeStorage so SecretStore is testable in plain node. Mutable flag lets the
+// unavailable-encryption fallback path be exercised without re-declaring the mock.
+const safeStorageMock = vi.hoisted(() => ({
+  encryptionAvailable: true,
+  isEncryptionAvailable: () => safeStorageMock.encryptionAvailable,
+  encryptString: (s: string) => Buffer.concat([Buffer.from('enc|'), Buffer.from(s, 'utf8')]),
+  decryptString: (b: Buffer) => {
+    const raw = b.toString('utf8');
+    if (!raw.startsWith('enc|')) throw new Error('not encrypted with this key');
+    return raw.slice(4);
+  }
+}));
+vi.mock('electron', () => ({ safeStorage: safeStorageMock }));
 
 describe('LineSplitter', () => {
   it('splits on LF only and strips CR', () => {
@@ -19,6 +56,20 @@ describe('LineSplitter', () => {
     s.push('{"a":1}\r\n{"b":"x y"}\n{"c"');
     s.push(':3}\n');
     expect(lines).toEqual(['{"a":1}', '{"b":"x y"}', '{"c":3}']);
+  });
+});
+
+describe('LineSplitter UTF-8 handling', () => {
+  it('reassembles a multi-byte codepoint split across two Buffer chunks', () => {
+    const lines: string[] = [];
+    const s = new LineSplitter((l) => lines.push(l));
+    // U+1F600 is four UTF-8 bytes (F0 9F 98 80); split it mid-codepoint between two chunks.
+    const full = Buffer.from('"emoji: \uD83D\uDE00"\n', 'utf8');
+    s.push(full.subarray(0, 9));
+    s.push(full.subarray(9));
+    s.flush();
+    expect(lines).toEqual(['"emoji: \uD83D\uDE00"']);
+    expect(lines[0]).not.toContain('\uFFFD');
   });
 });
 
@@ -171,5 +222,479 @@ describe('model mapping', () => {
     expect(m.id).toBe('gpt-5.5');
     expect(m.supportsImages).toBe(true);
     expect(m.pricing?.input).toBe(5);
+  });
+});
+
+describe('model capability overrides', () => {
+  const models: ModelInfo[] = [
+    { id: 'deepseek-v4.1-flash-expires-on-0910', provider: 'deepseek', displayName: 'DeepSeek V4.1 Flash', supportsImages: false },
+    { id: 'claude-opus-5', provider: 'anthropic', displayName: 'Claude Opus 5', supportsImages: true }
+  ];
+
+  it('keys by provider and keeps slashes in the model id', () => {
+    const key = modelOverrideKey('openrouter', 'openai/gpt-5.4');
+    expect(key).toBe('openrouter/openai/gpt-5.4');
+    expect(parseModelOverrideKey(key)).toEqual({ provider: 'openrouter', model: 'openai/gpt-5.4' });
+  });
+
+  it('applies only to the matching model and flags it as overridden', () => {
+    const out = applyModelOverrides(models, { 'deepseek/deepseek-v4.1-flash-expires-on-0910': { supportsImages: true } });
+    expect(out[0].supportsImages).toBe(true);
+    expect(out[0].overridden).toBe(true);
+    expect(out[1]).toBe(models[1]);
+  });
+
+  it('can also mark a model as text-only', () => {
+    const out = applyModelOverrides(models, { 'anthropic/claude-opus-5': { supportsImages: false } });
+    expect(out[1].supportsImages).toBe(false);
+  });
+
+  it('is a no-op without overrides, and ignores ones for other providers', () => {
+    expect(applyModelOverrides(models, undefined)).toBe(models);
+    expect(applyModelOverrides(models, {})).toBe(models);
+    // Same model slug, different provider: must not match.
+    expect(applyModelOverrides(models, { 'openrouter/claude-opus-5': { supportsImages: false } })[1].supportsImages).toBe(true);
+  });
+
+  it('prunes entries that no longer carry a value', () => {
+    expect(pruneModelOverrides({ 'a/b': {}, 'c/d': { supportsImages: false } })).toEqual({ 'c/d': { supportsImages: false } });
+  });
+
+  it('survives a settings round-trip and drops empty entries', () => {
+    expect(defaultSettings().modelOverrides).toEqual({});
+    const s = normalizeSettings({ modelOverrides: { 'deepseek/x': { supportsImages: true }, 'deepseek/y': {} } });
+    expect(s.modelOverrides).toEqual({ 'deepseek/x': { supportsImages: true } });
+    // Settings written before this feature existed have no such key.
+    expect(normalizeSettings({ theme: 'dark' }).modelOverrides).toEqual({});
+  });
+
+  it('marks pi as the only harness that strips images itself', () => {
+    const dropping = HARNESSES.filter((h) => h.capabilities.dropsUnsupportedImages).map((h) => h.id);
+    expect(dropping).toEqual(['pi']);
+    // Every harness still accepts attachments from the composer.
+    expect(HARNESSES.every((h) => h.capabilities.images)).toBe(true);
+  });
+
+  it('normalizes favoriteModels to valid model refs', () => {
+    expect(defaultSettings().favoriteModels).toEqual([]);
+    const s = normalizeSettings({
+      favoriteModels: [
+        { provider: 'openrouter', model: 'openai/gpt-4o' },
+        { provider: 'openrouter' },
+        'openrouter::junk'
+      ] as never
+    });
+    expect(s.favoriteModels).toEqual([{ provider: 'openrouter', model: 'openai/gpt-4o' }]);
+    // Settings written before this feature existed have no such key.
+    expect(normalizeSettings({ theme: 'dark' }).favoriteModels).toEqual([]);
+  });
+
+  it('normalizes sidebar folders to non-empty path strings', () => {
+    expect(defaultSettings().folders).toEqual([]);
+    const s = normalizeSettings({ folders: ['G:/proj/a', '', 42, 'G:/proj/b'] as never });
+    expect(s.folders).toEqual(['G:/proj/a', 'G:/proj/b']);
+    // Settings written before this feature existed have no such key.
+    expect(normalizeSettings({ theme: 'dark' }).folders).toEqual([]);
+  });
+});
+
+describe('SecretStore', () => {
+  const tmpRoot = path.join(os.tmpdir(), `vocs-code-secrets-test-${Date.now()}-${process.pid}`);
+  afterAll(async () => {
+    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  it('round-trips a key through the fake safeStorage as enc: base64', async () => {
+    safeStorageMock.encryptionAvailable = true;
+    const dir = path.join(tmpRoot, 'enc');
+    const store = new SecretStore(dir);
+    await store.load();
+    await store.set('deepseek', '  sk-test-123  ');
+    expect(store.has('deepseek')).toBe(true);
+    // Value is trimmed, encrypted (not plaintext) and decrypts back via the fake.
+    const raw = JSON.parse(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8')) as Record<string, string>;
+    expect(raw.deepseek.startsWith('enc:')).toBe(true);
+    expect(raw.deepseek).not.toContain('sk-test-123');
+    expect(await store.get('deepseek')).toBe('sk-test-123');
+  });
+
+  it('falls back to b64: obfuscation when OS encryption is unavailable', async () => {
+    safeStorageMock.encryptionAvailable = false;
+    try {
+      const dir = path.join(tmpRoot, 'b64');
+      const store = new SecretStore(dir);
+      await store.load();
+      await store.set('openai', 'sk-fallback');
+      const raw = JSON.parse(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8')) as Record<string, string>;
+      expect(raw.openai.startsWith('b64:')).toBe(true);
+      expect(raw.openai).not.toContain('sk-fallback');
+      expect(await store.get('openai')).toBe('sk-fallback');
+    } finally {
+      safeStorageMock.encryptionAvailable = true;
+    }
+  });
+
+  it('clears a key and treats an empty set as a clear', async () => {
+    const dir = path.join(tmpRoot, 'clear');
+    const store = new SecretStore(dir);
+    await store.load();
+    await store.set('anthropic', 'sk-a');
+    await store.clear('anthropic');
+    expect(store.has('anthropic')).toBe(false);
+    expect(await store.get('anthropic')).toBeUndefined();
+    await store.set('anthropic', '   ');
+    expect(store.has('anthropic')).toBe(false);
+    // Cleared state is persisted.
+    const again = new SecretStore(dir);
+    await again.load();
+    expect(again.has('anthropic')).toBe(false);
+  });
+});
+
+describe('SessionManager folder tracking', () => {
+  it('registers a project folder on create so it survives its last session being archived or deleted', async () => {
+    const stored = defaultSettings();
+    const settings = {
+      get: () => stored,
+      update: async (patch: Partial<AppSettings>) => {
+        Object.assign(stored, patch);
+      }
+    } as unknown as SettingsStore;
+    const store = { list: () => [], get: () => undefined, upsert: async () => undefined } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    const cfg = { harness: 'native', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as const;
+    await manager.create({ config: { ...cfg } });
+    expect(stored.folders).toEqual(['G:/proj/a']);
+    // Creating another session in the same folder must not duplicate the entry.
+    await manager.create({ config: { ...cfg } });
+    expect(stored.folders).toEqual(['G:/proj/a']);
+  });
+});
+
+describe('SessionManager PR state refresh', () => {
+  it('flips a pr session to merged when refreshGitState runs after /merge', async () => {
+    vi.useFakeTimers();
+    const session: SessionMeta = {
+      id: 'pr_session',
+      title: 'pr session',
+      createdAt: 1_000,
+      updatedAt: 2_000,
+      config: { harness: 'native', projectRoot: 'G:/proj/pr', permissionMode: 'auto' },
+      cwd: 'G:/proj/pr/.vocs-code/worktrees/wt',
+      worktreeBranch: 'harness/pr-session',
+      status: 'pr',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    const upsert = vi.fn();
+    const published: SessionMeta[][] = [];
+    const store = {
+      list: () => [session],
+      get: (id: string) => (id === session.id ? session : undefined),
+      upsert
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: (list) => published.push(list),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: true });
+    try {
+      manager.refreshGitState(session.id);
+      expect(session.status).toBe('pr'); // not flipped synchronously
+      await vi.advanceTimersByTimeAsync(2_000); // 1s check delay + the 300ms debounced persist
+      expect(session.status).toBe('merged');
+      expect(published.length).toBeGreaterThan(0);
+      expect(upsert).toHaveBeenCalled();
+    } finally {
+      vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: false });
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('SessionStore round-trip', () => {
+  const tmpRoot = path.join(os.tmpdir(), `vocs-code-store-test-${Date.now()}-${process.pid}`);
+  afterAll(async () => {
+    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  const meta = (id: string, status: SessionMeta['status'] = 'idle'): SessionMeta => ({
+    id,
+    title: `session ${id}`,
+    createdAt: 1_000,
+    updatedAt: 2_000,
+    config: { harness: 'native', projectRoot: tmpRoot, permissionMode: 'auto' },
+    cwd: tmpRoot,
+    status,
+    harnessRef: {},
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
+    queued: 3
+  });
+
+  it('publishes live running status to session list listeners', () => {
+    const session = meta('status_session');
+    const published: SessionMeta[][] = [];
+    const store = {
+      list: () => [session],
+      get: (id: string) => (id === session.id ? session : undefined)
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: (list) => published.push(list),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+
+    (manager as unknown as { emit: (id: string, event: SessionEvent) => void }).emit(session.id, { type: 'status', status: 'running', detail: 'Working' });
+
+    expect(session.status).toBe('running');
+    expect(session.statusDetail).toBe('Working');
+    expect(published).toHaveLength(1);
+    expect(published[0][0]).toMatchObject({ id: session.id, status: 'running', statusDetail: 'Working' });
+  });
+
+  it('persists session meta and transcripts that a fresh store over the same directory reads back', async () => {
+    const first = new SessionStore(tmpRoot);
+    await first.load();
+    const m = meta('sess_1', 'running');
+    await first.upsert(m);
+    await first.appendTranscript('sess_1', { id: 'i1', kind: 'user', ts: 1, text: 'hello' } as TranscriptItem);
+    await first.appendTranscript('sess_1', { id: 'i2', kind: 'user', ts: 2, text: 'again' } as TranscriptItem);
+    await first.appendTranscript('sess_1', { id: 'i1', kind: 'user', ts: 1, text: 'hello edited' } as TranscriptItem);
+
+    // A brand-new store instance over the same userData directory survives the "restart".
+    const second = new SessionStore(tmpRoot);
+    const loaded = await second.load();
+    expect(loaded.map((s) => s.id)).toContain('sess_1');
+    const restored = second.get('sess_1');
+    expect(restored?.title).toBe('session sess_1');
+    expect(restored?.config.harness).toBe('native');
+    // A session that was running when the app closed is downgraded to idle with an empty queue.
+    expect(restored?.status).toBe('idle');
+    expect(restored?.queued).toBe(0);
+
+    const items = await second.readTranscript('sess_1');
+    expect(items).toHaveLength(2);
+    expect(items[0].id).toBe('i1');
+    // Last write wins per id, first-occurrence order preserved.
+    expect(items[0]).toMatchObject({ kind: 'user', text: 'hello edited' });
+    expect(items[1].id).toBe('i2');
+  });
+
+  it('remove deletes the meta entry and the transcript directory', async () => {
+    const store = new SessionStore(tmpRoot);
+    await store.load();
+    await store.upsert(meta('sess_2'));
+    await store.appendTranscript('sess_2', { id: 'j1', kind: 'user', ts: 1, text: 'x' } as TranscriptItem);
+    await store.remove('sess_2');
+    expect(store.get('sess_2')).toBeUndefined();
+    const again = new SessionStore(tmpRoot);
+    await again.load();
+    expect(again.get('sess_2')).toBeUndefined();
+    expect(await again.readTranscript('sess_2')).toEqual([]);
+  });
+});
+
+describe('git branch/worktree plumbing', () => {
+  const tmpRoot = path.join(os.tmpdir(), `vocs-code-git-test-${Date.now()}-${process.pid}`);
+  const repo = path.join(tmpRoot, 'repo');
+  const wtDir = path.join(tmpRoot, 'wt');
+
+  const g = (...args: string[]) =>
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], {
+      cwd: repo,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    });
+
+  afterAll(async () => {
+    await fs.rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('lists branches and checks out another branch', async () => {
+    await fs.mkdir(repo, { recursive: true });
+    execFileSync('git', ['init'], { cwd: repo });
+    g('commit', '--allow-empty', '-m', 'init');
+    g('branch', 'feature');
+    const { current, branches } = await gitBranches(repo);
+    expect(branches.map((b) => b.name).sort()).toEqual(expect.arrayContaining(['feature']));
+    const head = branches.find((b) => b.current)!;
+    expect(current).toBe(head.name);
+    expect(await gitCheckout(repo, '-evil')).toMatchObject({ ok: false });
+    expect(await gitCheckout(repo, 'feature')).toMatchObject({ ok: true });
+    expect((await gitBranches(repo)).current).toBe('feature');
+  });
+
+  it('lists worktrees with branches and marks the session cwd', async () => {
+    g('checkout', '-'); // back to the default branch
+    g('worktree', 'add', wtDir, '-b', 'wtbranch');
+    const { current, worktrees } = await gitWorktrees(repo);
+    expect(current).toBe(path.resolve(repo));
+    expect(worktrees.map((w) => w.branch)).toContain('wtbranch');
+    const wt = worktrees.find((w) => w.path === path.resolve(wtDir));
+    expect(wt).toMatchObject({ branch: 'wtbranch', detached: false });
+    // From inside the worktree, that worktree is "current".
+    const fromWt = await gitWorktrees(wtDir);
+    expect(fromWt.current).toBe(path.resolve(wtDir));
+  });
+
+  it('removes a worktree and restores it from its branch', async () => {
+    const wt2 = path.join(tmpRoot, 'wt-cycle');
+    g('worktree', 'add', wt2, '-b', 'wtcycle');
+    // Uncommitted changes block a non-force removal (the archive flow surfaces this to the user).
+    await fs.writeFile(path.join(wt2, 'dirty.txt'), 'x');
+    await expect(removeWorktree(repo, wt2, { force: false })).rejects.toThrow();
+    await fs.rm(path.join(wt2, 'dirty.txt'));
+    await removeWorktree(repo, wt2, { force: false });
+    await expect(fs.stat(wt2)).rejects.toMatchObject({ code: 'ENOENT' });
+    // The branch survives the worktree removal, so a restore can recreate it at the same path.
+    expect((await gitBranches(repo)).branches.map((b) => b.name)).toContain('wtcycle');
+    await restoreWorktree(repo, wt2, 'wtcycle');
+    expect((await gitWorktrees(repo)).worktrees.map((w) => w.branch)).toContain('wtcycle');
+    // A branch with its worktree still checked out cannot be deleted; remove the worktree first.
+    await removeWorktree(repo, wt2, { force: false });
+    g('branch', '-D', 'wtcycle');
+    await expect(restoreWorktree(repo, wt2, 'wtcycle')).rejects.toThrow(/no longer exists/);
+  });
+});
+
+describe('diagnostics', () => {
+  const diagRoot = path.join(os.tmpdir(), `vocs-diag-${Date.now()}`);
+  afterAll(async () => {
+    await fs.rm(diagRoot, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  it('writes every level to the log file and gates debug behind the flag', async () => {
+    const dir = path.join(diagRoot, 'logs-quiet');
+    const quiet = createLogger(dir, false);
+    quiet.log('debug', 'hidden');
+    quiet.log('info', 'shown');
+    quiet.log('warn', 'careful');
+    await new Promise((r) => setTimeout(r, 50));
+    const text = await fs.readFile(path.join(dir, 'main.log'), 'utf8');
+    expect(quiet.file).toBe(path.join(dir, 'main.log'));
+    expect(text).not.toContain('hidden');
+    expect(text).toContain('INFO shown');
+    expect(text).toContain('WARN careful');
+
+    const loud = createLogger(path.join(diagRoot, 'logs-debug'), true);
+    loud.log('debug', 'visible');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await fs.readFile(path.join(diagRoot, 'logs-debug', 'main.log'), 'utf8')).toContain('DEBUG visible');
+  });
+
+  it('reports an event loop stall and stays quiet while the loop is free', async () => {
+    const lines: string[] = [];
+    const w = watchEventLoop((level, message) => lines.push(`${level} ${message}`), 10, 60);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(lines).toHaveLength(0);
+    const until = Date.now() + 150;
+    while (Date.now() < until) {
+      /* block the loop the way a synchronous main-process call would */
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    w.stop();
+    expect(lines.some((l) => l.startsWith('warn') && /main event loop stalled \d+ms/.test(l))).toBe(true);
+  });
+
+  it('timed logs only past the threshold and passes the value through', async () => {
+    const lines: string[] = [];
+    const log = (level: 'debug' | 'info' | 'warn' | 'error', message: string) => lines.push(`${level} ${message}`);
+    expect(await timed(log, 'fast op', 1000, () => 7)).toBe(7);
+    expect(lines).toHaveLength(0);
+    await timed(log, 'slow op', 10, () => new Promise((r) => setTimeout(r, 40)));
+    expect(lines[0]).toMatch(/^warn slow slow op: \d+ms$/);
+  });
+});
+
+describe('renderer dialogs', () => {
+  // Electron answers window.confirm/alert/prompt with a native message box that disables the whole
+  // window until it is dismissed. A dialog the user does not notice is indistinguishable from a
+  // frozen app: no clicks, no typing, no dropdowns, and nothing in the logs. Use askConfirm instead.
+  const NATIVE_CALL = /(^|[^A-Za-z0-9_.$])(confirm|alert|prompt)[(]/;
+  const VIA_WINDOW = /window[.](confirm|alert|prompt)[(]/;
+
+  it('never calls a native window dialog', async () => {
+    const root = path.resolve(__dirname, '..', 'src', 'renderer', 'src');
+    const files: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) await walk(full);
+        else if (e.name.endsWith('.ts') || e.name.endsWith('.tsx')) files.push(full);
+      }
+    };
+    await walk(root);
+    expect(files.length).toBeGreaterThan(10);
+
+    const offenders: string[] = [];
+    for (const file of files) {
+      const lines = (await fs.readFile(file, 'utf8')).split('\n');
+      lines.forEach((line, i) => {
+        const flat = line.split(' ').join('');
+        if (NATIVE_CALL.test(flat) || VIA_WINDOW.test(flat)) offenders.push(`${path.basename(file)}:${i + 1} ${line.trim()}`);
+      });
+    }
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe('pi credential detection', () => {
+  const savedEnv = { ...process.env };
+  const dirs: string[] = [];
+
+  const withAgentDir = async (auth: string | null) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-auth-'));
+    dirs.push(dir);
+    process.env.PI_CODING_AGENT_DIR = dir;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    if (auth !== null) await fs.writeFile(path.join(dir, 'auth.json'), auth);
+    return piHasCredentials();
+  };
+
+  afterAll(async () => {
+    process.env = savedEnv;
+    for (const dir of dirs) await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('detects a stored login in auth.json', async () => {
+    expect(await withAgentDir(JSON.stringify({ anthropic: { type: 'oauth', token: 'x' } }))).toBe(true);
+  });
+
+  it('treats an empty auth.json as not logged in', async () => {
+    expect(await withAgentDir('{}')).toBe(false);
+  });
+
+  it('falls back to env API keys', async () => {
+    expect(await withAgentDir('{}')).toBe(false);
+    process.env.ANTHROPIC_API_KEY = 'sk-test';
+    expect(await piHasCredentials()).toBe(true);
+  });
+
+  it('handles a missing auth.json', async () => {
+    expect(await withAgentDir(null)).toBe(false);
   });
 });

@@ -1,10 +1,11 @@
 /** zustand store for session state, panel selection and toasts. Selectors must return stable references. */
 import { create } from 'zustand';
 import type { AppSettings, HarnessAvailability, HarnessId, ModelInfo, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
+import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
-export type PanelTab = 'changes' | 'files' | 'goal' | 'usage' | 'terminal';
-export type View = 'chat' | 'settings';
+export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
+export type View = 'chat' | 'settings' | 'analytics';
 
 /** One entry of the title bar's back/forward history. */
 export interface NavEntry {
@@ -12,18 +13,17 @@ export interface NavEntry {
   sessionId: string | null;
 }
 
+/** A harness's model list fetched without a running session, so a not-yet-started session still has models. */
+export interface ModelCatalogEntry {
+  models: ModelInfo[];
+  loading: boolean;
+  error?: string;
+}
+
 export interface Toast {
   id: string;
   kind: 'info' | 'success' | 'error';
   text: string;
-}
-
-export interface TerminalLine {
-  runId: string;
-  text: string;
-  done?: boolean;
-  exitCode?: number | null;
-  command?: string;
 }
 
 interface State {
@@ -34,13 +34,25 @@ interface State {
   transcripts: Record<string, TranscriptItem[]>;
   loaded: Record<string, boolean>;
   models: Record<string, ModelInfo[]>;
+  /** Per-harness catalog, keyed by harness id, used until that session's process reports its own list. */
+  modelCatalog: Partial<Record<HarnessId, ModelCatalogEntry>>;
   availability: Partial<Record<HarnessId, HarnessAvailability>>;
-  terminal: Record<string, TerminalLine[]>;
+  /** Every session's terminals, as the main process reports them; the xterm instances live in terminal/host.ts. */
+  terminals: TerminalInfo[];
+  terminalsLoaded: boolean;
+  /** Selected terminal tab per session. */
+  activeTerminal: Record<string, string>;
+  /** Bumped to move keyboard focus into the active terminal. */
+  terminalFocusNonce: number;
+  /** Text another part of the UI wants appended to the composer draft (e.g. terminal output). */
+  composerInsert: { text: string; nonce: number } | null;
   view: View;
   sidebarOpen: boolean;
   panelOpen: boolean;
   panelTab: PanelTab;
   newSessionOpen: boolean;
+  /** Project folder the new session dialog is targeting; null until a folder is picked. */
+  newSessionRoot: string | null;
   paletteOpen: boolean;
   showThinking: boolean;
   toasts: Toast[];
@@ -61,13 +73,23 @@ interface State {
   togglePanel(open?: boolean): void;
   setPanelTab(t: PanelTab): void;
   openNewSession(open: boolean): void;
+  /** Opens the new session dialog for a folder; without one, asks the user to pick a project folder first. */
+  startNewSession(root?: string | null): Promise<void>;
   openPalette(open: boolean): void;
   toggleThinking(): void;
   toast(text: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
   refreshAvailability(): Promise<void>;
+  /** Fetches one harness's model catalog, at most once per harness until the model overrides change. */
+  ensureModelCatalog(harness: HarnessId): Promise<void>;
   clearTranscriptLocal(id: string): void;
-  appendTerminal(sessionId: string, line: TerminalLine): void;
+  /** Upserts a renderer-local info line in a session's transcript; null text removes it. Not persisted by the main process. */
+  setLocalInfo(sessionId: string, id: string, text: string | null, opts?: { level?: 'info' | 'warn' | 'error'; pending?: boolean }): void;
+  setTerminals(list: TerminalInfo[]): void;
+  setActiveTerminal(sessionId: string, terminalId: string): void;
+  focusTerminal(): void;
+  insertIntoComposer(text: string): void;
+  clearComposerInsert(): void;
 }
 
 let toastCounter = 0;
@@ -120,13 +142,19 @@ export const useStore = create<State>((set, get) => ({
   transcripts: {},
   loaded: {},
   models: {},
+  modelCatalog: {},
   availability: {},
-  terminal: {},
+  terminals: [],
+  terminalsLoaded: false,
+  activeTerminal: {},
+  terminalFocusNonce: 0,
+  composerInsert: null,
   view: 'chat',
   sidebarOpen: true,
   panelOpen: true,
   panelTab: 'changes',
   newSessionOpen: false,
+  newSessionRoot: null,
   paletteOpen: false,
   showThinking: true,
   toasts: [],
@@ -135,14 +163,15 @@ export const useStore = create<State>((set, get) => ({
   historyIndex: -1,
 
   async boot() {
-    const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
-    set({ settings, sessions, booted: true });
+    const [settings, sessions, terminals] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined), invoke('terminal:list', undefined)]);
+    set({ settings, sessions, terminals, terminalsLoaded: true, booted: true });
     if (!subscribed) {
       subscribed = true;
       on('push:sessionsChanged', (list) => get().setSessions(list));
       on('push:settingsChanged', (s) => get().setSettings(s));
       on('push:sessionEvent', (env) => get().applyEvent(env));
       on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId));
+      on('push:terminalsChanged', (list) => get().setTerminals(list));
     }
     const first = sessions.find((s) => !s.archived);
     if (first) await get().setActive(first.id);
@@ -197,7 +226,14 @@ export const useStore = create<State>((set, get) => ({
               if (item.kind === 'assistant') {
                 if (ev.textDelta) item.text += ev.textDelta;
                 if (ev.thinkingDelta) item.thinking = (item.thinking ?? '') + ev.thinkingDelta;
-              } else if (item.kind === 'tool' && ev.outputDelta) item.output = (item.output ?? '') + ev.outputDelta;
+              } else if (item.kind === 'tool' && ev.outputDelta) {
+                // Cap accumulated tool output so unbounded streamed deltas cannot balloon memory.
+                const cur = item.output ?? '';
+                if (cur.length < 30_000) {
+                  const next = cur + ev.outputDelta;
+                  item.output = next.length > 30_000 ? `${next.slice(0, 30_000)}\n[output truncated]` : next;
+                }
+              }
               list[idx] = item;
               touched.set(d.sessionId, list);
             }
@@ -242,16 +278,6 @@ export const useStore = create<State>((set, get) => ({
       case 'error':
         get().toast(event.message, 'error');
         break;
-      case 'shell.output':
-        set((s) => {
-          const lines = [...(s.terminal[sessionId] ?? [])];
-          const idx = lines.findIndex((l) => l.runId === event.runId);
-          if (idx >= 0) lines[idx] = { ...lines[idx], text: lines[idx].text + event.chunk, done: event.done ?? lines[idx].done, exitCode: event.exitCode ?? lines[idx].exitCode };
-          else lines.push({ runId: event.runId, text: event.chunk, done: event.done, exitCode: event.exitCode });
-          return { terminal: { ...s.terminal, [sessionId]: lines } };
-        });
-        if (event.done) set((s) => ({ changesVersion: s.changesVersion + 1 }));
-        break;
       case 'status':
         if (event.status === 'idle') set((s) => ({ changesVersion: s.changesVersion + 1 }));
         break;
@@ -261,10 +287,35 @@ export const useStore = create<State>((set, get) => ({
   },
 
   setSettings(settings) {
-    set({ settings });
+    set((s) => {
+      // Overrides are baked in when the catalog is fetched, so a change to them invalidates it.
+      const stale = !!s.settings && JSON.stringify(s.settings.modelOverrides) !== JSON.stringify(settings.modelOverrides);
+      return stale ? { settings, modelCatalog: {} } : { settings };
+    });
   },
   setSessions(sessions) {
-    set({ sessions });
+    set((s) => {
+      const ids = new Set(sessions.map((x) => x.id));
+      const removed = new Set<string>();
+      for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.loaded)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
+      if (removed.size === 0) return { sessions };
+      const transcripts = { ...s.transcripts };
+      const loaded = { ...s.loaded };
+      const activeTerminal = { ...s.activeTerminal };
+      const models = { ...s.models };
+      for (const id of removed) {
+        delete transcripts[id];
+        delete loaded[id];
+        delete activeTerminal[id];
+        delete models[id];
+      }
+      // A removed session cannot stay active; drop it and let the caller pick a new one.
+      const activeId = s.activeId && ids.has(s.activeId) ? s.activeId : null;
+      return { sessions, transcripts, loaded, activeTerminal, models, activeId };
+    });
   },
   setView(view) {
     set({ view });
@@ -281,6 +332,14 @@ export const useStore = create<State>((set, get) => ({
   },
   openNewSession(newSessionOpen) {
     set({ newSessionOpen });
+  },
+  async startNewSession(root) {
+    if (!root) {
+      const r = await invoke('app:pickFolder', { defaultPath: get().settings?.recentProjects[0] });
+      if (!r.path) return;
+      root = r.path;
+    }
+    set({ newSessionOpen: true, newSessionRoot: root });
   },
   openPalette(paletteOpen) {
     set({ paletteOpen });
@@ -304,11 +363,58 @@ export const useStore = create<State>((set, get) => ({
       /* ignore */
     }
   },
+
+  async ensureModelCatalog(harness) {
+    // Present means fetched, failed or in flight: one round trip per harness, not per session.
+    if (get().modelCatalog[harness]) return;
+    const put = (entry: ModelCatalogEntry) => set((s) => ({ modelCatalog: { ...s.modelCatalog, [harness]: entry } }));
+    put({ models: [], loading: true });
+    try {
+      const r = await invoke('harness:models', { harness });
+      put({ models: r.models, error: r.error, loading: false });
+    } catch (e) {
+      put({ models: [], error: (e as Error).message, loading: false });
+    }
+  },
   clearTranscriptLocal(id) {
     set((s) => ({ transcripts: { ...s.transcripts, [id]: [] } }));
   },
-  appendTerminal(sessionId, line) {
-    set((s) => ({ terminal: { ...s.terminal, [sessionId]: [...(s.terminal[sessionId] ?? []), line] } }));
+  setLocalInfo(sessionId, id, text, opts) {
+    set((s) => {
+      const list = s.transcripts[sessionId] ?? [];
+      const idx = list.findIndex((i) => i.id === id);
+      if (text === null) {
+        if (idx < 0) return {};
+        return { transcripts: { ...s.transcripts, [sessionId]: list.filter((i) => i.id !== id) } };
+      }
+      const item: TranscriptItem = {
+        id,
+        kind: 'info',
+        ts: idx >= 0 ? list[idx].ts : Date.now(),
+        level: opts?.level ?? 'info',
+        text,
+        pending: opts?.pending
+      };
+      const next = [...list];
+      if (idx >= 0) next[idx] = item;
+      else next.push(item);
+      return { transcripts: { ...s.transcripts, [sessionId]: next } };
+    });
+  },
+  setTerminals(terminals) {
+    set({ terminals, terminalsLoaded: true });
+  },
+  setActiveTerminal(sessionId, terminalId) {
+    set((s) => (s.activeTerminal[sessionId] === terminalId ? {} : { activeTerminal: { ...s.activeTerminal, [sessionId]: terminalId } }));
+  },
+  focusTerminal() {
+    set((s) => ({ terminalFocusNonce: s.terminalFocusNonce + 1 }));
+  },
+  insertIntoComposer(text) {
+    set((s) => ({ composerInsert: { text, nonce: (s.composerInsert?.nonce ?? 0) + 1 } }));
+  },
+  clearComposerInsert() {
+    set({ composerInsert: null });
   }
 }));
 

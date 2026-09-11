@@ -15,9 +15,9 @@ One desktop app for every coding agent. Pick the **harness** per session and any
 
 From the **Codex app**: threads grouped by project, isolated git worktrees per session, sandbox-graded permission modes, steer-vs-queue while a turn runs, diff review with per-file revert and commit, `/goal` with an iteration guard.
 
-From the **Claude Code desktop app**: multi-session sidebar with live status, permission modes (Ask / Accept edits / Plan / Auto / Full access), live model and effort switching, cost and context tracking, a side panel with Changes / Files / Terminal, slash commands and `@file` mentions, notifications when a turn needs you.
+From the **Claude Code desktop app**: multi-session sidebar with live status, permission modes (Ask / Accept edits / Plan / Auto / Full access), live model and effort switching, cost and context tracking, a side panel with Changes / Files and a real [terminal](#terminal), slash commands and `@file` mentions, notifications when a turn needs you.
 
-Added on top: every feature above works **across all harnesses** through one normalized event model, API keys live in the OS keychain (`safeStorage`), sessions resume after restart (Claude `resume`, Codex `thread/resume`, pi session files, ACP `session/resume`, native history), and a **Doctor** page shows which runtimes are installed and logged in.
+Added on top: every feature above works **across all harnesses** through one normalized event model, API keys live in the OS keychain (`safeStorage`), sessions resume after restart (Claude `resume`, Codex `thread/resume`, pi session files, ACP `session/resume`, native history), a **Doctor** page shows which runtimes are installed and logged in, and there are thirteen [themes](#themes) — four of them navy, one animated.
 
 ## Requirements
 
@@ -37,6 +37,8 @@ npm install
 npm run dev
 ```
 
+If `npm run dev` fails with missing modules (`electron-vite`, `typescript`, …), your environment sets `NODE_ENV=production`, which makes a plain `npm install` skip devDependencies — run `npm install --include=dev` instead.
+
 The app starts with no harness configured. Open **Settings -> Harnesses** to see which runtimes were detected, install the missing ones, and add an API key for any provider you want to reach directly. Keys are stored per provider in the OS keychain, never in this repository.
 
 ## Develop
@@ -45,7 +47,7 @@ The app starts with no harness configured. Open **Settings -> Harnesses** to see
 npm install
 npm run dev          # electron-vite dev server with HMR
 npm run typecheck    # main + renderer
-npm test             # offline suites: unit + format + review-fixes (21 tests, no network)
+npm test             # offline suites: unit, format, review-fixes, terminal (no network)
 npm run build        # bundles to out/
 npm run dist:win     # NSIS installer in dist/
 ```
@@ -62,9 +64,36 @@ HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=acp HARNESS_SMOKE_ACP_AGENT=claude-agent-acp 
 npm run build && HARNESS_E2E=1 HARNESS_E2E_HARNESS=native npx vitest run tests/e2e.electron.test.ts
 # Approval flow through the UI (Ask mode → approval card → Allow once → file written)
 HARNESS_E2E=1 npx vitest run tests/e2e.approval.test.ts
+# Text-only-model warning and the capability override. Needs no API key and makes no network call.
+npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
+# Every theme through the picker in the real app: distinct palettes, a recolored terminal, Nebula animating
+npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:themes
+# Terminal through the UI: type into a real PTY, reload the renderer, close and exit tabs (no API key needed)
+HARNESS_E2E=1 npx vitest run tests/e2e.terminal.test.ts
+# The same flow against the packaged app, which proves node-pty loads from the unpacked asar
+npm run dist:dir && HARNESS_E2E=1 HARNESS_E2E_EXE="$PWD/dist/win-unpacked/Vocs Code.exe" npx vitest run tests/e2e.terminal.test.ts
 ```
 
 Screenshots from the e2e runs land in `tests/artifacts/`. `npm run dist:win` produces `dist/Vocs-Code-<version>-win-x64.exe` (NSIS) plus `dist/win-unpacked/`.
+
+## Logs
+
+The main process writes every line it logs to `<userData>/logs/main.log` (2 MB, one rotated
+`main.log.1` behind it) as well as the console:
+
+| Platform | Path |
+| --- | --- |
+| Windows | `%APPDATA%\Vocs Code\logs\main.log` |
+| macOS | `~/Library/Application Support/Vocs Code/logs/main.log` |
+| Linux | `~/.config/Vocs Code/logs/main.log` |
+
+Warnings worth grepping for when the window stops responding:
+
+- `main event loop stalled <n>ms` — the main process blocked, which is the same thing as a window
+  that dispatches no clicks or keystrokes. The line before it usually names the cause.
+- `renderer longtask|input-delay|loop-lag <n>ms` — the renderer blocked instead: one script task ran
+  too long (typically an unbounded render), so input queued behind it.
+- `slow ipc <channel>: <n>ms` — one IPC handler held the main process that long.
 
 ## Environment variables
 
@@ -91,13 +120,50 @@ Test-only switches:
 | `HARNESS_SMOKE_VERBOSE` | Prints every harness event during the smoke run. |
 | `HARNESS_E2E=1` | Opts into the Playwright suites, which launch the built app from `out/`. |
 | `HARNESS_E2E_HARNESS` | Which harness the e2e session uses, for example `native`. |
+| `VOCS_CODE_E2E_UI=1` | Opts into `tests/e2e.vision.test.ts`. Runs with every provider key stripped from the environment, so it never reaches a provider. |
+| `HARNESS_E2E_EXE` | Path to a packaged binary (`dist/win-unpacked/Vocs Code.exe`); the terminal e2e drives it instead of `out/`. |
 
 The live suites need the corresponding runtime installed and logged in, and they spend real API credit.
+
+## Themes
+
+Thirteen themes: **System**, **Light** and **Dark**, plus ten palettes grouped by family in the **View** menu and in the swatch picker under *Settings → General*.
+
+| Family | Theme | |
+| --- | --- | --- |
+| Navy | **Midnight Navy** | deep classic navy, azure accent |
+| | **Abyss** | navy pushed to near-black, high contrast, aqua accent |
+| | **Blueprint** | navy ink on blue-tinted drafting paper — the light side of navy |
+| | **Admiral** | navy hull, parchment text, brass fittings |
+| Futuristic | **Nebula** | navy-indigo with neon cyan and magenta — animated |
+| Light | **Solarium** | warm sand paper, burnt-orange accent |
+| | **Blossom** | pale rose paper, plum accent |
+| Dark | **Evergreen** | dark conifer greens, mint accent |
+| | **Graphite** | achromatic — no hue in the chrome, only in status colors |
+| | **Ember** | charred warm dark, ember-orange accent |
+
+**Nebula** is the animated one: a drifting aurora and a sliding holographic grid behind frosted, translucent chrome, gradient sweeps across the wordmark and primary buttons, a light bar travelling along the title bar's edge, and glow on status lights, the selected session and focus rings. All of its motion stops under `prefers-reduced-motion`.
+
+A theme is data rather than a stylesheet. `src/shared/themes.ts` holds one palette of twenty tokens per theme and everything reads from it: the renderer's custom properties (emitted by `themeCss()`), the OS-drawn caption buttons and window background in the main process, the terminal's sixteen ANSI slots (`src/shared/ansi.ts` derives them per theme, so program output matches the UI), and the settings swatches. Tinted washes such as `--accent-soft` are `color-mix`ed once in `styles.css`, so a palette only declares base hues. Adding a theme means adding one entry — `tests/themes.test.ts` then holds it to the same bar as the others: every token present, WCAG AA body text, readable status hues, and a palette visibly distinct from all its siblings. Only Light and Dark are hand-authored in `styles.css`, so a complete palette exists before any script runs.
+
+## Terminal
+
+The Terminal tab in the side panel is a full terminal, not a command runner. Each tab is a pseudo-terminal (ConPTY on Windows, `forkpty` elsewhere, via a prebuilt `node-pty`) rendered by xterm.js, so interactive programs, prompts, colors, progress bars, `vim`/`less`/REPLs, Ctrl+C and your shell profile all behave as they would in Windows Terminal or iTerm.
+
+- **Shells.** New tabs start the session's working directory in the shell from *Settings → Terminal*: Auto (PowerShell on Windows, `$SHELL` elsewhere), or any detected shell — PowerShell 7, Windows PowerShell, cmd, Git Bash, WSL, zsh, bash, fish — or a custom executable. The `+` button's menu opens a one-off tab in another shell.
+- **Tabs.** Several per session; titles follow the shell's own title (the running command in cmd/PowerShell), or double-click to rename. Middle-click or `×` closes; a clean `exit` closes the tab, a failed shell stays readable with a **Restart** bar.
+- **Lives in the main process.** Shells keep running while you switch panel tabs, sessions, or reload the renderer; the panel re-attaches to an exact snapshot of the screen. On quit every screen is saved and the tabs come back on the next launch with their scrollback (the shell starts again when you open one) — toggle under *Settings → Terminal*.
+- **Find** (`Ctrl+F`, case / regex options), **Select all**, **Clear**, **Kill process** for a hung command, clickable URLs, 10 000 lines of scrollback by default.
+- **Send to agent.** The sparkle button puts the selection — or the last screenful of output — into the composer as a fenced block, so a failing build lands in the chat with one click. Output going idle also refreshes the Changes tab.
+- **From the composer.** Start a draft with `!` to run it as a shell command in the session's terminal instead of sending it to the agent: the command stays local, the Terminal tab opens on it, and the transcript is untouched.
+- **Shortcuts.** `Ctrl+`` focuses the terminal (again: back to the composer), `Ctrl+Shift+`` opens a new one, `Ctrl+Shift+C` / `Ctrl+Shift+V` copy and paste everywhere; on Windows/Linux `Ctrl+C` copies while text is selected (otherwise it interrupts) and `Ctrl+V` pastes. Right-click copies the selection or pastes. App chords (`Ctrl+N/K/B/J/,` and `Ctrl+1…9`) win over the shell.
+
+Packaging: `@lydell/node-pty` ships N-API prebuilds per platform as optional dependencies, so no compiler or `electron-rebuild` step is needed; `electron-builder.yml` unpacks it from the asar because the `.node` binaries and ConPTY DLLs must be real files.
 
 ## Architecture
 
 ```
-src/shared        types, IPC contract, harness metadata, diff parser (no runtime deps)
+src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette (no runtime deps)
 src/main
   harness/        one adapter per harness → normalized SessionEvent stream
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
@@ -111,10 +177,13 @@ src/main
   session-manager.ts  sessions, transcripts, approvals, goals, worktrees
   runtime.ts      binary discovery (PATH, app runtime dir, bundled), doctor, installer
   secrets.ts      API keys encrypted at rest via Electron safeStorage
-  git.ts / shell.ts / settings.ts / store.ts / ipc.ts / index.ts
+  terminal.ts     PTY tabs (node-pty) mirrored by headless xterm for snapshots, flow control, restore
+  git.ts / settings.ts / store.ts / ipc.ts / index.ts
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
-  components/     sidebar, transcript, composer, diff view, settings, command palette
+  components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
+  terminal/       xterm.js instances kept alive outside React (host.ts)
+  theme.ts        injects the data-driven palettes and applies the active theme to <html>
   store.ts        session state; api.ts wraps the preload bridge
 resources/pi      the approvals extension loaded into pi at spawn time
 tests             unit + format + review-fixes run offline; smoke and e2e are opt-in
@@ -143,7 +212,7 @@ Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping c
 - Codex exec (SDK) cannot ask for approval; prefer the app-server harness for interactive work.
 - Custom Codex model providers are passed as thread config overrides and were not verified against a live OpenAI-compatible endpoint.
 - ACP agents expose models only after the session starts; pick the model from the header once the agent is up.
-- The Terminal panel runs one-shot commands (no PTY).
+- The terminal tab's directory tracking relies on the shell announcing its cwd (OSC 7, or OSC 9;9 as Windows Terminal profiles do); shells without such a prompt hook show the directory they started in.
 
 ## License
 

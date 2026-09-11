@@ -101,7 +101,6 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   private totals: UsageTotals;
   private turnStartedAt = 0;
   private models: ModelInfo[] = [];
-  private modeOverridePending = false;
 
   constructor(private readonly ctx: HarnessContext) {
     this.totals = { ...ctx.session().usage };
@@ -124,61 +123,71 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     }
     const child = spawnTool(bin.path, ['app-server'], { cwd: meta.cwd, env });
     this.rpc = new JsonRpcStdioClient(child);
-    this.rpc.onStderr = (l) => this.ctx.log('debug', `[codex] ${l}`);
-    this.rpc.onClose = (code) => {
-      this._busy = false;
-      this.ctx.emit({ type: 'status', status: 'stopped', detail: `codex app-server exited (${code})` });
-    };
-    this.wireNotifications(this.rpc);
-    this.wireServerRequests(this.rpc);
-
-    await withTimeout(
-      this.rpc.request('initialize', {
-        clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' },
-        capabilities: { experimentalApi: true, requestAttestation: false }
-      }),
-      30_000,
-      'codex initialize'
-    );
-
-    this.model = meta.config.model?.model || meta.activeModel?.model;
-    this.modelProvider = meta.config.codexModelProvider?.id;
-    this.effort = this.ctx.effort();
-    const mode = this.ctx.permissionMode();
-    const common: Record<string, unknown> = {
-      model: this.model ?? null,
-      modelProvider: this.modelProvider ?? null,
-      cwd: meta.cwd,
-      approvalPolicy: approvalPolicyFor(mode),
-      sandbox: sandboxModeFor(mode)
-    };
-    if (meta.config.codexModelProvider) {
-      const p = meta.config.codexModelProvider;
-      common.config = {
-        model_providers: {
-          [p.id]: { name: p.name, base_url: p.baseUrl, env_key: p.envKey, wire_api: p.wireApi ?? 'chat' }
-        }
+    try {
+      this.rpc.onStderr = (l) => this.ctx.log('debug', `[codex] ${l}`);
+      this.rpc.onClose = (code) => {
+        this._busy = false;
+        this.ctx.emit({ type: 'status', status: 'stopped', detail: `codex app-server exited (${code})` });
       };
-    }
-    let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null };
-    if (meta.harnessRef.codexThreadId) {
-      try {
-        res = await this.rpc.request('thread/resume', { threadId: meta.harnessRef.codexThreadId, ...common });
-      } catch (e) {
-        this.info(`Could not resume Codex thread (${errorMessage(e)}); starting a new one.`, 'warn');
-        res = await this.rpc.request('thread/start', { ...common, sessionStartSource: null });
+      this.wireNotifications(this.rpc);
+      this.wireServerRequests(this.rpc);
+
+      await withTimeout(
+        this.rpc.request('initialize', {
+          clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' },
+          capabilities: { experimentalApi: true, requestAttestation: false }
+        }),
+        30_000,
+        'codex initialize'
+      );
+
+      this.model = meta.config.model?.model || meta.activeModel?.model;
+      this.modelProvider = meta.config.codexModelProvider?.id;
+      this.effort = this.ctx.effort();
+      const mode = this.ctx.permissionMode();
+      const common: Record<string, unknown> = {
+        model: this.model ?? null,
+        modelProvider: this.modelProvider ?? null,
+        cwd: meta.cwd,
+        approvalPolicy: approvalPolicyFor(mode),
+        sandbox: sandboxModeFor(mode)
+      };
+      if (meta.config.codexModelProvider) {
+        const p = meta.config.codexModelProvider;
+        common.config = {
+          model_providers: {
+            [p.id]: { name: p.name, base_url: p.baseUrl, env_key: p.envKey, wire_api: p.wireApi ?? 'chat' }
+          }
+        };
       }
-    } else {
-      res = await this.rpc.request('thread/start', common);
+      let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null };
+      if (meta.harnessRef.codexThreadId) {
+        try {
+          res = await withTimeout(this.rpc.request('thread/resume', { threadId: meta.harnessRef.codexThreadId, ...common }), 30_000, 'thread/resume');
+        } catch (e) {
+          this.info(`Could not resume Codex thread (${errorMessage(e)}); starting a new one.`, 'warn');
+          res = await withTimeout(this.rpc.request('thread/start', { ...common, sessionStartSource: null }), 30_000, 'thread/start');
+        }
+      } else {
+        res = await withTimeout(this.rpc.request('thread/start', common), 30_000, 'thread/start');
+      }
+      this.threadId = res.thread.id;
+      this.ctx.updateRef({ codexThreadId: this.threadId });
+      this.ctx.updateMeta({
+        activeModel: { provider: res.modelProvider || 'openai', model: res.model },
+        activeEffort: (res.reasoningEffort as EffortLevel | null) ?? undefined
+      });
+      this.ctx.emit({ type: 'status', status: 'idle' });
+      void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
+    } catch (e) {
+      // Handshake failed after spawn: tear the transport down so no app-server (with its
+      // injected API keys) is orphaned, then rethrow.
+      const rpc = this.rpc;
+      this.rpc = null;
+      rpc?.close();
+      setTimeout(() => killTree(child), 2000);
+      throw e;
     }
-    this.threadId = res.thread.id;
-    this.ctx.updateRef({ codexThreadId: this.threadId });
-    this.ctx.updateMeta({
-      activeModel: { provider: res.modelProvider || 'openai', model: res.model },
-      activeEffort: (res.reasoningEffort as EffortLevel | null) ?? undefined
-    });
-    this.ctx.emit({ type: 'status', status: 'idle' });
-    void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
   }
 
   private wireNotifications(rpc: JsonRpcStdioClient): void {
@@ -262,7 +271,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.ctx.emit({ type: 'status', status: 'idle' });
       const next = this.queue.shift();
       this.ctx.updateMeta({ queued: this.queue.length });
-      if (next) void this.send({ ...next, mode: 'now' });
+      if (next) void this.send({ ...next, mode: 'now' }).catch((e) => this.info(errorMessage(e), 'error'));
     });
     rpc.onNotification('thread/tokenUsage/updated', (p) => {
       const n = p as { tokenUsage: { total: { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number; reasoningOutputTokens: number; totalTokens: number }; last: { totalTokens: number }; modelContextWindow: number | null } };
@@ -536,7 +545,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     }
     if (this._busy && this.turnId) {
       if (input.mode === 'steer') {
-        await this.rpc.request('turn/steer', { threadId: this.threadId, input: content, expectedTurnId: this.turnId });
+        await withTimeout(this.rpc.request('turn/steer', { threadId: this.threadId, input: content, expectedTurnId: this.turnId }), 30_000, 'turn/steer');
         return;
       }
       this.queue.push({ ...input, mode: 'now' });
@@ -553,12 +562,11 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       model: this.model ?? null,
       effort: this.effort ?? null
     };
-    this.modeOverridePending = false;
     this._busy = true;
     this.turnStartedAt = Date.now();
     this.ctx.emit({ type: 'status', status: 'running' });
     try {
-      const res = await this.rpc.request<{ turn: { id: string } }>('turn/start', params);
+      const res = await withTimeout(this.rpc.request<{ turn: { id: string } }>('turn/start', params), 300_000, 'turn/start');
       this.turnId = res.turn.id;
     } catch (e) {
       this._busy = false;
@@ -570,7 +578,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   async interrupt(): Promise<void> {
     if (!this.rpc || !this.threadId || !this.turnId) return;
     try {
-      await this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId });
+      await withTimeout(this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId }), 30_000, 'turn/interrupt');
     } catch (e) {
       this.ctx.log('warn', `interrupt failed: ${errorMessage(e)}`);
     }
@@ -588,14 +596,13 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
-    this.modeOverridePending = true;
     // Session grants made under a looser mode must not carry into a stricter one.
     this.sessionAllowedCommands.clear();
     if (this._busy) this.info(`Permission mode "${mode}" applies to Codex from the next turn; the running turn keeps its current sandbox.`, 'warn');
   }
 
   async compact(): Promise<void> {
-    if (this.rpc && this.threadId) await this.rpc.request('thread/compact/start', { threadId: this.threadId });
+    if (this.rpc && this.threadId) await withTimeout(this.rpc.request('thread/compact/start', { threadId: this.threadId }), 30_000, 'thread/compact/start');
   }
 
   async listModels(): Promise<ModelInfo[]> {

@@ -1,12 +1,16 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
 import React, { useEffect, useState } from 'react';
 import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig } from '../../../shared/types';
+import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
-import { invoke } from '../api';
+import { parseModelOverrideKey } from '../../../shared/model-overrides';
+import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
+import { invoke, isMac, platform } from '../api';
 import { useStore } from '../store';
-import { Badge, Button, Field, Icon, Spinner, Toggle } from './ui';
+import { systemPrefersDark } from '../theme';
+import { Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
 
-type Section = 'general' | 'providers' | 'harnesses' | 'acp' | 'about';
+type Section = 'general' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'about';
 
 export function SettingsView() {
   const settings = useStore((s) => s.settings)!;
@@ -23,6 +27,7 @@ export function SettingsView() {
         {(
           [
             ['general', 'General', 'settings'],
+            ['terminal', 'Terminal', 'terminal'],
             ['providers', 'Providers & keys', 'bolt'],
             ['harnesses', 'Harnesses', 'shield'],
             ['acp', 'ACP agents', 'fork'],
@@ -36,6 +41,7 @@ export function SettingsView() {
       </div>
       <div className="settings-body">
         {section === 'general' && <General settings={settings} update={update} />}
+        {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
         {section === 'providers' && <Providers settings={settings} />}
         {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
         {section === 'acp' && <AcpAgents settings={settings} update={update} />}
@@ -45,17 +51,56 @@ export function SettingsView() {
   );
 }
 
+/** Swatch grid for the theme catalogue, grouped by family. */
+function ThemePicker({ value, onChange }: { value: ThemeId; onChange: (id: ThemeId) => void }) {
+  const systemDark = systemPrefersDark();
+  return (
+    <div className="theme-picker">
+      {GROUP_ORDER.map((group) => {
+        const themes = THEMES.filter((t) => t.group === group);
+        if (!themes.length) return null;
+        return (
+          <div key={group}>
+            <div className="theme-family">{GROUP_LABELS[group]}</div>
+            <div className="theme-grid">
+              {themes.map((t) => {
+                const [base, raised, accent] = swatchFor(t.id, systemDark);
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    className={`theme-card${value === t.id ? ' active' : ''}`}
+                    title={t.description}
+                    aria-pressed={value === t.id}
+                    onClick={() => onChange(t.id)}
+                  >
+                    <span className="theme-swatch" style={{ background: base, borderColor: raised }}>
+                      <span className="theme-swatch-bar" style={{ background: raised }} />
+                      <span className="theme-swatch-dot" style={{ background: accent }} />
+                    </span>
+                    <span className="theme-card-name">
+                      {t.name}
+                      {t.animated && <Icon name="sparkles" size={11} />}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function General({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   return (
     <div className="settings-section">
       <h2>General</h2>
-      <Field label="Theme">
-        <select value={settings.theme} onChange={(e) => update({ theme: e.target.value as AppSettings['theme'] })}>
-          <option value="system">System</option>
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-        </select>
-      </Field>
+      <div className="field">
+        <span className="field-label">Theme</span>
+        <ThemePicker value={settings.theme} onChange={(theme) => update({ theme })} />
+      </div>
       <Field label="Default harness">
         <select value={settings.defaultHarness} onChange={(e) => update({ defaultHarness: e.target.value as HarnessId })}>
           {HARNESSES.map((h) => (
@@ -98,6 +143,88 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
   );
 }
 
+const FONT_SIZES = [10, 11, 12, 13, 14, 15, 16, 18, 20];
+const SCROLLBACKS = [1_000, 5_000, 10_000, 20_000, 50_000, 100_000];
+
+function TerminalSection({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+  const t = settings.terminal;
+  const [shells, setShells] = useState<ShellOption[]>([]);
+  useEffect(() => {
+    void invoke('terminal:shells', undefined).then(setShells).catch(() => undefined);
+  }, []);
+  const patch = (p: Partial<TerminalSettings>) => update({ terminal: { ...t, ...p } });
+  const known = t.shell === 'auto' || t.shell === 'custom' || shells.some((s) => s.kind === t.shell);
+  const mod = isMac ? '⌘' : 'Ctrl';
+  return (
+    <div className="settings-section">
+      <h2>Terminal</h2>
+      <p className="muted small">Each tab in the Terminal panel is a real pseudo-terminal: interactive programs, colors, Ctrl+C and your shell profile all work, and tabs keep running while you use the rest of the app.</p>
+      <Field label="Default shell" hint="New terminals start this shell in the session's working directory. Auto picks PowerShell on Windows and your login shell elsewhere.">
+        <select value={t.shell} onChange={(e) => patch({ shell: e.target.value as ShellKind })}>
+          <option value="auto">Auto</option>
+          {shells.map((s) => (
+            <option key={s.kind} value={s.kind}>
+              {s.name} — {s.path}
+            </option>
+          ))}
+          {!known && <option value={t.shell}>{t.shell} (not found on this machine)</option>}
+          <option value="custom">Custom…</option>
+        </select>
+      </Field>
+      {t.shell === 'custom' && (
+        <div className="row gap12">
+          <Field label="Shell executable">
+            <input value={t.customShellPath} placeholder={platform === 'win32' ? 'C:\\tools\\nu.exe' : '/usr/local/bin/nu'} onChange={(e) => patch({ customShellPath: e.target.value })} spellCheck={false} />
+          </Field>
+          <Field label="Arguments" hint="Space separated.">
+            <input value={t.customShellArgs.join(' ')} onChange={(e) => patch({ customShellArgs: e.target.value.split(/\s+/).filter(Boolean) })} spellCheck={false} />
+          </Field>
+        </div>
+      )}
+      <div className="row gap12">
+        <Field label="Font size">
+          <select value={t.fontSize} onChange={(e) => patch({ fontSize: Number(e.target.value) })}>
+            {(FONT_SIZES.includes(t.fontSize) ? FONT_SIZES : [...FONT_SIZES, t.fontSize].sort((a, b) => a - b)).map((n) => (
+              <option key={n} value={n}>
+                {n} px
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Scrollback">
+          <select value={t.scrollback} onChange={(e) => patch({ scrollback: Number(e.target.value) })}>
+            {(SCROLLBACKS.includes(t.scrollback) ? SCROLLBACKS : [...SCROLLBACKS, t.scrollback].sort((a, b) => a - b)).map((n) => (
+              <option key={n} value={n}>
+                {n.toLocaleString()} lines
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Cursor">
+          <select value={t.cursorStyle} onChange={(e) => patch({ cursorStyle: e.target.value as TerminalSettings['cursorStyle'] })}>
+            <option value="block">Block</option>
+            <option value="underline">Underline</option>
+            <option value="bar">Bar</option>
+          </select>
+        </Field>
+      </div>
+      <Toggle checked={t.cursorBlink} onChange={(v) => patch({ cursorBlink: v })} label="Blinking cursor" />
+      <Toggle checked={t.restoreOnStartup} onChange={(v) => patch({ restoreOnStartup: v })} label="Restore terminals on startup: tabs come back with their scrollback, and the shell starts again when you open one" />
+      <h3>Shortcuts</h3>
+      <p className="muted small">
+        <Kbd>{mod}+`</Kbd> focus the terminal (again to return to the composer) · <Kbd>{mod}+Shift+`</Kbd> new terminal · <Kbd>{mod}+F</Kbd> find · <Kbd>Ctrl+Shift+C</Kbd> / <Kbd>Ctrl+Shift+V</Kbd> copy / paste
+        {!isMac && (
+          <>
+            {' '}
+            · <Kbd>Ctrl+C</Kbd> copies while text is selected, otherwise interrupts · <Kbd>Ctrl+V</Kbd> pastes
+          </>
+        )}{' '}
+        · right-click copies the selection or pastes · double-click a tab to rename it.
+      </p>
+    </div>
+  );
+}
+
 function Providers({ settings }: { settings: AppSettings }) {
   const toast = useStore((s) => s.toast);
   const [keys, setKeys] = useState<Record<string, string>>({});
@@ -133,6 +260,7 @@ function Providers({ settings }: { settings: AppSettings }) {
     <div className="settings-section">
       <h2>Providers & API keys</h2>
       <p className="muted">Keys are encrypted with the OS keychain (DPAPI on Windows) and only sent to the provider you configure. Harnesses that bring their own login (Claude Code, Codex, pi, dsh) keep using it; keys here are a fallback and power the native loop.</p>
+      <HarnessLogins />
       {settings.providers.map((p) => (
         <div key={p.id} className={`provider-card ${p.enabled ? '' : 'disabled'}`}>
           <div className="provider-head">
@@ -210,7 +338,121 @@ function Providers({ settings }: { settings: AppSettings }) {
           Add OpenAI-compatible provider
         </Button>
       )}
+      <ModelOverrides settings={settings} />
     </div>
+  );
+}
+
+/** Login state for harnesses that bring their own credentials, shown next to the key vault. */
+function HarnessLogins() {
+  const availability = useStore((s) => s.availability);
+  const refresh = useStore((s) => s.refreshAvailability);
+  const [refreshing, setRefreshing] = useState(false);
+  const credHome: Partial<Record<HarnessId, string>> = { claude: '~/.claude', codex: '~/.codex', pi: '~/.pi/agent' };
+  const refreshNow = async () => {
+    setRefreshing(true);
+    await refresh();
+    setRefreshing(false);
+  };
+  return (
+    <div className="provider-card">
+      <div className="provider-head">
+        <span className="provider-name">Harness logins</span>
+        <span className="spacer" />
+        <Button size="sm" variant="ghost" icon="refresh" onClick={() => void refreshNow()}>
+          {refreshing ? <Spinner /> : 'Refresh'}
+        </Button>
+      </div>
+      <div className="provider-body">
+        {(['claude', 'codex', 'pi'] as HarnessId[]).map((id) => {
+          const h = HARNESSES.find((x) => x.id === id)!;
+          const av = availability[id];
+          return (
+            <div key={id} className="row gap8" style={{ alignItems: 'center' }}>
+              <strong>{h.name}</strong>
+              {!av ? (
+                <Spinner size={11} />
+              ) : !av.available ? (
+                <Badge tone="red">not installed</Badge>
+              ) : av.authenticated === true ? (
+                <Badge tone="green">logged in</Badge>
+              ) : av.authenticated === false ? (
+                <Badge tone="amber">not logged in</Badge>
+              ) : (
+                <Badge tone="neutral">login unknown</Badge>
+              )}
+              <span className="muted small">
+                {av?.version ? `${av.version} · ` : ''}
+                uses its own credentials from {credHome[id]}
+              </span>
+            </div>
+          );
+        })}
+        <p className="muted small">Log in from a terminal with <code>claude</code>, <code>codex login</code> or <code>pi</code>; these sessions then reuse that login. API keys below are only used for the native loop and as a fallback.</p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Capability corrections. Each harness derives `supportsImages` from a different and sometimes
+ * wrong source, so the user gets the last word on a per-model basis.
+ */
+function ModelOverrides({ settings }: { settings: AppSettings }) {
+  const toast = useStore((s) => s.toast);
+  const [draft, setDraft] = useState({ provider: '', model: '', supportsImages: true });
+  const entries = Object.entries(settings.modelOverrides ?? {});
+
+  const set = async (provider: string, model: string, supportsImages: boolean | null) => {
+    try {
+      await invoke('models:setOverride', { provider, model, supportsImages });
+    } catch (e) {
+      toast(`Could not save the override: ${(e as Error).message}`, 'error');
+    }
+  };
+
+  return (
+    <>
+      <h3>Model capability overrides</h3>
+      <p className="muted">
+        Harnesses advertise which models accept images, and they get it wrong — a hand-written entry in a harness catalog, a stale model list, or a name-based guess for an
+        OpenAI-compatible endpoint. An override corrects one model here. It changes what this app believes and warns about; it cannot stop a harness that strips attachments
+        on its own (Pi does, from <code>~/.pi/agent/models.json</code>).
+      </p>
+      {entries.length === 0 && <p className="muted small">No overrides. Attach an image to a model listed as text-only and the composer offers to add one.</p>}
+      {entries.map(([key, o]) => {
+        const { provider, model } = parseModelOverrideKey(key);
+        return (
+          <div key={key} className="row gap8 override-row">
+            <code className="small">{key}</code>
+            <Badge tone={o.supportsImages ? 'green' : 'neutral'}>{o.supportsImages ? 'accepts images' : 'text only'}</Badge>
+            <span className="spacer" />
+            <Button size="sm" variant="ghost" onClick={() => void set(provider, model, !o.supportsImages)}>
+              Flip
+            </Button>
+            <Button size="sm" variant="ghost" icon="trash" title="Remove override" onClick={() => void set(provider, model, null)} />
+          </div>
+        );
+      })}
+      <div className="row gap8">
+        <input placeholder="provider (e.g. deepseek)" value={draft.provider} onChange={(e) => setDraft({ ...draft, provider: e.target.value.trim() })} />
+        <input placeholder="model id" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value.trim() })} />
+        <select value={draft.supportsImages ? 'yes' : 'no'} onChange={(e) => setDraft({ ...draft, supportsImages: e.target.value === 'yes' })}>
+          <option value="yes">accepts images</option>
+          <option value="no">text only</option>
+        </select>
+        <Button
+          size="sm"
+          disabled={!draft.provider || !draft.model}
+          onClick={async () => {
+            await set(draft.provider, draft.model, draft.supportsImages);
+            setDraft({ provider: '', model: '', supportsImages: true });
+          }}
+        >
+          Add
+        </Button>
+      </div>
+    </>
   );
 }
 
