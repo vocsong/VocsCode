@@ -18,6 +18,7 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
+    "update": "git pull && npm run build && npm start",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "start": "electron-vite preview",
