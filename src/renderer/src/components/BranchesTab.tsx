@@ -32,6 +32,7 @@ function underPath(dir: string, cwd: string): boolean {
 export function BranchesTab({ session }: { session: SessionMeta }) {
   const toast = useStore((s) => s.toast);
   const sessions = useStore((s) => s.sessions);
+  const setActive = useStore((s) => s.setActive);
   const [data, setData] = useState<GitBranchOverview | null>(null);
   const [view, setView] = useState<'branches' | 'worktrees'>('branches');
   const [filter, setFilter] = useState<Filter>('all');
@@ -85,6 +86,53 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
       danger: true
     });
     if (ok) void act(invoke('git:deleteBranch', { sessionId: session.id, branch: b.name, force }), `Deleted ${b.name}`);
+  };
+
+  /** The outcome is also recorded as a persistent note in this session's chat transcript. */
+  const runPr = (b: GitBranchOverviewItem) => {
+    if (!data?.base) return;
+    const noteId = `local-bpr-${session.id}`;
+    useStore.getState().setLocalInfo(session.id, noteId, `Opening a PR from ${b.name} into ${data.base}…`, { pending: true });
+    void invoke('git:pr', { sessionId: session.id, base: data.base, head: b.name })
+      .catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }))
+      .then((r) => {
+        useStore.getState().setLocalInfo(session.id, noteId, null);
+        if (!r.ok) toast(r.output ?? 'Failed to open the PR', 'error');
+        else toast(`PR opened: ${r.url ?? data.base}`, 'success');
+        void refresh();
+      });
+  };
+
+  const mergePr = async (b: GitBranchOverviewItem) => {
+    if (!b.pr) return;
+    const ok = await askConfirm({
+      title: `Merge the PR for ${b.name}?`,
+      body: `Merge #${b.pr.number} into its target branch via gh.\n\n${b.pr.title ?? ''}`.trim(),
+      confirmLabel: 'Merge PR'
+    });
+    if (!ok) return;
+    void act(invoke('git:merge', { sessionId: session.id, head: b.name }), `Merged ${b.name}`);
+  };
+
+  const newSessionOnBranch = async (b: GitBranchOverviewItem) => {
+    try {
+      const meta = await invoke('sessions:create', { config: { ...session.config, useWorktree: false }, title: b.name, checkoutBranch: b.name });
+      await setActive(meta.id);
+      toast(`Session started on ${b.name}`, 'success');
+    } catch (e) {
+      toast(String((e as Error).message ?? e), 'error');
+    }
+  };
+
+  /** Prefills the composer so the agent reasons about a branch it is not checked out on. */
+  const askAgent = (b: GitBranchOverviewItem) => {
+    useStore.getState().insertIntoComposer(
+      `The repo has a branch \`${b.name}\`${data?.base ? ` (base: ${data.base})` : ''}. Review its changes: summarize what it does, flag risks, and suggest a PR title and description.`
+    );
+  };
+
+  const copyName = (b: GitBranchOverviewItem) => {
+    void navigator.clipboard.writeText(b.name).then(() => toast(`Copied ${b.name}`, 'success'));
   };
 
   const removeWorktree = async (wt: GitWorktreeInfo) => {
@@ -188,6 +236,11 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
               ))}
             </div>
           </div>
+          {data.ghMissing && (
+            <div className="muted small pad" title="PR actions need the GitHub CLI">
+              GitHub CLI (gh) not found — PR actions are hidden. Install gh and run `gh auth login`.
+            </div>
+          )}
           <div className="branches-table">
             <div className="branches-cols">
               <span>Branch</span>
@@ -197,7 +250,20 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
               <span />
             </div>
             {visible.map((b) => (
-              <BranchRow key={b.name} b={b} onDelete={() => void deleteBranch(b)} />
+              <BranchRow
+                key={b.name}
+                b={b}
+                base={data.base}
+                ghMissing={data.ghMissing}
+                onDelete={() => void deleteBranch(b)}
+                onOpenPr={() => runPr(b)}
+                onViewPr={() => b.pr && void invoke('app:openExternal', { url: b.pr.url })}
+                onMergePr={() => void mergePr(b)}
+                onUpdate={() => void act(invoke('git:updateBranch', { sessionId: session.id, branch: b.name }), `Updated ${b.name}`)}
+                onCopy={() => copyName(b)}
+                onNewSession={() => void newSessionOnBranch(b)}
+                onAskAgent={() => askAgent(b)}
+              />
             ))}
             {visible.length === 0 && <div className="muted pad">No branches match.</div>}
           </div>
@@ -228,7 +294,33 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   );
 }
 
-function BranchRow({ b, onDelete }: { b: GitBranchOverviewItem; onDelete: () => void }) {
+function BranchRow({
+  b,
+  base,
+  ghMissing,
+  onDelete,
+  onOpenPr,
+  onViewPr,
+  onMergePr,
+  onUpdate,
+  onCopy,
+  onNewSession,
+  onAskAgent
+}: {
+  b: GitBranchOverviewItem;
+  base?: string;
+  ghMissing?: boolean;
+  onDelete: () => void;
+  onOpenPr: () => void;
+  onViewPr: () => void;
+  onMergePr: () => void;
+  onUpdate: () => void;
+  onCopy: () => void;
+  onNewSession: () => void;
+  onAskAgent: () => void;
+}) {
+  const pr = b.pr;
+  const hasOpenPr = pr?.state === 'OPEN';
   return (
     <div className="branch-row">
       <div className="branch-name">
@@ -254,7 +346,18 @@ function BranchRow({ b, onDelete }: { b: GitBranchOverviewItem; onDelete: () => 
         )}
       </span>
       <span className="branch-status">
-        {b.merged ? <Badge tone="purple">Merged</Badge> : <Badge tone="amber">Unmerged</Badge>}
+        {pr ? (
+          <Badge
+            tone={pr.state === 'OPEN' ? 'blue' : pr.state === 'MERGED' ? 'purple' : 'neutral'}
+            title={pr.title ? `#${pr.number}: ${pr.title}` : `#${pr.number}`}
+          >
+            {pr.state === 'OPEN' ? `PR #${pr.number}` : pr.state === 'MERGED' ? 'PR merged' : 'PR closed'}
+          </Badge>
+        ) : b.merged ? (
+          <Badge tone="purple">Merged</Badge>
+        ) : (
+          <Badge tone="amber">Unmerged</Badge>
+        )}
         {b.upstream && b.upstreamBehind !== undefined && <span className="muted small" title={`Behind ${b.upstream}`}>↓{b.upstreamBehind}</span>}
         {b.upstream && b.upstreamAhead !== undefined && <span className="muted small" title={`Ahead of ${b.upstream}`}>↑{b.upstreamAhead}</span>}
         {b.upstream && b.upstreamAhead === undefined && b.upstreamBehind === undefined && <span className="muted small" title={b.upstream}>synced</span>}
@@ -263,6 +366,12 @@ function BranchRow({ b, onDelete }: { b: GitBranchOverviewItem; onDelete: () => 
         {b.worktreePath && (
           <Button variant="ghost" size="sm" icon="external" title={`Open worktree ${basename(b.worktreePath)}`} onClick={() => void invoke('app:openInEditor', { path: b.worktreePath! })} />
         )}
+        {!ghMissing && !b.isBase &&
+          (hasOpenPr ? (
+            <Button variant="ghost" size="sm" icon="external" title={`Open PR #${pr!.number} on GitHub`} onClick={onViewPr} />
+          ) : (
+            <Button variant="ghost" size="sm" icon="pr" title={`Open a PR from ${b.name} into ${base ?? 'the base branch'}`} onClick={onOpenPr} />
+          ))}
         {!b.isBase && !b.current && (
           <Button
             variant="ghost"
@@ -272,6 +381,94 @@ function BranchRow({ b, onDelete }: { b: GitBranchOverviewItem; onDelete: () => 
             onClick={onDelete}
           />
         )}
+        <Dropdown
+          align="right"
+          width={260}
+          trigger={() => <Button variant="ghost" size="sm" icon="more" title="Branch actions" aria-label={`Actions for ${b.name}`} />}
+        >
+          {(close) => (
+            <>
+              <MenuItem
+                onClick={() => {
+                  close();
+                  onAskAgent();
+                }}
+                hint="Prefill the composer"
+              >
+                Ask the agent about this branch
+              </MenuItem>
+              {!ghMissing && !b.isBase && (
+                <MenuItem
+                  onClick={() => {
+                    close();
+                    onOpenPr();
+                  }}
+                  hint={`into ${base ?? 'base'}`}
+                >
+                  Open PR
+                </MenuItem>
+              )}
+              <MenuItem
+                disabled={!hasOpenPr}
+                onClick={() => {
+                  close();
+                  onViewPr();
+                }}
+                hint={hasOpenPr ? `#${pr!.number}` : undefined}
+              >
+                View PR on GitHub
+              </MenuItem>
+              <MenuItem
+                disabled={!hasOpenPr}
+                onClick={() => {
+                  close();
+                  void onMergePr();
+                }}
+              >
+                Merge PR
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  close();
+                  onUpdate();
+                }}
+                hint="git fetch + fast-forward"
+              >
+                Update from origin
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  close();
+                  onCopy();
+                }}
+              >
+                Copy branch name
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  close();
+                  void onNewSession();
+                }}
+                hint="isolated worktree"
+              >
+                New session on this branch
+              </MenuItem>
+              {!b.isBase && !b.current && (
+                <MenuItem
+                  danger
+                  disabled={!!b.worktreePath}
+                  onClick={() => {
+                    close();
+                    onDelete();
+                  }}
+                  hint={b.worktreePath ? 'remove worktree first' : undefined}
+                >
+                  Delete branch
+                </MenuItem>
+              )}
+            </>
+          )}
+        </Dropdown>
       </div>
     </div>
   );

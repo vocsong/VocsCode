@@ -566,6 +566,16 @@ export interface GitBranchOverviewItem {
   upstreamBehind?: number;
   /** Set when the branch is checked out in a worktree. */
   worktreePath?: string;
+  /** GitHub PR attached to this branch, when gh is available. */
+  pr?: GitPrInfo;
+}
+
+/** A GitHub PR whose head is a local branch. */
+export interface GitPrInfo {
+  number: number;
+  state: 'OPEN' | 'MERGED' | 'CLOSED';
+  url: string;
+  title?: string;
 }
 
 export interface GitBranchOverview {
@@ -573,6 +583,8 @@ export interface GitBranchOverview {
   base?: string;
   branches: GitBranchOverviewItem[];
   worktrees: GitWorktreeInfo[];
+  /** True when the GitHub CLI is unavailable; PR actions are hidden in the Branches panel. */
+  ghMissing?: boolean;
 }
 
 export interface FsEntry {
@@ -596,5 +608,7 @@ export interface CreateSessionRequest {
   title?: string;
   initialPrompt?: string;
   goal?: string;
+  /** Start the session in a worktree on this existing branch (reusing one when it exists). */
+  checkoutBranch?: string;
 }
 
