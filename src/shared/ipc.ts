@@ -103,16 +103,18 @@ export interface IpcContract {
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:stageAll': [{ sessionId: string }, { ok: boolean; error?: string }];
   'git:commit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];
-  /** Pushes the session's branch and opens a GitHub PR into `base` (needs gh). */
-  'git:pr': [{ sessionId: string; base: string }, { ok: boolean; url?: string; output?: string }];
-  /** Merges the open PR for the session's branch; `base`, when given, must match the PR's target. */
-  'git:merge': [{ sessionId: string; base?: string }, { ok: boolean; url?: string; output?: string }];
+  /** Pushes the session's branch (or `head`, without checking it out) and opens a GitHub PR into `base` (needs gh). */
+  'git:pr': [{ sessionId: string; base: string; head?: string }, { ok: boolean; url?: string; output?: string }];
+  /** Merges the open PR for the session's branch (or `head`); `base`, when given, must match the PR's target. */
+  'git:merge': [{ sessionId: string; base?: string; head?: string }, { ok: boolean; url?: string; output?: string }];
   'git:branches': [{ sessionId: string }, { current?: string; branches: GitBranchInfo[] }];
   'git:worktrees': [{ sessionId: string }, { current: string; worktrees: GitWorktreeInfo[] }];
   'git:checkout': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
   /** Branches-panel housekeeping: per-branch age, ahead/behind, merged state and worktree binding. */
   'git:branchesOverview': [{ sessionId: string }, GitBranchOverview];
   'git:deleteBranch': [{ sessionId: string; branch: string; force?: boolean }, { ok: boolean; error?: string }];
+  /** Fast-forwards a local branch to its upstream, whether or not it is checked out. */
+  'git:updateBranch': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
   'git:removeWorktree': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:pruneWorktrees': [{ sessionId: string }, { ok: boolean; output: string }];
   'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];

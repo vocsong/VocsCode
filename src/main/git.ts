@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
-import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
+import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitPrInfo, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import { runCapture, which } from './runtime';
 import { exists } from './util/fs';
@@ -203,30 +203,39 @@ async function gh(cwd: string, args: string[], timeoutMs = 120_000): Promise<{ c
 
 const prUrlIn = (out: string): string | undefined => out.match(PR_URL)?.[0];
 
-/** Pushes the current branch and opens a PR into `base` (gh). Refuses dirty trees so the PR is complete. */
-export async function gitCreatePr(cwd: string, base: string): Promise<PrResult> {
+/** Pushes `head` (default: the current branch) and opens a PR into `base` (gh). Refuses a dirty tree so the PR is complete. */
+export async function gitCreatePr(cwd: string, base: string, head?: string): Promise<PrResult> {
   if (!(await gitRoot(cwd))) return { ok: false, output: 'Not a git repository' };
   if (!ghBin()) return noGh();
-  const head = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
-  if (!head || head === 'HEAD') return { ok: false, output: 'Detached HEAD — check out a branch first.' };
-  if (head === base) return { ok: false, output: `${base} is already the current branch — /pr takes the branch to merge into.` };
-  const dirty = await git(cwd, ['status', '--porcelain=v1']);
-  if (dirty.stdout.trim()) return { ok: false, output: 'Uncommitted changes — commit them first (Changes panel or /diff).' };
-  const push = await git(cwd, ['push', '-u', 'origin', head], 120_000);
+  const current = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+  const branch = head?.trim() || current;
+  if (!branch || branch === 'HEAD') return { ok: false, output: 'Detached HEAD — check out a branch first.' };
+  if (branch === base) {
+    return { ok: false, output: branch === current ? `${base} is already the current branch — /pr takes the branch to merge into.` : `${base} is the base branch itself — pick a feature branch to PR into it.` };
+  }
+  if (branch !== current) {
+    // PRing another branch works without checkout: only that branch must exist locally.
+    const found = (await git(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
+    if (!found) return { ok: false, output: `Branch ${branch} does not exist locally.` };
+  } else {
+    const dirty = await git(cwd, ['status', '--porcelain=v1']);
+    if (dirty.stdout.trim()) return { ok: false, output: 'Uncommitted changes — commit them first (Changes panel or /diff).' };
+  }
+  const push = await git(cwd, ['push', '-u', 'origin', branch], 120_000);
   if (push.code !== 0) return { ok: false, output: (push.stderr || push.stdout).trim() || 'git push failed' };
-  const r = await gh(cwd, ['pr', 'create', '--base', base, '--head', head, '--fill']);
+  const r = await gh(cwd, ['pr', 'create', '--base', base, '--head', branch, '--fill']);
   const out = (r.stdout + r.stderr).trim();
   if (r.code !== 0) return { ok: false, output: out || 'gh pr create failed' };
   return { ok: true, url: prUrlIn(out), output: out };
 }
 
-/** Merges the open PR whose head is the current branch; `base`, when given, is checked against the PR's target. */
-export async function gitMergePr(cwd: string, base?: string): Promise<PrResult> {
+/** Merges the open PR whose head is `branch` (default: the current branch); `base`, when given, is checked against the PR's target. */
+export async function gitMergePr(cwd: string, base?: string, head?: string): Promise<PrResult> {
   if (!(await gitRoot(cwd))) return { ok: false, output: 'Not a git repository' };
   if (!ghBin()) return noGh();
-  const head = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
-  const view = await gh(cwd, ['pr', 'view', head, '--json', 'state,url,baseRefName'], 30_000);
-  if (view.code !== 0) return { ok: false, output: (view.stdout + view.stderr).trim() || `No open PR for ${head}` };
+  const branch = head?.trim() || (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+  const view = await gh(cwd, ['pr', 'view', branch, '--json', 'state,url,baseRefName'], 30_000);
+  if (view.code !== 0) return { ok: false, output: (view.stdout + view.stderr).trim() || `No open PR for ${branch}` };
   let pr: { state?: string; url?: string; baseRefName?: string };
   try {
     pr = JSON.parse(view.stdout.trim());
@@ -234,13 +243,35 @@ export async function gitMergePr(cwd: string, base?: string): Promise<PrResult> 
     return { ok: false, output: 'Could not read PR details.' };
   }
   if (pr.state === 'MERGED') return { ok: true, url: pr.url, output: `PR is MERGED (already merged): ${pr.url ?? ''}`.trim() };
-  if (pr.state !== 'OPEN') return { ok: false, output: pr.url ? `PR is ${pr.state ?? 'unknown'}: ${pr.url}` : `No open PR for ${head}` };
+  if (pr.state !== 'OPEN') return { ok: false, output: pr.url ? `PR is ${pr.state ?? 'unknown'}: ${pr.url}` : `No open PR for ${branch}` };
   if (base && pr.baseRefName && pr.baseRefName !== base) {
     return { ok: false, output: `That PR targets ${pr.baseRefName}, not ${base}: ${pr.url ?? ''}`.trim() };
   }
-  const merge = await gh(cwd, ['pr', 'merge', head, '--merge']);
+  const merge = await gh(cwd, ['pr', 'merge', branch, '--merge']);
   if (merge.code !== 0) return { ok: false, output: (merge.stderr || merge.stdout).trim() || 'gh pr merge failed' };
   return { ok: true, url: pr.url, output: (merge.stdout + merge.stderr).trim() || `Merged into ${pr.baseRefName ?? base ?? 'base'}` };
+}
+
+/** Maps each local branch to its most relevant PR (an open one wins over an older merged/closed). */
+export async function gitPrMap(cwd: string): Promise<{ prs?: Record<string, GitPrInfo>; ghMissing?: boolean }> {
+  if (!ghBin()) return { ghMissing: true };
+  const root = await gitRoot(cwd);
+  if (!root) return {};
+  const r = await gh(root, ['pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,headRefName,state,url,title'], 20_000);
+  if (r.code !== 0) return {};
+  try {
+    const list = JSON.parse(r.stdout.trim()) as { number: number; headRefName?: string; state?: string; url?: string; title?: string }[];
+    const prs: Record<string, GitPrInfo> = {};
+    for (const p of list) {
+      if (!p.headRefName || !p.url) continue;
+      const info: GitPrInfo = { number: p.number, state: (p.state as GitPrInfo['state']) ?? 'OPEN', url: p.url, ...(p.title ? { title: p.title } : {}) };
+      const prev = prs[p.headRefName];
+      if (!prev || (prev.state !== 'OPEN' && info.state === 'OPEN')) prs[p.headRefName] = info;
+    }
+    return { prs };
+  } catch {
+    return {};
+  }
 }
 
 export async function gitBranches(cwd: string): Promise<{ current?: string; branches: GitBranchInfo[] }> {
@@ -308,9 +339,10 @@ export function parseUpstreamTrack(track: string): { ahead?: number; behind?: nu
 export async function gitBranchesOverview(cwd: string): Promise<GitBranchOverview> {
   const root = await gitRoot(cwd);
   if (!root) return { isRepo: false, branches: [], worktrees: [] };
-  const [wt, refs] = await Promise.all([
+  const [wt, refs, pr] = await Promise.all([
     gitWorktrees(cwd),
-    git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)'])
+    git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)']),
+    gitPrMap(cwd)
   ]);
   const names = refs.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean);
   const base = pickBase(names);
@@ -344,14 +376,15 @@ export async function gitBranchesOverview(cwd: string): Promise<GitBranchOvervie
           ...counts,
           ...(up.ahead !== undefined ? { upstreamAhead: up.ahead } : {}),
           ...(up.behind !== undefined ? { upstreamBehind: up.behind } : {}),
-          ...(wtByBranch.has(name) ? { worktreePath: wtByBranch.get(name) } : {})
+          ...(wtByBranch.has(name) ? { worktreePath: wtByBranch.get(name) } : {}),
+          ...(pr.prs?.[name] ? { pr: pr.prs[name] } : {})
         };
         return item;
       })
   );
   // Newest work first, base branch pinned to top like GitHub's default-branch row.
   branches.sort((a, b) => Number(b.isBase) - Number(a.isBase) || (b.lastCommitAt ?? 0) - (a.lastCommitAt ?? 0));
-  return { isRepo: true, base, branches, worktrees: wt.worktrees };
+  return { isRepo: true, base, branches, worktrees: wt.worktrees, ...(pr.ghMissing ? { ghMissing: true } : {}) };
 }
 
 export async function gitDeleteBranch(cwd: string, branch: string, force: boolean): Promise<{ ok: boolean; error?: string }> {
@@ -360,6 +393,29 @@ export async function gitDeleteBranch(cwd: string, branch: string, force: boolea
   if (!/^[\w][\w./-]*$/.test(branch)) return { ok: false, error: 'Invalid branch name' };
   const r = await git(root, ['branch', force ? '-D' : '-d', branch]);
   return { ok: r.code === 0, error: (r.stderr || r.stdout).trim() || undefined };
+}
+
+/** Fast-forwards a local branch to its upstream, whether or not it is checked out. */
+export async function gitUpdateBranch(cwd: string, branch: string): Promise<{ ok: boolean; error?: string }> {
+  const root = await gitRoot(cwd);
+  if (!root) return { ok: false, error: 'Not a git repository' };
+  if (!/^[\w][\w./-]*$/.test(branch)) return { ok: false, error: 'Invalid branch name' };
+  const local = (await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
+  if (!local) return { ok: false, error: `Branch ${branch} does not exist locally.` };
+  const wts = await gitWorktrees(root);
+  const wt = wts.worktrees.find((w) => w.branch === branch);
+  if (wt) {
+    // Checked out in a worktree: fetch there and fast-forward, so the shared ref cannot move behind the checkout.
+    const dirty = await git(wt.path, ['status', '--porcelain=v1']);
+    if (dirty.stdout.trim()) return { ok: false, error: 'Uncommitted changes in the worktree — commit or stash them first.' };
+    const fetch = await git(wt.path, ['fetch', 'origin', branch], 120_000);
+    if (fetch.code !== 0) return { ok: false, error: (fetch.stderr || fetch.stdout).trim() || 'git fetch failed' };
+    const merge = await git(wt.path, ['merge', '--ff-only', 'FETCH_HEAD'], 120_000);
+    return { ok: merge.code === 0, error: merge.code === 0 ? undefined : (merge.stderr || merge.stdout).trim() || 'git merge failed' };
+  }
+  // Not checked out anywhere: fetch directly into the ref; git refuses a non-fast-forward.
+  const ff = await git(root, ['fetch', 'origin', `${branch}:${branch}`], 120_000);
+  return { ok: ff.code === 0, error: ff.code === 0 ? undefined : (ff.stderr || ff.stdout).trim() || 'git fetch failed' };
 }
 
 /** Drops administrative entries for worktrees whose directories were deleted by hand. */
@@ -388,13 +444,8 @@ export function slugify(s: string): string {
     .slice(0, 40) || 'session';
 }
 
-/** Creates an isolated worktree under <root>/.vocs-code/worktrees/<slug> on a new branch. */
-export async function createWorktree(projectRoot: string, slug: string): Promise<{ path: string; branch: string }> {
-  const root = await gitRoot(projectRoot);
-  if (!root) throw new Error('Worktrees require a git repository.');
-  const base = path.join(root, '.vocs-code', 'worktrees');
-  await fs.mkdir(base, { recursive: true });
-  // Keep the app folder out of git status.
+/** Keeps the app's worktree folder out of git status. */
+async function excludeWorktreesDir(root: string): Promise<void> {
   try {
     const exclude = path.join(root, '.git', 'info', 'exclude');
     const cur = (await exists(exclude)) ? await fs.readFile(exclude, 'utf8') : '';
@@ -402,6 +453,15 @@ export async function createWorktree(projectRoot: string, slug: string): Promise
   } catch {
     /* ignore */
   }
+}
+
+/** Creates an isolated worktree under <root>/.vocs-code/worktrees/<slug> on a new branch. */
+export async function createWorktree(projectRoot: string, slug: string): Promise<{ path: string; branch: string }> {
+  const root = await gitRoot(projectRoot);
+  if (!root) throw new Error('Worktrees require a git repository.');
+  const base = path.join(root, '.vocs-code', 'worktrees');
+  await fs.mkdir(base, { recursive: true });
+  await excludeWorktreesDir(root);
   // Pick a name whose directory AND branch are both free (a removed worktree leaves its branch behind).
   const branchExists = async (b: string) => (await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${b}`])).code === 0;
   let name = slug;
@@ -410,6 +470,22 @@ export async function createWorktree(projectRoot: string, slug: string): Promise
   const wtPath = path.join(base, name);
   const branch = `vocscode/${name}`;
   const r = await git(root, ['worktree', 'add', '-b', branch, wtPath], 60_000);
+  if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
+  return { path: wtPath, branch };
+}
+
+/** Creates a worktree under .vocs-code/worktrees for an EXISTING branch (new-session-on-branch flow). */
+export async function worktreeAddForBranch(projectRoot: string, branch: string): Promise<{ path: string; branch: string }> {
+  const root = await gitRoot(projectRoot);
+  if (!root) throw new Error('Worktrees require a git repository.');
+  const base = path.join(root, '.vocs-code', 'worktrees');
+  await fs.mkdir(base, { recursive: true });
+  await excludeWorktreesDir(root);
+  const name = slugify(branch.replace(/\//g, '-'));
+  let wtPath = path.join(base, name);
+  let i = 1;
+  while (await exists(wtPath)) wtPath = path.join(base, `${name}-${++i}`);
+  const r = await git(root, ['worktree', 'add', wtPath, branch], 60_000);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
   return { path: wtPath, branch };
 }
