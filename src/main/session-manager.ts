@@ -21,7 +21,7 @@ import type {
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
-import { branchGitState, createWorktree, gitRoot, removeWorktree, restoreWorktree, slugify, worktreeInfo, type BranchGitState } from './git';
+import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState } from './git';
 import { emptyUsage } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
@@ -129,6 +129,11 @@ export class SessionManager {
     this.scheduleGitStateCheck(id, 1_000);
   }
 
+  /** Appends a persistent info line to a session's transcript (renderer-visible, survives restart). */
+  note(id: string, text: string, level: 'info' | 'warn' | 'error' = 'info'): void {
+    this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level, text } });
+  }
+
   /** Reflects the session branch's PR/merge state in the sidebar status label. */
   private async checkGitState(id: string, recheck: boolean): Promise<void> {
     const meta = this.get(id);
@@ -176,7 +181,20 @@ export class SessionManager {
     const cfg = req.config;
     let cwd = cfg.projectRoot;
     let worktreeBranch: string | undefined;
-    if (cfg.useWorktree) {
+    if (req.checkoutBranch) {
+      // Reuse an existing worktree on the branch; otherwise create one for it.
+      if (!/^[\w][\w./-]*$/.test(req.checkoutBranch)) throw new Error('Invalid branch name');
+      const wts = await gitWorktrees(cfg.projectRoot);
+      const existing = wts.worktrees.find((w) => w.branch === req.checkoutBranch);
+      if (existing) {
+        cwd = existing.path;
+        worktreeBranch = req.checkoutBranch;
+      } else {
+        const wt = await worktreeAddForBranch(cfg.projectRoot, req.checkoutBranch);
+        cwd = wt.path;
+        worktreeBranch = wt.branch;
+      }
+    } else if (cfg.useWorktree) {
       const wt = await createWorktree(cfg.projectRoot, slugify(req.title || req.initialPrompt || id));
       cwd = wt.path;
       worktreeBranch = wt.branch;
