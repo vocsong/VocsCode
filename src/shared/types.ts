@@ -132,6 +132,18 @@ export interface UsageDay {
   durationMs: number;
   /** Completed tool calls recorded this day. */
   toolCalls: number;
+  /**
+   * Output tokens and wall time of completed turns that reported both, paired so that
+   * `speedTokens / speedMs` is a true average output speed (tokens per ms).
+   */
+  speedTokens: number;
+  speedMs: number;
+}
+
+/** Output tokens and wall time of the turns that reported both; `tokens / ms * 1000` is tok/s. */
+export interface UsageSpeed {
+  tokens: number;
+  ms: number;
 }
 
 /** Tool-call rollup per tool name. */
@@ -172,6 +184,8 @@ export interface UsageSessionRecord {
   usage: UsageTotals;
   /** Completed tool calls recorded for this session. */
   toolCalls: number;
+  /** Output speed sample for this session; absent in records written before speed was tracked. */
+  speed?: UsageSpeed;
 }
 
 /** Usage rollup for one dimension (harness, model, project). */
@@ -181,6 +195,7 @@ export interface UsageBucket {
   usage: UsageTotals;
   toolCalls: number;
   sessions: number;
+  speed: UsageSpeed;
 }
 
 export interface AnalyticsDayPoint {
@@ -191,6 +206,8 @@ export interface AnalyticsDayPoint {
 export interface AnalyticsSummary {
   /** All-time totals across every recorded session, including deleted ones. */
   totals: UsageTotals;
+  /** All-time output speed sample (completed turns that reported tokens and duration). */
+  speed: UsageSpeed;
   /** UTC days, ascending, filtered to the requested range. */
   days: AnalyticsDayPoint[];
   byHarness: UsageBucket[];
