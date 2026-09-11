@@ -100,6 +100,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   private queue: UserInput[] = [];
   private totals: UsageTotals;
   private turnStartedAt = 0;
+  /** Totals when the current turn started; the turn item reports the delta. */
+  private turnBase: UsageTotals | null = null;
   private models: ModelInfo[] = [];
 
   constructor(private readonly ctx: HarnessContext) {
@@ -196,6 +198,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.turnId = n.turn.id;
       this._busy = true;
       this.turnStartedAt = this.turnStartedAt || Date.now();
+      this.turnBase ??= { ...this.totals };
       this.ctx.emit({ type: 'status', status: 'running' });
     });
     rpc.onNotification('item/started', (p) => this.upsertItem((p as { item: ThreadItem }).item, false));
@@ -263,11 +266,23 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const status = n.turn.status === 'failed' ? 'failed' : n.turn.status === 'interrupted' ? 'interrupted' : 'completed';
       this.totals.turns += 1;
       this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
+      const base = this.turnBase;
+      const usage: Partial<UsageTotals> | undefined = base
+        ? {
+            inputTokens: Math.max(0, this.totals.inputTokens - base.inputTokens),
+            outputTokens: Math.max(0, this.totals.outputTokens - base.outputTokens),
+            cacheReadTokens: Math.max(0, this.totals.cacheReadTokens - base.cacheReadTokens),
+            cacheWriteTokens: Math.max(0, this.totals.cacheWriteTokens - base.cacheWriteTokens),
+            reasoningTokens: Math.max(0, this.totals.reasoningTokens - base.reasoningTokens)
+          }
+        : undefined;
+      const turnCost = base ? Math.max(0, this.totals.costUsd - base.costUsd) : undefined;
       this.ctx.emit({
         type: 'item.upsert',
-        item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: n.turn.durationMs ?? Date.now() - this.turnStartedAt, error: n.turn.error?.message }
+        item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: n.turn.durationMs ?? Date.now() - this.turnStartedAt, usage, costUsd: turnCost, error: n.turn.error?.message }
       });
       this.turnStartedAt = 0;
+      this.turnBase = null;
       this.ctx.emit({ type: 'status', status: 'idle' });
       const next = this.queue.shift();
       this.ctx.updateMeta({ queued: this.queue.length });
@@ -564,6 +579,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     };
     this._busy = true;
     this.turnStartedAt = Date.now();
+    this.turnBase = { ...this.totals };
     this.ctx.emit({ type: 'status', status: 'running' });
     try {
       const res = await withTimeout(this.rpc.request<{ turn: { id: string } }>('turn/start', params), 300_000, 'turn/start');

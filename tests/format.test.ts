@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { basename, fmtCost, fmtTokens } from '../src/renderer/src/format';
+import { basename, fmtCost, fmtRate, fmtTokens, speedOfTurns } from '../src/renderer/src/format';
 import { quoteWin } from '../src/main/harness/spawn';
 
 describe('renderer format helpers', () => {
@@ -26,5 +26,26 @@ describe('quoteWin', () => {
     expect(quoteWin('say "hi"')).toBe('"say \\"hi\\""');
     expect(quoteWin('trail\\ ')).toBe('"trail\\ "');
     expect(quoteWin('C:\\dir with space\\')).toBe('"C:\\dir with space\\\\"');
+  });
+});
+
+describe('fmtRate / speedOfTurns', () => {
+  it('formats tokens per second and hides incomplete samples', () => {
+    expect(fmtRate(100, 2_000)).toBe('50.0 tok/s');
+    expect(fmtRate(1_500, 10_000)).toBe('150 tok/s');
+    expect(fmtRate(0, 2_000)).toBe('');
+    expect(fmtRate(100, 0)).toBe('');
+    expect(fmtRate(undefined, undefined)).toBe('');
+  });
+
+  it('sums only completed turns that report both output tokens and duration', () => {
+    const turns = [
+      { status: 'completed', durationMs: 2_000, usage: { outputTokens: 100 } },
+      { status: 'completed', durationMs: 3_000 },
+      { status: 'interrupted', durationMs: 1_000, usage: { outputTokens: 900 } },
+      { status: 'completed', durationMs: 2_000, usage: { outputTokens: 60 } }
+    ];
+    expect(speedOfTurns(turns)).toEqual({ tokens: 160, ms: 4_000 });
+    expect(speedOfTurns([])).toEqual({ tokens: 0, ms: 0 });
   });
 });
