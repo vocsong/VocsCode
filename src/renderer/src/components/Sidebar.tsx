@@ -23,9 +23,19 @@ export function harnessShort(id: string): string {
 }
 
 /** Icon choices for folder headers (names from the renderer icon set). */
-const FOLDER_ICONS = ['folder', 'bolt', 'brain', 'shield', 'star', 'sparkles', 'target', 'branch', 'terminal', 'chart', 'play', 'file'] as const;
+const FOLDER_ICONS = [
+  'folder', 'bolt', 'brain', 'shield', 'star', 'sparkles', 'target', 'branch', 'terminal', 'chart',
+  'play', 'file', 'code', 'bug', 'wrench', 'rocket', 'globe', 'lock', 'key', 'cpu',
+  'database', 'cloud', 'fire', 'cube', 'layers', 'box', 'flag', 'bulb', 'link', 'map',
+  'moon', 'sun', 'palette', 'puzzle', 'robot', 'server', 'tag', 'heart', 'home', 'book',
+  'mail', 'bell', 'coffee', 'music', 'camera', 'video', 'gamepad', 'leaf', 'compass', 'gift'
+] as const;
 /** Swatch palette for folder headers. */
-const FOLDER_COLORS = ['#5b9bf8', '#22d3ee', '#34d399', '#84cc16', '#fbbf24', '#fb923c', '#f87171', '#f472b6', '#a78bfa', '#94a3b8'] as const;
+const FOLDER_COLORS = [
+  '#5b9bf8', '#2563eb', '#0ea5e9', '#22d3ee', '#2dd4bf', '#34d399', '#4ade80', '#84cc16',
+  '#a3e635', '#fbbf24', '#facc15', '#fb923c', '#f97316', '#f87171', '#ef4444', '#fb7185',
+  '#f472b6', '#e879f9', '#c084fc', '#a78bfa', '#818cf8', '#94a3b8', '#64748b', '#e2e8f0'
+] as const;
 
 export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
@@ -99,7 +109,12 @@ export function Sidebar() {
                 else delete next[g.root];
                 void invoke('settings:update', { folderStyles: next });
               }} />
-              <span className="project-title" style={folderStyles[g.root]?.color ? { color: folderStyles[g.root].color } : undefined}>{basename(g.root)}</span>
+              <span
+                className={`project-title ${folderStyles[g.root]?.color ? 'colored' : ''}`}
+                style={folderStyles[g.root]?.color ? { color: folderStyles[g.root].color } : undefined}
+              >
+                {basename(g.root)}
+              </span>
               <FolderBranch root={g.root} />
               <button
                 type="button"
@@ -246,7 +261,7 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
 function FolderStyleButton({ root, style, onPick }: { root: string; style?: { color?: string; icon?: string }; onPick: (patch?: { color?: string; icon?: string }) => void }) {
   const name = basename(root);
   return (
-    <Dropdown align="left" width={216} trigger={() => (
+    <Dropdown align="left" width={240} trigger={() => (
       <button
         type="button"
         className="project-icon-btn"
