@@ -4,7 +4,7 @@ const { which, runCapture } = vi.hoisted(() => ({ which: vi.fn(), runCapture: vi
 
 vi.mock('../src/main/runtime', () => ({ which, runCapture }));
 
-import { branchGitState } from '../src/main/git';
+import { branchGitState, gitFolderBranch } from '../src/main/git';
 
 const GIT = '/usr/bin/git';
 
@@ -21,6 +21,35 @@ const TIP = 'abc123';
 
 /** The per-base merge-commit scans branchGitState makes when gh is unavailable. */
 const mergeScan = (base: string) => ['log', base, '--merges', '--format=%P', '-n', '200'];
+
+describe('gitFolderBranch', () => {
+  beforeEach(() => {
+    which.mockReset();
+    runCapture.mockReset();
+    replies.clear();
+    which.mockImplementation((cmd: string) => cmd === 'git' ? GIT : null);
+  });
+
+  it.each(['G:\\repo', '/repo', '/repo/.vocs-code/worktrees/task'])('reads HEAD in the requested folder %s', async (cwd) => {
+    gitReply(['symbolic-ref', '--quiet', '--short', 'HEAD'], { code: 0, stdout: 'develop\n' });
+    expect(await gitFolderBranch(cwd)).toEqual({ branch: 'develop' });
+    expect(runCapture).toHaveBeenCalledWith(GIT, ['symbolic-ref', '--quiet', '--short', 'HEAD'], expect.objectContaining({ cwd }));
+    // Symbolic HEAD also works before the repository has its first commit.
+    expect(runCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('identifies a detached checkout by its short commit', async () => {
+    gitReply(['symbolic-ref', '--quiet', '--short', 'HEAD'], { code: 1 });
+    gitReply(['rev-parse', '--verify', '--short', 'HEAD'], { code: 0, stdout: 'abc1234\n' });
+    expect(await gitFolderBranch('/repo')).toEqual({ branch: 'abc1234', detached: true });
+  });
+
+  it('omits the branch for non-repositories and inaccessible folders', async () => {
+    gitReply(['symbolic-ref', '--quiet', '--short', 'HEAD'], { code: 128 });
+    gitReply(['rev-parse', '--verify', '--short', 'HEAD'], { code: 128 });
+    expect(await gitFolderBranch('/missing')).toEqual({});
+  });
+});
 
 describe('branchGitState', () => {
   beforeEach(() => {
