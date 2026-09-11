@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
-import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitPrInfo, GitSummary, GitWorktreeInfo } from '../shared/types';
+import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitPrInfo, GitPullRequest, GitPullRequestList, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import { runCapture, which } from './runtime';
 import { exists } from './util/fs';
@@ -436,6 +436,50 @@ export async function gitPrMap(cwd: string): Promise<{ prs?: Record<string, GitP
     return { prs };
   } catch {
     return {};
+  }
+}
+
+const PR_LIST_FIELDS = 'number,title,state,isDraft,headRefName,baseRefName,url,author,createdAt,updatedAt,mergedAt,reviewDecision,additions,deletions';
+
+const isoMs = (v: unknown): number | undefined => {
+  if (typeof v !== 'string' || !v) return undefined;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : undefined;
+};
+
+/** Pulls the repo's pull requests from GitHub (`gh pr list`, every state, newest first) for the Git panel's PR view. */
+export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> {
+  const fetchedAt = Date.now();
+  if (!ghBin()) return { prs: [], fetchedAt, ghMissing: true };
+  const root = await gitRoot(cwd);
+  if (!root) return { prs: [], fetchedAt, error: 'Not a git repository' };
+  const r = await gh(root, ['pr', 'list', '--state', 'all', '--limit', '100', '--json', PR_LIST_FIELDS], 30_000);
+  if (r.code !== 0) return { prs: [], fetchedAt, error: (r.stderr || r.stdout).trim() || 'gh pr list failed' };
+  try {
+    const list = JSON.parse(r.stdout.trim()) as Record<string, unknown>[];
+    const prs: GitPullRequest[] = [];
+    for (const p of list) {
+      if (typeof p.number !== 'number' || typeof p.url !== 'string') continue;
+      const state = p.state === 'MERGED' || p.state === 'CLOSED' ? p.state : 'OPEN';
+      const author = p.author && typeof p.author === 'object' ? (p.author as { login?: string; name?: string }) : undefined;
+      const pr: GitPullRequest = { number: p.number, title: typeof p.title === 'string' ? p.title : '', state, url: p.url };
+      if (p.isDraft === true) pr.isDraft = true;
+      if (typeof p.headRefName === 'string') pr.headRefName = p.headRefName;
+      if (typeof p.baseRefName === 'string') pr.baseRefName = p.baseRefName;
+      if (author?.login || author?.name) pr.author = author.login || author.name;
+      const created = isoMs(p.createdAt), updated = isoMs(p.updatedAt), merged = isoMs(p.mergedAt);
+      if (created !== undefined) pr.createdAt = created;
+      if (updated !== undefined) pr.updatedAt = updated;
+      if (merged !== undefined) pr.mergedAt = merged;
+      if (typeof p.reviewDecision === 'string' && p.reviewDecision) pr.reviewDecision = p.reviewDecision;
+      if (typeof p.additions === 'number') pr.additions = p.additions;
+      if (typeof p.deletions === 'number') pr.deletions = p.deletions;
+      prs.push(pr);
+    }
+    prs.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || b.number - a.number);
+    return { prs, fetchedAt };
+  } catch {
+    return { prs: [], fetchedAt, error: 'gh pr list returned something that is not JSON' };
   }
 }
 

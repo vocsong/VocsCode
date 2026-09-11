@@ -16,7 +16,7 @@ const EMPTY: never[] = [];
 const TABS: { id: PanelTab; label: string; icon: string }[] = [
   { id: 'changes', label: 'Changes', icon: 'diff' },
   { id: 'files', label: 'Files', icon: 'folder' },
-  { id: 'branches', label: 'Branches', icon: 'branch' },
+  { id: 'branches', label: 'Git', icon: 'branch' },
   { id: 'goal', label: 'Goal', icon: 'target' },
   { id: 'usage', label: 'Usage', icon: 'chart' },
   { id: 'terminal', label: 'Terminal', icon: 'terminal' }

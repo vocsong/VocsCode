@@ -9,6 +9,7 @@ import type {
   FsEntry,
   GitBranchInfo,
   GitBranchOverview,
+  GitPullRequestList,
   GitSummary,
   GitWorktreeInfo,
   HarnessAvailability,
@@ -118,6 +119,8 @@ export interface IpcContract {
   'git:removeWorktree': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:pruneWorktrees': [{ sessionId: string }, { ok: boolean; output: string }];
   'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];
+  /** Pulls the repo's pull requests (all states) from GitHub through gh, for the Git panel's PR view. */
+  'git:pullRequests': [{ sessionId: string }, GitPullRequestList];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];
