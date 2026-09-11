@@ -79,14 +79,14 @@ describe('branchGitState', () => {
     which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : cmd === 'gh' ? '/usr/bin/gh' : null));
     gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
     runCapture.mockImplementation((cmd: string, args: string[]) => {
-      if (cmd === '/usr/bin/gh' && args[0] === 'pr') return Promise.resolve({ code: 0, stdout: '[{"state":"OPEN"}]', stderr: '' });
+      if (cmd === '/usr/bin/gh' && args[0] === 'pr') return Promise.resolve({ code: 0, stdout: '[{"state":"OPEN","headRefName":"work"}]', stderr: '' });
       if (cmd === GIT && JSON.stringify(args) === JSON.stringify(['rev-parse', '--show-toplevel'])) return Promise.resolve({ code: 0, stdout: 'C:/repo', stderr: '' });
       return Promise.resolve({ code: 1, stdout: '', stderr: 'unexpected call' });
     });
     expect(await branchGitState('/repo', 'work')).toEqual({ pr: true, merged: false });
 
     runCapture.mockImplementation((cmd: string, args: string[]) => {
-      if (cmd === '/usr/bin/gh' && args[0] === 'pr') return Promise.resolve({ code: 0, stdout: '[{"state":"MERGED"}]', stderr: '' });
+      if (cmd === '/usr/bin/gh' && args[0] === 'pr') return Promise.resolve({ code: 0, stdout: '[{"state":"MERGED","headRefName":"work"}]', stderr: '' });
       if (cmd === GIT && JSON.stringify(args) === JSON.stringify(['rev-parse', '--show-toplevel'])) return Promise.resolve({ code: 0, stdout: 'C:/repo', stderr: '' });
       return Promise.resolve({ code: 1, stdout: '', stderr: 'unexpected call' });
     });
@@ -97,10 +97,68 @@ describe('branchGitState', () => {
     which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : cmd === 'gh' ? '/usr/bin/gh' : null));
     gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
     runCapture.mockImplementation((cmd: string, args: string[]) => {
-      if (cmd === '/usr/bin/gh' && args[0] === 'pr') return Promise.resolve({ code: 0, stdout: '[{"state":"MERGED"},{"state":"CLOSED"}]', stderr: '' });
+      if (cmd === '/usr/bin/gh' && args[0] === 'pr') return Promise.resolve({ code: 0, stdout: '[{"state":"MERGED","headRefName":"work"},{"state":"CLOSED","headRefName":"work"}]', stderr: '' });
       if (cmd === GIT && JSON.stringify(args) === JSON.stringify(['rev-parse', '--show-toplevel'])) return Promise.resolve({ code: 0, stdout: 'C:/repo', stderr: '' });
       return Promise.resolve({ code: 1, stdout: '', stderr: 'unexpected call' });
     });
     expect(await branchGitState('/repo', 'work')).toEqual({ pr: false, merged: true });
+  });
+
+  /** gh + repo replies for the agent-branch fallback: the PR's head is not the session branch. */
+  const agentPrReply = (prs: object[]) =>
+    runCapture.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === '/usr/bin/gh' && args[0] === 'pr') return Promise.resolve({ code: 0, stdout: JSON.stringify(prs), stderr: '' });
+      return Promise.resolve(replies.get(`${cmd} ${JSON.stringify(args)}`) ?? { code: 1, stdout: '', stderr: 'unexpected call' });
+    });
+
+  it('attributes a PR on the agent-owned branch to the session when unambiguous', async () => {
+    which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : cmd === 'gh' ? '/usr/bin/gh' : null));
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    gitReply(['for-each-ref', 'refs/heads', '--format=%(refname:short)'], { code: 0, stdout: 'work\nagent/feature\n' });
+    const NOW = 1_000_000_000_000;
+    gitReply(['show', '-s', '--format=%ct', 'agent/feature'], { code: 0, stdout: `${Math.floor(NOW / 1000)}\n` });
+    agentPrReply([{ number: 7, state: 'OPEN', headRefName: 'agent/feature' }]);
+    expect(
+      await branchGitState('/repo', 'work', { createdAfter: NOW - 60_000 * 60, updatedBefore: NOW + 60_000 })
+    ).toEqual({ pr: true, merged: false });
+  });
+
+  it('ignores fallback PRs committed after the session went idle', async () => {
+    which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : cmd === 'gh' ? '/usr/bin/gh' : null));
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    gitReply(['for-each-ref', 'refs/heads', '--format=%(refname:short)'], { code: 0, stdout: 'work\nagent/feature\n' });
+    const NOW = 1_000_000_000_000;
+    gitReply(['show', '-s', '--format=%ct', 'agent/feature'], { code: 0, stdout: `${Math.floor(NOW / 1000) + 3600}\n` });
+    agentPrReply([{ number: 7, state: 'OPEN', headRefName: 'agent/feature' }]);
+    expect(
+      await branchGitState('/repo', 'work', { createdAfter: NOW - 60_000 * 60, updatedBefore: NOW })
+    ).toEqual({ pr: false, merged: false });
+  });
+
+  it('does not flip the label when the fallback is ambiguous', async () => {
+    which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : cmd === 'gh' ? '/usr/bin/gh' : null));
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    gitReply(['for-each-ref', 'refs/heads', '--format=%(refname:short)'], { code: 0, stdout: 'work\nagent/a\nagent/b\n' });
+    const NOW = 1_000_000_000_000;
+    for (const b of ['agent/a', 'agent/b']) gitReply(['show', '-s', '--format=%ct', b], { code: 0, stdout: `${Math.floor(NOW / 1000)}\n` });
+    agentPrReply([
+      { number: 7, state: 'OPEN', headRefName: 'agent/a' },
+      { number: 8, state: 'OPEN', headRefName: 'agent/b' }
+    ]);
+    expect(
+      await branchGitState('/repo', 'work', { createdAfter: NOW - 60_000 * 60, updatedBefore: NOW + 60_000 })
+    ).toEqual({ pr: false, merged: false });
+  });
+
+  it('never attributes a branch owned by another session to this one', async () => {
+    which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : cmd === 'gh' ? '/usr/bin/gh' : null));
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    gitReply(['for-each-ref', 'refs/heads', '--format=%(refname:short)'], { code: 0, stdout: 'work\nother/session\n' });
+    const NOW = 1_000_000_000_000;
+    gitReply(['show', '-s', '--format=%ct', 'other/session'], { code: 0, stdout: `${Math.floor(NOW / 1000)}\n` });
+    agentPrReply([{ number: 7, state: 'OPEN', headRefName: 'other/session' }]);
+    expect(
+      await branchGitState('/repo', 'work', { excludeBranches: ['other/session'], createdAfter: NOW - 60_000 * 60, updatedBefore: NOW + 60_000 })
+    ).toEqual({ pr: false, merged: false });
   });
 });

@@ -77,34 +77,163 @@ export interface BranchGitState {
 
 const BASE_BRANCHES = ['develop', 'master', 'main'];
 
+/** A PR as reported by `gh pr list`, scoped to what session PR/merge resolution needs. */
+export interface PrInfo {
+  number: number;
+  state: string;
+  headRefName?: string;
+  baseRefName?: string;
+  url?: string;
+  title?: string;
+}
+
+/** A PR reference extracted from a session transcript: the number plus the repo slug in the URL, when it is a GitHub link. */
+export interface PrRef {
+  repo?: string;
+  number: number;
+}
+
+/** How a session's PR is resolved, shared by the sidebar label check and /merge. */
+export interface SessionPrQuery {
+  /** PRs the session itself referenced (the agent's report links them) — strongest signal. */
+  prRefs?: PrRef[];
+  /** Branches directly tied to the session: its worktree branch plus the checked-out HEAD. */
+  branches?: string[];
+  /** Worktree branches owned by other sessions; the repo-wide fallback never matches them. */
+  excludeBranches?: string[];
+  /** Git roots of other repos this app knows, used to resolve transcript PRs from a foreign repo. */
+  extraRoots?: string[];
+  /** Fallback PRs must have their head branch tip committed within the session's activity window. */
+  createdAfter?: number;
+  updatedBefore?: number;
+}
+
+const PR_FIELDS = 'number,state,headRefName,baseRefName,url,title';
+
+async function listPrs(opts: { cwd: string; repo?: string }): Promise<PrInfo[]> {
+  const gh = which('gh');
+  if (!gh) return [];
+  const args = ['pr', 'list', '--state', 'all', '--limit', '50', '--json', PR_FIELDS];
+  if (opts.repo) args.push('-R', opts.repo);
+  const r = await runCapture(gh, args, {
+    cwd: opts.cwd,
+    timeoutMs: 15_000,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+  });
+  if (r.code !== 0) return [];
+  try {
+    return JSON.parse(r.stdout) as PrInfo[];
+  } catch {
+    return [];
+  }
+}
+
+async function localBranches(root: string): Promise<Set<string>> {
+  const r = await git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)']);
+  return new Set(r.stdout.split('\n').map((s) => s.trim()).filter(Boolean));
+}
+
+/** Committer time (ms) of a branch tip, or undefined when the branch is unknown. */
+async function branchTipTime(root: string, branch: string): Promise<number | undefined> {
+  const r = await git(root, ['show', '-s', '--format=%ct', branch]);
+  const ts = r.code === 0 ? Number(r.stdout.trim()) * 1000 : NaN;
+  return Number.isFinite(ts) ? ts : undefined;
+}
+
+/** owner/repo slug from the origin remote URL, for matching PR URLs in transcripts to this repo. */
+export async function repoSlug(root: string): Promise<string | undefined> {
+  const r = await git(root, ['remote', 'get-url', 'origin']);
+  if (r.code !== 0) return undefined;
+  const m = r.stdout.trim().match(/github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/);
+  return m ? `${m[1]}/${m[2]}` : undefined;
+}
+
+/**
+ * Resolves the PRs belonging to a session, in order of strength:
+ * - `refs`: PRs the session itself named (the agent's report links them) — trusted outright.
+ *   A ref is resolved against the session's repo when its URL slug matches; a foreign or
+ *   stale slug (renamed repo) is resolved via `gh -R <slug>` or by number against other
+ *   known repos, so a session whose agent worked in a different repo still resolves.
+ * - `direct`: PRs whose head branch is the session's branch or worktree HEAD.
+ * - `fallback`: repo-wide matches — head is a local, non-base branch not owned by another
+ *   session, tip committed within the session's activity window. Callers must refuse to
+ *   act when the fallback alone is ambiguous.
+ */
+export async function findSessionPrs(root: string, q: SessionPrQuery = {}): Promise<{ refs: PrInfo[]; direct: PrInfo[]; fallback: PrInfo[] }> {
+  const localSlug = await repoSlug(root);
+  const prRefs = q.prRefs ?? [];
+  const prs = await listPrs({ cwd: root });
+  const refs: PrInfo[] = [];
+  for (const r of prRefs) {
+    // A ref aimed at this repo resolves from the local list; same numbers in other repos
+    // are never matched, so a foreign mention cannot steal a local PR (or vice versa).
+    if (r.repo && r.repo !== localSlug) continue;
+    const pr = prs.find((p) => p.number === r.number);
+    if (pr && !refs.includes(pr)) refs.push(pr);
+  }
+  // Foreign-slug refs: try the URL's slug (may be stale after a rename), then by number
+  // against the other repos the app knows about.
+  const localNumbers = new Set(prs.map((p) => p.number));
+  for (const r of prRefs) {
+    if (!r.repo || r.repo === localSlug || localNumbers.has(r.number)) continue;
+    let found = (await listPrs({ cwd: root, repo: r.repo })).find((p) => p.number === r.number);
+    if (!found) {
+      for (const extra of q.extraRoots ?? []) {
+        found = (await listPrs({ cwd: extra })).find((p) => p.number === r.number);
+        if (found) break;
+      }
+    }
+    if (found && !refs.some((p) => p.number === found!.number)) refs.push(found);
+  }
+  const known = new Set(q.branches?.filter(Boolean).filter((b) => !BASE_BRANCHES.includes(b)) ?? []);
+  const direct = prs.filter((p) => p.headRefName !== undefined && known.has(p.headRefName));
+  if (!prs.length) return { refs, direct, fallback: [] };
+  const exclude = new Set([...(q.excludeBranches ?? []), ...BASE_BRANCHES]);
+  const branches = await localBranches(root);
+  const fallback: PrInfo[] = [];
+  for (const p of prs) {
+    if (!p.headRefName || known.has(p.headRefName) || exclude.has(p.headRefName) || !branches.has(p.headRefName)) continue;
+    if (q.createdAfter !== undefined || q.updatedBefore !== undefined) {
+      const ts = await branchTipTime(root, p.headRefName);
+      if (ts === undefined) continue;
+      // Slack absorbs clock/debounce jitter; a tip outside the window belongs to another session.
+      if (q.createdAfter !== undefined && ts < q.createdAfter - 60_000) continue;
+      if (q.updatedBefore !== undefined && ts > q.updatedBefore + 60_000) continue;
+    }
+    fallback.push(p);
+  }
+  return { refs, direct, fallback };
+}
+
 /**
  * Classifies a session branch: open PR ('pr') or already merged into a base branch
  * ('merged'). Uses `gh` when available (also catches squash merges); otherwise falls
  * back to merge-commit ancestry, and to remote tracking (a fully pushed branch means
  * the PR was opened in this workflow).
  */
-export async function branchGitState(cwd: string, branch: string): Promise<BranchGitState> {
+export async function branchGitState(cwd: string, branch: string, q: SessionPrQuery = {}): Promise<BranchGitState> {
   const root = await gitRoot(cwd);
   if (!root) return { pr: false, merged: false };
   const state: BranchGitState = { pr: false, merged: false };
-  const gh = which('gh');
-  if (gh) {
-    const r = await runCapture(gh, ['pr', 'list', '--head', branch, '--state', 'all', '--limit', '10', '--json', 'state'], {
-      cwd: root,
-      timeoutMs: 15_000,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
-    });
-    if (r.code === 0) {
-      try {
-        const prs = JSON.parse(r.stdout) as { state: string }[];
-        if (prs.some((p) => p.state === 'MERGED')) return { pr: false, merged: true };
-        if (prs.some((p) => p.state === 'OPEN')) state.pr = true;
-      } catch {
-        /* ignore */
-      }
+  if (which('gh')) {
+    // The agent may have checked its own branch out inside the worktree, so the
+    // worktree's current HEAD joins the stored branch as a direct match.
+    const head = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+    const { refs, direct, fallback } = await findSessionPrs(root, { ...q, branches: [branch, head, ...(q.branches ?? [])] });
+    // PRs the session itself referenced win; a mention with no open PR falls through.
+    if (refs.length) {
+      if (refs.some((p) => p.state === 'OPEN')) return { pr: true, merged: false };
+      if (refs.every((p) => p.state === 'MERGED')) return { pr: false, merged: true };
+    }
+    if (direct.some((p) => p.state === 'MERGED')) return { pr: false, merged: true };
+    if (direct.some((p) => p.state === 'OPEN')) return { pr: true, merged: false };
+    // The repo-wide fallback only flips the label when it is unambiguous.
+    const all = [...direct, ...fallback];
+    if (all.length === 1) {
+      if (all[0].state === 'MERGED') return { pr: false, merged: true };
+      if (all[0].state === 'OPEN') return { pr: true, merged: false };
     }
   }
-  if (state.pr) return state;
   // A merge commit on a base branch whose second parent is the branch tip means the
   // branch really landed; a fresh branch sitting at the base tip must not count.
   // Squash merges need gh above.
@@ -114,11 +243,11 @@ export async function branchGitState(cwd: string, branch: string): Promise<Branc
     for (const base of BASE_BRANCHES) {
       const r = await git(root, ['log', base, '--merges', '--format=%P', '-n', '200']);
       if (r.code === 0 && r.stdout.split('\n').some((line) => line.trim().split(/\s+/)[1] === tipHash)) {
-        return { pr: state.pr, merged: true };
+        return { pr: false, merged: true };
       }
     }
   }
-  if (!gh) {
+  if (!which('gh')) {
     // Without gh, a fully pushed branch stands in for "PR created".
     const remote = await git(root, ['rev-parse', '--verify', '--quiet', `origin/${branch}`]);
     if (remote.code === 0) {
@@ -229,11 +358,8 @@ export async function gitCreatePr(cwd: string, base: string, head?: string): Pro
   return { ok: true, url: prUrlIn(out), output: out };
 }
 
-/** Merges the open PR whose head is `branch` (default: the current branch); `base`, when given, is checked against the PR's target. */
-export async function gitMergePr(cwd: string, base?: string, head?: string): Promise<PrResult> {
-  if (!(await gitRoot(cwd))) return { ok: false, output: 'Not a git repository' };
-  if (!ghBin()) return noGh();
-  const branch = head?.trim() || (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+/** Merges the open PR whose head is `branch` (explicit, e.g. from the Branches panel); `base`, when given, is checked against the PR's target. */
+async function gitMergeBranchPr(cwd: string, branch: string, base?: string): Promise<PrResult> {
   const view = await gh(cwd, ['pr', 'view', branch, '--json', 'state,url,baseRefName'], 30_000);
   if (view.code !== 0) return { ok: false, output: (view.stdout + view.stderr).trim() || `No open PR for ${branch}` };
   let pr: { state?: string; url?: string; baseRefName?: string };
@@ -250,6 +376,45 @@ export async function gitMergePr(cwd: string, base?: string, head?: string): Pro
   const merge = await gh(cwd, ['pr', 'merge', branch, '--merge']);
   if (merge.code !== 0) return { ok: false, output: (merge.stderr || merge.stdout).trim() || 'gh pr merge failed' };
   return { ok: true, url: pr.url, output: (merge.stdout + merge.stderr).trim() || `Merged into ${pr.baseRefName ?? base ?? 'base'}` };
+}
+
+/** Merges the open PR for the session; an explicit `head` branch pins the PR, otherwise the session's own is resolved. */
+export async function gitMergePr(cwd: string, base?: string, head?: string, q: SessionPrQuery = {}): Promise<PrResult> {
+  const root = await gitRoot(cwd);
+  if (!root) return { ok: false, output: 'Not a git repository' };
+  if (!ghBin()) return noGh();
+  if (head?.trim()) return gitMergeBranchPr(cwd, head.trim(), base);
+  const branch = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+  if (!branch || branch === 'HEAD') return { ok: false, output: 'Detached HEAD — check out a branch first.' };
+  const { refs, direct, fallback } = await findSessionPrs(root, { ...q, branches: [branch, ...(q.branches ?? [])] });
+  // One PR can be reachable through several signals; count each PR once, strongest tier first.
+  const byNumber = new Map<number, PrInfo>();
+  for (const p of [...refs, ...direct, ...fallback]) if (!byNumber.has(p.number)) byNumber.set(p.number, p);
+  const all = [...byNumber.values()];
+  const open = all.filter((p) => p.state === 'OPEN');
+  if (open.length > 1) {
+    const list = open.map((p) => `#${p.number} (${p.headRefName ?? 'unknown head'})`).join(', ');
+    return { ok: false, output: `Several open PRs could belong to this session: ${list}. Merge one explicitly from the Branches panel.` };
+  }
+  if (open.length === 1) {
+    const pr = open[0];
+    if (base && pr.baseRefName && pr.baseRefName !== base) {
+      return { ok: false, output: `That PR targets ${pr.baseRefName}, not ${base}: ${pr.url ?? ''}`.trim() };
+    }
+    // Foreign PRs merge by URL, so the repo does not need to be the session's.
+    const merge = await gh(cwd, ['pr', 'merge', pr.url ?? String(pr.number), '--merge']);
+    if (merge.code !== 0) return { ok: false, output: (merge.stderr || merge.stdout).trim() || 'gh pr merge failed' };
+    const headNote = pr.headRefName ? ` (head ${pr.headRefName})` : '';
+    return { ok: true, url: pr.url, output: (merge.stdout + merge.stderr).trim() || `Merged PR #${pr.number}${headNote} into ${pr.baseRefName ?? base ?? 'base'}` };
+  }
+  const merged = all.find((p) => p.state === 'MERGED');
+  if (merged) return { ok: true, url: merged.url, output: `PR is MERGED (already merged): ${merged.url ?? ''}`.trim() };
+  const closed = all.find((p) => p.state === 'CLOSED');
+  if (closed) return { ok: false, output: closed.url ? `PR is CLOSED: ${closed.url}` : `No open PR for ${branch}` };
+  return {
+    ok: false,
+    output: `No pull requests found for branch "${branch}". If the agent pushed its own branch, ask it to merge, or use the Branches panel.`
+  };
 }
 
 /** Maps each local branch to its most relevant PR (an open one wins over an older merged/closed). */
