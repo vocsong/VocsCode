@@ -198,6 +198,22 @@ export interface UsageBucket {
   speed: UsageSpeed;
 }
 
+/** Effective per-model pricing rates, blended from measured usage. */
+export interface ModelRateRow {
+  key: string;
+  label: string;
+  /** Effective blended cost per 1,000 tokens (input + output + cache), or undefined when no tokens were measured. */
+  usdPerKToken?: number;
+  /** Effective cost per model call (one turn), or undefined when no turns were measured. */
+  usdPerCall?: number;
+  /** All-time spend attributed to the model. */
+  costUsd: number;
+  /** All-time tokens (input + output + cache) attributed to the model. */
+  tokens: number;
+  /** All-time model calls (turns) attributed to the model. */
+  calls: number;
+}
+
 export interface AnalyticsDayPoint {
   date: string;
   usage: UsageDay;
@@ -213,6 +229,8 @@ export interface AnalyticsSummary {
   byHarness: UsageBucket[];
   byModel: UsageBucket[];
   byProject: UsageBucket[];
+  /** Effective $/1k tokens and $/call per model, sorted by spend. */
+  modelRates: ModelRateRow[];
   /** All-time tool-call totals and per-tool/per-file breakdowns, sorted by volume. */
   toolTotals: ToolUsage;
   tools: ToolUsageRow[];
