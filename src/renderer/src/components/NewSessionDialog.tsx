@@ -2,9 +2,9 @@
 import React, { useEffect, useState } from 'react';
 import type { EffortLevel, HarnessId, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
-import { invoke } from '../api';
+import { invoke, modKey } from '../api';
 import { useStore } from '../store';
-import { Badge, Button, Field, Icon, Modal, Spinner, Toggle } from './ui';
+import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
 
 export function NewSessionDialog() {
@@ -100,6 +100,13 @@ export function NewSessionDialog() {
     }
   };
 
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !creating && projectRoot) {
+      e.preventDefault();
+      void create();
+    }
+  };
+
   return (
     <Modal
       title={
@@ -116,8 +123,8 @@ export function NewSessionDialog() {
           <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={create} disabled={creating || !projectRoot}>
-            {creating ? <Spinner /> : <Icon name="play" />} Start session
+          <Button variant="primary" onClick={create} disabled={creating || !projectRoot} title={`Start from the prompt area with ${modKey}+Enter`}>
+            {creating ? <Spinner /> : <Icon name="play" />} Start session <Kbd>{modKey}+↵</Kbd>
           </Button>
         </>
       }
@@ -206,7 +213,7 @@ export function NewSessionDialog() {
           <Toggle checked={useWorktree} onChange={setUseWorktree} label={<span>Isolate in a git worktree <span className="muted">(new branch under .vocs-code/worktrees)</span></span>} />
 
           <Field label="First prompt (optional)">
-            <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="What should the agent do?" />
+            <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} placeholder="What should the agent do?" />
           </Field>
           <Field label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>} hint="A persistent objective. The session keeps continuing until the agent proves it is done or the iteration guard trips.">
             <textarea rows={2} value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="e.g. Make the test suite pass and open a PR" />
