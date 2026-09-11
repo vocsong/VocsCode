@@ -481,6 +481,13 @@ h4 {
   padding: 0 5px;
   background: var(--bg-elev);
 }
+.btn .kbd {
+  font-size: 9.5px;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  border-color: color-mix(in srgb, currentColor 35%, transparent);
+  border-bottom-width: 2px;
+}
 .chip {
   border: 1px solid var(--border);
   background: var(--bg-elev);
