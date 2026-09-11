@@ -2342,6 +2342,40 @@ body.resizing {
   padding: 6px 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
+.pr-cols,
+.pr-row {
+  grid-template-columns: minmax(0, 1fr) 96px 84px 110px 56px;
+}
+.pr-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+.pr-title .pr-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.pr-title .pr-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-title .pr-refs {
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-pulled {
+  color: var(--fg-muted);
+  font-size: 11px;
+  margin-left: 4px;
+}
 .branch-row:hover {
   background: var(--bg-hover);
 }

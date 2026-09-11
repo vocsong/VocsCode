@@ -588,6 +588,35 @@ export interface GitPrInfo {
   title?: string;
 }
 
+/** One pull request of the session's GitHub repo, as `gh pr list` reports it (PR view of the Git panel). */
+export interface GitPullRequest {
+  number: number;
+  title: string;
+  state: 'OPEN' | 'MERGED' | 'CLOSED';
+  isDraft?: boolean;
+  headRefName?: string;
+  baseRefName?: string;
+  url: string;
+  author?: string;
+  /** ms since epoch */
+  createdAt?: number;
+  updatedAt?: number;
+  mergedAt?: number;
+  /** GitHub's review decision: APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED or empty. */
+  reviewDecision?: string;
+  additions?: number;
+  deletions?: number;
+}
+
+/** The PR list pulled from GitHub; `error` carries gh's own words when the pull failed (not logged in, no remote…). */
+export interface GitPullRequestList {
+  prs: GitPullRequest[];
+  /** When the list was pulled (ms since epoch). */
+  fetchedAt: number;
+  ghMissing?: boolean;
+  error?: string;
+}
+
 export interface GitBranchOverview {
   isRepo: boolean;
   base?: string;
