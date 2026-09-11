@@ -1,12 +1,25 @@
-import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
 import { fmtCost, fmtDuration, fmtTokens } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
 import { DiffView } from './DiffView';
+import { ImageLightbox, type LightboxImage } from './ImageLightbox';
 import { TranscriptFind } from './TranscriptFind';
 import { Badge, Button, Icon, Spinner } from './ui';
+
+interface ImageLightboxState {
+  images: LightboxImage[];
+  index: number;
+}
+
+export type OnImageExpand = (images: LightboxImage[], index: number) => void;
+
+/** Data-URL rendering for a transcript image attachment. */
+export function imageSrc(im: { mimeType: string; data: string }): string {
+  return `data:${im.mimeType};base64,${im.data}`;
+}
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
 const EMPTY: never[] = [];
@@ -18,6 +31,10 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const ref = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
+  const [lightbox, setLightbox] = useState<ImageLightboxState | null>(null);
+  const onImageExpand = useCallback((images: LightboxImage[], index: number) => {
+    setLightbox({ images, index });
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -60,7 +77,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
           </div>
         )}
         {items.map((item) => (
-          <Item key={item.id} item={item} sessionId={session.id} showThinking={showThinking} />
+          <Item key={item.id} item={item} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} />
         ))}
         {(session.status === 'running' || session.status === 'starting') && (
           <div className="working">
@@ -68,6 +85,13 @@ export function Transcript({ session }: { session: SessionMeta }) {
           </div>
         )}
       </div>
+      {lightbox && (
+        <ImageLightbox
+          images={lightbox.images}
+          index={lightbox.index}
+          onClose={() => setLightbox(null)}
+        />
+      )}
       <TranscriptFind open={findOpen} onClose={() => setFindOpen(false)} container={ref} revision={items} />
       {!stick && (
         <button type="button" className="jump-bottom" onClick={() => { setStick(true); if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }}>
@@ -78,10 +102,10 @@ export function Transcript({ session }: { session: SessionMeta }) {
   );
 }
 
-const Item = memo(function Item({ item, sessionId, showThinking }: { item: TranscriptItem; sessionId: string; showThinking: boolean }) {
+const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand }: { item: TranscriptItem; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
   switch (item.kind) {
     case 'user':
-      return <UserMessage item={item} />;
+      return <UserMessage item={item} onImageExpand={onImageExpand} />;
     case 'assistant':
       return <AssistantMessage item={item} showThinking={showThinking} />;
     case 'tool':
@@ -121,17 +145,30 @@ const Item = memo(function Item({ item, sessionId, showThinking }: { item: Trans
   }
 });
 
-function UserMessage({ item }: { item: Extract<TranscriptItem, { kind: 'user' }> }) {
+export function UserMessage({ item, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; onImageExpand?: OnImageExpand }) {
+  const images = item.images ?? [];
   return (
     <div className="msg msg-user">
       <div className="msg-bubble">
         {item.queuedAs && item.queuedAs !== 'now' && <Badge tone="blue">{item.queuedAs}</Badge>}
         <div className="msg-text">{item.text}</div>
-        {item.images?.length ? (
+        {images.length ? (
           <div className="msg-images">
-            {item.images.map((im, i) => (
-              <img key={i} src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'attachment'} />
-            ))}
+            {images.map((im, i) =>
+              onImageExpand ? (
+                <button
+                  key={i}
+                  type="button"
+                  className="msg-image-btn"
+                  aria-label={`Preview ${im.name ?? 'image'}`}
+                  onClick={() => onImageExpand(images.map((att) => ({ src: imageSrc(att), name: att.name })), i)}
+                >
+                  <img src={imageSrc(im)} alt={im.name ?? 'attachment'} draggable={false} />
+                </button>
+              ) : (
+                <img key={i} src={imageSrc(im)} alt={im.name ?? 'attachment'} />
+              )
+            )}
           </div>
         ) : null}
       </div>
