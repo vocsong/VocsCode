@@ -35,6 +35,7 @@ export class CodexExecAdapter implements HarnessAdapter {
   private model: string | undefined;
   private effort: EffortLevel | undefined;
   private items = new Map<string, TranscriptItem>();
+  private turnStartedAt = 0;
   private totals: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
 
   constructor(private readonly ctx: HarnessContext) {}
@@ -91,6 +92,7 @@ export class CodexExecAdapter implements HarnessAdapter {
     this._busy = true;
     this.abort = new AbortController();
     const startedAt = Date.now();
+    this.turnStartedAt = startedAt;
     this.ctx.emit({ type: 'status', status: 'running' });
     void (async () => {
       try {
@@ -144,11 +146,21 @@ export class CodexExecAdapter implements HarnessAdapter {
         this.totals.reasoningTokens += u.reasoning_output_tokens;
         this.totals.turns += 1;
         this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
-        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'completed', usage: { inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheReadTokens: u.cached_input_tokens, reasoningTokens: u.reasoning_output_tokens } } });
+        this.ctx.emit({
+          type: 'item.upsert',
+          item: {
+            id: shortId('turn_'),
+            kind: 'turn',
+            ts: Date.now(),
+            status: 'completed',
+            durationMs: Date.now() - this.turnStartedAt,
+            usage: { inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheReadTokens: u.cached_input_tokens, cacheWriteTokens: u.cache_write_input_tokens, reasoningTokens: u.reasoning_output_tokens }
+          }
+        });
         return;
       }
       case 'turn.failed':
-        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'failed', error: ev.error.message } });
+        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'failed', durationMs: Date.now() - this.turnStartedAt, error: ev.error.message } });
         return;
       case 'error':
         this.ctx.emit({ type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'error', text: ev.message } });

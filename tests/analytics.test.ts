@@ -4,7 +4,7 @@ import path from 'node:path';
 import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
-import { addDay, AnalyticsStore, dayKey, emptyDay, summarize, toolCallFromItem, usageDelta } from '../src/main/analytics';
+import { addDay, AnalyticsStore, dayKey, emptyDay, summarize, tokensPerSecond, toolCallFromItem, turnSpeed, usageDelta } from '../src/main/analytics';
 import { emptyUsage } from '../src/main/models/static-models';
 import type { SessionMeta, TranscriptItem, UsageSessionRecord, UsageTotals } from '../src/shared/types';
 
@@ -42,6 +42,10 @@ function meta(id: string, harness: SessionMeta['config']['harness'], usageTotals
 }
 
 const log = () => undefined;
+
+function turn(overrides: Partial<Extract<TranscriptItem, { kind: 'turn' }>> = {}): Extract<TranscriptItem, { kind: 'turn' }> {
+  return { id: 'turn_1', kind: 'turn', ts: 1, status: 'completed', ...overrides };
+}
 
 describe('usageDelta', () => {
   it('computes per-field deltas', () => {
@@ -142,7 +146,7 @@ describe('AnalyticsStore', () => {
     await store.load([m]);
     store.recordUsage(m, usage({ inputTokens: 100, outputTokens: 50, costUsd: 1, turns: 2 }), t0);
     store.recordUsage(m, usage({ inputTokens: 150, outputTokens: 80, costUsd: 1.5, turns: 3 }), t0);
-    store.recordTurn(m, 4_000, t0);
+    store.recordTurn(m, turn({ durationMs: 4_000 }), t0);
     await store.flush();
 
     const fresh = new AnalyticsStore(dir, { log });
@@ -204,6 +208,66 @@ describe('AnalyticsStore', () => {
     const s = store.summary(0);
     expect(s.sessions[0].title).toBe('Renamed');
     expect(s.byModel[0]?.key).toBe('anthropic/opus');
+  });
+});
+
+describe('output speed', () => {
+  it('samples only completed turns that report both output tokens and wall time', () => {
+    expect(turnSpeed(turn({ durationMs: 2_000, usage: { outputTokens: 100 } }))).toEqual({ tokens: 100, ms: 2_000 });
+    expect(turnSpeed(turn({ durationMs: 2_000 }))).toBeNull();
+    expect(turnSpeed(turn({ usage: { outputTokens: 100 } }))).toBeNull();
+    expect(turnSpeed(turn({ status: 'interrupted', durationMs: 2_000, usage: { outputTokens: 100 } }))).toBeNull();
+    expect(tokensPerSecond({ tokens: 100, ms: 2_000 })).toBeCloseTo(50);
+    expect(tokensPerSecond({ tokens: 0, ms: 0 })).toBeNull();
+    expect(tokensPerSecond(undefined)).toBeNull();
+  });
+
+  it('accumulates paired samples per day and per session and rolls them up', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    const store = new AnalyticsStore(dir, { log });
+    const a = meta('a', 'claude', usage({}), { updatedAt: t0, activeModel: { provider: 'anthropic', model: 'opus' } });
+    const b = meta('b', 'acp', usage({}), { updatedAt: t0 });
+    await store.load([a, b]);
+    store.recordTurn(a, turn({ id: 't1', durationMs: 2_000, usage: { outputTokens: 100 } }), t0);
+    store.recordTurn(a, turn({ id: 't2', durationMs: 8_000, usage: { outputTokens: 100 } }), t0);
+    // No token report (ACP): wall time still counts toward duration, never toward speed.
+    store.recordTurn(b, turn({ id: 't3', durationMs: 5_000 }), t0);
+    // Interrupted turns count for nothing.
+    store.recordTurn(a, turn({ id: 't4', status: 'interrupted', durationMs: 1_000, usage: { outputTokens: 500 } }), t0);
+    await store.flush();
+
+    const fresh = new AnalyticsStore(dir, { log });
+    await fresh.load([]);
+    const s = fresh.summary(0, t0);
+    expect(s.days[0].usage.durationMs).toBe(15_000);
+    expect(s.days[0].usage.speedTokens).toBe(200);
+    expect(s.days[0].usage.speedMs).toBe(10_000);
+    expect(tokensPerSecond(s.speed)).toBeCloseTo(20);
+    const sa = s.sessions.find((x) => x.id === 'a');
+    const sb = s.sessions.find((x) => x.id === 'b');
+    expect(sa?.speed).toEqual({ tokens: 200, ms: 10_000 });
+    expect(sb?.speed).toEqual({ tokens: 0, ms: 0 });
+    expect(s.byHarness.find((x) => x.key === 'claude')?.speed).toEqual({ tokens: 200, ms: 10_000 });
+    expect(s.byModel.find((x) => x.key === 'anthropic/opus')?.speed).toEqual({ tokens: 200, ms: 10_000 });
+  });
+
+  it('loads day records written before speed was tracked as zero samples', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    const legacy = { ...emptyDay(), costUsd: 1, turns: 1, durationMs: 3_000 } as Record<string, number>;
+    delete legacy.speedTokens;
+    delete legacy.speedMs;
+    await fs.writeFile(path.join(dir, 'analytics.json'), JSON.stringify({ version: 1, days: { '2025-06-09': legacy }, recorded: {}, sessions: {}, tools: {}, files: {} }));
+    const store = new AnalyticsStore(dir, { log });
+    const m = meta('s1', 'native', usage({}), { updatedAt: t0 });
+    await store.load([m]);
+    store.recordTurn(m, turn({ durationMs: 1_000, usage: { outputTokens: 40 } }), t0);
+    const s = store.summary(0, t0);
+    expect(s.days[0].usage.speedTokens).toBe(40);
+    expect(s.days[0].usage.speedMs).toBe(1_000);
+    expect(s.days[0].usage.durationMs).toBe(4_000);
+    expect(tokensPerSecond(s.speed)).toBeCloseTo(40);
   });
 });
 

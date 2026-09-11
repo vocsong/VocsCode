@@ -416,7 +416,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       case 'result': {
         this.finishAssistant();
         this._busy = false;
-        const usage: Partial<UsageTotals> = {};
+        let usage: Partial<UsageTotals> | undefined;
         const mu = (msg as { modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number; contextWindow: number }> }).modelUsage;
         if (mu) {
           const totals: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
@@ -428,11 +428,19 @@ export class ClaudeAdapter implements HarnessAdapter {
             totals.costUsd += v.costUSD;
             totals.contextWindow = v.contextWindow || totals.contextWindow;
           }
-          totals.turns = this.ctx.session().usage.turns + 1;
+          const prev = this.ctx.session().usage;
+          totals.turns = prev.turns + 1;
           const u = (msg as { usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }).usage;
           if (u) totals.contextTokens = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+          // modelUsage is cumulative for the session; this turn's share is the delta (clamped, as a
+          // fresh SDK process restarts its counters).
+          usage = {
+            inputTokens: Math.max(0, totals.inputTokens - prev.inputTokens),
+            outputTokens: Math.max(0, totals.outputTokens - prev.outputTokens),
+            cacheReadTokens: Math.max(0, totals.cacheReadTokens - prev.cacheReadTokens),
+            cacheWriteTokens: Math.max(0, totals.cacheWriteTokens - prev.cacheWriteTokens)
+          };
           this.ctx.emit({ type: 'usage', totals });
-          Object.assign(usage, totals);
         }
         const turnCost = Math.max(0, (msg.total_cost_usd ?? 0) - this.lastCost);
         this.lastCost = msg.total_cost_usd ?? this.lastCost;

@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
-import { fmtCost, fmtDuration, fmtTokens } from '../format';
+import { fmtCost, fmtDuration, fmtRate, fmtTokens } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
 import { DiffView } from './DiffView';
@@ -124,6 +124,9 @@ const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand }
           <span>{item.status === 'completed' ? 'Turn complete' : item.status === 'interrupted' ? 'Interrupted' : `Failed${item.error ? `: ${item.error}` : ''}`}</span>
           {item.durationMs ? <span>· {fmtDuration(item.durationMs)}</span> : null}
           {item.usage && (item.usage.inputTokens || item.usage.outputTokens) ? <span>· {fmtTokens(item.usage.inputTokens)} in / {fmtTokens(item.usage.outputTokens)} out</span> : null}
+          {item.status === 'completed' && fmtRate(item.usage?.outputTokens, item.durationMs) ? (
+            <span title="Output tokens per second of turn wall time (includes tool execution)">· {fmtRate(item.usage?.outputTokens, item.durationMs)}</span>
+          ) : null}
           {item.costUsd ? <span>· {fmtCost(item.costUsd)}</span> : null}
         </div>
       );
