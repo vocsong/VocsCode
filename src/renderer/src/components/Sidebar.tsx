@@ -253,7 +253,6 @@ function FolderStyleButton({ root, style, onPick }: { root: string; style?: { co
         style={style?.color ? { color: style.color } : undefined}
         title={`Customize ${name}`}
         aria-label={`Customize ${name}`}
-        onClick={(e) => e.stopPropagation()}
       >
         <Icon name={style?.icon ?? 'folder'} size={13} />
       </button>
