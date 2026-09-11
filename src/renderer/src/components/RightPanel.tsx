@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FsEntry, GitSummary, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
 import { fmtCost, fmtDuration, fmtTokens } from '../format';
+import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore, type PanelTab } from '../store';
 import { BranchesTab } from './BranchesTab';
 import { DiffView } from './DiffView';
@@ -161,6 +162,9 @@ function FilesTab({ session }: { session: SessionMeta }) {
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [preview, setPreview] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
+  /** Markdown files open in rendered preview; the toggle flips back to the raw text. */
+  const [mdView, setMdView] = useState(false);
+  const mdBody = useRef<HTMLDivElement | null>(null);
   const toast = useStore((s) => s.toast);
   /** The session this component instance currently belongs to; responses from other sessions are dropped. */
   const liveId = useRef(session.id);
@@ -169,6 +173,7 @@ function FilesTab({ session }: { session: SessionMeta }) {
     setPath('');
     setEntries([]);
     setPreview(null);
+    setMdView(false);
   }, [session.id]);
   useEffect(() => {
     const sid = session.id;
@@ -184,6 +189,12 @@ function FilesTab({ session }: { session: SessionMeta }) {
       stale = true;
     };
   }, [session.id, path]); // eslint-disable-line react-hooks/exhaustive-deps
+  const isMd = !!preview && /\.(?:md|markdown)$/i.test(preview.path);
+  const mdHtml = useMemo(() => (isMd && preview ? renderMarkdown(preview.content) : ''), [isMd, preview]);
+  useEffect(() => {
+    if (!mdView || !mdBody.current) return;
+    return installMarkdownHandlers(mdBody.current, (url) => void invoke('app:openExternal', { url }));
+  }, [mdView, mdHtml]);
   const crumbs = path.split(/[\\/]/).filter(Boolean);
   return (
     <div className="files">
@@ -201,10 +212,23 @@ function FilesTab({ session }: { session: SessionMeta }) {
           <div className="file-preview-head">
             <span className="mono">{preview.path}</span>
             <span className="spacer" />
+            {isMd && (
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={mdView ? 'file' : 'eye'}
+                onClick={() => setMdView((v) => !v)}
+                title={mdView ? 'Show source' : 'Show markdown preview'}
+              />
+            )}
             <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}` })} title="Open in editor" />
             <Button size="sm" variant="ghost" icon="x" onClick={() => setPreview(null)} />
           </div>
-          <pre className="mono">{preview.content}{preview.truncated ? '\n… (truncated)' : ''}</pre>
+          {isMd && mdView ? (
+            <div ref={mdBody} className="md file-md" dangerouslySetInnerHTML={{ __html: mdHtml }} />
+          ) : (
+            <pre className="mono">{preview.content}{preview.truncated ? '\n… (truncated)' : ''}</pre>
+          )}
         </div>
       ) : (
         <div className="file-list">
@@ -217,7 +241,9 @@ function FilesTab({ session }: { session: SessionMeta }) {
                 if (e.isDir) setPath(e.path.replace(/\\/g, '/'));
                 else {
                   const r = await invoke('fs:read', { sessionId: session.id, path: e.path, maxBytes: 200_000 });
-                  setPreview({ path: e.path.replace(/\\/g, '/'), ...r });
+                  const p = e.path.replace(/\\/g, '/');
+                  setPreview({ path: p, ...r });
+                  setMdView(/\.(?:md|markdown)$/i.test(p));
                 }
               }}
             >
