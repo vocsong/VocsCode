@@ -296,6 +296,24 @@ describe('model capability overrides', () => {
     // Settings written before this feature existed have no such key.
     expect(normalizeSettings({ theme: 'dark' }).folders).toEqual([]);
   });
+
+  it('normalizes folder styles to hex colors and known-shape icon names', () => {
+    expect(defaultSettings().folderStyles).toEqual({});
+    const s = normalizeSettings({
+      folderStyles: {
+        'G:/proj/a': { color: '#5B9BF8', icon: 'bolt' },
+        'G:/proj/b': { color: 'red', icon: 'DROP TABLE' },
+        'G:/proj/c': { color: '#fff' },
+        'G:/proj/d': { icon: 42 },
+        'G:/proj/e': {},
+        '': { color: '#5b9bf8' },
+        'G:/proj/f': 'bogus'
+      } as never
+    });
+    expect(s.folderStyles).toEqual({ 'G:/proj/a': { color: '#5B9BF8', icon: 'bolt' } });
+    // Settings written before this feature existed have no such key.
+    expect(normalizeSettings({ theme: 'dark' }).folderStyles).toEqual({});
+  });
 });
 
 describe('SecretStore', () => {

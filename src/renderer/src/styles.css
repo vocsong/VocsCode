@@ -928,6 +928,75 @@ h4 {
   color: var(--fg-faint);
   font-weight: 600;
 }
+.project-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+.project-icon-btn:hover {
+  background: var(--bg-hover);
+}
+.project-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-style-picker {
+  padding: 6px;
+}
+.picker-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-faint);
+  margin: 2px 4px 6px;
+}
+.picker-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.picker-opt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 0;
+}
+.picker-opt:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.picker-opt.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.picker-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.picker-swatch.active {
+  border-color: var(--fg);
+}
 .project-new-btn {
   margin-left: auto;
   display: inline-flex;

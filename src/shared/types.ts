@@ -470,6 +470,14 @@ export interface HarnessDescriptor {
   docsUrl?: string;
 }
 
+/** Sidebar appearance override for one project folder. */
+export interface FolderStyle {
+  /** Hex color (e.g. `#5b9bf8`) tinting the folder icon and title. */
+  color?: string;
+  /** Icon name from the renderer's icon set (e.g. `folder`, `bolt`). */
+  icon?: string;
+}
+
 export interface AppSettings {
   version: 1;
   theme: ThemeId;
@@ -514,6 +522,8 @@ export interface AppSettings {
   recentProjects: string[];
   /** Project folders that stay in the sidebar even when they have no sessions left. */
   folders: string[];
+  /** Per-folder sidebar appearance keyed by project root. */
+  folderStyles?: Record<string, FolderStyle>;
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
 }
