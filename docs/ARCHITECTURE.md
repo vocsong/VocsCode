@@ -1,0 +1,75 @@
+# Architecture & Harness Reference
+
+Technical reference moved out of the README. For the friendly overview, read the [README](../README.md).
+
+## Source layout
+
+```
+src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette (no runtime deps)
+src/main
+  harness/        one adapter per harness → normalized SessionEvent stream
+    claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
+    codex-app-server.ts + jsonrpc.ts   Codex app-server client (thread/turn/item notifications, approval requests)
+    codex-exec.ts SDK fallback
+    pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
+    acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
+    native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
+  models/         provider clients and model discovery, with offline catalogs and pricing
+  util/           fs and async helpers shared by the adapters (no Electron imports)
+  session-manager.ts  sessions, transcripts, approvals, goals, worktrees
+  runtime.ts      binary discovery (PATH, app runtime dir, bundled), doctor, installer
+  secrets.ts      API keys encrypted at rest via Electron safeStorage
+  terminal.ts     PTY tabs (node-pty) mirrored by headless xterm for snapshots, flow control, restore
+  git.ts / settings.ts / store.ts / ipc.ts / index.ts
+src/preload       contextBridge (window.harness)
+src/renderer      React 19 + zustand UI
+  components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
+  terminal/       xterm.js instances kept alive outside React (host.ts)
+  theme.ts        injects the data-driven palettes and applies the active theme to <html>
+  store.ts        session state; api.ts wraps the preload bridge
+resources/pi      the approvals extension loaded into pi at spawn time
+tests             unit + format + review-fixes run offline; smoke and e2e are opt-in
+```
+
+## Harness matrix
+
+| Harness | Engine | Approvals | Models |
+| --- | --- | --- | --- |
+| **Claude Agent SDK** | `@anthropic-ai/claude-agent-sdk` (Claude Code loop, hooks, MCP, checkpoints) | interactive (`canUseTool`) | Anthropic catalog, plus Bedrock/Vertex/Foundry/gateway via env |
+| **Codex (app-server)** | `codex app-server` JSON-RPC — the same engine as the Codex desktop app | interactive (command + file-change requests), steer, interrupt | `model/list` from Codex, any `model_providers` entry |
+| **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | Codex catalog |
+| **Pi** | `pi --mode rpc` + bundled approvals extension | interactive | pi's registry: Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, Ollama, custom |
+| **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options |
+| **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) |
+
+Key invariants (enforced by convention and tsconfig project boundaries):
+
+- Adapters implement `HarnessAdapter` (`src/main/harness/types.ts`) and receive a `HarnessContext`. Adapters must not import Electron.
+- The terminal lives in the main process; the renderer re-attaches to snapshots and never owns PTY lifetime.
+- API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo.
+- Sessions must resume after restart for every harness.
+
+## Permission mode mapping
+
+| Mode | Claude | Codex | Pi (extension) | ACP client policy | Native |
+| --- | --- | --- | --- | --- | --- |
+| Ask | `default` + prompt | `untrusted` (every non-read-only command asks), workspace-write | confirm bash/edit/write | prompt | prompt |
+| Accept edits | `acceptEdits` | `untrusted`, auto-accept in-workspace file changes | confirm bash only | allow in-workspace edits | allow edits |
+| Plan | `plan` | read-only sandbox, decline writes | block mutations | reject mutations | read-only tools |
+| Auto | `default` + auto-allow safe | `on-request`, workspace-write with network | confirm dangerous only | allow unless dangerous | allow unless dangerous |
+| Full access | `bypassPermissions` | `never` + danger-full-access | never ask | allow always | allow |
+
+Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping curl into a shell, …) and any write outside the project directory always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`.
+
+## Security notes
+
+- API keys are encrypted with Electron `safeStorage` and never leave the machine except to the provider you configured.
+- The renderer runs sandboxed with context isolation; all privileged work happens in the main process behind a typed IPC contract.
+- "Full access" disables every prompt and sandbox. Use it only in disposable environments.
+
+## Known limitations
+
+- Codex exec (SDK) cannot ask for approval; prefer the app-server harness for interactive work.
+- Custom Codex model providers are passed as thread config overrides and were not verified against a live OpenAI-compatible endpoint.
+- ACP agents expose models only after the session starts; pick the model from the header once the agent is up.
+- The terminal tab's directory tracking relies on the shell announcing its cwd (OSC 7, or OSC 9;9 as Windows Terminal profiles do); shells without such a prompt hook show the directory they started in.
