@@ -122,6 +122,44 @@ describe('summarize', () => {
     expect(s.files[0]).toMatchObject({ path: 'src/a.ts', total: 4 });
   });
 
+  it('computes effective per-model rates, undefined while a denominator was never measured', () => {
+    const rec = (id: string, u: UsageTotals, provider: string, model: string): UsageSessionRecord => ({
+      id,
+      title: id,
+      harness: 'pi',
+      provider,
+      model,
+      projectRoot: '/repo',
+      createdAt: 1,
+      updatedAt: 1,
+      usage: u,
+      toolCalls: 0
+    });
+    const sessions = [
+      rec('a', usage({ costUsd: 2, inputTokens: 100_000, outputTokens: 50_000, cacheReadTokens: 50_000, turns: 4 }), 'anthropic', 'opus'),
+      rec('b', usage({ costUsd: 0.1, inputTokens: 400_000, turns: 1 }), 'deepseek', 'chat'),
+      rec('c', usage({ costUsd: 0.5, turns: 2 }), 'local', 'llama'),
+      rec('d', usage({ costUsd: 0.2, inputTokens: 1000 }), 'local', 'embed')
+    ];
+    const s = summarize(sessions, {}, {}, {}, 0, 0);
+    expect(s.modelRates.map((r) => r.key)).toEqual(['anthropic/opus', 'local/llama', 'local/embed', 'deepseek/chat']);
+    const opus = s.modelRates.find((r) => r.key === 'anthropic/opus')!;
+    expect(opus.tokens).toBe(200_000);
+    expect(opus.calls).toBe(4);
+    expect(opus.usdPerKToken).toBeCloseTo(2 / 200);
+    expect(opus.usdPerCall).toBeCloseTo(0.5);
+    const chat = s.modelRates.find((r) => r.key === 'deepseek/chat')!;
+    expect(chat.usdPerKToken).toBeCloseTo(0.1 / 400);
+    expect(chat.usdPerCall).toBeCloseTo(0.1);
+    // Tokens never measured: no $/1k token rate. Turns never measured: no $/call rate.
+    const llama = s.modelRates.find((r) => r.key === 'local/llama')!;
+    expect(llama.usdPerKToken).toBeUndefined();
+    expect(llama.usdPerCall).toBeCloseTo(0.25);
+    const embed = s.modelRates.find((r) => r.key === 'local/embed')!;
+    expect(embed.usdPerKToken).toBeCloseTo(0.2);
+    expect(embed.usdPerCall).toBeUndefined();
+  });
+
   it('filters days to the requested range and reports active days', () => {
     const now = Date.UTC(2025, 5, 10);
     const days = {
