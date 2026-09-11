@@ -1,6 +1,6 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
-import type { AcpAgentPreset, AppSettings, ModelRef, ProviderConfig } from '../shared/types';
+import type { AcpAgentPreset, AppSettings, FolderStyle, ModelRef, ProviderConfig } from '../shared/types';
 import { pruneModelOverrides } from '../shared/model-overrides';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
@@ -190,9 +190,24 @@ export function defaultSettings(): AppSettings {
     panelWidth: 420,
     recentProjects: [],
     folders: [],
+    folderStyles: {},
     goalDefaults: { autoContinue: true, maxIterations: 25 },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] }
   };
+}
+
+/** Keep only well-formed folder style entries (hex colors, sane icon names). */
+function normalizeFolderStyles(stored: unknown): Record<string, FolderStyle> {
+  if (!stored || typeof stored !== 'object') return {};
+  const out: Record<string, FolderStyle> = {};
+  for (const [root, raw] of Object.entries(stored as Record<string, unknown>)) {
+    if (!root || !raw || typeof raw !== 'object') continue;
+    const s = raw as Record<string, unknown>;
+    const color = typeof s.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(s.color) ? s.color : undefined;
+    const icon = typeof s.icon === 'string' && /^[a-z][a-z-]{0,23}$/.test(s.icon) ? s.icon : undefined;
+    if (color || icon) out[root] = { ...(color ? { color } : {}), ...(icon ? { icon } : {}) };
+  }
+  return out;
 }
 
 /** Merge stored settings over defaults, keeping builtin providers/agents present. */
@@ -212,6 +227,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
     folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    folderStyles: normalizeFolderStyles(stored.folderStyles),
     favoriteModels: Array.isArray(stored.favoriteModels)
       ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
       : [],
