@@ -8,7 +8,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
@@ -312,6 +312,10 @@ export function registerIpc(deps: IpcDeps): void {
     if (!m) throw new Error('Session not found');
     return m.cwd;
   };
+  handle('git:folderBranch', ({ projectRoot }) => {
+    const known = settings.get().folders.includes(projectRoot) || sessions.list().some((s) => s.config.projectRoot === projectRoot);
+    return known ? gitFolderBranch(projectRoot) : {};
+  });
   handle('git:summary', ({ sessionId }) => gitSummary(cwdOf(sessionId)));
   handle('git:diff', async ({ sessionId, path: p, staged }) => ({ diff: await gitDiff(cwdOf(sessionId), p, staged) }));
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));

@@ -22,6 +22,14 @@ export async function gitRoot(cwd: string): Promise<string | null> {
   return r.stdout.trim().replace(/\//g, path.sep);
 }
 
+/** Reads HEAD in this exact folder, including unborn branches and linked worktrees. */
+export async function gitFolderBranch(cwd: string): Promise<{ branch?: string; detached?: boolean }> {
+  const branch = await git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  if (branch.code === 0 && branch.stdout.trim()) return { branch: branch.stdout.trim() };
+  const head = await git(cwd, ['rev-parse', '--verify', '--short', 'HEAD']);
+  return head.code === 0 ? { branch: head.stdout.trim(), detached: true } : {};
+}
+
 export async function gitSummary(cwd: string): Promise<GitSummary> {
   const root = await gitRoot(cwd);
   if (!root) return { isRepo: false, files: [] };

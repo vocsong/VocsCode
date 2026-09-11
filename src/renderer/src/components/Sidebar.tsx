@@ -6,6 +6,7 @@ import { invoke } from '../api';
 import { basename, fmtCost, relTime } from '../format';
 import { useStore } from '../store';
 import { Resizer } from './Resizer';
+import { FolderBranch } from './FolderBranch';
 import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, StatusLabel } from './ui';
 
 const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
@@ -99,6 +100,7 @@ export function Sidebar() {
                 void invoke('settings:update', { folderStyles: next });
               }} />
               <span className="project-title" style={folderStyles[g.root]?.color ? { color: folderStyles[g.root].color } : undefined}>{basename(g.root)}</span>
+              <FolderBranch root={g.root} />
               <button
                 type="button"
                 className="project-new-btn"
