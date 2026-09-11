@@ -2,6 +2,8 @@
  * Shared domain types used by the main process, preload, and renderer.
  * Keep this file free of Node/Electron/DOM imports.
  */
+import type { TerminalSettings } from './terminal';
+import type { ThemeId } from './themes';
 
 export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'pi' | 'acp' | 'native';
 
@@ -10,7 +12,7 @@ export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-au
 
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
-export type SessionStatus = 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped';
+export type SessionStatus = 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped' | 'pr' | 'merged';
 
 export interface ModelInfo {
   /** Provider-scoped identifier used in API calls. */
@@ -28,6 +30,13 @@ export interface ModelInfo {
   /** USD per 1M tokens, when known. */
   pricing?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
   isDefault?: boolean;
+  /** Set when a user override in settings replaced what the harness reported. */
+  overridden?: boolean;
+}
+
+/** A user correction to one model's advertised capabilities (see shared/model-overrides.ts). */
+export interface ModelOverride {
+  supportsImages?: boolean;
 }
 
 export interface ModelRef {
@@ -108,6 +117,94 @@ export interface UsageTotals {
   contextWindow?: number;
   /** Tokens currently in the context window, when the harness reports it. */
   contextTokens?: number;
+}
+
+/** Aggregated usage for one UTC day, as accumulated by the analytics store. */
+export interface UsageDay {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  costUsd: number;
+  turns: number;
+  /** Cumulative completed-turn wall time in ms. */
+  durationMs: number;
+  /** Completed tool calls recorded this day. */
+  toolCalls: number;
+}
+
+/** Tool-call rollup per tool name. */
+export interface ToolUsage {
+  calls: number;
+  errors: number;
+  declined: number;
+  durationMs: number;
+}
+
+export interface ToolUsageRow extends ToolUsage {
+  name: string;
+}
+
+/** File-change counts by change kind, aggregated across tool calls. */
+export interface FileUsage {
+  adds: number;
+  updates: number;
+  deletes: number;
+  renames: number;
+}
+
+export interface FileUsageRow extends FileUsage {
+  path: string;
+  total: number;
+}
+
+/** Per-session usage snapshot; kept in the analytics store even after the session is deleted. */
+export interface UsageSessionRecord {
+  id: string;
+  title: string;
+  harness: HarnessId;
+  provider?: string;
+  model?: string;
+  projectRoot: string;
+  createdAt: number;
+  updatedAt: number;
+  usage: UsageTotals;
+  /** Completed tool calls recorded for this session. */
+  toolCalls: number;
+}
+
+/** Usage rollup for one dimension (harness, model, project). */
+export interface UsageBucket {
+  key: string;
+  label: string;
+  usage: UsageTotals;
+  toolCalls: number;
+  sessions: number;
+}
+
+export interface AnalyticsDayPoint {
+  date: string;
+  usage: UsageDay;
+}
+
+export interface AnalyticsSummary {
+  /** All-time totals across every recorded session, including deleted ones. */
+  totals: UsageTotals;
+  /** UTC days, ascending, filtered to the requested range. */
+  days: AnalyticsDayPoint[];
+  byHarness: UsageBucket[];
+  byModel: UsageBucket[];
+  byProject: UsageBucket[];
+  /** All-time tool-call totals and per-tool/per-file breakdowns, sorted by volume. */
+  toolTotals: ToolUsage;
+  tools: ToolUsageRow[];
+  files: FileUsageRow[];
+  /** Sessions sorted by spend, highest first. */
+  sessions: UsageSessionRecord[];
+  sessionCount: number;
+  activeDays: number;
+  firstDay?: string;
 }
 
 export interface HarnessRef {
@@ -231,7 +328,15 @@ export type TranscriptItem =
       decision?: ApprovalDecision;
       decidedAt?: number;
     }
-  | { id: string; kind: 'info'; ts: number; level: 'info' | 'warn' | 'error'; text: string }
+  | {
+      id: string;
+      kind: 'info';
+      ts: number;
+      level: 'info' | 'warn' | 'error';
+      text: string;
+      /** Set while a renderer-local operation (e.g. /pr) is still running; shows a spinner. */
+      pending?: boolean;
+    }
   | {
       id: string;
       kind: 'turn';
@@ -310,8 +415,7 @@ export type SessionEvent =
   | { type: 'meta'; patch: Partial<SessionMeta> }
   | { type: 'error'; message: string; fatal?: boolean }
   | { type: 'models'; models: ModelInfo[] }
-  | { type: 'log'; level: 'debug' | 'info' | 'warn' | 'error'; message: string }
-  | { type: 'shell.output'; runId: string; chunk: string; done?: boolean; exitCode?: number | null };
+  | { type: 'log'; level: 'debug' | 'info' | 'warn' | 'error'; message: string };
 
 export interface SessionEventEnvelope {
   sessionId: string;
@@ -338,6 +442,14 @@ export interface HarnessCapabilities {
   liveModelSwitch: boolean;
   effort: boolean;
   images: boolean;
+  /**
+   * Whether the harness itself strips image attachments when its own catalog says the selected
+   * model is text-only. Pi does this silently (it substitutes a placeholder in the prompt), so a
+   * capability override in this app cannot make the image reach the model — the harness catalog
+   * has to be corrected too. Everywhere else the attachment is passed through and the provider
+   * decides.
+   */
+  dropsUnsupportedImages: boolean;
   resume: boolean;
   fork: boolean;
   plan: boolean;
@@ -360,11 +472,13 @@ export interface HarnessDescriptor {
 
 export interface AppSettings {
   version: 1;
-  theme: 'system' | 'light' | 'dark';
+  theme: ThemeId;
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
   defaultEffort?: EffortLevel;
   defaultModelByHarness: Partial<Record<HarnessId, ModelRef>>;
+  /** Starred models, always listed first in the model pickers. */
+  favoriteModels: ModelRef[];
   notifications: boolean;
   soundOnApproval: boolean;
   /** Explicit binary paths (empty = auto-detect). */
@@ -392,11 +506,16 @@ export interface AppSettings {
   };
   acpAgents: AcpAgentPreset[];
   providers: ProviderConfig[];
+  /** Capability corrections keyed by `provider/model`; see shared/model-overrides.ts. */
+  modelOverrides: Record<string, ModelOverride>;
   windowBounds?: { x?: number; y?: number; width: number; height: number };
   sidebarWidth: number;
   panelWidth: number;
   recentProjects: string[];
+  /** Project folders that stay in the sidebar even when they have no sessions left. */
+  folders: string[];
   goalDefaults: { autoContinue: boolean; maxIterations: number };
+  terminal: TerminalSettings;
 }
 
 export interface GitFileStatus {
@@ -415,6 +534,45 @@ export interface GitSummary {
   files: GitFileStatus[];
   ahead?: number;
   behind?: number;
+}
+
+export interface GitBranchInfo {
+  name: string;
+  current: boolean;
+}
+
+export interface GitWorktreeInfo {
+  path: string;
+  branch?: string;
+  detached: boolean;
+}
+
+/** One local branch in the Branches panel's GitHub-style overview. */
+export interface GitBranchOverviewItem {
+  name: string;
+  current: boolean;
+  /** The branch the panel diffs everything against (develop/master/main). */
+  isBase: boolean;
+  lastCommitAt?: number;
+  lastCommitSubject?: string;
+  /** Commits on this branch that the base branch does not have. */
+  ahead?: number;
+  /** Commits on the base branch that this branch does not have. */
+  behind?: number;
+  /** Ancestor of the base branch — safe to delete without losing work. */
+  merged: boolean;
+  upstream?: string;
+  upstreamAhead?: number;
+  upstreamBehind?: number;
+  /** Set when the branch is checked out in a worktree. */
+  worktreePath?: string;
+}
+
+export interface GitBranchOverview {
+  isRepo: boolean;
+  base?: string;
+  branches: GitBranchOverviewItem[];
+  worktrees: GitWorktreeInfo[];
 }
 
 export interface FsEntry {
@@ -438,10 +596,5 @@ export interface CreateSessionRequest {
   title?: string;
   initialPrompt?: string;
   goal?: string;
-}
-
-export interface ShellRunRequest {
-  sessionId: string;
-  command: string;
 }
 

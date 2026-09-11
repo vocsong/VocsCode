@@ -1,15 +1,20 @@
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type {
+  AnalyticsSummary,
   ApprovalDecision,
   AppSettings,
   CreateSessionRequest,
   DoctorReport,
   EffortLevel,
   FsEntry,
+  GitBranchInfo,
+  GitBranchOverview,
   GitSummary,
+  GitWorktreeInfo,
   HarnessAvailability,
   HarnessId,
   ModelInfo,
+  ModelOverride,
   ModelRef,
   PermissionMode,
   ProviderConfig,
@@ -18,6 +23,7 @@ import type {
   TranscriptItem,
   UserInput
 } from './types';
+import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 
 /**
  * Request/response contract for ipcRenderer.invoke channels.
@@ -27,11 +33,13 @@ export interface IpcContract {
   'app:info': [void, { version: string; platform: string; userData: string; isPackaged: boolean }];
   'app:doctor': [void, DoctorReport];
   'app:openExternal': [{ url: string }, void];
-  'app:openPath': [{ path: string }, void];
+  'app:openPath': [{ path: string; sessionId: string }, void];
   'app:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
   'app:openTerminal': [{ cwd: string }, { ok: boolean; error?: string }];
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];
   'app:notify': [{ title: string; body: string }, void];
+  /** A renderer stall (long task, delayed input, timer drift) recorded in the main log. */
+  'app:diag': [{ kind: 'longtask' | 'input-delay' | 'loop-lag'; ms: number; detail?: string }, void];
 
   'window:toggleFullScreen': [void, void];
   'window:reload': [void, void];
@@ -52,6 +60,9 @@ export interface IpcContract {
   'providers:refreshModels': [{ id: string }, { models: ModelInfo[]; error?: string }];
   'providers:test': [{ id: string }, { ok: boolean; detail: string }];
 
+  /** Corrects one model's advertised capabilities; `null` clears that field's override. */
+  'models:setOverride': [{ provider: string; model: string; supportsImages: boolean | null }, Record<string, ModelOverride>];
+
   'harness:availability': [{ id?: HarnessId } | void, Partial<Record<HarnessId, HarnessAvailability>>];
   'harness:models': [
     { harness: HarnessId; acpAgent?: string; projectRoot?: string },
@@ -65,7 +76,7 @@ export interface IpcContract {
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
   'sessions:delete': [{ id: string; removeWorktree?: boolean }, void];
   'sessions:rename': [{ id: string; title: string }, SessionMeta];
-  'sessions:archive': [{ id: string; archived: boolean }, SessionMeta];
+  'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean }, SessionMeta];
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
   'sessions:send': [{ id: string; input: UserInput }, void];
   'sessions:interrupt': [{ id: string }, void];
@@ -77,10 +88,13 @@ export interface IpcContract {
   'sessions:clearTranscript': [{ id: string }, void];
   'sessions:export': [{ id: string }, { path: string | null }];
   'sessions:fork': [{ id: string }, SessionMeta | null];
+  'sessions:moveTo': [{ id: string; cwd: string }, SessionMeta];
   'sessions:goal': [
     { id: string; action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update'; objective?: string; autoContinue?: boolean; maxIterations?: number },
     SessionMeta
   ];
+
+  'analytics:summary': [{ days?: number } | void, AnalyticsSummary];
 
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 
@@ -89,13 +103,39 @@ export interface IpcContract {
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:stageAll': [{ sessionId: string }, { ok: boolean; error?: string }];
   'git:commit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];
+  /** Pushes the session's branch and opens a GitHub PR into `base` (needs gh). */
+  'git:pr': [{ sessionId: string; base: string }, { ok: boolean; url?: string; output?: string }];
+  /** Merges the open PR for the session's branch; `base`, when given, must match the PR's target. */
+  'git:merge': [{ sessionId: string; base?: string }, { ok: boolean; url?: string; output?: string }];
+  'git:branches': [{ sessionId: string }, { current?: string; branches: GitBranchInfo[] }];
+  'git:worktrees': [{ sessionId: string }, { current: string; worktrees: GitWorktreeInfo[] }];
+  'git:checkout': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
+  /** Branches-panel housekeeping: per-branch age, ahead/behind, merged state and worktree binding. */
+  'git:branchesOverview': [{ sessionId: string }, GitBranchOverview];
+  'git:deleteBranch': [{ sessionId: string; branch: string; force?: boolean }, { ok: boolean; error?: string }];
+  'git:removeWorktree': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
+  'git:pruneWorktrees': [{ sessionId: string }, { ok: boolean; output: string }];
+  'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];
   'fs:read': [{ sessionId: string; path: string; maxBytes?: number }, { content: string; truncated: boolean }];
 
-  'shell:run': [{ sessionId: string; command: string }, { runId: string }];
-  'shell:kill': [{ runId: string }, void];
+  'terminal:list': [void, TerminalInfo[]];
+  'terminal:shells': [void, ShellOption[]];
+  'terminal:create': [{ sessionId: string; shell?: ShellKind; cols?: number; rows?: number }, TerminalInfo];
+  /** Start showing a terminal: the screen as it is now plus the seq of the last chunk it contains. */
+  'terminal:attach': [{ terminalId: string; cols: number; rows: number }, { snapshot: string; seq: number; info: TerminalInfo }];
+  'terminal:detach': [{ terminalId: string }, void];
+  'terminal:input': [{ terminalId: string; data: string }, void];
+  'terminal:resize': [{ terminalId: string; cols: number; rows: number }, void];
+  /** Renderer consumed `chars` of output; lets main resume a PTY it paused for flow control. */
+  'terminal:ack': [{ terminalId: string; chars: number }, void];
+  'terminal:kill': [{ terminalId: string }, void];
+  'terminal:restart': [{ terminalId: string }, TerminalInfo];
+  'terminal:close': [{ terminalId: string }, void];
+  'terminal:clear': [{ terminalId: string }, void];
+  'terminal:rename': [{ terminalId: string; title: string }, TerminalInfo];
 }
 
 export type IpcChannel = keyof IpcContract;
@@ -107,7 +147,9 @@ export const PUSH_CHANNELS = {
   sessionEvent: 'push:sessionEvent',
   sessionsChanged: 'push:sessionsChanged',
   settingsChanged: 'push:settingsChanged',
-  focusSession: 'push:focusSession'
+  focusSession: 'push:focusSession',
+  terminalData: 'push:terminalData',
+  terminalsChanged: 'push:terminalsChanged'
 } as const;
 
 export type PushPayloads = {
@@ -115,6 +157,9 @@ export type PushPayloads = {
   'push:sessionsChanged': SessionMeta[];
   'push:settingsChanged': AppSettings;
   'push:focusSession': { sessionId: string };
+  /** Raw PTY output for one terminal; `seq` orders it against an attach snapshot. */
+  'push:terminalData': { terminalId: string; seq: number; data: string };
+  'push:terminalsChanged': TerminalInfo[];
 };
 
 /** The API exposed on window.harness by the preload script. */

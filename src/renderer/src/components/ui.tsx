@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 const ICONS: Record<string, string> = {
+  logo: 'M6.4 7.2L12 17L17.6 7.2M9.2 19h5.6',
   plus: 'M12 5v14M5 12h14',
   settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm7.4-3a7.4 7.4 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7.6 7.6 0 0 0-1.7-1L15 3H9l-.3 2.6a7.6 7.6 0 0 0-1.7 1l-2.3-1-2 3.4 2 1.5a7.4 7.4 0 0 0 0 2l-2 1.5 2 3.4 2.3-1c.5.4 1.1.7 1.7 1L9 21h6l.3-2.6c.6-.3 1.2-.6 1.7-1l2.3 1 2-3.4-2-1.5c.1-.3.1-.7.1-1z',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z',
@@ -44,12 +45,14 @@ const ICONS: Record<string, string> = {
   alert: 'M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
   info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01',
   compact: 'M4 14h16M4 10h16M12 3l3 3-3 3M12 21l3-3-3-3',
-  download: 'M12 3v12M6 11l6 6 6-6M4 21h16'
+  download: 'M12 3v12M6 11l6 6 6-6M4 21h16',
+  star: 'M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5-5.9-3.2-5.9 3.2 1.2-6.5L2.5 9.4l6.6-.9z'
 };
 
-export function Icon({ name, size = 16, className }: { name: keyof typeof ICONS | string; size?: number; className?: string }) {
+export function Icon({ name, size = 16, className, title }: { name: keyof typeof ICONS | string; size?: number; className?: string; title?: string }) {
   return (
-    <svg className={`icon ${className ?? ''}`} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg className={`icon ${className ?? ''}`} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden={title ? undefined : true}>
+      {title && <title>{title}</title>}
       <path d={ICONS[name] ?? ICONS.info} />
     </svg>
   );
@@ -151,6 +154,75 @@ export function Modal({ title, onClose, children, width = 720, footer }: { title
   );
 }
 
+export interface ConfirmOptions {
+  title: string;
+  body?: React.ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  /** Styles the confirming button as destructive. */
+  danger?: boolean;
+}
+
+type PendingConfirm = ConfirmOptions & { resolve: (ok: boolean) => void };
+
+let confirmHost: ((p: PendingConfirm | null) => void) | null = null;
+let confirmOpen = false;
+
+/**
+ * Replaces window.confirm, which must never be used here: Electron answers it with a native message
+ * box that disables the whole window until it is dismissed, so a dialog the user does not notice
+ * looks exactly like a frozen app — no clicks, no typing, no dropdowns.
+ */
+export function askConfirm(options: ConfirmOptions): Promise<boolean> {
+  if (!confirmHost || confirmOpen) return Promise.resolve(false);
+  confirmOpen = true;
+  return new Promise<boolean>((resolve) => {
+    confirmHost?.({
+      ...options,
+      resolve: (ok) => {
+        confirmOpen = false;
+        resolve(ok);
+      }
+    });
+  });
+}
+
+/** Mounted once by App; renders whatever askConfirm is currently waiting on. */
+export function ConfirmHost() {
+  const [pending, setPending] = useState<PendingConfirm | null>(null);
+  useEffect(() => {
+    confirmHost = setPending;
+    return () => {
+      confirmHost = null;
+    };
+  }, []);
+  if (!pending) return null;
+  const answer = (ok: boolean) => {
+    setPending(null);
+    pending.resolve(ok);
+  };
+  return (
+    <Modal
+      title={pending.title}
+      width={460}
+      onClose={() => answer(false)}
+      footer={
+        <>
+          <span className="spacer" />
+          <Button size="sm" onClick={() => answer(false)}>
+            {pending.cancelLabel ?? 'Cancel'}
+          </Button>
+          <Button size="sm" variant={pending.danger ? 'danger' : 'primary'} autoFocus onClick={() => answer(true)}>
+            {pending.confirmLabel ?? 'Confirm'}
+          </Button>
+        </>
+      }
+    >
+      {pending.body ?? null}
+    </Modal>
+  );
+}
+
 export function Field({ label, hint, children, inline }: { label: React.ReactNode; hint?: React.ReactNode; children: React.ReactNode; inline?: boolean }) {
   return (
     <label className={`field ${inline ? 'field-inline' : ''}`}>
@@ -179,6 +251,25 @@ export function Spinner({ size = 14 }: { size?: number }) {
 
 export function StatusDot({ status }: { status: string }) {
   return <span className={`status-dot status-${status}`} title={status} />;
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  idle: 'Idle',
+  starting: 'Starting',
+  running: 'Working',
+  awaiting: 'Pending',
+  pr: 'PR',
+  merged: 'Merged',
+  error: 'Error',
+  stopped: 'Stopped',
+};
+
+export function StatusLabel({ status }: { status: string }) {
+  return (
+    <span className={`session-status status-${status}`} title={status}>
+      {STATUS_LABELS[status] ?? status}
+    </span>
+  );
 }
 
 export function Kbd({ children }: { children: React.ReactNode }) {

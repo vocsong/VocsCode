@@ -5,6 +5,7 @@ import { fmtCost, fmtDuration, fmtTokens } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
 import { DiffView } from './DiffView';
+import { TranscriptFind } from './TranscriptFind';
 import { Badge, Button, Icon, Spinner } from './ui';
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
@@ -16,6 +17,18 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const showThinking = useStore((s) => s.showThinking);
   const ref = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
+  const [findOpen, setFindOpen] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   useEffect(() => {
     const el = ref.current;
@@ -23,9 +36,10 @@ export function Transcript({ session }: { session: SessionMeta }) {
     return installMarkdownHandlers(el, (url) => void invoke('app:openExternal', { url }));
   }, []);
 
+  // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
-    if (stick && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [items, stick]);
+    if (stick && !findOpen && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [items, stick, findOpen]);
 
   const onScroll = () => {
     const el = ref.current;
@@ -54,6 +68,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
           </div>
         )}
       </div>
+      <TranscriptFind open={findOpen} onClose={() => setFindOpen(false)} container={ref} revision={items} />
       {!stick && (
         <button type="button" className="jump-bottom" onClick={() => { setStick(true); if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }}>
           <Icon name="chevron" size={14} /> {pendingApprovals ? `${pendingApprovals} approval pending` : 'Jump to latest'}
@@ -76,7 +91,7 @@ const Item = memo(function Item({ item, sessionId, showThinking }: { item: Trans
     case 'info':
       return (
         <div className={`info-line info-${item.level}`}>
-          <Icon name={item.level === 'error' ? 'alert' : item.level === 'warn' ? 'alert' : 'info'} size={13} /> <span>{item.text}</span>
+          {item.pending ? <Spinner size={13} /> : <Icon name={item.level === 'error' ? 'alert' : item.level === 'warn' ? 'alert' : 'info'} size={13} />} <span>{item.text}</span>
         </div>
       );
     case 'turn':

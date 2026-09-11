@@ -3,8 +3,10 @@ import type { FsEntry, GitSummary, SessionMeta, TranscriptItem } from '../../../
 import { invoke } from '../api';
 import { fmtCost, fmtDuration, fmtTokens } from '../format';
 import { useStore, type PanelTab } from '../store';
+import { BranchesTab } from './BranchesTab';
 import { DiffView } from './DiffView';
 import { Resizer } from './Resizer';
+import { TerminalPanel } from './TerminalPanel';
 import { Badge, Button, EmptyState, Field, Icon, Spinner, Toggle } from './ui';
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
@@ -13,6 +15,7 @@ const EMPTY: never[] = [];
 const TABS: { id: PanelTab; label: string; icon: string }[] = [
   { id: 'changes', label: 'Changes', icon: 'diff' },
   { id: 'files', label: 'Files', icon: 'folder' },
+  { id: 'branches', label: 'Branches', icon: 'branch' },
   { id: 'goal', label: 'Goal', icon: 'target' },
   { id: 'usage', label: 'Usage', icon: 'chart' },
   { id: 'terminal', label: 'Terminal', icon: 'terminal' }
@@ -37,9 +40,10 @@ export function RightPanel({ session }: { session: SessionMeta }) {
       <div className="panel-body">
         {tab === 'changes' && <ChangesTab session={session} />}
         {tab === 'files' && <FilesTab session={session} />}
+        {tab === 'branches' && <BranchesTab session={session} />}
         {tab === 'goal' && <GoalTab session={session} />}
         {tab === 'usage' && <UsageTab session={session} />}
-        {tab === 'terminal' && <TerminalTab session={session} />}
+        {tab === 'terminal' && <TerminalPanel session={session} />}
       </div>
       <Resizer target="panel" />
     </aside>
@@ -54,20 +58,31 @@ function ChangesTab({ session }: { session: SessionMeta }) {
   const [diff, setDiff] = useState('');
   const [loading, setLoading] = useState(false);
   const [commitMsg, setCommitMsg] = useState('');
+  /** The session this component instance currently belongs to; async writes compare against it. */
+  const liveId = useRef(session.id);
 
   const refresh = async () => {
+    const sid = session.id;
     setLoading(true);
     try {
-      const s = await invoke('git:summary', { sessionId: session.id });
+      const s = await invoke('git:summary', { sessionId: sid });
+      if (liveId.current !== sid) return;
       setSummary(s);
-      const d = await invoke('git:diff', { sessionId: session.id, path: selected ?? undefined });
+      const d = await invoke('git:diff', { sessionId: sid, path: selected ?? undefined });
+      if (liveId.current !== sid) return;
       setDiff(d.diff);
     } catch (e) {
-      toast(String((e as Error).message ?? e), 'error');
+      if (liveId.current === sid) toast(String((e as Error).message ?? e), 'error');
     } finally {
-      setLoading(false);
+      if (liveId.current === sid) setLoading(false);
     }
   };
+  useEffect(() => {
+    liveId.current = session.id;
+    setSelected(null);
+    setDiff('');
+    setSummary(null);
+  }, [session.id]);
   useEffect(() => {
     void refresh();
   }, [session.id, version, selected]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -147,10 +162,27 @@ function FilesTab({ session }: { session: SessionMeta }) {
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [preview, setPreview] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
   const toast = useStore((s) => s.toast);
+  /** The session this component instance currently belongs to; responses from other sessions are dropped. */
+  const liveId = useRef(session.id);
   useEffect(() => {
-    invoke('fs:list', { sessionId: session.id, relPath: path || undefined })
-      .then(setEntries)
-      .catch((e) => toast(String(e.message ?? e), 'error'));
+    liveId.current = session.id;
+    setPath('');
+    setEntries([]);
+    setPreview(null);
+  }, [session.id]);
+  useEffect(() => {
+    const sid = session.id;
+    let stale = false;
+    invoke('fs:list', { sessionId: sid, relPath: path || undefined })
+      .then((list) => {
+        if (!stale && liveId.current === sid) setEntries(list);
+      })
+      .catch((e) => {
+        if (!stale && liveId.current === sid) toast(String(e.message ?? e), 'error');
+      });
+    return () => {
+      stale = true;
+    };
   }, [session.id, path]); // eslint-disable-line react-hooks/exhaustive-deps
   const crumbs = path.split(/[\\/]/).filter(Boolean);
   return (
@@ -298,46 +330,6 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="stat">
       <div className="stat-value">{value}</div>
       <div className="stat-label">{label}</div>
-    </div>
-  );
-}
-
-function TerminalTab({ session }: { session: SessionMeta }) {
-  const lines = useStore((s) => s.terminal[session.id] ?? EMPTY);
-  const appendTerminal = useStore((s) => s.appendTerminal);
-  const [cmd, setCmd] = useState('');
-  const [running, setRunning] = useState<string | null>(null);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-    const last = lines[lines.length - 1];
-    if (last?.done && running === last.runId) setRunning(null);
-  }, [lines, running]);
-  const run = async () => {
-    const c = cmd.trim();
-    if (!c) return;
-    setCmd('');
-    const { runId } = await invoke('shell:run', { sessionId: session.id, command: c });
-    appendTerminal(session.id, { runId, text: '', command: c });
-    setRunning(runId);
-  };
-  return (
-    <div className="term">
-      <div className="term-out mono" ref={ref}>
-        {lines.length === 0 && <div className="muted">Run project commands here. Output is not shared with the agent; use the chat for that.</div>}
-        {lines.map((l) => (
-          <div key={l.runId} className="term-block">
-            {l.command && <div className="term-cmd">$ {l.command}</div>}
-            <pre>{l.text}</pre>
-            {l.done && <div className={`term-exit ${l.exitCode ? 'bad' : ''}`}>exit {l.exitCode ?? '?'}</div>}
-          </div>
-        ))}
-      </div>
-      <div className="term-in">
-        <span className="mono muted">$</span>
-        <input className="mono" value={cmd} onChange={(e) => setCmd(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void run()} placeholder={`command in ${session.cwd.split(/[\\/]/).pop()}`} spellCheck={false} />
-        {running ? <Button size="sm" variant="danger" icon="stop" onClick={() => void invoke('shell:kill', { runId: running })} /> : <Button size="sm" variant="primary" icon="play" onClick={() => void run()} />}
-      </div>
     </div>
   );
 }

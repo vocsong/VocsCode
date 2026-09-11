@@ -23,7 +23,9 @@ export class SessionStore {
 
   async load(): Promise<SessionMeta[]> {
     await ensureDir(this.root);
-    this.sessions = await readJson<SessionMeta[]>(this.indexFile, []);
+    const loaded = await readJson<SessionMeta[]>(this.indexFile, []);
+    // A valid-JSON but wrong-shaped file must not abort boot; fall back to an empty index.
+    this.sessions = Array.isArray(loaded) ? loaded.filter((s): s is SessionMeta => !!s && typeof s === 'object' && typeof s.id === 'string') : [];
     // Any session that was running when the app closed is now idle.
     for (const s of this.sessions) {
       if (s.status === 'running' || s.status === 'awaiting' || s.status === 'starting') s.status = 'idle';

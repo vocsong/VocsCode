@@ -1,3 +1,12 @@
+/*
+ * Design tokens.
+ *
+ * `:root` is the Light palette and `[data-theme='dark']` the Dark one; both are authored here so a
+ * complete palette exists before any script runs. Every other theme is data in
+ * `src/shared/themes.ts` and its block is injected by `src/renderer/src/theme.ts`.
+ *
+ * A theme only needs to declare base hues: the `--*-soft` washes below are derived from them.
+ */
 :root {
   color-scheme: light dark;
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable', 'Segoe UI', Inter, Roboto, system-ui, sans-serif;
@@ -14,19 +23,23 @@
   --border-strong: #cfd1d6;
   --accent: #5b5bd6;
   --accent-fg: #ffffff;
-  --accent-soft: rgba(91, 91, 214, 0.12);
   --green: #1f9d55;
-  --green-soft: rgba(31, 157, 85, 0.14);
   --amber: #c27a10;
-  --amber-soft: rgba(194, 122, 16, 0.16);
   --red: #d13438;
-  --red-soft: rgba(209, 52, 56, 0.14);
   --blue: #2f6fed;
-  --blue-soft: rgba(47, 111, 237, 0.14);
   --purple: #8a4fd3;
-  --purple-soft: rgba(138, 79, 211, 0.14);
+  --cyan: #0f8a99;
   --user-bubble: #e9e9fb;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.14);
+
+  /* Derived from the hues above, so themes never restate them. */
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --green-soft: color-mix(in srgb, var(--green) 14%, transparent);
+  --amber-soft: color-mix(in srgb, var(--amber) 16%, transparent);
+  --red-soft: color-mix(in srgb, var(--red) 14%, transparent);
+  --blue-soft: color-mix(in srgb, var(--blue) 14%, transparent);
+  --purple-soft: color-mix(in srgb, var(--purple) 14%, transparent);
+
   --radius: 10px;
   --radius-sm: 6px;
   --sidebar: 280px;
@@ -34,8 +47,10 @@
   /** Must match TITLEBAR_HEIGHT in src/main/index.ts. */
   --titlebar: 36px;
 }
+/* Only 'system' (or no attribute yet) defers to the OS; a named theme owns its own palette. */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
+  :root:not([data-theme]),
+  :root[data-theme='system'] {
     --bg: #111318;
     --bg-elev: #191c23;
     --bg-sunken: #0d0f13;
@@ -48,17 +63,18 @@
     --border-strong: #363b47;
     --accent: #8b8bff;
     --accent-fg: #0e0e1a;
-    --accent-soft: rgba(139, 139, 255, 0.16);
     --green: #3ecf7a;
     --amber: #f0b44c;
     --red: #ff6b6e;
     --blue: #6ea0ff;
     --purple: #c084fc;
+    --cyan: #4dd0e1;
     --user-bubble: #23263a;
     --shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
   }
 }
 :root[data-theme='dark'] {
+  color-scheme: dark;
   --bg: #111318;
   --bg-elev: #191c23;
   --bg-sunken: #0d0f13;
@@ -71,14 +87,17 @@
   --border-strong: #363b47;
   --accent: #8b8bff;
   --accent-fg: #0e0e1a;
-  --accent-soft: rgba(139, 139, 255, 0.16);
   --green: #3ecf7a;
   --amber: #f0b44c;
   --red: #ff6b6e;
   --blue: #6ea0ff;
   --purple: #c084fc;
+  --cyan: #4dd0e1;
   --user-bubble: #23263a;
   --shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 * {
@@ -255,7 +274,11 @@ h4 {
   height: var(--titlebar);
   padding-left: 6px;
   background: var(--bg-elev);
-  border-bottom: 1px solid var(--border);
+  /* The separator is an outer shadow, not a border: on Windows/Linux the OS paints its caption
+     buttons over a rect exactly --titlebar tall, so a border-bottom (the bar's last pixel row, with
+     box-sizing: border-box) is covered and the line stops short of the window's right edge. One
+     pixel below the bar is outside that rect, so the hairline runs the full width. */
+  box-shadow: 0 1px 0 var(--border);
   user-select: none;
   /* The whole bar drags the window; interactive children opt out below. */
   -webkit-app-region: drag;
@@ -385,6 +408,15 @@ h4 {
   border-color: transparent;
   color: var(--red);
 }
+.btn-danger:hover {
+  background: color-mix(in srgb, var(--red) 26%, transparent);
+}
+.btn-icon {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  justify-content: center;
+}
 .link-btn {
   background: none;
   border: none;
@@ -449,6 +481,13 @@ h4 {
   padding: 0 5px;
   background: var(--bg-elev);
 }
+.btn .kbd {
+  font-size: 9.5px;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  border-color: color-mix(in srgb, currentColor 35%, transparent);
+  border-bottom-width: 2px;
+}
 .chip {
   border: 1px solid var(--border);
   background: var(--bg-elev);
@@ -494,8 +533,14 @@ h4 {
   animation: pulse 1.2s ease-in-out infinite;
 }
 .status-awaiting {
-  background: var(--amber);
+  background: var(--red);
   animation: pulse 0.8s ease-in-out infinite;
+}
+.status-pr {
+  background: var(--amber);
+}
+.status-merged {
+  background: var(--green);
 }
 .status-error {
   background: var(--red);
@@ -612,6 +657,98 @@ h4 {
   overflow: auto;
 }
 
+/* Model picker (searchable list with star favorites) */
+.model-picker {
+  display: flex;
+  flex-direction: column;
+}
+.mp-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+}
+.mp-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  color: var(--fg);
+  outline: none;
+  padding: 2px 0;
+  font-size: 13px;
+}
+.mp-clear {
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  display: flex;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+}
+.mp-clear:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+.mp-list {
+  max-height: 320px;
+  overflow: auto;
+}
+.mp-row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+.mp-row:hover {
+  background: var(--bg-hover);
+}
+.mp-row.active .mp-name {
+  color: var(--accent);
+}
+.mp-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 6px 4px 6px 8px;
+  cursor: pointer;
+  color: inherit;
+}
+.mp-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-star {
+  border: none;
+  background: none;
+  color: var(--fg-faint);
+  cursor: pointer;
+  display: flex;
+  padding: 4px 8px;
+  flex: none;
+}
+.mp-star:hover {
+  color: var(--amber);
+}
+.mp-star.on {
+  color: var(--amber);
+}
+.mp-star.on .icon {
+  fill: currentColor;
+}
+
 /* Modal */
 .modal-backdrop {
   position: fixed;
@@ -710,6 +847,11 @@ h4 {
 .toggle input:checked + .toggle-track {
   background: var(--accent);
 }
+/* On a light accent (Graphite's is near-white) a white thumb vanishes, so it flips to the
+   accent's own foreground once checked. */
+.toggle input:checked + .toggle-track .toggle-thumb {
+  background: var(--accent-fg);
+}
 .toggle input:checked + .toggle-track .toggle-thumb {
   left: 16px;
 }
@@ -736,6 +878,9 @@ h4 {
   gap: 8px;
   font-weight: 700;
   font-size: 14px;
+}
+.brand > .icon {
+  color: var(--accent);
 }
 .sidebar-search {
   display: flex;
@@ -783,6 +928,29 @@ h4 {
   color: var(--fg-faint);
   font-weight: 600;
 }
+.project-new-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
+}
+.project-group:hover .project-new-btn,
+.project-new-btn:focus-visible {
+  opacity: 1;
+}
+.project-new-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
 .session-row {
   display: flex;
   align-items: center;
@@ -798,6 +966,57 @@ h4 {
 .session-row.active {
   background: var(--bg-elev);
   box-shadow: inset 0 0 0 1px var(--border);
+}
+.session-status {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 4px;
+  align-self: center;
+}
+.session-status.status-idle {
+  color: var(--fg-faint);
+  background: var(--bg-hover);
+}
+.session-status.status-running,
+.session-status.status-starting {
+  color: var(--blue);
+  background: var(--blue-soft);
+  animation: status-fade 1.2s ease-in-out infinite;
+}
+.session-status.status-awaiting {
+  color: var(--red);
+  background: var(--red-soft);
+  animation: status-fade 0.8s ease-in-out infinite;
+}
+.session-status.status-pr {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+.session-status.status-merged {
+  color: var(--green);
+  background: var(--green-soft);
+}
+.session-status.status-error {
+  color: var(--red);
+  background: var(--red-soft);
+}
+.session-status.status-stopped {
+  color: var(--fg-faint);
+  background: var(--bg-hover);
+  opacity: 0.7;
+}
+@keyframes status-fade {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
 }
 .session-main {
   flex: 1;
@@ -815,6 +1034,13 @@ h4 {
 .session-title span {
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: text;
+  border-radius: 3px;
+}
+.session-row:hover .session-title span {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--fg-muted);
 }
 .session-meta {
   display: flex;
@@ -835,20 +1061,38 @@ h4 {
   color: var(--blue);
   font-weight: 600;
 }
+.session-worktree {
+  color: var(--accent);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+.session-worktree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 90px;
+}
 .session-rename {
   padding: 2px 6px;
 }
 .row-menu-btn {
   border: none;
   background: none;
-  color: var(--fg-muted);
-  padding: 4px;
+  color: var(--fg);
+  padding: 5px;
   border-radius: 4px;
   cursor: pointer;
-  opacity: 0;
-}
-.session-row:hover .row-menu-btn {
   opacity: 1;
+  flex-shrink: 0;
+}
+.row-menu-btn .icon {
+  stroke-width: 2.8;
+}
+.session-row:hover .row-menu-btn,
+.row-menu-btn:focus-visible {
+  color: var(--fg);
 }
 .row-menu-btn:hover {
   background: var(--bg-active);
@@ -924,7 +1168,8 @@ h4 {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.header-path:hover {
+.header-path:hover,
+.header-path.open {
   background: var(--bg-hover);
 }
 .header-status {
@@ -1042,6 +1287,66 @@ h4 {
   display: flex;
   gap: 6px;
   align-items: center;
+}
+/* Transcript find bar (Ctrl+F) */
+.find-bar {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 4px 6px;
+  color: var(--fg-muted);
+}
+.find-bar input {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  width: 200px;
+  padding: 3px 2px;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+.find-bar input:focus {
+  border: none;
+  box-shadow: none;
+}
+.find-count {
+  font-size: 11px;
+  color: var(--fg-muted);
+  min-width: 44px;
+  text-align: center;
+  white-space: nowrap;
+}
+.find-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 3px;
+}
+.find-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.find-btn .rot-up {
+  transform: rotate(180deg);
+}
+::highlight(transcript-find-match) {
+  background: rgba(255, 200, 0, 0.45);
+}
+::highlight(transcript-find-current) {
+  background: rgba(255, 122, 0, 0.6);
 }
 .msg-user {
   display: flex;
@@ -1539,6 +1844,27 @@ h4 {
   display: flex;
   gap: 8px;
 }
+.composer-warn {
+  max-width: 920px;
+  margin: 0 auto 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--amber);
+  background: var(--amber-soft);
+  color: var(--amber);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.composer-warn svg {
+  flex: none;
+}
+.override-row {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
 .attachment {
   position: relative;
 }
@@ -1750,6 +2076,174 @@ body.resizing {
   padding: 8px;
   border-top: 1px solid var(--border);
 }
+
+/* Branches tab */
+.branches {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.branches-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.seg {
+  display: inline-flex;
+  gap: 2px;
+}
+.seg button {
+  border: none;
+  background: none;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.seg button:hover {
+  color: var(--fg);
+}
+.seg button.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.branches-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.branches-search {
+  flex: 1;
+  min-width: 140px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  color: var(--fg-muted);
+}
+.branches-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  outline: none;
+  color: var(--fg);
+  font-size: 12px;
+}
+.branches-filters {
+  display: flex;
+  gap: 2px;
+}
+.branches-filters button {
+  border: none;
+  background: none;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.branches-filters button:hover {
+  color: var(--fg);
+}
+.branches-filters button.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.branches-filters .count {
+  margin-left: 4px;
+  font-size: 10px;
+  background: var(--bg-active);
+  border-radius: 8px;
+  padding: 0 5px;
+}
+.branches-table {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.branches-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 84px 110px 56px;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+  position: sticky;
+  top: 0;
+  background: var(--bg-elev);
+  z-index: 1;
+}
+.branches-cols .num {
+  text-align: right;
+}
+.branch-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 84px 110px 56px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.branch-row:hover {
+  background: var(--bg-hover);
+}
+.branch-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+.branch-name .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-wt {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+.branch-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.behind {
+  color: var(--red);
+}
+.ahead {
+  color: var(--green);
+}
 .crumbs {
   display: flex;
   gap: 4px;
@@ -1853,43 +2347,160 @@ body.resizing {
   height: 100%;
   background: var(--accent);
 }
+/* Terminal panel: tab strip, find/rename bars and the xterm mount. xterm paints its own screen
+   from the theme (see terminal/host.ts); the chrome around it uses the panel tokens. */
 .term {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
 }
-.term-out {
-  flex: 1;
-  overflow: auto;
-  padding: 10px;
-  background: var(--bg-sunken);
+.term-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex-shrink: 0;
 }
-.term-block {
-  margin-bottom: 8px;
+.term-tabs::-webkit-scrollbar {
+  display: none;
 }
-.term-cmd {
-  color: var(--accent);
-  font-weight: 600;
+.term-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  padding: 4px 6px 4px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.term-out pre {
-  margin: 2px 0;
-  white-space: pre-wrap;
-  word-break: break-word;
+.term-tab:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
 }
-.term-exit {
+.term-tab.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.term-tab.exited .term-tab-title {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.term-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.term-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  opacity: 0;
+}
+.term-tab:hover .term-tab-close,
+.term-tab.active .term-tab-close {
+  opacity: 0.7;
+}
+.term-tab-close:hover {
+  background: var(--bg-active);
+  opacity: 1;
+}
+.term-new {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.term-new .term-new-more {
+  margin-left: -6px;
+  padding-left: 2px;
+  padding-right: 2px;
+}
+/* The directory the active shell reports (OSC 7 / 9;9), else where it started. */
+.term-cwd {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--fg-faint);
   font-size: 11px;
+  padding: 0 4px;
+  flex-shrink: 1;
 }
-.term-exit.bad {
-  color: var(--red);
+.term-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sunken);
 }
-.term-in {
+.term-view {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 0 4px 8px;
+}
+.term-view .term-xterm,
+.term-view .xterm {
+  height: 100%;
+}
+/* xterm.css paints the viewport black; the sub-row remainder under the last line must match the theme. */
+.term-view .xterm .xterm-viewport {
+  background-color: var(--bg-sunken) !important;
+}
+.term-exit-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px;
+  padding: 6px 10px;
   border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 12px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+.term-find,
+.term-rename {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  flex-shrink: 0;
+}
+.term-find input,
+.term-rename input {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.term-find input.no-hit {
+  border-color: var(--red);
+}
+.term-find-opt {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.term-find-opt.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 /* New session dialog */
@@ -1897,6 +2508,17 @@ body.resizing {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
+}
+.ns-root {
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Trim long paths from the start (keep the leaf folder visible) while rendering the text itself LTR. */
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
 }
 .harness-cards {
   display: grid;
@@ -2148,4 +2770,462 @@ body.resizing {
 }
 .toast-success {
   border-left-color: var(--green);
+}
+
+/* Theme picker (Settings → General): one swatch card per theme, grouped by family. */
+.theme-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 2px;
+}
+.theme-family {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  margin-bottom: 6px;
+}
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
+  gap: 8px;
+}
+.theme-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, border-color 0.12s;
+}
+.theme-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.theme-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+/* A miniature of the theme: sunken ground, a raised bar, an accent dot. */
+.theme-swatch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 24px;
+  border: 1px solid;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.theme-swatch-bar {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: 9px;
+  border-radius: 2px;
+}
+.theme-swatch-dot {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.theme-card-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.theme-card-name svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------
+ * Nebula — the animated futuristic theme.
+ *
+ * Its palette is data like every other theme (src/shared/themes.ts); what lives here is the motion
+ * and glow only this theme opts into. App surfaces turn slightly translucent so the drifting aurora
+ * painted behind the window shows through them. All of it stops under prefers-reduced-motion.
+ * ------------------------------------------------------------------------- */
+:root[data-theme='nebula'] body {
+  background: var(--bg-sunken);
+}
+/* Layer 1 — the aurora: three blurred blobs on a fixed plane behind #root, drifting and breathing. */
+:root[data-theme='nebula'] body::before {
+  content: '';
+  position: fixed;
+  inset: -30%;
+  pointer-events: none;
+  background:
+    radial-gradient(closest-side, color-mix(in srgb, var(--accent) 55%, transparent), transparent) 18% 24% / 46% 44% no-repeat,
+    radial-gradient(closest-side, color-mix(in srgb, var(--red) 50%, transparent), transparent) 78% 70% / 44% 42% no-repeat,
+    radial-gradient(closest-side, color-mix(in srgb, var(--purple) 48%, transparent), transparent) 62% 12% / 38% 40% no-repeat;
+  filter: blur(70px) saturate(150%);
+  opacity: 0.55;
+  animation: nebula-drift 30s ease-in-out infinite alternate;
+}
+/* Layer 2 — a faint holographic grid sliding diagonally, still behind every app surface. */
+:root[data-theme='nebula'] #root::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--border-strong) 55%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--border-strong) 55%, transparent) 1px, transparent 1px);
+  background-size: 46px 46px;
+  opacity: 0.3;
+  animation: nebula-grid 22s linear infinite;
+}
+@keyframes nebula-drift {
+  0% {
+    transform: translate3d(-3%, -2%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(2%, 3%, 0) scale(1.12);
+  }
+  100% {
+    transform: translate3d(4%, -3%, 0) scale(1.04);
+  }
+}
+@keyframes nebula-grid {
+  to {
+    background-position: 46px 46px, 46px 46px;
+  }
+}
+/* Frosted chrome, so the aurora reads through the app instead of behind it. */
+:root[data-theme='nebula'] .titlebar,
+:root[data-theme='nebula'] .header,
+:root[data-theme='nebula'] .composer,
+:root[data-theme='nebula'] .panel {
+  background: color-mix(in srgb, var(--bg-elev) 80%, transparent);
+  backdrop-filter: blur(14px) saturate(130%);
+}
+:root[data-theme='nebula'] .main {
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+}
+:root[data-theme='nebula'] .sidebar {
+  background: color-mix(in srgb, var(--bg-sunken) 72%, transparent);
+  backdrop-filter: blur(12px);
+}
+/* A light bar sweeping along the title bar's edge. */
+:root[data-theme='nebula'] .titlebar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--accent), var(--purple), var(--red), transparent);
+  background-size: 55% 100%;
+  background-repeat: no-repeat;
+  animation: nebula-scan 7s linear infinite;
+}
+@keyframes nebula-scan {
+  0% {
+    background-position: -60% 0;
+  }
+  100% {
+    background-position: 160% 0;
+  }
+}
+/* The wordmark cycles through the palette; the mark beside it pulses. */
+:root[data-theme='nebula'] .brand span {
+  background: linear-gradient(100deg, var(--accent), var(--purple) 30%, var(--red) 50%, var(--accent) 80%);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: nebula-sweep 9s linear infinite;
+}
+:root[data-theme='nebula'] .brand > svg {
+  color: var(--accent);
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 70%, transparent));
+  animation: nebula-breathe 3.4s ease-in-out infinite;
+}
+@keyframes nebula-sweep {
+  to {
+    background-position: 300% 0;
+  }
+}
+@keyframes nebula-breathe {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(0.92);
+  }
+}
+/* Primary buttons: a moving gradient with a soft outer glow. */
+:root[data-theme='nebula'] .btn-primary {
+  background: linear-gradient(100deg, var(--accent), var(--purple) 40%, var(--red) 62%, var(--accent));
+  background-size: 260% 100%;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent), 0 0 18px color-mix(in srgb, var(--accent) 32%, transparent);
+  animation: nebula-sweep 7s linear infinite;
+}
+:root[data-theme='nebula'] .btn-primary:hover {
+  background: linear-gradient(100deg, var(--accent), var(--purple) 40%, var(--red) 62%, var(--accent));
+  background-size: 260% 100%;
+  filter: brightness(1.12) saturate(115%);
+}
+/* The selected session sits in its own pool of light. */
+:root[data-theme='nebula'] .session-row.active {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent), inset 3px 0 0 var(--accent),
+    0 0 16px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+/* Status lights actually glow. */
+:root[data-theme='nebula'] .status-running,
+:root[data-theme='nebula'] .status-starting {
+  box-shadow: 0 0 9px color-mix(in srgb, var(--blue) 85%, transparent);
+}
+:root[data-theme='nebula'] .status-awaiting {
+  box-shadow: 0 0 9px color-mix(in srgb, var(--amber) 85%, transparent);
+}
+:root[data-theme='nebula'] .status-error {
+  box-shadow: 0 0 9px color-mix(in srgb, var(--red) 85%, transparent);
+}
+:root[data-theme='nebula'] .dot-live {
+  box-shadow: 0 0 9px color-mix(in srgb, var(--green) 85%, transparent);
+}
+:root[data-theme='nebula'] .chip.active,
+:root[data-theme='nebula'] .pill.open,
+:root[data-theme='nebula'] .theme-card.active {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent), 0 0 14px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+:root[data-theme='nebula'] input:focus,
+:root[data-theme='nebula'] select:focus,
+:root[data-theme='nebula'] textarea:focus,
+:root[data-theme='nebula'] .composer-box:focus-within {
+  box-shadow: 0 0 0 2px var(--accent-soft), 0 0 18px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+:root[data-theme='nebula'] ::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--accent), var(--purple));
+  background-clip: padding-box;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme='nebula'] body::before,
+  :root[data-theme='nebula'] #root::before,
+  :root[data-theme='nebula'] .titlebar::after,
+  :root[data-theme='nebula'] .brand span,
+  :root[data-theme='nebula'] .brand > svg,
+  :root[data-theme='nebula'] .btn-primary {
+    animation: none;
+  }
+}
+
+/* Analytics dashboard */
+.analytics {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.analytics-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+.analytics-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 15px;
+}
+.analytics-body {
+  overflow: auto;
+  min-height: 0;
+  padding: 20px 24px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* Content taller than the viewport must scroll, not squash (charts have overflow, so their
+   automatic minimum size is 0 — without this the daily trend collapses to a sliver). */
+.analytics-body > * {
+  flex-shrink: 0;
+}
+.analytics-body h4 {
+  margin: 14px 0 6px;
+}
+.analytics-stats {
+  grid-template-columns: repeat(5, 1fr);
+}
+.day-chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.analytics-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 28px;
+  align-items: start;
+  margin-top: 4px;
+}
+.analytics-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.analytics-col h4 {
+  margin-top: 14px;
+}
+@media (max-width: 1000px) {
+  .analytics-cols {
+    grid-template-columns: 1fr;
+  }
+  .analytics-stats {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.segment {
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.segment + .segment {
+  border-left: 1px solid var(--border);
+}
+.segment.active {
+  background: var(--bg-hover);
+  color: var(--fg);
+  font-weight: 600;
+}
+.day-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 170px;
+  padding: 10px 6px 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  overflow-x: auto;
+}
+.day-bar-col {
+  flex: 1 0 14px;
+  max-width: 34px;
+  min-width: 14px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 2px;
+}
+.day-bar {
+  width: 100%;
+  min-height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+  opacity: 0.9;
+}
+.day-bar:hover {
+  opacity: 1;
+}
+.day-bar.zero {
+  background: var(--border);
+}
+.day-bar-label {
+  font-size: 9px;
+  color: var(--fg-muted);
+  text-align: center;
+}
+.breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.breakdown-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.breakdown-label {
+  width: 190px;
+  min-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.breakdown-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.breakdown-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.session-usage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.session-usage-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+.session-usage-row:hover {
+  background: var(--bg-hover);
+}
+.session-usage-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.session-usage-title {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-usage-row .breakdown-bar {
+  flex: 0 1 200px;
 }

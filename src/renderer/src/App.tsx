@@ -2,6 +2,7 @@
 import React, { useEffect } from 'react';
 import { invoke } from './api';
 import { useActiveSession, useStore } from './store';
+import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { CommandPalette } from './components/CommandPalette';
 import { Composer } from './components/Composer';
 import { Header } from './components/Header';
@@ -11,7 +12,9 @@ import { SettingsView } from './components/SettingsView';
 import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
-import { Button, EmptyState, Icon, Kbd, Spinner } from './components/ui';
+import { Button, ConfirmHost, EmptyState, Icon, Kbd, Spinner } from './components/ui';
+import { createTerminal } from './terminal/host';
+import { applyTheme } from './theme';
 
 export function App() {
   const booted = useStore((s) => s.booted);
@@ -30,9 +33,7 @@ export function App() {
   }, [boot]);
 
   useEffect(() => {
-    const theme = settings?.theme ?? 'system';
-    if (theme === 'system') document.documentElement.removeAttribute('data-theme');
-    else document.documentElement.setAttribute('data-theme', theme);
+    applyTheme(settings?.theme ?? 'system');
   }, [settings?.theme]);
 
   useEffect(() => {
@@ -41,7 +42,7 @@ export function App() {
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === 'n') {
         e.preventDefault();
-        st.openNewSession(true);
+        void st.startNewSession();
       } else if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         st.openPalette(!st.paletteOpen);
@@ -67,10 +68,19 @@ export function App() {
           e.preventDefault();
           void st.setActive(target.id);
         }
+      } else if (mod && e.code === 'Backquote' && st.activeId && st.view === 'chat') {
+        // Ctrl+` toggles focus between the terminal and the composer; Ctrl+Shift+` opens a new terminal.
+        e.preventDefault();
+        if (e.shiftKey) void createTerminal(st.activeId);
+        else if (st.panelOpen && st.panelTab === 'terminal' && document.activeElement?.closest('.term-view')) document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus();
+        else {
+          st.setPanelTab('terminal');
+          st.focusTerminal();
+        }
       } else if (e.key === 'Escape' && !st.newSessionOpen && !st.paletteOpen && st.activeId) {
         // Escape interrupts the agent only when nothing else would consume it: no open menu, dialog or
         // popover, and focus is on the page body or an empty composer.
-        if (document.querySelector('.dropdown-menu, .modal, .popover, .session-rename')) return;
+        if (document.querySelector('.dropdown-menu, .modal, .popover, .session-rename, .find-bar')) return;
         const el = document.activeElement as HTMLElement | null;
         const onBody = !el || el === document.body;
         const onEmptyComposer = el?.tagName === 'TEXTAREA' && el.closest('.composer') !== null && !(el as HTMLTextAreaElement).value;
@@ -102,18 +112,20 @@ export function App() {
         <main className="main">
           {view === 'settings' ? (
             <SettingsView />
+          ) : view === 'analytics' ? (
+            <AnalyticsDashboard />
           ) : session ? (
             <>
               <Header session={session} />
               <Transcript session={session} />
-              <Composer session={session} />
+              <Composer key={session.id} session={session} />
             </>
           ) : (
             <div className="main-empty">
               <EmptyState icon="sparkles" title="Welcome to Vocs Code">
                 <p>One desktop for every coding agent. Pick a harness per session — Claude Agent SDK, Codex, Pi, DeepSeek Harness or any ACP agent, or the built-in loop — and any model it can reach.</p>
                 <div className="row gap8 center">
-                  <Button variant="primary" icon="plus" onClick={() => useStore.getState().openNewSession(true)}>
+                  <Button variant="primary" icon="plus" onClick={() => void useStore.getState().startNewSession()}>
                     New session
                   </Button>
                   <Button icon="settings" onClick={() => useStore.getState().setView('settings')}>
@@ -131,6 +143,7 @@ export function App() {
       </div>
       {newSessionOpen && <NewSessionDialog />}
       {paletteOpen && <CommandPalette />}
+      <ConfirmHost />
       <div className="toasts">
         {toasts.map((t) => (
           <div key={t.id} className={`toast toast-${t.kind}`} onClick={() => useStore.getState().dismissToast(t.id)}>

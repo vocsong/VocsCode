@@ -1,6 +1,9 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
-import type { AcpAgentPreset, AppSettings, ProviderConfig } from '../shared/types';
+import type { AcpAgentPreset, AppSettings, ModelRef, ProviderConfig } from '../shared/types';
+import { pruneModelOverrides } from '../shared/model-overrides';
+import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
+import { isThemeId } from '../shared/themes';
 import { readJson, writeJson } from './util/fs';
 
 export const BUILTIN_ACP_AGENTS: AcpAgentPreset[] = [
@@ -173,6 +176,7 @@ export function defaultSettings(): AppSettings {
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
     defaultModelByHarness: {},
+    favoriteModels: [],
     notifications: true,
     soundOnApproval: false,
     binaries: {},
@@ -181,10 +185,13 @@ export function defaultSettings(): AppSettings {
     pi: { extraArgs: [] },
     acpAgents: BUILTIN_ACP_AGENTS.map((a) => ({ ...a })),
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
+    modelOverrides: {},
     sidebarWidth: 280,
     panelWidth: 420,
     recentProjects: [],
-    goalDefaults: { autoContinue: true, maxIterations: 25 }
+    folders: [],
+    goalDefaults: { autoContinue: true, maxIterations: 25 },
+    terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] }
   };
 }
 
@@ -195,22 +202,31 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
   const merged: AppSettings = {
     ...d,
     ...stored,
+    // A theme removed from the catalogue (or hand-edited into settings.json) falls back to 'system'.
+    theme: isThemeId(stored.theme) ? stored.theme : d.theme,
     binaries: { ...d.binaries, ...(stored.binaries ?? {}) },
     claude: { ...d.claude, ...(stored.claude ?? {}) },
     codex: { ...d.codex, ...(stored.codex ?? {}) },
     pi: { ...d.pi, ...(stored.pi ?? {}) },
     goalDefaults: { ...d.goalDefaults, ...(stored.goalDefaults ?? {}) },
+    terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
+    folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    favoriteModels: Array.isArray(stored.favoriteModels)
+      ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
+      : [],
+    modelOverrides: pruneModelOverrides(stored.modelOverrides),
     providers: [],
     acpAgents: []
   };
-  const storedProviders = stored.providers ?? [];
+  // Wrong-shaped arrays in settings.json must not break boot: coerce to arrays before use.
+  const storedProviders = Array.isArray(stored.providers) ? stored.providers : [];
   for (const bp of BUILTIN_PROVIDERS) {
     const s = storedProviders.find((p) => p.id === bp.id);
     merged.providers.push(s ? { ...bp, ...s, builtin: true } : { ...bp, models: [] });
   }
   for (const s of storedProviders) if (!BUILTIN_PROVIDERS.some((bp) => bp.id === s.id)) merged.providers.push({ ...s, builtin: false });
-  const storedAgents = stored.acpAgents ?? [];
+  const storedAgents = Array.isArray(stored.acpAgents) ? stored.acpAgents : [];
   for (const ba of BUILTIN_ACP_AGENTS) {
     const s = storedAgents.find((a) => a.id === ba.id);
     merged.acpAgents.push(s ? { ...ba, ...s, builtin: true } : { ...ba });

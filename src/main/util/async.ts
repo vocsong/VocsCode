@@ -1,4 +1,5 @@
 /** Small async helpers shared by harness adapters. Node-only, no Electron. */
+import { StringDecoder } from 'node:string_decoder';
 
 /** An unbounded async queue usable as an AsyncIterable (for streaming-input SDKs). */
 export class AsyncQueue<T> implements AsyncIterable<T> {
@@ -74,14 +75,18 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label = 'operation'): 
 }
 
 /**
- * Splits a byte stream into newline-delimited records. Handles CRLF and partial chunks.
+ * Splits a byte stream into newline-delimited records. Handles CRLF and partial chunks;
+ * multi-byte UTF-8 sequences straddling a chunk boundary are decoded correctly.
  * Splits ONLY on \n (JSONL semantics) so Unicode separators inside strings are preserved.
  */
 export class LineSplitter {
+  /** A never-terminated line is discarded once it grows past this, so the buffer stays bounded. */
+  private static readonly MAX_BUFFER = 10 * 1024 * 1024;
   private buffer = '';
+  private decoder = new StringDecoder('utf8');
   constructor(private readonly onLine: (line: string) => void) {}
   push(chunk: string | Buffer): void {
-    this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    this.buffer += typeof chunk === 'string' ? chunk : this.decoder.write(chunk);
     let idx: number;
     while ((idx = this.buffer.indexOf('\n')) >= 0) {
       let line = this.buffer.slice(0, idx);
@@ -89,8 +94,13 @@ export class LineSplitter {
       if (line.endsWith('\r')) line = line.slice(0, -1);
       if (line.length) this.onLine(line);
     }
+    if (this.buffer.length > LineSplitter.MAX_BUFFER) {
+      // Never-terminated line: drop it rather than grow without bound.
+      this.buffer = '';
+    }
   }
   flush(): void {
+    this.buffer += this.decoder.end();
     if (this.buffer.trim().length) this.onLine(this.buffer);
     this.buffer = '';
   }

@@ -5,17 +5,21 @@ import path from 'node:path';
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
 import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { PUSH_CHANNELS } from '../shared/ipc';
-import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, SessionEventEnvelope } from '../shared/types';
+import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
-import { gitCommit, gitDiff, gitRevertFile, gitStageAll, gitSummary } from './git';
+import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitMergePr, gitPruneWorktrees, gitRevertFile, gitStageAll, gitSummary, gitWorktrees, removeWorktree } from './git';
+import type { AnalyticsStore } from './analytics';
+import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import type { RuntimeResolver } from './runtime';
 import { which } from './runtime';
 import type { SecretStore } from './secrets';
+import type { Logger } from './log';
 import type { SessionManager } from './session-manager';
 import type { SettingsStore } from './settings';
-import { ShellRunner } from './shell';
+import type { TerminalManager } from './terminal';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
 
@@ -23,13 +27,28 @@ export interface IpcDeps {
   settings: SettingsStore;
   secrets: SecretStore;
   sessions: SessionManager;
+  terminals: TerminalManager;
   runtime: RuntimeResolver;
+  analytics: AnalyticsStore;
   getWindow: () => BrowserWindow | null;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }
 
+/** Set by registerIpc so handler timing can be logged without threading deps through every call. */
+let ipcLog: Logger = () => undefined;
+/** A handler holding the main process this long has already frozen the window; say so. */
+const SLOW_IPC_MS = 1000;
+
 function handle<K extends IpcChannel>(channel: K, fn: (req: IpcRequest<K>) => Promise<IpcResponse<K>> | IpcResponse<K>): void {
-  ipcMain.handle(channel, async (_e, req: IpcRequest<K>) => fn(req));
+  ipcMain.handle(channel, async (_e, req: IpcRequest<K>) => {
+    const t0 = Date.now();
+    try {
+      return await fn(req);
+    } finally {
+      const ms = Date.now() - t0;
+      if (ms >= SLOW_IPC_MS) ipcLog('warn', `slow ipc ${channel}: ${ms}ms`);
+    }
+  });
 }
 
 export function pushToRenderer(win: BrowserWindow | null, channel: string, payload: unknown): void {
@@ -38,8 +57,8 @@ export function pushToRenderer(win: BrowserWindow | null, channel: string, paylo
 }
 
 export function registerIpc(deps: IpcDeps): void {
-  const { settings, secrets, sessions, runtime } = deps;
-  const shellRunner = new ShellRunner();
+  const { settings, secrets, sessions, terminals, runtime } = deps;
+  ipcLog = deps.log;
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
 
   handle('app:info', () => ({ version: app.getVersion(), platform: process.platform, userData: app.getPath('userData'), isPackaged: app.isPackaged }));
@@ -59,7 +78,10 @@ export function registerIpc(deps: IpcDeps): void {
   handle('app:openExternal', async ({ url }) => {
     if (/^https?:\/\//i.test(url)) await shell.openExternal(url);
   });
-  handle('app:openPath', async ({ path: p }) => {
+  // Only open paths scoped to the session: a compromised renderer must not launch arbitrary files.
+  handle('app:openPath', async ({ sessionId, path: p }) => {
+    const m = sessions.get(sessionId);
+    if (!m || isOutsideWorkspace(m.cwd, p, path)) return;
     await shell.openPath(p);
   });
   handle('app:openInEditor', async ({ path: p, line }) => {
@@ -103,6 +125,9 @@ export function registerIpc(deps: IpcDeps): void {
     const win = deps.getWindow();
     const res = await dialog.showOpenDialog(win ?? (undefined as unknown as BrowserWindow), { properties: ['openDirectory', 'createDirectory'], defaultPath });
     return { path: res.canceled ? null : res.filePaths[0] ?? null };
+  });
+  handle('app:diag', ({ kind, ms, detail }) => {
+    deps.log('warn', `renderer ${kind} ${ms}ms${detail ? ` (${detail})` : ''}`);
   });
   handle('app:notify', async ({ title, body }) => {
     const { Notification } = await import('electron');
@@ -159,7 +184,10 @@ export function registerIpc(deps: IpcDeps): void {
     return next;
   }
 
-  handle('providers:list', () => settings.get().providers.map((p) => ({ ...p, hasApiKey: secrets.has(p.id), models: p.models.length ? p.models : fallbackModels(p) })));
+  handle('providers:list', () => {
+    const s = settings.get();
+    return s.providers.map((p) => ({ ...p, hasApiKey: secrets.has(p.id), models: applyModelOverrides(p.models.length ? p.models : fallbackModels(p), s.modelOverrides) }));
+  });
   handle('providers:save', async (provider) => {
     const s = settings.get();
     const idx = s.providers.findIndex((p) => p.id === provider.id);
@@ -187,9 +215,9 @@ export function registerIpc(deps: IpcDeps): void {
       const providers = s.providers.map((x) => (x.id === id ? { ...x, models, modelsUpdatedAt: Date.now() } : x));
       const next = await settings.update({ providers });
       pushToRenderer(deps.getWindow(), PUSH_CHANNELS.settingsChanged, next);
-      return { models };
+      return { models: applyModelOverrides(models, next.modelOverrides) };
     } catch (e) {
-      return { models: fallbackModels(p), error: errorMessage(e) };
+      return { models: applyModelOverrides(fallbackModels(p), s.modelOverrides), error: errorMessage(e) };
     }
   });
   handle('providers:test', async ({ id }) => {
@@ -198,6 +226,18 @@ export function registerIpc(deps: IpcDeps): void {
     const key = await resolveProviderApiKey(p, (pid) => secrets.get(pid));
     if (!key && !['ollama', 'lmstudio'].includes(p.kind)) return { ok: false, detail: `No API key stored and ${p.envKey ?? 'no env var'} is not set.` };
     return testProvider(p, key);
+  });
+  handle('models:setOverride', async ({ provider, model, supportsImages }) => {
+    const s = settings.get();
+    const key = modelOverrideKey(provider, model);
+    const modelOverrides = { ...s.modelOverrides };
+    if (supportsImages === null) delete modelOverrides[key];
+    else modelOverrides[key] = { ...modelOverrides[key], supportsImages };
+    const next = await settings.update({ modelOverrides });
+    pushToRenderer(deps.getWindow(), PUSH_CHANNELS.settingsChanged, next);
+    // Running sessions already have a model list; re-publish it so the change lands without a restart.
+    sessions.republishModels();
+    return next.modelOverrides;
   });
 
   handle('harness:availability', async (req) => {
@@ -228,9 +268,16 @@ export function registerIpc(deps: IpcDeps): void {
   handle('sessions:create', (req) => sessions.create(req));
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
-  handle('sessions:delete', ({ id, removeWorktree }) => sessions.delete(id, removeWorktree));
+  handle('sessions:delete', async ({ id, removeWorktree }) => {
+    // Shells hold their cwd open; take them down before the worktree is removed.
+    const t0 = Date.now();
+    await terminals.closeForSession(id);
+    const t1 = Date.now();
+    await sessions.delete(id, removeWorktree);
+    if (Date.now() - t0 >= SLOW_IPC_MS) deps.log('warn', `slow delete ${id}: terminals ${t1 - t0}ms, session ${Date.now() - t1}ms`);
+  });
   handle('sessions:rename', ({ id, title }) => sessions.patch(id, { title }));
-  handle('sessions:archive', ({ id, archived }) => sessions.patch(id, { archived }));
+  handle('sessions:archive', ({ id, archived, removeWorktree }) => sessions.setArchived(id, archived, removeWorktree));
   handle('sessions:pin', ({ id, pinned }) => sessions.patch(id, { pinned }));
   handle('sessions:send', ({ id, input }) => sessions.send(id, input));
   handle('sessions:interrupt', ({ id }) => sessions.interrupt(id));
@@ -253,9 +300,12 @@ export function registerIpc(deps: IpcDeps): void {
     return { path: res.filePath };
   });
   handle('sessions:fork', ({ id }) => sessions.fork(id));
+  handle('sessions:moveTo', ({ id, cwd }) => sessions.moveTo(id, cwd));
   handle('sessions:goal', ({ id, action, objective, autoContinue, maxIterations }) => sessions.goal(id, action, { objective, autoContinue, maxIterations }));
 
   handle('approvals:respond', ({ sessionId, requestId, decision }) => sessions.respondApproval(sessionId, requestId, decision));
+
+  handle('analytics:summary', (req) => deps.analytics.summary(req && typeof req === 'object' ? req.days ?? 30 : 30));
 
   const cwdOf = (sessionId: string) => {
     const m = sessions.get(sessionId);
@@ -267,6 +317,37 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
   handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));
+  // Local /pr and /merge run outside a turn, so nothing else triggers the sidebar's PR state check.
+  handle('git:pr', async ({ sessionId, base }) => {
+    const r = await gitCreatePr(cwdOf(sessionId), base);
+    if (r.ok) sessions.refreshGitState(sessionId);
+    return r;
+  });
+  handle('git:merge', async ({ sessionId, base }) => {
+    const r = await gitMergePr(cwdOf(sessionId), base);
+    if (r.ok) sessions.refreshGitState(sessionId);
+    return r;
+  });
+  handle('git:branches', ({ sessionId }) => gitBranches(cwdOf(sessionId)));
+  handle('git:worktrees', ({ sessionId }) => gitWorktrees(cwdOf(sessionId)));
+  handle('git:checkout', ({ sessionId, branch }) => gitCheckout(cwdOf(sessionId), branch));
+  handle('git:branchesOverview', ({ sessionId }) => gitBranchesOverview(cwdOf(sessionId)));
+  handle('git:deleteBranch', ({ sessionId, branch, force }) => gitDeleteBranch(cwdOf(sessionId), branch, !!force));
+  // Only registered worktrees may be removed; `path` must match one git reports so the
+  // renderer cannot ask for an arbitrary directory deletion.
+  handle('git:removeWorktree', async ({ sessionId, path: p }) => {
+    const target = path.resolve(p);
+    const { worktrees } = await gitWorktrees(cwdOf(sessionId));
+    if (!worktrees.some((w) => w.path === target)) return { ok: false, error: 'Not a registered worktree' };
+    try {
+      await removeWorktree(cwdOf(sessionId), target);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errorMessage(e) };
+    }
+  });
+  handle('git:pruneWorktrees', ({ sessionId }) => gitPruneWorktrees(cwdOf(sessionId)));
+  handle('git:fetchPrune', ({ sessionId }) => gitFetchPrune(cwdOf(sessionId)));
 
   handle('fs:list', async ({ sessionId, relPath }) => {
     const root = cwdOf(sessionId);
@@ -315,23 +396,26 @@ export function registerIpc(deps: IpcDeps): void {
   });
   handle('fs:read', async ({ sessionId, path: p, maxBytes }) => {
     const root = cwdOf(sessionId);
-    const abs = path.isAbsolute(p) ? p : path.join(root, p);
+    if (isOutsideWorkspace(root, p, path)) return { content: '', truncated: false };
+    const abs = path.resolve(root, p);
     const buf = await fs.readFile(abs);
-    const limit = maxBytes ?? 400_000;
+    const limit = Math.min(Math.max(0, maxBytes ?? 400_000), 2_000_000);
     return { content: buf.subarray(0, limit).toString('utf8'), truncated: buf.length > limit };
   });
 
-  handle('shell:run', ({ sessionId, command }) => {
-    const cwd = cwdOf(sessionId);
-    const runId = shellRunner.run(sessionId, cwd, command, (rid, chunk, done, exitCode) => {
-      const env: SessionEventEnvelope = { sessionId, event: { type: 'shell.output', runId: rid, chunk, done, exitCode }, ts: Date.now() };
-      pushToRenderer(deps.getWindow(), PUSH_CHANNELS.sessionEvent, env);
-    });
-    return { runId };
-  });
-  handle('shell:kill', ({ runId }) => shellRunner.kill(runId));
-
-  app.on('before-quit', () => shellRunner.killAll());
+  handle('terminal:list', () => terminals.list());
+  handle('terminal:shells', () => terminals.shells());
+  handle('terminal:create', ({ sessionId, shell, cols, rows }) => terminals.create(sessionId, { shell, cols, rows }));
+  handle('terminal:attach', ({ terminalId, cols, rows }) => terminals.attach(terminalId, cols, rows));
+  handle('terminal:detach', ({ terminalId }) => terminals.detach(terminalId));
+  handle('terminal:input', ({ terminalId, data }) => terminals.input(terminalId, data));
+  handle('terminal:resize', ({ terminalId, cols, rows }) => terminals.resize(terminalId, cols, rows));
+  handle('terminal:ack', ({ terminalId, chars }) => terminals.ack(terminalId, chars));
+  handle('terminal:kill', ({ terminalId }) => terminals.kill(terminalId));
+  handle('terminal:restart', ({ terminalId }) => terminals.restart(terminalId));
+  handle('terminal:close', ({ terminalId }) => terminals.close(terminalId));
+  handle('terminal:clear', ({ terminalId }) => terminals.clear(terminalId));
+  handle('terminal:rename', ({ terminalId, title }) => terminals.rename(terminalId, title));
 }
 
 function fuzzyMatch(hay: string, needle: string): boolean {

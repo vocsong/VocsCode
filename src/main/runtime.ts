@@ -2,7 +2,7 @@ import { promises as fs, statSync } from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import type { AppSettings, HarnessAvailability, HarnessId } from '../shared/types';
-import { spawnTool } from './harness/spawn';
+import { killTree, spawnTool } from './harness/spawn';
 import { exists } from './util/fs';
 
 /**
@@ -63,34 +63,41 @@ export function runCapture(
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    let timeout: NodeJS.Timeout | undefined;
+    const settle = (r: { code: number | null; stdout: string; stderr: string }) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      resolve(r);
+    };
     let child;
     try {
       child = spawnTool(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env });
     } catch (e) {
-      resolve({ code: null, stdout: '', stderr: String(e) });
+      settle({ code: null, stdout: '', stderr: String(e) });
       return;
     }
     if (!child.stdout || !child.stderr || !child.stdin) {
-      resolve({ code: null, stdout: '', stderr: 'no stdio' });
+      settle({ code: null, stdout: '', stderr: 'no stdio' });
       return;
     }
-    const t = setTimeout(() => {
+    timeout = setTimeout(() => {
       try {
-        child.kill();
+        killTree(child);
       } catch {
         /* ignore */
       }
+      // Grandchildren can inherit the pipes and keep stdio open (cmd.exe-wrapped shims on
+      // Windows); settle anyway so callers never hang on a killed child.
+      settle({ code: null, stdout, stderr: `${stderr}\ntimed out after ${opts.timeoutMs ?? 15_000}ms` });
     }, opts.timeoutMs ?? 15_000);
     child.stdout.on('data', (d) => (stdout += d.toString()));
     child.stderr.on('data', (d) => (stderr += d.toString()));
-    child.on('error', (e) => {
-      clearTimeout(t);
-      resolve({ code: null, stdout, stderr: stderr + String(e) });
-    });
-    child.on('close', (code) => {
-      clearTimeout(t);
-      resolve({ code, stdout, stderr });
-    });
+    child.on('error', (e) => settle({ code: null, stdout, stderr: stderr + String(e) }));
+    child.on('close', (code) => settle({ code, stdout, stderr }));
+    // A dead pipe must not surface as an uncaught exception.
+    child.stdin.on('error', () => undefined);
     if (opts.input !== undefined) child.stdin.end(opts.input);
     else child.stdin.end();
   });
@@ -235,7 +242,8 @@ export class RuntimeResolver {
         const bin = this.resolve('pi');
         if (!bin) return { available: false, detail: 'pi not found on PATH.', installHint: 'npm install -g @earendil-works/pi-coding-agent' };
         const v = await runCapture(bin.path, ['--version'], { timeoutMs: 20_000 });
-        return { available: v.code === 0, version: v.stdout.trim() || undefined, binaryPath: bin.path, authenticated: 'unknown' };
+        const authenticated = await piHasCredentials();
+        return { available: v.code === 0, version: v.stdout.trim() || undefined, binaryPath: bin.path, authenticated };
       }
       case 'acp': {
         const dsh = this.resolve('dsh');
@@ -288,4 +296,25 @@ export async function claudeHasCredentials(): Promise<boolean> {
   const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
   const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(home, '.claude');
   return exists(path.join(configDir, '.credentials.json'));
+}
+
+/** pi keeps provider logins in <agent dir>/auth.json; PI_CODING_AGENT_DIR overrides ~/.pi/agent. */
+export async function piHasCredentials(): Promise<boolean> {
+  if (process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY) return true;
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+  const envDir = process.env.PI_CODING_AGENT_DIR?.trim();
+  const agentDir = envDir ? expandTilde(envDir, home) : path.join(home, '.pi', 'agent');
+  try {
+    const raw = await fs.readFile(path.join(agentDir, 'auth.json'), 'utf8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.values(parsed).some((v) => v != null && (typeof v !== 'object' || Object.keys(v as object).length > 0));
+  } catch {
+    return false;
+  }
+}
+
+function expandTilde(p: string, home: string): string {
+  if (p === '~') return home;
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(home, p.slice(2));
+  return p;
 }

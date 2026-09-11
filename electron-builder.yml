@@ -11,11 +11,17 @@ files:
 extraResources:
   - from: resources/pi
     to: pi
+  - from: resources/icons
+    to: icons
 asarUnpack:
   - node_modules/@anthropic-ai/**
   - node_modules/@openai/**
+  # node-pty's prebuilt N-API binaries (and ConPTY's DLLs) must be real files, not asar entries.
+  - node_modules/@lydell/**
+# Every native dependency ships prebuilt (@lydell/node-pty); nothing needs a compiler at install time.
 npmRebuild: false
 win:
+  icon: resources/icons/vocs-code.ico
   target:
     - target: nsis
       arch: [x64]
@@ -26,8 +32,10 @@ nsis:
   allowToChangeInstallationDirectory: true
   shortcutName: Vocs Code
 mac:
+  icon: resources/icons/vocs-code.icns
   target: [dmg]
   category: public.app-category.developer-tools
 linux:
+  icon: resources/icons/vocs-code.png
   target: [AppImage]
   category: Development

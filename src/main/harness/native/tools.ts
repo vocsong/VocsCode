@@ -73,7 +73,7 @@ export const NATIVE_TOOLS: NativeToolDef[] = [
       type: 'object',
       properties: {
         path: { type: 'string' },
-        old_string: { type: 'string' },
+        old_string: { type: 'string', minLength: 1 },
         new_string: { type: 'string' },
         replace_all: { type: 'boolean' }
       },
@@ -136,7 +136,20 @@ export interface ToolExecResult {
 }
 
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', '.venv', 'venv', '__pycache__', 'target', '.vocs-code']);
-const MAX_OUTPUT = 30_000;
+export const MAX_OUTPUT = 30_000;
+let tmpCounter = 0;
+
+/** Write to a sibling temp file, then rename over the target so a crash mid-write never truncates the original. */
+async function atomicWrite(file: string, content: string): Promise<void> {
+  const tmp = `${file}.tmp-${(tmpCounter = (tmpCounter + 1) % 1_000_000)}`;
+  try {
+    await fs.writeFile(tmp, content, 'utf8');
+    await fs.rename(tmp, file);
+  } catch (e) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw e;
+  }
+}
 
 export function resolveInCwd(cwd: string, p: string | undefined): string {
   if (!p) return cwd;
@@ -258,7 +271,7 @@ export async function writeFileTool(cwd: string, args: { path: string; content: 
     before = null;
   }
   await fs.mkdir(path.dirname(abs), { recursive: true });
-  await fs.writeFile(abs, args.content, 'utf8');
+  await atomicWrite(abs, args.content);
   const rel = path.relative(cwd, abs) || args.path;
   const diff = createTwoFilesPatch(rel, rel, before ?? '', args.content, '', '', { context: 3 });
   return { output: `Wrote ${args.content.length} characters to ${rel}.`, isError: false, changes: [{ path: rel, kind: before === null ? 'add' : 'update', diff }] };
@@ -277,6 +290,7 @@ export async function previewWrite(cwd: string, args: { path: string; content: s
 }
 
 export async function previewEdit(cwd: string, args: { path: string; old_string: string; new_string: string; replace_all?: boolean }): Promise<{ changes?: FileChange[]; error?: string; after?: string }> {
+  if (!args.old_string) return { error: 'old_string must not be empty.' };
   const abs = resolveInCwd(cwd, args.path);
   let before: string;
   try {
@@ -296,7 +310,7 @@ export async function editFileTool(cwd: string, args: { path: string; old_string
   const preview = await previewEdit(cwd, args);
   if (preview.error) return { output: preview.error, isError: true };
   const abs = resolveInCwd(cwd, args.path);
-  await fs.writeFile(abs, preview.after ?? '', 'utf8');
+  await atomicWrite(abs, preview.after ?? '');
   return { output: `Edited ${path.relative(cwd, abs) || args.path}.`, isError: false, changes: preview.changes };
 }
 
@@ -353,6 +367,8 @@ export async function grepTool(cwd: string, args: { pattern: string; path?: stri
     });
     return res;
   }
+  // Model-supplied regex runs on the main process; refuse absurd patterns that could stall it.
+  if (args.pattern.length > 500) return { output: 'Pattern is too long (max 500 characters).', isError: true };
   let re: RegExp;
   try {
     re = new RegExp(args.pattern, 'i');
