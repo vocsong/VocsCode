@@ -1,6 +1,6 @@
 /** Electron entry point: app lifecycle, window creation, logging, and the headless debug hooks documented in the README. */
 import { spawn } from 'node:child_process';
-import { readdirSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, shell } from 'electron';
@@ -215,13 +215,22 @@ function reconcileDevShortcut(appRoot: string): void {
     // No Start Menu directory; nothing to reconcile.
   }
   try {
-    shell.writeShortcutLink(path.join(menu, `${APP_NAME}.lnk`), 'replace', {
+    // iconIndex is required: writeShortcutLink silently drops `icon` without it, and a shortcut
+    // without an icon leaves the taskbar (which resolves the window's AUMID to this shortcut)
+    // showing a blank page icon.
+    const options = {
       target: process.execPath,
       cwd: appRoot,
       description: APP_NAME,
       icon: appIconPath(appRoot),
+      iconIndex: 0,
       appUserModelId: APP_ID
-    });
+    };
+    const lnk = path.join(menu, `${APP_NAME}.lnk`);
+    // 'replace' only overwrites an existing shortcut; fall back to 'create' on the first run.
+    if (!shell.writeShortcutLink(lnk, existsSync(lnk) ? 'replace' : 'create', options)) {
+      log('warn', 'could not write the dev Start Menu shortcut; taskbar icon may fall back to Electron\'s');
+    }
   } catch {
     // Best effort: without the shortcut the registry DisplayName above still names the taskbar menu.
   }
