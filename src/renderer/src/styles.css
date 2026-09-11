@@ -2353,6 +2353,15 @@ body.resizing {
   padding: 10px;
   overflow: auto;
   flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.file-preview .file-md {
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
 }
 .stat-grid {
   display: grid;
