@@ -13,11 +13,12 @@ const GH_SH = [
   'printf \'%s\\n\' "$*" >> "$GH_LOG"',
   'case "$1 $2" in',
   "  'pr create') echo 'https://example.com/acme/repo/pull/7' ;;",
+  "  'pr list')",
+  '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
+  '    echo "[{\\"number\\":7,\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"headRefName\\":\\"${GH_HEAD:-harness/test}\\",\\"baseRefName\\":\\"$GH_BASE\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"title\\":\\"Test PR\\"}]" ;;',
   '  \'pr view\')',
   '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
   '    echo "{\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"baseRefName\\":\\"$GH_BASE\\"}" ;;',
-  '  \'pr list\')',
-  '    echo "[{\\"number\\":7,\\"headRefName\\":\\"harness/test\\",\\"state\\":\\"OPEN\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"title\\":\\"Test PR\\"}]" ;;',
   'esac',
   'exit 0'
 ].join('\n');
@@ -28,8 +29,10 @@ const GH_CMD = [
   'if /i "%~1"=="pr" if /i "%~2"=="create" echo https://example.com/acme/repo/pull/7',
   'if /i "%~1"=="pr" if /i "%~2"=="view" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
   'if "%GH_STATE%"=="" set "GH_STATE=OPEN"',
+  'if "%GH_HEAD%"=="" set "GH_HEAD=harness/test"',
+  'if /i "%~1"=="pr" if /i "%~2"=="list" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
+  'if /i "%~1"=="pr" if /i "%~2"=="list" echo [{"number":7,"state":"%GH_STATE%","headRefName":"%GH_HEAD%","baseRefName":"%GH_BASE%","url":"https://example.com/acme/repo/pull/7","title":"Test PR"}]',
   'if /i "%~1"=="pr" if /i "%~2"=="view" echo {"state":"%GH_STATE%","url":"https://example.com/acme/repo/pull/7","baseRefName":"%GH_BASE%"}',
-  'if /i "%~1"=="pr" if /i "%~2"=="list" echo [{"number":7,"headRefName":"harness/test","state":"OPEN","url":"https://example.com/acme/repo/pull/7","title":"Test PR"}]',
   'exit /b 0'
 ].join('\r\n');
 
@@ -67,7 +70,7 @@ describe('git PR flow (/pr, /merge)', () => {
     await git(['commit', '-m', 'feature'], repo);
 
     oldPath = process.env.PATH ?? '';
-    oldEnv = { GH_LOG: process.env.GH_LOG, GH_BASE: process.env.GH_BASE, GH_STATE: process.env.GH_STATE, GH_VIEW_FAIL: process.env.GH_VIEW_FAIL };
+    oldEnv = { GH_LOG: process.env.GH_LOG, GH_BASE: process.env.GH_BASE, GH_STATE: process.env.GH_STATE, GH_HEAD: process.env.GH_HEAD, GH_VIEW_FAIL: process.env.GH_VIEW_FAIL };
     process.env.PATH = `${bin}${path.delimiter}${oldPath}`;
     process.env.GH_LOG = path.join(tmp, 'gh.log');
     await fs.writeFile(process.env.GH_LOG, '');
@@ -152,7 +155,7 @@ describe('git PR flow (/pr, /merge)', () => {
     expect(m.prs?.['feature/other']).toBeUndefined();
   });
 
-  it('merges the open PR and checks the requested base', async () => {
+  it('merges the open PR for the current branch and checks the requested base', async () => {
     const mismatch = await gitMergePr(repo, 'main');
     expect(mismatch.ok).toBe(false);
     expect(mismatch.output).toContain('targets develop, not main');
@@ -163,6 +166,34 @@ describe('git PR flow (/pr, /merge)', () => {
 
     const anyBase = await gitMergePr(repo);
     expect(anyBase.ok).toBe(true);
+  });
+
+  it('merges via the repo-wide fallback when the PR head is neither HEAD nor a given session branch', async () => {
+    // Simulate the agent pushing its own branch: the PR head exists as a local branch,
+    // but the session sits on another branch. No activity window, so the fallback applies.
+    await git(['branch', 'agent/own'], repo);
+    process.env.GH_HEAD = 'agent/own';
+    try {
+      const r = await gitMergePr(repo, 'develop', undefined, { branches: ['unrelated/session'] });
+      expect(r.ok).toBe(true);
+      expect(r.url).toBe('https://example.com/acme/repo/pull/7');
+      expect(r.output).toContain('head agent/own');
+    } finally {
+      if (oldEnv.GH_HEAD === undefined) delete process.env.GH_HEAD;
+      else process.env.GH_HEAD = oldEnv.GH_HEAD;
+    }
+  });
+
+  it('skips the fallback when the PR head branch is not local', async () => {
+    process.env.GH_HEAD = 'deleted/upstream-branch';
+    try {
+      const r = await gitMergePr(repo, 'develop');
+      expect(r.ok).toBe(false);
+      expect(r.output).toContain('No pull requests found');
+    } finally {
+      if (oldEnv.GH_HEAD === undefined) delete process.env.GH_HEAD;
+      else process.env.GH_HEAD = oldEnv.GH_HEAD;
+    }
   });
 
   it('treats an already-merged PR as a success, not an error', async () => {

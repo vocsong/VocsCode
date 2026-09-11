@@ -1,4 +1,5 @@
 /** Owns sessions: transcripts, approvals, goals, worktrees, and resuming a session after a restart. */
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
   ApprovalDecision,
@@ -21,7 +22,7 @@ import type {
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
-import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState } from './git';
+import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { emptyUsage } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
@@ -141,7 +142,15 @@ export class SessionManager {
     if (!this.gitStateCheckable(meta.status)) return;
     let state: BranchGitState;
     try {
-      state = await branchGitState(meta.cwd, meta.worktreeBranch);
+      const others = this.deps.store.list().filter((s) => s.id !== id && s.worktreeBranch).map((s) => s.worktreeBranch!);
+      const q: SessionPrQuery = {
+        prRefs: await this.sessionPrRefs(id),
+        excludeBranches: others,
+        extraRoots: await this.knownRepoRoots(id),
+        createdAfter: meta.createdAt,
+        updatedBefore: meta.updatedAt
+      };
+      state = await branchGitState(meta.cwd, meta.worktreeBranch, q);
     } catch (e) {
       this.deps.log('warn', `pr/merge status check failed: ${errorMessage(e)}`);
       return;
@@ -162,6 +171,43 @@ export class SessionManager {
   private gitStateCheckable(status: SessionStatus): boolean {
     return status === 'idle' || status === 'pr' || status === 'merged';
   }
+
+  /**
+   * PRs this session itself referenced (the agent's report links the PR) — the strongest
+   * session→PR signal, since agents may push their own branch instead of the session
+   * worktree branch, and may even work in a different repo than the session's cwd.
+   */
+  async sessionPrRefs(id: string): Promise<PrRef[]> {
+    let raw = '';
+    try {
+      raw = await fs.readFile(path.join(this.deps.store.sessionDir(id), 'transcript.jsonl'), 'utf8');
+    } catch {
+      return [];
+    }
+    const out: PrRef[] = [];
+    for (const m of raw.matchAll(/github\.com[/:]([\w.-]+)\/([\w.-]+?)\/pull\/(\d+)/g)) {
+      const ref: PrRef = { repo: `${m[1]}/${m[2]}`, number: Number(m[3]) };
+      if (!out.some((p) => p.repo === ref.repo && p.number === ref.number)) out.push(ref);
+    }
+    return out;
+  }
+
+  /** Git roots of other sessions' repos (cached per cwd), for resolving transcript PRs from a foreign repo. */
+  async knownRepoRoots(excludeId: string): Promise<string[]> {
+    const roots = new Set<string>();
+    for (const s of this.deps.store.list()) {
+      if (s.id === excludeId || s.archived) continue;
+      let root = this.repoRootCache.get(s.cwd);
+      if (root === undefined) {
+        root = (await gitRoot(s.cwd).catch(() => null)) ?? '';
+        this.repoRootCache.set(s.cwd, root);
+      }
+      if (root) roots.add(root);
+    }
+    return [...roots];
+  }
+
+  private repoRootCache = new Map<string, string>();
 
   /** Persists every debounced meta update immediately (used on quit so trailing edits are not lost). */
   async flushPendingPersists(): Promise<void> {

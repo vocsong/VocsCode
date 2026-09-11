@@ -8,7 +8,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitMergePr, gitPruneWorktrees, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitMergePr, gitPruneWorktrees, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
@@ -319,7 +319,21 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));
   // Local /pr and /merge run outside a turn, so nothing else triggers the sidebar's PR state check.
   // The outcome is recorded as a persistent transcript note so it survives a restart (local-only
-  // info lines from the renderer do not).
+  // info lines from the renderer do not). PRs opened from another session's agent branch must
+  // not be attributed to this one; transcript PR references, the other sessions' branch names
+  // and the activity window keep the fallback honest.
+  const prQueryOf = async (sessionId: string): Promise<SessionPrQuery> => {
+    const m = sessions.get(sessionId);
+    if (!m) return {};
+    return {
+      prRefs: await sessions.sessionPrRefs(sessionId),
+      branches: m.worktreeBranch ? [m.worktreeBranch] : [],
+      excludeBranches: sessions.list().filter((s) => s.id !== sessionId && s.worktreeBranch).map((s) => s.worktreeBranch!),
+      extraRoots: await sessions.knownRepoRoots(sessionId),
+      createdAfter: m.createdAt,
+      updatedBefore: m.updatedAt
+    };
+  };
   handle('git:pr', async ({ sessionId, base, head }) => {
     const r = await gitCreatePr(cwdOf(sessionId), base, head);
     sessions.note(sessionId, r.ok ? `PR opened${head ? ` for ${head}` : ''}: ${r.url ?? ''}`.trim() : `PR failed: ${r.output ?? 'unknown error'}`, r.ok ? 'info' : 'error');
@@ -327,7 +341,8 @@ export function registerIpc(deps: IpcDeps): void {
     return r;
   });
   handle('git:merge', async ({ sessionId, base, head }) => {
-    const r = await gitMergePr(cwdOf(sessionId), base, head);
+    // An explicit head branch pins the PR (Branches panel); otherwise the session's own is resolved.
+    const r = await gitMergePr(cwdOf(sessionId), base, head, head ? {} : await prQueryOf(sessionId));
     sessions.note(sessionId, r.ok ? `Merged${head ? ` ${head}` : ''}: ${r.url ?? 'PR merged'}` : r.output ?? 'Failed to merge the PR', r.ok ? 'info' : 'error');
     if (r.ok) sessions.refreshGitState(sessionId);
     return r;
