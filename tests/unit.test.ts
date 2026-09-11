@@ -590,6 +590,12 @@ describe('git branch/worktree plumbing', () => {
     expect((await gitBranches(repo)).branches.map((b) => b.name)).toContain('wtcycle');
     await restoreWorktree(repo, wt2, 'wtcycle');
     expect((await gitWorktrees(repo)).worktrees.map((w) => w.branch)).toContain('wtcycle');
+    // A folder deleted outside the app counts as already removed: removal prunes, not throws.
+    await fs.rm(wt2, { recursive: true, force: true });
+    await removeWorktree(repo, wt2, { force: false });
+    // Unarchive still recreates the worktree over the stale registration.
+    await restoreWorktree(repo, wt2, 'wtcycle');
+    expect((await gitWorktrees(repo)).worktrees.map((w) => w.branch)).toContain('wtcycle');
     // A branch with its worktree still checked out cannot be deleted; remove the worktree first.
     await removeWorktree(repo, wt2, { force: false });
     g('branch', '-D', 'wtcycle');
