@@ -205,14 +205,14 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
   const byHarness = rollup((s) => ({ key: s.harness, label: s.harness }));
   const byModel = rollup((s) => (s.model ? { key: `${s.provider ?? ''}/${s.model}`, label: s.model } : null));
   const byProject = rollup((s) => ({ key: s.projectRoot, label: s.projectRoot }));
-  // Effective rates per model: blended $/1k tokens across input, output and cache, and $/call where
+  // Effective rates per model: blended $/M tokens across input, output and cache, and $/call where
   // one call is one model turn. Rates stay undefined while the denominator was never measured.
   const modelRates: ModelRateRow[] = byModel.map((b) => {
     const tokens = b.usage.inputTokens + b.usage.outputTokens + b.usage.cacheReadTokens + b.usage.cacheWriteTokens;
     return {
       key: b.key,
       label: b.label,
-      usdPerKToken: tokens > 0 ? (b.usage.costUsd / tokens) * 1000 : undefined,
+      usdPerMTok: tokens > 0 ? (b.usage.costUsd / tokens) * 1_000_000 : undefined,
       usdPerCall: b.usage.turns > 0 ? b.usage.costUsd / b.usage.turns : undefined,
       costUsd: b.usage.costUsd,
       tokens,

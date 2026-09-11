@@ -275,13 +275,13 @@ function Breakdown({ title, buckets, formatLabel }: { title: string; buckets: Us
   );
 }
 
-/** $ per 1k tokens and $ per call for each model; rates show — while their denominator was never measured. */
+/** $ per million tokens and $ per call for each model; rates show — while their denominator was never measured. */
 function ModelRates({ rates }: { rates: AnalyticsSummary['modelRates'] }) {
   if (rates.length === 0) return null;
   return (
     <>
       <h4>Model rates</h4>
-      <div className="muted small">All time · one call = one model turn · $/1k tokens blends input, output and cache</div>
+      <div className="muted small">All time · one call = one model turn · $/M tokens blends input, output and cache</div>
       <div className="session-usage-list">
         {rates.map((r) => (
           <div key={r.key} className="session-usage-row tool-usage-row" title={r.key}>
@@ -291,7 +291,7 @@ function ModelRates({ rates }: { rates: AnalyticsSummary['modelRates'] }) {
                 {fmtCost(r.costUsd)} · {fmtTokens(r.tokens)} tokens · {r.calls} call{r.calls === 1 ? '' : 's'}
               </span>
             </div>
-            <span className="muted small mono">{r.usdPerKToken != null ? `${fmtUnit(r.usdPerKToken)}/1k tok` : '—'}</span>
+            <span className="muted small mono">{r.usdPerMTok != null ? `${fmtUnit(r.usdPerMTok)}/M tok` : '—'}</span>
             <span className="muted small mono">{r.usdPerCall != null ? `${fmtUnit(r.usdPerCall)}/call` : '—'}</span>
           </div>
         ))}
@@ -300,7 +300,7 @@ function ModelRates({ rates }: { rates: AnalyticsSummary['modelRates'] }) {
   );
 }
 
-/** Rates carry more decimals than spend: $0.0020 per 1k tokens must not round to $0.00. */
+/** Rates carry decimals so cheap models stay readable: $0.10 per M tokens must not round to $0. */
 function fmtUnit(usd: number): string {
   return `$${usd.toFixed(usd < 0.01 ? 4 : usd < 1 ? 3 : 2)}`;
 }

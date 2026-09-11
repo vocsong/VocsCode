@@ -146,17 +146,17 @@ describe('summarize', () => {
     const opus = s.modelRates.find((r) => r.key === 'anthropic/opus')!;
     expect(opus.tokens).toBe(200_000);
     expect(opus.calls).toBe(4);
-    expect(opus.usdPerKToken).toBeCloseTo(2 / 200);
+    expect(opus.usdPerMTok).toBeCloseTo(2 / 200 * 1000);
     expect(opus.usdPerCall).toBeCloseTo(0.5);
     const chat = s.modelRates.find((r) => r.key === 'deepseek/chat')!;
-    expect(chat.usdPerKToken).toBeCloseTo(0.1 / 400);
+    expect(chat.usdPerMTok).toBeCloseTo(0.1 / 400 * 1000);
     expect(chat.usdPerCall).toBeCloseTo(0.1);
-    // Tokens never measured: no $/1k token rate. Turns never measured: no $/call rate.
+    // Tokens never measured: no $/M token rate. Turns never measured: no $/call rate.
     const llama = s.modelRates.find((r) => r.key === 'local/llama')!;
-    expect(llama.usdPerKToken).toBeUndefined();
+    expect(llama.usdPerMTok).toBeUndefined();
     expect(llama.usdPerCall).toBeCloseTo(0.25);
     const embed = s.modelRates.find((r) => r.key === 'local/embed')!;
-    expect(embed.usdPerKToken).toBeCloseTo(0.2);
+    expect(embed.usdPerMTok).toBeCloseTo(200);
     expect(embed.usdPerCall).toBeUndefined();
   });
 
