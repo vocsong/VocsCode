@@ -12,6 +12,7 @@ import type {
   UsageBucket,
   UsageDay,
   UsageSessionRecord,
+  UsageSpeed,
   UsageTotals
 } from '../shared/types';
 import { readJson, writeJson } from './util/fs';
@@ -32,12 +33,41 @@ interface AnalyticsFile {
 
 const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, files: {} };
 
-const DAY_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns', 'durationMs', 'toolCalls'] as const;
+const DAY_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns', 'durationMs', 'toolCalls', 'speedTokens', 'speedMs'] as const;
 
 const EMPTY_USAGE: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
 
 export function emptyDay(): UsageDay {
-  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0, durationMs: 0, toolCalls: 0 };
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0, durationMs: 0, toolCalls: 0, speedTokens: 0, speedMs: 0 };
+}
+
+export function emptySpeed(): UsageSpeed {
+  return { tokens: 0, ms: 0 };
+}
+
+/**
+ * Output speed sample of one finished turn: its output tokens paired with its wall time. Turns
+ * missing either (ACP agents report no tokens; interrupted turns are cut short) contribute nothing,
+ * so averages are only ever built from complete pairs.
+ */
+export function turnSpeed(turn: Extract<TranscriptItem, { kind: 'turn' }>): UsageSpeed | null {
+  if (turn.status !== 'completed') return null;
+  const tokens = turn.usage?.outputTokens ?? 0;
+  const ms = turn.durationMs ?? 0;
+  if (tokens <= 0 || ms <= 0) return null;
+  return { tokens, ms };
+}
+
+/** Tokens per second for a speed sample, or null when nothing was sampled. */
+export function tokensPerSecond(speed: UsageSpeed | undefined): number | null {
+  if (!speed || speed.ms <= 0 || speed.tokens <= 0) return null;
+  return (speed.tokens / speed.ms) * 1000;
+}
+
+function addSpeed(into: UsageSpeed, from: UsageSpeed | undefined): void {
+  if (!from) return;
+  into.tokens += from.tokens;
+  into.ms += from.ms;
 }
 
 export function emptyToolUsage(): ToolUsage {
@@ -83,7 +113,7 @@ export function addTotals(into: UsageTotals, from: UsageTotals): void {
   into.turns += from.turns;
 }
 
-function snapshotSession(meta: SessionMeta, toolCalls = 0): UsageSessionRecord {
+function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSessionRecord {
   return {
     id: meta.id,
     title: meta.title,
@@ -94,7 +124,8 @@ function snapshotSession(meta: SessionMeta, toolCalls = 0): UsageSessionRecord {
     createdAt: meta.createdAt,
     updatedAt: meta.updatedAt,
     usage: { ...meta.usage },
-    toolCalls
+    toolCalls: prev?.toolCalls ?? 0,
+    speed: prev?.speed ? { ...prev.speed } : emptySpeed()
   };
 }
 
@@ -160,9 +191,10 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     for (const s of sessions) {
       const k = key(s);
       if (!k) continue;
-      const b = map.get(k.key) ?? { key: k.key, label: k.label, usage: { ...EMPTY_USAGE }, toolCalls: 0, sessions: 0 };
+      const b = map.get(k.key) ?? { key: k.key, label: k.label, usage: { ...EMPTY_USAGE }, toolCalls: 0, sessions: 0, speed: emptySpeed() };
       addTotals(b.usage, s.usage);
       b.toolCalls += s.toolCalls;
+      addSpeed(b.speed, s.speed);
       b.sessions += 1;
       map.set(k.key, b);
     }
@@ -192,9 +224,16 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
 
   const sortedSessions = [...sessions].sort((a, b) => b.usage.costUsd - a.usage.costUsd || b.usage.turns - a.usage.turns || b.updatedAt - a.updatedAt);
   const dayList = Object.keys(dayMap).sort();
+  // Speed samples are add-only in both places; day buckets also cover sessions recorded before
+  // per-session speed existed, so they are the all-time source.
+  const speed = Object.values(dayMap).reduce<UsageSpeed>((acc, d) => {
+    addSpeed(acc, { tokens: d.speedTokens, ms: d.speedMs });
+    return acc;
+  }, emptySpeed());
 
   return {
     totals,
+    speed,
     days,
     byHarness,
     byModel,
@@ -242,11 +281,13 @@ export class AnalyticsStore {
       tools: stored?.tools && typeof stored.tools === 'object' ? stored.tools : {},
       files: stored?.files && typeof stored.files === 'object' ? stored.files : {}
     };
+    // Fields added after a file was written (speed samples) load as zero rather than NaN.
+    for (const day of Object.values(this.data.days)) for (const f of DAY_FIELDS) if (typeof day[f] !== 'number') day[f] = 0;
     let backfilled = 0;
     for (const meta of existing) {
       if (this.data.recorded[meta.id]) {
         // Still refresh the snapshot: the title/model may have changed since the last write.
-        this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]?.toolCalls ?? 0);
+        this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]);
         continue;
       }
       this.data.recorded[meta.id] = { ...meta.usage };
@@ -284,15 +325,26 @@ export class AnalyticsStore {
     const prev = this.data.recorded[meta.id];
     const delta = usageDelta(prev ?? { ...EMPTY_USAGE }, totals);
     this.data.recorded[meta.id] = { ...totals };
-    this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]?.toolCalls ?? 0);
+    this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]);
     addDay(this.dayFor(dayKey(now)), delta);
     this.scheduleWrite();
   }
 
-  /** Records a completed turn's wall time (turn counts come through the usage deltas). */
-  recordTurn(meta: SessionMeta, durationMs: number, now = Date.now()): void {
-    if (!durationMs || durationMs <= 0) return;
-    addDay(this.dayFor(dayKey(now)), { durationMs });
+  /**
+   * Records a completed turn's wall time and, when the turn also reported output tokens, its
+   * output-speed sample (turn counts come through the usage deltas).
+   */
+  recordTurn(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>, now = Date.now()): void {
+    if (turn.status !== 'completed') return;
+    const durationMs = turn.durationMs ?? 0;
+    const speed = turnSpeed(turn);
+    if (durationMs <= 0 && !speed) return;
+    const day = this.dayFor(dayKey(now));
+    addDay(day, { durationMs, speedTokens: speed?.tokens, speedMs: speed?.ms });
+    if (speed) {
+      const session = (this.data.sessions[meta.id] ??= snapshotSession(meta));
+      addSpeed((session.speed ??= emptySpeed()), speed);
+    }
     this.scheduleWrite();
   }
 
@@ -316,7 +368,7 @@ export class AnalyticsStore {
 
   /** Upserts the session snapshot without touching usage (creation, rename, model switch). */
   touchSession(meta: SessionMeta): void {
-    this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]?.toolCalls ?? 0);
+    this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]);
     this.scheduleWrite();
   }
 

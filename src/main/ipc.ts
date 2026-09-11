@@ -8,7 +8,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitMergePr, gitPruneWorktrees, gitRevertFile, gitStageAll, gitSummary, gitWorktrees, removeWorktree } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
@@ -312,19 +312,42 @@ export function registerIpc(deps: IpcDeps): void {
     if (!m) throw new Error('Session not found');
     return m.cwd;
   };
+  handle('git:folderBranch', ({ projectRoot }) => {
+    const known = settings.get().folders.includes(projectRoot) || sessions.list().some((s) => s.config.projectRoot === projectRoot);
+    return known ? gitFolderBranch(projectRoot) : {};
+  });
   handle('git:summary', ({ sessionId }) => gitSummary(cwdOf(sessionId)));
   handle('git:diff', async ({ sessionId, path: p, staged }) => ({ diff: await gitDiff(cwdOf(sessionId), p, staged) }));
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
   handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));
   // Local /pr and /merge run outside a turn, so nothing else triggers the sidebar's PR state check.
-  handle('git:pr', async ({ sessionId, base }) => {
-    const r = await gitCreatePr(cwdOf(sessionId), base);
+  // The outcome is recorded as a persistent transcript note so it survives a restart (local-only
+  // info lines from the renderer do not). PRs opened from another session's agent branch must
+  // not be attributed to this one; transcript PR references, the other sessions' branch names
+  // and the activity window keep the fallback honest.
+  const prQueryOf = async (sessionId: string): Promise<SessionPrQuery> => {
+    const m = sessions.get(sessionId);
+    if (!m) return {};
+    return {
+      prRefs: await sessions.sessionPrRefs(sessionId),
+      branches: m.worktreeBranch ? [m.worktreeBranch] : [],
+      excludeBranches: sessions.list().filter((s) => s.id !== sessionId && s.worktreeBranch).map((s) => s.worktreeBranch!),
+      extraRoots: await sessions.knownRepoRoots(sessionId),
+      createdAfter: m.createdAt,
+      updatedBefore: m.updatedAt
+    };
+  };
+  handle('git:pr', async ({ sessionId, base, head }) => {
+    const r = await gitCreatePr(cwdOf(sessionId), base, head);
+    sessions.note(sessionId, r.ok ? `PR opened${head ? ` for ${head}` : ''}: ${r.url ?? ''}`.trim() : `PR failed: ${r.output ?? 'unknown error'}`, r.ok ? 'info' : 'error');
     if (r.ok) sessions.refreshGitState(sessionId);
     return r;
   });
-  handle('git:merge', async ({ sessionId, base }) => {
-    const r = await gitMergePr(cwdOf(sessionId), base);
+  handle('git:merge', async ({ sessionId, base, head }) => {
+    // An explicit head branch pins the PR (Branches panel); otherwise the session's own is resolved.
+    const r = await gitMergePr(cwdOf(sessionId), base, head, head ? {} : await prQueryOf(sessionId));
+    sessions.note(sessionId, r.ok ? `Merged${head ? ` ${head}` : ''}: ${r.url ?? 'PR merged'}` : r.output ?? 'Failed to merge the PR', r.ok ? 'info' : 'error');
     if (r.ok) sessions.refreshGitState(sessionId);
     return r;
   });
@@ -333,6 +356,7 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:checkout', ({ sessionId, branch }) => gitCheckout(cwdOf(sessionId), branch));
   handle('git:branchesOverview', ({ sessionId }) => gitBranchesOverview(cwdOf(sessionId)));
   handle('git:deleteBranch', ({ sessionId, branch, force }) => gitDeleteBranch(cwdOf(sessionId), branch, !!force));
+  handle('git:updateBranch', ({ sessionId, branch }) => gitUpdateBranch(cwdOf(sessionId), branch));
   // Only registered worktrees may be removed; `path` must match one git reports so the
   // renderer cannot ask for an arbitrary directory deletion.
   handle('git:removeWorktree', async ({ sessionId, path: p }) => {
@@ -348,6 +372,7 @@ export function registerIpc(deps: IpcDeps): void {
   });
   handle('git:pruneWorktrees', ({ sessionId }) => gitPruneWorktrees(cwdOf(sessionId)));
   handle('git:fetchPrune', ({ sessionId }) => gitFetchPrune(cwdOf(sessionId)));
+  handle('git:pullRequests', ({ sessionId }) => gitPullRequests(cwdOf(sessionId)));
 
   handle('fs:list', async ({ sessionId, relPath }) => {
     const root = cwdOf(sessionId);

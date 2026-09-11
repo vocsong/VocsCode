@@ -58,7 +58,7 @@ export function Header({ session }: { session: SessionMeta }) {
           <Icon name="folder" size={12} /> {basename(session.cwd)}
         </button>
         {branch && (
-          <button type="button" className="header-path" title={`Branch ${branch} — open the branches panel`} onClick={() => setPanelTab('branches')}>
+          <button type="button" className="header-path" title={`Branch ${branch} — open the Git panel`} onClick={() => setPanelTab('branches')}>
             <Icon name="branch" size={12} /> {branch}
           </button>
         )}
