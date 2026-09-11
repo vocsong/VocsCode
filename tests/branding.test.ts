@@ -37,4 +37,15 @@ describe('application branding', () => {
     expect(ico.readUInt16LE(4)).toBeGreaterThanOrEqual(5);
     expect(icns.subarray(0, 4).toString('ascii')).toBe('icns');
   });
+
+  it('writes the dev Start Menu shortcut with an icon and a first-run create fallback', () => {
+    // shell.writeShortcutLink silently drops `icon` unless iconIndex is set, and 'replace'
+    // fails when the shortcut does not exist yet — either way the taskbar loses its icon.
+    const source = readFileSync(path.join(root, 'src', 'main', 'index.ts'), 'utf8');
+    const fn = source.match(/function reconcileDevShortcut[\s\S]*?\n\}/);
+    expect(fn, 'reconcileDevShortcut must exist').not.toBeNull();
+    expect(fn![0]).toContain('icon: appIconPath(appRoot)');
+    expect(fn![0]).toContain('iconIndex: 0');
+    expect(fn![0]).toContain("existsSync(lnk) ? 'replace' : 'create'");
+  });
 });
