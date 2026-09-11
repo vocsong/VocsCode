@@ -352,6 +352,7 @@ export class ClaudeAdapter implements HarnessAdapter {
         return;
       }
       case 'stream_event': {
+        this.markTurnStarted();
         if (msg.parent_tool_use_id) return; // nested subagent streams are summarized via tool items
         const ev = msg.event as { type: string; index?: number; content_block?: ContentBlockLike; delta?: { type: string; text?: string; thinking?: string } };
         if (ev.type === 'message_start') this.ensureAssistant();
@@ -368,6 +369,7 @@ export class ClaudeAdapter implements HarnessAdapter {
         return;
       }
       case 'assistant': {
+        this.markTurnStarted();
         const content = (msg.message.content ?? []) as ContentBlockLike[];
         for (const block of content) {
           if (block.type === 'text' && !msg.parent_tool_use_id) {
@@ -483,6 +485,15 @@ export class ClaudeAdapter implements HarnessAdapter {
     this.currentAssistant = null;
     if (!a.text && !a.thinking) return;
     this.ctx.emit({ type: 'item.upsert', item: { id: a.id, kind: 'assistant', ts: Date.now(), text: a.text, thinking: a.thinking || undefined, model, streaming: false } });
+  }
+
+  /** The CLI can begin a turn on its own — queued/steered messages (e.g. right after an interrupt)
+   *  run without a send() call — so turn start must also be observed from the message stream. */
+  private markTurnStarted(): void {
+    if (this._busy) return;
+    this._busy = true;
+    this.turnStartedAt = Date.now();
+    this.ctx.emit({ type: 'status', status: 'running' });
   }
 
   private info(text: string, level: 'info' | 'warn' | 'error' = 'info'): void {
