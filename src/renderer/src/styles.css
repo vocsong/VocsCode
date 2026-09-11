@@ -949,6 +949,25 @@ h4 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.project-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 45%;
+  color: var(--fg-muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.project-branch svg {
+  flex-shrink: 0;
+}
+.project-branch > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .folder-style-picker {
   padding: 6px;
 }

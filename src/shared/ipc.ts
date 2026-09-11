@@ -99,6 +99,7 @@ export interface IpcContract {
 
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 
+  'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   'git:summary': [{ sessionId: string }, GitSummary];
   'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string }];
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
