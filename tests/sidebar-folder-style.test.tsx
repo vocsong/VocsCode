@@ -3,8 +3,14 @@
 /** @vitest-environment jsdom */
 import { describe, expect, it, vi } from 'vitest';
 
-// Stub the preload bridge before any renderer module runs.
-const invokeMock = vi.fn().mockResolvedValue({});
+// Stub the preload bridge before any renderer module runs; settings:update writes back to the
+// store so post-pick assertions see the new folderStyles.
+const invokeMock = vi.fn().mockImplementation((_channel: string, args?: { folderStyles?: Record<string, { color?: string; icon?: string }> }) => {
+  if (args?.folderStyles) {
+    useStore.setState({ settings: { ...settings, folderStyles: args.folderStyles } });
+  }
+  return Promise.resolve({});
+});
 (window as unknown as { harness: unknown }).harness = {
   platform: 'win32',
   invoke: invokeMock,
@@ -40,5 +46,13 @@ describe('sidebar folder style picker', () => {
     expect(invokeMock).toHaveBeenCalledWith('settings:update', expect.objectContaining({
       folderStyles: { 'G:/proj/a': expect.objectContaining({ color: expect.any(String) }) }
     }));
+
+    // The picker must expose the full 50-icon / 24-color palette.
+    expect(document.querySelectorAll('.picker-opt')).toHaveLength(50);
+    expect(document.querySelectorAll('.picker-swatch')).toHaveLength(24);
+
+    // A colored folder name gets the visibility shadow class.
+    fireEvent.click(document.querySelectorAll('.picker-swatch')[3]);
+    expect(document.querySelector('.project-title.colored')).toBeTruthy();
   });
 });
