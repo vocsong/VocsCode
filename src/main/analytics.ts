@@ -11,12 +11,16 @@ import type {
   ToolUsageRow,
   TranscriptItem,
   UsageBucket,
+  UsageCounters,
   UsageDay,
   UsageSessionRecord,
   UsageSpeed,
   UsageTotals
 } from '../shared/types';
+import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage } from '../shared/usage-rollup';
 import { readJson, writeJson } from './util/fs';
+
+export { emptyFileUsage, emptyToolUsage };
 
 interface AnalyticsFile {
   version: 1;
@@ -34,12 +38,10 @@ interface AnalyticsFile {
 
 const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, files: {} };
 
-const DAY_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns', 'durationMs', 'toolCalls', 'speedTokens', 'speedMs'] as const;
-
 const EMPTY_USAGE: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
 
 export function emptyDay(): UsageDay {
-  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0, durationMs: 0, toolCalls: 0, speedTokens: 0, speedMs: 0 };
+  return emptyCounters();
 }
 
 export function emptySpeed(): UsageSpeed {
@@ -71,14 +73,6 @@ function addSpeed(into: UsageSpeed, from: UsageSpeed | undefined): void {
   into.ms += from.ms;
 }
 
-export function emptyToolUsage(): ToolUsage {
-  return { calls: 0, errors: 0, declined: 0, durationMs: 0 };
-}
-
-export function emptyFileUsage(): FileUsage {
-  return { adds: 0, updates: 0, deletes: 0, renames: 0 };
-}
-
 /** UTC calendar day for a timestamp, e.g. '2025-06-07'. */
 export function dayKey(ts: number): string {
   return new Date(ts).toISOString().slice(0, 10);
@@ -86,10 +80,7 @@ export function dayKey(ts: number): string {
 
 /** Adds `delta` into `day` in place; unknown fields are ignored so old files load cleanly. */
 export function addDay(day: UsageDay, delta: Partial<UsageDay>): void {
-  for (const f of DAY_FIELDS) {
-    const v = delta[f];
-    if (typeof v === 'number' && v > 0) day[f] += v;
-  }
+  addCounters(day, delta);
 }
 
 /**
@@ -114,6 +105,27 @@ export function addTotals(into: UsageTotals, from: UsageTotals): void {
   into.turns += from.turns;
 }
 
+/** The three attribution dimensions of a usage record; sessions carry all of them. */
+interface Attribution {
+  id: string;
+  harness: string;
+  provider?: string;
+  model?: string;
+  projectRoot: string;
+}
+
+function attributionOf(meta: SessionMeta): Attribution {
+  return { id: meta.id, harness: meta.config.harness, provider: meta.activeModel?.provider, model: meta.activeModel?.model, projectRoot: meta.config.projectRoot };
+}
+
+/** Adds `delta` to the day's harness, model and project slices for the session that produced it. */
+export function attribute(day: UsageDay, who: Attribution, delta: Partial<UsageCounters>): void {
+  const by = (day.by ??= emptyDimensions());
+  addSlice(by.harness, who.harness, who.harness, delta, who.id);
+  if (who.model) addSlice(by.model, `${who.provider ?? ''}/${who.model}`, who.model, delta, who.id);
+  addSlice(by.project, who.projectRoot, who.projectRoot, delta, who.id);
+}
+
 function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSessionRecord {
   return {
     id: meta.id,
@@ -128,20 +140,6 @@ function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSes
     toolCalls: prev?.toolCalls ?? 0,
     speed: prev?.speed ? { ...prev.speed } : emptySpeed()
   };
-}
-
-function addToolUsage(into: ToolUsage, from: ToolUsage): void {
-  into.calls += from.calls;
-  into.errors += from.errors;
-  into.declined += from.declined;
-  into.durationMs += from.durationMs;
-}
-
-function addFileUsage(into: FileUsage, from: FileUsage): void {
-  into.adds += from.adds;
-  into.updates += from.updates;
-  into.deletes += from.deletes;
-  into.renames += from.renames;
 }
 
 /** Collapses a tool transcript item into a single call record; running items yield nothing yet. */
@@ -181,11 +179,19 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     turns: Math.max(sessionTotals.turns, dayTotals.turns)
   };
 
+  // The range is the last `dayLimit` calendar days including today: the days after the cutoff day.
   const cutoff = dayLimit > 0 ? dayKey(now - dayLimit * 86_400_000) : '';
   const days: AnalyticsDayPoint[] = Object.entries(dayMap)
-    .filter(([date]) => !cutoff || date >= cutoff)
+    .filter(([date]) => !cutoff || date > cutoff)
     .map(([date, usage]) => ({ date, usage }))
     .sort((a, b) => a.date.localeCompare(b.date));
+  // The window of equal length just before the range, so the dashboard can show period-over-period deltas.
+  let previous: UsageCounters | undefined;
+  if (dayLimit > 0) {
+    const prevCutoff = dayKey(now - 2 * dayLimit * 86_400_000);
+    previous = emptyCounters();
+    for (const [date, usage] of Object.entries(dayMap)) if (date > prevCutoff && date <= cutoff) addCounters(previous, usage);
+  }
 
   const rollup = (key: (s: UsageSessionRecord) => { key: string; label: string } | null): UsageBucket[] => {
     const map = new Map<string, UsageBucket>();
@@ -250,6 +256,7 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     totals,
     speed,
     days,
+    previous,
     byHarness,
     byModel,
     byProject,
@@ -297,8 +304,12 @@ export class AnalyticsStore {
       tools: stored?.tools && typeof stored.tools === 'object' ? stored.tools : {},
       files: stored?.files && typeof stored.files === 'object' ? stored.files : {}
     };
-    // Fields added after a file was written (speed samples) load as zero rather than NaN.
-    for (const day of Object.values(this.data.days)) for (const f of DAY_FIELDS) if (typeof day[f] !== 'number') day[f] = 0;
+    // Fields added after a file was written (speed samples, dimension slices) load as zero rather than NaN.
+    for (const day of Object.values(this.data.days)) {
+      for (const f of COUNTER_FIELDS) if (typeof day[f] !== 'number') day[f] = 0;
+      if (day.by !== undefined && (typeof day.by !== 'object' || day.by === null)) delete day.by;
+      if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
+    }
     let backfilled = 0;
     for (const meta of existing) {
       if (this.data.recorded[meta.id]) {
@@ -310,7 +321,9 @@ export class AnalyticsStore {
       this.data.sessions[meta.id] = snapshotSession(meta);
       if (meta.usage.costUsd > 0 || meta.usage.turns > 0) {
         const day = this.dayFor(dayKey(meta.updatedAt));
-        addDay(day, usageDelta({ ...EMPTY_USAGE }, meta.usage));
+        const delta = usageDelta({ ...EMPTY_USAGE }, meta.usage);
+        addDay(day, delta);
+        attribute(day, attributionOf(meta), delta);
         backfilled++;
       }
       if (readTranscript) await this.backfillTranscript(meta.id, meta.updatedAt, readTranscript);
@@ -342,7 +355,9 @@ export class AnalyticsStore {
     const delta = usageDelta(prev ?? { ...EMPTY_USAGE }, totals);
     this.data.recorded[meta.id] = { ...totals };
     this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]);
-    addDay(this.dayFor(dayKey(now)), delta);
+    const day = this.dayFor(dayKey(now));
+    addDay(day, delta);
+    attribute(day, attributionOf(meta), delta);
     this.scheduleWrite();
   }
 
@@ -356,7 +371,9 @@ export class AnalyticsStore {
     const speed = turnSpeed(turn);
     if (durationMs <= 0 && !speed) return;
     const day = this.dayFor(dayKey(now));
-    addDay(day, { durationMs, speedTokens: speed?.tokens, speedMs: speed?.ms });
+    const delta = { durationMs, speedTokens: speed?.tokens, speedMs: speed?.ms };
+    addDay(day, delta);
+    attribute(day, attributionOf(meta), delta);
     if (speed) {
       const session = (this.data.sessions[meta.id] ??= snapshotSession(meta));
       addSpeed((session.speed ??= emptySpeed()), speed);
@@ -378,7 +395,13 @@ export class AnalyticsStore {
     }
     const session = this.data.sessions[sessionId];
     if (session) session.toolCalls += 1;
-    addDay(this.dayFor(dayKey(now)), { toolCalls: 1 });
+    const day = this.dayFor(dayKey(now));
+    addDay(day, { toolCalls: 1 });
+    const by = (day.by ??= emptyDimensions());
+    addToolUsage((by.tool[item.name] ??= emptyToolUsage()), parsed.usage);
+    for (const [p, u] of Object.entries(parsed.changes)) addFileUsage((by.file[p] ??= emptyFileUsage()), u);
+    // The snapshot knows which harness, model and project the call belongs to.
+    if (session) attribute(day, { id: session.id, harness: session.harness, provider: session.provider, model: session.model, projectRoot: session.projectRoot }, { toolCalls: 1 });
     this.scheduleWrite();
   }
 
@@ -409,6 +432,7 @@ export class AnalyticsStore {
     return this.writeQueue;
   }
 
+  /** Summary over the last `dayLimit` days (0 = all time), with the preceding window for comparison. */
   summary(dayLimit = 30, now = Date.now()): AnalyticsSummary {
     const sessions = Object.values(this.data.sessions);
     return summarize(sessions, this.data.days, this.data.tools, this.data.files, dayLimit, now);

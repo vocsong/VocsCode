@@ -24,6 +24,7 @@ src/main
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
+    analytics/    the usage dashboard: tabs, view model (model.ts) and the SVG chart primitives (charts.tsx)
   terminal/       xterm.js instances kept alive outside React (host.ts)
   theme.ts        injects the data-driven palettes and applies the active theme to <html>
   store.ts        session state; api.ts wraps the preload bridge
@@ -66,6 +67,12 @@ Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping c
 - API keys are encrypted with Electron `safeStorage` and never leave the machine except to the provider you configured.
 - The renderer runs sandboxed with context isolation; all privileged work happens in the main process behind a typed IPC contract.
 - "Full access" disables every prompt and sandbox. Use it only in disposable environments.
+
+## Usage analytics
+
+`userData/analytics.json` feeds the Analytics view. The main-process `AnalyticsStore` (`src/main/analytics.ts`) turns every cumulative usage report into a delta against the session's last totals and adds it to a UTC day bucket, attributing it to the harness, model and project active at that moment (`UsageDay.by`, which also remembers the session ids, per-tool counts and per-file change counts of the day). Session snapshots and the all-time per-tool and per-file maps survive session deletion, so history never shrinks.
+
+The dashboard (`src/renderer/src/components/analytics/`) asks for one range at a time and scopes every tab to it. All-time views come from the session records; bounded ranges (7, 30, 90 days) come from the day slices through the shared `src/shared/usage-rollup.ts`, and the summary also carries the preceding window so tiles can show period-over-period change. Days recorded before slices existed count in the totals but in no breakdown; they are labelled "unattributed" until they age out of the bounded ranges. Series colours come from `CHART_SERIES` in `src/shared/themes.ts`, a categorical palette validated for colour-vision separation on every theme surface (the theme hues themselves are UI accents and fail those checks); single-series charts use the theme accent.
 
 ## Known limitations
 
