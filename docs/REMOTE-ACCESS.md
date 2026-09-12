@@ -1,8 +1,8 @@
-# Remote access: code.vocs.io (exploration)
+# Remote access: code.vocs.io (plan)
 
-Status: **ideation / planning** — not a committed roadmap. This doc maps the idea, the
-shapes it could take, what the codebase already gives us, the hard problems, and a
-phased path if we decide to build.
+Status: **planning — direction decided: Model C (hybrid). Build Model A (relay) first;
+cloud workspaces (Model B) is the committed later track.** Remaining product questions
+are being resolved one at a time (§11).
 
 ## 1. The idea
 
@@ -18,7 +18,12 @@ These have wildly different cost, security, and effort profiles. The good news: 
 protocol and the same web client serve both, so we can start with the cheap one and keep
 the door open.
 
-## 2. Three shapes
+## 2. Three shapes — decision: Model C, build A first
+
+> **Decision:** Model C (hybrid) — build Model A (relay) first; Model B (cloud
+> workspaces) is the committed later track that reuses the same protocol, web client,
+> and auth. Cheapest path to a working product, smallest security surface, nothing
+> thrown away. The models below are kept for context.
 
 ### Model A — Relay (remote control of your desktop)
 
@@ -48,7 +53,7 @@ or synced in; keys and harness logins live server-side.
 - Needs: sandbox orchestration, headless harness login flows, server-side secrets (KMS),
   folder sync, per-session compute billing. Large, separate program.
 
-### Model C — Hybrid (recommended path)
+### Model C — Hybrid (chosen path)
 
 Build A first. The relay protocol, auth, pairing, and web client are exactly the pieces
 Model B needs later — a sandbox host just replaces the desktop app as the thing on the
@@ -317,9 +322,9 @@ security bar must go up, not sideways:
 7. **Platform bits.** ConPTY-specific terminal behavior, native notifications, and
    `app:open*` need browser-side shims or graceful degradation.
 
-## 9. Cloud workspaces (Model B) — later track
+## 9. Cloud workspaces (Model B) — committed later track
 
-When/if we go there, the pieces A builds are reused as-is: protocol, web client, auth,
+When we go there, the pieces A builds are reused as-is: protocol, web client, auth,
 pairing-less (server-side) trust. What's new:
 
 - Per-user sandbox with the harness runtimes installed (Containers/Firecracker/VM —
@@ -345,17 +350,28 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 
 **Relay MVP → beta: roughly 6–10 weeks.** Cloud workspaces: separate track afterward.
 
-## 11. Open questions (need product answers before P2)
+## 11. Decisions and open questions
+
+**Resolved:**
+
+- **Which model?** Model C (hybrid) — build A (relay) first; cloud workspaces (B) is the
+  committed later track (§9).
+- **Is "desktop must be online for chat" acceptable for v1?** Yes — implied by starting
+  with Model A; always-on arrives with cloud workspaces later.
+
+**Open (resolve one at a time, before P2):**
 
 1. Personal tool first, or multi-user product from day one? (drives auth, billing, relay
    tenancy, and how paranoid the pairing UX must be)
-2. Is "desktop must be online for chat" acceptable for v1? (Model A's core constraint)
-3. Is interactive terminal required at launch, or is chat + transcript + approvals enough?
-4. e2e encryption as default, or opt-in?
-5. Does the web client get a distinct visual identity, or is it the same UI in a tab?
-6. Mobile: is phone-sized layout in scope for v1? (renderer is desktop-laid-out today)
+2. Is interactive terminal required at launch, or is chat + transcript + approvals enough?
+3. e2e encryption as default, or opt-in?
+4. Does the web client get a distinct visual identity, or is it the same UI in a tab?
+5. Mobile: is phone-sized layout in scope for v1? (renderer is desktop-laid-out today)
 
-## 12. If we start: the first PR (P0 sketch)
+Plus the pairing-specific questions in §6.9 (QR mandatory?, auto-approve later devices?,
+relay hosting region?, GitHub-only auth?).
+
+## 12. The first PR (P0 sketch)
 
 1. Add `src/shared/transport.ts` — `Transport` interface + a typed client generated from
    the existing channel maps in `src/shared/ipc.ts`.
