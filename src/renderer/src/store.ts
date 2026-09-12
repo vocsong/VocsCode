@@ -45,6 +45,8 @@ interface State {
   terminalsLoaded: boolean;
   /** Selected terminal tab per session. */
   activeTerminal: Record<string, string>;
+  /** Unsent composer text per session, kept so switching sessions does not lose the draft. */
+  drafts: Record<string, string>;
   /** Bumped to move keyboard focus into the active terminal. */
   terminalFocusNonce: number;
   /** Text another part of the UI wants appended to the composer draft (e.g. terminal output). */
@@ -92,6 +94,7 @@ interface State {
   clearTranscriptLocal(id: string): void;
   /** Upserts a renderer-local info line in a session's transcript; null text removes it. Not persisted by the main process. */
   setLocalInfo(sessionId: string, id: string, text: string | null, opts?: { level?: 'info' | 'warn' | 'error'; pending?: boolean }): void;
+  setDraft(sessionId: string, text: string): void;
   setTerminals(list: TerminalInfo[]): void;
   setActiveTerminal(sessionId: string, terminalId: string): void;
   focusTerminal(): void;
@@ -154,6 +157,7 @@ export const useStore = create<State>((set, get) => ({
   terminals: [],
   terminalsLoaded: false,
   activeTerminal: {},
+  drafts: {},
   terminalFocusNonce: 0,
   composerInsert: null,
   view: 'chat',
@@ -310,20 +314,23 @@ export const useStore = create<State>((set, get) => ({
       for (const id of Object.keys(s.loaded)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
       if (removed.size === 0) return { sessions };
       const transcripts = { ...s.transcripts };
       const loaded = { ...s.loaded };
       const activeTerminal = { ...s.activeTerminal };
       const models = { ...s.models };
+      const drafts = { ...s.drafts };
       for (const id of removed) {
         delete transcripts[id];
         delete loaded[id];
         delete activeTerminal[id];
         delete models[id];
+        delete drafts[id];
       }
       // A removed session cannot stay active; drop it and let the caller pick a new one.
       const activeId = s.activeId && ids.has(s.activeId) ? s.activeId : null;
-      return { sessions, transcripts, loaded, activeTerminal, models, activeId };
+      return { sessions, transcripts, loaded, activeTerminal, models, drafts, activeId };
     });
   },
   setView(view) {
@@ -412,6 +419,9 @@ export const useStore = create<State>((set, get) => ({
       else next.push(item);
       return { transcripts: { ...s.transcripts, [sessionId]: next } };
     });
+  },
+  setDraft(sessionId, text) {
+    set((s) => (s.drafts[sessionId] === text ? {} : { drafts: { ...s.drafts, [sessionId]: text } }));
   },
   setTerminals(terminals) {
     set({ terminals, terminalsLoaded: true });
