@@ -50,8 +50,8 @@ export const SHORTCUT_COMMANDS: ShortcutCommandInfo[] = [
   { id: 'app.newSession', label: 'New session', description: 'Pick a project folder and configure a new session.', icon: 'plus' },
   { id: 'app.newSessionQuick', label: 'New session in folder', description: 'Quick-pick a known folder and start with defaults.', icon: 'folder' },
   { id: 'app.palette', label: 'Command palette', description: 'Toggle the command palette.', icon: 'search' },
-  { id: 'app.toggleSidebar', label: 'Toggle sidebar', description: 'Show or hide the left sidebar.', icon: 'sidebar' },
-  { id: 'app.togglePanel', label: 'Toggle side panel', description: 'Show or hide the right panel.', icon: 'layout' },
+  { id: 'app.toggleSidebar', label: 'Toggle left sidebar', description: 'Show or hide the left sidebar.', icon: 'sidebar' },
+  { id: 'app.togglePanel', label: 'Toggle right side panel', description: 'Show or hide the right panel.', icon: 'layout' },
   { id: 'app.toggleThinking', label: 'Toggle thinking', description: 'Show or hide the model’s thinking blocks.', icon: 'brain' },
   { id: 'app.focusTerminal', label: 'Focus terminal', description: 'Switch the side panel to the terminal and focus it.', icon: 'terminal' },
   { id: 'app.showChanges', label: 'Show changes', description: 'Switch the side panel to the changes view.', icon: 'diff' },
@@ -233,8 +233,8 @@ export const BUILTIN_SHORTCUT_GROUPS: BuiltinShortcutGroup[] = [
       { label: 'New session in folder (quick picker)', keys: ['Ctrl+Shift+N'] },
       { label: 'Command palette', keys: ['Ctrl+K'] },
       { label: 'Settings', keys: ['Ctrl+,'] },
-      { label: 'Toggle sidebar', keys: ['Ctrl+B'] },
-      { label: 'Toggle side panel', keys: ['Ctrl+J'] },
+      { label: 'Toggle left sidebar', keys: ['Ctrl+B'] },
+      { label: 'Toggle right side panel', keys: ['Ctrl+J'] },
       { label: 'Back', keys: ['Alt+ArrowLeft', 'Ctrl+['] },
       { label: 'Forward', keys: ['Alt+ArrowRight', 'Ctrl+]'] }
     ]
