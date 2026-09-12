@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import type { AnalyticsSummary } from '../../../../shared/types';
 import { totalTokens } from '../../../../shared/usage-rollup';
 import { basename, fmtCost, fmtTokens } from '../../format';
-import { harnessShort } from '../Sidebar';
+import { harnessShort } from '../../format';
 import { BarList, ChartCard, ColumnChart, DataTable, LineChart, Segmented, seriesTable } from './charts';
 import { cumulative, delta, fmtCompact, fmtUnit, METRICS, plural, SPLITS, splitSeries, type Scope, type Split } from './model';
 import { Footnotes, Hero } from './tiles';
