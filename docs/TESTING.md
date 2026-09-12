@@ -6,8 +6,8 @@ Testing details moved out of the README.
 
 ```bash
 npm run dev          # electron-vite dev server with HMR
-npm run typecheck    # main + renderer, both strict
-npm test             # offline suites: unit, format, review-fixes, terminal (no network)
+npm run typecheck    # main + renderer + tests, all strict
+npm test             # all offline suites (no network)
 npm run build        # bundles to out/
 npm run dist:win     # NSIS installer + dist/win-unpacked/
 ```
@@ -16,7 +16,7 @@ npm run dist:win     # NSIS installer + dist/win-unpacked/
 
 ```bash
 # Drive each adapter against the real runtime installed on this machine
-HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=codex,codex-exec,pi,claude,native,native-tools,acp npx vitest run tests/smoke.live.test.ts
+HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=codex,codex-exec,cursor,pi,claude,acp,native,native-tools npx vitest run tests/smoke.live.test.ts
 # ACP against a different agent preset (dsh is the default)
 HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=acp HARNESS_SMOKE_ACP_AGENT=claude-agent-acp npx vitest run tests/smoke.live.test.ts
 

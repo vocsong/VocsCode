@@ -3,7 +3,7 @@
 /** @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const invokeMock = vi.fn().mockResolvedValue({});
+const invokeMock = vi.fn().mockImplementation((channel: string) => Promise.resolve(channel === 'providers:list' ? [] : {}));
 (window as unknown as { harness: unknown }).harness = {
   platform: 'win32',
   invoke: invokeMock,

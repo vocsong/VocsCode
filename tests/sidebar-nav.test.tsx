@@ -14,7 +14,7 @@ import { nextFolderTarget, nextSessionTarget, sidebarNavModel } from '../src/ren
 import type { AppSettings, SessionMeta } from '../src/shared/types';
 
 const settings = {
-  folders: [],
+  folders: ['G:/proj/empty'],
   folderOrder: ['G:/proj/b', 'G:/proj/a', 'G:/proj/empty'],
   collapsedFolders: [],
 } as unknown as AppSettings;
