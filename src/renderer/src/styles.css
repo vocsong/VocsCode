@@ -1255,20 +1255,25 @@ h4 {
   border-top: 1px solid var(--border);
   padding: 6px 8px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: wrap;
   gap: 2px;
 }
 .sidebar-link {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
   border: none;
   background: none;
-  padding: 7px 8px;
+  padding: 7px 6px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--fg-muted);
-  text-align: left;
+  text-align: center;
 }
 .sidebar-link:hover,
 .sidebar-link.active {
@@ -1276,31 +1281,31 @@ h4 {
   color: var(--fg);
 }
 
-/* Header */
+/* Header — two rows: title/identity on top, controls below. */
 .header {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 8px;
-  padding: 8px 12px;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 12px 7px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
-  min-height: 46px;
 }
 .header-title {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1 1 280px;
   overflow: hidden;
+  font-size: 12px;
+  line-height: 20px;
 }
 .header-name {
   font-weight: 600;
+  font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 34vw;
+  max-width: 55vw;
 }
 .header-path {
   display: inline-flex;
@@ -1337,6 +1342,19 @@ h4 {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+  min-width: 0;
+}
+.header-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   margin-left: auto;
   flex-shrink: 0;
 }
@@ -3422,6 +3440,8 @@ body.resizing {
   border-bottom: 1px solid var(--border);
   background: var(--bg-sunken);
   overflow-x: auto;
+  /* Reserve the horizontal-scrollbar space so toggling overflow can't change the row height. */
+  scrollbar-gutter: stable;
 }
 .atab {
   display: inline-flex;
@@ -3434,7 +3454,8 @@ body.resizing {
   border-bottom: 2px solid transparent;
   color: var(--fg-muted);
   font-size: 12.5px;
-  font-weight: 500;
+  /* Same weight as .atab.active so switching tabs never reflows the row. */
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
@@ -3446,7 +3467,6 @@ body.resizing {
 .atab.active {
   color: var(--fg);
   border-bottom-color: var(--accent);
-  font-weight: 600;
 }
 .atab:focus-visible {
   outline: 2px solid var(--accent);
@@ -4257,6 +4277,23 @@ body.resizing {
   color: var(--fg);
   width: 170px;
   font-size: 12px;
+}
+.skills-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  overflow-x: auto;
+}
+.atab-count {
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+.atab.active .atab-count {
+  color: inherit;
 }
 .skills-body {
   display: grid;
