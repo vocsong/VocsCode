@@ -73,9 +73,11 @@ export class SessionManager {
 
   list(): SessionMeta[] {
     const list = this.deps.store.list();
-    // Sessions restored while parked on a PR resume polling for their merge.
+    // Sessions restored while parked on a PR resume polling for their merge. A harness that
+    // died while the app was closed ('stopped') gets its git-derived status re-checked once,
+    // so a quit that killed the harness does not erase a parked pr/merged badge for good.
     for (const s of list) {
-      if (s.status === 'pr' && !this.gitStateChecked.has(s.id)) {
+      if ((s.status === 'pr' || s.status === 'stopped') && !this.gitStateChecked.has(s.id)) {
         this.gitStateChecked.add(s.id);
         this.scheduleGitStateCheck(s.id);
       }
@@ -161,7 +163,10 @@ export class SessionManager {
     // The check can take seconds over the network; the session may have moved on.
     if (!this.gitStateCheckable(meta.status)) return;
     const next: SessionStatus = state.merged ? 'merged' : state.pr ? 'pr' : 'idle';
-    if (meta.status === next || meta.status === 'merged' || meta.status === 'error' || meta.status === 'stopped') return;
+    if (meta.status === next || meta.status === 'merged' || meta.status === 'error') return;
+    // A stopped harness stays stopped unless the branch is actually pr/merged: git evidence
+    // may upgrade the status, never downgrade it back to idle.
+    if (meta.status === 'stopped' && next === 'idle') return;
     meta.status = next;
     meta.statusDetail = undefined;
     this.schedulePersist(meta);
@@ -170,9 +175,9 @@ export class SessionManager {
     if (next === 'pr' && recheck) this.scheduleGitStateCheck(id, SessionManager.GIT_STATE_RECHECK_MS);
   }
 
-  /** Only idle/pr sessions take a label update; live or already-final statuses are left alone. */
+  /** Only idle/pr/stopped sessions take a label update; live or already-final statuses are left alone. */
   private gitStateCheckable(status: SessionStatus): boolean {
-    return status === 'idle' || status === 'pr' || status === 'merged';
+    return status === 'idle' || status === 'pr' || status === 'merged' || status === 'stopped';
   }
 
   /**
@@ -526,8 +531,11 @@ export class SessionManager {
     }
     const meta = this.get(id);
     if (meta) {
-      meta.status = 'idle';
-      meta.statusDetail = undefined;
+      // Stopping the harness does not change the branch's git state either.
+      if (meta.status !== 'pr' && meta.status !== 'merged') {
+        meta.status = 'idle';
+        meta.statusDetail = undefined;
+      }
       meta.queued = 0;
       await this.deps.store.upsert(meta);
       this.pushSessions();
@@ -672,8 +680,13 @@ export class SessionManager {
       case 'status': {
         if (meta) {
           if (event.status === 'idle' && active && active.approvals.size) break; // still awaiting
-          meta.status = event.status;
-          meta.statusDetail = event.detail;
+          // The harness process exiting says nothing about the branch's git state: a session
+          // parked on pr/merged keeps its git-derived status instead of flipping to stopped.
+          const gitParked = event.status === 'stopped' && (meta.status === 'pr' || meta.status === 'merged');
+          if (!gitParked) {
+            meta.status = event.status;
+            meta.statusDetail = event.detail;
+          }
           if (event.status === 'idle' || event.status === 'stopped' || event.status === 'error') {
             if (active) {
               void this.flushLive(sessionId, active).catch((e) => this.deps.log('warn', `live flush failed: ${errorMessage(e)}`));
