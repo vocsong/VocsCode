@@ -66,6 +66,7 @@ export function Header({ session }: { session: SessionMeta }) {
       </div>
 
       <div className="header-controls">
+        <div className="header-pills">
         <Dropdown align="right" width={380} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {current?.model ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
           {(close) => (
             <ModelPicker
@@ -121,11 +122,13 @@ export function Header({ session }: { session: SessionMeta }) {
           )}
         </button>
 
-        <Button variant="ghost" size="sm" icon={showThinking ? 'eye' : 'eyeOff'} onClick={toggleThinking} title={showThinking ? 'Hide thinking' : 'Show thinking'} />
-        {busy && <Button variant="danger" size="sm" icon="stop" onClick={() => void invoke('sessions:interrupt', { id: session.id })} title="Interrupt (Esc)">Stop</Button>}
-        <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" />
-        <Dropdown align="right" width={220} trigger={() => <Button variant="ghost" size="sm" icon="more" aria-label="More" />}>
-          {(close) => (
+        </div>
+
+        <div className="header-actions">
+          <Button variant="ghost" size="sm" icon={showThinking ? 'eye' : 'eyeOff'} onClick={toggleThinking} title={showThinking ? 'Hide thinking' : 'Show thinking'} />
+          <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" />
+          <Dropdown align="right" width={220} trigger={() => <Button variant="ghost" size="sm" icon="more" aria-label="More" />}>
+            {(close) => (
             <>
               <MenuItem onClick={() => { close(); void invoke('sessions:compact', { id: session.id }).then((r) => toast(r.ok ? 'Compaction requested' : r.detail ?? 'Not supported', r.ok ? 'success' : 'error')); }}>Compact context</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:export', { id: session.id }).then((r) => r.path && toast(`Exported to ${r.path}`, 'success')); }}>Export Markdown</MenuItem>
@@ -146,7 +149,8 @@ export function Header({ session }: { session: SessionMeta }) {
               <MenuItem onClick={() => { close(); void invoke('sessions:stop', { id: session.id }); }} disabled={session.status === 'idle' && !busy}>Stop harness process</MenuItem>
             </>
           )}
-        </Dropdown>
+          </Dropdown>
+        </div>
       </div>
     </header>
   );
