@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
-import { invoke, modKey } from '../api';
+import { invoke } from '../api';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
@@ -125,7 +125,7 @@ export function NewSessionDialog() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !creating && projectRoot) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !creating && projectRoot) {
       e.preventDefault();
       void create();
     }
@@ -170,8 +170,8 @@ export function NewSessionDialog() {
           <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={create} disabled={creating || !projectRoot} title={`Start from the prompt area with ${modKey}+Enter`}>
-            {creating ? <Spinner /> : <Icon name="play" />} Start session <Kbd>{modKey}+↵</Kbd>
+          <Button variant="primary" onClick={create} disabled={creating || !projectRoot} title="Start from the prompt area with Enter">
+            {creating ? <Spinner /> : <Icon name="play" />} Start session <Kbd>↵</Kbd>
           </Button>
         </>
       }
