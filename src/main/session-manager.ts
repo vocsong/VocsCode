@@ -33,6 +33,9 @@ import type { SessionStore } from './store';
 import type { AnalyticsStore } from './analytics';
 import { deferred, errorMessage, shortId, type Deferred } from './util/async';
 import { readJson, writeJson } from './util/fs';
+import { generateSessionTitle, titleFromPrompt } from './session-title';
+
+export { titleFromPrompt };
 
 export interface SessionManagerDeps {
   store: SessionStore;
@@ -254,7 +257,7 @@ export class SessionManager {
       worktreeBranch = wt.branch;
     }
     const s = this.settings();
-    const title = req.title?.trim() || (req.initialPrompt ? req.initialPrompt.trim().split('\n')[0].slice(0, 60) : 'New session');
+    const title = req.title?.trim() || (req.initialPrompt ? titleFromPrompt(req.initialPrompt) : 'New session');
     const meta: SessionMeta = {
       id,
       title,
@@ -291,6 +294,9 @@ export class SessionManager {
     const promptText = req.initialPrompt?.trim() ?? '';
     const initialImages = req.initialImages?.length ? req.initialImages : undefined;
     if (promptText || initialImages) {
+      // A user-supplied title stands; otherwise the prompt-derived one is only a placeholder
+      // until the one-shot LLM title call lands.
+      if (!req.title?.trim() && promptText) this.scheduleLlmTitle(id, title, promptText);
       const prompt = meta.goal && promptText ? `${promptText}\n\nActive goal: ${meta.goal.objective}` : promptText;
       void this.send(id, { text: prompt, images: initialImages }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     } else if (meta.goal) {
@@ -487,12 +493,31 @@ export class SessionManager {
     const userItem: TranscriptItem = { id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text, images: input.images, queuedAs: input.mode };
     this.emit(id, { type: 'item.upsert', item: userItem });
     if (meta.title === 'New session' && input.text.trim()) {
-      meta.title = input.text.trim().split('\n')[0].slice(0, 60);
+      const placeholder = titleFromPrompt(input.text);
+      meta.title = placeholder;
       this.schedulePersist(meta);
       this.pushSessions();
+      this.scheduleLlmTitle(id, placeholder, input.text);
     }
     const active = await this.ensureActive(id);
     await active.adapter.send(input);
+  }
+
+  /**
+   * Replaces a prompt-derived placeholder title with an LLM-generated one, as long as the
+   * user has not renamed (or deleted) the session while the call was in flight.
+   */
+  private scheduleLlmTitle(id: string, placeholder: string, prompt: string): void {
+    void generateSessionTitle(prompt, this.settings().providers, this.deps.getSecret)
+      .then((title) => {
+        if (!title || title === placeholder) return;
+        const meta = this.get(id);
+        if (!meta || meta.title !== placeholder) return;
+        meta.title = title;
+        this.schedulePersist(meta);
+        this.pushSessions();
+      })
+      .catch(() => undefined);
   }
 
   /** Denies every pending approval and records the decision on its transcript card. */
