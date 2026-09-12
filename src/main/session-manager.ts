@@ -248,10 +248,12 @@ export class SessionManager {
       worktreeBranch = wt.branch;
     }
     const s = this.settings();
-    const title = req.title?.trim() || (req.initialPrompt ? req.initialPrompt.trim().split('\n')[0].slice(0, 60) : 'New session');
+    const explicitTitle = req.title?.trim();
+    const title = explicitTitle || (req.initialPrompt ? req.initialPrompt.trim().split('\n')[0].slice(0, 60) : 'New session');
     const meta: SessionMeta = {
       id,
       title,
+      userTitle: !!explicitTitle,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       config: { ...cfg, model: cfg.model ?? s.defaultModelByHarness[cfg.harness] },
@@ -443,7 +445,7 @@ export class SessionManager {
     if (!meta) throw new Error('Session not found');
     const userItem: TranscriptItem = { id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text, images: input.images, queuedAs: input.mode };
     this.emit(id, { type: 'item.upsert', item: userItem });
-    if (meta.title === 'New session' && input.text.trim()) {
+    if (!meta.userTitle && meta.title === 'New session' && input.text.trim()) {
       meta.title = input.text.trim().split('\n')[0].slice(0, 60);
       this.schedulePersist(meta);
       this.pushSessions();

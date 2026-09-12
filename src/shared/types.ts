@@ -331,6 +331,8 @@ export interface GoalState {
 export interface SessionMeta {
   id: string;
   title: string;
+  /** True when the user set the title themselves (rename or new-session dialog); rendered in red. */
+  userTitle?: boolean;
   createdAt: number;
   updatedAt: number;
   config: SessionConfig;
