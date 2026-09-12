@@ -32,6 +32,8 @@ const VIRTUALIZE_MIN = 150;
 export function Transcript({ session }: { session: SessionMeta }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
   const loaded = useStore((s) => s.loaded[session.id]);
+  const transcriptError = useStore((s) => s.transcriptErrors[session.id]);
+  const loadTranscript = useStore((s) => s.loadTranscript);
   const showThinking = useStore((s) => s.showThinking);
   const jump = useStore((s) => s.searchJump);
   const ref = useRef<HTMLDivElement>(null);
@@ -178,7 +180,16 @@ export function Transcript({ session }: { session: SessionMeta }) {
   return (
     <div className="transcript-wrap">
       <div className={`transcript ${virtual ? 'virtual' : ''}`} ref={ref} onScroll={onScroll}>
-        {!loaded && <div className="transcript-loading"><Spinner /> Loading…</div>}
+        {!loaded && !transcriptError && <div className="transcript-loading"><Spinner /> Loading…</div>}
+        {!loaded && transcriptError && (
+          <div className="transcript-error callout warn" role="alert">
+            <div>Could not load this transcript.</div>
+            <div className="muted small">{transcriptError}</div>
+            <Button size="sm" variant="ghost" icon="refresh" onClick={() => void loadTranscript(session.id)}>
+              Retry
+            </Button>
+          </div>
+        )}
         {loaded && items.length === 0 && (
           <div className="transcript-empty">
             <Icon name="sparkles" size={28} />

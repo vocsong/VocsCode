@@ -71,6 +71,7 @@ export function OnboardingWizard() {
 function HarnessStep() {
   const settings = useStore((s) => s.settings)!;
   const availability = useStore((s) => s.availability);
+  const availabilityError = useStore((s) => s.availabilityError);
   const refresh = useStore((s) => s.refreshAvailability);
   const toast = useStore((s) => s.toast);
   const [installing, setInstalling] = useState<string | null>(null);
@@ -110,7 +111,13 @@ function HarnessStep() {
           return (
             <div key={h.id} className="row gap8 onboarding-harness-row">
               <span className="onboarding-harness-name">{h.name}</span>
-              <Badge tone={tone}>{label}</Badge>
+              {!a && availabilityError ? (
+                <button type="button" className="link-btn" onClick={() => void refresh()}>
+                  could not check — retry
+                </button>
+              ) : (
+                <Badge tone={tone}>{label}</Badge>
+              )}
               <span className="muted small spacer">{a?.version ?? a?.detail ?? a?.installHint ?? ''}</span>
               {INSTALLABLE.includes(h.id as Installable) && (
                 <Button size="sm" variant="ghost" disabled={installing !== null} onClick={() => void install(h.id as Installable)}>

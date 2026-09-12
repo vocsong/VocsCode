@@ -38,10 +38,14 @@ interface State {
   activeId: string | null;
   transcripts: Record<string, TranscriptItem[]>;
   loaded: Record<string, boolean>;
+  /** Last transcript load failure per session; the transcript pane offers a retry instead of spinning forever. */
+  transcriptErrors: Record<string, string>;
   models: Record<string, ModelInfo[]>;
   /** Per-harness catalog, keyed by harness id, used until that session's process reports its own list. */
   modelCatalog: Partial<Record<HarnessId, ModelCatalogEntry>>;
   availability: Partial<Record<HarnessId, HarnessAvailability>>;
+  /** Set when the last availability check failed; setup surfaces a retry instead of an endless spinner. */
+  availabilityError: string | null;
   /** Every session's terminals, as the main process reports them; the xterm instances live in terminal/host.ts. */
   terminals: TerminalInfo[];
   terminalsLoaded: boolean;
@@ -177,9 +181,11 @@ export const useStore = create<State>((set, get) => ({
   activeId: null,
   transcripts: {},
   loaded: {},
+  transcriptErrors: {},
   models: {},
   modelCatalog: {},
   availability: {},
+  availabilityError: null,
   terminals: [],
   terminalsLoaded: false,
   activeTerminal: {},
@@ -218,7 +224,7 @@ export const useStore = create<State>((set, get) => ({
           on('push:sessionsChanged', (list) => get().setSessions(list));
           on('push:settingsChanged', (s) => get().setSettings(s));
           on('push:sessionEvent', (env) => get().applyEvent(env));
-          on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId));
+          on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId).catch(toastError));
           on('push:terminalsChanged', (list) => get().setTerminals(list));
         }
         const first = sessions.find((s) => !s.archived);
@@ -253,10 +259,22 @@ export const useStore = create<State>((set, get) => ({
 
   async loadTranscript(id) {
     if (get().loaded[id]) return;
-    const items = await invoke('sessions:transcript', { id });
-    // The snapshot already contains any streamed text; deltas still queued for it would duplicate.
-    dropPendingDeltas(id);
-    set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
+    // Clear any previous failure so a retry shows the spinner again, not a stale error.
+    set((s) => {
+      if (!(id in s.transcriptErrors)) return {};
+      const transcriptErrors = { ...s.transcriptErrors };
+      delete transcriptErrors[id];
+      return { transcriptErrors };
+    });
+    try {
+      const items = await invoke('sessions:transcript', { id });
+      // The snapshot already contains any streamed text; deltas still queued for it would duplicate.
+      dropPendingDeltas(id);
+      set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
+    } catch (e) {
+      // Never throw: the transcript pane stays mounted with a retry instead of loading forever.
+      set((s) => ({ transcriptErrors: { ...s.transcriptErrors, [id]: e instanceof Error ? e.message : String(e) } }));
+    }
   },
 
   applyEvent(env) {
@@ -354,25 +372,29 @@ export const useStore = create<State>((set, get) => ({
       const removed = new Set<string>();
       for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.loaded)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.transcriptErrors)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
-      if (removed.size === 0) return { sessions };
+      // A removed session cannot stay active; fall back to the first remaining live session so the
+      // app does not sit on an empty shell while other sessions still exist.
+      const activeId = s.activeId && !ids.has(s.activeId) ? sessions.find((x) => !x.archived)?.id ?? null : s.activeId;
+      if (removed.size === 0) return { sessions, activeId };
       const transcripts = { ...s.transcripts };
       const loaded = { ...s.loaded };
+      const transcriptErrors = { ...s.transcriptErrors };
       const activeTerminal = { ...s.activeTerminal };
       const models = { ...s.models };
       const drafts = { ...s.drafts };
       for (const id of removed) {
         delete transcripts[id];
         delete loaded[id];
+        delete transcriptErrors[id];
         delete activeTerminal[id];
         delete models[id];
         delete drafts[id];
       }
-      // A removed session cannot stay active; drop it and let the caller pick a new one.
-      const activeId = s.activeId && ids.has(s.activeId) ? s.activeId : null;
-      return { sessions, transcripts, loaded, activeTerminal, models, drafts, activeId };
+      return { sessions, transcripts, loaded, transcriptErrors, activeTerminal, models, drafts, activeId };
     });
   },
   setView(view) {
@@ -437,7 +459,7 @@ export const useStore = create<State>((set, get) => ({
   },
   jumpToSearchMatch(sessionId, itemId) {
     set((s) => ({ searchOpen: false, searchJump: itemId ? { sessionId, itemId, n: (s.searchJump?.n ?? 0) + 1 } : null }));
-    void get().setActive(sessionId);
+    void get().setActive(sessionId).catch(toastError);
   },
   toggleThinking() {
     set((s) => ({ showThinking: !s.showThinking }));
@@ -453,9 +475,9 @@ export const useStore = create<State>((set, get) => ({
   async refreshAvailability() {
     try {
       const availability = await invoke('harness:availability', undefined);
-      set({ availability });
-    } catch {
-      /* ignore */
+      set({ availability, availabilityError: null });
+    } catch (e) {
+      set({ availabilityError: e instanceof Error ? e.message : String(e) });
     }
   },
 
@@ -515,6 +537,11 @@ export const useStore = create<State>((set, get) => ({
     set({ composerInsert: null });
   }
 }));
+
+/** Reports a rejected fire-and-forget action as an error toast instead of an unhandled rejection. */
+export function toastError(error: unknown): void {
+  useStore.getState().toast(error instanceof Error ? error.message : String(error), 'error');
+}
 
 export function useActiveSession(): SessionMeta | undefined {
   return useStore((s) => s.sessions.find((x) => x.id === s.activeId));
