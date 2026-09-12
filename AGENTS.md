@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Working agreements for agents in this repo: how to verify, what to touch, what to leave alone. Six harness adapters (Claude Agent SDK, Codex app-server, Codex exec SDK, Pi, ACP, native) all emit one normalized `SessionEvent` stream — keep it that way.
+Working agreements for agents in this repo: how to verify, what to touch, what to leave alone. Seven harness adapters (Claude Agent SDK, Codex app-server, Codex exec SDK, Cursor, Pi, ACP, native) all emit one normalized `SessionEvent` stream — keep it that way.
 
 ## Working style
 

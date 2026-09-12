@@ -14,11 +14,11 @@ const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neut
   claude: 'amber',
   codex: 'green',
   'codex-exec': 'green',
+  cursor: 'blue',
   pi: 'purple',
   acp: 'blue',
   native: 'neutral'
 };
-
 
 /** Icon choices for folder headers (names from the renderer icon set). */
 const FOLDER_ICONS = [

@@ -1,6 +1,6 @@
 # Vocs Code
 
-**One desktop app for every coding agent.** Pick your agent — Claude, Codex, Pi, DeepSeek, Gemini, or any OpenAI-compatible model — per session, and get the same beautiful interface every time.
+**One desktop app for every coding agent.** Pick your agent — Claude, Codex, Cursor, Pi, DeepSeek, Gemini, or any OpenAI-compatible model — per session, and get the same beautiful interface every time.
 
 ## Get started in one line
 

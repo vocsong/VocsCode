@@ -27,6 +27,7 @@ const CARD_NAMES: Record<string, string> = {
   native: 'Native loop',
   codex: 'Codex (app-server)',
   'codex-exec': 'Codex (exec SDK)',
+  cursor: 'Cursor',
   pi: 'Pi',
   claude: 'Claude Agent SDK',
   acp: 'ACP agent (DeepSeek Harness, ...)'
