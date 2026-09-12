@@ -60,8 +60,12 @@ export class SessionStore {
   }
 
   private flushIndex(): Promise<void> {
-    this.writeQueue = this.writeQueue.then(() => writeJson(this.indexFile, this.sessions)).catch(() => undefined);
-    return this.writeQueue;
+    // The queued chain keeps swallowing errors so later writes still run, but the caller's own
+    // write rejects: a silently failed index write loses meta on restart while the UI keeps
+    // showing it, so callers must be able to observe the failure.
+    const run = this.writeQueue.then(() => writeJson(this.indexFile, this.sessions));
+    this.writeQueue = run.catch(() => undefined);
+    return run;
   }
 
   async appendTranscript(id: string, item: TranscriptItem): Promise<void> {

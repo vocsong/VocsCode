@@ -86,4 +86,19 @@ describe('sidebar status labels', () => {
     fireEvent.click(reset);
     expect(invokeMock).toHaveBeenCalledWith('sessions:label', { id: 's1', label: undefined });
   });
+
+  it('toasts instead of silently swallowing a failed label save', async () => {
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'sessions:label') return Promise.reject(new Error('No handler registered'));
+      return Promise.resolve({});
+    });
+    const { container } = renderRow(session({}));
+    useStore.setState({ toasts: [] });
+    fireEvent.click(container.querySelector('.session-status') as HTMLElement);
+    const todo = [...document.querySelectorAll('.menu-item')].find((m) => m.textContent === 'Todo') as HTMLElement;
+    fireEvent.click(todo);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useStore.getState().toasts.some((t) => t.kind === 'error' && t.text.includes('No handler registered'))).toBe(true);
+  });
 });

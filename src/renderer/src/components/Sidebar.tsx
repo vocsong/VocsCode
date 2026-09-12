@@ -397,9 +397,15 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
     if (ok) void invoke('sessions:delete', { id: s.id, removeWorktree: !!s.worktreeBranch });
   };
   // Picking the label that names the current status resets to auto instead of labeling it red.
-  const setStatusLabel = (label?: string, nextCustom?: string[]) => {
+  // The pick must never fail silently: an error that swallows here loses the label on restart
+  // with no trace, so surface it as a toast.
+  const setStatusLabel = async (label?: string, nextCustom?: string[]) => {
     const picked = label && STATUS_LABELS[s.status] === label ? undefined : label;
-    void invoke('sessions:label', { id: s.id, label: picked });
+    try {
+      await invoke('sessions:label', { id: s.id, label: picked });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    }
     if (nextCustom) void invoke('settings:update', { customLabels: nextCustom });
   };
   // Only pinned rows can be dragged, and only while they are not being renamed.

@@ -664,6 +664,19 @@ describe('SessionStore round-trip', () => {
     expect(again.get('sess_2')).toBeUndefined();
     expect(await again.readTranscript('sess_2')).toEqual([]);
   });
+
+  it('upsert rejects when the index write fails instead of resolving silently', async () => {
+    // A directory where sessions.json belongs makes the atomic rename fail deterministically.
+    const brokenRoot = path.join(os.tmpdir(), `vocs-code-store-broken-${Date.now()}-${process.pid}`);
+    await fs.mkdir(path.join(brokenRoot, 'sessions.json'), { recursive: true });
+    try {
+      const store = new SessionStore(brokenRoot);
+      await store.load();
+      await expect(store.upsert(meta('sess_x'))).rejects.toThrow();
+    } finally {
+      await fs.rm(brokenRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
 });
 
 describe('git branch/worktree plumbing', () => {
