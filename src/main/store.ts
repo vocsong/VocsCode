@@ -3,6 +3,16 @@ import type { SessionMeta, TranscriptItem } from '../shared/types';
 import { appendLine, ensureDir, exists, readJson, readJsonl, rmrf, writeJson } from './util/fs';
 import { promises as fs } from 'node:fs';
 
+const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+function isValidSessionId(id: unknown): id is string {
+  return typeof id === 'string' && SESSION_ID_RE.test(id);
+}
+
+function assertValidSessionId(id: string): void {
+  if (!isValidSessionId(id)) throw new Error('Invalid session ID');
+}
+
 /**
  * Persistence for session metadata and transcripts.
  * Layout under userData:
@@ -27,7 +37,9 @@ export class SessionStore {
     await ensureDir(this.root);
     const loaded = await readJson<SessionMeta[]>(this.indexFile, []);
     // A valid-JSON but wrong-shaped file must not abort boot; fall back to an empty index.
-    this.sessions = Array.isArray(loaded) ? loaded.filter((s): s is SessionMeta => !!s && typeof s === 'object' && typeof s.id === 'string') : [];
+    this.sessions = Array.isArray(loaded)
+      ? loaded.filter((s): s is SessionMeta => !!s && typeof s === 'object' && isValidSessionId(s.id))
+      : [];
     // Any session that was running when the app closed is now idle.
     for (const s of this.sessions) {
       if (s.status === 'running' || s.status === 'awaiting' || s.status === 'starting') s.status = 'idle';
@@ -45,10 +57,12 @@ export class SessionStore {
   }
 
   sessionDir(id: string): string {
+    assertValidSessionId(id);
     return path.join(this.root, id);
   }
 
   async upsert(meta: SessionMeta): Promise<void> {
+    assertValidSessionId(meta.id);
     const idx = this.sessions.findIndex((s) => s.id === meta.id);
     if (idx >= 0) this.sessions[idx] = meta;
     else this.sessions.unshift(meta);
@@ -56,6 +70,7 @@ export class SessionStore {
   }
 
   async remove(id: string): Promise<void> {
+    assertValidSessionId(id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
     await this.flushIndex();
     await rmrf(this.sessionDir(id));
