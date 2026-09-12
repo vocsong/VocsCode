@@ -452,14 +452,14 @@ export class ClaudeAdapter implements HarnessAdapter {
             contextWindow: cumulative.contextWindow,
             contextTokens: u ? (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) : undefined
           });
-          trackerTurn = this.usage.finishTurn();
-          const turnUsage = trackerTurn.usage;
-          usage = turnUsage ? { inputTokens: turnUsage.inputTokens, outputTokens: turnUsage.outputTokens, cacheReadTokens: turnUsage.cacheReadTokens, cacheWriteTokens: turnUsage.cacheWriteTokens } : undefined;
-          this.ctx.emit({ type: 'usage', totals: trackerTurn.totals });
-        } else {
-          trackerTurn = this.usage.finishTurn(false);
         }
-        const turnCost = trackerTurn.usage?.costUsd ?? 0;
+        // Finish even when the SDK omitted modelUsage: total_cost_usd is still useful, and the
+        // tracker must close its baseline so the next streamed turn starts cleanly.
+        trackerTurn = this.usage.finishTurn();
+        const turnUsage = trackerTurn.usage;
+        if (mu) usage = turnUsage ? { inputTokens: turnUsage.inputTokens, outputTokens: turnUsage.outputTokens, cacheReadTokens: turnUsage.cacheReadTokens, cacheWriteTokens: turnUsage.cacheWriteTokens } : undefined;
+        if (mu || typeof msg.total_cost_usd === 'number') this.ctx.emit({ type: 'usage', totals: trackerTurn.totals });
+        const turnCost = turnUsage?.costUsd ?? 0;
         const turnMsg = msg as { is_error?: boolean; terminal_reason?: string };
         const isError = turnMsg.is_error || msg.subtype !== 'success';
         const interrupted = turnMsg.terminal_reason === 'aborted_streaming' || turnMsg.terminal_reason === 'aborted_tools';
