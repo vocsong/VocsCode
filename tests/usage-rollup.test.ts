@@ -11,6 +11,7 @@ interface Row {
   costUsd: number;
   turns?: number;
   toolCalls?: number;
+  durationMs?: number;
   speed?: [tokens: number, ms: number];
 }
 
@@ -23,7 +24,7 @@ function sliced(date: string, rows: Row[]): AnalyticsDayPoint {
   const usage = day();
   const by = emptyDimensions();
   for (const r of rows) {
-    const delta = { costUsd: r.costUsd, turns: r.turns ?? 0, toolCalls: r.toolCalls ?? 0, inputTokens: 1000, speedTokens: r.speed?.[0] ?? 0, speedMs: r.speed?.[1] ?? 0 };
+    const delta = { costUsd: r.costUsd, turns: r.turns ?? 0, toolCalls: r.toolCalls ?? 0, durationMs: r.durationMs ?? 0, inputTokens: 1000, speedTokens: r.speed?.[0] ?? 0, speedMs: r.speed?.[1] ?? 0 };
     addCounters(usage, delta);
     addSlice(by.harness, r.harness, r.harness, delta, r.id);
     if (r.model) addSlice(by.model, `p/${r.model}`, r.model, delta, r.id);
@@ -46,10 +47,10 @@ describe('addSlice', () => {
 describe('rollupDays', () => {
   const days = [
     sliced('2025-06-01', [
-      { id: 'a', harness: 'claude', model: 'opus', project: '/p1', costUsd: 2, turns: 4, toolCalls: 6, speed: [100, 2000] },
+      { id: 'a', harness: 'claude', model: 'opus', project: '/p1', costUsd: 2, turns: 4, toolCalls: 6, durationMs: 6000, speed: [100, 2000] },
       { id: 'b', harness: 'pi', model: 'glm', project: '/p2', costUsd: 1, turns: 2 }
     ]),
-    sliced('2025-06-02', [{ id: 'a', harness: 'claude', model: 'opus', project: '/p1', costUsd: 3, turns: 2, speed: [100, 8000] }])
+    sliced('2025-06-02', [{ id: 'a', harness: 'claude', model: 'opus', project: '/p1', costUsd: 3, turns: 2, durationMs: 3000, speed: [100, 8000] }])
   ];
   days[1].usage.by!.tool = { Bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } };
   days[0].usage.by!.tool = { Bash: { calls: 2, errors: 0, declined: 1, durationMs: 0 }, Read: { calls: 4, errors: 0, declined: 0, durationMs: 0 } };
@@ -67,7 +68,9 @@ describe('rollupDays', () => {
       ['p/opus', 'opus', 5, 1],
       ['p/glm', 'glm', 1, 1]
     ]);
-    expect(r.byHarness[0]).toMatchObject({ key: 'claude', toolCalls: 6, speed: { tokens: 200, ms: 10_000 } });
+    expect(r.byHarness[0]).toMatchObject({ key: 'claude', toolCalls: 6, durationMs: 9000, speed: { tokens: 200, ms: 10_000 } });
+    // Average turn time per model: 9000ms of wall time over 6 turns.
+    expect(r.byModel[0]).toMatchObject({ key: 'p/opus', durationMs: 9000 });
     expect(r.byProject.map((b) => b.key)).toEqual(['/p1', '/p2']);
     expect(Object.values(r.unattributed).every((v) => v === 0)).toBe(true);
   });
