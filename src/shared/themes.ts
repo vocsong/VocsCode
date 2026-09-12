@@ -428,6 +428,23 @@ function cssName(key: string): string {
 }
 
 /**
+ * Categorical series colours for the analytics charts (`--chart-1` … `--chart-6`), one set per
+ * light/dark base rather than per theme: the theme hues are UI accents, and several of them (the
+ * desaturated Graphite and Ember sets, the bright dark-theme badges) fail the colour-vision and
+ * lightness checks a data palette must pass. This order clears every adjacent-pair check on all
+ * catalogue surfaces; the first three slots also pass all-pairs. Light surfaces put slots 3–5 below
+ * 3:1 contrast, so every chart ships a legend, hover values and a table view.
+ */
+export const CHART_SERIES: Record<'light' | 'dark', string[]> = {
+  light: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300'],
+  dark: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300']
+};
+
+export function chartSeriesCss(base: 'light' | 'dark'): string[] {
+  return CHART_SERIES[base].map((hex, i) => `  --chart-${i + 1}: ${hex};`);
+}
+
+/**
  * CSS for every data-driven theme.
  *
  * The selectors are prefixed with `html` so they outrank `:root:not([data-theme='light'])` in
@@ -437,8 +454,10 @@ export function themeCss(): string {
   const blocks: string[] = [];
   for (const t of THEMES) {
     if (!t.palette) continue;
+    const base = t.base === 'light' ? 'light' : 'dark';
     const decls = Object.entries(t.palette).map(([k, v]) => `  ${cssName(k)}: ${v};`);
-    decls.unshift(`  color-scheme: ${t.base === 'light' ? 'light' : 'dark'};`);
+    decls.unshift(`  color-scheme: ${base};`);
+    decls.push(...chartSeriesCss(base));
     blocks.push(`html:root[data-theme='${t.id}'] {\n${decls.join('\n')}\n}`);
   }
   return blocks.join('\n');

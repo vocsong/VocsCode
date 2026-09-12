@@ -305,7 +305,8 @@ export function registerIpc(deps: IpcDeps): void {
 
   handle('approvals:respond', ({ sessionId, requestId, decision }) => sessions.respondApproval(sessionId, requestId, decision));
 
-  handle('analytics:summary', (req) => deps.analytics.summary(req && typeof req === 'object' ? req.days ?? 30 : 30));
+  // `days: 0` is all time; only an absent request falls back to the 30-day default.
+  handle('analytics:summary', (req) => deps.analytics.summary(req && typeof req === 'object' && typeof req.days === 'number' ? Math.max(0, req.days) : 30));
 
   const cwdOf = (sessionId: string) => {
     const m = sessions.get(sessionId);

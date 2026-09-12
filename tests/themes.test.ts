@@ -340,3 +340,24 @@ describe('color helpers', () => {
     expect(withAlpha('rgba(0, 0, 0, 0.5)', 0.35)).toBe('rgba(0, 0, 0, 0.5)');
   });
 });
+
+describe('chart series tokens', () => {
+  it('gives every data-driven theme the slots of its light/dark base, and the built-ins declare them in styles.css', async () => {
+    const { CHART_SERIES } = await import('../src/shared/themes');
+    expect(CHART_SERIES.light).toHaveLength(6);
+    expect(new Set(CHART_SERIES.light).size).toBe(6);
+    expect(CHART_SERIES.dark).toHaveLength(6);
+    const css = themeCss();
+    for (const t of THEMES) {
+      if (!t.palette) continue;
+      const start = css.indexOf(`[data-theme='${t.id}']`);
+      expect(start).toBeGreaterThan(-1);
+      const block = css.slice(start, css.indexOf('}', start));
+      const base = t.base === 'light' ? 'light' : 'dark';
+      CHART_SERIES[base].forEach((hex, i) => expect(block).toContain(`--chart-${i + 1}: ${hex};`));
+    }
+    const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'styles.css'), 'utf8');
+    CHART_SERIES.light.forEach((hex, i) => expect(styles).toContain(`--chart-${i + 1}: ${hex};`));
+    CHART_SERIES.dark.forEach((hex, i) => expect(styles).toContain(`--chart-${i + 1}: ${hex};`));
+  });
+});

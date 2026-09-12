@@ -6,6 +6,9 @@ import { invoke, on } from './api';
 
 export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
 export type View = 'chat' | 'settings' | 'analytics';
+export type AnalyticsTab = 'overview' | 'spend' | 'tokens' | 'activity' | 'tools' | 'sessions';
+/** Days in the analytics range; 0 is all time. */
+export type AnalyticsRange = 7 | 30 | 90 | 0;
 
 /** One entry of the title bar's back/forward history. */
 export interface NavEntry {
@@ -47,6 +50,9 @@ interface State {
   /** Text another part of the UI wants appended to the composer draft (e.g. terminal output). */
   composerInsert: { text: string; nonce: number } | null;
   view: View;
+  /** The analytics dashboard remembers its tab and range while the app is open. */
+  analyticsTab: AnalyticsTab;
+  analyticsRange: AnalyticsRange;
   sidebarOpen: boolean;
   panelOpen: boolean;
   panelTab: PanelTab;
@@ -67,6 +73,7 @@ interface State {
   setSettings(s: AppSettings): void;
   setSessions(list: SessionMeta[]): void;
   setView(v: View): void;
+  setAnalyticsView(patch: { tab?: AnalyticsTab; range?: AnalyticsRange }): void;
   navBack(): Promise<void>;
   navForward(): Promise<void>;
   toggleSidebar(): void;
@@ -150,6 +157,8 @@ export const useStore = create<State>((set, get) => ({
   terminalFocusNonce: 0,
   composerInsert: null,
   view: 'chat',
+  analyticsTab: 'overview',
+  analyticsRange: 30,
   sidebarOpen: true,
   panelOpen: true,
   panelTab: 'changes',
@@ -320,6 +329,9 @@ export const useStore = create<State>((set, get) => ({
   setView(view) {
     set({ view });
     pushHistory(set, get, { view, sessionId: get().activeId });
+  },
+  setAnalyticsView(patch) {
+    set((s) => ({ analyticsTab: patch.tab ?? s.analyticsTab, analyticsRange: patch.range ?? s.analyticsRange }));
   },
   toggleSidebar() {
     set((s) => ({ sidebarOpen: !s.sidebarOpen }));
