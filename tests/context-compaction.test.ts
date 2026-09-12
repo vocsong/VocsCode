@@ -163,7 +163,7 @@ describe('automatic compaction thresholds', () => {
 
 describe('adapter compaction coordination', () => {
   it('does not resolve until Claude reports that manual compaction finished', async () => {
-    const adapter = new ClaudeAdapter({ emit: vi.fn() } as unknown as HarnessContext);
+    const adapter = new ClaudeAdapter({ emit: vi.fn(), session: () => ({ usage: usage(0) }) } as unknown as HarnessContext);
     (adapter as unknown as { q: object }).q = {};
     let settled = false;
     const compacting = adapter.compact().then(() => {

@@ -57,6 +57,14 @@ export function TerminalPanel({ session }: { session: SessionMeta }) {
     return () => host.setFindHandler(null);
   }, []);
 
+  // Decorations belong to the xterm instance, so clear them when its panel goes away.
+  useEffect(() => {
+    const terminalId = active?.id;
+    return () => {
+      if (terminalId) host.clearFind(terminalId);
+    };
+  }, [active?.id]);
+
   const close = (id: string) => void invoke('terminal:close', { terminalId: id });
   const restart = (id: string) => void invoke('terminal:restart', { terminalId: id }).catch((e) => toast(String((e as Error).message ?? e), 'error'));
   const sendToAgent = () => {

@@ -88,7 +88,7 @@ export function SkillsView() {
 
   const openEditor = async (skill: SkillInfo) => {
     if (!skill.file) return;
-    const r = await invoke('app:openInEditor', { path: skill.file });
+    const r = await invoke('skills:openInEditor', { path: skill.file });
     if (!r.ok) toast(r.error ?? 'Could not open the editor', 'error');
   };
 

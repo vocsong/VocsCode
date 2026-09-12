@@ -507,6 +507,8 @@ describe('SecretStore', () => {
       expect(raw.openai.startsWith('b64:')).toBe(true);
       expect(raw.openai).not.toContain('sk-fallback');
       expect(await store.get('openai')).toBe('sk-fallback');
+      expect(store.status).toEqual({ encryptionAvailable: false, hasFallback: true, fallbackProviderIds: ['openai'] });
+      if (process.platform !== 'win32') expect((await fs.stat(path.join(dir, 'secrets.json'))).mode & 0o777).toBe(0o600);
     } finally {
       safeStorageMock.encryptionAvailable = true;
     }

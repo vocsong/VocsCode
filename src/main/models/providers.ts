@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { ModelInfo, ProviderConfig } from '../../shared/types';
 import { errorMessage } from '../util/async';
-import { cursorModelToInfo } from '../harness/cursor';
+import { cursorModelToInfo } from './static-models';
 import { STATIC_MODELS_BY_PROVIDER, findPricing } from './static-models';
 
 /** Stored key first, then the provider's env var. */

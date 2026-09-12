@@ -43,8 +43,9 @@ function desktopBridge(deps: IpcDeps): DesktopBridge {
     showOpenDialog: (opts) => dialog.showOpenDialog(deps.getWindow() ?? (undefined as unknown as BrowserWindow), opts as unknown as Electron.OpenDialogOptions),
     showSaveDialog: (opts) => dialog.showSaveDialog(deps.getWindow() ?? (undefined as unknown as BrowserWindow), opts as unknown as Electron.SaveDialogOptions),
     notify: async (title, body) => {
+      if (!deps.settings.get().notifications) return;
       const { Notification } = await import('electron');
-      if (Notification.isSupported()) new Notification({ title, body }).show();
+      if (Notification.isSupported()) new Notification({ title: title.slice(0, 200), body: body.slice(0, 200), silent: !deps.settings.get().soundOnApproval }).show();
     },
     toggleFullScreen: () => {
       const win = deps.getWindow();
@@ -63,8 +64,27 @@ function desktopBridge(deps: IpcDeps): DesktopBridge {
       // The renderer has no native menu on Windows/Linux, so the Edit menu drives WebContents directly.
       const wc = deps.getWindow()?.webContents;
       if (!wc) return;
-      if (command === 'selectAll') wc.selectAll();
-      else wc[command]();
+      // Keep this explicit: a compromised client can still send arbitrary JSON at runtime.
+      switch (command) {
+        case 'undo':
+          wc.undo();
+          break;
+        case 'redo':
+          wc.redo();
+          break;
+        case 'cut':
+          wc.cut();
+          break;
+        case 'copy':
+          wc.copy();
+          break;
+        case 'paste':
+          wc.paste();
+          break;
+        case 'selectAll':
+          wc.selectAll();
+          break;
+      }
     }
   };
 }

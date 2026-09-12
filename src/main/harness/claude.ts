@@ -1,7 +1,6 @@
 /** Claude Agent SDK adapter: streaming query() turns, canUseTool approvals and file-change hooks, normalized to SessionEvents. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { createTwoFilesPatch } from 'diff';
 import {
   query,
   type CanUseTool,
@@ -16,6 +15,8 @@ import {
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { findContextWindow } from '../models/static-models';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
+import { makeFileChange } from '../util/file-changes';
+import { TurnUsageTracker } from '../util/turn-usage';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
 import type { HarnessAdapter, HarnessContext } from './types';
 
@@ -107,12 +108,14 @@ export class ClaudeAdapter implements HarnessAdapter {
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
   private fileSnapshots = new Map<string, string | null>();
   private turnStartedAt = 0;
-  private lastCost = 0;
+  private readonly usage: TurnUsageTracker;
   private started = false;
   private modelsEmitted = false;
   private compactionWaiter: Deferred<void> | null = null;
 
-  constructor(private readonly ctx: HarnessContext) {}
+  constructor(private readonly ctx: HarnessContext) {
+    this.usage = new TurnUsageTracker(ctx.session().usage);
+  }
 
   get busy(): boolean {
     return this._busy;
@@ -274,9 +277,7 @@ export class ClaudeAdapter implements HarnessAdapter {
           after = e.replace_all ? after.split(oldS).join(newS) : after.replace(oldS, newS);
         }
       } else return undefined;
-      const rel = path.relative(this.ctx.session().cwd, abs) || file;
-      const diff = createTwoFilesPatch(rel, rel, before ?? '', after, before === null ? '(new file)' : '', '', { context: 3 });
-      return [{ path: rel, kind: before === null ? 'add' : 'update', diff }];
+      return [makeFileChange(this.ctx.session().cwd, file, before, after, { newFileHeader: '(new file)' })];
     } catch {
       return undefined;
     }
@@ -308,11 +309,10 @@ export class ClaudeAdapter implements HarnessAdapter {
         this.fileSnapshots.delete(input.tool_use_id);
         try {
           const after = await fs.readFile(abs, 'utf8');
-          const rel = path.relative(this.ctx.session().cwd, abs) || file;
-          const diff = createTwoFilesPatch(rel, rel, before ?? '', after, '', '', { context: 3 });
+          const change = makeFileChange(this.ctx.session().cwd, file, before, after);
           const item = this.toolItems.get(input.tool_use_id);
           if (item) {
-            item.changes = [{ path: rel, kind: before === null || before === undefined ? 'add' : 'update', diff }];
+            item.changes = [change];
             this.ctx.emit({ type: 'item.upsert', item: { ...item } });
           }
         } catch {
@@ -430,32 +430,36 @@ export class ClaudeAdapter implements HarnessAdapter {
         this._busy = false;
         let usage: Partial<UsageTotals> | undefined;
         const mu = (msg as { modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number; contextWindow: number }> }).modelUsage;
+        let trackerTurn: ReturnType<TurnUsageTracker['finishTurn']>;
+        if (typeof msg.total_cost_usd === 'number') this.usage.setCumulative({ costUsd: msg.total_cost_usd });
         if (mu) {
-          const totals: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
+          const cumulative: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
           for (const v of Object.values(mu)) {
-            totals.inputTokens += v.inputTokens;
-            totals.outputTokens += v.outputTokens;
-            totals.cacheReadTokens += v.cacheReadInputTokens;
-            totals.cacheWriteTokens += v.cacheCreationInputTokens;
-            totals.costUsd += v.costUSD;
-            totals.contextWindow = v.contextWindow || totals.contextWindow;
+            cumulative.inputTokens += v.inputTokens;
+            cumulative.outputTokens += v.outputTokens;
+            cumulative.cacheReadTokens += v.cacheReadInputTokens;
+            cumulative.cacheWriteTokens += v.cacheCreationInputTokens;
+            cumulative.costUsd += v.costUSD;
+            cumulative.contextWindow = v.contextWindow || cumulative.contextWindow;
           }
-          const prev = this.ctx.session().usage;
-          totals.turns = prev.turns + 1;
           const u = (msg as { usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }).usage;
-          if (u) totals.contextTokens = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-          // modelUsage is cumulative for the session; this turn's share is the delta (clamped, as a
-          // fresh SDK process restarts its counters).
-          usage = {
-            inputTokens: Math.max(0, totals.inputTokens - prev.inputTokens),
-            outputTokens: Math.max(0, totals.outputTokens - prev.outputTokens),
-            cacheReadTokens: Math.max(0, totals.cacheReadTokens - prev.cacheReadTokens),
-            cacheWriteTokens: Math.max(0, totals.cacheWriteTokens - prev.cacheWriteTokens)
-          };
-          this.ctx.emit({ type: 'usage', totals });
+          this.usage.setCumulative({
+            inputTokens: cumulative.inputTokens,
+            outputTokens: cumulative.outputTokens,
+            cacheReadTokens: cumulative.cacheReadTokens,
+            cacheWriteTokens: cumulative.cacheWriteTokens,
+            costUsd: cumulative.costUsd,
+            contextWindow: cumulative.contextWindow,
+            contextTokens: u ? (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) : undefined
+          });
         }
-        const turnCost = Math.max(0, (msg.total_cost_usd ?? 0) - this.lastCost);
-        this.lastCost = msg.total_cost_usd ?? this.lastCost;
+        // Finish even when the SDK omitted modelUsage: total_cost_usd is still useful, and the
+        // tracker must close its baseline so the next streamed turn starts cleanly.
+        trackerTurn = this.usage.finishTurn();
+        const turnUsage = trackerTurn.usage;
+        if (mu) usage = turnUsage ? { inputTokens: turnUsage.inputTokens, outputTokens: turnUsage.outputTokens, cacheReadTokens: turnUsage.cacheReadTokens, cacheWriteTokens: turnUsage.cacheWriteTokens } : undefined;
+        if (mu || typeof msg.total_cost_usd === 'number') this.ctx.emit({ type: 'usage', totals: trackerTurn.totals });
+        const turnCost = turnUsage?.costUsd ?? 0;
         const turnMsg = msg as { is_error?: boolean; terminal_reason?: string };
         const isError = turnMsg.is_error || msg.subtype !== 'success';
         const interrupted = turnMsg.terminal_reason === 'aborted_streaming' || turnMsg.terminal_reason === 'aborted_tools';
@@ -502,6 +506,7 @@ export class ClaudeAdapter implements HarnessAdapter {
   private markTurnStarted(): void {
     if (this._busy) return;
     this._busy = true;
+    this.usage.beginTurn();
     this.turnStartedAt = Date.now();
     this.ctx.emit({ type: 'status', status: 'running' });
   }
@@ -524,6 +529,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     } as unknown as SDKUserMessage;
     if (!this._busy) {
       this._busy = true;
+      this.usage.beginTurn();
       this.turnStartedAt = Date.now();
       this.ctx.emit({ type: 'status', status: 'running' });
     }
