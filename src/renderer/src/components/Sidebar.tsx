@@ -255,7 +255,7 @@ export function Sidebar() {
     <aside className="sidebar">
       <div className="sidebar-top">
         <div className="brand">
-          <Icon name="logo" size={18} />
+          <Icon name="logo" size={22} />
           <span>Vocs Code</span>
         </div>
         <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
