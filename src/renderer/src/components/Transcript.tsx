@@ -16,6 +16,11 @@ interface ImageLightboxState {
 
 export type OnImageExpand = (images: LightboxImage[], index: number) => void;
 
+/** Terminal key events are handled by the terminal find bar, not the transcript finder. */
+export function isTerminalEventTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest('.term, .term-view');
+}
+
 /** Data-URL rendering for a transcript image attachment. */
 export function imageSrc(im: { mimeType: string; data: string }): string {
   return `data:${im.mimeType};base64,${im.data}`;
@@ -39,6 +44,8 @@ export function Transcript({ session }: { session: SessionMeta }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Terminal owns Ctrl+F so its find bar opens instead of the transcript finder.
+      if (isTerminalEventTarget(e.target)) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && !e.shiftKey) {
         // Plain Ctrl+F: find in transcript. Ctrl+Shift+F is the global deep session search.
         e.preventDefault();
