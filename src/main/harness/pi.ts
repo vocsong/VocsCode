@@ -68,6 +68,9 @@ export class PiAdapter implements HarnessAdapter {
   private lastCost = 0;
   private lastTokens = { input: 0, output: 0 };
   private totals: UsageTotals;
+  /** stopReason/errorMessage of the last assistant message — pi reports turn failures here, not as events. */
+  private lastStopReason: string | null = null;
+  private lastErrorMessage: string | null = null;
   private models: ModelInfo[] = [];
   private nextId = 1;
   private exited = false;
@@ -176,9 +179,13 @@ export class PiAdapter implements HarnessAdapter {
         this.turnStartedAt = this.turnStartedAt || Date.now();
         this.ctx.emit({ type: 'status', status: 'running' });
         return;
-      case 'agent_end':
+      case 'agent_end': {
+        // A retry (or compaction) follows this run; wait for the final agent_end so the
+        // turn item reflects the whole prompt, not the failed attempt.
+        if ((ev as { willRetry?: boolean }).willRetry) return;
         void this.finishTurn();
         return;
+      }
       case 'turn_start':
       case 'turn_end':
         return;
@@ -206,7 +213,11 @@ export class PiAdapter implements HarnessAdapter {
         return;
       }
       case 'message_end': {
-        const msg = ev.message as { role?: string; content?: { type: string; text?: string; thinking?: string }[]; model?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } };
+        const msg = ev.message as { role?: string; content?: { type: string; text?: string; thinking?: string }[]; model?: string; stopReason?: string; errorMessage?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } };
+        if (msg?.role === 'assistant') {
+          this.lastStopReason = msg.stopReason ?? null;
+          this.lastErrorMessage = msg.errorMessage ?? null;
+        }
         if (msg?.role === 'assistant' && this.currentAssistant) {
           const a = this.currentAssistant;
           const text = (msg.content ?? []).filter((c) => c.type === 'text').map((c) => c.text ?? '').join('');
@@ -269,8 +280,10 @@ export class PiAdapter implements HarnessAdapter {
         this.info('Compacting context…');
         return;
       case 'compaction_end': {
-        const e = ev as { aborted?: boolean; result?: { tokensBefore?: number; estimatedTokensAfter?: number } };
-        this.info(e.aborted ? 'Compaction aborted.' : `Context compacted${e.result ? ` (${e.result.tokensBefore} → ~${e.result.estimatedTokensAfter} tokens)` : ''}.`);
+        const e = ev as { aborted?: boolean; errorMessage?: string; result?: { tokensBefore?: number; estimatedTokensAfter?: number } };
+        if (e.aborted) this.info('Compaction aborted.');
+        else if (e.errorMessage) this.info(e.errorMessage, 'error');
+        else this.info(`Context compacted${e.result ? ` (${e.result.tokensBefore} → ~${e.result.estimatedTokensAfter} tokens)` : ''}.`);
         return;
       }
       case 'auto_retry_start': {
@@ -432,7 +445,26 @@ export class PiAdapter implements HarnessAdapter {
     } catch (e) {
       this.ctx.log('debug', `get_session_stats failed: ${errorMessage(e)}`);
     }
-    this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'completed', durationMs: Date.now() - this.turnStartedAt, costUsd: turnCost, usage: turnUsage } });
+    // pi ends a failed turn with an assistant message (stopReason 'error'), not an error event.
+    const stopReason = this.lastStopReason;
+    const errorMsg = this.lastErrorMessage;
+    this.lastStopReason = null;
+    this.lastErrorMessage = null;
+    const failed = stopReason === 'error' && errorMsg;
+    if (failed) this.info(`Turn failed: ${errorMsg}`, 'error');
+    this.ctx.emit({
+      type: 'item.upsert',
+      item: {
+        id: shortId('turn_'),
+        kind: 'turn',
+        ts: Date.now(),
+        status: failed ? 'failed' : stopReason === 'aborted' ? 'interrupted' : 'completed',
+        durationMs: Date.now() - this.turnStartedAt,
+        costUsd: turnCost,
+        usage: turnUsage,
+        error: failed ? errorMsg : undefined
+      }
+    });
     this.turnStartedAt = 0;
     this.ctx.emit({ type: 'status', status: 'idle' });
   }
