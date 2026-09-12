@@ -9,7 +9,7 @@ import { Header } from './components/Header';
 import { NewSessionDialog } from './components/NewSessionDialog';
 import { RightPanel } from './components/RightPanel';
 import { SettingsView } from './components/SettingsView';
-import { Sidebar } from './components/Sidebar';
+import { nextFolderTarget, nextSessionTarget, sidebarNavModel, Sidebar } from './components/Sidebar';
 import { SkillsView } from './components/SkillsView';
 import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
@@ -62,6 +62,20 @@ export function App() {
       } else if (mod && e.key === ',') {
         e.preventDefault();
         st.setView(st.view === 'settings' ? 'chat' : 'settings');
+      } else if (mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        // Ctrl+Arrow walks session rows; Ctrl+Shift+Arrow jumps to the first session of the
+        // folder below/above — both work no matter where focus is (terminal, composer, sidebar).
+        e.preventDefault();
+        const down = e.key === 'ArrowDown';
+        const model = sidebarNavModel(st.sessions, st.settings);
+        const target = e.shiftKey ? nextFolderTarget(model, st.activeId, down) : nextSessionTarget(model, st.activeId, down);
+        if (target) {
+          const collapsed = st.settings?.collapsedFolders ?? [];
+          if (collapsed.includes(target.root)) void invoke('settings:update', { collapsedFolders: collapsed.filter((r) => r !== target.root) });
+          void st.setActive(target.sessionId);
+          // The sidebar row may not be in view (long list, or folder just expanded above).
+          requestAnimationFrame(() => document.querySelector(`[data-session-id="${CSS.escape(target.sessionId)}"]`)?.scrollIntoView({ block: 'nearest' }));
+        }
       } else if (mod && /^[1-9]$/.test(e.key)) {
         const list = st.sessions.filter((s) => !s.archived);
         const target = list[Number(e.key) - 1];
