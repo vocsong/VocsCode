@@ -5,6 +5,8 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it, vi } from 'vitest';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { AsyncQueue, LineSplitter } from '../src/main/util/async';
 import { globToRegExp } from '../src/main/harness/native/tools';
 import { parseUnifiedDiff } from '../src/shared/diff-parse';
@@ -50,6 +52,21 @@ const safeStorageMock = vi.hoisted(() => ({
 }));
 vi.mock('electron', () => ({ safeStorage: safeStorageMock }));
 
+/** Starts an HTTP server that answers every request via respond(); resolves once it is listening. */
+function listenOnce(respond: (req: IncomingMessage, res: ServerResponse, body?: string) => void): Promise<{ url: string; close: () => Promise<void> }> {
+  const server: Server = createServer((req, res) => {
+    let body: string | undefined;
+    req.on('data', (c: Buffer) => (body = (body ?? '') + c.toString()));
+    req.on('end', () => respond(req, res, body));
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as AddressInfo).port;
+      resolve({ url: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(() => r())) });
+    });
+  });
+}
+
 describe('auto session titles', () => {
   it('caps derived titles at 6 words', () => {
     expect(titleFromPrompt('Fix the bug where the sidebar flickers when switching folders')).toBe('Fix the bug where the sidebar');
@@ -67,11 +84,12 @@ describe('auto session titles', () => {
 });
 
 describe('LLM session titles', () => {
-  const getSecret = async () => undefined;
+  const getSecret = async (id: string) => (id === 'fake' ? 'sk-test' : undefined);
 
   it('strips quotes and preamble from model replies and keeps the 6-word cap', () => {
     expect(sanitizeLlmTitle('"Fix the sidebar flicker on folder switch"')).toBe('Fix the sidebar flicker on folder');
-    expect(sanitizeLlmTitle('Title: Refactor auth module.')).toBe('Title: Refactor auth module');
+    expect(sanitizeLlmTitle('**Fix the sidebar flicker**')).toBe('Fix the sidebar flicker');
+    expect(sanitizeLlmTitle('Title: Refactor auth module.')).toBe('Refactor auth module');
     expect(sanitizeLlmTitle('  \n\n  ')).toBeNull();
   });
 
@@ -98,6 +116,46 @@ describe('LLM session titles', () => {
     // but reaching that failure proves the fallback provider was chosen over the unusable one.
     const title = await generateSessionTitle('Fix the bug', [unusable, usable] as never, getSecret, { provider: 'unused', model: 'm1' });
     expect(title).toBeNull();
+  });
+
+  it('names sessions end-to-end against an OpenAI-compatible endpoint, using the preferred provider', async () => {
+    const seen: { auth?: string; body?: Record<string, unknown> } = {};
+    const server = await listenOnce((req, res, body) => {
+      seen.auth = req.headers.authorization;
+      seen.body = JSON.parse(body ?? '{}') as Record<string, unknown>;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: '"Fix the sidebar flicker"' }, finish_reason: 'stop' }] }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'openai-compatible' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [{ id: 'cheap-flash', name: 'Cheap Flash', provider: 'fake' }] };
+      const title = await generateSessionTitle('Fix the bug', [provider] as never, getSecret, { provider: 'fake', model: 'cheap-flash' });
+      expect(title).toBe('Fix the sidebar flicker');
+      expect(seen.auth).toBe('Bearer sk-test');
+      expect(seen.body?.model).toBe('cheap-flash');
+      expect(seen.body?.max_tokens).toBe(200);
+      expect(seen.body?.max_completion_tokens).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('uses max_completion_tokens with low effort for reasoning models', async () => {
+    const seen: { body?: Record<string, unknown> } = {};
+    const server = await listenOnce((req, res, body) => {
+      seen.body = JSON.parse(body ?? '{}') as Record<string, unknown>;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: 'Migrate auth to OAuth' }, finish_reason: 'stop' }] }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'openai-compatible' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [] };
+      const title = await generateSessionTitle('Migrate the auth module', [provider] as never, getSecret, { provider: 'fake', model: 'gpt-5-mini' });
+      expect(title).toBe('Migrate auth to OAuth');
+      expect(seen.body?.max_tokens).toBeUndefined();
+      expect(seen.body?.max_completion_tokens).toBe(1024);
+      expect(seen.body?.reasoning_effort).toBe('low');
+    } finally {
+      server.close();
+    }
   });
 });
 
