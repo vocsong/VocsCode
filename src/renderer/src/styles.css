@@ -1011,9 +1011,18 @@ h4 {
   background: var(--bg-hover);
 }
 .project-title {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-weight: inherit;
+  text-align: left;
+  cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.project-title:hover {
+  color: var(--fg);
 }
 /* A custom color reads quieter than the default hue on the dark sidebar; a hairline
    dark shadow restores edge contrast without looking like a glow. */
