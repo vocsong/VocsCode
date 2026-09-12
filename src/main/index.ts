@@ -12,6 +12,7 @@ import { watchEventLoop } from './diag';
 import { registerIpc, pushToRenderer } from './ipc';
 import { createLogger, type Logger } from './log';
 import { RuntimeResolver } from './runtime';
+import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
 import { SettingsStore } from './settings';
@@ -78,6 +79,15 @@ async function main(): Promise<void> {
   const analytics = new AnalyticsStore(userData, { log });
   await analytics.load(store.list(), (id) => store.readTranscript(id));
 
+  // Deep search index: derived from transcripts, so it lives beside them and rebuilds itself.
+  const search = new SearchIndex(userData, { store, log });
+  await search.init();
+  store.hooks = {
+    onAppend: (id, item) => search.indexItem(id, item),
+    onRewrite: (id) => search.resyncSession(id),
+    onRemove: (id) => search.dropSession(id)
+  };
+
   // out/main/index.js → two levels up is the app root both in development and inside app.asar.
   // (app.getAppPath() returns out/main when launched as `electron out/main/index.js`.)
   const appRoot = path.resolve(here, '..', '..');
@@ -98,7 +108,10 @@ async function main(): Promise<void> {
     analytics,
     getSecret: (id) => secrets.get(id),
     pushEvent: (env: SessionEventEnvelope) => pushToRenderer(mainWindow, PUSH_CHANNELS.sessionEvent, env),
-    pushSessions: (list: SessionMeta[]) => pushToRenderer(mainWindow, PUSH_CHANNELS.sessionsChanged, list),
+    pushSessions: (list: SessionMeta[]) => {
+      search.syncMeta(list);
+      pushToRenderer(mainWindow, PUSH_CHANNELS.sessionsChanged, list);
+    },
     notify: (sessionId, title, body) => {
       if (!settings.get().notifications) return;
       if (mainWindow?.isFocused()) return;
@@ -125,7 +138,7 @@ async function main(): Promise<void> {
   });
   await terminals.load();
 
-  registerIpc({ settings, secrets, sessions, terminals, runtime, analytics, getWindow: () => mainWindow, log });
+  registerIpc({ settings, secrets, sessions, terminals, runtime, analytics, search, getWindow: () => mainWindow, log });
 
   settings.onChange((s) => {
     currentTheme = s.theme;
@@ -162,7 +175,7 @@ async function main(): Promise<void> {
     e.preventDefault();
     // Drain debounced session-meta persists after the sessions themselves are stopped.
     const drainSessions = sessions ? sessions.stopAll().then(() => sessions?.flushPendingPersists()).then(() => analytics.flush()) : Promise.resolve();
-    Promise.race([Promise.all([drainSessions, terminals?.shutdown()]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
+    Promise.race([Promise.all([drainSessions, terminals?.shutdown(), Promise.resolve(search?.close())]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
   });
 }
 
