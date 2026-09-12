@@ -15,6 +15,7 @@ import { SkillsView } from './components/SkillsView';
 import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
 import { Button, ConfirmHost, EmptyState, Icon, Kbd, Spinner } from './components/ui';
+import { handleCustomShortcut } from './shortcuts';
 import { createTerminal } from './terminal/host';
 import { applyTheme } from './theme';
 
@@ -99,6 +100,9 @@ export function App() {
           st.setPanelTab('terminal');
           st.focusTerminal();
         }
+      } else if (handleCustomShortcut(e)) {
+        // A custom shortcut bound in Settings → Shortcuts consumed the key; the fixed
+        // shortcuts above keep priority.
       } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && st.activeId) {
         // Escape interrupts the agent only when nothing else would consume it: no open menu, dialog or
         // popover, and focus is on the page body or an empty composer.

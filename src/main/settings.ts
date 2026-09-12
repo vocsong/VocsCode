@@ -2,6 +2,7 @@
 import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, FolderStyle, ModelRef, ProviderConfig } from '../shared/types';
 import { pruneModelOverrides } from '../shared/model-overrides';
+import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
 import { readJson, writeJson } from './util/fs';
@@ -205,6 +206,7 @@ export function defaultSettings(): AppSettings {
     customLabels: [],
     folderOrder: [],
     collapsedFolders: [],
+    customShortcuts: {},
     goalDefaults: { autoContinue: true, maxIterations: 25 },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] }
   };
@@ -258,6 +260,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     collapsedFolders: Array.isArray(stored.collapsedFolders) ? stored.collapsedFolders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderStyles: normalizeFolderStyles(stored.folderStyles),
     customLabels: normalizeCustomLabels(stored.customLabels),
+    customShortcuts: normalizeCustomShortcuts(stored.customShortcuts),
     favoriteModels: Array.isArray(stored.favoriteModels)
       ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
       : [],
