@@ -60,6 +60,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
   const [summary, setSummary] = useState<GitSummary | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [diff, setDiff] = useState('');
+  const [diffError, setDiffError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [commitMsg, setCommitMsg] = useState('');
   /** The session this component instance currently belongs to; async writes compare against it. */
@@ -75,6 +76,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
       const d = await invoke('git:diff', { sessionId: sid, path: selected ?? undefined });
       if (liveId.current !== sid) return;
       setDiff(d.diff);
+      setDiffError(d.error ?? null);
     } catch (e) {
       if (liveId.current === sid) toast(String((e as Error).message ?? e), 'error');
     } finally {
@@ -85,6 +87,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
     liveId.current = session.id;
     setSelected(null);
     setDiff('');
+    setDiffError(null);
     setSummary(null);
   }, [session.id]);
   useEffect(() => {
@@ -106,6 +109,16 @@ function ChangesTab({ session }: { session: SessionMeta }) {
         <Button variant="ghost" size="sm" icon="refresh" onClick={() => void refresh()} title="Refresh" />
         <Button variant="ghost" size="sm" icon="external" onClick={() => void invoke('app:openInEditor', { path: session.cwd })} title="Open in editor" />
       </div>
+      {summary?.error && (
+        <div className="callout warn" role="status">
+          {summary.error}
+        </div>
+      )}
+      {diffError && diffError !== summary?.error && (
+        <div className="callout warn" role="status">
+          {diffError}
+        </div>
+      )}
       {files.length > 0 && (
         <div className="file-list">
           <button type="button" className={`file-row ${selected === null ? 'active' : ''}`} onClick={() => setSelected(null)}>
@@ -124,7 +137,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
       )}
       <div className="changes-diff">
         {loading && <Spinner />}
-        {!loading && files.length === 0 && <div className="muted pad">Working tree clean.</div>}
+        {!loading && !summary?.error && files.length === 0 && <div className="muted pad">Working tree clean.</div>}
         {!loading && files.length > 0 && (
           <DiffView
             diff={diff}

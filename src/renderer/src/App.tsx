@@ -24,6 +24,7 @@ import { applyTheme } from './theme';
 
 export function App() {
   const booted = useStore((s) => s.booted);
+  const bootError = useStore((s) => s.bootError);
   const boot = useStore((s) => s.boot);
   const settings = useStore((s) => s.settings);
   const view = useStore((s) => s.view);
@@ -126,6 +127,24 @@ export function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  if (bootError) {
+    return (
+      <div className="shell">
+        <TitleBar />
+        <div className="boot boot-error" role="alert">
+          <div className="boot-error-copy">
+            <Icon name="alert" size={24} />
+            <strong>Could not load Vocs Code</strong>
+            <span className="boot-error-detail">{bootError}</span>
+          </div>
+          <Button variant="primary" icon="refresh" onClick={() => void boot()}>
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   if (!booted || !settings) {
     return (

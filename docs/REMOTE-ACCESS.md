@@ -366,6 +366,12 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 **Relay MVP → beta: roughly 8–11 weeks (chat-first; terminal lands in P3.5 after).**
 Cloud workspaces: separate track afterward.
 
+**Status:** P0 implemented — transport extraction (`src/shared/transport.ts`,
+`src/main/handlers.ts`, registry tests). P1 in progress — the localhost web server +
+WebSocket transport landed (`VOCS_CODE_WEB=1`, serves the built renderer in a browser
+tab with a per-boot token); the distinct web shell branding and the responsive layer
+are the remaining P1 work.
+
 ## 11. Decisions and open questions
 
 **Resolved:**
@@ -432,6 +438,12 @@ Pairing-level questions from §6.9:
 unblocked; next concrete step is P0 (§12).
 
 ## 12. The first PR (P0 sketch)
+
+Status: **P0 is implemented** — `src/shared/transport.ts` (Transport interface, the type
+behind `window.harness`), `src/main/handlers.ts` (the Electron-free registry),
+`src/main/ipc.ts` (binds it to `ipcMain` + supplies the DesktopBridge), and
+`tests/handler-registry.test.ts` (registry driven in plain Node). The renderer and the
+IPC contract are unchanged.
 
 1. Add `src/shared/transport.ts` — `Transport` interface + a typed client generated from
    the existing channel maps in `src/shared/ipc.ts`.

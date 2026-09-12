@@ -70,15 +70,15 @@ export interface HarnessFactory {
 // Best-effort detection of obviously destructive shell commands; not exhaustive.
 // Verbatim copy kept in resources/pi/vocs-code-approvals.ts — keep the two in sync.
 export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
-  // rm: recursive + force flags in any arrangement, or a recursive flag aimed at an absolute root target
-  /\brm\s+(?=(?:-\S+\s+)*(?:-[a-z]*r[a-z]*\b|--recursive\b))(?=(?:-\S+\s+)*(?:-[a-z]*f[a-z]*\b|--force\b))/i,
-  /\brm\s+(?:-\S+\s+)*-[a-z]*r[a-z]*\b(?:\s+-\S+)*\s+[\/~]/i,
+  // rm: recursive + force flags in any arrangement, including shell-quoted flags
+  /\brm\s+(?=(?:(?:"[^"]*"|'[^']*'|-\S+)\s+)*(?:"-[a-z]*r[a-z]*"|'-[a-z]*r[a-z]*'|"--recursive"|'--recursive'|-[a-z]*r[a-z]*\b|--recursive\b))(?=(?:(?:"[^"]*"|'[^']*'|-\S+)\s+)*(?:"-[a-z]*f[a-z]*"|'-[a-z]*f[a-z]*'|"--force"|'--force'|-[a-z]*f[a-z]*\b|--force\b))/i,
+  /\brm\s+(?:(?:-\S+|"-{1,2}[a-zA-Z-]+"|'-{1,2}[a-zA-Z-]+')\s+)*(?:"-[a-z]*r[a-z]*"|'-[a-z]*r[a-z]*'|"--recursive"|'--recursive'|-[a-z]*r[a-z]*\b)(?:\s+-\S+|\s+"-{1,2}[a-zA-Z-]+"|\s+'-{1,2}[a-zA-Z-]+')*\s+["']?[\/~]/i,
   // dd reading from or writing to a device node
   /\bmkfs\b|\bdd\s+(?:\S+\s+)*(?:if|of)=\/dev\//i,
   // chmod 777 with a recursive flag, in any order
   /\bchmod\s+(?=(?:\S+\s+)*(?:-[a-z]*r[a-z]*\b|--recursive\b))(?=(?:\S+\s+)*777)/i,
-  // git force-push: --force, -f or a +-prefixed refspec, allowing global git options before push
-  /\bgit(?:\s+-{1,2}\S+(?:\s+"[^"]*"|\s+\S+)?)*\s+push\b(?=\s)[^|;&]*?(?:--force\b|\s-f\b|\s\+\S)/i,
+  // git force-push: --force, --force-with-lease, -f or a +-prefixed refspec, allowing global git options before push
+  /\bgit(?:\s+-{1,2}\S+(?:\s+"[^"]*"|\s+\S+)?)*\s+push\b(?=\s)[^|;&]*?(?:--force(?:-with-lease)?\b|\s-f\b|\s\+\S)/i,
   /\bgit\s+reset\s+--hard\b/i,
   // any -f-containing flag cluster in any position
   /\bgit\s+clean\s+(?:-\S+\s+)*-[a-z]*f/i,
@@ -91,8 +91,13 @@ export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
   // Remove-Item and its aliases with a recurse flag
   /\b(?:remove-item|ri)\s+(?:\S+\s+)*(?:-recurse\b|-[a-z]*r\b)/i,
   /\bnpm\s+publish\b|\bpnpm\s+publish\b|\byarn\s+publish\b/i,
-  /\bcurl\b.*\|\s*(ba)?sh\b/i,
-  /\b(sudo|doas)\b/i,
+  // Downloaded or decoded payloads piped directly into a shell
+  /\b(?:curl|wget|base64)\b[^|;&\r\n]*\|\s*(?:ba)?sh\b/i,
+  // PowerShell's download-and-evaluate aliases, including its pipeline form
+  /\b(?:iex|invoke-expression)\s*(?:\(\s*)?(?:iwr|invoke-webrequest|irm|invoke-restmethod)\b/i,
+  /\b(?:iwr|invoke-webrequest|irm|invoke-restmethod|curl|wget)\b[^|;&\r\n]*\|\s*(?:iex|invoke-expression)\b/i,
+  /\b(?:sudo|doas|pkexec)\b/i,
+  /(?:^|[|;&]\s*)\bsu(?:\s+(?!--?(?:help|version|h)\b)\S+|\s*$)/i,
   // arbitrary encoded payloads
   /\b(?:powershell|pwsh)(?:\.exe)?\s+(?:\S+\s+)*(?:-encodedcommand\b|-enc\b|-e\b)/i,
   /:\(\)\s*\{\s*:\|:&\s*\};:/

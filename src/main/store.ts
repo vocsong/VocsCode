@@ -25,6 +25,8 @@ export class SessionStore {
   private readonly indexFile: string;
   private sessions: SessionMeta[] = [];
   private writeQueue: Promise<void> = Promise.resolve();
+  /** Per-session transcript write chain: reads and rewrites wait for in-flight appends to land first. */
+  private transcriptWrites = new Map<string, Promise<void>>();
   /** Optional observers (the search indexer); set after construction to avoid a dependency cycle. */
   hooks: { onAppend?: (sessionId: string, item: TranscriptItem) => void; onRewrite?: (sessionId: string) => void; onRemove?: (sessionId: string) => void } = {};
 
@@ -73,6 +75,8 @@ export class SessionStore {
     assertValidSessionId(id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
     await this.flushIndex();
+    await (this.transcriptWrites.get(id) ?? Promise.resolve()).catch(() => undefined);
+    this.transcriptWrites.delete(id);
     await rmrf(this.sessionDir(id));
     this.hooks.onRemove?.(id);
   }
@@ -87,11 +91,15 @@ export class SessionStore {
   }
 
   async appendTranscript(id: string, item: TranscriptItem): Promise<void> {
-    await appendLine(path.join(this.sessionDir(id), 'transcript.jsonl'), JSON.stringify(item));
+    const run = this.queueTranscriptWrite(id, () => appendLine(path.join(this.sessionDir(id), 'transcript.jsonl'), JSON.stringify(item)));
+    await run;
     this.hooks.onAppend?.(id, item);
   }
 
   async readTranscript(id: string): Promise<TranscriptItem[]> {
+    // A renderer can request the transcript right after a pushed event promised it an item;
+    // without this wait the snapshot read can race the pending append and drop that item.
+    await (this.transcriptWrites.get(id) ?? Promise.resolve());
     const rows = await readJsonl<TranscriptItem>(path.join(this.sessionDir(id), 'transcript.jsonl'));
     // Collapse upserts: keep insertion order of first occurrence, latest content.
     const order: string[] = [];
@@ -106,9 +114,19 @@ export class SessionStore {
   /** Rewrites the transcript file from a compacted item list (used after clear). */
   async rewriteTranscript(id: string, items: TranscriptItem[]): Promise<void> {
     const file = path.join(this.sessionDir(id), 'transcript.jsonl');
-    await ensureDir(path.dirname(file));
-    await fs.writeFile(file, items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : ''), 'utf8');
+    // Behind the append chain: a pending append flushing after the rewrite would resurrect a cleared item.
+    await this.queueTranscriptWrite(id, async () => {
+      await ensureDir(path.dirname(file));
+      await fs.writeFile(file, items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : ''), 'utf8');
+    });
     this.hooks.onRewrite?.(id);
+  }
+
+  /** Chains a transcript write behind the session's pending ones; the chain never rejects. */
+  private queueTranscriptWrite<T>(id: string, run: () => Promise<T>): Promise<T> {
+    const next = (this.transcriptWrites.get(id) ?? Promise.resolve()).then(run, run);
+    this.transcriptWrites.set(id, next.then(() => undefined, () => undefined));
+    return next;
   }
 
   async readNativeHistory<T>(id: string): Promise<T | null> {

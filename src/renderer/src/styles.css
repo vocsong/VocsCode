@@ -286,6 +286,26 @@ h4 {
   gap: 10px;
   color: var(--fg-muted);
 }
+.boot-error {
+  flex-direction: column;
+  padding: 24px;
+  text-align: center;
+}
+.boot-error-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 560px;
+  color: var(--fg);
+}
+.boot-error-copy .icon {
+  color: var(--red);
+}
+.boot-error-detail {
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
 
 /* Title bar (frameless window chrome) */
 .titlebar {
@@ -309,6 +329,10 @@ h4 {
 /* macOS draws its traffic lights inside the bar, so the controls start after them. */
 .titlebar-mac {
   padding-left: 78px;
+}
+/* Web build: the browser owns window chrome; the bar is a plain app header. */
+.titlebar-web {
+  -webkit-app-region: no-drag;
 }
 .titlebar-lead {
   display: flex;

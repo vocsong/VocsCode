@@ -270,6 +270,11 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
 
   return (
     <div className="branches">
+      {data.error && (
+        <div className="callout warn" role="status">
+          {data.error}
+        </div>
+      )}
       <div className="branches-head">
         <div className="seg">
           <button type="button" className={view === 'branches' ? 'active' : ''} onClick={() => setView('branches')}>
