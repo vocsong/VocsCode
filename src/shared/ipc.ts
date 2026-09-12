@@ -9,6 +9,7 @@ import type {
   FsEntry,
   GitBranchInfo,
   GitBranchOverview,
+  GitIssueList,
   GitPullRequestList,
   GitSummary,
   GitWorktreeInfo,
@@ -138,6 +139,8 @@ export interface IpcContract {
   'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];
   /** Pulls the repo's pull requests (all states) from GitHub through gh, for the Git panel's PR view. */
   'git:pullRequests': [{ sessionId: string }, GitPullRequestList];
+  /** Pulls the repo's issues (all states) from GitHub through gh, for the Git panel's Issues view. */
+  'git:issues': [{ sessionId: string }, GitIssueList];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];
