@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
 import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
+import { TurnUsageTracker } from '../util/turn-usage';
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { gateAction, OPTIONS_ALLOW_DENY } from './permissions';
@@ -99,15 +100,13 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   /** Exact command lines the user approved "for session"; Codex keeps its own per-command memory too. */
   private sessionAllowedCommands = new Set<string>();
   private queue: UserInput[] = [];
-  private totals: UsageTotals;
   private turnStartedAt = 0;
-  /** Totals when the current turn started; the turn item reports the delta. */
-  private turnBase: UsageTotals | null = null;
+  private readonly usage: TurnUsageTracker;
   private models: ModelInfo[] = [];
   private compactionWaiter: Deferred<void> | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
-    this.totals = { ...ctx.session().usage };
+    this.usage = new TurnUsageTracker(ctx.session().usage);
   }
 
   get busy(): boolean {
@@ -199,8 +198,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const n = p as { turn: { id: string } };
       this.turnId = n.turn.id;
       this._busy = true;
+      if (!this.turnStartedAt) this.usage.beginTurn();
       this.turnStartedAt = this.turnStartedAt || Date.now();
-      this.turnBase ??= { ...this.totals };
       this.ctx.emit({ type: 'status', status: 'running' });
     });
     rpc.onNotification('item/started', (p) => this.upsertItem((p as { item: ThreadItem }).item, false));
@@ -266,25 +265,15 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.turnId = null;
       for (const item of this.items.values()) if (item.kind === 'assistant' && item.streaming) this.ctx.emit({ type: 'item.upsert', item: { ...item, streaming: false } });
       const status = n.turn.status === 'failed' ? 'failed' : n.turn.status === 'interrupted' ? 'interrupted' : 'completed';
-      this.totals.turns += 1;
-      this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
-      const base = this.turnBase;
-      const usage: Partial<UsageTotals> | undefined = base
-        ? {
-            inputTokens: Math.max(0, this.totals.inputTokens - base.inputTokens),
-            outputTokens: Math.max(0, this.totals.outputTokens - base.outputTokens),
-            cacheReadTokens: Math.max(0, this.totals.cacheReadTokens - base.cacheReadTokens),
-            cacheWriteTokens: Math.max(0, this.totals.cacheWriteTokens - base.cacheWriteTokens),
-            reasoningTokens: Math.max(0, this.totals.reasoningTokens - base.reasoningTokens)
-          }
-        : undefined;
-      const turnCost = base ? Math.max(0, this.totals.costUsd - base.costUsd) : undefined;
+      const completed = this.usage.finishTurn();
+      this.ctx.emit({ type: 'usage', totals: completed.totals });
+      const usage = completed.usage;
+      const turnCost = usage?.costUsd;
       this.ctx.emit({
         type: 'item.upsert',
         item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: n.turn.durationMs ?? Date.now() - this.turnStartedAt, usage, costUsd: turnCost, error: n.turn.error?.message }
       });
       this.turnStartedAt = 0;
-      this.turnBase = null;
       this.ctx.emit({ type: 'status', status: 'idle' });
       const next = this.queue.shift();
       this.ctx.updateMeta({ queued: this.queue.length });
@@ -293,21 +282,19 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     rpc.onNotification('thread/tokenUsage/updated', (p) => {
       const n = p as { tokenUsage: { total: { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number; reasoningOutputTokens: number; totalTokens: number }; last: { totalTokens: number }; modelContextWindow: number | null } };
       const t = n.tokenUsage.total;
-      const base = this.ctx.session().usage;
-      // total is per thread (cumulative); use it directly.
-      this.totals = {
-        ...this.totals,
+      const current = this.usage.snapshot();
+      const cumulative = {
         inputTokens: t.inputTokens,
         outputTokens: t.outputTokens,
         cacheReadTokens: t.cachedInputTokens,
         cacheWriteTokens: t.cacheWriteInputTokens,
         reasoningTokens: t.reasoningOutputTokens,
-        contextWindow: n.tokenUsage.modelContextWindow ?? base.contextWindow,
-        contextTokens: n.tokenUsage.last?.totalTokens ?? base.contextTokens
+        contextWindow: n.tokenUsage.modelContextWindow ?? current.contextWindow,
+        contextTokens: n.tokenUsage.last?.totalTokens ?? current.contextTokens
       };
       const pricing = findPricing(this.modelProvider ?? 'openai', this.model ?? '', this.models);
-      this.totals.costUsd = estimateCostUsd(pricing, this.totals);
-      this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
+      this.usage.setCumulative({ ...cumulative, costUsd: estimateCostUsd(pricing, { ...current, ...cumulative }) });
+      this.ctx.emit({ type: 'usage', totals: this.usage.snapshot() });
     });
     rpc.onNotification('error', (p) => {
       const n = p as { error: { message: string }; willRetry: boolean };
@@ -584,7 +571,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     };
     this._busy = true;
     this.turnStartedAt = Date.now();
-    this.turnBase = { ...this.totals };
+    this.usage.beginTurn();
     this.ctx.emit({ type: 'status', status: 'running' });
     try {
       const res = await withTimeout(this.rpc.request<{ turn: { id: string } }>('turn/start', params), 300_000, 'turn/start');

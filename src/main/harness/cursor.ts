@@ -25,7 +25,7 @@ import type {
 } from '../../shared/types';
 import { errorMessage, shortId, truncate } from '../util/async';
 import type { HarnessAdapter, HarnessContext } from './types';
-import { CURSOR_STATIC_MODELS } from '../models/static-models';
+import { CURSOR_STATIC_MODELS, cursorModelToInfo } from '../models/static-models';
 
 const TEXT_LIMIT = 40_000;
 
@@ -122,18 +122,6 @@ function toSdkMessage(input: UserInput): { text: string; images?: { data: string
   return {
     text: input.text,
     images: input.images?.length ? input.images.map((i) => ({ data: i.data, mimeType: i.mimeType })) : undefined
-  };
-}
-
-/** Map a Cursor catalog entry to the app's ModelInfo. Context windows and pricing are not part of the catalog (usage is billed to the Cursor plan). */
-export function cursorModelToInfo(m: { id: string; displayName?: string; description?: string }): ModelInfo {
-  return {
-    id: m.id,
-    provider: 'cursor',
-    displayName: m.displayName ?? m.id,
-    description: m.description,
-    supportsImages: true,
-    supportsReasoning: true
   };
 }
 
