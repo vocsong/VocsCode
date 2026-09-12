@@ -1,11 +1,12 @@
 /** New session dialog: project directory, harness, model, permission mode and worktree isolation. */
 import React, { useEffect, useState } from 'react';
-import type { EffortLevel, HarnessId, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
+import type { EffortLevel, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke, modKey } from '../api';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
+import { fileToAttachment } from './Composer';
 
 export function NewSessionDialog() {
   const settings = useStore((s) => s.settings)!;
@@ -28,6 +29,7 @@ export function NewSessionDialog() {
   const [useWorktree, setUseWorktree] = useState(false);
   const [acpAgent, setAcpAgent] = useState(settings.acpAgents[0]?.id ?? 'dsh');
   const [prompt, setPrompt] = useState('');
+  const [images, setImages] = useState<ImageAttachment[]>([]);
   const [goal, setGoal] = useState('');
   const [title, setTitle] = useState('');
   const [advanced, setAdvanced] = useState(false);
@@ -89,7 +91,7 @@ export function NewSessionDialog() {
         maxBudgetUsd: maxBudget ? Number(maxBudget) : undefined,
         codexModelProvider: harness === 'codex' && customProvider.id && customProvider.baseUrl ? { id: customProvider.id, name: customProvider.name || customProvider.id, baseUrl: customProvider.baseUrl, envKey: customProvider.envKey || undefined, wireApi: 'chat' } : undefined
       };
-      const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, goal: goal.trim() || undefined });
+      const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, initialImages: images.length ? images : undefined, goal: goal.trim() || undefined });
       await invoke('settings:update', { defaultHarness: harness, defaultPermissionMode: mode, defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model } });
       close();
       await setActive(meta.id);
@@ -107,13 +109,36 @@ export function NewSessionDialog() {
     }
   };
 
+  // Same image handling as the chat composer: pasted or picked screenshots ride along with the first prompt.
+  const onPaste = async (e: React.ClipboardEvent) => {
+    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    e.preventDefault();
+    const imgs = await Promise.all(files.map(fileToAttachment));
+    setImages((prev) => [...prev, ...imgs]);
+  };
+
+  const addFiles = async (list: FileList | null) => {
+    if (!list) return;
+    const imgs = await Promise.all([...list].filter((f) => f.type.startsWith('image/')).map(fileToAttachment));
+    setImages((prev) => [...prev, ...imgs]);
+  };
+
+  const titleEl = (
+    <span className="ns-header">
+      <span className="row gap8">
+        <Icon name="plus" /> New session
+      </span>
+      <span className="ns-header-root row gap6" title={projectRoot}>
+        <Icon name="folder" size={13} />
+        <span className="ns-root">{projectRoot || 'No folder selected'}</span>
+      </span>
+    </span>
+  );
+
   return (
     <Modal
-      title={
-        <span className="row gap8">
-          <Icon name="plus" /> New session
-        </span>
-      }
+      title={titleEl}
       onClose={close}
       width={860}
       footer={
@@ -131,13 +156,6 @@ export function NewSessionDialog() {
     >
       <div className="ns-grid">
         <section className="ns-col">
-          <Field label="Project folder">
-            <div className="row gap8">
-              <Icon name="folder" size={14} />
-              <span className="ns-root" title={projectRoot}>{projectRoot || 'No folder selected'}</span>
-            </div>
-          </Field>
-
           <Field label="Harness">
             <div className="harness-cards">
               {HARNESSES.map((h) => {
@@ -211,10 +229,32 @@ export function NewSessionDialog() {
           {!descriptor.capabilities.approvals && mode !== 'plan' && <div className="callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
 
           <Toggle checked={useWorktree} onChange={setUseWorktree} label={<span>Isolate in a git worktree <span className="muted">(new branch under .vocs-code/worktrees)</span></span>} />
+        </section>
 
-          <Field label="First prompt (optional)">
-            <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} placeholder="What should the agent do?" />
-          </Field>
+        <section className="ns-span2">
+          <div className="field">
+            <span className="field-label">First prompt (optional)</span>
+            {images.length > 0 && (
+              <div className="attachments ns-attachments">
+                {images.map((im, i) => (
+                  <div key={i} className="attachment">
+                    <img src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'image'} />
+                    <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove">
+                      <Icon name="x" size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="ns-prompt-box">
+              <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
+              <label className="icon-btn ns-attach" title="Attach image">
+                <Icon name="image" size={14} />
+                <input type="file" accept="image/*" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
+              </label>
+            </div>
+            <span className="field-hint">Paste a screenshot or attach one with the button — it is sent with the first message.</span>
+          </div>
           <Field label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>} hint="A persistent objective. The session keeps continuing until the agent proves it is done or the iteration guard trips.">
             <textarea rows={2} value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="e.g. Make the test suite pass and open a PR" />
           </Field>

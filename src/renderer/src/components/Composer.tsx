@@ -468,7 +468,7 @@ export function Composer({ session }: { session: SessionMeta }) {
   );
 }
 
-async function fileToAttachment(f: File): Promise<ImageAttachment> {
+export async function fileToAttachment(f: File): Promise<ImageAttachment> {
   const buf = await f.arrayBuffer();
   let binary = '';
   const bytes = new Uint8Array(buf);
