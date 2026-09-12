@@ -3,7 +3,7 @@ productName: Vocs Code
 copyright: Copyright © 2026 Vocs
 directories:
   output: dist
-  buildResources: build
+  buildResources: resources
 files:
   - out/**
   - package.json

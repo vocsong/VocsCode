@@ -84,7 +84,7 @@ describe('ToolGroup', () => {
     tool({ summary: 'git status', output: 'clean' }),
     tool({ summary: 'git push', output: 'ok' }),
   ];
-  const props = { sessionId: 's', showThinking: false } as const;
+  const props = { sessionId: 's', showThinking: false, onImageExpand: () => undefined } as const;
 
   it('renders collapsed by default showing the ran count', () => {
     render(<ToolGroup entries={items} {...props} />);

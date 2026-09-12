@@ -67,12 +67,13 @@ describe('sidebar status labels', () => {
     expect(invokeMock).toHaveBeenCalledWith('sessions:label', { id: 's1', label: undefined });
   });
 
-  it('adds a new label to the predefined list and applies it', () => {
+  it('adds a new label to the predefined list and applies it', async () => {
     const { container } = renderRow(session({}));
     fireEvent.click(container.querySelector('.session-status') as HTMLElement);
     const input = document.querySelector('.status-label-add input') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'wip' } });
     fireEvent.keyDown(input, { key: 'Enter' });
+    await Promise.resolve();
     // 'wip' already exists in settings, so the list dedupes to itself.
     expect(invokeMock).toHaveBeenCalledWith('settings:update', { customLabels: ['wip'] });
     expect(invokeMock).toHaveBeenCalledWith('sessions:label', { id: 's1', label: 'wip' });
