@@ -4460,7 +4460,7 @@ body.resizing {
 }
 .slist-row {
   display: grid;
-  grid-template-columns: minmax(200px, 1fr) 84px 84px 64px 64px 90px;
+  grid-template-columns: minmax(200px, 1fr) 84px 84px 64px 64px 76px 90px;
   align-items: center;
   gap: 12px;
   padding: 7px 10px;
@@ -4535,7 +4535,8 @@ body.resizing {
     grid-template-columns: minmax(160px, 1fr) 80px 80px 56px;
   }
   .slist:not(.compact) .slist-row > .num:nth-child(5),
-  .slist:not(.compact) .slist-row > .num:nth-child(6) {
+  .slist:not(.compact) .slist-row > .num:nth-child(6),
+  .slist:not(.compact) .slist-row > .num:nth-child(7) {
     display: none;
   }
 }

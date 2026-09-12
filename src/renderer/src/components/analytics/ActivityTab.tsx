@@ -23,6 +23,11 @@ export function ActivityTab({ scope, summary }: { scope: Scope; summary: Analyti
       .map((b) => ({ key: b.key, label: label(b.key, b.label), value: speedTps(b.speed) ?? 0, sub: `${plural(b.usage.turns, 'turn')}`, title: b.key }))
       .filter((r) => r.value > 0)
       .sort((a, b) => b.value - a.value);
+  const avgTurnRows = (buckets: Scope['byModel'], label: (key: string, l: string) => string) =>
+    buckets
+      .map((b) => ({ key: b.key, label: label(b.key, b.label), value: b.usage.turns > 0 ? b.durationMs / b.usage.turns : 0, sub: `${plural(b.usage.turns, 'turn')}`, title: b.key }))
+      .filter((r) => r.value > 0)
+      .sort((a, b) => b.value - a.value);
   return (
     <>
       <KpiGrid caption={scope.previousLabel ? `Change is against the ${scope.previousLabel}.` : undefined}>
@@ -58,6 +63,12 @@ export function ActivityTab({ scope, summary }: { scope: Scope; summary: Analyti
       )}
 
       <div className="agrid">
+        <ChartCard title="Avg turn by model" subtitle="Wall time per completed turn">
+          <BarList rows={avgTurnRows(scope.byModel, (_k, l) => l)} format={fmtMs} share={false} emptyText="No turns recorded yet." />
+        </ChartCard>
+        <ChartCard title="Avg turn by harness" subtitle="Wall time per completed turn">
+          <BarList rows={avgTurnRows(scope.byHarness, (k) => harnessShort(k))} format={fmtMs} share={false} emptyText="No turns recorded yet." />
+        </ChartCard>
         <ChartCard title="Speed by model" subtitle="Average over sampled turns">
           <BarList rows={speedRows(scope.byModel, (_k, l) => l)} format={fmtTps} share={false} emptyText="No speed samples yet." />
         </ChartCard>

@@ -158,7 +158,7 @@ function sessionWeight(s: UsageSessionRecord, f: keyof UsageCounters): number {
     case 'speedMs':
       return s.speed?.ms ?? 0;
     case 'durationMs':
-      return s.usage.turns;
+      return s.durationMs ?? 0;
     default:
       return s.usage[f];
   }
@@ -197,6 +197,7 @@ function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSes
     updatedAt: meta.updatedAt,
     usage: { ...meta.usage },
     toolCalls: prev?.toolCalls ?? 0,
+    durationMs: prev?.durationMs ?? 0,
     speed: prev?.speed ? { ...prev.speed } : emptySpeed()
   };
 }
@@ -257,9 +258,10 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     for (const s of sessions) {
       const k = key(s);
       if (!k) continue;
-      const b = map.get(k.key) ?? { key: k.key, label: k.label, usage: { ...EMPTY_USAGE }, toolCalls: 0, sessions: 0, speed: emptySpeed() };
+      const b = map.get(k.key) ?? { key: k.key, label: k.label, usage: { ...EMPTY_USAGE }, toolCalls: 0, durationMs: 0, sessions: 0, speed: emptySpeed() };
       addTotals(b.usage, s.usage);
       b.toolCalls += s.toolCalls;
+      b.durationMs += s.durationMs ?? 0;
       addSpeed(b.speed, s.speed);
       b.sessions += 1;
       map.set(k.key, b);
@@ -451,10 +453,19 @@ export class AnalyticsStore {
       return;
     }
     let calls = 0;
+    let durationMs = 0;
     for (const item of items) {
+      if (item.kind === 'turn' && item.status === 'completed') {
+        durationMs += Math.max(0, item.durationMs ?? 0);
+        continue;
+      }
       if (item.kind !== 'tool' || item.status === 'running') continue;
       this.recordToolCall(sessionId, item, dayTs);
       calls++;
+    }
+    if (durationMs > 0) {
+      const session = this.data.sessions[sessionId];
+      if (session) session.durationMs = (session.durationMs ?? 0) + durationMs;
     }
     if (calls) this.deps.log('debug', `analytics: backfilled ${calls} tool call(s) from ${sessionId}`);
   }
@@ -484,8 +495,9 @@ export class AnalyticsStore {
     const delta = { durationMs, speedTokens: speed?.tokens, speedMs: speed?.ms };
     addDay(day, delta);
     attribute(day, attributionOf(meta), delta);
+    const session = (this.data.sessions[meta.id] ??= snapshotSession(meta));
+    session.durationMs = (session.durationMs ?? 0) + durationMs;
     if (speed) {
-      const session = (this.data.sessions[meta.id] ??= snapshotSession(meta));
       addSpeed((session.speed ??= emptySpeed()), speed);
     }
     this.scheduleWrite();
