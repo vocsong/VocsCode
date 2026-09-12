@@ -3385,6 +3385,8 @@ body.resizing {
   border-bottom: 1px solid var(--border);
   background: var(--bg-sunken);
   overflow-x: auto;
+  /* Reserve the horizontal-scrollbar space so toggling overflow can't change the row height. */
+  scrollbar-gutter: stable;
 }
 .atab {
   display: inline-flex;
@@ -3397,7 +3399,8 @@ body.resizing {
   border-bottom: 2px solid transparent;
   color: var(--fg-muted);
   font-size: 12.5px;
-  font-weight: 500;
+  /* Same weight as .atab.active so switching tabs never reflows the row. */
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
@@ -3409,7 +3412,6 @@ body.resizing {
 .atab.active {
   color: var(--fg);
   border-bottom-color: var(--accent);
-  font-weight: 600;
 }
 .atab:focus-visible {
   outline: 2px solid var(--accent);
