@@ -328,7 +328,7 @@ export function Sidebar() {
                 {basename(g.root)}
               </button>
               {isCollapsed && g.list.length > 0 && <span className="project-count">{g.list.length}</span>}
-              <FolderBranch root={g.root} />
+              <FolderBranch root={g.root} expanded={!isCollapsed} />
               <button
                 type="button"
                 className="project-new-btn"
@@ -462,7 +462,7 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
         ) : (
           <div className="session-title">
             {s.pinned && <Icon name="pin" size={11} />}
-            <span title="Click to rename" onClick={() => startRename()}>{s.title}</span>
+            <span title="Click to rename" onClick={(e) => { e.stopPropagation(); startRename(); }}>{s.title}</span>
           </div>
         )}
         <div className="session-meta">

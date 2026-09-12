@@ -5,7 +5,7 @@ import { HARNESSES } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { useStore } from '../store';
 import { ModelPicker } from './ModelPicker';
-import { Badge, Button, Field, Modal, Spinner } from './ui';
+import { Badge, Button, Field, Icon, Modal, Spinner } from './ui';
 
 const INSTALLABLE = ['claude', 'codex', 'pi', 'dsh'] as const;
 type Installable = (typeof INSTALLABLE)[number];
@@ -17,9 +17,12 @@ export function OnboardingWizard() {
   const update = (patch: Partial<AppSettings>) => void invoke('settings:update', patch);
   const [step, setStep] = useState(0);
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
+  const [providersError, setProvidersError] = useState<string | null>(null);
 
   useEffect(() => {
-    void invoke('providers:list', undefined).then(setProviders).catch(() => undefined);
+    void invoke('providers:list', undefined)
+      .then(setProviders)
+      .catch((e) => setProvidersError(e instanceof Error ? e.message : String(e)));
   }, []);
 
   // Closing the wizard at any point marks onboarding done — the guide should not
@@ -60,6 +63,7 @@ export function OnboardingWizard() {
         </div>
       }
     >
+      {providersError && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {providersError}</span></div>}
       {step === 0 && <HarnessStep />}
       {step === 1 && <ProviderKeys providers={providers} onChanged={setProviders} />}
       {step === 2 && <UtilityModelStep settings={settings} providers={providers} update={update} />}

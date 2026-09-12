@@ -49,6 +49,15 @@ describe('sidebar session actions', () => {
     expect(invokeMock).toHaveBeenCalledWith('sessions:pin', { id: 's_a', pinned: true });
   });
 
+  it('starts renaming from the title without selecting the row', () => {
+    const setActive = vi.fn();
+    useStore.setState({ sessions: [session('s_a', { title: 'A' })], settings, activeId: null, view: 'chat', setActive } as never);
+    const { container } = render(<Sidebar />);
+    fireEvent.click(container.querySelector('.session-title span[title="Click to rename"]') as HTMLElement);
+    expect(setActive).not.toHaveBeenCalled();
+    expect(container.querySelector('.session-rename')).toBeTruthy();
+  });
+
   it('pinned rows offer unpin and are draggable', () => {
     useStore.setState({ sessions: [session('s_a', { title: 'A', pinned: true, pinnedAt: 5 })], settings, activeId: null, view: 'chat' });
     const { container } = render(<Sidebar />);

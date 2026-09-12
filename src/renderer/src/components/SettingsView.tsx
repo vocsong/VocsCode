@@ -172,12 +172,16 @@ const SCROLLBACKS = [1_000, 5_000, 10_000, 20_000, 50_000, 100_000];
 /** General → Utility model: the cheap model used for background chores like session titles. */
 function UtilityModelField({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    void invoke('providers:list', undefined).then(setProviders).catch(() => undefined);
+    void invoke('providers:list', undefined)
+      .then(setProviders)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
   const models = providers.filter((p) => p.enabled).flatMap((p) => p.models);
   return (
     <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions. Falls back to the session's own model when unset.">
+      {error && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {error}</span></div>}
       <div className="onboarding-model-picker">
         <ModelPicker
           models={models}
