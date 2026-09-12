@@ -33,7 +33,6 @@ export function App() {
   const quickSessionOpen = useStore((s) => s.quickSessionOpen);
   const paletteOpen = useStore((s) => s.paletteOpen);
   const searchOpen = useStore((s) => s.searchOpen);
-  const toasts = useStore((s) => s.toasts);
   const session = useActiveSession();
 
   useEffect(() => {
@@ -201,13 +200,26 @@ export function App() {
       {paletteOpen && <CommandPalette />}
       {searchOpen && <SearchModal />}
       <ConfirmHost />
-      <div className="toasts">
-        {toasts.map((t) => (
-          <div key={t.id} className={`toast toast-${t.kind}`} onClick={() => useStore.getState().dismissToast(t.id)}>
-            <Icon name={t.kind === 'error' ? 'alert' : t.kind === 'success' ? 'check' : 'info'} size={14} /> <span>{t.text}</span>
-          </div>
-        ))}
-      </div>
+      <Toasts />
+    </div>
+  );
+}
+
+/** Bottom-right toast stack: polite for status, assertive for errors. */
+export function Toasts() {
+  const toasts = useStore((s) => s.toasts);
+  return (
+    <div className="toasts" role="status" aria-live="polite" aria-atomic="false">
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className={`toast toast-${t.kind}`}
+          role={t.kind === 'error' ? 'alert' : 'status'}
+          onClick={() => useStore.getState().dismissToast(t.id)}
+        >
+          <Icon name={t.kind === 'error' ? 'alert' : t.kind === 'success' ? 'check' : 'info'} size={14} /> <span>{t.text}</span>
+        </div>
+      ))}
     </div>
   );
 }
