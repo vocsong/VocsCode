@@ -49,6 +49,8 @@ export function Sidebar() {
   const toast = useStore((s) => s.toast);
   const [query, setQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
+  // Drag-to-reorder state: which folder block is being dragged, and where it currently hovers.
+  const [drag, setDrag] = useState<{ root: string; over: string | null; after: boolean } | null>(null);
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -58,22 +60,74 @@ export function Sidebar() {
       const key = s.config.projectRoot;
       byProject.set(key, [...(byProject.get(key) ?? []), s]);
     }
-    const groups = [...byProject.entries()]
-      .map(([root, list]) => ({ root, list: list.sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updatedAt - a.updatedAt) }))
-      .sort((a, b) => Math.max(...b.list.map((x) => x.updatedAt)) - Math.max(...a.list.map((x) => x.updatedAt)));
+    const groups = [...byProject.entries()].map(([root, list]) => ({
+      root,
+      list: list.sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updatedAt - a.updatedAt)
+    }));
     if (!showArchived) {
       // A folder whose last active session was archived or deleted stays listed so a new
-      // session can still be added to it; empty folders sort alphabetically at the bottom.
+      // session can still be added to it.
       const empties = (settings?.folders ?? [])
         .filter((root) => !byProject.has(root) && (!q || root.toLowerCase().includes(q)))
-        .sort((a, b) => basename(a).localeCompare(basename(b)))
         .map((root) => ({ root, list: [] as SessionMeta[] }));
       groups.push(...empties);
     }
+    // Positioning is persistent: folders follow the manually saved order and stay put no
+    // matter which session was active last. Folders never positioned sort alphabetically
+    // after the positioned ones.
+    const order = settings?.folderOrder ?? [];
+    const pos = (root: string) => {
+      const i = order.indexOf(root);
+      return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+    };
+    groups.sort((a, b) => pos(a.root) - pos(b.root) || basename(a.root).localeCompare(basename(b.root)));
     return groups;
   }, [sessions, settings, query, showArchived]);
 
   const folderStyles = settings?.folderStyles ?? {};
+  const collapsed = settings?.collapsedFolders ?? [];
+
+  const toggleCollapsed = (root: string) => {
+    const cur = settings?.collapsedFolders ?? [];
+    const next = cur.includes(root) ? cur.filter((r) => r !== root) : [...cur, root];
+    void invoke('settings:update', { collapsedFolders: next });
+  };
+
+  /** Persist a drop of `from` next to `to` (before or after, by drop edge). */
+  const commitOrder = (from: string, to: string, after: boolean) => {
+    const roots = groups.map((g) => g.root);
+    const fromIdx = roots.indexOf(from);
+    const toBase = roots.indexOf(to);
+    if (from === to || fromIdx === -1 || toBase === -1) return;
+    roots.splice(fromIdx, 1);
+    const toIdx = roots.indexOf(to);
+    if (toIdx === -1) return;
+    roots.splice(after ? toIdx + 1 : toIdx, 0, from);
+    void invoke('settings:update', { folderOrder: roots });
+  };
+
+  const onDragStart = (e: React.DragEvent, root: string) => {
+    e.dataTransfer.effectAllowed = 'move';
+    // Firefox needs some payload before it will start a drag at all.
+    e.dataTransfer.setData('text/plain', root);
+    setDrag({ root, over: null, after: false });
+  };
+  const onDragOverGroup = (e: React.DragEvent, root: string) => {
+    if (!drag) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = e.currentTarget.getBoundingClientRect();
+    const after = e.clientY > rect.top + rect.height / 2;
+    if (drag.over !== root || drag.after !== after) setDrag({ ...drag, over: root, after });
+  };
+  const onDropGroup = (e: React.DragEvent, root: string) => {
+    if (!drag) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (root !== drag.root) commitOrder(drag.root, root, drag.after);
+    setDrag(null);
+  };
 
   const awaiting = sessions.filter((s) => s.status === 'awaiting').length;
   const running = sessions.filter((s) => s.status === 'running').length;
@@ -99,12 +153,52 @@ export function Sidebar() {
           {running > 0 && <Badge tone="blue">{running} running</Badge>}
         </div>
       )}
-      <div className="sidebar-list">
+      <div
+        className="sidebar-list"
+        onDragOver={(e) => {
+          // Only the empty space below the last group lands here (group handlers stop
+          // propagation); treat it as "move to the end".
+          if (!drag) return;
+          e.preventDefault();
+          const last = groups[groups.length - 1];
+          if (last && (drag.over !== last.root || !drag.after)) setDrag({ ...drag, over: last.root, after: true });
+        }}
+        onDrop={(e) => {
+          if (!drag) return;
+          e.preventDefault();
+          if (drag.over && drag.over !== drag.root) commitOrder(drag.root, drag.over, drag.after);
+          setDrag(null);
+        }}
+      >
         {groups.length === 0 && <div className="sidebar-empty">{showArchived ? 'No archived sessions.' : 'No sessions yet. Create one to start.'}</div>}
-        {groups.map((g) => (
-          <div key={g.root} className="project-group">
-            <div className="project-header" title={g.root}>
-              <FolderStyleButton root={g.root} style={folderStyles[g.root]} onPick={(patch) => {
+        {groups.map((g) => {
+          const isCollapsed = collapsed.includes(g.root);
+          const dropMark = drag && drag.over === g.root && drag.root !== g.root ? (drag.after ? 'drop-after' : 'drop-before') : '';
+          return (
+            <div
+              key={g.root}
+              className={`project-group ${drag?.root === g.root ? 'dragging' : ''} ${dropMark}`}
+              onDragOver={(e) => onDragOverGroup(e, g.root)}
+              onDrop={(e) => onDropGroup(e, g.root)}
+            >
+              <div
+                className="project-header"
+                title={g.root}
+                draggable
+                onDragStart={(e) => onDragStart(e, g.root)}
+                onDragEnd={() => setDrag(null)}
+              >
+                <button
+                  type="button"
+                  className="project-fold-btn"
+                  title={isCollapsed ? 'Expand folder' : 'Collapse folder'}
+                  aria-label={isCollapsed ? `Expand ${basename(g.root)}` : `Collapse ${basename(g.root)}`}
+                  aria-expanded={!isCollapsed}
+                  onClick={() => toggleCollapsed(g.root)}
+                >
+                  <Icon name={isCollapsed ? 'chevronRight' : 'chevron'} size={12} />
+                </button>
+                <FolderStyleButton root={g.root} style={folderStyles[g.root]} onPick={(patch) => {
                 const next = { ...folderStyles };
                 if (patch) next[g.root] = { ...next[g.root], ...patch };
                 else delete next[g.root];
@@ -116,6 +210,7 @@ export function Sidebar() {
               >
                 {basename(g.root)}
               </span>
+              {isCollapsed && g.list.length > 0 && <span className="project-count">{g.list.length}</span>}
               <FolderBranch root={g.root} />
               <button
                 type="button"
@@ -126,12 +221,13 @@ export function Sidebar() {
               >
                 <Icon name="plus" size={13} />
               </button>
+              </div>
+              {!isCollapsed && g.list.map((s) => (
+                <SessionRow key={s.id} session={s} active={s.id === activeId && view === 'chat'} onSelect={() => void setActive(s.id)} toast={toast} />
+              ))}
             </div>
-            {g.list.map((s) => (
-              <SessionRow key={s.id} session={s} active={s.id === activeId && view === 'chat'} onSelect={() => void setActive(s.id)} toast={toast} />
-            ))}
-          </div>
-        ))}
+          );
+        })}
       </div>
       <div className="sidebar-bottom">
         <button type="button" className={`sidebar-link ${showArchived ? 'active' : ''}`} onClick={() => setShowArchived((v) => !v)}>

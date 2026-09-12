@@ -622,6 +622,10 @@ export interface AppSettings {
   folders: string[];
   /** Per-folder sidebar appearance keyed by project root. */
   folderStyles?: Record<string, FolderStyle>;
+  /** Manual sidebar order for project folders; roots not listed sort alphabetically after. */
+  folderOrder?: string[];
+  /** Project roots whose sidebar folder block is collapsed. */
+  collapsedFolders?: string[];
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
 }
