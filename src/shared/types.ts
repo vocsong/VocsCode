@@ -4,6 +4,7 @@
  */
 import type { TerminalSettings } from './terminal';
 import type { ThemeId } from './themes';
+import type { ShortcutCommand } from './shortcuts';
 
 export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'native';
 
@@ -632,6 +633,8 @@ export interface AppSettings {
   folderOrder?: string[];
   /** Project roots whose sidebar folder block is collapsed. */
   collapsedFolders?: string[];
+  /** Extra keyboard shortcuts keyed by canonical accelerator (e.g. 'Ctrl+Alt+A'); see shared/shortcuts.ts. */
+  customShortcuts?: Record<string, ShortcutCommand>;
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
 }

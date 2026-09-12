@@ -4659,6 +4659,78 @@ body.resizing {
   flex-direction: column;
   gap: 12px;
 }
+
+/* Settings → Shortcuts */
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  margin-bottom: 6px;
+}
+.shortcut-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.shortcut-row-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.shortcut-row-desc {
+  margin-top: 1px;
+}
+.shortcut-add {
+  margin: 4px 0 2px;
+}
+.shortcut-capture {
+  min-width: 160px;
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: center;
+}
+.shortcut-warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--amber);
+  margin: 2px 0 0;
+}
+.shortcut-ref {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin: 12px 0;
+  overflow: hidden;
+}
+.shortcut-ref-title {
+  font-weight: 700;
+  font-size: 12px;
+  padding: 8px 12px 6px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
+}
+.shortcut-ref-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 12px;
+  font-size: 12.5px;
+}
+.shortcut-ref-row + .shortcut-ref-row {
+  border-top: 1px solid var(--border);
+}
+.shortcut-ref-keys {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
 @media (max-width: 1000px) {
   .skills-body {
     grid-template-columns: 1fr;
