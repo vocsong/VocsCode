@@ -281,9 +281,11 @@ export class SessionManager {
     const folders = s.folders.includes(cfg.projectRoot) ? s.folders : [...s.folders, cfg.projectRoot];
     await this.deps.settings.update({ recentProjects: recent, folders });
     this.pushSessions();
-    if (req.initialPrompt?.trim()) {
-      const prompt = meta.goal ? `${req.initialPrompt.trim()}\n\nActive goal: ${meta.goal.objective}` : req.initialPrompt.trim();
-      void this.send(id, { text: prompt }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+    const promptText = req.initialPrompt?.trim() ?? '';
+    const initialImages = req.initialImages?.length ? req.initialImages : undefined;
+    if (promptText || initialImages) {
+      const prompt = meta.goal && promptText ? `${promptText}\n\nActive goal: ${meta.goal.objective}` : promptText;
+      void this.send(id, { text: prompt, images: initialImages }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     } else if (meta.goal) {
       void this.send(id, { text: this.goalKickoffPrompt(meta.goal) }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     }

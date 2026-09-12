@@ -10,6 +10,7 @@ import { NewSessionDialog } from './components/NewSessionDialog';
 import { RightPanel } from './components/RightPanel';
 import { SettingsView } from './components/SettingsView';
 import { Sidebar } from './components/Sidebar';
+import { SkillsView } from './components/SkillsView';
 import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
 import { Button, ConfirmHost, EmptyState, Icon, Kbd, Spinner } from './components/ui';
@@ -114,6 +115,8 @@ export function App() {
             <SettingsView />
           ) : view === 'analytics' ? (
             <AnalyticsDashboard />
+          ) : view === 'skills' ? (
+            <SkillsView />
           ) : session ? (
             <>
               <Header session={session} />

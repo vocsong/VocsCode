@@ -19,6 +19,7 @@ import type { SecretStore } from './secrets';
 import type { Logger } from './log';
 import type { SessionManager } from './session-manager';
 import type { SettingsStore } from './settings';
+import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc, skillRoots } from './skills';
 import type { TerminalManager } from './terminal';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
@@ -263,6 +264,16 @@ export function registerIpc(deps: IpcDeps): void {
     availabilityCache.clear();
     return r;
   });
+
+  handle('skills:list', () => listSkills());
+  handle('skills:read', ({ path: p }) => readSkillDoc(p));
+  // Only paths main itself listed (a skills root or one of its skill folders) may be revealed.
+  handle('skills:reveal', async ({ path: p }) => {
+    if (locateSkillPath(p)) await shell.openPath(path.resolve(p));
+  });
+  handle('skills:create', (req) => createSkill(req));
+  handle('skills:copy', (req) => copySkill(req));
+  handle('skills:delete', ({ path: p }) => deleteSkill(p));
 
   handle('sessions:list', () => sessions.list());
   handle('sessions:create', (req) => sessions.create(req));
