@@ -2567,9 +2567,9 @@ body.resizing {
 }
 .branches-cols {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 72px 84px minmax(96px, 116px) 104px;
-  gap: 8px;
-  padding: 6px 10px;
+  grid-template-columns: minmax(0, 1fr) 64px 74px minmax(100px, 112px) 108px;
+  gap: 6px;
+  padding: 5px 10px;
   border-bottom: 1px solid var(--border);
   color: var(--fg-muted);
   font-size: 11px;
@@ -2583,15 +2583,15 @@ body.resizing {
 }
 .branch-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 72px 84px minmax(96px, 116px) 104px;
+  grid-template-columns: minmax(0, 1fr) 64px 74px minmax(100px, 112px) 108px;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
+  gap: 6px;
+  padding: 5px 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 .pr-cols,
 .pr-row {
-  grid-template-columns: minmax(0, 1fr) 80px 72px minmax(96px, 116px) 72px;
+  grid-template-columns: minmax(0, 1fr) 72px 64px minmax(100px, 112px) 60px;
 }
 /* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
 .branch-row > :nth-child(2) {
@@ -2685,6 +2685,10 @@ body.resizing {
   flex-wrap: wrap;
   gap: 2px;
   min-width: 0;
+}
+/* Icon-only buttons shrink here so up to four actions fit one line without wrapping. */
+.branch-actions .btn-sm {
+  padding: 3px 4px;
 }
 
 /* Narrow panel: two-line rows — name + meta + behind/ahead, then status + actions —

@@ -333,9 +333,9 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
             <div className="branches-cols">
               <span>Branch</span>
               <span>Updated</span>
-              <span className="num">Behind / Ahead</span>
+              <span className="num">Behind/Ahead</span>
               <span>Status</span>
-              <span />
+              <span className="num">Actions</span>
             </div>
             {visible.map((b) => (
               <BranchRow
@@ -363,7 +363,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
             <span>Branch</span>
             <span className="num">Sessions</span>
             <span>Status</span>
-            <span />
+            <span className="num">Actions</span>
           </div>
           {data.worktrees.map((wt) => (
             <WorktreeRow
@@ -649,7 +649,7 @@ function PrList({
             <span>Author</span>
             <span>Updated</span>
             <span>Status</span>
-            <span />
+            <span className="num">Actions</span>
           </div>
           {visible.map((pr) => (
             <PrRow
