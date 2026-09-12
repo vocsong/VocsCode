@@ -60,7 +60,12 @@ export function Composer({ session }: { session: SessionMeta }) {
   }, [text]);
 
   useEffect(() => {
-    ref.current?.focus();
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // Put the caret at the end of a restored draft so typing continues where it left off.
+    const end = el.value.length;
+    el.setSelectionRange(end, end);
   }, [session.id]);
 
   // Mirror every draft change (typed, inserted, history-navigated, cleared after send) into the store.
