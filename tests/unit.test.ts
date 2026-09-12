@@ -199,6 +199,12 @@ describe('settings normalization', () => {
     expect(s.providers.find((p) => p.id === 'custom')?.builtin).toBe(false);
     expect(s.acpAgents.length).toBe(d.acpAgents.length);
   });
+  it('remembers the worktree isolation decision and defaults it to off', () => {
+    expect(defaultSettings().defaultUseWorktree).toBe(false);
+    expect(normalizeSettings({ defaultUseWorktree: true }).defaultUseWorktree).toBe(true);
+    // Settings written before this key existed fall back to off.
+    expect(normalizeSettings({ theme: 'dark' }).defaultUseWorktree).toBe(false);
+  });
 });
 
 describe('pricing', () => {
@@ -399,6 +405,105 @@ describe('SessionManager folder tracking', () => {
   });
 });
 
+describe('SessionManager fork', () => {
+  const sourceSession = (): SessionMeta => ({
+    id: 's_src',
+    title: 'source session',
+    createdAt: 1_000,
+    updatedAt: 2_000,
+    config: {
+      harness: 'claude',
+      projectRoot: 'G:/proj/a',
+      permissionMode: 'auto',
+      model: { provider: 'anthropic', model: 'claude-sonnet-4-5' }
+    },
+    cwd: 'G:/proj/a/.vocs-code/worktrees/wt',
+    worktreeBranch: 'agent/source-session',
+    status: 'idle',
+    harnessRef: { claudeSessionId: 'claude_abc' },
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+  });
+
+  const forkManager = (src: SessionMeta) => {
+    const sessions: SessionMeta[] = [src];
+    const transcripts = new Map<string, TranscriptItem[]>();
+    const settings = defaultSettings();
+    settings.defaultModelByHarness.pi = { provider: 'anthropic', model: 'claude-sonnet-4-5' };
+    const store = {
+      list: () => sessions,
+      get: (id: string) => sessions.find((s) => s.id === id),
+      upsert: async (m: SessionMeta) => {
+        const i = sessions.findIndex((s) => s.id === m.id);
+        if (i >= 0) sessions[i] = m;
+        else sessions.push(m);
+      },
+      readTranscript: async (id: string) => transcripts.get(id) ?? [],
+      rewriteTranscript: async (id: string, items: TranscriptItem[]) => void transcripts.set(id, items),
+      readNativeHistory: async () => null,
+      writeNativeHistory: async () => undefined,
+      sessionDir: (id: string) => path.join(os.tmpdir(), `fork-test-${id}`)
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => settings } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    return { manager, transcripts };
+  };
+
+  it('forks into a different harness on the same worktree with a fresh provider session', async () => {
+    const src = sourceSession();
+    src.config.acpAgent = 'dsh';
+    src.config.codexModelProvider = { id: 'x', name: 'x', baseUrl: 'https://x' };
+    const items: TranscriptItem[] = [
+      { id: 'u_1', kind: 'user', ts: 1, text: 'fix the login bug' },
+      { id: 'a_1', kind: 'assistant', ts: 2, text: 'done' }
+    ];
+    const { manager, transcripts } = forkManager(src);
+    transcripts.set(src.id, items);
+    const fork = await manager.fork(src.id, 'pi');
+    expect(fork).toBeTruthy();
+    expect(fork!.id).not.toBe(src.id);
+    expect(fork!.config.harness).toBe('pi');
+    // Same directory and branch as the source.
+    expect(fork!.cwd).toBe(src.cwd);
+    expect(fork!.worktreeBranch).toBe('agent/source-session');
+    // The new harness cannot resume the source's provider session.
+    expect(fork!.harnessRef).toEqual({});
+    // Harness-specific config does not transfer; the model falls back to the target default.
+    expect(fork!.config.acpAgent).toBeUndefined();
+    expect(fork!.config.codexModelProvider).toBeUndefined();
+    expect(fork!.config.model).toEqual({ provider: 'anthropic', model: 'claude-sonnet-4-5' });
+    expect(fork!.activeModel).toEqual(fork!.config.model);
+    // The transcript is carried over for reference plus an explanatory info note.
+    const copied = transcripts.get(fork!.id) ?? [];
+    expect(copied.map((i) => i.id)).toContain('u_1');
+    const note = copied.find((i) => i.kind === 'info');
+    expect(note?.kind === 'info' && note.text).toContain('Forked from');
+    expect(fork!.title).toContain('fork');
+  });
+
+  it('keeps same-harness fork semantics: drops the worktree claim and carries provider state', async () => {
+    const src = sourceSession();
+    const items: TranscriptItem[] = [{ id: 'u_1', kind: 'user', ts: 1, text: 'hi' }];
+    const { manager, transcripts } = forkManager(src);
+    transcripts.set(src.id, items);
+    const fork = await manager.fork(src.id);
+    expect(fork!.config.harness).toBe('claude');
+    expect(fork!.worktreeBranch).toBeUndefined();
+    expect(fork!.harnessRef).toEqual({ claudeSessionId: 'claude_abc', forkOnResume: true });
+    const copied = transcripts.get(fork!.id) ?? [];
+    expect(copied.some((i) => i.kind === 'info')).toBe(false);
+    expect(copied.map((i) => i.id)).toContain('u_1');
+  });
+});
+
 describe('SessionManager PR state refresh', () => {
   it('flips a pr session to merged when refreshGitState runs after /merge', async () => {
     vi.useFakeTimers();
@@ -594,6 +699,13 @@ describe('git branch/worktree plumbing', () => {
     await fs.rm(wt2, { recursive: true, force: true });
     await removeWorktree(repo, wt2, { force: false });
     // Unarchive still recreates the worktree over the stale registration.
+    await restoreWorktree(repo, wt2, 'wtcycle');
+    expect((await gitWorktrees(repo)).worktrees.map((w) => w.branch)).toContain('wtcycle');
+    // A folder whose registration git lost (e.g. its .git link was deleted) is not a working tree:
+    // removal prunes and deletes the folder instead of blocking archive.
+    await fs.rm(path.join(wt2, '.git'));
+    await removeWorktree(repo, wt2, { force: false });
+    await expect(fs.stat(wt2)).rejects.toMatchObject({ code: 'ENOENT' });
     await restoreWorktree(repo, wt2, 'wtcycle');
     expect((await gitWorktrees(repo)).worktrees.map((w) => w.branch)).toContain('wtcycle');
     // A branch with its worktree still checked out cannot be deleted; remove the worktree first.

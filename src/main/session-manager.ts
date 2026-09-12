@@ -8,6 +8,7 @@ import type {
   CreateSessionRequest,
   EffortLevel,
   GoalState,
+  HarnessId,
   HarnessRef,
   ModelInfo,
   ModelRef,
@@ -832,34 +833,65 @@ export class SessionManager {
     return meta;
   }
 
-  async fork(id: string): Promise<SessionMeta | null> {
+  async fork(id: string, harness?: HarnessId): Promise<SessionMeta | null> {
     const src = this.get(id);
     if (!src) return null;
     const items = await this.transcript(id);
     const nid = shortId('s_');
+    const cross = !!harness && harness !== src.config.harness;
+    const target = cross ? harness! : src.config.harness;
     const meta: SessionMeta = {
       ...structuredClone(src),
       id: nid,
-      title: `${src.title} (fork)`,
+      title: cross ? `${src.title} (fork → ${HARNESS_BY_ID[target].name})` : `${src.title} (fork)`,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       status: 'idle',
       statusDetail: undefined,
       queued: 0,
       harnessRef: {},
-      goal: undefined,
-      // The fork shares the directory but does not own the original's worktree (deleting it must not remove that).
-      worktreeBranch: undefined
+      goal: undefined
     };
-    // Carry harness state where the harness supports it.
-    if (src.config.harness === 'claude' && src.harnessRef.claudeSessionId) meta.harnessRef = { claudeSessionId: src.harnessRef.claudeSessionId, forkOnResume: true } as HarnessRef;
-    if (src.config.harness === 'native') {
-      const hist = await this.deps.store.readNativeHistory(id);
-      if (hist) await this.deps.store.writeNativeHistory(nid, hist);
-      meta.harnessRef = { nativeHistory: true };
+    if (cross) {
+      // A different harness cannot resume the source's provider session: it starts fresh in the
+      // same directory/worktree. The copied transcript is carried over for reference only.
+      const s = this.settings();
+      meta.config = {
+        ...src.config,
+        harness: target,
+        model: s.defaultModelByHarness[target],
+        acpAgent: undefined,
+        codexModelProvider: undefined,
+        // Already living in the source's directory; no new worktree for the fork.
+        useWorktree: false
+      };
+      meta.activeModel = meta.config.model;
+      meta.activeEffort = undefined;
+      // The fork keeps the same worktree/branch as the session it was forked from.
+      meta.worktreeBranch = src.worktreeBranch;
+    } else {
+      // The fork shares the directory but does not own the original's worktree (deleting it must not remove that).
+      meta.worktreeBranch = undefined;
+      // Carry harness state where the harness supports it.
+      if (src.config.harness === 'claude' && src.harnessRef.claudeSessionId) meta.harnessRef = { claudeSessionId: src.harnessRef.claudeSessionId, forkOnResume: true } as HarnessRef;
+      if (src.config.harness === 'native') {
+        const hist = await this.deps.store.readNativeHistory(id);
+        if (hist) await this.deps.store.writeNativeHistory(nid, hist);
+        meta.harnessRef = { nativeHistory: true };
+      }
     }
     await this.deps.store.upsert(meta);
-    await this.deps.store.rewriteTranscript(nid, items.filter((i) => !(i.kind === 'approval' && !i.decision)));
+    const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision));
+    if (cross) {
+      keep.push({
+        id: shortId('i_'),
+        kind: 'info',
+        ts: Date.now(),
+        level: 'info',
+        text: `Forked from ${HARNESS_BY_ID[src.config.harness].name} into ${HARNESS_BY_ID[target].name} in the same directory${meta.worktreeBranch ? ` (branch ${meta.worktreeBranch})` : ''}. The new harness starts with a fresh context — the transcript above is carried over for reference.`
+      });
+    }
+    await this.deps.store.rewriteTranscript(nid, keep);
     this.pushSessions();
     return meta;
   }

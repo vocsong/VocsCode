@@ -10,6 +10,7 @@ import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
 import { GROUP_LABELS, GROUP_ORDER, THEMES } from '../../../shared/themes';
 import { Icon, MenuItem } from './ui';
+import { ForkIntoItems } from './ForkInto';
 
 const REPO = 'https://github.com/vocsong/Vocs-Code';
 
@@ -130,6 +131,7 @@ function FileMenu({ close }: { close: () => void }) {
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)))}>
         Fork session
       </MenuItem>
+      {session && <ForkIntoItems session={session} onForked={(f) => st.setActive(f.id)} />}
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:export', { id: session.id }).then((r) => r.path && st.toast(`Exported to ${r.path}`, 'success')))}>
         Export transcript…
       </MenuItem>

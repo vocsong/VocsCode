@@ -185,6 +185,7 @@ export function defaultSettings(): AppSettings {
     defaultHarness: 'claude',
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
+    defaultUseWorktree: false,
     defaultModelByHarness: {},
     favoriteModels: [],
     notifications: true,
