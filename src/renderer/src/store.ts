@@ -1,6 +1,6 @@
 /** zustand store for session state, panel selection and toasts. Selectors must return stable references. */
 import { create } from 'zustand';
-import type { AppSettings, HarnessAvailability, HarnessId, ModelInfo, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
+import type { AppSettings, HarnessAvailability, HarnessId, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
@@ -61,6 +61,8 @@ interface State {
   newSessionOpen: boolean;
   /** Project folder the new session dialog is targeting; null until a folder is picked. */
   newSessionRoot: string | null;
+  /** Ctrl+Shift+N quick picker: choose a known folder, then start a session with defaults. */
+  quickSessionOpen: boolean;
   paletteOpen: boolean;
   showThinking: boolean;
   toasts: Toast[];
@@ -84,6 +86,9 @@ interface State {
   openNewSession(open: boolean): void;
   /** Opens the new session dialog for a folder; without one, asks the user to pick a project folder first. */
   startNewSession(root?: string | null): Promise<void>;
+  openQuickSession(open: boolean): void;
+  /** Starts a session for a known folder straight from settings defaults, skipping the dialog. */
+  createQuickSession(root: string): Promise<void>;
   openPalette(open: boolean): void;
   toggleThinking(): void;
   toast(text: string, kind?: Toast['kind']): void;
@@ -168,6 +173,7 @@ export const useStore = create<State>((set, get) => ({
   panelTab: 'changes',
   newSessionOpen: false,
   newSessionRoot: null,
+  quickSessionOpen: false,
   paletteOpen: false,
   showThinking: true,
   toasts: [],
@@ -359,6 +365,29 @@ export const useStore = create<State>((set, get) => ({
       root = r.path;
     }
     set({ newSessionOpen: true, newSessionRoot: root });
+  },
+  openQuickSession(quickSessionOpen) {
+    set({ quickSessionOpen });
+  },
+  async createQuickSession(root) {
+    const settings = get().settings;
+    if (!settings) return;
+    const harness = settings.defaultHarness;
+    const config: SessionConfig = {
+      harness,
+      projectRoot: root,
+      model: settings.defaultModelByHarness[harness],
+      effort: settings.defaultEffort,
+      permissionMode: settings.defaultPermissionMode,
+      useWorktree: settings.defaultUseWorktree ?? false,
+      acpAgent: harness === 'acp' ? settings.acpAgents[0]?.id : undefined
+    };
+    try {
+      const meta = await invoke('sessions:create', { config });
+      await get().setActive(meta.id);
+    } catch (e) {
+      get().toast(String((e as Error).message ?? e), 'error');
+    }
   },
   openPalette(paletteOpen) {
     set({ paletteOpen });
