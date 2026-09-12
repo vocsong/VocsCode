@@ -21,7 +21,8 @@ src/main
   runtime.ts      binary discovery (PATH, app runtime dir, bundled), doctor, installer
   secrets.ts      API keys encrypted at rest via Electron safeStorage
   terminal.ts     PTY tabs (node-pty) mirrored by headless xterm for snapshots, flow control, restore
-  git.ts / settings.ts / store.ts / ipc.ts / index.ts
+  handlers.ts     transport-agnostic IPC handler registry (Electron-free, unit-tested in Node)
+  git.ts / settings.ts / store.ts / ipc.ts / index.ts   (ipc.ts binds handlers.ts to ipcMain)
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette

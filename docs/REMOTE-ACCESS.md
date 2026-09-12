@@ -433,6 +433,12 @@ unblocked; next concrete step is P0 (§12).
 
 ## 12. The first PR (P0 sketch)
 
+Status: **P0 is implemented** — `src/shared/transport.ts` (Transport interface, the type
+behind `window.harness`), `src/main/handlers.ts` (the Electron-free registry),
+`src/main/ipc.ts` (binds it to `ipcMain` + supplies the DesktopBridge), and
+`tests/handler-registry.test.ts` (registry driven in plain Node). The renderer and the
+IPC contract are unchanged.
+
 1. Add `src/shared/transport.ts` — `Transport` interface + a typed client generated from
    the existing channel maps in `src/shared/ipc.ts`.
 2. Refactor `src/main/ipc.ts` — extract `createHandlerRegistry(deps)`; `ipcMain.handle`
