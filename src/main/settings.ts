@@ -203,6 +203,8 @@ export function defaultSettings(): AppSettings {
     folders: [],
     folderStyles: {},
     customLabels: [],
+    folderOrder: [],
+    collapsedFolders: [],
     goalDefaults: { autoContinue: true, maxIterations: 25 },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] }
   };
@@ -252,6 +254,8 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
     folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    folderOrder: Array.isArray(stored.folderOrder) ? stored.folderOrder.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    collapsedFolders: Array.isArray(stored.collapsedFolders) ? stored.collapsedFolders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderStyles: normalizeFolderStyles(stored.folderStyles),
     customLabels: normalizeCustomLabels(stored.customLabels),
     favoriteModels: Array.isArray(stored.favoriteModels)
