@@ -2,7 +2,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
-import { EFFORT_LEVELS } from '../../shared/harness-meta';
+import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { shutdownChild, spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
@@ -145,7 +145,7 @@ export class PiAdapter implements HarnessAdapter {
 
     const state = await withTimeout(this.request<{ model?: PiModel; thinkingLevel?: string; sessionFile?: string; sessionId?: string }>('get_state'), 60_000, 'pi get_state');
     if (state.sessionFile) this.ctx.updateRef({ piSessionFile: state.sessionFile });
-    if (state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: state.thinkingLevel as EffortLevel | undefined });
+    if (state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: isEffortLevel(state.thinkingLevel) ? state.thinkingLevel : undefined });
     this.ctx.emit({ type: 'status', status: 'idle' });
     void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
   }

@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import { isEffortLevel } from '../../shared/harness-meta';
 import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
 import { JsonRpcStdioClient } from './jsonrpc';
@@ -179,7 +180,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.ctx.updateRef({ codexThreadId: this.threadId });
       this.ctx.updateMeta({
         activeModel: { provider: res.modelProvider || 'openai', model: res.model },
-        activeEffort: (res.reasoningEffort as EffortLevel | null) ?? undefined
+        activeEffort: isEffortLevel(res.reasoningEffort) ? res.reasoningEffort : undefined
       });
       this.ctx.emit({ type: 'status', status: 'idle' });
       void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
@@ -663,6 +664,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
 
 export function codexModelToInfo(m: CodexModel, provider = 'openai'): ModelInfo {
   const pricing = findPricing('openai', m.model);
+  // Codex advertises levels the app does not model (ultra, persistent); only ours may enter the shared effort state.
+  const efforts = (m.supportedReasoningEfforts ?? []).map((o) => o.reasoningEffort).filter(isEffortLevel);
   return {
     id: m.model,
     provider,
@@ -670,8 +673,8 @@ export function codexModelToInfo(m: CodexModel, provider = 'openai'): ModelInfo 
     description: m.description,
     supportsImages: (m.inputModalities ?? []).includes('image'),
     supportsReasoning: true,
-    supportedEfforts: (m.supportedReasoningEfforts ?? []).map((o) => o.reasoningEffort as EffortLevel),
-    defaultEffort: m.defaultReasoningEffort as EffortLevel,
+    supportedEfforts: efforts.length ? efforts : undefined,
+    defaultEffort: isEffortLevel(m.defaultReasoningEffort) ? m.defaultReasoningEffort : undefined,
     isDefault: m.isDefault,
     pricing
   };
