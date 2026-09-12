@@ -333,10 +333,23 @@ describe('pricing', () => {
 
 describe('model mapping', () => {
   it('maps pi models', () => {
-    const m = piModelToInfo({ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'deepseek', reasoning: true, input: ['text'], contextWindow: 1_000_000, cost: { input: 0.435, output: 0.87 }, thinkingLevelMap: { minimal: null, high: 'high', max: 'max' } });
+    const m = piModelToInfo({ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'deepseek', reasoning: true, input: ['text'], contextWindow: 1_000_000, cost: { input: 0.435, output: 0.87 }, thinkingLevelMap: { minimal: null, low: null, medium: null, high: 'high', xhigh: null, max: 'max' } });
     expect(m.supportedEfforts).toEqual(['high', 'max']);
     expect(m.supportsImages).toBe(false);
     expect(m.pricing?.output).toBe(0.87);
+  });
+  it('keeps pi levels missing from thinkingLevelMap', () => {
+    // openai-codex ships holes for the standard levels: only `null` hides one.
+    const m = piModelToInfo({ id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', provider: 'openai-codex', reasoning: true, input: ['text', 'image'], contextWindow: 272_000, thinkingLevelMap: { xhigh: 'xhigh', max: 'max', minimal: 'low' } });
+    expect(m.supportedEfforts).toEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  });
+  it('drops pi off and explicitly hidden levels', () => {
+    const m = piModelToInfo({ id: 'x', name: 'X', provider: 'openai', reasoning: true, thinkingLevelMap: { off: 'none', minimal: null, low: 'low', xhigh: null, max: 'max' } });
+    expect(m.supportedEfforts).toEqual(['low', 'medium', 'high', 'max']);
+  });
+  it('leaves the effort list open when pi reports no thinkingLevelMap', () => {
+    const m = piModelToInfo({ id: 'x', name: 'X', provider: 'openrouter', reasoning: true });
+    expect(m.supportedEfforts).toBeUndefined();
   });
   it('maps codex models', () => {
     const m = codexModelToInfo({ id: 'x', model: 'gpt-5.5', displayName: 'GPT-5.5', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'high', description: '' }], defaultReasoningEffort: 'high', inputModalities: ['text', 'image'], isDefault: true });
