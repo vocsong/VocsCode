@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import type { EffortLevel, ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
+import type { ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, fmtTokens, harnessShort } from '../format';
-import { archiveSession } from '../sessionActions';
+import { archiveSession, setSessionEffort } from '../sessionActions';
 import { useSessionModels } from '../models';
 import { useStore } from '../store';
 import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
@@ -96,7 +96,7 @@ export function Header({ session }: { session: SessionMeta }) {
             {(close) => (
               <>
                 {effortOptions.map((l) => (
-                  <MenuItem key={l} active={(session.activeEffort ?? session.config.effort) === l} onClick={() => { close(); void invoke('sessions:setEffort', { id: session.id, effort: l as EffortLevel }).catch((e) => toast(String(e.message ?? e), 'error')); }}>
+                  <MenuItem key={l} active={(session.activeEffort ?? session.config.effort) === l} onClick={() => { close(); void setSessionEffort(session.id, l, toast); }}>
                     {l}
                   </MenuItem>
                 ))}

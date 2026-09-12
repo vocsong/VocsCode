@@ -3,14 +3,16 @@
 import { describe, expect, it, vi } from 'vitest';
 
 // Stub the preload bridge before any renderer module runs.
+const invokeMock = vi.fn().mockResolvedValue({ ok: true });
 (window as unknown as { harness: unknown }).harness = {
   platform: 'win32',
-  invoke: vi.fn().mockResolvedValue({ ok: true }),
+  invoke: invokeMock,
   on: vi.fn().mockReturnValue(() => undefined),
 };
 
-import { fireEvent, render } from '@testing-library/react';
+import { fireEvent, render, waitFor } from '@testing-library/react';
 import { Composer } from '../src/renderer/src/components/Composer';
+import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta } from '../src/shared/types';
 
 const session: SessionMeta = {
@@ -81,5 +83,32 @@ describe('composer input history', () => {
 
     fireEvent.keyDown(ta, { key: 'ArrowUp' });
     expect(ta.value).toBe('plain message');
+  });
+
+  it('remembers an effort selected through the slash command', async () => {
+    const { container } = render(<Composer session={session} />);
+    const ta = container.querySelector('textarea') as HTMLTextAreaElement;
+    invokeMock.mockClear();
+
+    type(ta, '/effort high');
+    fireEvent.keyDown(ta, { key: 'Enter' });
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('settings:update', { defaultEffort: 'high' }));
+    expect(invokeMock).toHaveBeenCalledWith('sessions:setEffort', { id: 's1', effort: 'high' });
+  });
+
+  it('does not remember effort for a harness that cannot apply it', async () => {
+    const cursorSession = { ...session, config: { ...session.config, harness: 'cursor' as const } };
+    useStore.setState({ toasts: [] });
+    const { container } = render(<Composer session={cursorSession} />);
+    const ta = container.querySelector('textarea') as HTMLTextAreaElement;
+    invokeMock.mockClear();
+
+    type(ta, '/effort high');
+    fireEvent.keyDown(ta, { key: 'Enter' });
+
+    await waitFor(() => expect(useStore.getState().toasts.some((toast) => toast.text.includes('does not support reasoning effort'))).toBe(true));
+    expect(invokeMock).not.toHaveBeenCalledWith('sessions:setEffort', expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
   });
 });
