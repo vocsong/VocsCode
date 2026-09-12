@@ -78,7 +78,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
         )}
         {groupTranscript(items).map((chunk) =>
           chunk.kind === 'group' ? (
-            <ToolGroup key={chunk.id} items={chunk.items} />
+            <ToolGroup key={chunk.id} entries={chunk.entries} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} />
           ) : (
             <Item key={chunk.item.id} item={chunk.item} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} />
           )
@@ -210,53 +210,72 @@ const HINT_ICON: Record<string, string> = { execute: 'terminal', edit: 'edit', r
 
 type ToolItem = Extract<TranscriptItem, { kind: 'tool' }>;
 
-/** Consecutive shell commands collapse into one group; everything else renders standalone. */
+/** A run of shell commands (with interleaved commentary) collapses into one group. */
 export type RenderChunk =
   | { kind: 'single'; item: TranscriptItem }
-  | { kind: 'group'; id: string; items: ToolItem[] };
+  | { kind: 'group'; id: string; entries: TranscriptItem[] };
 
-/** Group runs of adjacent execute tools (per nesting parent) into collapsible chunks. */
+/** A run ends at user messages, approvals, turn boundaries, plans and non-command tools. */
+const breaksCommandRun = (item: TranscriptItem): boolean =>
+  (item.kind === 'tool' && item.hint !== 'execute') ||
+  item.kind === 'user' || item.kind === 'approval' || item.kind === 'turn' || item.kind === 'plan';
+
+/**
+ * Group execute tools (per nesting parent) into collapsible chunks. Assistant text, thinking
+ * and info lines between two commands are absorbed so commentary does not break the run;
+ * anything trailing the last command is popped back out so the turn's answer stays visible.
+ */
 export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
+  const isCmd = (item: TranscriptItem): item is ToolItem => item.kind === 'tool' && item.hint === 'execute';
   const chunks: RenderChunk[] = [];
-  let run: ToolItem[] = [];
+  let run: TranscriptItem[] = [];
   let runId = '';
   let runParent: string | null = null;
   const flush = () => {
-    if (run.length === 1) chunks.push({ kind: 'single', item: run[0] });
-    else if (run.length > 1) chunks.push({ kind: 'group', id: runId, items: run });
+    if (run.length) {
+      const lastCmd = run.reduce((acc, it, idx) => (isCmd(it) ? idx : acc), -1);
+      const head = run.slice(0, lastCmd + 1);
+      const commands = head.filter(isCmd);
+      if (commands.length > 1) chunks.push({ kind: 'group', id: runId, entries: head });
+      else for (const it of head) chunks.push({ kind: 'single', item: it });
+      for (const it of run.slice(lastCmd + 1)) chunks.push({ kind: 'single', item: it });
+    }
     run = [];
   };
   for (const item of items) {
-    if (item.kind === 'tool' && item.hint === 'execute') {
+    if (isCmd(item)) {
       const parent = item.parentId ?? null;
-      if (run.length && runParent !== parent) flush();
+      if (run.length && parent !== runParent) flush();
       if (!run.length) {
         runId = item.id;
         runParent = parent;
       }
       run.push(item);
-      continue;
+    } else if (run.length && !breaksCommandRun(item)) {
+      run.push(item);
+    } else {
+      flush();
+      chunks.push({ kind: 'single', item });
     }
-    flush();
-    chunks.push({ kind: 'single', item });
   }
   flush();
   return chunks;
 }
 
-/** Collapsed "Ran n commands" header for a run of consecutive shell commands. */
-export function ToolGroup({ items }: { items: ToolItem[] }) {
+/** Collapsed "Ran n commands" header for a run of shell commands, with interleaved commentary inside. */
+export function ToolGroup({ entries, sessionId, showThinking, onImageExpand }: { entries: TranscriptItem[]; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
   // open === null means the user has not toggled; then follow running state so live output stays visible.
   const [open, setOpen] = useState<boolean | null>(null);
-  const running = items.some((i) => i.status === 'running');
+  const commands = entries.filter((e): e is ToolItem => e.kind === 'tool');
+  const running = commands.some((i) => i.status === 'running');
   const expanded = open ?? running;
-  const failed = items.filter((i) => i.status === 'error' || i.status === 'declined').length;
-  const totalMs = items.reduce((sum, i) => sum + (i.durationMs ?? 0), 0);
+  const failed = commands.filter((i) => i.status === 'error' || i.status === 'declined').length;
+  const totalMs = commands.reduce((sum, i) => sum + (i.durationMs ?? 0), 0);
   return (
     <div className={`tool-group ${running ? 'tool-group-running' : ''}`}>
       <button type="button" className="tool-group-head" onClick={() => setOpen(!expanded)}>
         <Icon name="terminal" size={14} className="tool-icon" />
-        <span className="tool-name">{running ? 'Running' : 'Ran'} {items.length} command{items.length === 1 ? '' : 's'}</span>
+        <span className="tool-name">{running ? 'Running' : 'Ran'} {commands.length} command{commands.length === 1 ? '' : 's'}</span>
         <span className="spacer" />
         {failed ? <Badge tone="red">{failed} failed</Badge> : null}
         {running ? <Spinner size={12} /> : totalMs ? <span className="muted small">{fmtDuration(totalMs)}</span> : null}
@@ -264,9 +283,13 @@ export function ToolGroup({ items }: { items: ToolItem[] }) {
       </button>
       {expanded && (
         <div className="tool-group-body">
-          {items.map((i) => (
-            <ToolCard key={i.id} item={i} />
-          ))}
+          {entries.map((e) =>
+            e.kind === 'tool' ? (
+              <ToolCard key={e.id} item={e} />
+            ) : (
+              <Item key={e.id} item={e} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} />
+            )
+          )}
         </div>
       )}
     </div>
