@@ -333,7 +333,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
             <div className="branches-cols">
               <span>Branch</span>
               <span>Updated</span>
-              <span className="num">Behind/Ahead</span>
+              <span>Behind/Ahead</span>
               <span>Status</span>
               <span className="num">Actions</span>
             </div>
@@ -361,7 +361,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           <div className="branches-cols">
             <span>Worktree</span>
             <span>Branch</span>
-            <span className="num">Sessions</span>
+            <span>Sessions</span>
             <span>Status</span>
             <span className="num">Actions</span>
           </div>
@@ -422,7 +422,7 @@ function BranchRow({
         )}
       </div>
       <span className="muted small">{b.lastCommitAt ? relTime(b.lastCommitAt) : '—'}</span>
-      <span className="num small mono">
+      <span className="small mono">
         {b.isBase ? (
           <span className="muted">—</span>
         ) : (
@@ -812,7 +812,7 @@ function WorktreeRow({
         {current && <Badge tone="green">This session</Badge>}
       </div>
       <span className="muted small mono">{wt.detached ? 'detached' : wt.branch ?? '—'}</span>
-      <span className="num small">{sessions + branchSessions || <span className="muted">0</span>}</span>
+      <span className="small">{sessions + branchSessions || <span className="muted">0</span>}</span>
       <span className="branch-status">{busy ? <Badge tone="blue">In use</Badge> : <Badge tone="neutral">Idle</Badge>}</span>
       <div className="branch-actions">
         <Button variant="ghost" size="sm" icon="external" title="Open worktree folder in editor" onClick={onOpen} />
