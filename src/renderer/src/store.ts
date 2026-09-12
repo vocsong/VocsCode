@@ -63,6 +63,8 @@ interface State {
   newSessionRoot: string | null;
   /** Ctrl+N quick picker: choose a known folder, then start a session with defaults. */
   quickSessionOpen: boolean;
+  /** First prompt the quick picker starts with, e.g. seeded from a GitHub issue. */
+  quickSessionPrefill?: string;
   paletteOpen: boolean;
   /** Ctrl+Shift+F deep search modal over titles and transcript contents. */
   searchOpen: boolean;
@@ -90,7 +92,8 @@ interface State {
   openNewSession(open: boolean): void;
   /** Opens the new session dialog for a folder; without one, asks the user to pick a project folder first. */
   startNewSession(root?: string | null): Promise<void>;
-  openQuickSession(open: boolean): void;
+  /** Opens the quick picker; `prefill` seeds the first prompt (cleared again on close). */
+  openQuickSession(open: boolean, prefill?: string): void;
   /** Starts a session for a known folder straight from settings defaults, skipping the dialog. */
   createQuickSession(root: string, first?: { prompt?: string; images?: ImageAttachment[] }): Promise<void>;
   openPalette(open: boolean): void;
@@ -181,6 +184,7 @@ export const useStore = create<State>((set, get) => ({
   newSessionOpen: false,
   newSessionRoot: null,
   quickSessionOpen: false,
+  quickSessionPrefill: undefined,
   paletteOpen: false,
   searchOpen: false,
   searchJump: null,
@@ -375,8 +379,8 @@ export const useStore = create<State>((set, get) => ({
     }
     set({ newSessionOpen: true, newSessionRoot: root });
   },
-  openQuickSession(quickSessionOpen) {
-    set({ quickSessionOpen });
+  openQuickSession(quickSessionOpen, quickSessionPrefill) {
+    set(quickSessionOpen ? { quickSessionOpen, quickSessionPrefill } : { quickSessionOpen, quickSessionPrefill: undefined });
   },
   async createQuickSession(root, first) {
     const settings = get().settings;
