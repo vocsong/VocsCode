@@ -5,7 +5,7 @@ import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
 export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
-export type View = 'chat' | 'settings' | 'analytics';
+export type View = 'chat' | 'settings' | 'analytics' | 'skills';
 export type AnalyticsTab = 'overview' | 'spend' | 'tokens' | 'activity' | 'tools' | 'sessions';
 /** Days in the analytics range; 0 is all time. */
 export type AnalyticsRange = 7 | 30 | 90 | 0;
