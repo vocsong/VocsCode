@@ -2698,12 +2698,13 @@ body.resizing {
 /* Narrow panel: two-line rows — name + behind/ahead on line one, updated time +
    status + actions on line two — so the name keeps the full width. The column
    header is meaningless here. Secondary inline actions collapse into the ⋯ menu,
-   which already offers everything they do. */
+   which already offers everything they do. Issue rows are exempt: they keep their
+   header table at every width and only tighten their columns below. */
 @container (max-width: 619.9px) {
-  .branches-cols {
+  .branches-cols:not(.issue-cols) {
     display: none;
   }
-  .branch-row {
+  .branch-row:not(.issue-row) {
     grid-template-columns: minmax(0, 1fr) auto auto;
     grid-template-areas:
       'name name num'
@@ -2711,19 +2712,19 @@ body.resizing {
     row-gap: 3px;
     padding: 7px 10px;
   }
-  .branch-row > :nth-child(1) {
+  .branch-row:not(.issue-row) > :nth-child(1) {
     grid-area: name;
   }
-  .branch-row > :nth-child(2) {
+  .branch-row:not(.issue-row) > :nth-child(2) {
     grid-area: meta;
   }
-  .branch-row > :nth-child(3) {
+  .branch-row:not(.issue-row) > :nth-child(3) {
     grid-area: num;
   }
-  .branch-row > :nth-child(4) {
+  .branch-row:not(.issue-row) > :nth-child(4) {
     grid-area: status;
   }
-  .branch-row > :nth-child(5) {
+  .branch-row:not(.issue-row) > :nth-child(5) {
     grid-area: actions;
   }
   /* Only the ⋯ menu stays; wrapping here is what made narrow rows pile up. */
@@ -2733,25 +2734,13 @@ body.resizing {
   .branch-actions .branch-inline {
     display: none;
   }
-  /* Issues: number rides with the title, author folds under it, actions stay on the right. */
+  /* Issues keep their header table; the fixed columns just give back some width. */
+  .issue-cols,
   .issue-row {
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    grid-template-areas:
-      'num name actions'
-      'num author actions';
-  }
-  .issue-row > :nth-child(1) {
-    grid-area: num;
-  }
-  .issue-row > :nth-child(2) {
-    grid-area: name;
-    max-width: none;
-  }
-  .issue-row > :nth-child(3) {
-    grid-area: author;
-  }
-  .issue-row > :nth-child(4) {
-    grid-area: actions;
+    grid-template-columns: 40px minmax(0, 1fr) 52px 52px;
+    gap: 4px;
+    padding-left: 8px;
+    padding-right: 8px;
   }
 }
 .num {
