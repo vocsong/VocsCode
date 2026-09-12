@@ -448,7 +448,6 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
             {harnessShort(s.config.harness)}
           </Badge>
           {s.activeModel && <span className="session-model" title={`${s.activeModel.provider}/${s.activeModel.model}`}>{s.activeModel.model}</span>}
-          <span className="session-time">{relTime(s.updatedAt)}</span>
           {s.usage.costUsd > 0 && <span className="session-cost">{fmtCost(s.usage.costUsd)}</span>}
           {s.worktreeBranch && (
             <span className="session-worktree" title={`Worktree · ${s.worktreeBranch}`}>
@@ -459,10 +458,11 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
           {(s.queued ?? 0) > 0 && <span className="session-queued">+{s.queued}</span>}
         </div>
       </div>
-      <div onClick={(e) => e.stopPropagation()}>
+      <div className="session-side" onClick={(e) => e.stopPropagation()}>
         <Dropdown align="right" width={200} trigger={() => <StatusLabel status={s.status} label={s.statusLabel} />}>
           {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
         </Dropdown>
+        <span className="session-time">{relTime(s.updatedAt)}</span>
       </div>
       <div className="row-actions" onClick={(e) => e.stopPropagation()}>
         {s.archived ? (
