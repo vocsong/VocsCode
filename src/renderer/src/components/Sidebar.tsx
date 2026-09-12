@@ -18,6 +18,9 @@ const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neut
   native: 'neutral'
 };
 
+/** Predefined labels offered as one-click suggestions while renaming a session. */
+const PRESET_LABELS = ['todo', 'error', 'bug', 'fix', 'feature', 'refactor', 'docs', 'test'] as const;
+
 export function harnessShort(id: string): string {
   return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
 }
@@ -167,23 +170,39 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
     <div className={`session-row ${active ? 'active' : ''}`} onClick={onSelect} onDoubleClick={startRename}>
       <div className="session-main">
         {renaming ? (
-          <input
-            className="session-rename"
-            autoFocus
-            onFocus={(e) => e.currentTarget.select()}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onBlur={commit}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void commit();
-              if (e.key === 'Escape') setRenaming(false);
-            }}
-            onClick={(e) => e.stopPropagation()}
-          />
+          <div className="session-rename-wrap" onClick={(e) => e.stopPropagation()}>
+            <input
+              className="session-rename"
+              autoFocus
+              onFocus={(e) => e.currentTarget.select()}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onBlur={commit}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void commit();
+                if (e.key === 'Escape') setRenaming(false);
+              }}
+              placeholder="Session label"
+            />
+            <div className="session-rename-suggest">
+              {PRESET_LABELS.map((label) => (
+                <button
+                  key={label}
+                  type="button"
+                  className={`suggest-chip ${title === label ? 'active' : ''}`}
+                  // Keep input focus so blur-commit doesn't fire before the click lands.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setTitle(label)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
         ) : (
           <div className="session-title">
             {s.pinned && <Icon name="pin" size={11} />}
-            <span title="Click to rename" onClick={() => startRename()}>{s.title}</span>
+            <span className={s.userTitle ? 'user-titled' : ''} title="Click to rename" onClick={() => startRename()}>{s.title}</span>
           </div>
         )}
         <div className="session-meta">

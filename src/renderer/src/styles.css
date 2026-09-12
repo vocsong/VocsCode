@@ -1154,6 +1154,13 @@ h4 {
   cursor: text;
   border-radius: 3px;
 }
+.session-title span.user-titled,
+.header-name.user-titled {
+  color: var(--red);
+}
+.session-row:hover .session-title span.user-titled {
+  text-decoration-color: var(--red);
+}
 .session-row:hover .session-title span {
   text-decoration: underline dotted;
   text-underline-offset: 3px;
@@ -1193,6 +1200,36 @@ h4 {
 }
 .session-rename {
   padding: 2px 6px;
+}
+.session-rename-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.session-rename-suggest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.suggest-chip {
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--fg-muted);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.suggest-chip:hover {
+  color: var(--fg);
+  border-color: var(--fg-muted);
+}
+.suggest-chip.active {
+  color: var(--red);
+  border-color: var(--red);
+  background: var(--red-soft);
 }
 .row-menu-btn {
   border: none;
