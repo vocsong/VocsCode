@@ -1218,20 +1218,25 @@ h4 {
   border-top: 1px solid var(--border);
   padding: 6px 8px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: wrap;
   gap: 2px;
 }
 .sidebar-link {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
   border: none;
   background: none;
-  padding: 7px 8px;
+  padding: 7px 6px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--fg-muted);
-  text-align: left;
+  text-align: center;
 }
 .sidebar-link:hover,
 .sidebar-link.active {
