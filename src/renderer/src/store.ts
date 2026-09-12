@@ -5,7 +5,7 @@ import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
 export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
-export type View = 'chat' | 'settings' | 'analytics';
+export type View = 'chat' | 'settings' | 'analytics' | 'skills';
 
 /** One entry of the title bar's back/forward history. */
 export interface NavEntry {
