@@ -366,6 +366,12 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 **Relay MVP → beta: roughly 8–11 weeks (chat-first; terminal lands in P3.5 after).**
 Cloud workspaces: separate track afterward.
 
+**Status:** P0 implemented — transport extraction (`src/shared/transport.ts`,
+`src/main/handlers.ts`, registry tests). P1 in progress — the localhost web server +
+WebSocket transport landed (`VOCS_CODE_WEB=1`, serves the built renderer in a browser
+tab with a per-boot token); the distinct web shell branding and the responsive layer
+are the remaining P1 work.
+
 ## 11. Decisions and open questions
 
 **Resolved:**
