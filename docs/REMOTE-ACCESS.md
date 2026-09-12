@@ -111,8 +111,10 @@ New pieces:
    opt-in, off by default. Exposes a *filtered* IPC surface (see §5).
 2. **Relay service** — stateful router: accounts, devices, presence, message routing.
    Small stateless-ish service; one connection per desktop, N per account.
-3. **Web client** — `code.vocs.io`: the existing renderer built for the browser with a
-   different `window.harness` transport, plus account/pairing screens and a few shims.
+3. **Web client** — `code.vocs.io`: a distinct web shell around the reused renderer
+   core — different `window.harness` transport, browser-native chrome (desktop
+   titlebar/menu hidden in web builds), slim account/device header, code.vocs.io
+   branding, account/pairing screens, and a few shims.
 
 Key idea: **the web client is the existing renderer with a different transport.** The
 less the renderer knows about how `window.harness` is backed, the more is reused.
@@ -351,13 +353,13 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 | Phase | Scope | Size |
 | --- | --- | --- |
 | **P0 — Transport extraction** | `src/shared/transport.ts`; extract handler registry from `src/main/ipc.ts`; renderer `window.harness` rides on Transport; zero user-visible change; handler registry unit-tested in plain Node | ~1 wk |
-| **P1 — Web-buildable renderer** | Build renderer as a plain SPA; shims for paste/notify/openExternal/pickFolder; serve it from a localhost Node server wrapping the handler registry. Dogfood: run Vocs Code in a browser tab on the same machine | 1–2 wk |
+| **P1 — Web client shell** | Build renderer as a plain SPA inside a distinct web shell: browser-native chrome (desktop titlebar/menu hidden), slim account/device header, code.vocs.io branding; shims for paste/notify/openExternal/pickFolder; serve it from a localhost Node server wrapping the handler registry. Dogfood: run Vocs Code in a browser tab on the same machine | 2–3 wk |
 | **P2 — Pairing + relay, read-only** | Relay service (accounts, devices, routing — accounts-lite: single provisioned v1 account, account-keyed registry from day one); desktop remote host (opt-in, e2e encrypted); web login + pairing (§6); browse folders, sessions, transcripts live | 2–3 wk |
 | **P3 — Interactive** | Send prompts, remote approvals (presence, timeouts, audit), session lifecycle (create/stop/rename). No terminal in v1 (§11) | 2–4 wk |
 | **P3.5 — Terminal over WAN** (post-launch) | Read-only first, then read/write; PTY streaming + flow-control tuning (coalescing, ack windows, reconnect mid-PTY) | 1–2 wk |
 | **P4 — Hardening** | Multi-device management + revocation UI, offline encrypted transcript mirror (read-only), audit log surface, view-only mode | 2–4 wk |
 
-**Relay MVP → beta: roughly 6–10 weeks (chat-first; terminal lands in P3.5 after).**
+**Relay MVP → beta: roughly 7–11 weeks (chat-first; terminal lands in P3.5 after).**
 Cloud workspaces: separate track afterward.
 
 ## 11. Decisions and open questions
@@ -384,10 +386,14 @@ Cloud workspaces: separate track afterward.
   forge. Relay-side debugging is metadata-only; a dev-only client flag may bypass the
   AEAD layer during development, never shipped as a user-facing toggle.
 
+- **Distinct web identity.** The web client is a dedicated web shell around the reused
+  renderer core: browser-native chrome (desktop titlebar/menu hidden in web builds), a
+  slim account/device header, code.vocs.io branding. The renderer underneath is
+  unchanged; the shell carries the identity. Branding deepens with the cloud track.
+
 **Open (resolve one at a time, before P2):**
 
-1. Does the web client get a distinct visual identity, or is it the same UI in a tab?
-2. Mobile: is phone-sized layout in scope for v1? (renderer is desktop-laid-out today)
+1. Mobile: is phone-sized layout in scope for v1? (renderer is desktop-laid-out today)
 
 Plus the pairing-specific questions in §6.9 (QR mandatory?, auto-approve later devices?,
 relay hosting region?, GitHub-only auth?).
