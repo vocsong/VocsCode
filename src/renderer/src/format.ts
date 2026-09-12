@@ -69,5 +69,5 @@ export function clamp(s: string, n: number): string {
 
 /** Short display name for a harness id (sidebar badges, menus, analytics). */
 export function harnessShort(id: string): string {
-  return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
+  return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', cursor: 'Cursor', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
 }

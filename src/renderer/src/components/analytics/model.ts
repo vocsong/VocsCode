@@ -142,7 +142,7 @@ export const METRICS: Record<Metric, MetricDef> = {
 };
 
 /** Fixed colour slot per harness, so a harness keeps its colour whichever others are on screen. */
-export const HARNESS_ORDER = ['claude', 'codex', 'codex-exec', 'pi', 'acp', 'native'];
+export const HARNESS_ORDER = ['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'acp', 'native'];
 
 export function harnessColor(id: string): string {
   const i = HARNESS_ORDER.indexOf(id);

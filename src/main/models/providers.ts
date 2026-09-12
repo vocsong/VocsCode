@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { ModelInfo, ProviderConfig } from '../../shared/types';
 import { errorMessage } from '../util/async';
+import { cursorModelToInfo } from '../harness/cursor';
 import { STATIC_MODELS_BY_PROVIDER, findPricing } from './static-models';
 
 /** Stored key first, then the provider's env var. */
@@ -20,6 +21,13 @@ export function fallbackModels(provider: ProviderConfig): ModelInfo[] {
 }
 
 export async function fetchProviderModels(provider: ProviderConfig, apiKey: string | undefined): Promise<ModelInfo[]> {
+  if (provider.kind === 'cursor') {
+    // Not an API endpoint: models live in the Cursor harness picker, and the key is checked there.
+    if (!apiKey) throw new Error('No Cursor API key stored. Add one under this provider or set CURSOR_API_KEY.');
+    const { Cursor } = await import('@cursor/sdk');
+    const models = await Cursor.models.list({ apiKey });
+    return models.map((m) => ({ ...cursorModelToInfo(m), provider: provider.id }));
+  }
   if (provider.kind === 'anthropic') {
     const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, defaultHeaders: provider.headers });
     const out: ModelInfo[] = [];

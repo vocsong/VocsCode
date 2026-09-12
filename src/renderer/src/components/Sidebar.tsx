@@ -14,6 +14,7 @@ const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neut
   claude: 'amber',
   codex: 'green',
   'codex-exec': 'green',
+  cursor: 'blue',
   pi: 'purple',
   acp: 'blue',
   native: 'neutral'
