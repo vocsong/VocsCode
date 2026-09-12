@@ -3364,6 +3364,9 @@ body.resizing {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  /* Keep the header rows out of the column's flex shrinking; tall tab content must
+     scroll inside .analytics-body, never squeeze the title or tab strip. */
+  flex-shrink: 0;
   padding: 10px 16px 8px;
   background: var(--bg-sunken);
 }
@@ -3387,6 +3390,7 @@ body.resizing {
   overflow-x: auto;
   /* Reserve the horizontal-scrollbar space so toggling overflow can't change the row height. */
   scrollbar-gutter: stable;
+  flex-shrink: 0;
 }
 .atab {
   display: inline-flex;
