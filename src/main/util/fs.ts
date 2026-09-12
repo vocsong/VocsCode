@@ -44,8 +44,16 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
 async function writeJsonOnce(file: string, data: unknown): Promise<void> {
   await ensureDir(path.dirname(file));
   const tmp = `${file}.${process.pid}.${Date.now()}.${(tmpCounter = (tmpCounter + 1) % 1_000_000)}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
   try {
+    const handle = await fs.open(tmp, 'w');
+    try {
+      await handle.writeFile(JSON.stringify(data, null, 2), 'utf8');
+      // Flush to disk before the rename: without the fsync an unclean shutdown can leave the
+      // renamed target zero-filled (size intact, data still in cache), wiping the store.
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await renameWithRetry(tmp, file);
   } catch (e) {
     await fs.rm(tmp, { force: true }).catch(() => undefined);
