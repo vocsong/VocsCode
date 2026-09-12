@@ -782,6 +782,8 @@ export interface GitSummary {
   files: GitFileStatus[];
   ahead?: number;
   behind?: number;
+  /** Set when git could not produce a trustworthy summary (timeout/corrupt repo); the file list may be empty or incomplete. */
+  error?: string;
 }
 
 export interface GitBranchInfo {
@@ -886,6 +888,8 @@ export interface GitBranchOverview {
   worktrees: GitWorktreeInfo[];
   /** True when the GitHub CLI is unavailable; PR actions are hidden in the Branches panel. */
   ghMissing?: boolean;
+  /** Set when the branch list could not be read in full (e.g. git timed out). */
+  error?: string;
 }
 
 export interface FsEntry {

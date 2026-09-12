@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { LineSplitter, deferred, type Deferred } from '../util/async';
+import { shutdownChild } from './spawn';
 
 /**
  * Minimal newline-delimited JSON-RPC client used for the Codex app-server.
@@ -141,19 +142,9 @@ export class JsonRpcStdioClient {
     }
   }
 
-  close(): void {
+  /** Closes stdin and brings the whole child tree down before resolving (see shutdownChild). */
+  async close(): Promise<void> {
     this.closed = true;
-    try {
-      this.child.stdin?.end();
-    } catch {
-      /* ignore */
-    }
-    setTimeout(() => {
-      try {
-        if (this.child.exitCode === null) this.child.kill();
-      } catch {
-        /* ignore */
-      }
-    }, 1500);
+    await shutdownChild(this.child, 1500);
   }
 }

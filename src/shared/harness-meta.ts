@@ -1,4 +1,4 @@
-import type { HarnessDescriptor, HarnessId, PermissionMode } from './types';
+import type { EffortLevel, HarnessDescriptor, HarnessId, PermissionMode } from './types';
 
 export const HARNESSES: HarnessDescriptor[] = [
   {
@@ -224,6 +224,11 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, { label: string; sho
 };
 
 export const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/** Harnesses advertise levels beyond ours (Codex has `ultra`/`persistent`); only known levels may enter the app's effort state. */
+export function isEffortLevel(value: unknown): value is EffortLevel {
+  return typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value);
+}
 
 export const SLASH_COMMANDS: { name: string; description: string; args?: string }[] = [
   { name: 'help', description: 'Show available commands and shortcuts' },

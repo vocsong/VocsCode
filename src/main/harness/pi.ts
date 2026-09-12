@@ -2,8 +2,9 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
-import { killTree, spawnTool } from './spawn';
+import { shutdownChild, spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 
@@ -35,11 +36,7 @@ interface PiModel {
 }
 
 export function piModelToInfo(m: PiModel): ModelInfo {
-  const efforts = m.thinkingLevelMap
-    ? (Object.entries(m.thinkingLevelMap)
-        .filter(([, v]) => v !== null)
-        .map(([k]) => k) as EffortLevel[])
-    : undefined;
+  const efforts = piSupportedEfforts(m);
   return {
     id: m.id,
     provider: m.provider,
@@ -51,6 +48,23 @@ export function piModelToInfo(m: PiModel): ModelInfo {
     supportedEfforts: efforts && efforts.length ? efforts : undefined,
     pricing: m.cost ? { input: m.cost.input, output: m.cost.output, cacheRead: m.cost.cacheRead, cacheWrite: m.cost.cacheWrite } : undefined
   };
+}
+
+/**
+ * Mirrors pi's own getSupportedThinkingLevels: a level is hidden only by an explicit `null`, a
+ * missing standard level keeps the provider's default mapping, and the extended `xhigh`/`max`
+ * levels need an explicit mapping. `off` is dropped — leaving effort unset already runs the model
+ * default. Without a map we keep the full list; pi clamps anything the model cannot use.
+ */
+function piSupportedEfforts(m: PiModel): EffortLevel[] | undefined {
+  const map = m.thinkingLevelMap;
+  if (!m.reasoning || !map) return undefined;
+  return EFFORT_LEVELS.filter((level) => {
+    const mapped = map[level];
+    if (mapped === null) return false;
+    if (level === 'xhigh' || level === 'max') return mapped !== undefined;
+    return true;
+  });
 }
 
 function piThinkingLevel(effort: EffortLevel | undefined): string | undefined {
@@ -131,7 +145,7 @@ export class PiAdapter implements HarnessAdapter {
 
     const state = await withTimeout(this.request<{ model?: PiModel; thinkingLevel?: string; sessionFile?: string; sessionId?: string }>('get_state'), 60_000, 'pi get_state');
     if (state.sessionFile) this.ctx.updateRef({ piSessionFile: state.sessionFile });
-    if (state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: state.thinkingLevel as EffortLevel | undefined });
+    if (state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: isEffortLevel(state.thinkingLevel) ? state.thinkingLevel : undefined });
     this.ctx.emit({ type: 'status', status: 'idle' });
     void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
   }
@@ -540,12 +554,7 @@ export class PiAdapter implements HarnessAdapter {
     const child = this.child;
     this.child = null;
     if (!child) return;
-    try {
-      child.stdin?.end();
-    } catch {
-      /* ignore */
-    }
-    setTimeout(() => killTree(child), 1500);
+    await shutdownChild(child, 1500);
   }
 }
 
@@ -571,11 +580,6 @@ export async function listPiModels(piPath: string, extraEnv: NodeJS.ProcessEnv =
   try {
     return await withTimeout(d.promise, 45_000, 'pi model list');
   } finally {
-    try {
-      child.stdin?.end();
-    } catch {
-      /* ignore */
-    }
-    setTimeout(() => killTree(child), 1000);
+    await shutdownChild(child, 1000);
   }
 }
