@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { fireEvent, render } from '@testing-library/react';
 import { TranscriptFind, search } from '../src/renderer/src/components/TranscriptFind';
 
-function html(s: string): HTMLElement {
+function html(s: string): HTMLDivElement {
   const div = document.createElement('div');
   div.innerHTML = s;
   return div;
