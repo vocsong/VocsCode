@@ -123,7 +123,7 @@ export interface IpcContract {
 
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   'git:summary': [{ sessionId: string }, GitSummary];
-  'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string }];
+  'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string; error?: string }];
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:stageAll': [{ sessionId: string }, { ok: boolean; error?: string }];
   'git:commit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];

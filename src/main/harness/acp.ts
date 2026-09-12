@@ -9,7 +9,7 @@ import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
 import { which } from '../runtime';
 import { isDangerousCommand, type HarnessAdapter, type HarnessContext } from './types';
 import { isOutsideWorkspace } from './permissions';
-import { killTree, spawnTool } from './spawn';
+import { shutdownChild, spawnTool } from './spawn';
 
 interface ConfigOptionLike {
   id: string;
@@ -74,18 +74,11 @@ export class AcpAdapter implements HarnessAdapter {
     return preset;
   }
 
-  private killChild(): void {
+  private async killChild(): Promise<void> {
     const child = this.child;
     this.conn = null;
     this.child = null;
-    if (child) {
-      try {
-        child.stdin?.end();
-      } catch {
-        /* ignore */
-      }
-      setTimeout(() => killTree(child), 2000);
-    }
+    if (child) await shutdownChild(child, 2000);
   }
 
   async start(): Promise<void> {
@@ -169,7 +162,7 @@ export class AcpAdapter implements HarnessAdapter {
       if (effort) await this.setEffort(effort).catch(() => undefined);
     } catch (e) {
       // Handshake failed: tear the agent down so it cannot linger holding injected API keys.
-      this.killChild();
+      await this.killChild();
       throw e;
     }
     this.ctx.emit({ type: 'status', status: 'idle' });
@@ -531,7 +524,7 @@ export class AcpAdapter implements HarnessAdapter {
       const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { close?: unknown };
       if (sessionCaps.close) await withTimeout(conn.closeSession({ sessionId: this.sessionId } as acp.CloseSessionRequest), 5000, 'session/close').catch(() => undefined);
     }
-    this.killChild();
+    await this.killChild();
   }
 }
 

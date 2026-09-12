@@ -4,7 +4,7 @@ import type { ChildProcess } from 'node:child_process';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { EFFORT_LEVELS } from '../../shared/harness-meta';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
-import { killTree, spawnTool } from './spawn';
+import { shutdownChild, spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 
@@ -554,12 +554,7 @@ export class PiAdapter implements HarnessAdapter {
     const child = this.child;
     this.child = null;
     if (!child) return;
-    try {
-      child.stdin?.end();
-    } catch {
-      /* ignore */
-    }
-    setTimeout(() => killTree(child), 1500);
+    await shutdownChild(child, 1500);
   }
 }
 
@@ -585,11 +580,6 @@ export async function listPiModels(piPath: string, extraEnv: NodeJS.ProcessEnv =
   try {
     return await withTimeout(d.promise, 45_000, 'pi model list');
   } finally {
-    try {
-      child.stdin?.end();
-    } catch {
-      /* ignore */
-    }
-    setTimeout(() => killTree(child), 1000);
+    await shutdownChild(child, 1000);
   }
 }
