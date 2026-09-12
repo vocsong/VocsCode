@@ -2,12 +2,13 @@ import React, { useEffect, useState } from 'react';
 import type { EffortLevel, ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
-import { basename, fmtCost, fmtTokens } from '../format';
+import { basename, fmtCost, fmtTokens, harnessShort } from '../format';
 import { useSessionModels } from '../models';
 import { useStore } from '../store';
 import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
+import { ForkIntoItems } from './ForkInto';
 import { ModelPicker } from './ModelPicker';
-import { harnessShort } from './Sidebar';
+
 
 
 export function Header({ session }: { session: SessionMeta }) {
@@ -130,6 +131,7 @@ export function Header({ session }: { session: SessionMeta }) {
               <MenuItem onClick={() => { close(); void invoke('sessions:compact', { id: session.id }).then((r) => toast(r.ok ? 'Compaction requested' : r.detail ?? 'Not supported', r.ok ? 'success' : 'error')); }}>Compact context</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:export', { id: session.id }).then((r) => r.path && toast(`Exported to ${r.path}`, 'success')); }}>Export Markdown</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:fork', { id: session.id }).then((f) => f && useStore.getState().setActive(f.id)); }}>Fork session</MenuItem>
+              <ForkIntoItems session={session} onForked={(f) => useStore.getState().setActive(f.id)} />
               <MenuItem onClick={() => { close(); void invoke('app:openInEditor', { path: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error')); }}>Open in editor</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('app:openTerminal', { cwd: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error')); }}>Open terminal here</MenuItem>
               <MenuItem

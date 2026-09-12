@@ -101,7 +101,7 @@ export interface IpcContract {
   'sessions:compact': [{ id: string }, { ok: boolean; detail?: string }];
   'sessions:clearTranscript': [{ id: string }, void];
   'sessions:export': [{ id: string }, { path: string | null }];
-  'sessions:fork': [{ id: string }, SessionMeta | null];
+  'sessions:fork': [{ id: string; harness?: HarnessId }, SessionMeta | null];
   'sessions:moveTo': [{ id: string; cwd: string }, SessionMeta];
   'sessions:goal': [
     { id: string; action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update'; objective?: string; autoContinue?: boolean; maxIterations?: number },
