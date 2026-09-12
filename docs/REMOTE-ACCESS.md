@@ -158,6 +158,8 @@ root of trust.)
    trust — the desktop-side confirm step is what makes a device binding.
 2. **The relay is blind.** It never holds private keys, shared keys, or plaintext
    payloads. Compromise of the relay yields routing metadata and opaque blobs only.
+   e2e is **mandatory in shipped builds, not a setting** (§11): no TLS-only mode ships;
+   a dev-only client flag may bypass the AEAD layer for relay debugging.
 3. **Per-device identity.** Every browser is its own device with its own keypair; trust
    and revocation are per-device, never per-account.
 4. **Private keys never leave their machine.** Desktop keys live in the existing
@@ -377,11 +379,15 @@ Cloud workspaces: separate track afterward.
   clean. The agent still runs commands in the workspace either way; deferred is the
   human typing into their own shell remotely.
 
+- **e2e encryption: default and mandatory.** The §6.3 handshake is not a setting; every
+  paired session is end-to-end encrypted in shipped builds — the relay cannot read or
+  forge. Relay-side debugging is metadata-only; a dev-only client flag may bypass the
+  AEAD layer during development, never shipped as a user-facing toggle.
+
 **Open (resolve one at a time, before P2):**
 
-1. e2e encryption as default, or opt-in?
-2. Does the web client get a distinct visual identity, or is it the same UI in a tab?
-3. Mobile: is phone-sized layout in scope for v1? (renderer is desktop-laid-out today)
+1. Does the web client get a distinct visual identity, or is it the same UI in a tab?
+2. Mobile: is phone-sized layout in scope for v1? (renderer is desktop-laid-out today)
 
 Plus the pairing-specific questions in §6.9 (QR mandatory?, auto-approve later devices?,
 relay hosting region?, GitHub-only auth?).
