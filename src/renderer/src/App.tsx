@@ -7,6 +7,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { Composer } from './components/Composer';
 import { Header } from './components/Header';
 import { NewSessionDialog } from './components/NewSessionDialog';
+import { QuickSessionPicker } from './components/QuickSessionPicker';
 import { RightPanel } from './components/RightPanel';
 import { SettingsView } from './components/SettingsView';
 import { Sidebar } from './components/Sidebar';
@@ -25,6 +26,7 @@ export function App() {
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const panelOpen = useStore((s) => s.panelOpen);
   const newSessionOpen = useStore((s) => s.newSessionOpen);
+  const quickSessionOpen = useStore((s) => s.quickSessionOpen);
   const paletteOpen = useStore((s) => s.paletteOpen);
   const toasts = useStore((s) => s.toasts);
   const session = useActiveSession();
@@ -41,7 +43,12 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       const st = useStore.getState();
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === 'n') {
+      if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
+        // Ctrl+Shift+N: quick-pick a known folder, start with defaults. Plain Ctrl+N keeps the
+        // folder-picker flow (native picker, then the full new-session dialog).
+        e.preventDefault();
+        st.openQuickSession(true);
+      } else if (mod && e.key.toLowerCase() === 'n') {
         e.preventDefault();
         void st.startNewSession();
       } else if (mod && e.key.toLowerCase() === 'k') {
@@ -78,7 +85,7 @@ export function App() {
           st.setPanelTab('terminal');
           st.focusTerminal();
         }
-      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.paletteOpen && st.activeId) {
+      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && st.activeId) {
         // Escape interrupts the agent only when nothing else would consume it: no open menu, dialog or
         // popover, and focus is on the page body or an empty composer.
         if (document.querySelector('.dropdown-menu, .modal, .popover, .session-rename, .find-bar')) return;
@@ -136,7 +143,7 @@ export function App() {
                   </Button>
                 </div>
                 <p className="muted small">
-                  <Kbd>Ctrl+N</Kbd> new · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
+                  <Kbd>Ctrl+N</Kbd> new · <Kbd>Ctrl+Shift+N</Kbd> new in folder · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
                 </p>
               </EmptyState>
             </div>
@@ -145,6 +152,7 @@ export function App() {
         {panelOpen && session && view === 'chat' && <RightPanel session={session} />}
       </div>
       {newSessionOpen && <NewSessionDialog />}
+      {quickSessionOpen && <QuickSessionPicker />}
       {paletteOpen && <CommandPalette />}
       <ConfirmHost />
       <div className="toasts">
