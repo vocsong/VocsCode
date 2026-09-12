@@ -83,20 +83,20 @@ describe('LLM session titles', () => {
     expect(title).toBeNull();
   });
 
-  it('falls back to the first usable provider when the session model has no usable provider', async () => {
-    const unusable = { id: 'unused', kind: 'openai' as const, name: 'Unused', enabled: true, hasApiKey: false, models: [{ id: 'm1', name: 'M1', provider: 'unused' }] };
-    const usable = { id: 'fallback', kind: 'ollama' as const, name: 'Fallback', enabled: true, hasApiKey: false, baseUrl: 'http://127.0.0.1:1', models: [] };
-    // The fallback provider points at a closed port, so the call fails and the title stays null —
-    // but reaching that failure proves the fallback provider was chosen over the unusable one.
-    const title = await generateSessionTitle('Fix the bug', [unusable, usable] as never, getSecret, { provider: 'unused', model: 'm1' });
-    expect(title).toBeNull();
-  });
-
   it('ignores disabled providers', async () => {
     const providers = [{
       id: 'anthropic', kind: 'anthropic', name: 'Anthropic', enabled: false, hasApiKey: true, models: []
     }];
     const title = await generateSessionTitle('Fix the bug', providers as never, getSecret);
+    expect(title).toBeNull();
+  });
+
+  it('falls back to the first usable provider when the preferred one is unusable', async () => {
+    const unusable = { id: 'unused', kind: 'openai' as const, name: 'Unused', enabled: true, hasApiKey: false, models: [{ id: 'm1', name: 'M1', provider: 'unused' }] };
+    const usable = { id: 'fallback', kind: 'ollama' as const, name: 'Fallback', enabled: true, hasApiKey: false, baseUrl: 'http://127.0.0.1:1', models: [] };
+    // The fallback provider points at a closed port, so the call fails and the title stays null —
+    // but reaching that failure proves the fallback provider was chosen over the unusable one.
+    const title = await generateSessionTitle('Fix the bug', [unusable, usable] as never, getSecret, { provider: 'unused', model: 'm1' });
     expect(title).toBeNull();
   });
 });
