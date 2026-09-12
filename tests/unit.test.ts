@@ -815,6 +815,42 @@ describe('SessionManager PR state refresh', () => {
   });
 });
 
+describe('SessionManager filesystem guards', () => {
+  it('does not touch the store for unknown sessions', async () => {
+    const remove = vi.fn(async () => undefined);
+    const readTranscript = vi.fn(async () => [] as TranscriptItem[]);
+    const rewriteTranscript = vi.fn(async () => undefined);
+    const store = {
+      list: () => [],
+      get: () => undefined,
+      remove,
+      readTranscript,
+      rewriteTranscript
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    const stop = vi.spyOn(manager, 'stop');
+
+    await manager.delete('../sentinel');
+    await expect(manager.transcript('../sentinel')).rejects.toThrow('Session not found');
+    await expect(manager.clearTranscript('../sentinel')).rejects.toThrow('Session not found');
+
+    expect(stop).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(readTranscript).not.toHaveBeenCalled();
+    expect(rewriteTranscript).not.toHaveBeenCalled();
+  });
+});
+
 describe('SessionStore round-trip', () => {
   const tmpRoot = path.join(os.tmpdir(), `vocs-code-store-test-${Date.now()}-${process.pid}`);
   afterAll(async () => {
@@ -900,6 +936,61 @@ describe('SessionStore round-trip', () => {
     await again.load();
     expect(again.get('sess_2')).toBeUndefined();
     expect(await again.readTranscript('sess_2')).toEqual([]);
+  });
+
+  it('rejects traversal before transcript reads, rewrites, or removal can touch an outside directory', async () => {
+    const securityRoot = path.join(os.tmpdir(), `vocs-code-store-security-${Date.now()}-${process.pid}`);
+    const sentinelDir = path.join(securityRoot, 'sentinel');
+    const sentinelFile = path.join(sentinelDir, 'transcript.jsonl');
+    const sentinel = `${JSON.stringify({ id: 'secret', kind: 'user', ts: 1, text: 'do not touch' })}\n`;
+    await fs.mkdir(sentinelDir, { recursive: true });
+    await fs.writeFile(sentinelFile, sentinel, 'utf8');
+    try {
+      const store = new SessionStore(securityRoot);
+      await store.load();
+
+      await expect(store.readTranscript('../sentinel')).rejects.toThrow('Invalid session ID');
+      await expect(store.rewriteTranscript('../sentinel', [])).rejects.toThrow('Invalid session ID');
+      await expect(store.remove('../sentinel')).rejects.toThrow('Invalid session ID');
+      await expect(store.upsert({ ...meta('s1'), id: '../sentinel' })).rejects.toThrow('Invalid session ID');
+
+      expect(store.list()).toEqual([]);
+      expect(await fs.readFile(sentinelFile, 'utf8')).toBe(sentinel);
+      expect(await fs.stat(sentinelDir)).toBeTruthy();
+      expect(() => store.sessionDir('.')).toThrow('Invalid session ID');
+      expect(() => store.sessionDir('..')).toThrow('Invalid session ID');
+      expect(() => store.sessionDir('C:\\sentinel')).toThrow('Invalid session ID');
+      expect(store.sessionDir('a')).toBe(path.join(securityRoot, 'sessions', 'a'));
+    } finally {
+      await fs.rm(securityRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('filters malformed persisted session IDs while retaining safe legacy IDs', async () => {
+    const loadedRoot = path.join(os.tmpdir(), `vocs-code-store-loaded-${Date.now()}-${process.pid}`);
+    await fs.mkdir(loadedRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(loadedRoot, 'sessions.json'),
+      JSON.stringify([
+        meta('s1'),
+        meta('sess_1'),
+        meta('a'),
+        meta('../sentinel'),
+        meta('.'),
+        meta('..'),
+        meta('bad/slash'),
+        meta('bad\\slash'),
+        meta('C:\\drive')
+      ]),
+      'utf8'
+    );
+    try {
+      const store = new SessionStore(loadedRoot);
+      const loaded = await store.load();
+      expect(loaded.map((session) => session.id)).toEqual(['s1', 'sess_1', 'a']);
+    } finally {
+      await fs.rm(loadedRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
   });
 
   it('upsert rejects when the index write fails instead of resolving silently', async () => {
