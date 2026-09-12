@@ -10,6 +10,7 @@ import { invoke, isMac, platform } from '../api';
 import { useStore } from '../store';
 import { systemPrefersDark } from '../theme';
 import { Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
+import { ModelPicker } from './ModelPicker';
 
 type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'about';
 
@@ -133,6 +134,7 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
         </select>
       </Field>
       <Toggle checked={settings.notifications} onChange={(v) => update({ notifications: v })} label="Desktop notifications when a turn finishes or approval is needed (only while the window is unfocused)" />
+      <UtilityModelField settings={settings} update={update} />
       <h3>Goal defaults</h3>
       <Toggle checked={settings.goalDefaults.autoContinue} onChange={(v) => update({ goalDefaults: { ...settings.goalDefaults, autoContinue: v } })} label="Auto-continue goals after each turn" />
       <Field label="Iteration guard">
@@ -148,6 +150,27 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
 
 const FONT_SIZES = [10, 11, 12, 13, 14, 15, 16, 18, 20];
 const SCROLLBACKS = [1_000, 5_000, 10_000, 20_000, 50_000, 100_000];
+
+/** General → Utility model: the cheap model used for background chores like session titles. */
+function UtilityModelField({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+  const [providers, setProviders] = useState<ProviderConfig[]>([]);
+  useEffect(() => {
+    void invoke('providers:list', undefined).then(setProviders).catch(() => undefined);
+  }, []);
+  const models = providers.filter((p) => p.enabled).flatMap((p) => p.models);
+  return (
+    <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions. Falls back to the session's own model when unset.">
+      <div className="onboarding-model-picker">
+        <ModelPicker
+          models={models}
+          selected={settings.utilityModel}
+          clearOption={{ label: 'Use the session model' }}
+          onSelect={(m) => update({ utilityModel: m ? { provider: m.provider, model: m.id } : undefined })}
+        />
+      </div>
+    </Field>
+  );
+}
 
 function TerminalSection({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   const t = settings.terminal;

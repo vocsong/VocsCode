@@ -83,6 +83,15 @@ describe('LLM session titles', () => {
     expect(title).toBeNull();
   });
 
+  it('falls back to the first usable provider when the session model has no usable provider', async () => {
+    const unusable = { id: 'unused', kind: 'openai' as const, name: 'Unused', enabled: true, hasApiKey: false, models: [{ id: 'm1', name: 'M1', provider: 'unused' }] };
+    const usable = { id: 'fallback', kind: 'ollama' as const, name: 'Fallback', enabled: true, hasApiKey: false, baseUrl: 'http://127.0.0.1:1', models: [] };
+    // The fallback provider points at a closed port, so the call fails and the title stays null —
+    // but reaching that failure proves the fallback provider was chosen over the unusable one.
+    const title = await generateSessionTitle('Fix the bug', [unusable, usable] as never, getSecret, { provider: 'unused', model: 'm1' });
+    expect(title).toBeNull();
+  });
+
   it('ignores disabled providers', async () => {
     const providers = [{
       id: 'anthropic', kind: 'anthropic', name: 'Anthropic', enabled: false, hasApiKey: true, models: []
@@ -247,6 +256,11 @@ describe('settings normalization', () => {
     expect(normalizeSettings({ defaultUseWorktree: true }).defaultUseWorktree).toBe(true);
     // Settings written before this key existed fall back to off.
     expect(normalizeSettings({ theme: 'dark' }).defaultUseWorktree).toBe(false);
+  });
+  it('keeps a well-formed utility model and drops malformed ones', () => {
+    expect(normalizeSettings({ utilityModel: { provider: 'deepseek', model: 'deepseek-chat' } }).utilityModel).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
+    expect(normalizeSettings({}).utilityModel).toBeUndefined();
+    expect(normalizeSettings({ utilityModel: { provider: 3, model: 'x' } as never }).utilityModel).toBeUndefined();
   });
 });
 

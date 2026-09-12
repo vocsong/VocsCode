@@ -264,6 +264,10 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     favoriteModels: Array.isArray(stored.favoriteModels)
       ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
       : [],
+    utilityModel:
+      stored.utilityModel && typeof stored.utilityModel.provider === 'string' && typeof stored.utilityModel.model === 'string'
+        ? { provider: stored.utilityModel.provider, model: stored.utilityModel.model }
+        : undefined,
     modelOverrides: pruneModelOverrides(stored.modelOverrides),
     providers: [],
     acpAgents: []
