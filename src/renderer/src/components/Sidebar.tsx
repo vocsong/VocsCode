@@ -1,14 +1,13 @@
 /** Session list grouped by project, with live status badges per harness. */
-import React, { useMemo, useState } from 'react';
-import type { SessionMeta } from '../../../shared/types';
-import { HARNESS_BY_ID } from '../../../shared/harness-meta';
+import React, { useMemo, useRef, useState } from 'react';
+import type { HarnessId, SessionMeta } from '../../../shared/types';
+import { HARNESS_BY_ID, HARNESSES } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, harnessShort, relTime } from '../format';
 import { useStore } from '../store';
 import { Resizer } from './Resizer';
 import { FolderBranch } from './FolderBranch';
 import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
-import { ForkIntoItems } from './ForkInto';
 
 const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
   claude: 'amber',
@@ -34,6 +33,24 @@ const FOLDER_COLORS = [
   '#a3e635', '#fbbf24', '#facc15', '#fb923c', '#f97316', '#f87171', '#ef4444', '#fb7185',
   '#f472b6', '#e879f9', '#c084fc', '#a78bfa', '#818cf8', '#94a3b8', '#64748b', '#e2e8f0'
 ] as const;
+
+/** Drag state for reordering the pinned section of one folder. */
+interface DndState {
+  dragId: string | null;
+  overId: string | null;
+  pos: 'before' | 'after';
+}
+const DND_CLEAR: DndState = { dragId: null, overId: null, pos: 'before' };
+
+/** Pinned rows sort to the top by pin stamp (first pin on top); the rest stay in recency order. */
+function pinRank(s: SessionMeta): number {
+  return s.pinned ? (s.pinnedAt ?? s.createdAt) : Number.POSITIVE_INFINITY;
+}
+
+/** Canonical display order for one folder's session list. */
+export function sortSessionRows(list: SessionMeta[]): SessionMeta[] {
+  return [...list].sort((a, b) => pinRank(a) - pinRank(b) || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+}
 
 /** Built-in status labels offered in the picker; user-added labels extend these via settings. */
 const STATUS_LABEL_CHOICES = ['Idle', 'Starting', 'Working', 'Awaiting', 'Error', 'Stopped', 'PR', 'Merged', 'Todo'];
@@ -62,7 +79,7 @@ export function Sidebar() {
     }
     const groups = [...byProject.entries()].map(([root, list]) => ({
       root,
-      list: list.sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updatedAt - a.updatedAt)
+      list: sortSessionRows(list)
     }));
     if (!showArchived) {
       // A folder whose last active session was archived or deleted stays listed so a new
@@ -128,6 +145,48 @@ export function Sidebar() {
     if (root !== drag.root) commitOrder(drag.root, root, drag.after);
     setDrag(null);
   };
+
+  // Pinned-section drag reorder: only pinned rows of the same folder accept a drop.
+  const [dnd, setDnd] = useState<DndState>(DND_CLEAR);
+  const dndRef = useRef(dnd);
+  dndRef.current = dnd;
+  const onDragStartRow = (id: string) => setDnd({ dragId: id, overId: null, pos: 'before' });
+  const onDragEndRow = () => setDnd(DND_CLEAR);
+  const onDragOverRow = (id: string, e: React.DragEvent<HTMLElement>) => {
+    const { dragId } = dndRef.current;
+    const dragged = dragId ? sessions.find((x) => x.id === dragId) : null;
+    const target = sessions.find((x) => x.id === id);
+    if (!dragged || !target?.pinned || target.id === dragId || target.config.projectRoot !== dragged.config.projectRoot) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pos = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+    setDnd((d) => (d.overId === id && d.pos === pos ? d : { ...d, overId: id, pos }));
+  };
+  const onDragLeaveRow = (id: string, e: React.DragEvent<HTMLElement>) => {
+    const next = e.relatedTarget as Node | null;
+    if (next && e.currentTarget.contains(next)) return;
+    setDnd((d) => (d.overId === id ? { ...d, overId: null, pos: 'before' } : d));
+  };
+  const onDropRow = (id: string) => {
+    const { dragId, pos } = dndRef.current;
+    const dragged = dragId ? sessions.find((x) => x.id === dragId) : null;
+    const target = sessions.find((x) => x.id === id);
+    if (dragged && target && target.pinned && target.id !== dragId && target.config.projectRoot === dragged.config.projectRoot) {
+      const section = sortSessionRows(sessions.filter((x) => x.config.projectRoot === target.config.projectRoot && !x.archived))
+        .filter((x) => x.pinned)
+        .map((x) => x.id);
+      const rest = section.filter((sid) => sid !== dragId);
+      const at = rest.indexOf(id);
+      if (at >= 0) {
+        const at2 = pos === 'before' ? at : at + 1;
+        const next = [...rest.slice(0, at2), dragId!, ...rest.slice(at2)];
+        if (next.some((sid, i) => sid !== section[i])) void invoke('sessions:pinOrder', { ids: next });
+      }
+    }
+    setDnd(DND_CLEAR);
+  };
+  const dndHandlers = { start: onDragStartRow, end: onDragEndRow, over: onDragOverRow, leave: onDragLeaveRow, drop: onDropRow };
 
   const awaiting = sessions.filter((s) => s.status === 'awaiting').length;
   const running = sessions.filter((s) => s.status === 'running').length;
@@ -223,7 +282,16 @@ export function Sidebar() {
               </button>
               </div>
               {!isCollapsed && g.list.map((s) => (
-                <SessionRow key={s.id} session={s} active={s.id === activeId && view === 'chat'} customLabels={settings?.customLabels ?? []} onSelect={() => void setActive(s.id)} toast={toast} />
+                <SessionRow
+                  key={s.id}
+                  session={s}
+                  active={s.id === activeId && view === 'chat'}
+                  customLabels={settings?.customLabels ?? []}
+                  onSelect={() => void setActive(s.id)}
+                  toast={toast}
+                  dnd={dnd}
+                  dndHandlers={dndHandlers}
+                />
               ))}
             </div>
           );
@@ -248,7 +316,24 @@ export function Sidebar() {
   );
 }
 
-function SessionRow({ session: s, active, customLabels, onSelect, toast }: { session: SessionMeta; active: boolean; customLabels: string[]; onSelect: () => void; toast: (t: string, k?: 'info' | 'success' | 'error') => void }) {
+type DndHandlers = {
+  start: (id: string) => void;
+  end: () => void;
+  over: (id: string, e: React.DragEvent<HTMLElement>) => void;
+  leave: (id: string, e: React.DragEvent<HTMLElement>) => void;
+  drop: (id: string) => void;
+};
+
+function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dndHandlers }: {
+  session: SessionMeta;
+  active: boolean;
+  customLabels: string[];
+  onSelect: () => void;
+  toast: (t: string, k?: 'info' | 'success' | 'error') => void;
+  dnd: DndState;
+  dndHandlers: DndHandlers;
+}) {
+  const availability = useStore((st) => st.availability);
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(s.title);
   const h = HARNESS_BY_ID[s.config.harness];
@@ -260,14 +345,83 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast }: { ses
     setRenaming(false);
     if (title.trim() && title !== s.title) await invoke('sessions:rename', { id: s.id, title: title.trim() });
   };
+  const fork = (harness: HarnessId) => {
+    void invoke('sessions:fork', { id: s.id, harness }).then((f) => {
+      if (f) toast(`Forked into ${harnessShort(f.config.harness)}`, 'success');
+    });
+  };
+  const archiveRow = async () => {
+    if (s.worktreeBranch) {
+      const ok = await askConfirm({
+        title: `Remove the worktree for "${s.title}"?`,
+        body: `The worktree folder is deleted; uncommitted changes block this. The branch ${s.worktreeBranch} is kept — unarchiving recreates the worktree.`,
+        confirmLabel: 'Archive & remove',
+        danger: true
+      });
+      if (!ok) return;
+      try {
+        await invoke('sessions:archive', { id: s.id, archived: true, removeWorktree: true });
+        toast('Worktree removed; the branch is kept', 'success');
+      } catch (e) {
+        // A dirty worktree refuses removal; offer to discard the changes and retry with force.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!msg.includes('modified or untracked files')) {
+          toast(msg, 'error');
+          return;
+        }
+        const force = await askConfirm({
+          title: 'Discard uncommitted changes?',
+          body: `The worktree has modified or untracked files. Removing it discards them; the branch ${s.worktreeBranch} is kept.`,
+          confirmLabel: 'Discard & remove',
+          danger: true
+        });
+        if (!force) return;
+        try {
+          await invoke('sessions:archive', { id: s.id, archived: true, removeWorktree: true, forceWorktree: true });
+          toast('Worktree removed with its changes; the branch is kept', 'success');
+        } catch (e2) {
+          toast(e2 instanceof Error ? e2.message : String(e2), 'error');
+        }
+      }
+      return;
+    }
+    void invoke('sessions:archive', { id: s.id, archived: true });
+  };
+  const deleteRow = async () => {
+    const ok = await askConfirm({
+      title: `Delete session "${s.title}"?`,
+      body: s.worktreeBranch ? `Its worktree and the branch ${s.worktreeBranch} are removed with it.` : 'Its transcript is removed. This cannot be undone.',
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (ok) void invoke('sessions:delete', { id: s.id, removeWorktree: !!s.worktreeBranch });
+  };
   // Picking the label that names the current status resets to auto instead of labeling it red.
   const setStatusLabel = (label?: string, nextCustom?: string[]) => {
     const picked = label && STATUS_LABELS[s.status] === label ? undefined : label;
     void invoke('sessions:label', { id: s.id, label: picked });
     if (nextCustom) void invoke('settings:update', { customLabels: nextCustom });
   };
+  // Only pinned rows can be dragged, and only while they are not being renamed.
+  const canDrag = !!s.pinned && !s.archived && !renaming;
+  const dragClass = dnd.dragId === s.id ? ' dragging' : '';
+  const indicator = dnd.overId === s.id && dnd.dragId && dnd.dragId !== s.id ? (dnd.pos === 'before' ? ' drag-above' : ' drag-below') : '';
   return (
-    <div className={`session-row ${active ? 'active' : ''}`} onClick={onSelect} onDoubleClick={startRename}>
+    <div
+      className={`session-row ${active ? 'active' : ''}${dragClass}${indicator}`}
+      draggable={canDrag}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', s.id);
+        dndHandlers.start(s.id);
+      }}
+      onDragEnd={dndHandlers.end}
+      onDragOver={(e) => dndHandlers.over(s.id, e)}
+      onDragLeave={(e) => dndHandlers.leave(s.id, e)}
+      onDrop={(e) => dndHandlers.drop(s.id)}
+      onClick={onSelect}
+      onDoubleClick={startRename}
+    >
       <div className="session-main">
         {renaming ? (
           <input
@@ -310,81 +464,52 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast }: { ses
           {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
         </Dropdown>
       </div>
-      <div onClick={(e) => e.stopPropagation()}>
-        <Dropdown align="right" width={220} trigger={() => <button type="button" className="row-menu-btn" aria-label="Session menu"><Icon name="more" size={18} /></button>}>
-          {(close) => (
-            <>
-              <MenuItem onClick={() => { close(); startRename(); }}>Rename</MenuItem>
-              <MenuItem onClick={() => { close(); void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }); }}>{s.pinned ? 'Unpin' : 'Pin'}</MenuItem>
-              <MenuItem onClick={async () => { close(); const f = await invoke('sessions:fork', { id: s.id }); if (f) toast('Forked session created', 'success'); }}>Fork</MenuItem>
-              <ForkIntoItems session={s} onForked={(f) => toast(`Forked into ${harnessShort(f.config.harness)}`, 'success')} />
-              <MenuItem onClick={() => { close(); void invoke('app:openPath', { path: s.cwd, sessionId: s.id }); }}>Open folder</MenuItem>
-              <MenuItem onClick={() => { close(); void invoke('sessions:stop', { id: s.id }); }} disabled={s.status === 'idle' || s.status === 'stopped'}>Stop process</MenuItem>
-              <MenuItem
-                onClick={async () => {
-                  close();
-                  if (s.archived) {
-                    void invoke('sessions:archive', { id: s.id, archived: false });
-                    return;
-                  }
-                  if (s.worktreeBranch) {
-                    const ok = await askConfirm({
-                      title: `Remove the worktree for "${s.title}"?`,
-                      body: `The worktree folder is deleted; uncommitted changes block this. The branch ${s.worktreeBranch} is kept — unarchiving recreates the worktree.`,
-                      confirmLabel: 'Archive & remove',
-                      danger: true
-                    });
-                    if (!ok) return;
-                    try {
-                      await invoke('sessions:archive', { id: s.id, archived: true, removeWorktree: true });
-                      toast('Worktree removed; the branch is kept', 'success');
-                    } catch (e) {
-                      const msg = e instanceof Error ? e.message : String(e);
-                      if (!msg.includes('modified or untracked files')) {
-                        toast(msg, 'error');
-                        return;
-                      }
-                      const force = await askConfirm({
-                        title: 'Discard uncommitted changes?',
-                        body: `The worktree has modified or untracked files. Removing it discards them; the branch ${s.worktreeBranch} is kept.`,
-                        confirmLabel: 'Discard & remove',
-                        danger: true
-                      });
-                      if (!force) return;
-                      try {
-                        await invoke('sessions:archive', { id: s.id, archived: true, removeWorktree: true, forceWorktree: true });
-                        toast('Worktree removed with its changes; the branch is kept', 'success');
-                      } catch (e2) {
-                        toast(e2 instanceof Error ? e2.message : String(e2), 'error');
-                      }
-                    }
-                    return;
-                  }
-                  void invoke('sessions:archive', { id: s.id, archived: true });
-                }}
-              >
-                {s.archived ? 'Unarchive' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'}
-              </MenuItem>
-              <MenuItem
-                danger
-                onClick={async () => {
-                  close();
-                  const ok = await askConfirm({
-                    title: `Delete session "${s.title}"?`,
-                    body: s.worktreeBranch
-                      ? `Its worktree and the branch ${s.worktreeBranch} are removed with it.`
-                      : 'Its transcript is removed. This cannot be undone.',
-                    confirmLabel: 'Delete',
-                    danger: true
-                  });
-                  if (ok) void invoke('sessions:delete', { id: s.id, removeWorktree: !!s.worktreeBranch });
-                }}
-              >
-                Delete
-              </MenuItem>
-            </>
-          )}
-        </Dropdown>
+      <div className="row-actions" onClick={(e) => e.stopPropagation()}>
+        {s.archived ? (
+          <>
+            <button type="button" className="row-act-btn" title="Restore session" aria-label="Restore session" onClick={() => void invoke('sessions:archive', { id: s.id, archived: false })}>
+              <Icon name="restore" size={15} />
+            </button>
+            <button type="button" className="row-act-btn danger" title="Delete session" aria-label="Delete session" onClick={() => void deleteRow()}>
+              <Icon name="trash" size={15} />
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className={`row-act-btn ${s.pinned ? 'is-pinned' : ''}`}
+              title={s.pinned ? 'Unpin' : 'Pin to top'}
+              aria-label={s.pinned ? 'Unpin session' : 'Pin session'}
+              onClick={() => void invoke('sessions:pin', { id: s.id, pinned: !s.pinned })}
+            >
+              <Icon name="pin" size={15} />
+            </button>
+            <Dropdown align="right" width={190} trigger={() => (
+              <button type="button" className="row-act-btn" title="Fork into another harness" aria-label="Fork session">
+                <Icon name="fork" size={15} />
+              </button>
+            )}>
+              {(close) => (
+                <>
+                  <MenuItem disabled>Fork into</MenuItem>
+                  {[h, ...HARNESSES.filter((x) => x.id !== s.config.harness)].map((x) => {
+                    const av = availability[x.id];
+                    const unavailable = !!av && !av.available;
+                    return (
+                      <MenuItem key={x.id} active={x.id === s.config.harness} disabled={unavailable} onClick={() => { close(); fork(x.id); }}>
+                        {harnessShort(x.id)}{unavailable ? ' (not installed)' : ''}
+                      </MenuItem>
+                    );
+                  })}
+                </>
+              )}
+            </Dropdown>
+            <button type="button" className="row-act-btn" title={s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={() => void archiveRow()}>
+              <Icon name="archive" size={15} />
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

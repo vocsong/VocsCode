@@ -351,6 +351,8 @@ export interface SessionMeta {
   activeEffort?: EffortLevel;
   goal?: GoalState;
   pinned?: boolean;
+  /** Epoch ms when pinned; pinned rows sort by it ascending (first pin on top). Rewritten on drag-reorder. */
+  pinnedAt?: number;
   archived?: boolean;
   /** Number of queued (steer/follow-up) messages waiting. */
   queued?: number;
