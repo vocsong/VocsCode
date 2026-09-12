@@ -49,6 +49,15 @@ describe('per-session composer draft', () => {
     expect((b2.container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('draft for session two');
   });
 
+  it('puts the caret at the end of a restored draft', () => {
+    useStore.setState((s) => ({ drafts: { ...s.drafts, s1: 'restored text' } }));
+    const a = render(<Composer session={makeSession('s1')} />);
+    const ta = a.container.querySelector('textarea') as HTMLTextAreaElement;
+    expect(ta.value).toBe('restored text');
+    expect(ta.selectionStart).toBe(ta.value.length);
+    expect(ta.selectionEnd).toBe(ta.value.length);
+  });
+
   it('clears the stored draft after sending', () => {
     const a = render(<Composer session={makeSession('s1')} />);
     const ta = a.container.querySelector('textarea') as HTMLTextAreaElement;
