@@ -200,9 +200,7 @@ export function Sidebar() {
           <Icon name="logo" size={18} />
           <span>Vocs Code</span>
         </div>
-        <Button variant="primary" size="sm" icon="folder" onClick={() => void startNewSession()} title="New folder (Ctrl+N)">
-          New folder
-        </Button>
+        <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
       </div>
       <div className="sidebar-search">
         <Icon name="search" size={14} />
