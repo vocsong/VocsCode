@@ -1,11 +1,11 @@
 # Vocs Code
 
-**One desktop app for every coding agent.** Pick your agent — Claude, Codex, Pi, DeepSeek, Gemini, or any OpenAI-compatible model — per session, and get the same beautiful interface every time.
+**One desktop app for every coding agent.** Pick your agent — Claude, Codex, Cursor, Pi, DeepSeek, Gemini, or any OpenAI-compatible model — per session, and get the same beautiful interface every time.
 
 ## Get started in one line
 
 ```bash
-git clone https://github.com/vocsong/Vocs-Code.git && cd Vocs-Code && npm run setup
+git clone https://github.com/vocsong/VocsCode.git && cd VocsCode && npm run setup
 ```
 
 That's it. It installs everything (including dev dependencies, even if your environment sets `NODE_ENV=production`) and launches the app with hot reload.
@@ -36,7 +36,7 @@ Everything technical lives here:
 | --- | --- |
 | [Architecture & harness reference](docs/ARCHITECTURE.md) | Source layout, harness engines, permission modes, security model |
 | [Terminal reference](docs/TERMINAL.md) | PTY handling, shells, tabs, shortcuts, packaging notes |
-| [Themes](docs/THEMES.md) | All thirteen themes and how they're built |
+| [Themes](docs/THEMES.md) | All 23 themes and how they're built |
 | [Testing & verification](docs/TESTING.md) | Dev commands, offline and live test suites |
 | [Operations](docs/OPERATIONS.md) | Log locations, environment variables |
 

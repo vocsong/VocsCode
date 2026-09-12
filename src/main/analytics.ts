@@ -6,6 +6,7 @@ import type {
   FileUsage,
   FileUsageRow,
   ModelRateRow,
+  ModelToolRow,
   SessionMeta,
   ToolUsage,
   ToolUsageRow,
@@ -17,7 +18,7 @@ import type {
   UsageSpeed,
   UsageTotals
 } from '../shared/types';
-import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage } from '../shared/usage-rollup';
+import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, totalTokens } from '../shared/usage-rollup';
 import { readJson, writeJson } from './util/fs';
 
 export { emptyFileUsage, emptyToolUsage };
@@ -32,11 +33,13 @@ interface AnalyticsFile {
   sessions: Record<string, UsageSessionRecord>;
   /** Completed tool calls per tool name. */
   tools: Record<string, ToolUsage>;
+  /** Completed tool calls per tool name, keyed by model (`provider/model`). */
+  modelTools: Record<string, Record<string, ToolUsage>>;
   /** File-change counts per path, aggregated from tool results. */
   files: Record<string, FileUsage>;
 }
 
-const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, files: {} };
+const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, files: {} };
 
 const EMPTY_USAGE: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
 
@@ -126,6 +129,62 @@ export function attribute(day: UsageDay, who: Attribution, delta: Partial<UsageC
   addSlice(by.project, who.projectRoot, who.projectRoot, delta, who.id);
 }
 
+/**
+ * Splits `total` across `weights` proportionally. Integer splits use largest-remainder rounding so
+ * the parts add up to the total exactly; all-zero weights fall back to an even split.
+ */
+export function apportion(total: number, weights: number[], integer: boolean): number[] {
+  if (weights.length === 0 || !(total > 0)) return weights.map(() => 0);
+  const sum = weights.reduce((a, w) => a + Math.max(0, w), 0);
+  const w = sum > 0 ? weights.map((x) => Math.max(0, x) / sum) : weights.map(() => 1 / weights.length);
+  if (!integer) return w.map((x) => total * x);
+  const raw = w.map((x) => total * x);
+  const parts = raw.map(Math.floor);
+  let left = Math.round(total) - parts.reduce((a, b) => a + b, 0);
+  const order = raw.map((v, i) => [v - Math.floor(v), i] as const).sort((a, b) => b[0] - a[0]);
+  for (let k = 0; left > 0 && k < order.length; k++, left--) parts[order[k][1]] += 1;
+  return parts;
+}
+
+const INTEGER_FIELDS = new Set<keyof UsageCounters>(['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'turns', 'toolCalls']);
+
+/** Each session's own total of a counter, the weight used to share a legacy day's total between them. */
+function sessionWeight(s: UsageSessionRecord, f: keyof UsageCounters): number {
+  switch (f) {
+    case 'toolCalls':
+      return s.toolCalls;
+    case 'speedTokens':
+      return s.speed?.tokens ?? 0;
+    case 'speedMs':
+      return s.speed?.ms ?? 0;
+    case 'durationMs':
+      return s.durationMs ?? 0;
+    default:
+      return s.usage[f];
+  }
+}
+
+/**
+ * Estimates the slices of a day recorded before slice tracking from the sessions last active that
+ * day: every counter is shared between them in proportion to their own totals of it (falling back
+ * to spend, then an even split). The original backfill put a whole session on its last active day,
+ * so for sessions that lived within one day this reproduces exactly what live tracking would have.
+ */
+export function estimateDaySlices(day: UsageDay, sessions: UsageSessionRecord[]): boolean {
+  const active = sessions.filter((s) => s.usage.costUsd > 0 || s.usage.turns > 0 || s.toolCalls > 0 || totalTokens(s.usage) > 0);
+  if (day.by || active.length === 0) return false;
+  const shares: Partial<UsageCounters>[] = active.map(() => ({}));
+  for (const f of COUNTER_FIELDS) {
+    if (!(day[f] > 0)) continue;
+    let weights = active.map((s) => sessionWeight(s, f));
+    if (!weights.some((w) => w > 0)) weights = active.map((s) => s.usage.costUsd);
+    apportion(day[f], weights, INTEGER_FIELDS.has(f)).forEach((v, i) => (shares[i][f] = v));
+  }
+  day.by = { ...emptyDimensions(), estimated: true };
+  active.forEach((s, i) => attribute(day, { id: s.id, harness: s.harness, provider: s.provider, model: s.model, projectRoot: s.projectRoot }, shares[i]));
+  return true;
+}
+
 function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSessionRecord {
   return {
     id: meta.id,
@@ -138,6 +197,7 @@ function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSes
     updatedAt: meta.updatedAt,
     usage: { ...meta.usage },
     toolCalls: prev?.toolCalls ?? 0,
+    durationMs: prev?.durationMs ?? 0,
     speed: prev?.speed ? { ...prev.speed } : emptySpeed()
   };
 }
@@ -157,7 +217,7 @@ export function toolCallFromItem(item: Extract<TranscriptItem, { kind: 'tool' }>
   return { usage, changes };
 }
 
-export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, files: Record<string, FileUsage>, dayLimit: number, now: number): AnalyticsSummary {
+export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, modelTools: Record<string, Record<string, ToolUsage>>, files: Record<string, FileUsage>, dayLimit: number, now: number): AnalyticsSummary {
   const seed = (): UsageTotals => ({ ...EMPTY_USAGE });
   const sessionTotals = sessions.reduce<UsageTotals>((acc, s) => {
     addTotals(acc, s.usage);
@@ -198,9 +258,10 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     for (const s of sessions) {
       const k = key(s);
       if (!k) continue;
-      const b = map.get(k.key) ?? { key: k.key, label: k.label, usage: { ...EMPTY_USAGE }, toolCalls: 0, sessions: 0, speed: emptySpeed() };
+      const b = map.get(k.key) ?? { key: k.key, label: k.label, usage: { ...EMPTY_USAGE }, toolCalls: 0, durationMs: 0, sessions: 0, speed: emptySpeed() };
       addTotals(b.usage, s.usage);
       b.toolCalls += s.toolCalls;
+      b.durationMs += s.durationMs ?? 0;
       addSpeed(b.speed, s.speed);
       b.sessions += 1;
       map.set(k.key, b);
@@ -229,6 +290,9 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
   const toolRows: ToolUsageRow[] = Object.entries(tools)
     .map(([name, usage]) => ({ name, ...usage }))
     .sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
+  const modelToolRows: ModelToolRow[] = Object.entries(modelTools)
+    .flatMap(([key, perTool]) => Object.entries(perTool).map(([name, usage]) => ({ key, label: key.slice(key.indexOf('/') + 1), name, ...usage })))
+    .sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
   const toolTotals: ToolUsage = Object.values(tools).reduce<ToolUsage>((acc, t) => {
     addToolUsage(acc, t);
     return acc;
@@ -263,6 +327,7 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     modelRates,
     toolTotals,
     tools: toolRows,
+    modelTools: modelToolRows,
     files: fileRows,
     sessions: sortedSessions,
     sessionCount: sessions.length,
@@ -279,7 +344,7 @@ export interface AnalyticsDeps {
 export type TranscriptReader = (sessionId: string) => Promise<TranscriptItem[]>;
 
 export class AnalyticsStore {
-  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, files: {} };
+  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, files: {} };
   private readonly file: string;
   private writeTimer: NodeJS.Timeout | null = null;
   private writeQueue: Promise<void> = Promise.resolve();
@@ -302,14 +367,17 @@ export class AnalyticsStore {
       recorded: stored?.recorded && typeof stored.recorded === 'object' ? stored.recorded : {},
       sessions: stored?.sessions && typeof stored.sessions === 'object' ? stored.sessions : {},
       tools: stored?.tools && typeof stored.tools === 'object' ? stored.tools : {},
+      modelTools: stored?.modelTools && typeof stored.modelTools === 'object' ? stored.modelTools : {},
       files: stored?.files && typeof stored.files === 'object' ? stored.files : {}
     };
     // Fields added after a file was written (speed samples, dimension slices) load as zero rather than NaN.
     for (const day of Object.values(this.data.days)) {
       for (const f of COUNTER_FIELDS) if (typeof day[f] !== 'number') day[f] = 0;
       if (day.by !== undefined && (typeof day.by !== 'object' || day.by === null)) delete day.by;
-      if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
+      if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'modelTool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
     }
+    const estimated = this.estimateLegacyDays();
+    if (estimated) this.deps.log('info', `analytics: estimated per-model slices for ${estimated} day(s) recorded before slice tracking`);
     let backfilled = 0;
     for (const meta of existing) {
       if (this.data.recorded[meta.id]) {
@@ -332,6 +400,50 @@ export class AnalyticsStore {
     await this.flush();
   }
 
+  /**
+   * One-time reconstruction of days written before slice tracking (see estimateDaySlices), using
+   * only the sessions already in the file. Their per-tool and per-file counts are the all-time maps
+   * minus whatever later days recorded live, shared between the legacy days by call volume. Runs
+   * before the session backfill, so newly seen sessions are attributed exactly on top.
+   */
+  private estimateLegacyDays(): number {
+    const legacy = Object.entries(this.data.days).filter(([, d]) => !d.by);
+    if (legacy.length === 0) return 0;
+    const byDay = new Map<string, UsageSessionRecord[]>();
+    for (const s of Object.values(this.data.sessions)) {
+      const key = dayKey(s.updatedAt);
+      byDay.set(key, [...(byDay.get(key) ?? []), s]);
+    }
+    const estimated = legacy.filter(([date, day]) => estimateDaySlices(day, byDay.get(date) ?? [])).map(([, day]) => day);
+    const weights = estimated.map((d) => d.toolCalls);
+    if (estimated.length > 0 && weights.some((w) => w > 0)) {
+      const knownTools: Record<string, ToolUsage> = {};
+      const knownFiles: Record<string, FileUsage> = {};
+      for (const d of Object.values(this.data.days)) {
+        if (!d.by || d.by.estimated) continue;
+        for (const [name, t] of Object.entries(d.by.tool)) addToolUsage((knownTools[name] ??= emptyToolUsage()), t);
+        for (const [p, f] of Object.entries(d.by.file)) addFileUsage((knownFiles[p] ??= emptyFileUsage()), f);
+      }
+      for (const [name, t] of Object.entries(this.data.tools)) {
+        const k = knownTools[name] ?? emptyToolUsage();
+        const parts = (['calls', 'errors', 'declined', 'durationMs'] as const).map((f) => apportion(Math.max(0, t[f] - k[f]), weights, f !== 'durationMs'));
+        estimated.forEach((d, i) => {
+          const share: ToolUsage = { calls: parts[0][i], errors: parts[1][i], declined: parts[2][i], durationMs: parts[3][i] };
+          if (share.calls > 0 || share.errors > 0 || share.declined > 0) d.by!.tool[name] = share;
+        });
+      }
+      for (const [p, f] of Object.entries(this.data.files)) {
+        const k = knownFiles[p] ?? emptyFileUsage();
+        const parts = (['adds', 'updates', 'deletes', 'renames'] as const).map((field) => apportion(Math.max(0, f[field] - k[field]), weights, true));
+        estimated.forEach((d, i) => {
+          const share: FileUsage = { adds: parts[0][i], updates: parts[1][i], deletes: parts[2][i], renames: parts[3][i] };
+          if (share.adds + share.updates + share.deletes + share.renames > 0) d.by!.file[p] = share;
+        });
+      }
+    }
+    return estimated.length;
+  }
+
   /** Aggregates completed tool calls from an old transcript into the store, one-time per session. */
   private async backfillTranscript(sessionId: string, dayTs: number, readTranscript: (id: string) => Promise<TranscriptItem[]>): Promise<void> {
     let items: TranscriptItem[];
@@ -341,10 +453,19 @@ export class AnalyticsStore {
       return;
     }
     let calls = 0;
+    let durationMs = 0;
     for (const item of items) {
+      if (item.kind === 'turn' && item.status === 'completed') {
+        durationMs += Math.max(0, item.durationMs ?? 0);
+        continue;
+      }
       if (item.kind !== 'tool' || item.status === 'running') continue;
       this.recordToolCall(sessionId, item, dayTs);
       calls++;
+    }
+    if (durationMs > 0) {
+      const session = this.data.sessions[sessionId];
+      if (session) session.durationMs = (session.durationMs ?? 0) + durationMs;
     }
     if (calls) this.deps.log('debug', `analytics: backfilled ${calls} tool call(s) from ${sessionId}`);
   }
@@ -374,8 +495,9 @@ export class AnalyticsStore {
     const delta = { durationMs, speedTokens: speed?.tokens, speedMs: speed?.ms };
     addDay(day, delta);
     attribute(day, attributionOf(meta), delta);
+    const session = (this.data.sessions[meta.id] ??= snapshotSession(meta));
+    session.durationMs = (session.durationMs ?? 0) + durationMs;
     if (speed) {
-      const session = (this.data.sessions[meta.id] ??= snapshotSession(meta));
       addSpeed((session.speed ??= emptySpeed()), speed);
     }
     this.scheduleWrite();
@@ -399,6 +521,12 @@ export class AnalyticsStore {
     addDay(day, { toolCalls: 1 });
     const by = (day.by ??= emptyDimensions());
     addToolUsage((by.tool[item.name] ??= emptyToolUsage()), parsed.usage);
+    // The snapshot knows which model the call belongs to; keep the per-model tool map in step.
+    const modelKey = session?.model ? `${session.provider ?? ''}/${session.model}` : undefined;
+    if (modelKey) {
+      addToolUsage(((this.data.modelTools[modelKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+      addToolUsage(((by.modelTool[modelKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+    }
     for (const [p, u] of Object.entries(parsed.changes)) addFileUsage((by.file[p] ??= emptyFileUsage()), u);
     // The snapshot knows which harness, model and project the call belongs to.
     if (session) attribute(day, { id: session.id, harness: session.harness, provider: session.provider, model: session.model, projectRoot: session.projectRoot }, { toolCalls: 1 });
@@ -435,6 +563,6 @@ export class AnalyticsStore {
   /** Summary over the last `dayLimit` days (0 = all time), with the preceding window for comparison. */
   summary(dayLimit = 30, now = Date.now()): AnalyticsSummary {
     const sessions = Object.values(this.data.sessions);
-    return summarize(sessions, this.data.days, this.data.tools, this.data.files, dayLimit, now);
+    return summarize(sessions, this.data.days, this.data.tools, this.data.modelTools, this.data.files, dayLimit, now);
   }
 }

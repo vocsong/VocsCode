@@ -1,6 +1,6 @@
 /** zustand store for session state, panel selection and toasts. Selectors must return stable references. */
 import { create } from 'zustand';
-import type { AppSettings, HarnessAvailability, HarnessId, ModelInfo, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
+import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
@@ -31,6 +31,8 @@ export interface Toast {
 
 interface State {
   booted: boolean;
+  /** Human-readable startup failure; when set, App shows a retry instead of an endless spinner. */
+  bootError: string | null;
   settings: AppSettings | null;
   sessions: SessionMeta[];
   activeId: string | null;
@@ -45,6 +47,8 @@ interface State {
   terminalsLoaded: boolean;
   /** Selected terminal tab per session. */
   activeTerminal: Record<string, string>;
+  /** Unsent composer text per session, kept so switching sessions does not lose the draft. */
+  drafts: Record<string, string>;
   /** Bumped to move keyboard focus into the active terminal. */
   terminalFocusNonce: number;
   /** Text another part of the UI wants appended to the composer draft (e.g. terminal output). */
@@ -59,7 +63,15 @@ interface State {
   newSessionOpen: boolean;
   /** Project folder the new session dialog is targeting; null until a folder is picked. */
   newSessionRoot: string | null;
+  /** Ctrl+N quick picker: choose a known folder, then start a session with defaults. */
+  quickSessionOpen: boolean;
+  /** First prompt the quick picker starts with, e.g. seeded from a GitHub issue. */
+  quickSessionPrefill?: string;
   paletteOpen: boolean;
+  /** Ctrl+Shift+F deep search modal over titles and transcript contents. */
+  searchOpen: boolean;
+  /** Pending jump-to-match: Transcript scrolls to the item once its session is loaded. */
+  searchJump: { sessionId: string; itemId: string; n: number } | null;
   showThinking: boolean;
   toasts: Toast[];
   changesVersion: number;
@@ -82,7 +94,14 @@ interface State {
   openNewSession(open: boolean): void;
   /** Opens the new session dialog for a folder; without one, asks the user to pick a project folder first. */
   startNewSession(root?: string | null): Promise<void>;
+  /** Opens the quick picker; `prefill` seeds the first prompt (cleared again on close). */
+  openQuickSession(open: boolean, prefill?: string): void;
+  /** Starts a session for a known folder straight from settings defaults, skipping the dialog. */
+  createQuickSession(root: string, first?: { prompt?: string; images?: ImageAttachment[] }): Promise<void>;
   openPalette(open: boolean): void;
+  openSearch(open: boolean): void;
+  /** Closes the search modal, activates the session and scrolls to the matched item. */
+  jumpToSearchMatch(sessionId: string, itemId?: string): void;
   toggleThinking(): void;
   toast(text: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
@@ -92,6 +111,7 @@ interface State {
   clearTranscriptLocal(id: string): void;
   /** Upserts a renderer-local info line in a session's transcript; null text removes it. Not persisted by the main process. */
   setLocalInfo(sessionId: string, id: string, text: string | null, opts?: { level?: 'info' | 'warn' | 'error'; pending?: boolean }): void;
+  setDraft(sessionId: string, text: string): void;
   setTerminals(list: TerminalInfo[]): void;
   setActiveTerminal(sessionId: string, terminalId: string): void;
   focusTerminal(): void;
@@ -106,6 +126,14 @@ const pendingDeltas: SessionEventEnvelope[] = [];
 let flushScheduled = false;
 /** IPC listeners are registered once per page, even if React StrictMode runs boot() twice. */
 let subscribed = false;
+/** StrictMode can run App's mount effect twice; share one startup request between both calls. */
+let bootInFlight: Promise<void> | null = null;
+
+function bootErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'string' && error) return error;
+  return 'An unexpected error occurred while loading Vocs Code.';
+}
 
 function dropPendingDeltas(sessionId: string, itemId?: string): void {
   for (let i = pendingDeltas.length - 1; i >= 0; i--) {
@@ -143,6 +171,7 @@ async function applyNav(set: Setter, get: Getter, entry: NavEntry, index: number
 
 export const useStore = create<State>((set, get) => ({
   booted: false,
+  bootError: null,
   settings: null,
   sessions: [],
   activeId: null,
@@ -154,6 +183,7 @@ export const useStore = create<State>((set, get) => ({
   terminals: [],
   terminalsLoaded: false,
   activeTerminal: {},
+  drafts: {},
   terminalFocusNonce: 0,
   composerInsert: null,
   view: 'chat',
@@ -164,27 +194,43 @@ export const useStore = create<State>((set, get) => ({
   panelTab: 'changes',
   newSessionOpen: false,
   newSessionRoot: null,
+  quickSessionOpen: false,
+  quickSessionPrefill: undefined,
   paletteOpen: false,
+  searchOpen: false,
+  searchJump: null,
   showThinking: true,
   toasts: [],
   changesVersion: 0,
   history: [],
   historyIndex: -1,
 
-  async boot() {
-    const [settings, sessions, terminals] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined), invoke('terminal:list', undefined)]);
-    set({ settings, sessions, terminals, terminalsLoaded: true, booted: true });
-    if (!subscribed) {
-      subscribed = true;
-      on('push:sessionsChanged', (list) => get().setSessions(list));
-      on('push:settingsChanged', (s) => get().setSettings(s));
-      on('push:sessionEvent', (env) => get().applyEvent(env));
-      on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId));
-      on('push:terminalsChanged', (list) => get().setTerminals(list));
-    }
-    const first = sessions.find((s) => !s.archived);
-    if (first) await get().setActive(first.id);
-    void get().refreshAvailability();
+  boot() {
+    if (bootInFlight) return bootInFlight;
+    if (get().booted && get().settings && !get().bootError) return Promise.resolve();
+    set({ bootError: null, booted: false });
+    bootInFlight = (async () => {
+      try {
+        const [settings, sessions, terminals] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined), invoke('terminal:list', undefined)]);
+        set({ settings, sessions, terminals, terminalsLoaded: true, booted: true });
+        if (!subscribed) {
+          subscribed = true;
+          on('push:sessionsChanged', (list) => get().setSessions(list));
+          on('push:settingsChanged', (s) => get().setSettings(s));
+          on('push:sessionEvent', (env) => get().applyEvent(env));
+          on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId));
+          on('push:terminalsChanged', (list) => get().setTerminals(list));
+        }
+        const first = sessions.find((s) => !s.archived);
+        if (first) await get().setActive(first.id);
+        void get().refreshAvailability();
+      } catch (error) {
+        set({ booted: false, bootError: bootErrorMessage(error) });
+      }
+    })().finally(() => {
+      bootInFlight = null;
+    });
+    return bootInFlight;
   },
 
   async setActive(id) {
@@ -310,20 +356,23 @@ export const useStore = create<State>((set, get) => ({
       for (const id of Object.keys(s.loaded)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
       if (removed.size === 0) return { sessions };
       const transcripts = { ...s.transcripts };
       const loaded = { ...s.loaded };
       const activeTerminal = { ...s.activeTerminal };
       const models = { ...s.models };
+      const drafts = { ...s.drafts };
       for (const id of removed) {
         delete transcripts[id];
         delete loaded[id];
         delete activeTerminal[id];
         delete models[id];
+        delete drafts[id];
       }
       // A removed session cannot stay active; drop it and let the caller pick a new one.
       const activeId = s.activeId && ids.has(s.activeId) ? s.activeId : null;
-      return { sessions, transcripts, loaded, activeTerminal, models, activeId };
+      return { sessions, transcripts, loaded, activeTerminal, models, drafts, activeId };
     });
   },
   setView(view) {
@@ -353,8 +402,42 @@ export const useStore = create<State>((set, get) => ({
     }
     set({ newSessionOpen: true, newSessionRoot: root });
   },
+  openQuickSession(quickSessionOpen, quickSessionPrefill) {
+    set(quickSessionOpen ? { quickSessionOpen, quickSessionPrefill } : { quickSessionOpen, quickSessionPrefill: undefined });
+  },
+  async createQuickSession(root, first) {
+    const settings = get().settings;
+    if (!settings) return;
+    const harness = settings.defaultHarness;
+    const config: SessionConfig = {
+      harness,
+      projectRoot: root,
+      model: settings.defaultModelByHarness[harness],
+      effort: settings.defaultEffort,
+      permissionMode: settings.defaultPermissionMode,
+      useWorktree: settings.defaultUseWorktree ?? false,
+      acpAgent: harness === 'acp' ? settings.acpAgents[0]?.id : undefined
+    };
+    try {
+      const meta = await invoke('sessions:create', {
+        config,
+        initialPrompt: first?.prompt?.trim() || undefined,
+        initialImages: first?.images?.length ? first.images : undefined
+      });
+      await get().setActive(meta.id);
+    } catch (e) {
+      get().toast(String((e as Error).message ?? e), 'error');
+    }
+  },
   openPalette(paletteOpen) {
     set({ paletteOpen });
+  },
+  openSearch(searchOpen) {
+    set({ searchOpen });
+  },
+  jumpToSearchMatch(sessionId, itemId) {
+    set((s) => ({ searchOpen: false, searchJump: itemId ? { sessionId, itemId, n: (s.searchJump?.n ?? 0) + 1 } : null }));
+    void get().setActive(sessionId);
   },
   toggleThinking() {
     set((s) => ({ showThinking: !s.showThinking }));
@@ -412,6 +495,9 @@ export const useStore = create<State>((set, get) => ({
       else next.push(item);
       return { transcripts: { ...s.transcripts, [sessionId]: next } };
     });
+  },
+  setDraft(sessionId, text) {
+    set((s) => (s.drafts[sessionId] === text ? {} : { drafts: { ...s.drafts, [sessionId]: text } }));
   },
   setTerminals(terminals) {
     set({ terminals, terminalsLoaded: true });

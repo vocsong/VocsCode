@@ -14,7 +14,8 @@ import {
   type SDKUserMessage
 } from '@anthropic-ai/claude-agent-sdk';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
-import { AsyncQueue, errorMessage, shortId, truncate } from '../util/async';
+import { findContextWindow } from '../models/static-models';
+import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
 import type { HarnessAdapter, HarnessContext } from './types';
 
@@ -109,6 +110,7 @@ export class ClaudeAdapter implements HarnessAdapter {
   private lastCost = 0;
   private started = false;
   private modelsEmitted = false;
+  private compactionWaiter: Deferred<void> | null = null;
 
   constructor(private readonly ctx: HarnessContext) {}
 
@@ -173,6 +175,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
     this.q = query({ prompt: this.input, options });
     this.pump = this.consume(this.q).catch((e) => {
+      this.compactionWaiter?.reject(e instanceof Error ? e : new Error(errorMessage(e)));
       this.ctx.emit({ type: 'error', message: `Claude harness stopped: ${errorMessage(e)}`, fatal: true });
       this.ctx.emit({ type: 'status', status: 'error', detail: errorMessage(e) });
     });
@@ -322,6 +325,7 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   private async consume(q: Query): Promise<void> {
     for await (const msg of q) this.handle(msg, q);
+    this.compactionWaiter?.reject(new Error('Claude Code stopped during context compaction.'));
     this._busy = false;
     this.ctx.emit({ type: 'status', status: 'stopped', detail: 'Claude Code process ended' });
   }
@@ -336,15 +340,21 @@ export class ClaudeAdapter implements HarnessAdapter {
           if (!this.modelsEmitted) {
             this.modelsEmitted = true;
             q.supportedModels()
-              .then((models) => this.ctx.emit({ type: 'models', models: models.map(toModelInfo) }))
+              .then((models) => this.ctx.emit({ type: 'models', models: models.map(claudeModelToInfo) }))
               .catch(() => {
                 // Retry on the next init so the model picker is not permanently empty.
                 this.modelsEmitted = false;
               });
           }
-        } else if (msg.subtype === 'compact_boundary' || (msg as { subtype?: string }).subtype === 'status') {
-          const m = msg as { subtype: string; compact_result?: string };
-          if (m.compact_result) this.info(`Context compaction ${m.compact_result}.`);
+        } else if (msg.subtype === 'compact_boundary') {
+          if (msg.compact_metadata.trigger === 'manual') this.compactionWaiter?.resolve();
+        } else if ((msg as { subtype?: string }).subtype === 'status') {
+          const m = msg as { compact_result?: 'success' | 'failed'; compact_error?: string };
+          if (m.compact_result) {
+            this.info(`Context compaction ${m.compact_result}.`, m.compact_result === 'failed' ? 'warn' : 'info');
+            if (m.compact_result === 'failed') this.compactionWaiter?.reject(new Error(m.compact_error || 'Claude context compaction failed.'));
+            else this.compactionWaiter?.resolve();
+          }
         } else if ((msg as { subtype?: string }).subtype === 'permission_denied') {
           const m = msg as { tool_name: string };
           this.info(`Tool ${m.tool_name} was auto-denied by the harness.`, 'warn');
@@ -551,15 +561,29 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   async compact(): Promise<void> {
-    await this.send({ text: '/compact' });
+    if (this.compactionWaiter) {
+      await withTimeout(this.compactionWaiter.promise, 120_000, 'Claude context compaction');
+      return;
+    }
+    const waiter = deferred<void>();
+    // Process shutdown can reject this before send() reaches its next microtask; mark it observed now.
+    void waiter.promise.catch(() => undefined);
+    this.compactionWaiter = waiter;
+    try {
+      await this.send({ text: '/compact' });
+      await withTimeout(waiter.promise, 120_000, 'Claude context compaction');
+    } finally {
+      if (this.compactionWaiter === waiter) this.compactionWaiter = null;
+    }
   }
 
   async listModels(): Promise<ModelInfo[]> {
     if (!this.q) return [];
-    return (await this.q.supportedModels()).map(toModelInfo);
+    return (await this.q.supportedModels()).map(claudeModelToInfo);
   }
 
   async dispose(): Promise<void> {
+    this.compactionWaiter?.reject(new Error('Claude context compaction was cancelled.'));
     this.input.close();
     this.abort.abort();
     try {
@@ -571,8 +595,17 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 }
 
-function toModelInfo(m: { value: string; displayName: string; description?: string; resolvedModel?: string }): ModelInfo {
-  return { id: m.value, provider: 'anthropic', displayName: m.displayName || m.value, description: m.description, supportsImages: true, supportsReasoning: true, supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] };
+export function claudeModelToInfo(m: { value: string; displayName: string; description?: string; resolvedModel?: string }): ModelInfo {
+  return {
+    id: m.value,
+    provider: 'anthropic',
+    displayName: m.displayName || m.value,
+    description: m.description,
+    contextWindow: findContextWindow('anthropic', m.resolvedModel ?? m.value),
+    supportsImages: true,
+    supportsReasoning: true,
+    supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max']
+  };
 }
 
 function extractText(content: unknown): string {

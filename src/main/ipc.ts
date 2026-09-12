@@ -3,6 +3,7 @@ import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
 import { createHandlerRegistry, type DesktopBridge } from './handlers';
 import type { AnalyticsStore } from './analytics';
 import type { RuntimeResolver } from './runtime';
+import type { SearchIndex } from './search';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import type { SettingsStore } from './settings';
@@ -15,6 +16,7 @@ export interface IpcDeps {
   terminals: TerminalManager;
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
+  search: SearchIndex;
   getWindow: () => BrowserWindow | null;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }
@@ -73,6 +75,7 @@ export function registerIpc(deps: IpcDeps): void {
     terminals: deps.terminals,
     runtime: deps.runtime,
     analytics: deps.analytics,
+    search: deps.search,
     log: deps.log,
     push: (channel, payload) => pushToRenderer(deps.getWindow(), channel, payload),
     desktop: desktopBridge(deps)

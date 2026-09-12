@@ -1,11 +1,11 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
-import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
+import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { gateAction, OPTIONS_ALLOW_DENY } from './permissions';
-import { killTree, spawnTool } from './spawn';
+import { spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 
 /* ---- Minimal protocol shapes (from `codex app-server generate-ts`) ---- */
@@ -103,6 +103,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   /** Totals when the current turn started; the turn item reports the delta. */
   private turnBase: UsageTotals | null = null;
   private models: ModelInfo[] = [];
+  private compactionWaiter: Deferred<void> | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
     this.totals = { ...ctx.session().usage };
@@ -128,6 +129,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     try {
       this.rpc.onStderr = (l) => this.ctx.log('debug', `[codex] ${l}`);
       this.rpc.onClose = (code) => {
+        this.compactionWaiter?.reject(new Error(`Codex stopped during context compaction (${code}).`));
         this._busy = false;
         this.ctx.emit({ type: 'status', status: 'stopped', detail: `codex app-server exited (${code})` });
       };
@@ -183,11 +185,10 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
     } catch (e) {
       // Handshake failed after spawn: tear the transport down so no app-server (with its
-      // injected API keys) is orphaned, then rethrow.
+      // injected API keys) is orphaned, then rethrow. close() awaits the tree kill.
       const rpc = this.rpc;
       this.rpc = null;
-      rpc?.close();
-      setTimeout(() => killTree(child), 2000);
+      await rpc?.close();
       throw e;
     }
   }
@@ -317,7 +318,10 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const n = p as { name?: string | null };
       if (n.name && /^New session|^Untitled/i.test(this.ctx.session().title)) this.ctx.updateMeta({ title: n.name });
     });
-    rpc.onNotification('thread/compacted', () => this.info('Codex compacted the conversation context.'));
+    rpc.onNotification('thread/compacted', () => {
+      this.info('Codex compacted the conversation context.');
+      this.compactionWaiter?.resolve();
+    });
     rpc.onNotification('model/rerouted', (p) => this.info(`Model rerouted: ${JSON.stringify(p)}`, 'warn'));
     rpc.onNotification('account/rateLimits/updated', (p) => this.ctx.log('debug', `[codex rate limits] ${JSON.stringify(p)}`));
   }
@@ -618,7 +622,18 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   async compact(): Promise<void> {
-    if (this.rpc && this.threadId) await withTimeout(this.rpc.request('thread/compact/start', { threadId: this.threadId }), 30_000, 'thread/compact/start');
+    if (!this.rpc || !this.threadId) throw new Error('Codex thread is not ready');
+    if (this.compactionWaiter) return withTimeout(this.compactionWaiter.promise, 180_000, 'Codex context compaction');
+    const waiter = deferred<void>();
+    // Process shutdown can reject this before compact/start's request rejects; mark it observed now.
+    void waiter.promise.catch(() => undefined);
+    this.compactionWaiter = waiter;
+    try {
+      await withTimeout(this.rpc.request('thread/compact/start', { threadId: this.threadId }), 30_000, 'thread/compact/start');
+      await withTimeout(waiter.promise, 180_000, 'Codex context compaction');
+    } finally {
+      if (this.compactionWaiter === waiter) this.compactionWaiter = null;
+    }
   }
 
   async listModels(): Promise<ModelInfo[]> {
@@ -634,13 +649,14 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   async dispose(): Promise<void> {
+    this.compactionWaiter?.reject(new Error('Codex stopped during context compaction.'));
     const rpc = this.rpc;
     this.rpc = null;
     if (!rpc) return;
     try {
       if (this.threadId) await withTimeout(rpc.request('thread/unsubscribe', { threadId: this.threadId }), 2000, 'unsubscribe').catch(() => undefined);
     } finally {
-      rpc.close();
+      await rpc.close();
     }
   }
 }
@@ -672,7 +688,6 @@ export async function listCodexModels(codexPath: string): Promise<ModelInfo[]> {
     const res = await withTimeout(rpc.request<{ data: CodexModel[] }>('model/list', { limit: 100 }), 20_000, 'model/list');
     return res.data.map((m) => codexModelToInfo(m));
   } finally {
-    rpc.close();
-    setTimeout(() => killTree(child), 2000);
+    await rpc.close();
   }
 }

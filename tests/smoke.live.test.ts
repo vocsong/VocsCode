@@ -140,6 +140,25 @@ describe('live harness smoke', () => {
     expect(assistantText(items)).toMatch(/PONG/i);
   });
 
+  it.runIf(want('cursor'))('cursor SDK answers a prompt', async (t) => {
+    // The adapter passes no key when the store is empty, so the SDK's own fallbacks
+    // (CURSOR_API_KEY env, then a stored Cursor.auth.login()) carry the test.
+    if (!process.env.CURSOR_API_KEY) {
+      console.warn('cursor smoke skipped: no CURSOR_API_KEY in env');
+      return t.skip();
+    }
+    const { ctx, items, waitTurn, meta } = await makeCtx('cursor');
+    const adapter = createAdapter('cursor', ctx);
+    cleanups.push(() => adapter.dispose());
+    await adapter.start();
+    const models = await adapter.listModels!();
+    expect(models.length).toBeGreaterThan(0);
+    await adapter.send({ text: PROMPT });
+    await waitTurn(170_000);
+    expect(assistantText(items)).toMatch(/PONG/i);
+    expect(meta.harnessRef.cursorAgentId).toBeTruthy();
+  });
+
   it.runIf(want('pi'))('pi rpc answers a prompt and lists models', async () => {
     const { ctx, items, waitTurn, meta } = await makeCtx('pi');
     const adapter = createAdapter('pi', ctx);
@@ -158,6 +177,9 @@ describe('live harness smoke', () => {
     const adapter = createAdapter('claude', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
+    const models = await adapter.listModels!();
+    expect(models.length).toBeGreaterThan(0);
+    expect(models.some((model) => model.contextWindow)).toBe(true);
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
     expect(assistantText(items)).toMatch(/PONG/i);

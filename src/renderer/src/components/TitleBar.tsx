@@ -8,10 +8,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import { invoke, isMac, modKey } from '../api';
 import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
-import { GROUP_LABELS, GROUP_ORDER, THEMES } from '../../../shared/themes';
 import { Icon, MenuItem } from './ui';
+import { ForkIntoItems } from './ForkInto';
 
-const REPO = 'https://github.com/vocsong/Vocs-Code';
+const REPO = 'https://github.com/vocsong/VocsCode';
 
 const PANEL_TABS: { id: PanelTab; label: string }[] = [
   { id: 'changes', label: 'Changes' },
@@ -130,6 +130,7 @@ function FileMenu({ close }: { close: () => void }) {
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)))}>
         Fork session
       </MenuItem>
+      {session && <ForkIntoItems session={session} onForked={(f) => st.setActive(f.id)} />}
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:export', { id: session.id }).then((r) => r.path && st.toast(`Exported to ${r.path}`, 'success')))}>
         Export transcript…
       </MenuItem>
@@ -197,7 +198,6 @@ function ViewMenu({ close }: { close: () => void }) {
   const panelOpen = useStore((s) => s.panelOpen);
   const panelTab = useStore((s) => s.panelTab);
   const showThinking = useStore((s) => s.showThinking);
-  const theme = useStore((s) => s.settings?.theme ?? 'system');
   const st = useStore.getState();
   const run = (fn: () => void) => () => {
     close();
@@ -229,39 +229,7 @@ function ViewMenu({ close }: { close: () => void }) {
         Thinking
       </MenuItem>
       <Sep />
-      <MenuItem hint={`${modKey}++`} onClick={run(() => void invoke('window:zoom', { direction: 'in' }))}>
-        Zoom in
-      </MenuItem>
-      <MenuItem hint={`${modKey}+-`} onClick={run(() => void invoke('window:zoom', { direction: 'out' }))}>
-        Zoom out
-      </MenuItem>
-      <MenuItem hint={`${modKey}+0`} onClick={run(() => void invoke('window:zoom', { direction: 'reset' }))}>
-        Reset zoom
-      </MenuItem>
-      <Sep />
-      <MenuItem hint={isMac ? '⌃⌘F' : 'F11'} onClick={run(() => void invoke('window:toggleFullScreen', undefined))}>
-        Full screen
-      </MenuItem>
-      <MenuItem onClick={run(() => void invoke('window:reload', undefined))}>Reload</MenuItem>
-      <MenuItem hint={isMac ? '⌥⌘I' : 'Ctrl+Shift+I'} onClick={run(() => void invoke('window:toggleDevTools', undefined))}>
-        Developer tools
-      </MenuItem>
-      {/* Last, because the catalogue is long and this panel scrolls. */}
-      <Sep />
-      {GROUP_ORDER.map((group) => (
-        <React.Fragment key={group}>
-          <div className="menu-group">{group === 'core' ? 'Theme' : `Theme — ${GROUP_LABELS[group]}`}</div>
-          {THEMES.filter((t) => t.group === group).map((t) => (
-            <MenuItem
-              key={t.id}
-              active={theme === t.id}
-              onClick={run(() => void invoke('settings:update', { theme: t.id }).then((s) => st.setSettings(s)))}
-            >
-              {t.name}
-            </MenuItem>
-          ))}
-        </React.Fragment>
-      ))}
+      <MenuItem onClick={run(() => st.setView('settings'))}>Theme</MenuItem>
     </>
   );
 }

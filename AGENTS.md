@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Working agreements for agents in this repo: how to verify, what to touch, what to leave alone. Six harness adapters (Claude Agent SDK, Codex app-server, Codex exec SDK, Pi, ACP, native) all emit one normalized `SessionEvent` stream — keep it that way.
+Working agreements for agents in this repo: how to verify, what to touch, what to leave alone. Seven harness adapters (Claude Agent SDK, Codex app-server, Codex exec SDK, Cursor, Pi, ACP, native) all emit one normalized `SessionEvent` stream — keep it that way.
 
 ## Working style
 
@@ -21,8 +21,8 @@ Working agreements for agents in this repo: how to verify, what to touch, what t
 
 ```bash
 npm run dev          # electron-vite dev server with HMR
-npm run typecheck    # main + renderer, both strict; run before calling work done
-npm test             # offline suites only (unit, format, review-fixes, terminal); no network
+npm run typecheck    # main + renderer + tests, all strict; run before calling work done
+npm test             # all offline suites; no network
 npm run build        # bundles to out/
 npm run dist:win     # NSIS installer + dist/win-unpacked/
 ```
@@ -30,7 +30,7 @@ npm run dist:win     # NSIS installer + dist/win-unpacked/
 Opt-in suites that spend real credit or need a logged-in runtime (`tests/`):
 
 ```bash
-HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=codex,pi,native npx vitest run tests/smoke.live.test.ts
+HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=codex,codex-exec,cursor,pi,claude,acp,native,native-tools npx vitest run tests/smoke.live.test.ts
 HARNESS_E2E=1 HARNESS_E2E_HARNESS=native npx vitest run tests/e2e.electron.test.ts
 HARNESS_E2E=1 npx vitest run tests/e2e.approval.test.ts
 HARNESS_E2E=1 npx vitest run tests/e2e.terminal.test.ts

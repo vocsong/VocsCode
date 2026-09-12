@@ -1,13 +1,15 @@
 import React, { useEffect, useState } from 'react';
-import type { EffortLevel, ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
+import type { ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
-import { basename, fmtCost, fmtTokens } from '../format';
+import { basename, fmtCost, fmtTokens, harnessShort } from '../format';
+import { archiveSession, setSessionEffort } from '../sessionActions';
 import { useSessionModels } from '../models';
 import { useStore } from '../store';
-import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
+import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
+import { ForkIntoDropdown } from './ForkInto';
 import { ModelPicker } from './ModelPicker';
-import { harnessShort } from './Sidebar';
+
 
 
 export function Header({ session }: { session: SessionMeta }) {
@@ -63,9 +65,12 @@ export function Header({ session }: { session: SessionMeta }) {
           </button>
         )}
         {session.statusDetail && busy && <span className="header-status muted">{session.statusDetail}</span>}
+        <span className="spacer" />
+        <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" aria-label="Toggle panel" />
       </div>
 
       <div className="header-controls">
+        <div className="header-pills">
         <Dropdown align="right" width={380} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {current?.model ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
           {(close) => (
             <ModelPicker
@@ -91,7 +96,7 @@ export function Header({ session }: { session: SessionMeta }) {
             {(close) => (
               <>
                 {effortOptions.map((l) => (
-                  <MenuItem key={l} active={(session.activeEffort ?? session.config.effort) === l} onClick={() => { close(); void invoke('sessions:setEffort', { id: session.id, effort: l as EffortLevel }).catch((e) => toast(String(e.message ?? e), 'error')); }}>
+                  <MenuItem key={l} active={(session.activeEffort ?? session.config.effort) === l} onClick={() => { close(); void setSessionEffort(session.id, l, toast); }}>
                     {l}
                   </MenuItem>
                 ))}
@@ -121,32 +126,24 @@ export function Header({ session }: { session: SessionMeta }) {
           )}
         </button>
 
-        <Button variant="ghost" size="sm" icon={showThinking ? 'eye' : 'eyeOff'} onClick={toggleThinking} title={showThinking ? 'Hide thinking' : 'Show thinking'} />
-        {busy && <Button variant="danger" size="sm" icon="stop" onClick={() => void invoke('sessions:interrupt', { id: session.id })} title="Interrupt (Esc)">Stop</Button>}
-        <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" />
-        <Dropdown align="right" width={220} trigger={() => <Button variant="ghost" size="sm" icon="more" aria-label="More" />}>
-          {(close) => (
-            <>
-              <MenuItem onClick={() => { close(); void invoke('sessions:compact', { id: session.id }).then((r) => toast(r.ok ? 'Compaction requested' : r.detail ?? 'Not supported', r.ok ? 'success' : 'error')); }}>Compact context</MenuItem>
-              <MenuItem onClick={() => { close(); void invoke('sessions:export', { id: session.id }).then((r) => r.path && toast(`Exported to ${r.path}`, 'success')); }}>Export Markdown</MenuItem>
-              <MenuItem onClick={() => { close(); void invoke('sessions:fork', { id: session.id }).then((f) => f && useStore.getState().setActive(f.id)); }}>Fork session</MenuItem>
-              <MenuItem onClick={() => { close(); void invoke('app:openInEditor', { path: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error')); }}>Open in editor</MenuItem>
-              <MenuItem onClick={() => { close(); void invoke('app:openTerminal', { cwd: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error')); }}>Open terminal here</MenuItem>
-              <MenuItem
-                onClick={async () => {
-                  close();
-                  const ok = await askConfirm({ title: 'Clear the visible transcript?', body: 'The harness keeps its own state; only what you see here is removed.', confirmLabel: 'Clear' });
-                  if (!ok) return;
-                  void invoke('sessions:clearTranscript', { id: session.id });
-                  useStore.getState().clearTranscriptLocal(session.id);
-                }}
-              >
-                Clear transcript
-              </MenuItem>
-              <MenuItem onClick={() => { close(); void invoke('sessions:stop', { id: session.id }); }} disabled={session.status === 'idle' && !busy}>Stop harness process</MenuItem>
-            </>
-          )}
-        </Dropdown>
+        </div>
+
+        <div className="header-actions">
+          <Button variant="ghost" size="sm" icon={showThinking ? 'eye' : 'eyeOff'} onClick={toggleThinking} title={showThinking ? 'Hide thinking' : 'Show thinking'} aria-label={showThinking ? 'Hide thinking' : 'Show thinking'} />
+          <ForkIntoDropdown
+            session={session}
+            onForked={(f) => useStore.getState().setActive(f.id)}
+            trigger={() => <Button variant="ghost" size="sm" icon="fork" title="Fork into another harness" aria-label="Fork session" />}
+          />
+          <Button
+            variant="ghost"
+            size="sm"
+            icon="archive"
+            title={session.worktreeBranch ? 'Archive & remove worktree' : 'Archive'}
+            aria-label="Archive session"
+            onClick={() => void archiveSession(session, toast)}
+          />
+        </div>
       </div>
     </header>
   );

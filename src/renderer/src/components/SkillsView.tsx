@@ -15,6 +15,7 @@ export function SkillsView() {
   const [roots, setRoots] = useState<SkillRootInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [harness, setHarness] = useState<SkillHarness | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [doc, setDoc] = useState<{ content: string; truncated: boolean } | null>(null);
   const [creating, setCreating] = useState(false);
@@ -64,14 +65,26 @@ export function SkillsView() {
     return installMarkdownHandlers(mdBody.current, (url) => void invoke('app:openExternal', { url }));
   }, [mdHtml]);
 
+  // Keep the active tab on a real root; default to the first harness that has skills.
+  useEffect(() => {
+    if (!roots) return;
+    if (roots.some((r) => r.harness === harness)) return;
+    setHarness(roots.find((r) => r.skills.length > 0)?.harness ?? roots[0]?.harness ?? null);
+  }, [roots, harness]);
+
   const q = query.trim().toLowerCase();
-  const visible = useMemo(() => {
-    if (!roots) return [];
-    return roots
-      .map((r) => ({ ...r, skills: q ? r.skills.filter((s) => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q) || basename(s.path).toLowerCase().includes(q)) : r.skills }))
-      .filter((r) => !q || r.skills.length > 0);
-  }, [roots, q]);
+  const activeRoot = useMemo(() => (roots ?? []).find((r) => r.harness === harness), [roots, harness]);
+  const activeSkills = useMemo(() => {
+    if (!activeRoot) return [];
+    if (!q) return activeRoot.skills;
+    return activeRoot.skills.filter((s) => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q) || basename(s.path).toLowerCase().includes(q));
+  }, [activeRoot, q]);
   const total = roots?.reduce((n, r) => n + r.skills.length, 0) ?? 0;
+
+  const switchTab = (h: SkillHarness) => {
+    setHarness(h);
+    if (harness !== h) setSelectedPath(null);
+  };
 
   const openEditor = async (skill: SkillInfo) => {
     if (!skill.file) return;
@@ -85,6 +98,7 @@ export function SkillsView() {
     const r = await invoke('skills:copy', { path: skill.path, toHarness: to });
     if (r.ok) {
       toast(`Copied to ${label}`, 'success');
+      setHarness(to);
       await load();
       if (r.path) setSelectedPath(r.path);
     } else {
@@ -137,6 +151,16 @@ export function SkillsView() {
         </div>
       </div>
       {error && <div className="skills-error">{error}</div>}
+      {roots !== null && roots.length > 0 && (
+        <div className="skills-tabs">
+          {roots.map((r) => (
+            <button key={r.harness} type="button" className={`atab ${harness === r.harness ? 'active' : ''}`} onClick={() => switchTab(r.harness)}>
+              {r.label}
+              <span className="atab-count">{r.skills.length}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="skills-body">
         <div className="skills-list">
           {roots === null && (
@@ -152,33 +176,30 @@ export function SkillsView() {
               </Button>
             </EmptyState>
           )}
-          {visible.map((root) => (
-            <div key={root.path} className="skill-root">
+          {activeRoot && (
+            <div className="skill-root">
               <div className="skill-root-head">
-                <Badge tone={TONE[root.harness]}>{root.label}</Badge>
-                <span className="skill-root-path mono" title={root.path}>{root.display}</span>
-                <button type="button" className="skill-reveal" title="Show folder" aria-label="Show folder" onClick={() => void invoke('skills:reveal', { path: root.path })}>
+                <span className="skill-root-path mono" title={activeRoot.path}>{activeRoot.display}</span>
+                <button type="button" className="skill-reveal" title="Show folder" aria-label="Show folder" onClick={() => void invoke('skills:reveal', { path: activeRoot.path })}>
                   <Icon name="external" size={12} />
                 </button>
-                <span className="spacer" />
-                <span className="muted small">{root.skills.length}</span>
               </div>
-              {root.skills.length === 0 && <div className="skill-none">{root.exists ? 'No skills installed.' : 'Directory does not exist yet — it is created with the first skill.'}</div>}
-              {root.skills.map((skill) => (
+              {activeRoot.skills.length === 0 && !q && <div className="skill-none">{activeRoot.exists ? 'No skills installed.' : 'Directory does not exist yet — it is created with the first skill.'}</div>}
+              {activeSkills.map((skill) => (
                 <SkillRow
                   key={skill.path}
                   skill={skill}
                   active={skill.path === selectedPath}
-                  targets={(roots ?? []).filter((r) => r.harness !== root.harness)}
+                  targets={(roots ?? []).filter((r) => r.harness !== activeRoot.harness)}
                   onSelect={() => setSelectedPath(skill.path)}
                   onEdit={() => void openEditor(skill)}
                   onCopy={(to, close) => void copyTo(skill, to, close)}
                   onDelete={(close) => void remove(skill, close)}
                 />
               ))}
+              {q && activeSkills.length === 0 && <div className="skill-none">No skills match “{query}”.</div>}
             </div>
-          ))}
-          {roots !== null && q && visible.every((r) => r.skills.length === 0) && <div className="skill-none">No skills match “{query}”.</div>}
+          )}
         </div>
         <div className="skills-preview">
           {selected ? (

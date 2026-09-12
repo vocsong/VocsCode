@@ -10,26 +10,27 @@
   "author": "Vocs",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vocsong/Vocs-Code.git"
+    "url": "git+https://github.com/vocsong/VocsCode.git"
   },
-  "homepage": "https://github.com/vocsong/Vocs-Code#readme",
+  "homepage": "https://github.com/vocsong/VocsCode#readme",
   "bugs": {
-    "url": "https://github.com/vocsong/Vocs-Code/issues"
+    "url": "https://github.com/vocsong/VocsCode/issues"
   },
   "scripts": {
     "dev": "electron-vite dev",
     "setup": "npm install --include=dev && npm run dev",
-    "update": "git pull && npm run build && npm start",
+    "update": "git pull && npm install --include=dev && npm run build && npm start",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "start": "electron-vite preview",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "test": "vitest run tests/branding.test.ts tests/pr.test.ts tests/unit.test.ts tests/handler-registry.test.ts tests/format.test.ts tests/git-branch-state.test.ts tests/folder-branch.test.tsx tests/review-fixes.test.ts tests/skills.test.ts tests/terminal.test.ts tests/themes.test.ts tests/analytics.test.ts tests/usage-rollup.test.ts tests/analytics-dashboard.test.tsx tests/composer-history.test.tsx tests/transcript-find.test.tsx tests/image-lightbox.test.tsx tests/sidebar-folder-style.test.tsx",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:test",
+    "test": "vitest run",
     "dist:win": "electron-vite build && electron-builder --win --config electron-builder.yml",
     "dist:dir": "electron-vite build && electron-builder --dir --config electron-builder.yml",
-    "test:unit": "vitest run tests/branding.test.ts tests/pr.test.ts tests/unit.test.ts tests/handler-registry.test.ts tests/format.test.ts tests/git-branch-state.test.ts tests/folder-branch.test.tsx tests/review-fixes.test.ts tests/terminal.test.ts tests/themes.test.ts tests/analytics.test.ts tests/usage-rollup.test.ts tests/analytics-dashboard.test.tsx tests/composer-history.test.tsx tests/image-lightbox.test.tsx",
+    "test:unit": "vitest run",
     "test:e2e": "vitest run tests/e2e.electron.test.ts",
     "test:e2e:ui": "vitest run tests/e2e.vision.test.ts",
     "test:e2e:terminal": "vitest run tests/e2e.terminal.test.ts",
@@ -41,6 +42,7 @@
     "@agentclientprotocol/sdk": "^1.4.0",
     "@anthropic-ai/claude-agent-sdk": "^0.3.263",
     "@anthropic-ai/sdk": "^0.124.0",
+    "@cursor/sdk": "^1.0.31",
     "@lydell/node-pty": "^1.2.0-beta.15",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@openai/codex-sdk": "^0.153.4",
@@ -65,7 +67,6 @@
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
-    "@types/diff": "^8.0.0",
     "@types/node": "^22.20.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",

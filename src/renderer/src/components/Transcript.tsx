@@ -28,6 +28,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
   const loaded = useStore((s) => s.loaded[session.id]);
   const showThinking = useStore((s) => s.showThinking);
+  const jump = useStore((s) => s.searchJump);
   const ref = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
@@ -38,7 +39,8 @@ export function Transcript({ session }: { session: SessionMeta }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && !e.shiftKey) {
+        // Plain Ctrl+F: find in transcript. Ctrl+Shift+F is the global deep session search.
         e.preventDefault();
         setFindOpen(true);
       }
@@ -64,6 +66,19 @@ export function Transcript({ session }: { session: SessionMeta }) {
     setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
   };
 
+  // Jump-to-match from the deep search modal: scroll to the item and flash it. Waits for the
+  // transcript to load when the session was not the active one.
+  useEffect(() => {
+    if (!jump || jump.sessionId !== session.id || !loaded || !ref.current) return;
+    const el = ref.current.querySelector(`[data-item-id="${CSS.escape(jump.itemId)}"]`);
+    if (!el) return;
+    setStick(false);
+    el.scrollIntoView({ block: 'center' });
+    el.classList.add('search-jump-hl');
+    const t = setTimeout(() => el.classList.remove('search-jump-hl'), 2400);
+    return () => clearTimeout(t);
+  }, [jump, loaded, session.id]);
+
   const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
 
   return (
@@ -76,9 +91,13 @@ export function Transcript({ session }: { session: SessionMeta }) {
             <p>Send a message to start. Type <code>/</code> for commands, <code>@</code> to mention files, paste images to attach them.</p>
           </div>
         )}
-        {items.map((item) => (
-          <Item key={item.id} item={item} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} />
-        ))}
+        {groupTranscript(items).map((chunk) =>
+          chunk.kind === 'group' ? (
+            <ToolGroup key={chunk.id} entries={chunk.entries} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} />
+          ) : (
+            <Item key={chunk.item.id} item={chunk.item} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={chunk.item.id} />
+          )
+        )}
         {(session.status === 'running' || session.status === 'starting') && (
           <div className="working">
             <Spinner size={12} /> {session.status === 'starting' ? session.statusDetail ?? 'Starting…' : 'Working…'}
@@ -102,7 +121,16 @@ export function Transcript({ session }: { session: SessionMeta }) {
   );
 }
 
-const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand }: { item: TranscriptItem; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
+/** One transcript row; `dataItemId` anchors deep-search jumps to the exact item. */
+const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand, dataItemId }: { item: TranscriptItem; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand; dataItemId?: string }) {
+  return (
+    <div data-item-id={dataItemId}>
+      {renderItem(item, sessionId, showThinking, onImageExpand)}
+    </div>
+  );
+});
+
+function renderItem(item: TranscriptItem, sessionId: string, showThinking: boolean, onImageExpand: OnImageExpand) {
   switch (item.kind) {
     case 'user':
       return <UserMessage item={item} onImageExpand={onImageExpand} />;
@@ -146,7 +174,7 @@ const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand }
     default:
       return null;
   }
-});
+}
 
 export function UserMessage({ item, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; onImageExpand?: OnImageExpand }) {
   const images = item.images ?? [];
@@ -204,12 +232,103 @@ function AssistantMessage({ item, showThinking }: { item: Extract<TranscriptItem
 
 const HINT_ICON: Record<string, string> = { execute: 'terminal', edit: 'edit', read: 'file', search: 'search', fetch: 'external', think: 'brain', mcp: 'bolt', agent: 'fork', other: 'bolt' };
 
-function ToolCard({ item }: { item: Extract<TranscriptItem, { kind: 'tool' }> }) {
+type ToolItem = Extract<TranscriptItem, { kind: 'tool' }>;
+
+/** A run of shell commands (with interleaved commentary) collapses into one group. */
+export type RenderChunk =
+  | { kind: 'single'; item: TranscriptItem }
+  | { kind: 'group'; id: string; entries: TranscriptItem[] };
+
+/** A run ends at user messages, approvals, turn boundaries, plans and non-command tools. */
+const breaksCommandRun = (item: TranscriptItem): boolean =>
+  (item.kind === 'tool' && item.hint !== 'execute') ||
+  item.kind === 'user' || item.kind === 'approval' || item.kind === 'turn' || item.kind === 'plan';
+
+/**
+ * Group execute tools (per nesting parent) into collapsible chunks. Assistant text, thinking
+ * and info lines between two commands are absorbed so commentary does not break the run;
+ * anything trailing the last command is popped back out so the turn's answer stays visible.
+ */
+export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
+  const isCmd = (item: TranscriptItem): item is ToolItem => item.kind === 'tool' && item.hint === 'execute';
+  const chunks: RenderChunk[] = [];
+  let run: TranscriptItem[] = [];
+  let runId = '';
+  let runParent: string | null = null;
+  const flush = () => {
+    if (run.length) {
+      const lastCmd = run.reduce((acc, it, idx) => (isCmd(it) ? idx : acc), -1);
+      const head = run.slice(0, lastCmd + 1);
+      const commands = head.filter(isCmd);
+      if (commands.length > 1) chunks.push({ kind: 'group', id: runId, entries: head });
+      else for (const it of head) chunks.push({ kind: 'single', item: it });
+      for (const it of run.slice(lastCmd + 1)) chunks.push({ kind: 'single', item: it });
+    }
+    run = [];
+  };
+  for (const item of items) {
+    if (isCmd(item)) {
+      const parent = item.parentId ?? null;
+      if (run.length && parent !== runParent) flush();
+      if (!run.length) {
+        runId = item.id;
+        runParent = parent;
+      }
+      run.push(item);
+    } else if (run.length && !breaksCommandRun(item)) {
+      run.push(item);
+    } else {
+      flush();
+      chunks.push({ kind: 'single', item });
+    }
+  }
+  flush();
+  return chunks;
+}
+
+/** Collapsed "Ran n commands" header for a run of shell commands, with interleaved commentary inside. */
+export function ToolGroup({ entries, sessionId, showThinking, onImageExpand }: { entries: TranscriptItem[]; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
+  // open === null means the user has not toggled; then follow running state so live output stays visible.
+  const [open, setOpen] = useState<boolean | null>(null);
+  // A deep-search jump into one of these commands forces the group open so the anchor exists.
+  const jump = useStore((s) => s.searchJump);
+  const jumpHere = !!jump && jump.sessionId === sessionId && entries.some((e) => e.id === jump.itemId);
+  const commands = entries.filter((e): e is ToolItem => e.kind === 'tool');
+  const running = commands.some((i) => i.status === 'running');
+  const expanded = jumpHere || (open ?? running);
+  const failed = commands.filter((i) => i.status === 'error' || i.status === 'declined').length;
+  const totalMs = commands.reduce((sum, i) => sum + (i.durationMs ?? 0), 0);
+  return (
+    <div className={`tool-group ${running ? 'tool-group-running' : ''}`}>
+      <button type="button" className="tool-group-head" onClick={() => setOpen(!expanded)}>
+        <Icon name="terminal" size={14} className="tool-icon" />
+        <span className="tool-name">{running ? 'Running' : 'Ran'} {commands.length} command{commands.length === 1 ? '' : 's'}</span>
+        <span className="spacer" />
+        {failed ? <Badge tone="red">{failed} failed</Badge> : null}
+        {running ? <Spinner size={12} /> : totalMs ? <span className="muted small">{fmtDuration(totalMs)}</span> : null}
+        <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
+      </button>
+      {expanded && (
+        <div className="tool-group-body">
+          {entries.map((e) =>
+            e.kind === 'tool' ? (
+              <ToolCard key={e.id} item={e} dataItemId={e.id} />
+            ) : (
+              <Item key={e.id} item={e} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={e.id} />
+            )
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolCard({ item, dataItemId }: { item: Extract<TranscriptItem, { kind: 'tool' }>; dataItemId?: string }) {
   const [open, setOpen] = useState(false);
   const hasBody = !!item.output || !!(item.changes && item.changes.length) || item.input !== undefined;
   const statusTone = item.status === 'running' ? 'blue' : item.status === 'error' ? 'red' : item.status === 'declined' ? 'amber' : 'green';
   return (
-    <div className={`tool-card tool-${item.status} ${item.parentId ? 'tool-nested' : ''}`}>
+    <div data-item-id={dataItemId} className={`tool-card tool-${item.status} ${item.parentId ? 'tool-nested' : ''}`}>
       <button type="button" className="tool-head" onClick={() => hasBody && setOpen((o) => !o)}>
         <Icon name={HINT_ICON[item.hint ?? 'other']} size={14} className="tool-icon" />
         <span className="tool-name">{item.title ?? item.name}</span>

@@ -4,13 +4,16 @@
  */
 import type { TerminalSettings } from './terminal';
 import type { ThemeId } from './themes';
+import type { ShortcutCommand } from './shortcuts';
 
-export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'pi' | 'acp' | 'native';
+export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'native';
 
 /** App-level permission modes, mapped per harness (see harness-meta.ts). */
 export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-auto';
 
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export type AutoCompactionThreshold = '50%' | '75%' | '90%' | '100k' | '250k' | '500k' | '750k' | '1m';
 
 export type SessionStatus = 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped' | 'pr' | 'merged';
 
@@ -48,6 +51,7 @@ export type ProviderKind =
   | 'anthropic'
   | 'openai'
   | 'openai-compatible'
+  | 'cursor'
   | 'deepseek'
   | 'openrouter'
   | 'ollama'
@@ -180,11 +184,15 @@ export interface UsageSlice extends UsageCounters {
 
 /** Per-dimension attribution of one day's usage; the bounded ranges of the dashboard are built from it. */
 export interface UsageDayDimensions {
+  /** Set when the slices were estimated from session totals for a day recorded before slice tracking. */
+  estimated?: boolean;
   harness: Record<string, UsageSlice>;
   /** Keyed `provider/model`, attributed to the model active when the usage was reported. */
   model: Record<string, UsageSlice>;
   project: Record<string, UsageSlice>;
   tool: Record<string, ToolUsage>;
+  /** Per-tool call counts keyed by model (`provider/model`), attributed to the model active when the call ran. */
+  modelTool: Record<string, Record<string, ToolUsage>>;
   file: Record<string, FileUsage>;
 }
 
@@ -209,6 +217,16 @@ export interface ToolUsage {
 }
 
 export interface ToolUsageRow extends ToolUsage {
+  name: string;
+}
+
+/** Tool-call rollup for one tool under one model. */
+export interface ModelToolRow extends ToolUsage {
+  /** `provider/model` of the session that made the call. */
+  key: string;
+  /** The model name alone. */
+  label: string;
+  /** Tool name. */
   name: string;
 }
 
@@ -238,6 +256,8 @@ export interface UsageSessionRecord {
   usage: UsageTotals;
   /** Completed tool calls recorded for this session. */
   toolCalls: number;
+  /** Cumulative completed-turn wall time in ms; absent in records written before it was tracked. */
+  durationMs?: number;
   /** Output speed sample for this session; absent in records written before speed was tracked. */
   speed?: UsageSpeed;
 }
@@ -248,6 +268,8 @@ export interface UsageBucket {
   label: string;
   usage: UsageTotals;
   toolCalls: number;
+  /** Cumulative completed-turn wall time in ms, so `durationMs / turns` is the average turn. */
+  durationMs: number;
   sessions: number;
   speed: UsageSpeed;
 }
@@ -290,6 +312,8 @@ export interface AnalyticsSummary {
   /** All-time tool-call totals and per-tool/per-file breakdowns, sorted by volume. */
   toolTotals: ToolUsage;
   tools: ToolUsageRow[];
+  /** Per-tool call counts per model, sorted by volume. */
+  modelTools: ModelToolRow[];
   files: FileUsageRow[];
   /** Sessions sorted by spend, highest first. */
   sessions: UsageSessionRecord[];
@@ -303,6 +327,8 @@ export interface HarnessRef {
   claudeSessionId?: string;
   /** Codex thread id (thread/resume). */
   codexThreadId?: string;
+  /** Cursor agent id (Agent.resume); bc- prefixed ids are cloud agents. */
+  cursorAgentId?: string;
   /** Pi session file path. */
   piSessionFile?: string;
   /** ACP session id. */
@@ -336,6 +362,8 @@ export interface SessionMeta {
   worktreeBranch?: string;
   status: SessionStatus;
   statusDetail?: string;
+  /** User-picked display label for the status badge; shown instead of the status name until cleared. */
+  statusLabel?: string;
   harnessRef: HarnessRef;
   usage: UsageTotals;
   lastError?: string;
@@ -344,6 +372,8 @@ export interface SessionMeta {
   activeEffort?: EffortLevel;
   goal?: GoalState;
   pinned?: boolean;
+  /** Epoch ms when pinned; pinned rows sort by it ascending (first pin on top). Rewritten on drag-reorder. */
+  pinnedAt?: number;
   archived?: boolean;
   /** Number of queued (steer/follow-up) messages waiting. */
   queued?: number;
@@ -575,6 +605,10 @@ export interface AppSettings {
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
   defaultEffort?: EffortLevel;
+  /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */
+  autoCompactionThreshold?: AutoCompactionThreshold;
+  /** Last chosen worktree isolation decision in the new-session dialog. */
+  defaultUseWorktree?: boolean;
   defaultModelByHarness: Partial<Record<HarnessId, ModelRef>>;
   /** Starred models, always listed first in the model pickers. */
   favoriteModels: ModelRef[];
@@ -615,8 +649,20 @@ export interface AppSettings {
   folders: string[];
   /** Per-folder sidebar appearance keyed by project root. */
   folderStyles?: Record<string, FolderStyle>;
+  /** User-added labels offered in the status-label picker alongside the built-in statuses. */
+  customLabels?: string[];
+  /** Manual sidebar order for project folders; roots not listed sort alphabetically after. */
+  folderOrder?: string[];
+  /** Project roots whose sidebar folder block is collapsed. */
+  collapsedFolders?: string[];
+  /** Extra keyboard shortcuts keyed by canonical accelerator (e.g. 'Ctrl+Alt+A'); see shared/shortcuts.ts. */
+  customShortcuts?: Record<string, ShortcutCommand>;
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
+  /** Cheap model for background tasks (session titles, summaries). Unset until the user picks one. */
+  utilityModel?: ModelRef;
+  /** Set once the first-run setup guide has been completed. */
+  onboardingDone?: boolean;
 }
 
 export interface GitFileStatus {
@@ -635,6 +681,8 @@ export interface GitSummary {
   files: GitFileStatus[];
   ahead?: number;
   behind?: number;
+  /** Set when git could not produce a trustworthy summary (timeout/corrupt repo); the file list may be empty or incomplete. */
+  error?: string;
 }
 
 export interface GitBranchInfo {
@@ -708,6 +756,30 @@ export interface GitPullRequestList {
   error?: string;
 }
 
+/** One issue of the session's GitHub repo, as `gh issue list` reports it (Issues view of the Git panel). */
+export interface GitIssue {
+  number: number;
+  title: string;
+  state: 'OPEN' | 'CLOSED';
+  url: string;
+  author?: string;
+  labels?: { name: string; color?: string }[];
+  comments?: number;
+  /** ms since epoch */
+  createdAt?: number;
+  updatedAt?: number;
+  closedAt?: number;
+}
+
+/** The issue list pulled from GitHub; `error` carries gh's own words when the pull failed (not logged in, no remote…). */
+export interface GitIssueList {
+  issues: GitIssue[];
+  /** When the list was pulled (ms since epoch). */
+  fetchedAt: number;
+  ghMissing?: boolean;
+  error?: string;
+}
+
 export interface GitBranchOverview {
   isRepo: boolean;
   base?: string;
@@ -715,6 +787,8 @@ export interface GitBranchOverview {
   worktrees: GitWorktreeInfo[];
   /** True when the GitHub CLI is unavailable; PR actions are hidden in the Branches panel. */
   ghMissing?: boolean;
+  /** Set when the branch list could not be read in full (e.g. git timed out). */
+  error?: string;
 }
 
 export interface FsEntry {
@@ -731,6 +805,30 @@ export interface DoctorReport {
   harnesses: Record<HarnessId, HarnessAvailability>;
   providers: { id: string; name: string; hasKey: boolean; envKeyPresent: boolean }[];
   userData: string;
+}
+
+/** Filters narrowing a session search to a subset of sessions. */
+export interface SearchFilters {
+  archived?: boolean;
+  harness?: HarnessId;
+  projectRoot?: string;
+}
+
+/** One deep-search hit: a title/goal match or a match inside a transcript item. */
+export interface SearchResult {
+  sessionId: string;
+  /** Transcript item id for deep hits; absent for title/goal matches (nothing to scroll to). */
+  itemId?: string;
+  kind: 'meta' | 'user' | 'assistant' | 'tool' | 'info';
+  ts: number;
+  /** Snippet with \u0001/\u0002 around the matched terms; the renderer turns them into <mark>. */
+  snippet: string;
+}
+
+export interface SearchResponse {
+  /** False when node:sqlite/FTS5 is unavailable in this runtime; deep search is disabled then. */
+  available: boolean;
+  results: SearchResult[];
 }
 
 export interface CreateSessionRequest {

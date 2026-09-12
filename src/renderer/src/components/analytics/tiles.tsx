@@ -70,6 +70,7 @@ export function Footnotes({ scope, summary, extra }: { scope: Scope; summary: An
   if (summary.firstDay) notes.push(`Tracking since ${fmtDay(summary.firstDay)} ${summary.firstDay.slice(0, 4)} across ${plural(summary.sessionCount, 'session')}, including deleted ones.`);
   notes.push('Days are UTC calendar days.');
   if (u && (u.costUsd > 0 || u.turns > 0 || u.toolCalls > 0)) notes.push(`${fmtCost(u.costUsd)}, ${plural(u.turns, 'turn')} and ${plural(u.toolCalls, 'tool call')} in this range were recorded before per-model tracking existed; they count in the totals but appear in no breakdown.`);
+  if (scope.estimatedDays > 0) notes.push(`Breakdowns for ${plural(scope.estimatedDays, 'day')} recorded before per-model tracking were estimated from the sessions last active on each day, in proportion to their lifetime usage.`);
   if (scope.allTime) notes.push('All-time breakdowns attribute each session to its last model; bounded ranges attribute usage to the model that was active when it happened.');
   for (const e of extra ?? []) notes.push(e);
   return (

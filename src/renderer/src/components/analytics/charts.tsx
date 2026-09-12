@@ -258,7 +258,8 @@ export function LineChart({ dates, series, format, axis = format, integer, heigh
   const x = (i: number) => (n > 1 ? M.left + i * step : M.left + plotW / 2);
   const y = (v: number) => M.top + plotH - (v / top) * plotH;
   const every = xLabelEvery(n, plotW);
-  const markers = n <= 31;
+  // Ringed markers on every point only while they stay sparse; longer ranges mark the hovered day.
+  const markers = n <= 14;
 
   const pathOf = (values: (number | null)[]): string => {
     let d = '';

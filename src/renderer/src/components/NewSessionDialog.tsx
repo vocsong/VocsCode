@@ -1,8 +1,9 @@
 /** New session dialog: project directory, harness, model, permission mode and worktree isolation. */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
-import { invoke, modKey } from '../api';
+import { invoke } from '../api';
+import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
@@ -21,12 +22,12 @@ export function NewSessionDialog() {
   const projectRoot = useStore((s) => s.newSessionRoot) ?? activeSession?.config.projectRoot ?? '';
   const [harness, setHarness] = useState<HarnessId>(settings.defaultHarness);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(!!projectRoot);
   const [modelsError, setModelsError] = useState<string | undefined>();
   const [model, setModel] = useState<ModelRef | undefined>(settings.defaultModelByHarness[settings.defaultHarness]);
   const [effort, setEffort] = useState<EffortLevel | ''>(settings.defaultEffort ?? '');
   const [mode, setMode] = useState<PermissionMode>(settings.defaultPermissionMode);
-  const [useWorktree, setUseWorktree] = useState(false);
+  const [useWorktree, setUseWorktree] = useState(settings.defaultUseWorktree ?? false);
   const [acpAgent, setAcpAgent] = useState(settings.acpAgents[0]?.id ?? 'dsh');
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<ImageAttachment[]>([]);
@@ -37,6 +38,28 @@ export function NewSessionDialog() {
   const [maxBudget, setMaxBudget] = useState('');
   const [customProvider, setCustomProvider] = useState({ id: '', name: '', baseUrl: '', envKey: '' });
   const [creating, setCreating] = useState(false);
+
+  // Focus the first-prompt textarea so typing can start immediately.
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    promptRef.current?.focus();
+  }, []);
+
+  // The model column keeps the harness column's height; the model list scrolls inside it.
+  const harnessColRef = useRef<HTMLElement>(null);
+  const modelColRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const left = harnessColRef.current;
+    const right = modelColRef.current;
+    if (!left || !right) return;
+    const apply = () => {
+      right.style.height = `${left.offsetHeight}px`;
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(left);
+    return () => ro.disconnect();
+  }, [harness, acpAgent]);
 
   const descriptor = HARNESSES.find((h) => h.id === harness)!;
   const modes = descriptor.capabilities.permissionModes;
@@ -49,7 +72,7 @@ export function NewSessionDialog() {
     let cancelled = false;
     setModels([]);
     setModelsError(undefined);
-    setModelsLoading(!projectRoot);
+    setModelsLoading(!!projectRoot);
     setModel(settings.defaultModelByHarness[harness]);
     if (!projectRoot) return;
     invoke('harness:models', { harness, acpAgent, projectRoot })
@@ -70,9 +93,17 @@ export function NewSessionDialog() {
   }, [harness, acpAgent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedModel = models.find((m) => model && m.id === model.model && m.provider === model.provider);
-  const effortOptions = selectedModel?.supportedEfforts?.length ? selectedModel.supportedEfforts : [...EFFORT_LEVELS];
+  const supportedEfforts = selectedModel?.supportedEfforts;
+  const effortOptions = supportedEfforts?.length ? supportedEfforts : [...EFFORT_LEVELS];
+  // Keep the remembered choice when possible; an incompatible model uses its own default instead
+  // of submitting a hidden, unsupported value.
+  let selectedEffort: EffortLevel | '' = effort;
+  if (effort && supportedEfforts?.length && !supportedEfforts.includes(effort)) {
+    selectedEffort = selectedModel?.defaultEffort && supportedEfforts.includes(selectedModel.defaultEffort) ? selectedModel.defaultEffort : '';
+  }
 
   const create = async () => {
+    if (modelsLoading) return;
     if (!projectRoot) {
       toast('Choose a project folder first.', 'error');
       return;
@@ -83,7 +114,7 @@ export function NewSessionDialog() {
         harness,
         projectRoot,
         model,
-        effort: effort || undefined,
+        effort: selectedEffort || undefined,
         permissionMode: mode,
         useWorktree,
         acpAgent: harness === 'acp' ? acpAgent : undefined,
@@ -91,8 +122,15 @@ export function NewSessionDialog() {
         maxBudgetUsd: maxBudget ? Number(maxBudget) : undefined,
         codexModelProvider: harness === 'codex' && customProvider.id && customProvider.baseUrl ? { id: customProvider.id, name: customProvider.name || customProvider.id, baseUrl: customProvider.baseUrl, envKey: customProvider.envKey || undefined, wireApi: 'chat' } : undefined
       };
+      // Persist before creation so an initial prompt also sees an explicit switch back to the
+      // harness default instead of inheriting the previously remembered effort.
+      await rememberEffort(selectedEffort || undefined, {
+        defaultHarness: harness,
+        defaultPermissionMode: mode,
+        defaultUseWorktree: useWorktree,
+        defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model }
+      });
       const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, initialImages: images.length ? images : undefined, goal: goal.trim() || undefined });
-      await invoke('settings:update', { defaultHarness: harness, defaultPermissionMode: mode, defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model } });
       close();
       await setActive(meta.id);
     } catch (e) {
@@ -103,7 +141,7 @@ export function NewSessionDialog() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !creating && projectRoot) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !creating && !modelsLoading && projectRoot) {
       e.preventDefault();
       void create();
     }
@@ -148,14 +186,14 @@ export function NewSessionDialog() {
           <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={create} disabled={creating || !projectRoot} title={`Start from the prompt area with ${modKey}+Enter`}>
-            {creating ? <Spinner /> : <Icon name="play" />} Start session <Kbd>{modKey}+↵</Kbd>
+          <Button variant="primary" onClick={create} disabled={creating || modelsLoading || !projectRoot} title="Start from the prompt area with Enter">
+            {creating ? <Spinner /> : <Icon name="play" />} Start session <Kbd>↵</Kbd>
           </Button>
         </>
       }
     >
       <div className="ns-grid">
-        <section className="ns-col">
+        <section className="ns-col" ref={harnessColRef}>
           <Field label="Harness">
             <div className="harness-cards">
               {HARNESSES.map((h) => {
@@ -193,7 +231,7 @@ export function NewSessionDialog() {
           )}
         </section>
 
-        <section className="ns-col">
+        <section className="ns-col ns-col-model" ref={modelColRef}>
           <Field label={<span className="row gap6">Model {modelsLoading && <Spinner size={11} />}</span>} hint={modelsError}>
             <ModelPicker
               models={models}
@@ -206,7 +244,7 @@ export function NewSessionDialog() {
           </Field>
           <div className="row gap12">
             <Field label="Reasoning effort">
-              <select value={effort} onChange={(e) => setEffort(e.target.value as EffortLevel | '')} disabled={!descriptor.capabilities.effort}>
+              <select value={selectedEffort} onChange={(e) => setEffort(e.target.value as EffortLevel | '')} disabled={!descriptor.capabilities.effort}>
                 <option value="">Default</option>
                 {effortOptions.map((l) => (
                   <option key={l} value={l}>
@@ -247,7 +285,7 @@ export function NewSessionDialog() {
               </div>
             )}
             <div className="ns-prompt-box">
-              <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
+              <textarea ref={promptRef} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
               <label className="icon-btn ns-attach" title="Attach image">
                 <Icon name="image" size={14} />
                 <input type="file" accept="image/*" multiple hidden onChange={(e) => void addFiles(e.target.files)} />

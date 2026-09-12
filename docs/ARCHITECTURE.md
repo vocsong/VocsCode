@@ -11,6 +11,7 @@ src/main
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
     codex-app-server.ts + jsonrpc.ts   Codex app-server client (thread/turn/item notifications, approval requests)
     codex-exec.ts SDK fallback
+    cursor.ts     @cursor/sdk, local runtime; sandbox + plan-mode allowlist instead of approvals
     pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
     acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
@@ -40,6 +41,7 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 | **Claude Agent SDK** | `@anthropic-ai/claude-agent-sdk` (Claude Code loop, hooks, MCP, checkpoints) | interactive (`canUseTool`) | Anthropic catalog, plus Bedrock/Vertex/Foundry/gateway via env |
 | **Codex (app-server)** | `codex app-server` JSON-RPC — the same engine as the Codex desktop app | interactive (command + file-change requests), steer, interrupt | `model/list` from Codex, any `model_providers` entry |
 | **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | Codex catalog |
+| **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan |
 | **Pi** | `pi --mode rpc` + bundled approvals extension | interactive | pi's registry: Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, Ollama, custom |
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) |
@@ -73,11 +75,13 @@ Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping c
 
 `userData/analytics.json` feeds the Analytics view. The main-process `AnalyticsStore` (`src/main/analytics.ts`) turns every cumulative usage report into a delta against the session's last totals and adds it to a UTC day bucket, attributing it to the harness, model and project active at that moment (`UsageDay.by`, which also remembers the session ids, per-tool counts and per-file change counts of the day). Session snapshots and the all-time per-tool and per-file maps survive session deletion, so history never shrinks.
 
-The dashboard (`src/renderer/src/components/analytics/`) asks for one range at a time and scopes every tab to it. All-time views come from the session records; bounded ranges (7, 30, 90 days) come from the day slices through the shared `src/shared/usage-rollup.ts`, and the summary also carries the preceding window so tiles can show period-over-period change. Days recorded before slices existed count in the totals but in no breakdown; they are labelled "unattributed" until they age out of the bounded ranges. Series colours come from `CHART_SERIES` in `src/shared/themes.ts`, a categorical palette validated for colour-vision separation on every theme surface (the theme hues themselves are UI accents and fail those checks); single-series charts use the theme accent.
+The dashboard (`src/renderer/src/components/analytics/`) asks for one range at a time and scopes every tab to it. All-time views come from the session records; bounded ranges (7, 30, 90 days) come from the day slices through the shared `src/shared/usage-rollup.ts`, and the summary also carries the preceding window so tiles can show period-over-period change. Days recorded before slices existed are reconstructed once on load from the sessions last active that day, in proportion to their lifetime usage (per-tool and per-file counts are shared out from the all-time maps by call volume); those days are flagged `estimated` and the dashboard says so. A legacy day with no matching session keeps its usage in the totals only and is labelled "unattributed" until it ages out of the bounded ranges. Series colours come from `CHART_SERIES` in `src/shared/themes.ts`, a categorical palette validated for colour-vision separation on every theme surface (the theme hues themselves are UI accents and fail those checks); single-series charts use the theme accent.
 
 ## Known limitations
 
 - Codex exec (SDK) cannot ask for approval; prefer the app-server harness for interactive work.
+- The Cursor harness cannot ask for approval either; safety comes from Cursor's sandbox (Auto) and Plan mode. A `.cursor/hooks.json` approval bridge is a possible follow-up.
+- Cursor usage is billed to the user's Cursor plan, so the analytics show tokens but no dollar cost for that harness.
 - Custom Codex model providers are passed as thread config overrides and were not verified against a live OpenAI-compatible endpoint.
 - ACP agents expose models only after the session starts; pick the model from the header once the agent is up.
 - The terminal tab's directory tracking relies on the shell announcing its cwd (OSC 7, or OSC 9;9 as Windows Terminal profiles do); shells without such a prompt hook show the directory they started in.

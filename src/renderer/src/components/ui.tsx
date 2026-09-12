@@ -20,6 +20,8 @@ const ICONS: Record<string, string> = {
   x: 'M18 6L6 18M6 6l12 12',
   search: 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3',
   pin: 'M12 17v5M5 17h14l-2-5V4H7v8l-2 5z',
+  archive: 'M3 3h18v5H3zM5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4',
+  restore: 'M3 12a9 9 0 1 0 3-6.7M3 3v6h6M12 7v5l3 3',
   trash: 'M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14',
   copy: 'M8 8h12v12H8zM4 16V4h12',
   external: 'M14 4h6v6M20 4l-9 9M19 14v6H4V5h6',
@@ -87,6 +89,7 @@ const ICONS: Record<string, string> = {
   camera: 'M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2v11zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',
   video: 'M23 7l-7 5 7 5V7zM14 5H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z',
   gamepad: 'M6 11h4M8 9v4M15 12h.01M18 10h.01M17.32 5H6.68a4 4 0 0 0-3.98 3.59c-.01 0 0 .01 0 .01L2 18a3 3 0 0 0 5.16 2.06L9.5 17h5l2.34 3.06A3 3 0 0 0 22 18l-.7-9.4A4 4 0 0 0 17.32 5z',
+  keyboard: 'M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM6 9h.01M9.5 9h.01M13 9h.01M16.5 9h.01M18 12.5h.01M6 12.5h.01M9 15h6M9.5 12.5h.01M13 12.5h.01M16 12.5h.01',
   leaf: 'M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10zM2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12',
   compass: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM16.24 7.76l-2.12 6.53-6.53 2.12 2.12-6.53 6.53-2.12z',
   gift: 'M20 12v10H4V12M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z'
@@ -296,7 +299,7 @@ export function StatusDot({ status }: { status: string }) {
   return <span className={`status-dot status-${status}`} title={status} />;
 }
 
-const STATUS_LABELS: Record<string, string> = {
+export const STATUS_LABELS: Record<string, string> = {
   idle: 'Idle',
   starting: 'Starting',
   running: 'Working',
@@ -307,7 +310,10 @@ const STATUS_LABELS: Record<string, string> = {
   stopped: 'Stopped',
 };
 
-export function StatusLabel({ status }: { status: string }) {
+export function StatusLabel({ status, label }: { status: string; label?: string }) {
+  if (label) {
+    return <span className="session-status status-custom" title={`${label} — click to change`}>{label}</span>;
+  }
   return (
     <span className={`session-status status-${status}`} title={status}>
       {STATUS_LABELS[status] ?? status}

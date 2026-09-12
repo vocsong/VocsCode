@@ -11,6 +11,7 @@ interface Row {
   costUsd: number;
   turns?: number;
   toolCalls?: number;
+  durationMs?: number;
   speed?: [tokens: number, ms: number];
 }
 
@@ -23,7 +24,7 @@ function sliced(date: string, rows: Row[]): AnalyticsDayPoint {
   const usage = day();
   const by = emptyDimensions();
   for (const r of rows) {
-    const delta = { costUsd: r.costUsd, turns: r.turns ?? 0, toolCalls: r.toolCalls ?? 0, inputTokens: 1000, speedTokens: r.speed?.[0] ?? 0, speedMs: r.speed?.[1] ?? 0 };
+    const delta = { costUsd: r.costUsd, turns: r.turns ?? 0, toolCalls: r.toolCalls ?? 0, durationMs: r.durationMs ?? 0, inputTokens: 1000, speedTokens: r.speed?.[0] ?? 0, speedMs: r.speed?.[1] ?? 0 };
     addCounters(usage, delta);
     addSlice(by.harness, r.harness, r.harness, delta, r.id);
     if (r.model) addSlice(by.model, `p/${r.model}`, r.model, delta, r.id);
@@ -46,13 +47,15 @@ describe('addSlice', () => {
 describe('rollupDays', () => {
   const days = [
     sliced('2025-06-01', [
-      { id: 'a', harness: 'claude', model: 'opus', project: '/p1', costUsd: 2, turns: 4, toolCalls: 6, speed: [100, 2000] },
+      { id: 'a', harness: 'claude', model: 'opus', project: '/p1', costUsd: 2, turns: 4, toolCalls: 6, durationMs: 6000, speed: [100, 2000] },
       { id: 'b', harness: 'pi', model: 'glm', project: '/p2', costUsd: 1, turns: 2 }
     ]),
-    sliced('2025-06-02', [{ id: 'a', harness: 'claude', model: 'opus', project: '/p1', costUsd: 3, turns: 2, speed: [100, 8000] }])
+    sliced('2025-06-02', [{ id: 'a', harness: 'claude', model: 'opus', project: '/p1', costUsd: 3, turns: 2, durationMs: 3000, speed: [100, 8000] }])
   ];
   days[1].usage.by!.tool = { Bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } };
   days[0].usage.by!.tool = { Bash: { calls: 2, errors: 0, declined: 1, durationMs: 0 }, Read: { calls: 4, errors: 0, declined: 0, durationMs: 0 } };
+  days[0].usage.by!.modelTool = { 'p/opus': { Bash: { calls: 2, errors: 0, declined: 1, durationMs: 0 } } };
+  days[1].usage.by!.modelTool = { 'p/opus': { Bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } }, 'p/glm': { Read: { calls: 1, errors: 1, declined: 0, durationMs: 0 } } };
   days[0].usage.by!.file = { 'a.ts': { adds: 1, updates: 2, deletes: 0, renames: 0 } };
   days[1].usage.by!.file = { 'a.ts': { adds: 0, updates: 1, deletes: 0, renames: 0 }, 'b.ts': { adds: 0, updates: 0, deletes: 0, renames: 0 } };
 
@@ -65,7 +68,9 @@ describe('rollupDays', () => {
       ['p/opus', 'opus', 5, 1],
       ['p/glm', 'glm', 1, 1]
     ]);
-    expect(r.byHarness[0]).toMatchObject({ key: 'claude', toolCalls: 6, speed: { tokens: 200, ms: 10_000 } });
+    expect(r.byHarness[0]).toMatchObject({ key: 'claude', toolCalls: 6, durationMs: 9000, speed: { tokens: 200, ms: 10_000 } });
+    // Average turn time per model: 9000ms of wall time over 6 turns.
+    expect(r.byModel[0]).toMatchObject({ key: 'p/opus', durationMs: 9000 });
     expect(r.byProject.map((b) => b.key)).toEqual(['/p1', '/p2']);
     expect(Object.values(r.unattributed).every((v) => v === 0)).toBe(true);
   });
@@ -77,6 +82,10 @@ describe('rollupDays', () => {
       ['Read', 4, 0, 0]
     ]);
     expect(r.toolTotals).toEqual({ calls: 9, errors: 1, declined: 1, durationMs: 300 });
+    expect(r.modelTools.map((t) => [t.key, t.label, t.name, t.calls, t.errors])).toEqual([
+      ['p/opus', 'opus', 'Bash', 5, 1],
+      ['p/glm', 'glm', 'Read', 1, 1]
+    ]);
     expect(r.files).toEqual([{ path: 'a.ts', adds: 1, updates: 3, deletes: 0, renames: 0, total: 4 }]);
   });
 
@@ -88,6 +97,10 @@ describe('rollupDays', () => {
     expect(r.byModel.reduce((a, b) => a + b.usage.costUsd, 0)).toBeCloseTo(6);
     // The day counters (6 + 7) exceed the per-tool rows (9), so the total follows the day counters.
     expect(r.toolTotals.calls).toBe(13);
+    expect(r.estimatedDays).toBe(0);
+    days[0].usage.by!.estimated = true;
+    expect(rollupDays(days).estimatedDays).toBe(1);
+    delete days[0].usage.by!.estimated;
   });
 });
 
@@ -115,7 +128,7 @@ describe('dimensionSeries', () => {
   });
 
   it('honours a fixed order for harnesses and omits Other when nothing was folded', () => {
-    const s = dimensionSeries(days, 'harness', (c) => c.costUsd, 6, ['claude', 'codex', 'codex-exec', 'pi', 'acp', 'native']);
+    const s = dimensionSeries(days, 'harness', (c) => c.costUsd, 6, ['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'acp', 'native']);
     expect(s.series.map((x) => x.key)).toEqual(['claude', 'pi', 'native']);
     expect(s.other).toBeUndefined();
   });

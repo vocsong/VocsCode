@@ -5,6 +5,8 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it, vi } from 'vitest';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { AsyncQueue, LineSplitter } from '../src/main/util/async';
 import { globToRegExp } from '../src/main/harness/native/tools';
 import { parseUnifiedDiff } from '../src/shared/diff-parse';
@@ -14,6 +16,7 @@ import { isDangerousCommand } from '../src/main/harness/types';
 import { normalizeSettings, defaultSettings } from '../src/main/settings';
 import type { SettingsStore } from '../src/main/settings';
 import { SessionManager } from '../src/main/session-manager';
+import { generateSessionTitle, sanitizeLlmTitle, titleFromPrompt } from '../src/main/session-title';
 import type { RuntimeResolver } from '../src/main/runtime';
 import { piHasCredentials } from '../src/main/runtime';
 import { estimateCostUsd, findPricing } from '../src/main/models/static-models';
@@ -25,7 +28,7 @@ import { HARNESSES } from '../src/shared/harness-meta';
 import type { AppSettings, ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
-import { branchGitState, gitBranches, gitCheckout, gitWorktrees, removeWorktree, restoreWorktree } from '../src/main/git';
+import { branchGitState, gitBranches, gitCheckout, gitWorktrees, removeWorktree, restoreWorktree, WorktreeDirtyError } from '../src/main/git';
 import { createLogger } from '../src/main/log';
 import { timed, watchEventLoop } from '../src/main/diag';
 
@@ -48,6 +51,113 @@ const safeStorageMock = vi.hoisted(() => ({
   }
 }));
 vi.mock('electron', () => ({ safeStorage: safeStorageMock }));
+
+describe('auto session titles', () => {
+  it('caps derived titles at 6 words', () => {
+    expect(titleFromPrompt('Fix the bug where the sidebar flickers when switching folders')).toBe('Fix the bug where the sidebar');
+  });
+
+  it('keeps short prompts whole and only uses the first line', () => {
+    expect(titleFromPrompt('Add dark mode')).toBe('Add dark mode');
+    expect(titleFromPrompt('First line stays\nsecond line ignored')).toBe('First line stays');
+  });
+
+  it('still enforces the 60 char cap on long words', () => {
+    const title = titleFromPrompt('Supercalifragilisticexpialidocious antidisestablishmentarianism floccinaucinihilipilification');
+    expect(title.length).toBeLessThanOrEqual(60);
+  });
+});
+
+/** Starts an HTTP server that answers every request via respond(); resolves once it is listening. */
+function listenOnce(respond: (req: IncomingMessage, res: ServerResponse, body?: string) => void): Promise<{ url: string; close: () => Promise<void> }> {
+  const server: Server = createServer((req, res) => {
+    let body: string | undefined;
+    req.on('data', (c: Buffer) => (body = (body ?? '') + c.toString()));
+    req.on('end', () => respond(req, res, body));
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as AddressInfo).port;
+      resolve({ url: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(() => r())) });
+    });
+  });
+}
+
+describe('LLM session titles', () => {
+  const getSecret = async (id: string) => (id === 'fake' ? 'sk-test' : undefined);
+
+  it('strips quotes and preamble from model replies and keeps the 6-word cap', () => {
+    expect(sanitizeLlmTitle('"Fix the sidebar flicker on folder switch"')).toBe('Fix the sidebar flicker on folder');
+    expect(sanitizeLlmTitle('**Fix the sidebar flicker**')).toBe('Fix the sidebar flicker');
+    expect(sanitizeLlmTitle('Title: Refactor auth module.')).toBe('Refactor auth module');
+    expect(sanitizeLlmTitle('  \n\n  ')).toBeNull();
+  });
+
+  it('returns null when no enabled provider has a usable key', async () => {
+    const providers = [{
+      id: 'anthropic', kind: 'anthropic', name: 'Anthropic', enabled: true, hasApiKey: false, models: []
+    }];
+    const title = await generateSessionTitle('Fix the bug', providers as never, getSecret);
+    expect(title).toBeNull();
+  });
+
+  it('ignores disabled providers', async () => {
+    const providers = [{
+      id: 'anthropic', kind: 'anthropic', name: 'Anthropic', enabled: false, hasApiKey: true, models: []
+    }];
+    const title = await generateSessionTitle('Fix the bug', providers as never, getSecret);
+    expect(title).toBeNull();
+  });
+
+  it('falls back to the first usable provider when the preferred one is unusable', async () => {
+    const unusable = { id: 'unused', kind: 'openai' as const, name: 'Unused', enabled: true, hasApiKey: false, models: [{ id: 'm1', name: 'M1', provider: 'unused' }] };
+    const usable = { id: 'fallback', kind: 'ollama' as const, name: 'Fallback', enabled: true, hasApiKey: false, baseUrl: 'http://127.0.0.1:1', models: [] };
+    // The fallback provider points at a closed port, so the call fails and the title stays null —
+    // but reaching that failure proves the fallback provider was chosen over the unusable one.
+    const title = await generateSessionTitle('Fix the bug', [unusable, usable] as never, getSecret, { provider: 'unused', model: 'm1' });
+    expect(title).toBeNull();
+  });
+
+  it('names sessions end-to-end against an OpenAI-compatible endpoint, using the preferred provider', async () => {
+    const seen: { auth?: string; body?: Record<string, unknown> } = {};
+    const server = await listenOnce((req, res, body) => {
+      seen.auth = req.headers.authorization;
+      seen.body = JSON.parse(body ?? '{}') as Record<string, unknown>;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: '"Fix the sidebar flicker"' }, finish_reason: 'stop' }] }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'openai-compatible' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [{ id: 'cheap-flash', name: 'Cheap Flash', provider: 'fake' }] };
+      const title = await generateSessionTitle('Fix the bug', [provider] as never, getSecret, { provider: 'fake', model: 'cheap-flash' });
+      expect(title).toBe('Fix the sidebar flicker');
+      expect(seen.auth).toBe('Bearer sk-test');
+      expect(seen.body?.model).toBe('cheap-flash');
+      expect(seen.body?.max_tokens).toBe(200);
+      expect(seen.body?.max_completion_tokens).toBeUndefined();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('uses max_completion_tokens with low effort for reasoning models', async () => {
+    const seen: { body?: Record<string, unknown> } = {};
+    const server = await listenOnce((req, res, body) => {
+      seen.body = JSON.parse(body ?? '{}') as Record<string, unknown>;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: 'Migrate auth to OAuth' }, finish_reason: 'stop' }] }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'openai-compatible' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [] };
+      const title = await generateSessionTitle('Migrate the auth module', [provider] as never, getSecret, { provider: 'fake', model: 'gpt-5-mini' });
+      expect(title).toBe('Migrate auth to OAuth');
+      expect(seen.body?.max_tokens).toBeUndefined();
+      expect(seen.body?.max_completion_tokens).toBe(1024);
+      expect(seen.body?.reasoning_effort).toBe('low');
+    } finally {
+      await server.close();
+    }
+  });
+});
 
 describe('LineSplitter', () => {
   it('splits on LF only and strips CR', () => {
@@ -199,6 +309,17 @@ describe('settings normalization', () => {
     expect(s.providers.find((p) => p.id === 'custom')?.builtin).toBe(false);
     expect(s.acpAgents.length).toBe(d.acpAgents.length);
   });
+  it('remembers the worktree isolation decision and defaults it to off', () => {
+    expect(defaultSettings().defaultUseWorktree).toBe(false);
+    expect(normalizeSettings({ defaultUseWorktree: true }).defaultUseWorktree).toBe(true);
+    // Settings written before this key existed fall back to off.
+    expect(normalizeSettings({ theme: 'dark' }).defaultUseWorktree).toBe(false);
+  });
+  it('keeps a well-formed utility model and drops malformed ones', () => {
+    expect(normalizeSettings({ utilityModel: { provider: 'deepseek', model: 'deepseek-chat' } }).utilityModel).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
+    expect(normalizeSettings({}).utilityModel).toBeUndefined();
+    expect(normalizeSettings({ utilityModel: { provider: 3, model: 'x' } as never }).utilityModel).toBeUndefined();
+  });
 });
 
 describe('pricing', () => {
@@ -212,10 +333,23 @@ describe('pricing', () => {
 
 describe('model mapping', () => {
   it('maps pi models', () => {
-    const m = piModelToInfo({ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'deepseek', reasoning: true, input: ['text'], contextWindow: 1_000_000, cost: { input: 0.435, output: 0.87 }, thinkingLevelMap: { minimal: null, high: 'high', max: 'max' } });
+    const m = piModelToInfo({ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'deepseek', reasoning: true, input: ['text'], contextWindow: 1_000_000, cost: { input: 0.435, output: 0.87 }, thinkingLevelMap: { minimal: null, low: null, medium: null, high: 'high', xhigh: null, max: 'max' } });
     expect(m.supportedEfforts).toEqual(['high', 'max']);
     expect(m.supportsImages).toBe(false);
     expect(m.pricing?.output).toBe(0.87);
+  });
+  it('keeps pi levels missing from thinkingLevelMap', () => {
+    // openai-codex ships holes for the standard levels: only `null` hides one.
+    const m = piModelToInfo({ id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', provider: 'openai-codex', reasoning: true, input: ['text', 'image'], contextWindow: 272_000, thinkingLevelMap: { xhigh: 'xhigh', max: 'max', minimal: 'low' } });
+    expect(m.supportedEfforts).toEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  });
+  it('drops pi off and explicitly hidden levels', () => {
+    const m = piModelToInfo({ id: 'x', name: 'X', provider: 'openai', reasoning: true, thinkingLevelMap: { off: 'none', minimal: null, low: 'low', xhigh: null, max: 'max' } });
+    expect(m.supportedEfforts).toEqual(['low', 'medium', 'high', 'max']);
+  });
+  it('leaves the effort list open when pi reports no thinkingLevelMap', () => {
+    const m = piModelToInfo({ id: 'x', name: 'X', provider: 'openrouter', reasoning: true });
+    expect(m.supportedEfforts).toBeUndefined();
   });
   it('maps codex models', () => {
     const m = codexModelToInfo({ id: 'x', model: 'gpt-5.5', displayName: 'GPT-5.5', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'high', description: '' }], defaultReasoningEffort: 'high', inputModalities: ['text', 'image'], isDefault: true });
@@ -295,6 +429,20 @@ describe('model capability overrides', () => {
     expect(s.folders).toEqual(['G:/proj/a', 'G:/proj/b']);
     // Settings written before this feature existed have no such key.
     expect(normalizeSettings({ theme: 'dark' }).folders).toEqual([]);
+  });
+
+  it('normalizes folder order and collapsed roots to non-empty path strings', () => {
+    expect(defaultSettings().folderOrder).toEqual([]);
+    expect(defaultSettings().collapsedFolders).toEqual([]);
+    const s = normalizeSettings({
+      folderOrder: ['G:/proj/b', '', 42, 'G:/proj/a'],
+      collapsedFolders: ['G:/proj/a', 7, '']
+    } as never);
+    expect(s.folderOrder).toEqual(['G:/proj/b', 'G:/proj/a']);
+    expect(s.collapsedFolders).toEqual(['G:/proj/a']);
+    // Settings written before this feature existed have no such keys.
+    expect(normalizeSettings({ theme: 'dark' }).folderOrder).toEqual([]);
+    expect(normalizeSettings({ theme: 'dark' }).collapsedFolders).toEqual([]);
   });
 
   it('normalizes folder styles to hex colors and known-shape icon names', () => {
@@ -399,6 +547,117 @@ describe('SessionManager folder tracking', () => {
   });
 });
 
+describe('SessionManager fork', () => {
+  const sourceSession = (): SessionMeta => ({
+    id: 's_src',
+    title: 'source session',
+    createdAt: 1_000,
+    updatedAt: 2_000,
+    config: {
+      harness: 'claude',
+      projectRoot: 'G:/proj/a',
+      permissionMode: 'auto',
+      model: { provider: 'anthropic', model: 'claude-sonnet-4-5' }
+    },
+    cwd: 'G:/proj/a/.vocs-code/worktrees/wt',
+    worktreeBranch: 'agent/source-session',
+    status: 'idle',
+    harnessRef: { claudeSessionId: 'claude_abc' },
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+  });
+
+  const forkManager = (src: SessionMeta) => {
+    const sessions: SessionMeta[] = [src];
+    const transcripts = new Map<string, TranscriptItem[]>();
+    const settings = defaultSettings();
+    settings.defaultModelByHarness.pi = { provider: 'anthropic', model: 'claude-sonnet-4-5' };
+    const store = {
+      list: () => sessions,
+      get: (id: string) => sessions.find((s) => s.id === id),
+      upsert: async (m: SessionMeta) => {
+        const i = sessions.findIndex((s) => s.id === m.id);
+        if (i >= 0) sessions[i] = m;
+        else sessions.push(m);
+      },
+      readTranscript: async (id: string) => transcripts.get(id) ?? [],
+      rewriteTranscript: async (id: string, items: TranscriptItem[]) => void transcripts.set(id, items),
+      readNativeHistory: async () => null,
+      writeNativeHistory: async () => undefined,
+      sessionDir: (id: string) => path.join(os.tmpdir(), `fork-test-${id}`)
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => settings } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    return { manager, transcripts };
+  };
+
+  it('forks into a different harness on the same worktree with a fresh provider session', async () => {
+    const src = sourceSession();
+    src.config.acpAgent = 'dsh';
+    src.config.codexModelProvider = { id: 'x', name: 'x', baseUrl: 'https://x' };
+    const items: TranscriptItem[] = [
+      { id: 'u_1', kind: 'user', ts: 1, text: 'fix the login bug' },
+      { id: 'a_1', kind: 'assistant', ts: 2, text: 'done' }
+    ];
+    const { manager, transcripts } = forkManager(src);
+    transcripts.set(src.id, items);
+    const fork = await manager.fork(src.id, 'pi');
+    expect(fork).toBeTruthy();
+    expect(fork!.id).not.toBe(src.id);
+    expect(fork!.config.harness).toBe('pi');
+    // Same directory and branch as the source.
+    expect(fork!.cwd).toBe(src.cwd);
+    expect(fork!.worktreeBranch).toBe('agent/source-session');
+    // The new harness cannot resume the source's provider session.
+    expect(fork!.harnessRef).toEqual({});
+    // Harness-specific config does not transfer; the model falls back to the target default.
+    expect(fork!.config.acpAgent).toBeUndefined();
+    expect(fork!.config.codexModelProvider).toBeUndefined();
+    expect(fork!.config.model).toEqual({ provider: 'anthropic', model: 'claude-sonnet-4-5' });
+    expect(fork!.activeModel).toEqual(fork!.config.model);
+    // The transcript is carried over for reference plus an explanatory info note.
+    const copied = transcripts.get(fork!.id) ?? [];
+    expect(copied.map((i) => i.id)).toContain('u_1');
+    const note = copied.find((i) => i.kind === 'info');
+    expect(note?.kind === 'info' && note.text).toContain('Forked from');
+    expect(fork!.title).toContain('fork');
+  });
+
+  it('keeps same-harness fork semantics: drops the worktree claim and carries provider state', async () => {
+    const src = sourceSession();
+    const items: TranscriptItem[] = [{ id: 'u_1', kind: 'user', ts: 1, text: 'hi' }];
+    const { manager, transcripts } = forkManager(src);
+    transcripts.set(src.id, items);
+    const fork = await manager.fork(src.id);
+    expect(fork!.config.harness).toBe('claude');
+    expect(fork!.worktreeBranch).toBeUndefined();
+    expect(fork!.harnessRef).toEqual({ claudeSessionId: 'claude_abc', forkOnResume: true });
+    const copied = transcripts.get(fork!.id) ?? [];
+    expect(copied.some((i) => i.kind === 'info')).toBe(false);
+    expect(copied.map((i) => i.id)).toContain('u_1');
+  });
+});
+
+describe('custom status label settings', () => {
+  it('normalizes user-added labels: trims, dedupes case-insensitively, drops junk, caps at 24 chars', () => {
+    const stored = { customLabels: ['  Wip ', 'wip', 42, '', 'x'.repeat(40), 'ok'] } as unknown as Partial<AppSettings>;
+    expect(normalizeSettings(stored).customLabels).toEqual(['Wip', 'x'.repeat(24), 'ok']);
+  });
+
+  it('falls back to an empty list for wrong-shaped values', () => {
+    expect(normalizeSettings({ customLabels: 'nope' } as unknown as Partial<AppSettings>).customLabels).toEqual([]);
+    expect(normalizeSettings(undefined).customLabels).toEqual([]);
+  });
+});
+
 describe('SessionManager PR state refresh', () => {
   it('flips a pr session to merged when refreshGitState runs after /merge', async () => {
     vi.useFakeTimers();
@@ -444,6 +703,164 @@ describe('SessionManager PR state refresh', () => {
       vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: false });
       vi.useRealTimers();
     }
+  });
+
+  it('keeps a git-derived status when the harness exits instead of flipping to stopped', () => {
+    const session: SessionMeta = {
+      id: 'merged_session',
+      title: 'merged session',
+      createdAt: 1_000,
+      updatedAt: 2_000,
+      config: { harness: 'pi', projectRoot: 'G:/proj/pr', permissionMode: 'auto' },
+      cwd: 'G:/proj/pr/.vocs-code/worktrees/wt',
+      worktreeBranch: 'harness/merged-session',
+      status: 'merged',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    const manager = new SessionManager({
+      store: { list: () => [session], get: (id: string) => (id === session.id ? session : undefined), upsert: vi.fn() } as unknown as SessionStore,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    // The pi process died (e.g. killed while the app quit) and reported its exit.
+    (manager as unknown as { emit: (id: string, event: SessionEvent) => void }).emit(session.id, { type: 'status', status: 'stopped', detail: 'pi exited (0)' });
+    expect(session.status).toBe('merged');
+  });
+
+  it('stop() keeps a parked pr/merged status', async () => {
+    const session: SessionMeta = {
+      id: 'merged_session',
+      title: 'merged session',
+      createdAt: 1_000,
+      updatedAt: 2_000,
+      config: { harness: 'pi', projectRoot: 'G:/proj/pr', permissionMode: 'auto' },
+      cwd: 'G:/proj/pr/.vocs-code/worktrees/wt',
+      worktreeBranch: 'harness/merged-session',
+      status: 'merged',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    const manager = new SessionManager({
+      store: { list: () => [session], get: (id: string) => (id === session.id ? session : undefined), upsert: vi.fn(), appendTranscript: async () => undefined } as unknown as SessionStore,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    const active = {
+      adapter: { dispose: vi.fn(async () => undefined) },
+      approvals: new Map(),
+      liveItems: new Map(),
+      dirty: new Set<string>(),
+      lastAssistantText: '',
+      starting: null,
+      models: null
+    };
+    (manager as unknown as { active: Map<string, typeof active> }).active.set(session.id, active);
+    await manager.stop(session.id);
+    expect(active.adapter.dispose).toHaveBeenCalled();
+    expect(session.status).toBe('merged');
+  });
+
+  it('a stopped session is re-checked at boot and upgraded back to merged', async () => {
+    vi.useFakeTimers();
+    const session: SessionMeta = {
+      id: 'stopped_session',
+      title: 'stopped session',
+      createdAt: 1_000,
+      updatedAt: 2_000,
+      config: { harness: 'pi', projectRoot: 'G:/proj/pr', permissionMode: 'auto' },
+      cwd: 'G:/proj/pr/.vocs-code/worktrees/wt',
+      worktreeBranch: 'harness/merged-session',
+      status: 'stopped',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    const store = {
+      list: () => [session],
+      get: (id: string) => (id === session.id ? session : undefined),
+      // Throwing keeps sessionPrRefs on its synchronous catch path: no real fs I/O that fake
+      // timers would not flush before the assertions.
+      sessionDir: () => {
+        throw new Error('no fs in test');
+      },
+      upsert: vi.fn()
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    try {
+      vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: true });
+      manager.list(); // boot: schedules the one-shot re-check for stopped sessions
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(session.status).toBe('merged');
+
+      // Without git evidence the stopped status is kept, never downgraded to idle.
+      session.status = 'stopped';
+      (manager as unknown as { gitStateChecked: Set<string> }).gitStateChecked.delete(session.id);
+      vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: false });
+      manager.list();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(session.status).toBe('stopped');
+    } finally {
+      vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: false });
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('SessionManager filesystem guards', () => {
+  it('does not touch the store for unknown sessions', async () => {
+    const remove = vi.fn(async () => undefined);
+    const readTranscript = vi.fn(async () => [] as TranscriptItem[]);
+    const rewriteTranscript = vi.fn(async () => undefined);
+    const store = {
+      list: () => [],
+      get: () => undefined,
+      remove,
+      readTranscript,
+      rewriteTranscript
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    const stop = vi.spyOn(manager, 'stop');
+
+    await manager.delete('../sentinel');
+    await expect(manager.transcript('../sentinel')).rejects.toThrow('Session not found');
+    await expect(manager.clearTranscript('../sentinel')).rejects.toThrow('Session not found');
+
+    expect(stop).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(readTranscript).not.toHaveBeenCalled();
+    expect(rewriteTranscript).not.toHaveBeenCalled();
   });
 });
 
@@ -533,6 +950,74 @@ describe('SessionStore round-trip', () => {
     expect(again.get('sess_2')).toBeUndefined();
     expect(await again.readTranscript('sess_2')).toEqual([]);
   });
+
+  it('rejects traversal before transcript reads, rewrites, or removal can touch an outside directory', async () => {
+    const securityRoot = path.join(os.tmpdir(), `vocs-code-store-security-${Date.now()}-${process.pid}`);
+    const sentinelDir = path.join(securityRoot, 'sentinel');
+    const sentinelFile = path.join(sentinelDir, 'transcript.jsonl');
+    const sentinel = `${JSON.stringify({ id: 'secret', kind: 'user', ts: 1, text: 'do not touch' })}\n`;
+    await fs.mkdir(sentinelDir, { recursive: true });
+    await fs.writeFile(sentinelFile, sentinel, 'utf8');
+    try {
+      const store = new SessionStore(securityRoot);
+      await store.load();
+
+      await expect(store.readTranscript('../sentinel')).rejects.toThrow('Invalid session ID');
+      await expect(store.rewriteTranscript('../sentinel', [])).rejects.toThrow('Invalid session ID');
+      await expect(store.remove('../sentinel')).rejects.toThrow('Invalid session ID');
+      await expect(store.upsert({ ...meta('s1'), id: '../sentinel' })).rejects.toThrow('Invalid session ID');
+
+      expect(store.list()).toEqual([]);
+      expect(await fs.readFile(sentinelFile, 'utf8')).toBe(sentinel);
+      expect(await fs.stat(sentinelDir)).toBeTruthy();
+      expect(() => store.sessionDir('.')).toThrow('Invalid session ID');
+      expect(() => store.sessionDir('..')).toThrow('Invalid session ID');
+      expect(() => store.sessionDir('C:\\sentinel')).toThrow('Invalid session ID');
+      expect(store.sessionDir('a')).toBe(path.join(securityRoot, 'sessions', 'a'));
+    } finally {
+      await fs.rm(securityRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('filters malformed persisted session IDs while retaining safe legacy IDs', async () => {
+    const loadedRoot = path.join(os.tmpdir(), `vocs-code-store-loaded-${Date.now()}-${process.pid}`);
+    await fs.mkdir(loadedRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(loadedRoot, 'sessions.json'),
+      JSON.stringify([
+        meta('s1'),
+        meta('sess_1'),
+        meta('a'),
+        meta('../sentinel'),
+        meta('.'),
+        meta('..'),
+        meta('bad/slash'),
+        meta('bad\\slash'),
+        meta('C:\\drive')
+      ]),
+      'utf8'
+    );
+    try {
+      const store = new SessionStore(loadedRoot);
+      const loaded = await store.load();
+      expect(loaded.map((session) => session.id)).toEqual(['s1', 'sess_1', 'a']);
+    } finally {
+      await fs.rm(loadedRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it('upsert rejects when the index write fails instead of resolving silently', async () => {
+    // A directory where sessions.json belongs makes the atomic rename fail deterministically.
+    const brokenRoot = path.join(os.tmpdir(), `vocs-code-store-broken-${Date.now()}-${process.pid}`);
+    await fs.mkdir(path.join(brokenRoot, 'sessions.json'), { recursive: true });
+    try {
+      const store = new SessionStore(brokenRoot);
+      await store.load();
+      await expect(store.upsert(meta('sess_x'))).rejects.toThrow();
+    } finally {
+      await fs.rm(brokenRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
 });
 
 describe('git branch/worktree plumbing', () => {
@@ -582,7 +1067,7 @@ describe('git branch/worktree plumbing', () => {
     g('worktree', 'add', wt2, '-b', 'wtcycle');
     // Uncommitted changes block a non-force removal (the archive flow surfaces this to the user).
     await fs.writeFile(path.join(wt2, 'dirty.txt'), 'x');
-    await expect(removeWorktree(repo, wt2, { force: false })).rejects.toThrow();
+    await expect(removeWorktree(repo, wt2, { force: false })).rejects.toBeInstanceOf(WorktreeDirtyError);
     await fs.rm(path.join(wt2, 'dirty.txt'));
     await removeWorktree(repo, wt2, { force: false });
     await expect(fs.stat(wt2)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -594,6 +1079,13 @@ describe('git branch/worktree plumbing', () => {
     await fs.rm(wt2, { recursive: true, force: true });
     await removeWorktree(repo, wt2, { force: false });
     // Unarchive still recreates the worktree over the stale registration.
+    await restoreWorktree(repo, wt2, 'wtcycle');
+    expect((await gitWorktrees(repo)).worktrees.map((w) => w.branch)).toContain('wtcycle');
+    // A folder whose registration git lost (e.g. its .git link was deleted) is not a working tree:
+    // removal prunes and deletes the folder instead of blocking archive.
+    await fs.rm(path.join(wt2, '.git'));
+    await removeWorktree(repo, wt2, { force: false });
+    await expect(fs.stat(wt2)).rejects.toMatchObject({ code: 'ENOENT' });
     await restoreWorktree(repo, wt2, 'wtcycle');
     expect((await gitWorktrees(repo)).worktrees.map((w) => w.branch)).toContain('wtcycle');
     // A branch with its worktree still checked out cannot be deleted; remove the worktree first.
@@ -720,5 +1212,62 @@ describe('pi credential detection', () => {
 
   it('handles a missing auth.json', async () => {
     expect(await withAgentDir(null)).toBe(false);
+  });
+});
+
+describe('SessionManager pin ordering', () => {
+  const makeManager = (sessions: SessionMeta[]) => {
+    const upsert = vi.fn();
+    const store = { list: () => sessions, get: (id: string) => sessions.find((s) => s.id === id), upsert } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings(), update: async () => undefined } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    return { manager, upsert };
+  };
+  const pinnedSession = (id: string, patch: Partial<SessionMeta>): SessionMeta => ({
+    id,
+    title: id,
+    createdAt: 1_000,
+    updatedAt: 1_000,
+    config: { harness: 'native', projectRoot: 'G:/proj/a', permissionMode: 'ask' },
+    cwd: 'G:/proj/a',
+    status: 'idle',
+    harnessRef: {},
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
+    ...patch
+  });
+
+  it('setPinned stamps the pin time and never bumps updatedAt', async () => {
+    const s = pinnedSession('s_a', {});
+    const { manager } = makeManager([s]);
+    const before = s.updatedAt;
+    const pinned = await manager.setPinned(s.id, true);
+    expect(pinned.pinned).toBe(true);
+    expect(pinned.pinnedAt).toBeGreaterThan(0);
+    // The unpinned section orders by updatedAt, so pinning must not reshuffle it.
+    expect(pinned.updatedAt).toBe(before);
+    const unpinned = await manager.setPinned(s.id, false);
+    expect(unpinned.pinned).toBeUndefined();
+    expect(unpinned.pinnedAt).toBeUndefined();
+  });
+
+  it('setPinOrder rewrites pin stamps in display order and skips unknown ids', async () => {
+    const a = pinnedSession('s_a', { pinned: true, pinnedAt: 100 });
+    const b = pinnedSession('s_b', { pinned: true, pinnedAt: 200 });
+    const { manager, upsert } = makeManager([a, b]);
+    await manager.setPinOrder(['s_b', 's_a']);
+    // Small ordinals keep future pins (stamped with Date.now()) below the reordered section.
+    expect(b.pinnedAt).toBe(1);
+    expect(a.pinnedAt).toBe(2);
+    expect(upsert).toHaveBeenCalledTimes(2);
+    await expect(manager.setPinOrder(['s_missing'])).resolves.toBeUndefined();
   });
 });

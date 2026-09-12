@@ -78,9 +78,9 @@ function distance(a: string, b: string): number {
 }
 
 describe('theme catalogue', () => {
-  it('has the three built-ins plus ten data-driven themes, with unique ids and names', () => {
+  it('has the three built-ins plus twenty data-driven themes, with unique ids and names', () => {
     expect(THEMES.filter((t) => !t.palette).map((t) => t.id)).toEqual(['system', 'light', 'dark']);
-    expect(CUSTOM).toHaveLength(10);
+    expect(CUSTOM).toHaveLength(20);
     expect(new Set(THEME_IDS).size).toBe(THEMES.length);
     expect(new Set(THEMES.map((t) => t.name)).size).toBe(THEMES.length);
   });
@@ -88,7 +88,7 @@ describe('theme catalogue', () => {
   it('puts every theme in a known group and leans navy', () => {
     for (const t of THEMES) expect(GROUP_ORDER).toContain(t.group);
     expect(CUSTOM.filter((t) => t.group === 'navy')).toHaveLength(4);
-    // Nebula is navy-indigo too, so five of the ten new themes are navy-family.
+    // Nebula, Ultraviolet and Magma are futuristic, so seven of the twenty data themes are navy-family.
     expect(CUSTOM.filter((t) => t.group === 'navy' || t.group === 'futuristic').length).toBeGreaterThanOrEqual(5);
   });
 
