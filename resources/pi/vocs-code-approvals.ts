@@ -32,7 +32,7 @@ interface UiLike {
 }
 
 interface CtxLike {
-  ui: UiLike;
+  ui?: UiLike;
   hasUI?: boolean;
   cwd?: string;
 }
@@ -136,7 +136,10 @@ export default function vocsCodeApprovals(pi: PiLike): void {
       if (mode === 'accept-edits' && EDITS.has(tool)) return undefined;
       if (sessionAllowed.has(tool)) return undefined;
     }
-    if (!ctx.ui || typeof ctx.ui.select !== 'function') return undefined;
+    // No approval UI means we cannot ask: fail closed instead of letting a gated action run.
+    if (!ctx.ui || typeof ctx.ui.select !== 'function') {
+      return { block: true, reason: 'Vocs Code approval UI is unavailable; refusing to run this action.' };
+    }
 
     const summary = command ?? (typeof event.input?.path === 'string' ? (event.input.path as string) : '');
     const payload = JSON.stringify({ tool, input: trimInput(event.input), summary: outside ? `${summary} (outside the project directory)` : summary });
