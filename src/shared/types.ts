@@ -5,7 +5,7 @@
 import type { TerminalSettings } from './terminal';
 import type { ThemeId } from './themes';
 
-export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'pi' | 'acp' | 'native';
+export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'native';
 
 /** App-level permission modes, mapped per harness (see harness-meta.ts). */
 export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-auto';
@@ -48,6 +48,7 @@ export type ProviderKind =
   | 'anthropic'
   | 'openai'
   | 'openai-compatible'
+  | 'cursor'
   | 'deepseek'
   | 'openrouter'
   | 'ollama'
@@ -303,6 +304,8 @@ export interface HarnessRef {
   claudeSessionId?: string;
   /** Codex thread id (thread/resume). */
   codexThreadId?: string;
+  /** Cursor agent id (Agent.resume); bc- prefixed ids are cloud agents. */
+  cursorAgentId?: string;
   /** Pi session file path. */
   piSessionFile?: string;
   /** ACP session id. */

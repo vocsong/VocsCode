@@ -11,6 +11,7 @@ src/main
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
     codex-app-server.ts + jsonrpc.ts   Codex app-server client (thread/turn/item notifications, approval requests)
     codex-exec.ts SDK fallback
+    cursor.ts     @cursor/sdk, local runtime; sandbox + plan-mode allowlist instead of approvals
     pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
     acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
@@ -39,6 +40,7 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 | **Claude Agent SDK** | `@anthropic-ai/claude-agent-sdk` (Claude Code loop, hooks, MCP, checkpoints) | interactive (`canUseTool`) | Anthropic catalog, plus Bedrock/Vertex/Foundry/gateway via env |
 | **Codex (app-server)** | `codex app-server` JSON-RPC — the same engine as the Codex desktop app | interactive (command + file-change requests), steer, interrupt | `model/list` from Codex, any `model_providers` entry |
 | **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | Codex catalog |
+| **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan |
 | **Pi** | `pi --mode rpc` + bundled approvals extension | interactive | pi's registry: Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, Ollama, custom |
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) |
@@ -77,6 +79,8 @@ The dashboard (`src/renderer/src/components/analytics/`) asks for one range at a
 ## Known limitations
 
 - Codex exec (SDK) cannot ask for approval; prefer the app-server harness for interactive work.
+- The Cursor harness cannot ask for approval either; safety comes from Cursor's sandbox (Auto) and Plan mode. A `.cursor/hooks.json` approval bridge is a possible follow-up.
+- Cursor usage is billed to the user's Cursor plan, so the analytics show tokens but no dollar cost for that harness.
 - Custom Codex model providers are passed as thread config overrides and were not verified against a live OpenAI-compatible endpoint.
 - ACP agents expose models only after the session starts; pick the model from the header once the agent is up.
 - The terminal tab's directory tracking relies on the shell announcing its cwd (OSC 7, or OSC 9;9 as Windows Terminal profiles do); shells without such a prompt hook show the directory they started in.

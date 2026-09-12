@@ -268,6 +268,18 @@ export class RuntimeResolver {
           };
         return { available: false, detail: 'Neither dsh nor npx found.', installHint: 'npm install -g @deepseek-ai/dsh' };
       }
+      case 'cursor': {
+        // The SDK ships with the app; only credentials are user-supplied. Cursor reads them from
+        // CURSOR_API_KEY or ~/.cursor/sdk/auth.json (Cursor.auth.login()), same as our key store.
+        const key = process.env.CURSOR_API_KEY;
+        const authed = key ? true : await cursorHasStoredLogin();
+        return {
+          available: true,
+          detail: 'Bundled @cursor/sdk (local runtime)',
+          authenticated: authed,
+          installHint: authed ? undefined : 'Add a Cursor API key under Settings → Providers, or sign in once with Cursor.auth.login().'
+        };
+      }
       case 'native':
         return { available: true, detail: 'Built in. Add an API key under Settings → Providers.', authenticated: 'unknown' };
     }
@@ -289,6 +301,12 @@ export class RuntimeResolver {
     });
     return { ok: r.code === 0, log: r.stdout + r.stderr };
   }
+}
+
+/** Cursor SDK stores a browser login's minted API key in ~/.cursor/sdk/auth.json. */
+export async function cursorHasStoredLogin(): Promise<boolean> {
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+  return exists(path.join(home, '.cursor', 'sdk', 'auth.json'));
 }
 
 export async function claudeHasCredentials(): Promise<boolean> {
