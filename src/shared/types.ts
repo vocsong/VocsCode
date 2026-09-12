@@ -746,6 +746,30 @@ export interface GitPullRequestList {
   error?: string;
 }
 
+/** One issue of the session's GitHub repo, as `gh issue list` reports it (Issues view of the Git panel). */
+export interface GitIssue {
+  number: number;
+  title: string;
+  state: 'OPEN' | 'CLOSED';
+  url: string;
+  author?: string;
+  labels?: { name: string; color?: string }[];
+  comments?: number;
+  /** ms since epoch */
+  createdAt?: number;
+  updatedAt?: number;
+  closedAt?: number;
+}
+
+/** The issue list pulled from GitHub; `error` carries gh's own words when the pull failed (not logged in, no remote…). */
+export interface GitIssueList {
+  issues: GitIssue[];
+  /** When the list was pulled (ms since epoch). */
+  fetchedAt: number;
+  ghMissing?: boolean;
+  error?: string;
+}
+
 export interface GitBranchOverview {
   isRepo: boolean;
   base?: string;

@@ -1,6 +1,6 @@
-/** Git panel tab: GitHub-style branch overview, worktree housekeeping and the repo's pull requests (pulled via gh). */
+/** Git panel tab: GitHub-style branch overview, worktree housekeeping and the repo's pull requests and issues (pulled via gh). */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { GitBranchOverview, GitBranchOverviewItem, GitPullRequest, GitPullRequestList, GitWorktreeInfo, SessionMeta } from '../../../shared/types';
+import type { GitBranchOverview, GitBranchOverviewItem, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, GitWorktreeInfo, SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { basename, relTime } from '../format';
 import { useStore } from '../store';
@@ -17,12 +17,19 @@ const FILTERS: { id: Filter; label: string }[] = [
   { id: 'merged', label: 'Merged' }
 ];
 
-type View = 'branches' | 'worktrees' | 'prs';
+type View = 'branches' | 'worktrees' | 'prs' | 'issues';
 type PrFilter = 'open' | 'merged' | 'closed' | 'all';
+type IssueFilter = 'open' | 'closed' | 'all';
 
 const PR_FILTERS: { id: PrFilter; label: string }[] = [
   { id: 'open', label: 'Open' },
   { id: 'merged', label: 'Merged' },
+  { id: 'closed', label: 'Closed' },
+  { id: 'all', label: 'All' }
+];
+
+const ISSUE_FILTERS: { id: IssueFilter; label: string }[] = [
+  { id: 'open', label: 'Open' },
   { id: 'closed', label: 'Closed' },
   { id: 'all', label: 'All' }
 ];
@@ -52,6 +59,11 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   const [prLoading, setPrLoading] = useState(false);
   const [prFilter, setPrFilter] = useState<PrFilter>('open');
   const [prQuery, setPrQuery] = useState('');
+  /** Issues likewise come from gh and only load once the Issues view is opened. */
+  const [issueData, setIssueData] = useState<GitIssueList | null>(null);
+  const [issueLoading, setIssueLoading] = useState(false);
+  const [issueFilter, setIssueFilter] = useState<IssueFilter>('open');
+  const [issueQuery, setIssueQuery] = useState('');
   /** The session this instance belongs to; async responses for other sessions are dropped. */
   const liveId = useRef(session.id);
 
@@ -76,15 +88,30 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
       if (liveId.current === sid) setPrLoading(false);
     }
   };
+  const refreshIssues = async () => {
+    const sid = session.id;
+    setIssueLoading(true);
+    try {
+      const r = await invoke('git:issues', { sessionId: sid });
+      if (liveId.current === sid) setIssueData(r);
+    } catch (e) {
+      if (liveId.current === sid) toast(String((e as Error).message ?? e), 'error');
+    } finally {
+      if (liveId.current === sid) setIssueLoading(false);
+    }
+  };
   useEffect(() => {
     liveId.current = session.id;
     setData(null);
     setPrData(null);
+    setIssueData(null);
     void refresh();
     if (view === 'prs') void refreshPrs();
+    if (view === 'issues') void refreshIssues();
   }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (view === 'prs' && !prData && !prLoading) void refreshPrs();
+    if (view === 'issues' && !issueData && !issueLoading) void refreshIssues();
   }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Sessions rooted inside a worktree — removals must respect them. */
@@ -171,6 +198,13 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
     );
   };
 
+  /** Prefills the composer with the issue so the agent can dig into it without leaving the desk. */
+  const askAgentAboutIssue = (issue: GitIssue) => {
+    useStore.getState().insertIntoComposer(
+      `Investigate issue #${issue.number} "${issue.title}" (${issue.url}): figure out the cause and propose a fix.`
+    );
+  };
+
   const newSessionOnBranch = async (b: GitBranchOverviewItem) => {
     try {
       const meta = await invoke('sessions:create', { config: { ...session.config, useWorktree: false }, title: b.name, checkoutBranch: b.name });
@@ -233,6 +267,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   const staleCount = data.branches.filter((b) => !b.isBase && (b.lastCommitAt ?? 0) < staleAt).length;
   const mergedCount = data.branches.filter((b) => b.merged && !b.isBase).length;
   const openPrCount = prData?.prs.filter((p) => p.state === 'OPEN').length;
+  const openIssueCount = issueData?.issues.filter((i) => i.state === 'OPEN').length;
   const localBranches = new Set(data.branches.map((b) => b.name));
 
   return (
@@ -247,6 +282,9 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           </button>
           <button type="button" className={view === 'prs' ? 'active' : ''} onClick={() => setView('prs')} title="Pull requests on GitHub (via gh)">
             PR {openPrCount !== undefined && <span className="muted">{openPrCount}</span>}
+          </button>
+          <button type="button" className={view === 'issues' ? 'active' : ''} onClick={() => setView('issues')} title="Issues on GitHub (via gh)">
+            Issues {openIssueCount !== undefined && <span className="muted">{openIssueCount}</span>}
           </button>
         </div>
         <span className="spacer" />
@@ -282,16 +320,30 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           variant="ghost"
           size="sm"
           icon="refresh"
-          disabled={prLoading}
+          disabled={prLoading || issueLoading}
           onClick={() => {
             void refresh();
             if (view === 'prs' || prData) void refreshPrs();
+            if (view === 'issues' || issueData) void refreshIssues();
           }}
-          title={view === 'prs' ? 'Pull the PR list from GitHub again' : 'Refresh'}
+          title={view === 'prs' ? 'Pull the PR list from GitHub again' : view === 'issues' ? 'Pull the issue list from GitHub again' : 'Refresh'}
         />
       </div>
 
-      {view === 'prs' ? (
+      {view === 'issues' ? (
+        <IssueList
+          data={issueData}
+          loading={issueLoading}
+          filter={issueFilter}
+          setFilter={setIssueFilter}
+          query={issueQuery}
+          setQuery={setIssueQuery}
+          onRefresh={() => void refreshIssues()}
+          onView={(issue) => void invoke('app:openExternal', { url: issue.url })}
+          onCopyUrl={(issue) => void navigator.clipboard.writeText(issue.url).then(() => toast(`Copied ${issue.url}`, 'success'))}
+          onAskAgent={askAgentAboutIssue}
+        />
+      ) : view === 'prs' ? (
         <PrList
           data={prData}
           loading={prLoading}
@@ -794,6 +846,173 @@ function PrRow({
                 }}
               >
                 Copy PR link
+              </MenuItem>
+            </>
+          )}
+        </Dropdown>
+      </div>
+    </div>
+  );
+}
+
+function IssueList({
+  data,
+  loading,
+  filter,
+  setFilter,
+  query,
+  setQuery,
+  onRefresh,
+  onView,
+  onCopyUrl,
+  onAskAgent
+}: {
+  data: GitIssueList | null;
+  loading: boolean;
+  filter: IssueFilter;
+  setFilter: (f: IssueFilter) => void;
+  query: string;
+  setQuery: (q: string) => void;
+  onRefresh: () => void;
+  onView: (issue: GitIssue) => void;
+  onCopyUrl: (issue: GitIssue) => void;
+  onAskAgent: (issue: GitIssue) => void;
+}) {
+  const issues = data?.issues ?? [];
+  const counts = {
+    open: issues.filter((i) => i.state === 'OPEN').length,
+    closed: issues.filter((i) => i.state === 'CLOSED').length,
+    all: issues.length
+  };
+  const q = query.trim().toLowerCase();
+  const visible = issues
+    .filter((i) => (filter === 'all' ? true : i.state === filter.toUpperCase()))
+    .filter((i) => !q || i.title.toLowerCase().includes(q) || `#${i.number}`.includes(q) || (i.author ?? '').toLowerCase().includes(q) || (i.labels ?? []).some((l) => l.name.toLowerCase().includes(q)));
+
+  return (
+    <>
+      <div className="branches-toolbar">
+        <div className="branches-search">
+          <Icon name="search" size={13} />
+          <input placeholder="Search issues (title, #number, author, label)…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+        <div className="branches-filters">
+          {ISSUE_FILTERS.map((f) => (
+            <button key={f.id} type="button" className={filter === f.id ? 'active' : ''} onClick={() => setFilter(f.id)}>
+              {f.label}
+              {data && counts[f.id] > 0 && <span className="count">{counts[f.id]}</span>}
+            </button>
+          ))}
+        </div>
+        {data && !data.error && !data.ghMissing && (
+          <span className="pr-pulled" title={new Date(data.fetchedAt).toLocaleString()}>
+            {loading ? 'Pulling from GitHub…' : `Pulled ${relTime(data.fetchedAt)}`}
+          </span>
+        )}
+      </div>
+      {data?.ghMissing && (
+        <div className="muted small pad">GitHub CLI (gh) not found — the issue list needs it. Install gh and run `gh auth login`.</div>
+      )}
+      {data?.error && (
+        <div className="pad small">
+          <div className="muted" style={{ whiteSpace: 'pre-wrap' }}>
+            Could not pull the issue list from GitHub: {data.error}
+          </div>
+          <Button variant="ghost" size="sm" icon="refresh" onClick={onRefresh}>
+            Try again
+          </Button>
+        </div>
+      )}
+      {!data && (
+        <div className="pad">
+          <Spinner />
+        </div>
+      )}
+      {data && !data.error && !data.ghMissing && (
+        <div className="branches-table">
+          <div className="branches-cols pr-cols">
+            <span>Issue</span>
+            <span>Author</span>
+            <span>Updated</span>
+            <span>Status</span>
+            <span className="num">Actions</span>
+          </div>
+          {visible.map((issue) => (
+            <IssueRow
+              key={issue.number}
+              issue={issue}
+              onView={() => onView(issue)}
+              onCopyUrl={() => onCopyUrl(issue)}
+              onAskAgent={() => onAskAgent(issue)}
+            />
+          ))}
+          {visible.length === 0 && <div className="muted pad">{issues.length === 0 ? 'No issues on GitHub for this repo.' : 'No issues match.'}</div>}
+        </div>
+      )}
+    </>
+  );
+}
+
+function IssueRow({ issue, onView, onCopyUrl, onAskAgent }: { issue: GitIssue; onView: () => void; onCopyUrl: () => void; onAskAgent: () => void }) {
+  const open = issue.state === 'OPEN';
+  return (
+    <div className="branch-row pr-row">
+      <div className="pr-title">
+        <div className="pr-head">
+          <span className="mono muted">#{issue.number}</span>
+          <span title={issue.title}>{issue.title}</span>
+        </div>
+        {(issue.labels?.length || issue.comments) && (
+          <div className="pr-refs">
+            {(issue.labels ?? []).slice(0, 4).map((l) => (
+              <Badge key={l.name} tone="neutral" title={`Label: ${l.name}`}>
+                {l.name}
+              </Badge>
+            ))}
+            {!!issue.comments && <span className="muted small">{issue.comments} comment{issue.comments === 1 ? '' : 's'}</span>}
+          </div>
+        )}
+      </div>
+      <span className="pr-author muted small" title={issue.author}>
+        {issue.author ?? '—'}
+      </span>
+      <span className="muted small" title={issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : undefined}>
+        {issue.updatedAt ? relTime(issue.updatedAt) : '—'}
+      </span>
+      <span className="branch-status">{open ? <Badge tone="green">Open</Badge> : <Badge tone="purple">Closed</Badge>}</span>
+      <div className="branch-actions">
+        <Button variant="ghost" size="sm" icon="external" title={`Open issue #${issue.number} on GitHub`} onClick={onView} />
+        <Dropdown
+          align="right"
+          width={260}
+          trigger={() => <Button variant="ghost" size="sm" icon="more" title="Issue actions" aria-label={`Actions for issue #${issue.number}`} />}
+        >
+          {(close) => (
+            <>
+              <MenuItem
+                onClick={() => {
+                  close();
+                  onView();
+                }}
+              >
+                View issue on GitHub
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  close();
+                  onAskAgent();
+                }}
+                hint="Prefill the composer"
+              >
+                Ask the agent about this issue
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  close();
+                  onCopyUrl();
+                }}
+              >
+                Copy issue link
               </MenuItem>
             </>
           )}
