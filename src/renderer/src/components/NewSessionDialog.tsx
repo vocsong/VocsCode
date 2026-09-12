@@ -1,5 +1,5 @@
 /** New session dialog: project directory, harness, model, permission mode and worktree isolation. */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke, modKey } from '../api';
@@ -26,7 +26,7 @@ export function NewSessionDialog() {
   const [model, setModel] = useState<ModelRef | undefined>(settings.defaultModelByHarness[settings.defaultHarness]);
   const [effort, setEffort] = useState<EffortLevel | ''>(settings.defaultEffort ?? '');
   const [mode, setMode] = useState<PermissionMode>(settings.defaultPermissionMode);
-  const [useWorktree, setUseWorktree] = useState(false);
+  const [useWorktree, setUseWorktree] = useState(settings.defaultUseWorktree ?? false);
   const [acpAgent, setAcpAgent] = useState(settings.acpAgents[0]?.id ?? 'dsh');
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<ImageAttachment[]>([]);
@@ -37,6 +37,22 @@ export function NewSessionDialog() {
   const [maxBudget, setMaxBudget] = useState('');
   const [customProvider, setCustomProvider] = useState({ id: '', name: '', baseUrl: '', envKey: '' });
   const [creating, setCreating] = useState(false);
+
+  // The model column keeps the harness column's height; the model list scrolls inside it.
+  const harnessColRef = useRef<HTMLElement>(null);
+  const modelColRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const left = harnessColRef.current;
+    const right = modelColRef.current;
+    if (!left || !right) return;
+    const apply = () => {
+      right.style.height = `${left.offsetHeight}px`;
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(left);
+    return () => ro.disconnect();
+  }, [harness, acpAgent]);
 
   const descriptor = HARNESSES.find((h) => h.id === harness)!;
   const modes = descriptor.capabilities.permissionModes;
@@ -92,7 +108,7 @@ export function NewSessionDialog() {
         codexModelProvider: harness === 'codex' && customProvider.id && customProvider.baseUrl ? { id: customProvider.id, name: customProvider.name || customProvider.id, baseUrl: customProvider.baseUrl, envKey: customProvider.envKey || undefined, wireApi: 'chat' } : undefined
       };
       const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, initialImages: images.length ? images : undefined, goal: goal.trim() || undefined });
-      await invoke('settings:update', { defaultHarness: harness, defaultPermissionMode: mode, defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model } });
+      await invoke('settings:update', { defaultHarness: harness, defaultPermissionMode: mode, defaultUseWorktree: useWorktree, defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model } });
       close();
       await setActive(meta.id);
     } catch (e) {
@@ -155,7 +171,7 @@ export function NewSessionDialog() {
       }
     >
       <div className="ns-grid">
-        <section className="ns-col">
+        <section className="ns-col" ref={harnessColRef}>
           <Field label="Harness">
             <div className="harness-cards">
               {HARNESSES.map((h) => {
@@ -193,7 +209,7 @@ export function NewSessionDialog() {
           )}
         </section>
 
-        <section className="ns-col">
+        <section className="ns-col ns-col-model" ref={modelColRef}>
           <Field label={<span className="row gap6">Model {modelsLoading && <Spinner size={11} />}</span>} hint={modelsError}>
             <ModelPicker
               models={models}
