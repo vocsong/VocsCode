@@ -576,6 +576,128 @@ describe('SessionManager PR state refresh', () => {
       vi.useRealTimers();
     }
   });
+
+  it('keeps a git-derived status when the harness exits instead of flipping to stopped', () => {
+    const session: SessionMeta = {
+      id: 'merged_session',
+      title: 'merged session',
+      createdAt: 1_000,
+      updatedAt: 2_000,
+      config: { harness: 'pi', projectRoot: 'G:/proj/pr', permissionMode: 'auto' },
+      cwd: 'G:/proj/pr/.vocs-code/worktrees/wt',
+      worktreeBranch: 'harness/merged-session',
+      status: 'merged',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    const manager = new SessionManager({
+      store: { list: () => [session], get: (id: string) => (id === session.id ? session : undefined), upsert: vi.fn() } as unknown as SessionStore,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    // The pi process died (e.g. killed while the app quit) and reported its exit.
+    (manager as unknown as { emit: (id: string, event: SessionEvent) => void }).emit(session.id, { type: 'status', status: 'stopped', detail: 'pi exited (0)' });
+    expect(session.status).toBe('merged');
+  });
+
+  it('stop() keeps a parked pr/merged status', async () => {
+    const session: SessionMeta = {
+      id: 'merged_session',
+      title: 'merged session',
+      createdAt: 1_000,
+      updatedAt: 2_000,
+      config: { harness: 'pi', projectRoot: 'G:/proj/pr', permissionMode: 'auto' },
+      cwd: 'G:/proj/pr/.vocs-code/worktrees/wt',
+      worktreeBranch: 'harness/merged-session',
+      status: 'merged',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    const manager = new SessionManager({
+      store: { list: () => [session], get: (id: string) => (id === session.id ? session : undefined), upsert: vi.fn(), appendTranscript: async () => undefined } as unknown as SessionStore,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    const active = {
+      adapter: { dispose: vi.fn(async () => undefined) },
+      approvals: new Map(),
+      liveItems: new Map(),
+      dirty: new Set<string>(),
+      lastAssistantText: '',
+      starting: null,
+      models: null
+    };
+    (manager as unknown as { active: Map<string, typeof active> }).active.set(session.id, active);
+    await manager.stop(session.id);
+    expect(active.adapter.dispose).toHaveBeenCalled();
+    expect(session.status).toBe('merged');
+  });
+
+  it('a stopped session is re-checked at boot and upgraded back to merged', async () => {
+    vi.useFakeTimers();
+    const session: SessionMeta = {
+      id: 'stopped_session',
+      title: 'stopped session',
+      createdAt: 1_000,
+      updatedAt: 2_000,
+      config: { harness: 'pi', projectRoot: 'G:/proj/pr', permissionMode: 'auto' },
+      cwd: 'G:/proj/pr/.vocs-code/worktrees/wt',
+      worktreeBranch: 'harness/merged-session',
+      status: 'stopped',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    const store = {
+      list: () => [session],
+      get: (id: string) => (id === session.id ? session : undefined),
+      // Throwing keeps sessionPrRefs on its synchronous catch path: no real fs I/O that fake
+      // timers would not flush before the assertions.
+      sessionDir: () => {
+        throw new Error('no fs in test');
+      },
+      upsert: vi.fn()
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    try {
+      vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: true });
+      manager.list(); // boot: schedules the one-shot re-check for stopped sessions
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(session.status).toBe('merged');
+
+      // Without git evidence the stopped status is kept, never downgraded to idle.
+      session.status = 'stopped';
+      (manager as unknown as { gitStateChecked: Set<string> }).gitStateChecked.delete(session.id);
+      vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: false });
+      manager.list();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(session.status).toBe('stopped');
+    } finally {
+      vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: false });
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('SessionStore round-trip', () => {
