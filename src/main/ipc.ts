@@ -344,7 +344,7 @@ export function registerIpc(deps: IpcDeps): void {
     return known ? gitFolderBranch(projectRoot) : {};
   });
   handle('git:summary', ({ sessionId }) => gitSummary(cwdOf(sessionId)));
-  handle('git:diff', async ({ sessionId, path: p, staged }) => ({ diff: await gitDiff(cwdOf(sessionId), p, staged) }));
+  handle('git:diff', async ({ sessionId, path: p, staged }) => gitDiff(cwdOf(sessionId), p, staged));
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
   handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));

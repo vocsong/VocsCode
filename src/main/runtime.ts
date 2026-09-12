@@ -59,13 +59,13 @@ export function runCapture(
   cmd: string,
   args: string[],
   opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; input?: string } = {}
-): Promise<{ code: number | null; stdout: string; stderr: string }> {
+): Promise<{ code: number | null; stdout: string; stderr: string; timedOut?: boolean }> {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
     let settled = false;
     let timeout: NodeJS.Timeout | undefined;
-    const settle = (r: { code: number | null; stdout: string; stderr: string }) => {
+    const settle = (r: { code: number | null; stdout: string; stderr: string; timedOut?: boolean }) => {
       if (settled) return;
       settled = true;
       if (timeout) clearTimeout(timeout);
@@ -83,14 +83,11 @@ export function runCapture(
       return;
     }
     timeout = setTimeout(() => {
-      try {
-        killTree(child);
-      } catch {
-        /* ignore */
-      }
+      void killTree(child);
       // Grandchildren can inherit the pipes and keep stdio open (cmd.exe-wrapped shims on
-      // Windows); settle anyway so callers never hang on a killed child.
-      settle({ code: null, stdout, stderr: `${stderr}\ntimed out after ${opts.timeoutMs ?? 15_000}ms` });
+      // Windows); settle anyway so callers never hang on a killed child. timedOut marks the
+      // partial output as untrustworthy rather than a completed run.
+      settle({ code: null, stdout, stderr: `${stderr}\ntimed out after ${opts.timeoutMs ?? 15_000}ms`, timedOut: true });
     }, opts.timeoutMs ?? 15_000);
     child.stdout.on('data', (d) => (stdout += d.toString()));
     child.stderr.on('data', (d) => (stderr += d.toString()));
