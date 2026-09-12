@@ -940,6 +940,16 @@ h4 {
 .project-group {
   margin-bottom: 8px;
 }
+/* The folder block's position is manual: dragging the header reorders the whole block. */
+.project-group.dragging {
+  opacity: 0.45;
+}
+.project-group.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.project-group.drop-after {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
 .project-header {
   display: flex;
   align-items: center;
@@ -950,6 +960,39 @@ h4 {
   letter-spacing: 0.05em;
   color: var(--fg-faint);
   font-weight: 600;
+  cursor: grab;
+}
+.project-header:active {
+  cursor: grabbing;
+}
+/* The header is a drag handle; its text must not start a text-selection drag instead. */
+.project-header * {
+  user-select: none;
+}
+.project-fold-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+.project-fold-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.project-count {
+  flex-shrink: 0;
+  color: var(--fg-faint);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
 }
 .project-icon-btn {
   display: inline-flex;
@@ -3426,6 +3469,9 @@ body.resizing {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  /* Keep the header rows out of the column's flex shrinking; tall tab content must
+     scroll inside .analytics-body, never squeeze the title or tab strip. */
+  flex-shrink: 0;
   padding: 10px 16px 8px;
   background: var(--bg-sunken);
 }
@@ -3449,6 +3495,7 @@ body.resizing {
   overflow-x: auto;
   /* Reserve the horizontal-scrollbar space so toggling overflow can't change the row height. */
   scrollbar-gutter: stable;
+  flex-shrink: 0;
 }
 .atab {
   display: inline-flex;
