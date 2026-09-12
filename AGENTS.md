@@ -31,6 +31,7 @@ Opt-in suites that spend real credit or need a logged-in runtime (`tests/`):
 
 ```bash
 HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=codex,codex-exec,cursor,pi,claude,acp,native,native-tools npx vitest run tests/smoke.live.test.ts
+HARNESS_SMOKE=1 HARNESS_SMOKE_RESUME=1 HARNESS_SMOKE_ONLY=codex,pi npx vitest run tests/smoke.live.test.ts  # resume round-trips (two turns per harness)
 HARNESS_E2E=1 HARNESS_E2E_HARNESS=native npx vitest run tests/e2e.electron.test.ts
 HARNESS_E2E=1 npx vitest run tests/e2e.approval.test.ts
 HARNESS_E2E=1 npx vitest run tests/e2e.terminal.test.ts
