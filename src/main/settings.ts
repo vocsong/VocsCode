@@ -1,11 +1,13 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
-import type { AcpAgentPreset, AppSettings, FolderStyle, ModelRef, ProviderConfig } from '../shared/types';
+import type { AcpAgentPreset, AppSettings, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, ProviderConfig } from '../shared/types';
 import { isAutoCompactionThreshold } from '../shared/compaction';
+import { HARNESSES } from '../shared/harness-meta';
 import { pruneModelOverrides } from '../shared/model-overrides';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
+import { isValidServerId } from './mcp/file';
 import { readJson, writeJson } from './util/fs';
 
 export const BUILTIN_ACP_AGENTS: AcpAgentPreset[] = [
@@ -198,6 +200,8 @@ export function defaultSettings(): AppSettings {
     codex: { runtime: 'auto' },
     pi: { extraArgs: [] },
     acpAgents: BUILTIN_ACP_AGENTS.map((a) => ({ ...a })),
+    mcpServers: [],
+    mcpProjectState: {},
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
     modelOverrides: {},
     sidebarWidth: 280,
@@ -241,6 +245,63 @@ function normalizeCustomLabels(stored: unknown): string[] {
   return out;
 }
 
+/** Keep only well-formed MCP server definitions; a malformed entry must not reach a harness. */
+export function normalizeMcpServers(stored: unknown): McpServerDef[] {
+  if (!Array.isArray(stored)) return [];
+  const out: McpServerDef[] = [];
+  for (const raw of stored) {
+    if (!raw || typeof raw !== 'object') continue;
+    const s = raw as Record<string, unknown>;
+    const id = typeof s.id === 'string' ? s.id.trim() : '';
+    if (!isValidServerId(id) || out.some((x) => x.id === id)) continue;
+    const transport: McpTransport = s.transport === 'http' || s.transport === 'sse' ? s.transport : 'stdio';
+    const def: McpServerDef = { id, transport };
+    if (transport === 'stdio') {
+      if (typeof s.command !== 'string' || !s.command.trim()) continue;
+      def.command = s.command;
+      if (Array.isArray(s.args)) def.args = s.args.filter((a): a is string => typeof a === 'string');
+      def.env = strMap(s.env);
+    } else {
+      if (typeof s.url !== 'string' || !/^https?:\/\//i.test(s.url)) continue;
+      def.url = s.url;
+      def.headers = strMap(s.headers);
+    }
+    if (Array.isArray(s.harnesses)) {
+      const ids = s.harnesses.filter((h): h is HarnessId => typeof h === 'string' && HARNESSES.some((d) => d.id === h));
+      if (ids.length) def.harnesses = ids;
+    }
+    if (typeof s.timeoutMs === 'number' && s.timeoutMs > 0) def.timeoutMs = Math.round(s.timeoutMs);
+    if (typeof s.description === 'string' && s.description.trim()) def.description = s.description.trim();
+    if (s.disabled === true) def.disabled = true;
+    out.push(def);
+  }
+  return out;
+}
+
+function strMap(v: unknown): Record<string, string> | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) if (k.trim() && typeof val === 'string') out[k] = val;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Per-repo MCP switches: string id lists, keyed by absolute project root. */
+export function normalizeMcpProjectState(stored: unknown): Record<string, McpProjectState> {
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
+  const ids = (v: unknown): string[] => (Array.isArray(v) ? [...new Set(v.filter((x): x is string => typeof x === 'string' && !!x))] : []);
+  const out: Record<string, McpProjectState> = {};
+  for (const [root, raw] of Object.entries(stored as Record<string, unknown>)) {
+    if (!root || !raw || typeof raw !== 'object') continue;
+    const s = raw as Record<string, unknown>;
+    const disabledGlobal = ids(s.disabledGlobal);
+    const enabledRepo = ids(s.enabledRepo);
+    if (disabledGlobal.length || enabledRepo.length) {
+      out[root] = { ...(disabledGlobal.length ? { disabledGlobal } : {}), ...(enabledRepo.length ? { enabledRepo } : {}) };
+    }
+  }
+  return out;
+}
+
 /** Merge stored settings over defaults, keeping builtin providers/agents present. */
 export function normalizeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
   const d = defaultSettings();
@@ -272,6 +333,8 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
         ? { provider: stored.utilityModel.provider, model: stored.utilityModel.model }
         : undefined,
     modelOverrides: pruneModelOverrides(stored.modelOverrides),
+    mcpServers: normalizeMcpServers(stored.mcpServers),
+    mcpProjectState: normalizeMcpProjectState(stored.mcpProjectState),
     providers: [],
     acpAgents: []
   };

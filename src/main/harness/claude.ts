@@ -14,6 +14,7 @@ import {
   type SDKUserMessage
 } from '@anthropic-ai/claude-agent-sdk';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import { toClaude } from '../mcp/effective';
 import { findContextWindow } from '../models/static-models';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
@@ -168,6 +169,16 @@ export class ClaudeAdapter implements HarnessAdapter {
     if (this.started) return;
     this.started = true;
     const options = this.buildOptions();
+    // `strictMcpConfig` stays unset on purpose: the user's own ~/.claude.json and plugin servers
+    // must keep working alongside the ones this app injects. With 'project' in settingSources
+    // Claude also reads <cwd>/.mcp.json itself, so a repo server this app passes is declared
+    // twice under one name; injecting it is still the reliable route, because Claude's
+    // project-scope trust prompt has no interactive path in SDK mode (docs/MCP.md §11).
+    const mcp = await this.ctx.mcpServers().catch((e) => {
+      this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
+      return [];
+    });
+    if (mcp.length) options.mcpServers = toClaude(mcp.map((r) => r.def));
     const s = this.ctx.settings();
     if (s.claude.useProviderKey) {
       const key = await this.ctx.getApiKey('anthropic');
