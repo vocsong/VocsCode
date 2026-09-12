@@ -3,11 +3,12 @@ import React, { useMemo, useState } from 'react';
 import type { SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
-import { basename, fmtCost, relTime } from '../format';
+import { basename, fmtCost, harnessShort, relTime } from '../format';
 import { useStore } from '../store';
 import { Resizer } from './Resizer';
 import { FolderBranch } from './FolderBranch';
 import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, StatusLabel } from './ui';
+import { ForkIntoItems } from './ForkInto';
 
 const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
   claude: 'amber',
@@ -20,10 +21,6 @@ const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neut
 
 /** Predefined labels offered as one-click suggestions while renaming a session. */
 const PRESET_LABELS = ['todo', 'error', 'bug', 'fix', 'feature', 'refactor', 'docs', 'test'] as const;
-
-export function harnessShort(id: string): string {
-  return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
-}
 
 /** Icon choices for folder headers (names from the renderer icon set). */
 const FOLDER_ICONS = [
@@ -229,6 +226,7 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
               <MenuItem onClick={() => { close(); startRename(); }}>Rename</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }); }}>{s.pinned ? 'Unpin' : 'Pin'}</MenuItem>
               <MenuItem onClick={async () => { close(); const f = await invoke('sessions:fork', { id: s.id }); if (f) toast('Forked session created', 'success'); }}>Fork</MenuItem>
+              <ForkIntoItems session={s} onForked={(f) => toast(`Forked into ${harnessShort(f.config.harness)}`, 'success')} />
               <MenuItem onClick={() => { close(); void invoke('app:openPath', { path: s.cwd, sessionId: s.id }); }}>Open folder</MenuItem>
               <MenuItem onClick={() => { close(); void invoke('sessions:stop', { id: s.id }); }} disabled={s.status === 'idle' || s.status === 'stopped'}>Stop process</MenuItem>
               <MenuItem

@@ -6,7 +6,7 @@ import type { AnalyticsDayPoint, AnalyticsSummary, FileUsageRow, ToolUsage, Tool
 import { addCounters, COUNTER_FIELDS, dimensionSeries, emptyCounters, fillDays, rollupDays, speedTps, totalTokens, type SliceDimension } from '../../../../shared/usage-rollup';
 import { basename, fmtCost, fmtTokens } from '../../format';
 import type { AnalyticsRange, AnalyticsTab } from '../../store';
-import { harnessShort } from '../Sidebar';
+import { harnessShort } from '../../format';
 
 export const RANGES: { value: AnalyticsRange; label: string }[] = [
   { value: 7, label: '7 days' },

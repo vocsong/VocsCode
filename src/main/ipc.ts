@@ -310,7 +310,7 @@ export function registerIpc(deps: IpcDeps): void {
     await fs.writeFile(res.filePath, md, 'utf8');
     return { path: res.filePath };
   });
-  handle('sessions:fork', ({ id }) => sessions.fork(id));
+  handle('sessions:fork', ({ id, harness }) => sessions.fork(id, harness));
   handle('sessions:moveTo', ({ id, cwd }) => sessions.moveTo(id, cwd));
   handle('sessions:goal', ({ id, action, objective, autoContinue, maxIterations }) => sessions.goal(id, action, { objective, autoContinue, maxIterations }));
 

@@ -1,10 +1,11 @@
 /** Command palette for slash commands and quick navigation. */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '../api';
+import { harnessShort } from '../format';
 import { useStore } from '../store';
 import { createTerminal } from '../terminal/host';
 import { Icon } from './ui';
-import { harnessShort } from './Sidebar';
+
 
 interface Cmd {
   id: string;
