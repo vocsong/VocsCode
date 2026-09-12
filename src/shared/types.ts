@@ -637,6 +637,10 @@ export interface AppSettings {
   customShortcuts?: Record<string, ShortcutCommand>;
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
+  /** Cheap model for background tasks (session titles, summaries). Unset until the user picks one. */
+  utilityModel?: ModelRef;
+  /** Set once the first-run setup guide has been completed. */
+  onboardingDone?: boolean;
 }
 
 export interface GitFileStatus {
