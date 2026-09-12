@@ -268,7 +268,7 @@ Web (browser)                Relay                      Desktop (host)
 | Code expires / wrong code | Nothing is recorded; start over with a fresh code |
 | Deny or ignore at desktop | Pairing never completes; web sees "request denied/expired" |
 | Two browsers | Two devices, two pairings, both receive pushes; approvals resolve first-wins (§8.1) |
-| New browser on same machine | New pairing, fresh code — no auto-approve in v1 |
+| New browser on same machine | New pairing: fresh code + desktop confirm — no codeless/auto path in v1 (codeless-with-confirm is a v2 convenience) |
 | Desktop reinstall / wiped userData | New desktop identity; revoke the old device from the web account page |
 | Desktop offline during claim | Relay queues the pairing request for the code TTL; expires after |
 | Replayed/late frames | Per-direction AEAD counters; replayed frames fail decryption and drop |
@@ -295,9 +295,8 @@ pending approval, so neither a stolen token nor a compromised relay can forge an
 
 - Pairing itself (code + claim + confirm + handshake, both clients) ≈ **2–3 days inside
   P2**. The relay device registry + token service it requires is the real work (~1 wk).
-- Open: auto-approve subsequent devices for a known account (later convenience, v1: no)?
-  Where is the relay hosted (region/data-residency requirements)? Email fallback auth in
-  v1 or GitHub-only?
+- Open: where is the relay hosted (region/data-residency requirements)? Email fallback
+  auth in v1 or GitHub-only?
 
 ## 7. Threat model
 
@@ -410,9 +409,15 @@ Pairing-level questions from §6.9:
 
 **Open (resolve one at a time, before P2):**
 
-1. Auto-approve later devices for a known account (v1: no)?
-2. Where is the relay hosted (region / data-residency)?
-3. GitHub-only auth in v1, or email fallback too?
+- **Code + confirm, always.** Every pairing — including later devices — needs a fresh
+  code and the desktop-side Allow. Codeless pairing (logged-in request, desktop still
+  confirms) is the deliberate v2 convenience; silent auto-approve never ships (§6.1
+  principle 1).
+
+**Open (resolve one at a time, before P2):**
+
+1. Where is the relay hosted (region / data-residency)?
+2. GitHub-only auth in v1, or email fallback too?
 
 ## 12. The first PR (P0 sketch)
 
