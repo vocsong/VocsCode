@@ -7,6 +7,7 @@ import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, t
 import { shutdownChild, spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
+import { TurnUsageTracker } from '../util/turn-usage';
 
 export const PI_APPROVAL_MARKER = 'VCODE_APPROVAL::';
 
@@ -79,9 +80,7 @@ export class PiAdapter implements HarnessAdapter {
   private currentAssistant: Extract<TranscriptItem, { kind: 'assistant' }> | null = null;
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
   private turnStartedAt = 0;
-  private lastCost = 0;
-  private lastTokens = { input: 0, output: 0 };
-  private totals: UsageTotals;
+  private readonly usage: TurnUsageTracker;
   /** stopReason/errorMessage of the last assistant message — pi reports turn failures here, not as events. */
   private lastStopReason: string | null = null;
   private lastErrorMessage: string | null = null;
@@ -91,7 +90,7 @@ export class PiAdapter implements HarnessAdapter {
   private modeFile: string | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
-    this.totals = { ...ctx.session().usage };
+    this.usage = new TurnUsageTracker(ctx.session().usage);
   }
 
   get busy(): boolean {
@@ -190,6 +189,7 @@ export class PiAdapter implements HarnessAdapter {
     switch (type) {
       case 'agent_start':
         this._busy = true;
+        if (!this.turnStartedAt) this.usage.beginTurn();
         this.turnStartedAt = this.turnStartedAt || Date.now();
         this.ctx.emit({ type: 'status', status: 'running' });
         return;
@@ -440,22 +440,19 @@ export class PiAdapter implements HarnessAdapter {
       );
       if (stats.sessionFile) this.ctx.updateRef({ piSessionFile: stats.sessionFile });
       const t = stats.tokens ?? {};
-      this.totals = {
-        ...this.totals,
-        inputTokens: t.input ?? this.totals.inputTokens,
-        outputTokens: t.output ?? this.totals.outputTokens,
-        cacheReadTokens: t.cacheRead ?? this.totals.cacheReadTokens,
-        cacheWriteTokens: t.cacheWrite ?? this.totals.cacheWriteTokens,
-        costUsd: stats.cost ?? this.totals.costUsd,
-        turns: this.totals.turns + 1,
-        contextTokens: stats.contextUsage?.tokens ?? this.totals.contextTokens,
-        contextWindow: stats.contextUsage?.contextWindow ?? this.totals.contextWindow
-      };
-      turnCost = Math.max(0, (stats.cost ?? 0) - this.lastCost);
-      this.lastCost = stats.cost ?? this.lastCost;
-      turnUsage = { inputTokens: (t.input ?? 0) - this.lastTokens.input, outputTokens: (t.output ?? 0) - this.lastTokens.output };
-      this.lastTokens = { input: t.input ?? 0, output: t.output ?? 0 };
-      this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
+      this.usage.setCumulative({
+        inputTokens: t.input,
+        outputTokens: t.output,
+        cacheReadTokens: t.cacheRead,
+        cacheWriteTokens: t.cacheWrite,
+        costUsd: stats.cost,
+        contextTokens: stats.contextUsage?.tokens,
+        contextWindow: stats.contextUsage?.contextWindow
+      });
+      const completed = this.usage.finishTurn();
+      turnCost = completed.usage?.costUsd ?? 0;
+      turnUsage = completed.usage ? { inputTokens: completed.usage.inputTokens, outputTokens: completed.usage.outputTokens } : undefined;
+      this.ctx.emit({ type: 'usage', totals: completed.totals });
     } catch (e) {
       this.ctx.log('debug', `get_session_stats failed: ${errorMessage(e)}`);
     }
