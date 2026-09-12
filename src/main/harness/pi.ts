@@ -2,6 +2,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import { EFFORT_LEVELS } from '../../shared/harness-meta';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { killTree, spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
@@ -35,11 +36,7 @@ interface PiModel {
 }
 
 export function piModelToInfo(m: PiModel): ModelInfo {
-  const efforts = m.thinkingLevelMap
-    ? (Object.entries(m.thinkingLevelMap)
-        .filter(([, v]) => v !== null)
-        .map(([k]) => k) as EffortLevel[])
-    : undefined;
+  const efforts = piSupportedEfforts(m);
   return {
     id: m.id,
     provider: m.provider,
@@ -51,6 +48,23 @@ export function piModelToInfo(m: PiModel): ModelInfo {
     supportedEfforts: efforts && efforts.length ? efforts : undefined,
     pricing: m.cost ? { input: m.cost.input, output: m.cost.output, cacheRead: m.cost.cacheRead, cacheWrite: m.cost.cacheWrite } : undefined
   };
+}
+
+/**
+ * Mirrors pi's own getSupportedThinkingLevels: a level is hidden only by an explicit `null`, a
+ * missing standard level keeps the provider's default mapping, and the extended `xhigh`/`max`
+ * levels need an explicit mapping. `off` is dropped — leaving effort unset already runs the model
+ * default. Without a map we keep the full list; pi clamps anything the model cannot use.
+ */
+function piSupportedEfforts(m: PiModel): EffortLevel[] | undefined {
+  const map = m.thinkingLevelMap;
+  if (!m.reasoning || !map) return undefined;
+  return EFFORT_LEVELS.filter((level) => {
+    const mapped = map[level];
+    if (mapped === null) return false;
+    if (level === 'xhigh' || level === 'max') return mapped !== undefined;
+    return true;
+  });
 }
 
 function piThinkingLevel(effort: EffortLevel | undefined): string | undefined {
