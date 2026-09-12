@@ -304,6 +304,7 @@ export async function gitDiff(cwd: string, file?: string, staged = false): Promi
     const abs = path.join(root, file);
     const tracked = await git(cwd, ['ls-files', '--error-unmatch', '--', file]);
     if (timedOut(tracked)) return { diff: '', error: `git timed out while checking ${file}.` };
+    if (tracked.truncated) return { diff: '', error: `git output was truncated while checking ${file}.` };
     if (tracked.code !== 0) {
       // Untracked: synthesize an add diff, size-checked before reading.
       const content = await readCapped(abs, MAX_SINGLE_FILE_DIFF_BYTES);
@@ -312,14 +313,17 @@ export async function gitDiff(cwd: string, file?: string, staged = false): Promi
     }
     const r = await git(cwd, ['diff', ...(staged ? ['--cached'] : ['HEAD']), '--', file], DIFF_TIMEOUT_MS);
     if (timedOut(r)) return { diff: '', error: diffTimeoutMessage() };
+    if (r.truncated) return { diff: '', error: `Diff output was truncated; narrow the change or select a smaller file: ${file}` };
     return { diff: r.stdout };
   }
   const r = await git(cwd, ['diff', ...(staged ? ['--cached'] : ['HEAD'])], DIFF_TIMEOUT_MS);
   if (timedOut(r)) return { diff: '', error: diffTimeoutMessage() };
+  if (r.truncated) return { diff: '', error: 'Diff output was truncated; select a file or narrow the change.' };
   let out = r.stdout;
   // Append untracked files, capped before reading so a stray artifact cannot spike memory.
   const untracked = await git(cwd, ['ls-files', '--others', '--exclude-standard']);
   if (timedOut(untracked)) return { diff: out, error: 'The untracked-file list timed out — new files may be missing from this diff.' };
+  if (untracked.truncated) return { diff: out, error: 'The untracked-file list was truncated — new files may be missing from this diff.' };
   for (const f of untracked.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
     const content = await readCapped(path.join(root, f), MAX_UNTRACKED_DIFF_BYTES);
     if (content === undefined) continue;
