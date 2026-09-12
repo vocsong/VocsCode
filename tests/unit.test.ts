@@ -320,6 +320,10 @@ describe('settings normalization', () => {
     expect(normalizeSettings({}).utilityModel).toBeUndefined();
     expect(normalizeSettings({ utilityModel: { provider: 3, model: 'x' } as never }).utilityModel).toBeUndefined();
   });
+  it('drops an effort level the app no longer models', () => {
+    expect(normalizeSettings({ defaultEffort: 'high' }).defaultEffort).toBe('high');
+    expect(normalizeSettings({ defaultEffort: 'ultra' as never }).defaultEffort).toBeUndefined();
+  });
 });
 
 describe('pricing', () => {
@@ -356,6 +360,14 @@ describe('model mapping', () => {
     expect(m.id).toBe('gpt-5.5');
     expect(m.supportsImages).toBe(true);
     expect(m.pricing?.input).toBe(5);
+    expect(m.supportedEfforts).toEqual(['high']);
+    expect(m.defaultEffort).toBe('high');
+  });
+  it('drops codex effort levels the app cannot express', () => {
+    // Codex 0.153 advertises `ultra` on the 5.6/6 family; the shared effort state only knows minimal..max.
+    const m = codexModelToInfo({ id: 'x', model: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }, { reasoningEffort: 'high', description: '' }, { reasoningEffort: 'ultra', description: '' }], defaultReasoningEffort: 'ultra', inputModalities: ['text'], isDefault: false });
+    expect(m.supportedEfforts).toEqual(['low', 'high']);
+    expect(m.defaultEffort).toBeUndefined();
   });
 });
 
