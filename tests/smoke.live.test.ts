@@ -3,12 +3,15 @@
  * machine. Skipped unless HARNESS_SMOKE=1. Individual harnesses can be selected with
  * HARNESS_SMOKE_ONLY=codex,pi,... Each test sends one prompt asking for the literal token
  * PONG and asserts the adapter produced an assistant item containing it plus a turn item.
+ * HARNESS_SMOKE_ONLY=mcp drives one harness (HARNESS_SMOKE_MCP_HARNESS, default claude) with an
+ * injected MCP server and asserts it actually called a tool from it.
  */
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
 import type { ApprovalDecision, HarnessId, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { ResolvedServer } from '../src/main/mcp/effective';
 import { createAdapter } from '../src/main/harness/registry';
 import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
 import { RuntimeResolver } from '../src/main/runtime';
@@ -28,7 +31,7 @@ afterAll(async () => {
   await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
 });
 
-async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']> = {}) {
+async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']> = {}, mcp: ResolvedServer[] = []) {
   const cwd = path.join(tmpRoot, harness);
   await fs.mkdir(cwd, { recursive: true });
   await fs.writeFile(path.join(cwd, 'README.md'), '# smoke\n');
@@ -58,7 +61,7 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
     permissionMode: () => meta.config.permissionMode,
     effort: () => meta.config.effort,
     getApiKey: async () => undefined,
-    mcpServers: async () => [],
+    mcpServers: async () => mcp,
     emit: (event) => {
       events.push(event);
       if (event.type === 'item.upsert') items.set(event.item.id, event.item);
@@ -185,6 +188,34 @@ describe('live harness smoke', () => {
     await waitTurn(170_000);
     expect(assistantText(items)).toMatch(/PONG/i);
     expect(meta.harnessRef.claudeSessionId).toBeTruthy();
+  });
+
+  // Proves the injection path end to end rather than only at the dialect converter: the harness
+  // must connect to a server this app handed it and call one of its tools. Runs against the
+  // offline fixture server in tests/fixtures, so only the model call costs anything.
+  // Verified for claude, codex and acp. codex-exec fails here on purpose: it loads the server,
+  // but that adapter runs with approvalPolicy 'never' and Codex declines MCP tool calls in that
+  // mode ("MCP tool call requires approval, but approval policy is never").
+  it.runIf(want('mcp'))('a harness loads an MCP server this app injected', async () => {
+    const harness = (process.env.HARNESS_SMOKE_MCP_HARNESS ?? 'claude') as HarnessId;
+    const def = {
+      id: 'smokefixture',
+      transport: 'stdio' as const,
+      command: process.execPath,
+      args: [path.resolve(__dirname, 'fixtures/mcp-echo-server.mjs')]
+    };
+    const extra = harness === 'acp' ? { acpAgent: process.env.HARNESS_SMOKE_ACP_AGENT ?? 'dsh' } : {};
+    const { ctx, items, waitTurn } = await makeCtx(harness, extra, [{ def, missing: [], secretEnvKeys: [], secretHeaderKeys: [] }]);
+    const adapter = createAdapter(harness, ctx);
+    cleanups.push(() => adapter.dispose());
+    await adapter.start();
+    await adapter.send({ text: 'Call the echo tool from the smokefixture MCP server with the text ping, then reply with its exact output and nothing else.' });
+    await waitTurn(170_000);
+    // Harnesses name MCP tool calls differently (Claude uses mcp__<server>__<tool>, ACP reports
+    // its own kind), so the proof is the stamp the fixture adds: it is nowhere in the prompt, so
+    // only a real round trip to the server can put it in the answer.
+    expect([...items.values()].some((i) => i.kind === 'tool')).toBe(true);
+    expect(assistantText(items)).toContain('VOCSMCP9137');
   });
 
   it.runIf(want('acp'))('deepseek harness over ACP answers a prompt', async () => {

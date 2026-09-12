@@ -16,7 +16,7 @@ describe('inspectServer', () => {
     expect(r.ok).toBe(true);
     expect(r.serverInfo).toEqual({ name: 'fixture', version: '9.9.9' });
     expect(r.tools.map((t) => t.name).sort()).toEqual(['echo', 'probe']);
-    expect(r.tools.find((t) => t.name === 'echo')?.description).toBe('Says it back');
+    expect(r.tools.find((t) => t.name === 'echo')?.description).toBe('Says it back, stamped');
   }, 60_000);
 
   it("passes the definition's env through to the server process", async () => {

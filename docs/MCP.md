@@ -198,8 +198,13 @@ status request (`mcpServerStatus/list` or similar) to feed §7.2; if not, the ta
 "configured" only.
 
 **Codex exec** — `new Codex({ codexPathOverride, env, config: { mcp_servers } })`. The SDK
-flattens it to `--config` flags; secrets must therefore go through `env` +
-`bearer_token_env_var`, never inline (§8).
+flattens it to `--config` flags; secrets therefore go through `env_vars` and
+`env_http_headers`, never inline (§8). Verified live: Codex loads the servers, but this
+adapter runs with `approvalPolicy: 'never'` (it has no interactive approvals) and Codex
+answers every MCP tool call with "MCP tool call requires approval, but approval policy is
+never". So the tools are visible and unusable here; the panel says so and points at the
+app-server harness. Making them callable means auto-approving MCP tool calls in a
+harness with no approval UI, which is a permission decision for the user, not a P0 default.
 
 **ACP** — `newSession/resumeSession({ cwd, mcpServers: toAcp(effective) })`; env and
 headers become `[{ name, value }]` arrays; http/sse entries are dropped unless
@@ -359,6 +364,14 @@ native loop needs, so P1's native work is mostly the tool-list merge and the gat
 
 **Settled while building P0**
 
+- Injection is verified live end to end for **claude**, **codex** (app-server) and **acp**
+  (dsh): each connects to a server this app handed it and calls one of its tools. The
+  fixture stamps its output with a token that never appears in the prompt, so a model
+  cannot fake the round trip (`HARNESS_SMOKE_ONLY=mcp`, §10).
+- **codex-exec** loads the servers but cannot call them; see §6.
+- The ACP adapter reports an MCP tool call with the transcript name `other` rather than the
+  server-qualified name. Cosmetic, pre-existing in the ACP tool mapping, noted for P1.
+
 - Codex's TOML MCP keys are `command` / `args` / `env` / `env_vars` for stdio and
   `url` / `http_headers` / `env_http_headers` / `bearer_token_env_var` for HTTP, plus
   `startup_timeout_sec` / `tool_timeout_sec` / `enabled_tools` / `disabled_tools`
@@ -373,7 +386,6 @@ native loop needs, so P1's native work is mostly the tool-list merge and the gat
 
 - Whether an SDK `mcpServers` entry and a `.mcp.json` entry with the same name dedupe.
 - Whether `.mcp.json` servers load at all in SDK mode without `enableAllProjectMcpServers`.
-- Which ACP agents accept `session/new.mcpServers` (dsh, pi-acp).
 - Whether Claude Code resolves `npx` shims itself on Windows.
 
 ## 12. What P0 shipped
