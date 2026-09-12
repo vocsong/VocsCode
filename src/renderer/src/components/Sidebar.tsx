@@ -263,12 +263,15 @@ export function Sidebar() {
                 else delete next[g.root];
                 void invoke('settings:update', { folderStyles: next });
               }} />
-              <span
+              <button
+                type="button"
                 className={`project-title ${folderStyles[g.root]?.color ? 'colored' : ''}`}
                 style={folderStyles[g.root]?.color ? { color: folderStyles[g.root].color } : undefined}
+                title={isCollapsed ? 'Expand folder' : 'Collapse folder'}
+                onClick={() => toggleCollapsed(g.root)}
               >
                 {basename(g.root)}
-              </span>
+              </button>
               {isCollapsed && g.list.length > 0 && <span className="project-count">{g.list.length}</span>}
               <FolderBranch root={g.root} />
               <button
