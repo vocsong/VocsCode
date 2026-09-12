@@ -7,6 +7,7 @@ import * as acp from '@agentclientprotocol/sdk';
 import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
 import { which } from '../runtime';
+import { toAcp } from '../mcp/effective';
 import { isDangerousCommand, type HarnessAdapter, type HarnessContext } from './types';
 import { isOutsideWorkspace } from './permissions';
 import { killTree, spawnTool } from './spawn';
@@ -145,17 +146,26 @@ export class AcpAdapter implements HarnessAdapter {
       this.caps = (init.agentCapabilities ?? {}) as Record<string, unknown>;
 
       const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { resume?: unknown; list?: unknown };
+      // HTTP and SSE entries are dropped unless the agent said it understands them.
+      const mcpCaps = (this.caps.mcpCapabilities ?? {}) as { http?: boolean; sse?: boolean };
+      const mcpServers = toAcp(
+        (await this.ctx.mcpServers().catch((e) => {
+          this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
+          return [];
+        })).map((r) => r.def),
+        mcpCaps
+      ) as unknown as acp.NewSessionRequest['mcpServers'];
       let res: { sessionId?: string; configOptions?: unknown[] | null; modes?: unknown } | null = null;
       if (meta.harnessRef.acpSessionId && sessionCaps.resume) {
         try {
-          const r = await withTimeout(this.conn.resumeSession({ sessionId: meta.harnessRef.acpSessionId, cwd: meta.cwd, mcpServers: [] } as acp.ResumeSessionRequest), 120_000, 'session/resume');
+          const r = await withTimeout(this.conn.resumeSession({ sessionId: meta.harnessRef.acpSessionId, cwd: meta.cwd, mcpServers } as acp.ResumeSessionRequest), 120_000, 'session/resume');
           res = { sessionId: meta.harnessRef.acpSessionId, configOptions: r.configOptions ?? null, modes: r.modes };
         } catch (e) {
           this.info(`Could not resume ACP session (${errorMessage(e)}); starting a new one.`, 'warn');
         }
       }
       if (!res) {
-        const r = await withTimeout(this.conn.newSession({ cwd: meta.cwd, mcpServers: [] }), 180_000, 'session/new');
+        const r = await withTimeout(this.conn.newSession({ cwd: meta.cwd, mcpServers }), 180_000, 'session/new');
         res = { sessionId: r.sessionId, configOptions: r.configOptions ?? null, modes: r.modes };
       }
       this.sessionId = res.sessionId ?? null;

@@ -23,6 +23,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -49,6 +50,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: false,
+      mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -75,6 +77,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: false,
       costReporting: false,
+      mcp: 'inject',
       permissionModes: ['plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -101,6 +104,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: true,
       costReporting: false,
+      mcp: 'inherit',
       permissionModes: ['plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -127,6 +131,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      mcp: 'none',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -153,6 +158,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: true,
       costReporting: false,
+      mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'acp-config'
     }
@@ -178,6 +184,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      mcp: 'client',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'providers'
     }
@@ -229,6 +236,7 @@ export const SLASH_COMMANDS: { name: string; description: string; args?: string 
     args: '[objective|status|pause|resume|clear|complete]'
   },
   { name: 'diff', description: 'Open the Changes panel' },
+  { name: 'mcp', description: 'Open the MCP panel for this repo' },
   { name: 'cost', description: 'Show token usage and cost for this session' },
   { name: 'compact', description: 'Ask the harness to compact its context (where supported)' },
   { name: 'clear', description: 'Clear the visible transcript (keeps harness state)' },

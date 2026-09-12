@@ -22,6 +22,8 @@ On first launch the app starts with no agent configured — open **Settings → 
 
 **Built for long days.** Live model and effort switching, cost and context tracking, a real terminal in the side panel, slash commands and `@file` mentions, and notifications when a turn needs you.
 
+**MCP where you want it.** Add a server once — globally, or in a repo's `.mcp.json` — and Claude, both Codex adapters and any ACP agent pick it up. Test a server before you rely on it; secrets stay in your keychain, never in the repo.
+
 **Private by default.** Keys in your keychain, encrypted at rest. Sessions resume after restart, whatever agent you used.
 
 ## Why you'll like it
@@ -39,7 +41,7 @@ Everything technical lives here:
 | [Themes](docs/THEMES.md) | All 23 themes and how they're built |
 | [Testing & verification](docs/TESTING.md) | Dev commands, offline and live test suites |
 | [Operations](docs/OPERATIONS.md) | Log locations, environment variables |
-| [MCP support (plan)](docs/MCP.md) | Global and per-repo MCP servers: storage, per-harness injection, UI, trust model, phasing |
+| [MCP servers](docs/MCP.md) | Global and per-repo MCP servers: storage, per-harness injection, UI, trust model, phasing |
 
 ## Requirements
 
