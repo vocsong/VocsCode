@@ -138,19 +138,149 @@ read-mostly `git:*`, `fs:list/search/read`, `analytics:*`, `skills:list/read`,
 `app:openPath`, `app:openInEditor`, `secrets:*`, `dialog` flows. The web client never
 touches or needs API keys.
 
-## 6. Auth, pairing, trust
+## 6. Auth, pairing, trust — detailed plan
 
-- **Account** on code.vocs.io (GitHub OAuth is the natural fit for a dev tool; email as
-  fallback).
-- **Pairing** (device authorization flow, like SSH agent trust):
-  1. Desktop: Settings → Remote access → Enable → shows a short pairing code + QR
-     (valid ~5 minutes).
-  2. Web: log in → "Add computer" → enter code.
-  3. Relay links the desktop to the account; desktop issues a per-device credential.
-  4. Both sides derive a symmetric key from the pairing exchange; **all payload frames
-     are end-to-end encrypted** — the relay sees routing metadata only, never content.
-- **Devices are revocable** (desktop settings lists paired devices, kill switch is the
-  same toggle). Every remote action lands in an audit log.
+The desktop user is the root of trust. The web login proves *who you are* to the relay;
+pairing proves *to the desktop* that a specific browser on a specific machine may act for
+you. The relay is untrusted infrastructure: it routes frames and stores routing metadata
+only. (Pattern: WhatsApp-Web / OAuth device grant, with the desktop user as the human
+root of trust.)
+
+### 6.1 Principles
+
+1. **No pairing without a human at the desktop.** The code alone is never sufficient
+   trust — the desktop-side confirm step is what makes a device binding.
+2. **The relay is blind.** It never holds private keys, shared keys, or plaintext
+   payloads. Compromise of the relay yields routing metadata and opaque blobs only.
+3. **Per-device identity.** Every browser is its own device with its own keypair; trust
+   and revocation are per-device, never per-account.
+4. **Private keys never leave their machine.** Desktop keys live in the existing
+   safeStorage-backed secrets store; web keys are non-extractable WebCrypto keys in
+   IndexedDB.
+5. **Everything is revocable.** One toggle kills remote access entirely; each device is
+   individually revocable from desktop or web.
+
+### 6.2 Identities and key material
+
+| Party | Identity | Key material | Storage |
+| --- | --- | --- | --- |
+| Account | code.vocs.io user id (GitHub OAuth; email fallback) | passwordless | relay DB |
+| Desktop host | device id + human name ("Work PC") | Ed25519 signing + X25519 key-agreement keypair | private half via `secrets.ts` (safeStorage) |
+| Web device | device id + human name ("Chrome on Windows") | Ed25519 signing + X25519 key-agreement keypair | non-extractable WebCrypto (IndexedDB) |
+| Relay | routing registry | public keys + token **hashes** only | relay DB |
+
+Token model: after pairing, both sides hold a random 256-bit refresh token (relay stores
+only its hash) plus short-lived (~1 h) access tokens bound to the device's public key.
+Refreshing = signing a relay-issued challenge with the device key (proof of possession).
+A stolen token without the private key is useless.
+
+### 6.3 Pairing flow
+
+```
+Web (browser)                Relay                      Desktop (host)
+      │                        │                            │
+      │                        │ ◀─ enable, request code ──│  (1)
+      │                        │── code MVBT-K7Q2 ────────▶│  (2)
+      │  enter code / scan QR  │                            │
+      │── {code, web_pub} ────▶│  (3)                       │
+      │                        │── pairing request ────────▶│  (4)
+      │                        │                            │  human: Allow / Deny
+      │                        │ ◀───────── approved ───────│
+      │◀── handshake blobs ────┼───────────────────────────▶│  (5) relay is blind
+      │    K = ECDH(...)       │        K = ECDH(...)       │
+      │◀═══════ AEAD frames under K, routed by relay ═════▶│  (6)
+```
+
+1. **Enable (desktop).** Settings → Remote access → Enable. Desktop generates its device
+   keypair, stores the private half in the secrets store, connects outbound WSS to the
+   relay, and requests a pairing code.
+2. **Code.** Relay returns a single-use code (`MVBT-K7Q2`, ~2^40 space, 8 chars from a
+   32-symbol alphabet — no ambiguous glyphs) with a **5-minute TTL**, plus a QR payload
+   (`https://code.vocs.io/pair?code=…`). Desktop shows code + QR and a status line.
+3. **Claim (web).** Logged-in user opens "Add a computer", enters the code or scans the
+   QR. The browser generates its keypair and posts `{code, web_public_key, device_name}`
+   to the relay. Relay rate-limits attempts per account/IP (the TTL plus single-use
+   already makes brute force impractical; rate limiting is defense in depth).
+4. **Confirm (desktop).** Relay pushes a pairing request to the desktop: account,
+   device name, browser/OS. Desktop shows a confirm dialog — **Allow / Deny**. Deny or
+   timeout expires the code; nothing is recorded. This is the deliberate redundancy: the
+   code alone proves nothing, the human at the desktop does.
+5. **Handshake (relay goes blind).** On approval, both sides run a Noise-XX-style
+   handshake *through* the relay: mutual ECDH + verification of each other's signatures
+   → shared symmetric key `K`. The relay shuttles opaque handshake blobs only — it never
+   sees `K`.
+6. **Live.** Every payload frame after that is AEAD-encrypted (XChaCha20-Poly1305) with
+   `K`, with per-direction counters for replay protection. The relay routes on
+   `{account, device, seq}` metadata only: it can see *that* you chat, never *what*.
+
+| Step | Why it exists |
+| --- | --- |
+| 5-min single-use code | A stale or shoulder-surfed code is worthless |
+| Desktop confirm prompt | Possession ≠ trust; the human approves the actual device |
+| Per-device keypairs | Revoking one browser breaks nothing else; private keys never cross the wire |
+| Tokens bound to signing keys | A stolen token alone is useless without the device key |
+| E2E under the relay | Relay compromise = timing metadata only; cannot read or forge |
+
+### 6.4 What the relay stores
+
+- Accounts, devices (id, name, platform, public keys, token hashes, last seen, status).
+- Routing state: which desktop is online for which account; short-lived queues of
+  *encrypted* payloads pending delivery.
+- Pairing codes (hashed, TTL'd, single-use).
+- **Never:** plaintext payloads, keys, transcripts. (The offline transcript mirror, if
+  enabled later (§8.3), is stored encrypted under a key derived from the pairing — still
+  opaque to the relay.)
+
+### 6.5 Session lifecycle and revocation
+
+- **Reconnect.** Tokens are refreshed by signing relay challenges; a device key that is
+  gone (cleared IndexedDB, new browser profile) simply fails refresh → new pairing.
+- **Revoke one device.** Desktop settings device list, or the web account page — either
+  side invalidates the token at the relay and drops the route. The two are independent
+  escape hatches (lost laptop → revoke from the desktop; lost desktop → revoke from web).
+- **Pause remote access.** One toggle on the desktop invalidates all tokens and drops all
+  routes; the persistent "remote connected" indicator is the same surface.
+- **Audit.** Pairing, approval, revocation, and connection events land in the audit log
+  (§8) with device name, timestamp, and action class.
+- **Device cap.** Start with a small per-account device limit (e.g. 10) to bound abuse.
+
+### 6.6 Edge cases
+
+| Case | Behavior |
+| --- | --- |
+| Code expires / wrong code | Nothing is recorded; start over with a fresh code |
+| Deny or ignore at desktop | Pairing never completes; web sees "request denied/expired" |
+| Two browsers | Two devices, two pairings, both receive pushes; approvals resolve first-wins (§8.1) |
+| New browser on same machine | New pairing, fresh code — no auto-approve in v1 |
+| Desktop reinstall / wiped userData | New desktop identity; revoke the old device from the web account page |
+| Desktop offline during claim | Relay queues the pairing request for the code TTL; expires after |
+| Replayed/late frames | Per-direction AEAD counters; replayed frames fail decryption and drop |
+| Lost device | Revoke from desktop or web account page; token dead, key never had value without the token |
+
+### 6.7 UI touchpoints
+
+- **Desktop Settings → Remote access:** enable/disable toggle, pairing code + QR display
+  with countdown, paired-device list (name, platform, last seen) with per-device revoke,
+  "pause all" kill switch, recent activity feed.
+- **Confirm dialog:** account, device name, browser/OS, Allow / Deny — mirrors the
+  existing approval-prompt styling (§5 of the approval flow, same pattern).
+- **Web:** login → "Add a computer" → code entry → waiting-for-approval state → device
+  connected. Account page lists paired desktops with last-seen + revoke.
+
+### 6.8 Approvals ride signed, encrypted frames
+
+Approval decisions (§5 filtered surface) travel inside the e2e channel and are signed
+with the responding device's key. The desktop verifies the signature before resolving a
+pending approval, so neither a stolen token nor a compromised relay can forge an approval
+— tying directly into the §7 threat model.
+
+### 6.9 Sizing and open questions
+
+- Pairing itself (code + claim + confirm + handshake, both clients) ≈ **2–3 days inside
+  P2**. The relay device registry + token service it requires is the real work (~1 wk).
+- Open: QR code mandatory or optional? Auto-approve subsequent devices for a known
+  account (later convenience, v1: no)? Where is the relay hosted (region/data-residency
+  requirements)? Email fallback auth in v1 or GitHub-only?
 
 ## 7. Threat model
 
@@ -209,7 +339,7 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 | --- | --- | --- |
 | **P0 — Transport extraction** | `src/shared/transport.ts`; extract handler registry from `src/main/ipc.ts`; renderer `window.harness` rides on Transport; zero user-visible change; handler registry unit-tested in plain Node | ~1 wk |
 | **P1 — Web-buildable renderer** | Build renderer as a plain SPA; shims for paste/notify/openExternal/pickFolder; serve it from a localhost Node server wrapping the handler registry. Dogfood: run Vocs Code in a browser tab on the same machine | 1–2 wk |
-| **P2 — Pairing + relay, read-only** | Relay service (accounts, devices, routing); desktop remote host (opt-in, e2e encrypted); web login + pairing; browse folders, sessions, transcripts live | 2–3 wk |
+| **P2 — Pairing + relay, read-only** | Relay service (accounts, devices, routing); desktop remote host (opt-in, e2e encrypted); web login + pairing (§6); browse folders, sessions, transcripts live | 2–3 wk |
 | **P3 — Interactive** | Send prompts, remote approvals (presence, timeouts, audit), terminal read/write over WAN, session lifecycle (create/stop/rename) | 3–5 wk |
 | **P4 — Hardening** | Multi-device management + revocation UI, offline encrypted transcript mirror (read-only), audit log surface, terminal WAN tuning, view-only mode | 2–4 wk |
 
