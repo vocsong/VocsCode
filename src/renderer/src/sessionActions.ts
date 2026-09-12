@@ -10,7 +10,7 @@ export async function archiveSession(s: SessionMeta, toast: Toast) {
   if (s.worktreeBranch) {
     const ok = await askConfirm({
       title: `Remove the worktree for "${s.title}"?`,
-      body: `The worktree folder is deleted; uncommitted changes block this. The branch ${s.worktreeBranch} is kept — unarchiving recreates the worktree.`,
+      body: `The folder is deleted; the branch ${s.worktreeBranch} is kept. Unarchiving recreates the worktree.`,
       confirmLabel: 'Archive & remove',
       danger: true
     });
