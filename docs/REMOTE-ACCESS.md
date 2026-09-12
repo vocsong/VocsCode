@@ -179,6 +179,10 @@ only its hash) plus short-lived (~1 h) access tokens bound to the device's publi
 Refreshing = signing a relay-issued challenge with the device key (proof of possession).
 A stolen token without the private key is useless.
 
+v1 account model: **accounts-lite** — a single provisioned account, no signup or
+billing flow. The device registry and routing are account-keyed from day one, so
+productizing later means adding signup + billing, not rework.
+
 ### 6.3 Pairing flow
 
 ```
@@ -344,7 +348,7 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 | --- | --- | --- |
 | **P0 — Transport extraction** | `src/shared/transport.ts`; extract handler registry from `src/main/ipc.ts`; renderer `window.harness` rides on Transport; zero user-visible change; handler registry unit-tested in plain Node | ~1 wk |
 | **P1 — Web-buildable renderer** | Build renderer as a plain SPA; shims for paste/notify/openExternal/pickFolder; serve it from a localhost Node server wrapping the handler registry. Dogfood: run Vocs Code in a browser tab on the same machine | 1–2 wk |
-| **P2 — Pairing + relay, read-only** | Relay service (accounts, devices, routing); desktop remote host (opt-in, e2e encrypted); web login + pairing (§6); browse folders, sessions, transcripts live | 2–3 wk |
+| **P2 — Pairing + relay, read-only** | Relay service (accounts, devices, routing — accounts-lite: single provisioned v1 account, account-keyed registry from day one); desktop remote host (opt-in, e2e encrypted); web login + pairing (§6); browse folders, sessions, transcripts live | 2–3 wk |
 | **P3 — Interactive** | Send prompts, remote approvals (presence, timeouts, audit), terminal read/write over WAN, session lifecycle (create/stop/rename) | 3–5 wk |
 | **P4 — Hardening** | Multi-device management + revocation UI, offline encrypted transcript mirror (read-only), audit log surface, terminal WAN tuning, view-only mode | 2–4 wk |
 
@@ -358,12 +362,14 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
   committed later track (§9).
 - **Is "desktop must be online for chat" acceptable for v1?** Yes — implied by starting
   with Model A; always-on arrives with cloud workspaces later.
+- **Personal first, product later.** The relay and protocol are multi-tenant-capable
+  from day one (everything is keyed by account), but v1 ships with a single provisioned
+  account and no billing. Full auth + billing becomes the P4 → cloud-track on-ramp,
+  not P2 scope.
 
 **Open (resolve one at a time, before P2):**
 
-1. Personal tool first, or multi-user product from day one? (drives auth, billing, relay
-   tenancy, and how paranoid the pairing UX must be)
-2. Is interactive terminal required at launch, or is chat + transcript + approvals enough?
+1. Is interactive terminal required at launch, or is chat + transcript + approvals enough?
 3. e2e encryption as default, or opt-in?
 4. Does the web client get a distinct visual identity, or is it the same UI in a tab?
 5. Mobile: is phone-sized layout in scope for v1? (renderer is desktop-laid-out today)
