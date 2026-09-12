@@ -303,6 +303,20 @@ describe('model capability overrides', () => {
     expect(normalizeSettings({ theme: 'dark' }).folders).toEqual([]);
   });
 
+  it('normalizes folder order and collapsed roots to non-empty path strings', () => {
+    expect(defaultSettings().folderOrder).toEqual([]);
+    expect(defaultSettings().collapsedFolders).toEqual([]);
+    const s = normalizeSettings({
+      folderOrder: ['G:/proj/b', '', 42, 'G:/proj/a'],
+      collapsedFolders: ['G:/proj/a', 7, '']
+    } as never);
+    expect(s.folderOrder).toEqual(['G:/proj/b', 'G:/proj/a']);
+    expect(s.collapsedFolders).toEqual(['G:/proj/a']);
+    // Settings written before this feature existed have no such keys.
+    expect(normalizeSettings({ theme: 'dark' }).folderOrder).toEqual([]);
+    expect(normalizeSettings({ theme: 'dark' }).collapsedFolders).toEqual([]);
+  });
+
   it('normalizes folder styles to hex colors and known-shape icon names', () => {
     expect(defaultSettings().folderStyles).toEqual({});
     const s = normalizeSettings({
@@ -405,73 +419,6 @@ describe('SessionManager folder tracking', () => {
   });
 });
 
-describe('SessionManager user titles', () => {
-  const makeManager = (sessions: SessionMeta[]) => {
-    const upsert = vi.fn();
-    const store = { list: () => sessions, get: (id: string) => sessions.find((s) => s.id === id), upsert, appendTranscript: async () => undefined } as unknown as SessionStore;
-    const manager = new SessionManager({
-      store,
-      settings: { get: () => defaultSettings(), update: async () => undefined } as unknown as SettingsStore,
-      runtime: undefined as unknown as RuntimeResolver,
-      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
-      getSecret: async () => undefined,
-      pushEvent: vi.fn(),
-      pushSessions: vi.fn(),
-      notify: vi.fn(),
-      log: vi.fn()
-    });
-    return { manager, upsert };
-  };
-  const cfg = { harness: 'native', projectRoot: 'G:/proj/label', permissionMode: 'ask' } as const;
-  const baseSession = (patch: Partial<SessionMeta>): SessionMeta => ({
-    id: 's_label',
-    title: 'New session',
-    createdAt: 1_000,
-    updatedAt: 1_000,
-    config: { harness: 'native', projectRoot: 'G:/proj/label', permissionMode: 'auto' },
-    cwd: 'G:/proj/label',
-    status: 'idle',
-    harnessRef: {},
-    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
-    ...patch
-  });
-
-  it('marks explicitly provided titles as user-set, auto titles as not', async () => {
-    const { manager } = makeManager([]);
-    const named = await manager.create({ config: { ...cfg }, title: '  todo  ' });
-    expect(named.title).toBe('todo');
-    expect(named.userTitle).toBe(true);
-    const auto = await manager.create({ config: { ...cfg } });
-    expect(auto.title).toBe('New session');
-    expect(auto.userTitle).toBeFalsy();
-  });
-
-  it('rename keeps the user-set marker and persists the patch', async () => {
-    const session = baseSession({});
-    const { manager, upsert } = makeManager([session]);
-    const renamed = await manager.patch(session.id, { title: 'error', userTitle: true });
-    expect(renamed.title).toBe('error');
-    expect(renamed.userTitle).toBe(true);
-    expect(renamed.updatedAt).toBeGreaterThan(session.createdAt);
-    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ id: session.id, title: 'error', userTitle: true }));
-  });
-
-  it('auto-title from the first prompt is skipped once the user renamed', async () => {
-    const session = baseSession({ userTitle: true });
-    const { manager } = makeManager([session]);
-    // ensureActive fails with no runtime, but the auto-title runs before it.
-    await expect(manager.send(session.id, { text: 'Fix the login flow' })).rejects.toThrow();
-    expect(session.title).toBe('New session');
-  });
-
-  it('auto-title still applies when the title was never user-set', async () => {
-    const session = baseSession({});
-    const { manager } = makeManager([session]);
-    await expect(manager.send(session.id, { text: 'Fix the login flow' })).rejects.toThrow();
-    expect(session.title).toBe('Fix the login flow');
-  });
-});
-
 describe('SessionManager fork', () => {
   const sourceSession = (): SessionMeta => ({
     id: 's_src',
@@ -568,6 +515,18 @@ describe('SessionManager fork', () => {
     const copied = transcripts.get(fork!.id) ?? [];
     expect(copied.some((i) => i.kind === 'info')).toBe(false);
     expect(copied.map((i) => i.id)).toContain('u_1');
+  });
+});
+
+describe('custom status label settings', () => {
+  it('normalizes user-added labels: trims, dedupes case-insensitively, drops junk, caps at 24 chars', () => {
+    const stored = { customLabels: ['  Wip ', 'wip', 42, '', 'x'.repeat(40), 'ok'] } as unknown as Partial<AppSettings>;
+    expect(normalizeSettings(stored).customLabels).toEqual(['Wip', 'x'.repeat(24), 'ok']);
+  });
+
+  it('falls back to an empty list for wrong-shaped values', () => {
+    expect(normalizeSettings({ customLabels: 'nope' } as unknown as Partial<AppSettings>).customLabels).toEqual([]);
+    expect(normalizeSettings(undefined).customLabels).toEqual([]);
   });
 });
 

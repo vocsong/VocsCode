@@ -90,6 +90,7 @@ export interface IpcContract {
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
   'sessions:delete': [{ id: string; removeWorktree?: boolean }, void];
   'sessions:rename': [{ id: string; title: string }, SessionMeta];
+  'sessions:label': [{ id: string; label?: string }, SessionMeta];
   'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean }, SessionMeta];
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
   /** Persists a pinned-section drag reorder: ids in their new display order. */
