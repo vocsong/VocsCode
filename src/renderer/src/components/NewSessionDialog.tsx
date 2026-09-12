@@ -38,6 +38,12 @@ export function NewSessionDialog() {
   const [customProvider, setCustomProvider] = useState({ id: '', name: '', baseUrl: '', envKey: '' });
   const [creating, setCreating] = useState(false);
 
+  // Focus the first-prompt textarea so typing can start immediately.
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    promptRef.current?.focus();
+  }, []);
+
   // The model column keeps the harness column's height; the model list scrolls inside it.
   const harnessColRef = useRef<HTMLElement>(null);
   const modelColRef = useRef<HTMLElement>(null);
@@ -263,7 +269,7 @@ export function NewSessionDialog() {
               </div>
             )}
             <div className="ns-prompt-box">
-              <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
+              <textarea ref={promptRef} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
               <label className="icon-btn ns-attach" title="Attach image">
                 <Icon name="image" size={14} />
                 <input type="file" accept="image/*" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
