@@ -2716,25 +2716,23 @@ body.resizing {
   .branch-actions {
     flex-wrap: nowrap;
   }
-  /* Issues: number rides with the title, author folds under it, actions stay on the right. */
+  /* Issues keep their full header table at every width; the fixed columns just give
+     back some width (a flexible # column here would misalign rows against each other). */
+  .issue-cols,
   .issue-row {
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    grid-template-areas:
-      'num name actions'
-      'num author actions';
+    grid-template-columns: 40px minmax(0, 1fr) 52px 52px;
+    gap: 4px;
+    padding-left: 8px;
+    padding-right: 8px;
   }
-  .issue-row > :nth-child(1) {
-    grid-area: num;
-  }
-  .issue-row > :nth-child(2) {
-    grid-area: name;
-    max-width: none;
-  }
-  .issue-row > :nth-child(3) {
-    grid-area: author;
-  }
-  .issue-row > :nth-child(4) {
-    grid-area: actions;
+}
+/* Ultra-narrow: same header table, tighter still. */
+@container (max-width: 399.9px) {
+  .issue-cols,
+  .issue-row {
+    grid-template-columns: 36px minmax(0, 1fr) 44px 44px;
+    padding-left: 6px;
+    padding-right: 6px;
   }
 }
 .num {
