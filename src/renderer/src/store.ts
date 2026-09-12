@@ -63,7 +63,13 @@ interface State {
   newSessionRoot: string | null;
   /** Ctrl+N quick picker: choose a known folder, then start a session with defaults. */
   quickSessionOpen: boolean;
+  /** First prompt the quick picker starts with, e.g. seeded from a GitHub issue. */
+  quickSessionPrefill?: string;
   paletteOpen: boolean;
+  /** Ctrl+Shift+F deep search modal over titles and transcript contents. */
+  searchOpen: boolean;
+  /** Pending jump-to-match: Transcript scrolls to the item once its session is loaded. */
+  searchJump: { sessionId: string; itemId: string; n: number } | null;
   showThinking: boolean;
   toasts: Toast[];
   changesVersion: number;
@@ -86,10 +92,14 @@ interface State {
   openNewSession(open: boolean): void;
   /** Opens the new session dialog for a folder; without one, asks the user to pick a project folder first. */
   startNewSession(root?: string | null): Promise<void>;
-  openQuickSession(open: boolean): void;
+  /** Opens the quick picker; `prefill` seeds the first prompt (cleared again on close). */
+  openQuickSession(open: boolean, prefill?: string): void;
   /** Starts a session for a known folder straight from settings defaults, skipping the dialog. */
   createQuickSession(root: string, first?: { prompt?: string; images?: ImageAttachment[] }): Promise<void>;
   openPalette(open: boolean): void;
+  openSearch(open: boolean): void;
+  /** Closes the search modal, activates the session and scrolls to the matched item. */
+  jumpToSearchMatch(sessionId: string, itemId?: string): void;
   toggleThinking(): void;
   toast(text: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
@@ -174,7 +184,10 @@ export const useStore = create<State>((set, get) => ({
   newSessionOpen: false,
   newSessionRoot: null,
   quickSessionOpen: false,
+  quickSessionPrefill: undefined,
   paletteOpen: false,
+  searchOpen: false,
+  searchJump: null,
   showThinking: true,
   toasts: [],
   changesVersion: 0,
@@ -366,8 +379,8 @@ export const useStore = create<State>((set, get) => ({
     }
     set({ newSessionOpen: true, newSessionRoot: root });
   },
-  openQuickSession(quickSessionOpen) {
-    set({ quickSessionOpen });
+  openQuickSession(quickSessionOpen, quickSessionPrefill) {
+    set(quickSessionOpen ? { quickSessionOpen, quickSessionPrefill } : { quickSessionOpen, quickSessionPrefill: undefined });
   },
   async createQuickSession(root, first) {
     const settings = get().settings;
@@ -395,6 +408,13 @@ export const useStore = create<State>((set, get) => ({
   },
   openPalette(paletteOpen) {
     set({ paletteOpen });
+  },
+  openSearch(searchOpen) {
+    set({ searchOpen });
+  },
+  jumpToSearchMatch(sessionId, itemId) {
+    set((s) => ({ searchOpen: false, searchJump: itemId ? { sessionId, itemId, n: (s.searchJump?.n ?? 0) + 1 } : null }));
+    void get().setActive(sessionId);
   },
   toggleThinking() {
     set((s) => ({ showThinking: !s.showThinking }));

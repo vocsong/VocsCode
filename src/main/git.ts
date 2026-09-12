@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
-import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitPrInfo, GitPullRequest, GitPullRequestList, GitSummary, GitWorktreeInfo } from '../shared/types';
+import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import { runCapture, which } from './runtime';
 import { exists } from './util/fs';
@@ -488,6 +488,46 @@ export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> 
     return { prs, fetchedAt };
   } catch {
     return { prs: [], fetchedAt, error: 'gh pr list returned something that is not JSON' };
+  }
+}
+
+const ISSUE_LIST_FIELDS = 'number,title,state,url,author,labels,comments,createdAt,updatedAt,closedAt';
+
+/** Pulls the repo's issues from GitHub (`gh issue list`, every state, newest first) for the Git panel's Issues view. */
+export async function gitIssues(cwd: string): Promise<GitIssueList> {
+  const fetchedAt = Date.now();
+  if (!ghBin()) return { issues: [], fetchedAt, ghMissing: true };
+  const root = await gitRoot(cwd);
+  if (!root) return { issues: [], fetchedAt, error: 'Not a git repository' };
+  const r = await gh(root, ['issue', 'list', '--state', 'all', '--limit', '100', '--json', ISSUE_LIST_FIELDS], 30_000);
+  if (r.code !== 0) return { issues: [], fetchedAt, error: (r.stderr || r.stdout).trim() || 'gh issue list failed' };
+  try {
+    const list = JSON.parse(r.stdout.trim()) as Record<string, unknown>[];
+    const issues: GitIssue[] = [];
+    for (const p of list) {
+      if (typeof p.number !== 'number' || typeof p.url !== 'string') continue;
+      const state = p.state === 'CLOSED' ? 'CLOSED' : 'OPEN';
+      const author = p.author && typeof p.author === 'object' ? (p.author as { login?: string; name?: string }) : undefined;
+      const issue: GitIssue = { number: p.number, title: typeof p.title === 'string' ? p.title : '', state, url: p.url };
+      if (author?.login || author?.name) issue.author = author.login || author.name;
+      if (Array.isArray(p.labels)) {
+        const labels = p.labels
+          .filter((l): l is { name?: string; color?: string } => !!l && typeof l === 'object')
+          .map((l) => ({ name: typeof l.name === 'string' ? l.name : '', color: typeof l.color === 'string' ? l.color : undefined }))
+          .filter((l) => l.name);
+        if (labels.length > 0) issue.labels = labels.map((l) => (l.color ? l : { name: l.name }));
+      }
+      if (typeof p.comments === 'number') issue.comments = p.comments;
+      const created = isoMs(p.createdAt), updated = isoMs(p.updatedAt), closed = isoMs(p.closedAt);
+      if (created !== undefined) issue.createdAt = created;
+      if (updated !== undefined) issue.updatedAt = updated;
+      if (closed !== undefined) issue.closedAt = closed;
+      issues.push(issue);
+    }
+    issues.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || b.number - a.number);
+    return { issues, fetchedAt };
+  } catch {
+    return { issues: [], fetchedAt, error: 'gh issue list returned something that is not JSON' };
   }
 }
 
