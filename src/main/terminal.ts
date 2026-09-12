@@ -198,6 +198,8 @@ interface Term {
 
 export class TerminalManager {
   private terms = new Map<string, Term>();
+  /** Renderer reloads can request overlapping attaches; serialize each terminal's snapshot drain. */
+  private attachChains = new Map<string, Promise<{ snapshot: string; seq: number; info: TerminalInfo }>>();
   private listTimer: NodeJS.Timeout | null = null;
 
   constructor(private deps: TerminalManagerDeps) {}
@@ -235,6 +237,19 @@ export class TerminalManager {
    * last chunk in it. Restored tabs get their shell here, on first sight.
    */
   async attach(id: string, cols: number, rows: number): Promise<{ snapshot: string; seq: number; info: TerminalInfo }> {
+    const previous = this.attachChains.get(id) ?? Promise.resolve();
+    const run = previous
+      .catch(() => undefined)
+      .then(() => this.attachOnce(id, cols, rows));
+    this.attachChains.set(id, run);
+    try {
+      return await run;
+    } finally {
+      if (this.attachChains.get(id) === run) this.attachChains.delete(id);
+    }
+  }
+
+  private async attachOnce(id: string, cols: number, rows: number): Promise<{ snapshot: string; seq: number; info: TerminalInfo }> {
     const t = this.must(id);
     if (cols > 0 && rows > 0) this.resize(id, cols, rows);
     if (!t.pty && t.info.restored) {
@@ -251,6 +266,7 @@ export class TerminalManager {
     t.attached = false;
     t.pty?.pause();
     await new Promise<void>((r) => t.screen.write('', r));
+    if (this.terms.get(id) !== t) throw new Error('Terminal not found');
     const snapshot = t.serializer.serialize({ scrollback: this.deps.settings().scrollback });
     const seq = t.seq;
     t.attached = true;
@@ -334,6 +350,7 @@ export class TerminalManager {
     const t = this.terms.get(id);
     if (!t) return;
     this.terms.delete(id);
+    this.attachChains.delete(id);
     t.attached = false;
     t.gen++;
     if (t.pty) killProcessTree(t.pty);
@@ -382,11 +399,20 @@ export class TerminalManager {
     for (const t of this.terms.values()) t.screen.options.scrollback = ts.scrollback;
   }
 
-  /** Writes every screen to disk so the tabs come back after a restart. */
-  async persist(): Promise<void> {
+  /** Writes every screen to disk so the tabs come back after a restart. Restored tabs go first. */
+  async persist(deadline?: number): Promise<void> {
     if (!this.deps.settings().restoreOnStartup) return;
     await ensureDir(this.deps.dir);
-    for (const t of this.terms.values()) {
+    const terms = [...this.terms.values()].sort((a, b) => Number(!!b.info.restored) - Number(!!a.info.restored));
+    let warned = false;
+    for (const t of terms) {
+      if (deadline !== undefined && Date.now() >= deadline) {
+        if (!warned) {
+          warned = true;
+          this.deps.log('warn', `terminal snapshot deadline reached; ${terms.length - terms.indexOf(t)} terminal(s) were not persisted`);
+        }
+        break;
+      }
       await new Promise<void>((r) => t.screen.write('', r)); // output still queued in the parser must make it in
       const snapshot = t.serializer.serialize({ scrollback: this.deps.settings().scrollback });
       const data: Persisted = { info: { ...t.info, pid: undefined, exit: undefined, restored: true }, cols: t.cols, rows: t.rows, snapshot };
@@ -418,8 +444,8 @@ export class TerminalManager {
   }
 
   /** App quit: persist, then take the shells down with us. */
-  async shutdown(): Promise<void> {
-    await this.persist();
+  async shutdown(deadline?: number): Promise<void> {
+    await this.persist(deadline);
     for (const t of this.terms.values()) {
       t.attached = false;
       t.gen++;

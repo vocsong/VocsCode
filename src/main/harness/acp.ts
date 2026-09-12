@@ -202,6 +202,9 @@ export class AcpAdapter implements HarnessAdapter {
     return {
       requestPermission: async (params: acp.RequestPermissionRequest) => this.onRequestPermission(params),
       sessionUpdate: async (params: acp.SessionNotification) => this.onSessionUpdate(params),
+      // ACP reads intentionally retain the adapter-wide read policy: an absolute path is allowed
+      // even when it is outside the session workspace. Writes and commands still go through the
+      // permission gate; callers should only use ACP with an agent they trust.
       readTextFile: async (params: acp.ReadTextFileRequest) => {
         const p = params as { path: string; line?: number | null; limit?: number | null };
         const abs = path.isAbsolute(p.path) ? p.path : path.join(cwd(), p.path);

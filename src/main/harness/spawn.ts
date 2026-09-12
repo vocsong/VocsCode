@@ -4,6 +4,10 @@ const isWin = process.platform === 'win32';
 
 /** Quote one argument for cmd.exe the way cross-spawn does. */
 export function quoteWin(arg: string): string {
+  // cmd.exe expands percent pairs and treats newlines as command separators before the target
+  // shim sees them. There is no reliable escaping for every cmd mode, so fail closed at the
+  // .cmd/.bat spawn boundary rather than silently changing an argument.
+  if (/[%\r\n]/.test(arg)) throw new Error('Windows command arguments cannot contain percent signs or newlines');
   if (arg === '') return '""';
   if (!/[\s"&|<>^()%!]/.test(arg)) return arg;
   // Escape backslashes that precede a quote, then the quote itself; trailing backslashes double up.

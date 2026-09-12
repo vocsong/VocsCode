@@ -41,12 +41,14 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
   }
 }
 
-async function writeJsonOnce(file: string, data: unknown): Promise<void> {
+async function writeJsonOnce(file: string, data: unknown, mode?: number): Promise<void> {
   await ensureDir(path.dirname(file));
   const tmp = `${file}.${process.pid}.${Date.now()}.${(tmpCounter = (tmpCounter + 1) % 1_000_000)}.tmp`;
   try {
     const handle = await fs.open(tmp, 'w');
     try {
+      // Secret stores pass 0600 so the restrictive mode is present before the atomic rename.
+      if (mode !== undefined) await handle.chmod(mode);
       await handle.writeFile(JSON.stringify(data, null, 2), 'utf8');
       // Flush to disk before the rename: without the fsync an unclean shutdown can leave the
       // renamed target zero-filled (size intact, data still in cache), wiping the store.
@@ -69,10 +71,10 @@ const writeChain = new Map<string, Promise<void>>();
  * path are serialized rather than racing, because on Windows two concurrent renames onto one target
  * make the loser fail with EPERM. The rename is also retried for transient locks (antivirus, indexer).
  */
-export async function writeJson(file: string, data: unknown): Promise<void> {
+export async function writeJson(file: string, data: unknown, options: { mode?: number } = {}): Promise<void> {
   const run = (writeChain.get(file) ?? Promise.resolve()).then(
-    () => writeJsonOnce(file, data),
-    () => writeJsonOnce(file, data)
+    () => writeJsonOnce(file, data, options.mode),
+    () => writeJsonOnce(file, data, options.mode)
   );
   writeChain.set(file, run);
   try {

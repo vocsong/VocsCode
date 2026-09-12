@@ -254,7 +254,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         return true;
       }
       case 'open':
-        if (arg === 'editor') await invoke('app:openInEditor', { path: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
+        if (arg === 'editor') await invoke('app:openInEditor', { path: session.cwd, sessionId: session.id }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
         else if (arg === 'terminal') await invoke('app:openTerminal', { cwd: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
         else await invoke('app:openPath', { path: session.cwd, sessionId: session.id });
         return true;

@@ -44,15 +44,29 @@ export class SecretStore {
     return !!this.data[id];
   }
 
+  get hasFallback(): boolean {
+    return Object.values(this.data).some((value) => value.startsWith('b64:'));
+  }
+
+  get status(): { encryptionAvailable: boolean; hasFallback: boolean } {
+    return { encryptionAvailable: this.encryptionAvailable, hasFallback: this.hasFallback };
+  }
+
+  private persist(): Promise<void> {
+    // Keys may be reversible when safeStorage is unavailable; never leave the file readable by
+    // other users while that fallback is in use (and keep the mode for encrypted values too).
+    return writeJson(this.file, this.data, { mode: 0o600 });
+  }
+
   async set(id: string, value: string): Promise<void> {
     const trimmed = value.trim();
     if (!trimmed) return this.clear(id);
     this.data[id] = this.encryptionAvailable ? 'enc:' + safeStorage.encryptString(trimmed).toString('base64') : 'b64:' + Buffer.from(trimmed, 'utf8').toString('base64');
-    await writeJson(this.file, this.data);
+    await this.persist();
   }
 
   async clear(id: string): Promise<void> {
     delete this.data[id];
-    await writeJson(this.file, this.data);
+    await this.persist();
   }
 }
