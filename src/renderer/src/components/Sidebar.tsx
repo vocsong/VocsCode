@@ -1,12 +1,14 @@
 /** Session list grouped by project, with live status badges per harness. */
 import React, { useMemo, useRef, useState } from 'react';
-import type { HarnessId, SessionMeta } from '../../../shared/types';
-import { HARNESS_BY_ID, HARNESSES } from '../../../shared/harness-meta';
+import type { SessionMeta } from '../../../shared/types';
+import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, harnessShort, relTime } from '../format';
+import { archiveSession } from '../sessionActions';
 import { useStore } from '../store';
 import { Resizer } from './Resizer';
 import { FolderBranch } from './FolderBranch';
+import { ForkIntoDropdown } from './ForkInto';
 import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
 
 const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
@@ -333,7 +335,6 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
   dnd: DndState;
   dndHandlers: DndHandlers;
 }) {
-  const availability = useStore((st) => st.availability);
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(s.title);
   const h = HARNESS_BY_ID[s.config.harness];
@@ -344,48 +345,6 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
   const commit = async () => {
     setRenaming(false);
     if (title.trim() && title !== s.title) await invoke('sessions:rename', { id: s.id, title: title.trim() });
-  };
-  const fork = (harness: HarnessId) => {
-    void invoke('sessions:fork', { id: s.id, harness }).then((f) => {
-      if (f) toast(`Forked into ${harnessShort(f.config.harness)}`, 'success');
-    });
-  };
-  const archiveRow = async () => {
-    if (s.worktreeBranch) {
-      const ok = await askConfirm({
-        title: `Remove the worktree for "${s.title}"?`,
-        body: `The worktree folder is deleted; uncommitted changes block this. The branch ${s.worktreeBranch} is kept — unarchiving recreates the worktree.`,
-        confirmLabel: 'Archive & remove',
-        danger: true
-      });
-      if (!ok) return;
-      try {
-        await invoke('sessions:archive', { id: s.id, archived: true, removeWorktree: true });
-        toast('Worktree removed; the branch is kept', 'success');
-      } catch (e) {
-        // A dirty worktree refuses removal; offer to discard the changes and retry with force.
-        const msg = e instanceof Error ? e.message : String(e);
-        if (!msg.includes('modified or untracked files')) {
-          toast(msg, 'error');
-          return;
-        }
-        const force = await askConfirm({
-          title: 'Discard uncommitted changes?',
-          body: `The worktree has modified or untracked files. Removing it discards them; the branch ${s.worktreeBranch} is kept.`,
-          confirmLabel: 'Discard & remove',
-          danger: true
-        });
-        if (!force) return;
-        try {
-          await invoke('sessions:archive', { id: s.id, archived: true, removeWorktree: true, forceWorktree: true });
-          toast('Worktree removed with its changes; the branch is kept', 'success');
-        } catch (e2) {
-          toast(e2 instanceof Error ? e2.message : String(e2), 'error');
-        }
-      }
-      return;
-    }
-    void invoke('sessions:archive', { id: s.id, archived: true });
   };
   const deleteRow = async () => {
     const ok = await askConfirm({
@@ -485,27 +444,8 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
             >
               <Icon name="pin" size={15} />
             </button>
-            <Dropdown align="right" width={190} trigger={() => (
-              <button type="button" className="row-act-btn" title="Fork into another harness" aria-label="Fork session">
-                <Icon name="fork" size={15} />
-              </button>
-            )}>
-              {(close) => (
-                <>
-                  <MenuItem disabled>Fork into</MenuItem>
-                  {[h, ...HARNESSES.filter((x) => x.id !== s.config.harness)].map((x) => {
-                    const av = availability[x.id];
-                    const unavailable = !!av && !av.available;
-                    return (
-                      <MenuItem key={x.id} active={x.id === s.config.harness} disabled={unavailable} onClick={() => { close(); fork(x.id); }}>
-                        {harnessShort(x.id)}{unavailable ? ' (not installed)' : ''}
-                      </MenuItem>
-                    );
-                  })}
-                </>
-              )}
-            </Dropdown>
-            <button type="button" className="row-act-btn" title={s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={() => void archiveRow()}>
+            <ForkIntoDropdown session={s} />
+            <button type="button" className="row-act-btn" title={s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={() => void archiveSession(s, toast)}>
               <Icon name="archive" size={15} />
             </button>
           </>
