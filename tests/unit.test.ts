@@ -596,6 +596,13 @@ describe('git branch/worktree plumbing', () => {
     // Unarchive still recreates the worktree over the stale registration.
     await restoreWorktree(repo, wt2, 'wtcycle');
     expect((await gitWorktrees(repo)).worktrees.map((w) => w.branch)).toContain('wtcycle');
+    // A folder whose registration git lost (e.g. its .git link was deleted) is not a working tree:
+    // removal prunes and deletes the folder instead of blocking archive.
+    await fs.rm(path.join(wt2, '.git'));
+    await removeWorktree(repo, wt2, { force: false });
+    await expect(fs.stat(wt2)).rejects.toMatchObject({ code: 'ENOENT' });
+    await restoreWorktree(repo, wt2, 'wtcycle');
+    expect((await gitWorktrees(repo)).worktrees.map((w) => w.branch)).toContain('wtcycle');
     // A branch with its worktree still checked out cannot be deleted; remove the worktree first.
     await removeWorktree(repo, wt2, { force: false });
     g('branch', '-D', 'wtcycle');

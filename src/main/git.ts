@@ -718,7 +718,21 @@ export async function removeWorktree(projectRoot: string, wtPath: string, opts: 
   const force = opts.force ?? true;
   // Without --force git refuses a worktree holding uncommitted changes; callers decide whether to surface that.
   const r = await git(root, force ? ['worktree', 'remove', '--force', wtPath] : ['worktree', 'remove', wtPath], 60_000);
-  if (r.code !== 0) throw new Error(`git worktree remove failed: ${r.stderr || r.stdout}`);
+  if (r.code !== 0) {
+    // A stale or foreign folder (registration pruned, .git link deleted, path drift, plain directory)
+    // cannot be removed as a worktree, and archive must not block on it: drop the registration and the
+    // folder directly. A folder that IS a worktree of this repo keeps its real error (dirty tree, ...).
+    const probe = await git(wtPath, ['rev-parse', '--git-common-dir']);
+    const eq = (a: string, b: string) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+    const commonDir = probe.code === 0 ? path.resolve(probe.stdout.trim()) : '';
+    const ours = eq(commonDir, path.resolve(root)) || eq(commonDir, path.resolve(root, '.git'));
+    if (probe.code === 0 && ours) {
+      throw new Error(`git worktree remove failed: ${r.stderr || r.stdout}`);
+    }
+    await git(root, ['worktree', 'prune']);
+    await fs.rm(wtPath, { recursive: true, force: true }).catch(() => undefined);
+    return;
+  }
   await git(root, ['worktree', 'prune']);
 }
 
