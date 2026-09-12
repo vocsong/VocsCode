@@ -2695,43 +2695,26 @@ body.resizing {
   min-width: 0;
 }
 
-/* Narrow panel: two-line rows — name + behind/ahead on line one, updated time +
-   status + actions on line two — so the name keeps the full width. The column
-   header is meaningless here. Secondary inline actions collapse into the ⋯ menu,
-   which already offers everything they do. */
+/* Narrow panel: keep the table layout and its column header, just drop the
+   Updated, Behind/Ahead and Status columns so the name keeps the width. */
 @container (max-width: 619.9px) {
-  .branches-cols {
+  .branches-cols:not(.issue-cols),
+  .branch-row:not(.issue-row),
+  .pr-cols,
+  .pr-row:not(.issue-row) {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .branches-cols:not(.issue-cols) > :nth-child(2),
+  .branches-cols:not(.issue-cols) > :nth-child(3),
+  .branches-cols:not(.issue-cols) > :nth-child(4),
+  .branch-row:not(.issue-row) > :nth-child(2),
+  .branch-row:not(.issue-row) > :nth-child(3),
+  .branch-row:not(.issue-row) > :nth-child(4) {
     display: none;
   }
-  .branch-row {
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    grid-template-areas:
-      'name name num'
-      'meta status actions';
-    row-gap: 3px;
-    padding: 7px 10px;
-  }
-  .branch-row > :nth-child(1) {
-    grid-area: name;
-  }
-  .branch-row > :nth-child(2) {
-    grid-area: meta;
-  }
-  .branch-row > :nth-child(3) {
-    grid-area: num;
-  }
-  .branch-row > :nth-child(4) {
-    grid-area: status;
-  }
-  .branch-row > :nth-child(5) {
-    grid-area: actions;
-  }
-  /* Only the ⋯ menu stays; wrapping here is what made narrow rows pile up. */
+  /* One line of actions even when the name column is squeezed. */
   .branch-actions {
     flex-wrap: nowrap;
-  }
-  .branch-actions .branch-inline {
-    display: none;
   }
   /* Issues: number rides with the title, author folds under it, actions stay on the right. */
   .issue-row {
@@ -2752,21 +2735,6 @@ body.resizing {
   }
   .issue-row > :nth-child(4) {
     grid-area: actions;
-  }
-}
-/* Ultra-narrow panel: one line per row — name (+ badges) and the actions menu.
-   Updated time, behind/ahead and status are all reachable via the ⋯ menu or
-   tooltips, so they give their space back to the name. */
-@container (max-width: 399.9px) {
-  .branch-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas: 'name actions';
-    row-gap: 0;
-  }
-  .branch-row > :nth-child(2),
-  .branch-row > :nth-child(3),
-  .branch-row > :nth-child(4) {
-    display: none;
   }
 }
 .num {
