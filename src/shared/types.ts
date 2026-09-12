@@ -66,6 +66,8 @@ export interface SecretStatus {
   encryptionAvailable: boolean;
   /** Whether one or more stored values use the reversible fallback encoding. */
   hasFallback: boolean;
+  /** Provider ids whose stored values use the reversible fallback encoding. */
+  fallbackProviderIds: string[];
 }
 
 export interface ProviderConfig {

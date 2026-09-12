@@ -7,6 +7,9 @@ export interface FileChangeOptions {
   addWhenEmpty?: boolean;
   /** Header shown for the old side of a newly-created file. */
   newFileHeader?: string;
+  /** Optional patch labels, used by raw git diffs that expect /dev/null for an add. */
+  oldFileName?: string;
+  newFileName?: string;
   context?: number;
 }
 
@@ -18,6 +21,14 @@ export function makeFileChange(cwd: string, file: string, before: string | null 
   return {
     path: rel,
     kind: isAdd ? 'add' : 'update',
-    diff: createTwoFilesPatch(rel, rel, oldText, after, isAdd ? options.newFileHeader ?? '' : '', '', { context: options.context ?? 3 })
+    diff: createTwoFilesPatch(
+      isAdd ? options.oldFileName ?? rel : rel,
+      options.newFileName ?? rel,
+      oldText,
+      after,
+      isAdd ? options.newFileHeader ?? '' : '',
+      '',
+      { context: options.context ?? 3 }
+    )
   };
 }
