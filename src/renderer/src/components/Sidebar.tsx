@@ -197,7 +197,7 @@ export function Sidebar() {
     <aside className="sidebar">
       <div className="sidebar-top">
         <div className="brand">
-          <Icon name="logo" size={18} />
+          <Icon name="logo" size={22} />
           <span>Vocs Code</span>
         </div>
         <Button variant="primary" size="sm" icon="folder" onClick={() => void startNewSession()} title="New folder (Ctrl+N)">
