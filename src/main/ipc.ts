@@ -1,6 +1,6 @@
 /** Binds the transport-agnostic handler registry (handlers.ts) to Electron's ipcMain and pushes events to the renderer window. */
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
-import { createHandlerRegistry, type DesktopBridge } from './handlers';
+import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry } from './handlers';
 import type { AnalyticsStore } from './analytics';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
@@ -17,6 +17,8 @@ export interface IpcDeps {
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
   search: SearchIndex;
+  /** Extra push sink for non-window clients (the localhost web server today, the relay later). */
+  broadcast?: (channel: string, payload: unknown) => void;
   getWindow: () => BrowserWindow | null;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }
@@ -67,7 +69,7 @@ function desktopBridge(deps: IpcDeps): DesktopBridge {
   };
 }
 
-export function registerIpc(deps: IpcDeps): void {
+export function registerIpc(deps: IpcDeps): HandlerRegistry {
   const registry = createHandlerRegistry({
     settings: deps.settings,
     secrets: deps.secrets,
@@ -77,8 +79,12 @@ export function registerIpc(deps: IpcDeps): void {
     analytics: deps.analytics,
     search: deps.search,
     log: deps.log,
-    push: (channel, payload) => pushToRenderer(deps.getWindow(), channel, payload),
+    push: (channel, payload) => {
+      pushToRenderer(deps.getWindow(), channel, payload);
+      deps.broadcast?.(channel, payload);
+    },
     desktop: desktopBridge(deps)
   });
   for (const channel of registry.channels()) ipcMain.handle(channel, (_e, req: unknown) => registry.invoke(channel, req));
+  return registry;
 }

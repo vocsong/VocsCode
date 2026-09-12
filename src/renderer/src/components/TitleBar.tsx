@@ -5,7 +5,7 @@
  * reserves that space; on macOS the traffic lights sit in the padded left edge instead.
  */
 import React, { useEffect, useRef, useState } from 'react';
-import { invoke, isMac, modKey } from '../api';
+import { invoke, isMac, isWeb, modKey } from '../api';
 import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
 import { Icon, MenuItem } from './ui';
@@ -33,7 +33,7 @@ export function TitleBar() {
   const title = view === 'settings' ? 'Settings · Vocs Code' : session ? `${session.title} · Vocs Code` : 'Vocs Code';
 
   return (
-    <div className={`titlebar ${isMac ? 'titlebar-mac' : ''}`}>
+    <div className={`titlebar ${isMac ? 'titlebar-mac' : ''} ${isWeb ? 'titlebar-web' : ''}`}>
       <div className="titlebar-lead">
         <TitleBarButton icon="sidebar" label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} hint={`${modKey}+B`} onClick={toggleSidebar} />
         <TitleBarButton icon="arrowLeft" label="Back" hint={isMac ? '⌘[' : 'Alt+←'} disabled={!canBack} onClick={() => void navBack()} />
