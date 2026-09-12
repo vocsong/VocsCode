@@ -139,6 +139,7 @@ describe('analytics dashboard', () => {
     summary.modelTools = [
       { key: 'p/opus', label: 'opus', name: 'Bash', calls: 10, errors: 2, declined: 0, durationMs: 0 },
       { key: 'p/glm', label: 'glm', name: 'Bash', calls: 4, errors: 1, declined: 0, durationMs: 0 },
+      { key: 'p/opus', label: 'opus', name: 'Read', calls: 0, errors: 0, declined: 0, durationMs: 0 },
       { key: 'p/glm', label: 'glm', name: 'Read', calls: 2, errors: 0, declined: 0, durationMs: 0 }
     ];
     const { container } = render(<AnalyticsDashboard />);
@@ -152,8 +153,10 @@ describe('analytics dashboard', () => {
     expect(table).toBeTruthy();
     expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Tool', 'opus', 'glm']);
     const bashRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('Bash')) as HTMLTableRowElement;
-    expect(bashRow.textContent).toContain('20%'); // 2 errors in 10 calls
-    expect(bashRow.textContent).toContain('25%'); // 1 error in 4 calls
+    expect(bashRow.textContent).toContain('(2/10) 20%');
+    expect(bashRow.textContent).toContain('(1/4) 25%');
+    const readRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('Read')) as HTMLTableRowElement;
+    expect(Array.from(readRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['Read', '—', '(0/2) 0%']);
   });
 
   it('lets the legend hide a series and every chart card swap to its table', async () => {
