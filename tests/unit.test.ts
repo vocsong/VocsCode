@@ -14,6 +14,7 @@ import { isDangerousCommand } from '../src/main/harness/types';
 import { normalizeSettings, defaultSettings } from '../src/main/settings';
 import type { SettingsStore } from '../src/main/settings';
 import { SessionManager } from '../src/main/session-manager';
+import { generateSessionTitle, sanitizeLlmTitle, titleFromPrompt } from '../src/main/session-title';
 import type { RuntimeResolver } from '../src/main/runtime';
 import { piHasCredentials } from '../src/main/runtime';
 import { estimateCostUsd, findPricing } from '../src/main/models/static-models';
@@ -48,6 +49,48 @@ const safeStorageMock = vi.hoisted(() => ({
   }
 }));
 vi.mock('electron', () => ({ safeStorage: safeStorageMock }));
+
+describe('auto session titles', () => {
+  it('caps derived titles at 6 words', () => {
+    expect(titleFromPrompt('Fix the bug where the sidebar flickers when switching folders')).toBe('Fix the bug where the sidebar');
+  });
+
+  it('keeps short prompts whole and only uses the first line', () => {
+    expect(titleFromPrompt('Add dark mode')).toBe('Add dark mode');
+    expect(titleFromPrompt('First line stays\nsecond line ignored')).toBe('First line stays');
+  });
+
+  it('still enforces the 60 char cap on long words', () => {
+    const title = titleFromPrompt('Supercalifragilisticexpialidocious antidisestablishmentarianism floccinaucinihilipilification');
+    expect(title.length).toBeLessThanOrEqual(60);
+  });
+});
+
+describe('LLM session titles', () => {
+  const getSecret = async () => undefined;
+
+  it('strips quotes and preamble from model replies and keeps the 6-word cap', () => {
+    expect(sanitizeLlmTitle('"Fix the sidebar flicker on folder switch"')).toBe('Fix the sidebar flicker on folder');
+    expect(sanitizeLlmTitle('Title: Refactor auth module.')).toBe('Title: Refactor auth module');
+    expect(sanitizeLlmTitle('  \n\n  ')).toBeNull();
+  });
+
+  it('returns null when no enabled provider has a usable key', async () => {
+    const providers = [{
+      id: 'anthropic', kind: 'anthropic', name: 'Anthropic', enabled: true, hasApiKey: false, models: []
+    }];
+    const title = await generateSessionTitle('Fix the bug', providers as never, getSecret);
+    expect(title).toBeNull();
+  });
+
+  it('ignores disabled providers', async () => {
+    const providers = [{
+      id: 'anthropic', kind: 'anthropic', name: 'Anthropic', enabled: false, hasApiKey: true, models: []
+    }];
+    const title = await generateSessionTitle('Fix the bug', providers as never, getSecret);
+    expect(title).toBeNull();
+  });
+});
 
 describe('LineSplitter', () => {
   it('splits on LF only and strips CR', () => {
