@@ -15,7 +15,9 @@ export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsS
   const dates = scope.days.map((d) => d.date);
   const calls = splitSeries(scope, split, 'toolCalls');
   const errorRate = tt.calls > 0 ? tt.errors / tt.calls : null;
-  const timed = scope.tools.some((x) => x.durationMs > 0);
+  // Most harnesses report no tool timing, so the average is over the calls of tools that do.
+  const timedCalls = scope.tools.filter((x) => x.durationMs > 0).reduce((a, x) => a + x.calls, 0);
+  const timed = timedCalls > 0;
   const files = allFiles ? scope.files : scope.files.slice(0, 15);
   const kindLegend = FILE_KINDS.map((k) => ({ key: k.key, label: k.label, color: k.color }));
   const toolSub = (x: Scope['tools'][number]) => {
@@ -33,7 +35,7 @@ export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsS
         <StatTile label="Declined" value={fmtCompact(tt.declined)} sub="approvals you refused" />
         <StatTile label="Distinct tools" value={fmtCompact(scope.tools.length)} sub={scope.tools[0] ? `${scope.tools[0].name || '(unnamed)'} is the busiest` : undefined} />
         <StatTile label="Files touched" value={fmtCompact(scope.files.length)} sub={scope.files.length ? `${plural(scope.files.reduce((a, f) => a + f.total, 0), 'change')}` : undefined} />
-        {timed && <StatTile label="Avg tool time" value={fmtMs(tt.durationMs / Math.max(1, tt.calls))} sub="over tools that report timing" />}
+        {timed && <StatTile label="Avg tool time" value={fmtMs(tt.durationMs / timedCalls)} sub={`over ${plural(timedCalls, 'timed call')}`} />}
       </KpiGrid>
 
       <div className="agrid agrid-meter">

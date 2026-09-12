@@ -87,6 +87,8 @@ export interface RangeRollup {
   sessionIds: string[];
   /** Usage on days that predate per-dimension tracking: inside the totals, but in no bucket. */
   unattributed: UsageCounters;
+  /** Days whose slices were estimated from session totals rather than recorded live. */
+  estimatedDays: number;
 }
 
 function bucketsOf(days: AnalyticsDayPoint[], dim: SliceDimension): UsageBucket[] {
@@ -137,6 +139,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
   }
   const unattributed = emptyCounters();
   for (const f of COUNTER_FIELDS) unattributed[f] = Math.max(0, totals[f] - attributed[f]);
+  const estimatedDays = days.filter((d) => d.usage.by?.estimated).length;
 
   const toolRows: ToolUsageRow[] = Object.entries(tools)
     .map(([name, usage]) => ({ name, ...usage }))
@@ -160,7 +163,8 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
     toolTotals,
     files: fileRows,
     sessionIds: [...ids],
-    unattributed
+    unattributed,
+    estimatedDays
   };
 }
 

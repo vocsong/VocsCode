@@ -289,7 +289,7 @@ export function registerIpc(deps: IpcDeps): void {
   });
   handle('sessions:rename', ({ id, title }) => sessions.patch(id, { title }));
   handle('sessions:label', ({ id, label }) => sessions.patch(id, { statusLabel: label?.trim() || undefined }));
-  handle('sessions:archive', ({ id, archived, removeWorktree }) => sessions.setArchived(id, archived, removeWorktree));
+  handle('sessions:archive', ({ id, archived, removeWorktree, forceWorktree }) => sessions.setArchived(id, archived, removeWorktree, forceWorktree));
   handle('sessions:pin', ({ id, pinned }) => sessions.setPinned(id, pinned));
   handle('sessions:pinOrder', ({ ids }) => sessions.setPinOrder(ids));
   handle('sessions:send', ({ id, input }) => sessions.send(id, input));

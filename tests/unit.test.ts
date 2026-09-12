@@ -25,7 +25,7 @@ import { HARNESSES } from '../src/shared/harness-meta';
 import type { AppSettings, ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
-import { branchGitState, gitBranches, gitCheckout, gitWorktrees, removeWorktree, restoreWorktree } from '../src/main/git';
+import { branchGitState, gitBranches, gitCheckout, gitWorktrees, removeWorktree, restoreWorktree, WorktreeDirtyError } from '../src/main/git';
 import { createLogger } from '../src/main/log';
 import { timed, watchEventLoop } from '../src/main/diag';
 
@@ -713,7 +713,7 @@ describe('git branch/worktree plumbing', () => {
     g('worktree', 'add', wt2, '-b', 'wtcycle');
     // Uncommitted changes block a non-force removal (the archive flow surfaces this to the user).
     await fs.writeFile(path.join(wt2, 'dirty.txt'), 'x');
-    await expect(removeWorktree(repo, wt2, { force: false })).rejects.toThrow();
+    await expect(removeWorktree(repo, wt2, { force: false })).rejects.toBeInstanceOf(WorktreeDirtyError);
     await fs.rm(path.join(wt2, 'dirty.txt'));
     await removeWorktree(repo, wt2, { force: false });
     await expect(fs.stat(wt2)).rejects.toMatchObject({ code: 'ENOENT' });
