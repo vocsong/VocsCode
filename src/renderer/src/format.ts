@@ -66,3 +66,8 @@ export function basename(p: string): string {
 export function clamp(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
+
+/** Short display name for a harness id (sidebar badges, menus, analytics). */
+export function harnessShort(id: string): string {
+  return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', cursor: 'Cursor', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
+}

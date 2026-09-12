@@ -578,6 +578,8 @@ export interface AppSettings {
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
   defaultEffort?: EffortLevel;
+  /** Last chosen worktree isolation decision in the new-session dialog. */
+  defaultUseWorktree?: boolean;
   defaultModelByHarness: Partial<Record<HarnessId, ModelRef>>;
   /** Starred models, always listed first in the model pickers. */
   favoriteModels: ModelRef[];

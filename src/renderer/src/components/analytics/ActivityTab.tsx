@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import type { AnalyticsSummary } from '../../../../shared/types';
 import { speedTps } from '../../../../shared/usage-rollup';
-import { harnessShort } from '../Sidebar';
+import { harnessShort } from '../../format';
 import { BarList, ChartCard, ColumnChart, Heatmap, LineChart, Segmented, seriesTable } from './charts';
 import { delta, fmtCompact, fmtMs, fmtTps, METRICS, plural, speedSeries, SPLITS, splitSeries, type Scope, type Split } from './model';
 import { Footnotes, KpiGrid, StatTile } from './tiles';
