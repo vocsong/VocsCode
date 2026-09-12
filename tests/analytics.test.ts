@@ -6,6 +6,7 @@ import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
 import { addDay, AnalyticsStore, dayKey, emptyDay, summarize, tokensPerSecond, toolCallFromItem, turnSpeed, usageDelta } from '../src/main/analytics';
 import { emptyUsage } from '../src/main/models/static-models';
+import { rollupDays } from '../src/shared/usage-rollup';
 import type { SessionMeta, TranscriptItem, UsageSessionRecord, UsageTotals } from '../src/shared/types';
 
 const dirs: string[] = [];
@@ -293,7 +294,7 @@ describe('output speed', () => {
   it('loads day records written before speed was tracked as zero samples', async () => {
     const dir = tmpDir();
     const t0 = Date.UTC(2025, 5, 9, 12);
-    const legacy = { ...emptyDay(), costUsd: 1, turns: 1, durationMs: 3_000 } as Record<string, number>;
+    const legacy = { ...emptyDay(), costUsd: 1, turns: 1, durationMs: 3_000 } as unknown as Record<string, number>;
     delete legacy.speedTokens;
     delete legacy.speedMs;
     await fs.writeFile(path.join(dir, 'analytics.json'), JSON.stringify({ version: 1, days: { '2025-06-09': legacy }, recorded: {}, sessions: {}, tools: {}, files: {} }));
@@ -386,5 +387,80 @@ describe('per-tool-call tracking', () => {
     // Snapshot preserved across a reload keeps its tool-call count.
     await store.load([m], async () => transcript);
     expect(store.summary(0, t0).toolTotals.calls).toBe(3);
+  });
+});
+describe('per-dimension day slices', () => {
+  it('attributes usage, turns and tool calls to the harness, model and project active at the time', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    const store = new AnalyticsStore(dir, { log });
+    const a = meta('a', 'claude', usage({}), { updatedAt: t0, activeModel: { provider: 'anthropic', model: 'opus' }, config: { harness: 'claude', permissionMode: 'ask', projectRoot: '/repo-a' } });
+    const b = meta('b', 'pi', usage({}), { updatedAt: t0, activeModel: { provider: 'openrouter', model: 'glm' }, config: { harness: 'pi', permissionMode: 'ask', projectRoot: '/repo-b' } });
+    await store.load([a, b]);
+    store.recordUsage(a, usage({ costUsd: 1, turns: 1, inputTokens: 100 }), t0);
+    store.recordUsage(b, usage({ costUsd: 2, turns: 2, inputTokens: 200 }), t0);
+    // A live model switch: the next delta belongs to the new model, the harness total keeps growing.
+    const a2 = { ...a, activeModel: { provider: 'anthropic', model: 'sonnet' } };
+    store.recordUsage(a2, usage({ costUsd: 1.5, turns: 2, inputTokens: 150 }), t0);
+    store.recordTurn(a2, turn({ durationMs: 2_000, usage: { outputTokens: 100 } }), t0);
+    store.recordToolCall('b', { id: 'x1', kind: 'tool', ts: 1, name: 'bash', status: 'done', durationMs: 10, changes: [{ path: 'f.ts', kind: 'update' }] }, t0);
+    await store.flush();
+
+    const fresh = new AnalyticsStore(dir, { log });
+    await fresh.load([]);
+    const s = fresh.summary(0, t0);
+    const by = s.days[0].usage.by;
+    expect(by?.harness.claude).toMatchObject({ costUsd: 1.5, turns: 2, inputTokens: 150, durationMs: 2_000, speedTokens: 100, speedMs: 2_000, sessions: ['a'] });
+    expect(by?.harness.pi).toMatchObject({ costUsd: 2, turns: 2, toolCalls: 1, sessions: ['b'] });
+    expect(by?.model['anthropic/opus']).toMatchObject({ costUsd: 1, turns: 1, label: 'opus' });
+    expect(by?.model['anthropic/sonnet']).toMatchObject({ costUsd: 0.5, turns: 1, label: 'sonnet', durationMs: 2_000 });
+    expect(by?.project['/repo-b']?.toolCalls).toBe(1);
+    expect(by?.tool.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
+    expect(by?.file['f.ts']).toEqual({ adds: 0, updates: 1, deletes: 0, renames: 0 });
+    // The range rollup rebuilds the totals from the slices with nothing left over.
+    const r = rollupDays(s.days);
+    expect(r.totals.costUsd).toBeCloseTo(3.5);
+    expect(r.totals.toolCalls).toBe(1);
+    expect(r.unattributed.costUsd).toBe(0);
+    expect(r.sessionIds.sort()).toEqual(['a', 'b']);
+    expect(r.byModel.map((x) => x.key)).toEqual(['openrouter/glm', 'anthropic/opus', 'anthropic/sonnet']);
+  });
+
+  it('backfills pre-existing sessions into slices and reports the window before the range', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 20, 12);
+    const old = meta('old', 'pi', usage({ costUsd: 4, turns: 8 }), { updatedAt: Date.UTC(2025, 5, 10, 12), activeModel: { provider: 'x', model: 'm' } });
+    const store = new AnalyticsStore(dir, { log });
+    await store.load([old]);
+    const cur = meta('cur', 'pi', usage({}), { updatedAt: t0 });
+    store.touchSession(cur);
+    store.recordUsage(cur, usage({ costUsd: 1, turns: 1 }), t0);
+
+    const week = store.summary(7, t0);
+    expect(week.days.map((d) => d.date)).toEqual(['2025-06-20']);
+    // June 10 falls in the seven days before the range: it is the comparison baseline, not part of it.
+    expect(week.previous).toMatchObject({ costUsd: 4, turns: 8 });
+    expect(store.summary(0, t0).previous).toBeUndefined();
+    const oldDay = store.summary(0, t0).days.find((d) => d.date === '2025-06-10');
+    expect(oldDay?.usage.by?.model['x/m']).toMatchObject({ costUsd: 4, turns: 8, label: 'm', sessions: ['old'] });
+    expect(oldDay?.usage.by?.project['/repo']?.sessions).toEqual(['old']);
+  });
+
+  it('loads legacy days without slices and leaves their usage unattributed', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    const legacy = { ...emptyDay(), costUsd: 1, turns: 1, toolCalls: 3 };
+    await fs.writeFile(path.join(dir, 'analytics.json'), JSON.stringify({ version: 1, days: { '2025-06-08': legacy }, recorded: {}, sessions: {}, tools: {}, files: {} }));
+    const store = new AnalyticsStore(dir, { log });
+    const m = meta('s1', 'native', usage({}), { updatedAt: t0 });
+    await store.load([m]);
+    store.recordUsage(m, usage({ costUsd: 2, turns: 1 }), t0);
+    const days = store.summary(0, t0).days;
+    expect(days[0].usage.by).toBeUndefined();
+    expect(days[1].usage.by?.harness.native).toMatchObject({ costUsd: 2, turns: 1, sessions: ['s1'] });
+    const r = rollupDays(days);
+    expect(r.totals.costUsd).toBeCloseTo(3);
+    expect(r.unattributed).toMatchObject({ costUsd: 1, turns: 1, toolCalls: 3 });
+    expect(r.byHarness).toHaveLength(1);
   });
 });
