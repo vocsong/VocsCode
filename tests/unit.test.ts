@@ -504,6 +504,18 @@ describe('SessionManager fork', () => {
   });
 });
 
+describe('custom status label settings', () => {
+  it('normalizes user-added labels: trims, dedupes case-insensitively, drops junk, caps at 24 chars', () => {
+    const stored = { customLabels: ['  Wip ', 'wip', 42, '', 'x'.repeat(40), 'ok'] } as unknown as Partial<AppSettings>;
+    expect(normalizeSettings(stored).customLabels).toEqual(['Wip', 'x'.repeat(24), 'ok']);
+  });
+
+  it('falls back to an empty list for wrong-shaped values', () => {
+    expect(normalizeSettings({ customLabels: 'nope' } as unknown as Partial<AppSettings>).customLabels).toEqual([]);
+    expect(normalizeSettings(undefined).customLabels).toEqual([]);
+  });
+});
+
 describe('SessionManager PR state refresh', () => {
   it('flips a pr session to merged when refreshGitState runs after /merge', async () => {
     vi.useFakeTimers();

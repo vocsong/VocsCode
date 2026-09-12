@@ -1126,6 +1126,24 @@ h4 {
   background: var(--bg-hover);
   opacity: 0.7;
 }
+.session-status.status-custom {
+  color: var(--red);
+  background: var(--red-soft);
+}
+.session-row .session-status {
+  cursor: pointer;
+}
+.status-label-add {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+}
+.status-label-add input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+}
 @keyframes status-fade {
   0%,
   100% {
