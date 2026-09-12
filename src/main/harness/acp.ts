@@ -5,6 +5,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
 import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import { isEffortLevel } from '../../shared/harness-meta';
 import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
 import { which } from '../runtime';
 import { isDangerousCommand, type HarnessAdapter, type HarnessContext } from './types';
@@ -180,7 +181,8 @@ export class AcpAdapter implements HarnessAdapter {
     const opt = this.modelOption();
     if (!opt) return;
     const eff = this.effortOption();
-    const efforts = eff ? (flattenSelect(eff).map((o) => o.value) as EffortLevel[]) : undefined;
+    // Agents can advertise values the app does not model (none, auto, numeric levels); drop them at the boundary.
+    const efforts = eff ? flattenSelect(eff).map((o) => o.value).filter(isEffortLevel) : undefined;
     const models: ModelInfo[] = flattenSelect(opt).map((o) => ({
       id: o.value,
       provider: this.preset?.id ?? 'acp',
@@ -192,7 +194,7 @@ export class AcpAdapter implements HarnessAdapter {
     this.ctx.emit({ type: 'models', models });
     const current = models.find((m) => m.id === opt.currentValue);
     if (current) this.ctx.updateMeta({ activeModel: { provider: current.provider, model: current.id } });
-    if (eff && typeof eff.currentValue === 'string') this.ctx.updateMeta({ activeEffort: eff.currentValue as EffortLevel });
+    if (eff && isEffortLevel(eff.currentValue)) this.ctx.updateMeta({ activeEffort: eff.currentValue });
   }
 
   private clientHandlers(): acp.Client {
