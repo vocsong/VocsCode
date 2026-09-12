@@ -47,11 +47,11 @@ export const SHORTCUT_COMMANDS: ShortcutCommandInfo[] = [
   { id: 'session.newTerminal', label: 'New terminal', description: 'Open a new terminal tab for the active session.', icon: 'terminal', needsSession: true },
   { id: 'session.export', label: 'Export transcript', description: 'Export the active session’s transcript as Markdown.', icon: 'download', needsSession: true },
   { id: 'session.compact', label: 'Compact context', description: 'Ask the harness to compact the active session’s context.', icon: 'compact', needsSession: true },
-  { id: 'app.newSession', label: 'New session', description: 'Pick a project folder and configure a new session.', icon: 'plus' },
-  { id: 'app.newSessionQuick', label: 'New session in folder', description: 'Quick-pick a known folder and start with defaults.', icon: 'folder' },
+  { id: 'app.newSession', label: 'New session in folder', description: 'Pick a project folder and configure a new session.', icon: 'plus' },
+  { id: 'app.newSessionQuick', label: 'New session (quick picker)', description: 'Quick-pick a known folder and start with defaults.', icon: 'folder' },
   { id: 'app.palette', label: 'Command palette', description: 'Toggle the command palette.', icon: 'search' },
-  { id: 'app.toggleSidebar', label: 'Toggle sidebar', description: 'Show or hide the left sidebar.', icon: 'sidebar' },
-  { id: 'app.togglePanel', label: 'Toggle side panel', description: 'Show or hide the right panel.', icon: 'layout' },
+  { id: 'app.toggleSidebar', label: 'Toggle left sidebar', description: 'Show or hide the left sidebar.', icon: 'sidebar' },
+  { id: 'app.togglePanel', label: 'Toggle right side panel', description: 'Show or hide the right panel.', icon: 'layout' },
   { id: 'app.toggleThinking', label: 'Toggle thinking', description: 'Show or hide the model’s thinking blocks.', icon: 'brain' },
   { id: 'app.focusTerminal', label: 'Focus terminal', description: 'Switch the side panel to the terminal and focus it.', icon: 'terminal' },
   { id: 'app.showChanges', label: 'Show changes', description: 'Switch the side panel to the changes view.', icon: 'diff' },
@@ -180,7 +180,7 @@ export function formatAccelerator(text: string, mac: boolean): string {
  * text-editing basics so a custom combo can never swallow copy/paste/undo while typing.
  */
 export const RESERVED_ACCELS: string[] = [
-  'Ctrl+N', 'Ctrl+Shift+N', 'Ctrl+K', 'Ctrl+B', 'Ctrl+J', 'Ctrl+,', 'Ctrl+[', 'Ctrl+]',
+  'Ctrl+N', 'Ctrl+Alt+N', 'Ctrl+K', 'Ctrl+B', 'Ctrl+J', 'Ctrl+,', 'Ctrl+[', 'Ctrl+]',
   'Ctrl+ArrowUp', 'Ctrl+ArrowDown', 'Ctrl+Shift+ArrowUp', 'Ctrl+Shift+ArrowDown',
   'Alt+ArrowLeft', 'Alt+ArrowRight',
   ...['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((d) => `Ctrl+${d}`),
@@ -229,12 +229,12 @@ export const BUILTIN_SHORTCUT_GROUPS: BuiltinShortcutGroup[] = [
   {
     title: 'General',
     rows: [
-      { label: 'New session', keys: ['Ctrl+N'] },
-      { label: 'New session in folder (quick picker)', keys: ['Ctrl+Shift+N'] },
+      { label: 'New session (quick picker)', keys: ['Ctrl+N'] },
+      { label: 'New session in folder', keys: ['Ctrl+Alt+N'] },
       { label: 'Command palette', keys: ['Ctrl+K'] },
       { label: 'Settings', keys: ['Ctrl+,'] },
-      { label: 'Toggle sidebar', keys: ['Ctrl+B'] },
-      { label: 'Toggle side panel', keys: ['Ctrl+J'] },
+      { label: 'Toggle left sidebar', keys: ['Ctrl+B'] },
+      { label: 'Toggle right side panel', keys: ['Ctrl+J'] },
       { label: 'Back', keys: ['Alt+ArrowLeft', 'Ctrl+['] },
       { label: 'Forward', keys: ['Alt+ArrowRight', 'Ctrl+]'] }
     ]

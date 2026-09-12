@@ -52,21 +52,6 @@ const safeStorageMock = vi.hoisted(() => ({
 }));
 vi.mock('electron', () => ({ safeStorage: safeStorageMock }));
 
-/** Starts an HTTP server that answers every request via respond(); resolves once it is listening. */
-function listenOnce(respond: (req: IncomingMessage, res: ServerResponse, body?: string) => void): Promise<{ url: string; close: () => Promise<void> }> {
-  const server: Server = createServer((req, res) => {
-    let body: string | undefined;
-    req.on('data', (c: Buffer) => (body = (body ?? '') + c.toString()));
-    req.on('end', () => respond(req, res, body));
-  });
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      const port = (server.address() as AddressInfo).port;
-      resolve({ url: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(() => r())) });
-    });
-  });
-}
-
 describe('auto session titles', () => {
   it('caps derived titles at 6 words', () => {
     expect(titleFromPrompt('Fix the bug where the sidebar flickers when switching folders')).toBe('Fix the bug where the sidebar');
@@ -82,6 +67,21 @@ describe('auto session titles', () => {
     expect(title.length).toBeLessThanOrEqual(60);
   });
 });
+
+/** Starts an HTTP server that answers every request via respond(); resolves once it is listening. */
+function listenOnce(respond: (req: IncomingMessage, res: ServerResponse, body?: string) => void): Promise<{ url: string; close: () => Promise<void> }> {
+  const server: Server = createServer((req, res) => {
+    let body: string | undefined;
+    req.on('data', (c: Buffer) => (body = (body ?? '') + c.toString()));
+    req.on('end', () => respond(req, res, body));
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as AddressInfo).port;
+      resolve({ url: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(() => r())) });
+    });
+  });
+}
 
 describe('LLM session titles', () => {
   const getSecret = async (id: string) => (id === 'fake' ? 'sk-test' : undefined);
@@ -135,7 +135,7 @@ describe('LLM session titles', () => {
       expect(seen.body?.max_tokens).toBe(200);
       expect(seen.body?.max_completion_tokens).toBeUndefined();
     } finally {
-      server.close();
+      await server.close();
     }
   });
 
@@ -154,7 +154,7 @@ describe('LLM session titles', () => {
       expect(seen.body?.max_completion_tokens).toBe(1024);
       expect(seen.body?.reasoning_effort).toBe('low');
     } finally {
-      server.close();
+      await server.close();
     }
   });
 });
