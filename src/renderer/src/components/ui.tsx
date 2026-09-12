@@ -20,6 +20,8 @@ const ICONS: Record<string, string> = {
   x: 'M18 6L6 18M6 6l12 12',
   search: 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3',
   pin: 'M12 17v5M5 17h14l-2-5V4H7v8l-2 5z',
+  archive: 'M3 3h18v5H3zM5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4',
+  restore: 'M3 12a9 9 0 1 0 3-6.7M3 3v6h6M12 7v5l3 3',
   trash: 'M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14',
   copy: 'M8 8h12v12H8zM4 16V4h12',
   external: 'M14 4h6v6M20 4l-9 9M19 14v6H4V5h6',

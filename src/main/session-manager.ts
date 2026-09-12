@@ -326,6 +326,42 @@ export class SessionManager {
     return meta;
   }
 
+  /**
+   * Pins a session to the top of its folder; the first pin sits on top, later pins below it.
+   * Pin state must not bump updatedAt: the unpinned section orders by it, and pinning or
+   * reordering pins must not reshuffle the rest of the list.
+   */
+  async setPinned(id: string, pinned: boolean): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (pinned) {
+      meta.pinned = true;
+      meta.pinnedAt = Date.now();
+    } else {
+      meta.pinned = undefined;
+      delete meta.pinnedAt;
+    }
+    await this.deps.store.upsert(meta);
+    this.pushSessions();
+    return meta;
+  }
+
+  /** Persists a pinned-section drag reorder: ids in display order get ascending pin stamps. */
+  async setPinOrder(ids: string[]): Promise<void> {
+    let changed = false;
+    for (let i = 0; i < ids.length; i++) {
+      const meta = this.get(ids[i]);
+      if (!meta || !meta.pinned) continue;
+      // Small ordinals keep future pins (stamped with Date.now()) below the reordered section.
+      const pinnedAt = i + 1;
+      if (meta.pinnedAt === pinnedAt) continue;
+      meta.pinnedAt = pinnedAt;
+      await this.deps.store.upsert(meta);
+      changed = true;
+    }
+    if (changed) this.pushSessions();
+  }
+
   /** Archives a session; with `removeWt` it also deletes the worktree (the branch is kept so unarchive can restore it). */
   async setArchived(id: string, archived: boolean, removeWt = false, forceWt = false): Promise<SessionMeta> {
     const meta = this.get(id);
@@ -851,7 +887,11 @@ export class SessionManager {
       statusDetail: undefined,
       queued: 0,
       harnessRef: {},
-      goal: undefined
+      goal: undefined,
+      // A fresh fork starts unpinned and active, never in the archive.
+      pinned: undefined,
+      pinnedAt: undefined,
+      archived: undefined
     };
     if (cross) {
       // A different harness cannot resume the source's provider session: it starts fresh in the
