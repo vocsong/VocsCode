@@ -702,7 +702,7 @@ function PrRow({
           {diffStat && <span className="muted"> · {diffStat}</span>}
         </div>
       </div>
-      <span className="muted small" title={pr.author}>
+      <span className="pr-author muted small" title={pr.author}>
         {pr.author ?? '—'}
       </span>
       <span className="muted small" title={pr.updatedAt ? new Date(pr.updatedAt).toLocaleString() : undefined}>
