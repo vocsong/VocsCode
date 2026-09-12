@@ -137,11 +137,12 @@ interface Transport {
   `sessions:transcript` + `terminal:attach` snapshot — the same boot sequence the
   renderer does today on window focus.
 
-**Filtered surface.** Remote gets: `sessions:*`, `approvals:respond`, `terminal:*`,
-read-mostly `git:*`, `fs:list/search/read`, `analytics:*`, `skills:list/read`,
+**Filtered surface.** Remote gets: `sessions:*`, `approvals:respond`, read-mostly
+`git:*`, `fs:list/search/read`, `analytics:*`, `skills:list/read`,
 `harness:availability/models`. Excluded or remapped: `window:*`, `app:pickFolder`,
 `app:openPath`, `app:openInEditor`, `secrets:*`, `dialog` flows. The web client never
-touches or needs API keys.
+touches or needs API keys. Terminal channels join the surface in P3.5 (chat-first
+launch, §11).
 
 ## 6. Auth, pairing, trust — detailed plan
 
@@ -317,8 +318,9 @@ security bar must go up, not sideways:
 3. **Desktop offline.** Interactive features die gracefully; to make the web useful
    while offline, mirror encrypted transcripts to relay storage (opt-in) for read-only
    browsing. This is the main "make it feel always-on" investment.
-4. **Terminal over WAN.** String frames + seq + ack flow control exist, but WAN latency
-   and reconnect-mid-PTY need tuning (coalescing, larger ack windows, snapshot-on-reconnect).
+4. **Terminal over WAN** (deferred to P3.5 — chat-first launch, §11). String frames +
+   seq + ack flow control exist, but WAN latency and reconnect-mid-PTY need tuning
+   (coalescing, larger ack windows, snapshot-on-reconnect).
 5. **Transcript replay size.** Long sessions replay fully over the socket today (fine on
    IPC, different on mobile). Will need pagination / tail-first loading in the web client.
 6. **Secrets invariant.** Holds trivially in Model A (keys never leave the machine) —
@@ -349,10 +351,12 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 | **P0 — Transport extraction** | `src/shared/transport.ts`; extract handler registry from `src/main/ipc.ts`; renderer `window.harness` rides on Transport; zero user-visible change; handler registry unit-tested in plain Node | ~1 wk |
 | **P1 — Web-buildable renderer** | Build renderer as a plain SPA; shims for paste/notify/openExternal/pickFolder; serve it from a localhost Node server wrapping the handler registry. Dogfood: run Vocs Code in a browser tab on the same machine | 1–2 wk |
 | **P2 — Pairing + relay, read-only** | Relay service (accounts, devices, routing — accounts-lite: single provisioned v1 account, account-keyed registry from day one); desktop remote host (opt-in, e2e encrypted); web login + pairing (§6); browse folders, sessions, transcripts live | 2–3 wk |
-| **P3 — Interactive** | Send prompts, remote approvals (presence, timeouts, audit), terminal read/write over WAN, session lifecycle (create/stop/rename) | 3–5 wk |
-| **P4 — Hardening** | Multi-device management + revocation UI, offline encrypted transcript mirror (read-only), audit log surface, terminal WAN tuning, view-only mode | 2–4 wk |
+| **P3 — Interactive** | Send prompts, remote approvals (presence, timeouts, audit), session lifecycle (create/stop/rename). No terminal in v1 (§11) | 2–4 wk |
+| **P3.5 — Terminal over WAN** (post-launch) | Read-only first, then read/write; PTY streaming + flow-control tuning (coalescing, ack windows, reconnect mid-PTY) | 1–2 wk |
+| **P4 — Hardening** | Multi-device management + revocation UI, offline encrypted transcript mirror (read-only), audit log surface, view-only mode | 2–4 wk |
 
-**Relay MVP → beta: roughly 6–10 weeks.** Cloud workspaces: separate track afterward.
+**Relay MVP → beta: roughly 6–10 weeks (chat-first; terminal lands in P3.5 after).**
+Cloud workspaces: separate track afterward.
 
 ## 11. Decisions and open questions
 
@@ -367,12 +371,17 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
   account and no billing. Full auth + billing becomes the P4 → cloud-track on-ramp,
   not P2 scope.
 
+- **Chat-first launch.** v1 remote is chat + transcript + approvals — no terminal in
+  the web client. Terminal over WAN is deferred to P3.5 (read-only first, then
+  read/write): skips the hardest WAN tuning on the critical path and keeps the phone UX
+  clean. The agent still runs commands in the workspace either way; deferred is the
+  human typing into their own shell remotely.
+
 **Open (resolve one at a time, before P2):**
 
-1. Is interactive terminal required at launch, or is chat + transcript + approvals enough?
-3. e2e encryption as default, or opt-in?
-4. Does the web client get a distinct visual identity, or is it the same UI in a tab?
-5. Mobile: is phone-sized layout in scope for v1? (renderer is desktop-laid-out today)
+1. e2e encryption as default, or opt-in?
+2. Does the web client get a distinct visual identity, or is it the same UI in a tab?
+3. Mobile: is phone-sized layout in scope for v1? (renderer is desktop-laid-out today)
 
 Plus the pairing-specific questions in §6.9 (QR mandatory?, auto-approve later devices?,
 relay hosting region?, GitHub-only auth?).
