@@ -4743,3 +4743,26 @@ body.resizing {
     display: none;
   }
 }
+
+/* First-run setup wizard */
+.onboarding-harness-list,
+.onboarding-key-row {
+  margin-top: 8px;
+}
+.onboarding-harness-row,
+.onboarding-key-row {
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.onboarding-harness-name {
+  min-width: 140px;
+  font-weight: 500;
+}
+.onboarding-model-picker {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+}
