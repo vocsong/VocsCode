@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
-import type { ProviderConfig } from '../shared/types';
+import type { ModelRef, ProviderConfig } from '../shared/types';
 import { STATIC_MODELS_BY_PROVIDER } from './models/static-models';
 import { resolveProviderApiKey } from './models/providers';
 import { isAnthropicProvider } from './harness/native/drivers';
@@ -40,16 +40,29 @@ const PROMPT_SAMPLE_CHARS = 800;
  * One-shot LLM call that names a session from its opening prompt. Never throws:
  * returns null when no provider is usable or the call fails, leaving the
  * truncated-prompt placeholder in place.
+ *
+ * Prefers the session's own model when its provider is usable, so the title
+ * comes from the same LLM the user picked; otherwise falls back to the first
+ * usable enabled provider's default model.
  */
 export async function generateSessionTitle(
   prompt: string,
   providers: ProviderConfig[],
-  getSecret: (providerId: string) => Promise<string | undefined>
+  getSecret: (providerId: string) => Promise<string | undefined>,
+  preferred?: ModelRef
 ): Promise<string | null> {
   const usable = providers.filter((p) => p.enabled && (p.hasApiKey || (p.envKey && process.env[p.envKey]) || p.kind === 'ollama' || p.kind === 'lmstudio'));
-  const provider = usable.find((p) => modelFor(p));
-  if (!provider) return null;
-  const model = modelFor(provider)!;
+  let provider: ProviderConfig | undefined;
+  let model: string | null = null;
+  const pref = preferred && usable.find((p) => p.id === preferred.provider);
+  if (pref) {
+    provider = pref;
+    model = preferred.model;
+  } else {
+    provider = usable.find((p) => modelFor(p));
+    model = provider ? modelFor(provider)! : null;
+  }
+  if (!provider || !model) return null;
   const apiKey = await resolveProviderApiKey(provider, getSecret);
   const sample = prompt.trim().slice(0, PROMPT_SAMPLE_CHARS);
   try {

@@ -7,6 +7,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { Composer } from './components/Composer';
 import { Header } from './components/Header';
 import { NewSessionDialog } from './components/NewSessionDialog';
+import { OnboardingWizard } from './components/OnboardingWizard';
 import { QuickSessionPicker } from './components/QuickSessionPicker';
 import { RightPanel } from './components/RightPanel';
 import { SettingsView } from './components/SettingsView';
@@ -170,6 +171,7 @@ export function App() {
         {panelOpen && session && view === 'chat' && <RightPanel session={session} />}
       </div>
       {newSessionOpen && <NewSessionDialog />}
+      {!settings.onboardingDone && <OnboardingWizard />}
       {quickSessionOpen && <QuickSessionPicker />}
       {paletteOpen && <CommandPalette />}
       <ConfirmHost />
