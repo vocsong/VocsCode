@@ -100,7 +100,7 @@ function bucketsOf(days: AnalyticsDayPoint[], dim: SliceDimension): UsageBucket[
     const slices = d.usage.by?.[dim];
     if (!slices) continue;
     for (const [key, s] of Object.entries(slices)) {
-      const b = map.get(key) ?? { key, label: s.label, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }, toolCalls: 0, sessions: 0, speed: { tokens: 0, ms: 0 }, ids: new Set<string>() };
+      const b = map.get(key) ?? { key, label: s.label, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }, toolCalls: 0, durationMs: 0, sessions: 0, speed: { tokens: 0, ms: 0 }, ids: new Set<string>() };
       b.label = s.label || b.label;
       b.usage.inputTokens += s.inputTokens;
       b.usage.outputTokens += s.outputTokens;
@@ -110,6 +110,7 @@ function bucketsOf(days: AnalyticsDayPoint[], dim: SliceDimension): UsageBucket[
       b.usage.costUsd += s.costUsd;
       b.usage.turns += s.turns;
       b.toolCalls += s.toolCalls;
+      b.durationMs += s.durationMs;
       b.speed.tokens += s.speedTokens;
       b.speed.ms += s.speedMs;
       for (const id of s.sessions) b.ids.add(id);

@@ -254,6 +254,8 @@ export interface UsageSessionRecord {
   usage: UsageTotals;
   /** Completed tool calls recorded for this session. */
   toolCalls: number;
+  /** Cumulative completed-turn wall time in ms; absent in records written before it was tracked. */
+  durationMs?: number;
   /** Output speed sample for this session; absent in records written before speed was tracked. */
   speed?: UsageSpeed;
 }
@@ -264,6 +266,8 @@ export interface UsageBucket {
   label: string;
   usage: UsageTotals;
   toolCalls: number;
+  /** Cumulative completed-turn wall time in ms, so `durationMs / turns` is the average turn. */
+  durationMs: number;
   sessions: number;
   speed: UsageSpeed;
 }
