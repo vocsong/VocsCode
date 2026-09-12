@@ -1,8 +1,8 @@
 # Remote access: code.vocs.io (plan)
 
-Status: **planning — direction decided: Model C (hybrid). Build Model A (relay) first;
-cloud workspaces (Model B) is the committed later track.** Remaining product questions
-are being resolved one at a time (§11).
+Status: **planning — direction and product decisions locked. Model C (hybrid): build
+Model A (relay) first; cloud workspaces (Model B) is the committed later track. All
+pre-P2 product and pairing questions are resolved (§11); next step is P0 (§12).**
 
 ## 1. The idea
 
@@ -176,7 +176,7 @@ root of trust.)
 
 | Party | Identity | Key material | Storage |
 | --- | --- | --- | --- |
-| Account | code.vocs.io user id (GitHub OAuth; email fallback) | passwordless | relay DB |
+| Account | code.vocs.io user id (GitHub OAuth in v1; email deferred to productization) | passwordless | DO storage (Workers) |
 | Desktop host | device id + human name ("Work PC") | Ed25519 signing + X25519 key-agreement keypair | private half via `secrets.ts` (safeStorage) |
 | Web device | device id + human name ("Chrome on Windows") | Ed25519 signing + X25519 key-agreement keypair | non-extractable WebCrypto (IndexedDB) |
 | Relay | routing registry | public keys + token **hashes** only | DO storage (Workers) |
@@ -293,11 +293,12 @@ with the responding device's key. The desktop verifies the signature before reso
 pending approval, so neither a stolen token nor a compromised relay can forge an approval
 — tying directly into the §7 threat model.
 
-### 6.9 Sizing and open questions
+### 6.9 Sizing
 
 - Pairing itself (code + claim + confirm + handshake, both clients) ≈ **2–3 days inside
   P2**. The relay device registry + token service it requires is the real work (~1 wk).
-- Open: email fallback auth in v1 or GitHub-only?
+
+All pairing decisions are resolved (§11).
 
 ## 7. Threat model
 
@@ -422,9 +423,13 @@ Pairing-level questions from §6.9:
   desktops, global anycast; the same deployment scales into the product/cloud track
   without re-architecture.
 
-**Open (resolve one at a time, before P2):**
+- **GitHub-only auth in v1.** Passwordless, no email infrastructure, and the audience
+  is coders — a GitHub account is a given. v1 allowlists the provisioned account at the
+  provider. The auth provider is a swappable module (the registry is account-keyed);
+  email magic-link arrives with signup + billing at productization.
 
-1. GitHub-only auth in v1, or email fallback too?
+**Open:** none — all pre-P2 product and pairing questions are resolved. P2 is
+unblocked; next concrete step is P0 (§12).
 
 ## 12. The first PR (P0 sketch)
 
