@@ -50,7 +50,7 @@ function errorRateTable(modelTools: ModelToolRow[]): { columns: { label: string;
   const cell = (r: ModelToolRow | undefined) => {
     if (!r || !(r.calls > 0)) return { text: '—', tone: undefined, title: 'No calls' };
     const rate = r.errors / r.calls;
-    return { text: fmtPct(rate), tone: rateTone(rate), title: `${plural(r.errors, 'error')} in ${plural(r.calls, 'call')}` };
+    return { text: `(${r.errors}/${r.calls}) ${fmtPct(rate)}`, tone: rateTone(rate), title: `${plural(r.errors, 'error')} in ${plural(r.calls, 'call')}` };
   };
   return {
     columns: [{ label: 'Tool' }, ...cols.map((c) => ({ label: c.label, numeric: true }))],
