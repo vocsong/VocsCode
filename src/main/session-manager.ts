@@ -311,11 +311,12 @@ export class SessionManager {
 
   async delete(id: string, removeWt = false): Promise<void> {
     const meta = this.get(id);
+    if (!meta) return;
     const t0 = Date.now();
     await this.stop(id);
     this.cancelPersist(id);
     const tStop = Date.now();
-    if (meta?.worktreeBranch && removeWt) {
+    if (meta.worktreeBranch && removeWt) {
       try {
         await removeWorktree(meta.config.projectRoot, meta.cwd);
       } catch (e) {
@@ -396,6 +397,7 @@ export class SessionManager {
   }
 
   transcript(id: string): Promise<TranscriptItem[]> {
+    if (!this.get(id)) return Promise.reject(new Error('Session not found'));
     return this.deps.store.readTranscript(id).then((items) => {
       const live = this.active.get(id)?.liveItems;
       if (!live) return items;
@@ -628,6 +630,7 @@ export class SessionManager {
   }
 
   async clearTranscript(id: string): Promise<void> {
+    if (!this.get(id)) throw new Error('Session not found');
     const active = this.active.get(id);
     if (active) active.liveItems.clear();
     await this.deps.store.rewriteTranscript(id, []);

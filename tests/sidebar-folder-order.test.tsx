@@ -9,8 +9,9 @@ const invokeMock = vi.fn().mockImplementation((_channel: string, args?: { folder
   const patch: Record<string, unknown> = {};
   if (args?.folderOrder) patch.folderOrder = args.folderOrder;
   if (args?.collapsedFolders) patch.collapsedFolders = args.collapsedFolders;
-  if (Object.keys(patch).length > 0) {
-    useStore.setState({ settings: { ...useStore.getState().settings, ...patch } });
+  const settings = useStore.getState().settings;
+  if (settings && Object.keys(patch).length > 0) {
+    useStore.setState({ settings: { ...settings, ...patch } });
   }
   return Promise.resolve({});
 });

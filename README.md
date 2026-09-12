@@ -36,7 +36,7 @@ Everything technical lives here:
 | --- | --- |
 | [Architecture & harness reference](docs/ARCHITECTURE.md) | Source layout, harness engines, permission modes, security model |
 | [Terminal reference](docs/TERMINAL.md) | PTY handling, shells, tabs, shortcuts, packaging notes |
-| [Themes](docs/THEMES.md) | All thirteen themes and how they're built |
+| [Themes](docs/THEMES.md) | All 23 themes and how they're built |
 | [Testing & verification](docs/TESTING.md) | Dev commands, offline and live test suites |
 | [Operations](docs/OPERATIONS.md) | Log locations, environment variables |
 
