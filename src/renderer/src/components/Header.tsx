@@ -48,7 +48,7 @@ export function Header({ session }: { session: SessionMeta }) {
     <header className="header">
       <div className="header-title">
         <StatusDot status={session.status} />
-        <span className="header-name" title={session.title}>
+        <span className={`header-name ${session.userTitle ? 'user-titled' : ''}`} title={session.title}>
           {session.title}
         </span>
         <Badge tone="neutral" title={h.name}>
