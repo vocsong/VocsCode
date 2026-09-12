@@ -681,6 +681,8 @@ export interface CreateSessionRequest {
   config: SessionConfig;
   title?: string;
   initialPrompt?: string;
+  /** Screenshots attached in the new-session dialog, sent together with the initial prompt. */
+  initialImages?: ImageAttachment[];
   goal?: string;
   /** Start the session in a worktree on this existing branch (reusing one when it exists). */
   checkoutBranch?: string;

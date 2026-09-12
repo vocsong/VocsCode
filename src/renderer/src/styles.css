@@ -2770,6 +2770,40 @@ body.resizing {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
+  /* Harness and model columns stretch to the same height. */
+  align-items: stretch;
+}
+.ns-span2 {
+  grid-column: 1 / -1;
+}
+.ns-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+.ns-header-root {
+  min-width: 0;
+  max-width: 46%;
+}
+.ns-attachments {
+  max-width: none;
+  margin: 0 0 6px;
+}
+.ns-prompt-box {
+  position: relative;
+}
+.ns-prompt-box textarea {
+  width: 100%;
+}
+.ns-attach {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
 }
 .ns-root {
   font-size: 12px;
