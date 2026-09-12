@@ -451,24 +451,26 @@ function BranchRow({
         {b.upstream && b.upstreamAhead === undefined && b.upstreamBehind === undefined && <span className="muted small" title={b.upstream}>synced</span>}
       </span>
       <div className="branch-actions">
-        {b.worktreePath && (
-          <Button variant="ghost" size="sm" icon="external" title={`Open worktree ${basename(b.worktreePath)}`} onClick={() => void invoke('app:openInEditor', { path: b.worktreePath! })} />
-        )}
-        {!ghMissing && !b.isBase &&
-          (hasOpenPr ? (
-            <Button variant="ghost" size="sm" icon="external" title={`Open PR #${pr!.number} on GitHub`} onClick={onViewPr} />
-          ) : (
-            <Button variant="ghost" size="sm" icon="pr" title={`Open a PR from ${b.name} into ${base ?? 'the base branch'}`} onClick={onOpenPr} />
-          ))}
-        {!b.isBase && !b.current && (
-          <Button
-            variant="ghost"
-            size="sm"
-            icon="trash"
-            title={b.worktreePath ? 'Remove the worktree first' : b.merged ? 'Delete branch (merged — safe)' : 'Force-delete branch (unmerged)'}
-            onClick={onDelete}
-          />
-        )}
+        <span className="branch-inline">
+          {b.worktreePath && (
+            <Button variant="ghost" size="sm" icon="external" title={`Open worktree ${basename(b.worktreePath)}`} onClick={() => void invoke('app:openInEditor', { path: b.worktreePath! })} />
+          )}
+          {!ghMissing && !b.isBase &&
+            (hasOpenPr ? (
+              <Button variant="ghost" size="sm" icon="external" title={`Open PR #${pr!.number} on GitHub`} onClick={onViewPr} />
+            ) : (
+              <Button variant="ghost" size="sm" icon="pr" title={`Open a PR from ${b.name} into ${base ?? 'the base branch'}`} onClick={onOpenPr} />
+            ))}
+          {!b.isBase && !b.current && (
+            <Button
+              variant="ghost"
+              size="sm"
+              icon="trash"
+              title={b.worktreePath ? 'Remove the worktree first' : b.merged ? 'Delete branch (merged — safe)' : 'Force-delete branch (unmerged)'}
+              onClick={onDelete}
+            />
+          )}
+        </span>
         <Dropdown
           align="right"
           width={260}
@@ -476,6 +478,17 @@ function BranchRow({
         >
           {(close) => (
             <>
+              {b.worktreePath && (
+                <MenuItem
+                  onClick={() => {
+                    close();
+                    void invoke('app:openInEditor', { path: b.worktreePath! });
+                  }}
+                  hint={basename(b.worktreePath)}
+                >
+                  Open worktree in editor
+                </MenuItem>
+              )}
               <MenuItem
                 onClick={() => {
                   close();
@@ -727,7 +740,9 @@ function PrRow({
         )}
       </span>
       <div className="branch-actions">
-        <Button variant="ghost" size="sm" icon="external" title={`Open PR #${pr.number} on GitHub`} onClick={onView} />
+        <span className="branch-inline">
+          <Button variant="ghost" size="sm" icon="external" title={`Open PR #${pr.number} on GitHub`} onClick={onView} />
+        </span>
         <Dropdown
           align="right"
           width={260}

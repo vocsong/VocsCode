@@ -2690,9 +2690,19 @@ body.resizing {
 .branch-actions .btn-sm {
   padding: 3px 4px;
 }
+/* Secondary inline actions (open worktree / PR / delete) grouped so the compact
+   layout can collapse them into the ⋯ menu. */
+.branch-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
 
-/* Narrow panel: two-line rows — name + meta + behind/ahead, then status + actions —
-   so nothing overlaps or clips. The column header is meaningless here. */
+/* Narrow panel: two-line rows — name + behind/ahead on line one, updated time +
+   status + actions on line two — so the name keeps the full width. The column
+   header is meaningless here. Secondary inline actions collapse into the ⋯ menu,
+   which already offers everything they do. */
 @container (max-width: 619.9px) {
   .branches-cols {
     display: none;
@@ -2700,8 +2710,8 @@ body.resizing {
   .branch-row {
     grid-template-columns: minmax(0, 1fr) auto auto;
     grid-template-areas:
-      'name meta num'
-      'status status actions';
+      'name name num'
+      'meta status actions';
     row-gap: 3px;
     padding: 7px 10px;
   }
@@ -2710,10 +2720,6 @@ body.resizing {
   }
   .branch-row > :nth-child(2) {
     grid-area: meta;
-    max-width: 45%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .branch-row > :nth-child(3) {
     grid-area: num;
@@ -2723,6 +2729,13 @@ body.resizing {
   }
   .branch-row > :nth-child(5) {
     grid-area: actions;
+  }
+  /* Only the ⋯ menu stays; wrapping here is what made narrow rows pile up. */
+  .branch-actions {
+    flex-wrap: nowrap;
+  }
+  .branch-actions .branch-inline {
+    display: none;
   }
 }
 .num {
