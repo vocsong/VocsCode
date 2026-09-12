@@ -298,7 +298,7 @@ export function StatusDot({ status }: { status: string }) {
   return <span className={`status-dot status-${status}`} title={status} />;
 }
 
-const STATUS_LABELS: Record<string, string> = {
+export const STATUS_LABELS: Record<string, string> = {
   idle: 'Idle',
   starting: 'Starting',
   running: 'Working',
@@ -309,7 +309,10 @@ const STATUS_LABELS: Record<string, string> = {
   stopped: 'Stopped',
 };
 
-export function StatusLabel({ status }: { status: string }) {
+export function StatusLabel({ status, label }: { status: string; label?: string }) {
+  if (label) {
+    return <span className="session-status status-custom" title={`${label} — click to change`}>{label}</span>;
+  }
   return (
     <span className={`session-status status-${status}`} title={status}>
       {STATUS_LABELS[status] ?? status}

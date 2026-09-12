@@ -202,6 +202,9 @@ export function defaultSettings(): AppSettings {
     recentProjects: [],
     folders: [],
     folderStyles: {},
+    customLabels: [],
+    folderOrder: [],
+    collapsedFolders: [],
     goalDefaults: { autoContinue: true, maxIterations: 25 },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] }
   };
@@ -217,6 +220,19 @@ function normalizeFolderStyles(stored: unknown): Record<string, FolderStyle> {
     const color = typeof s.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(s.color) ? s.color : undefined;
     const icon = typeof s.icon === 'string' && /^[a-z][a-z-]{0,23}$/.test(s.icon) ? s.icon : undefined;
     if (color || icon) out[root] = { ...(color ? { color } : {}), ...(icon ? { icon } : {}) };
+  }
+  return out;
+}
+
+/** Keep only well-formed custom status labels (trimmed, non-empty, deduped, capped). */
+function normalizeCustomLabels(stored: unknown): string[] {
+  if (!Array.isArray(stored)) return [];
+  const out: string[] = [];
+  for (const raw of stored) {
+    if (typeof raw !== 'string') continue;
+    const label = raw.trim().slice(0, 24);
+    if (label && !out.some((l) => l.toLowerCase() === label.toLowerCase())) out.push(label);
+    if (out.length >= 30) break;
   }
   return out;
 }
@@ -238,7 +254,10 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
     folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    folderOrder: Array.isArray(stored.folderOrder) ? stored.folderOrder.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    collapsedFolders: Array.isArray(stored.collapsedFolders) ? stored.collapsedFolders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderStyles: normalizeFolderStyles(stored.folderStyles),
+    customLabels: normalizeCustomLabels(stored.customLabels),
     favoriteModels: Array.isArray(stored.favoriteModels)
       ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
       : [],

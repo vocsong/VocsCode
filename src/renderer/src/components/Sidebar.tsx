@@ -7,7 +7,7 @@ import { basename, fmtCost, harnessShort, relTime } from '../format';
 import { useStore } from '../store';
 import { Resizer } from './Resizer';
 import { FolderBranch } from './FolderBranch';
-import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, StatusLabel } from './ui';
+import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
 
 const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
   claude: 'amber',
@@ -18,9 +18,6 @@ const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neut
   acp: 'blue',
   native: 'neutral'
 };
-
-/** Predefined labels offered as one-click suggestions while renaming a session. */
-const PRESET_LABELS = ['todo', 'error', 'bug', 'fix', 'feature', 'refactor', 'docs', 'test'] as const;
 
 /** Icon choices for folder headers (names from the renderer icon set). */
 const FOLDER_ICONS = [
@@ -55,6 +52,9 @@ export function sortSessionRows(list: SessionMeta[]): SessionMeta[] {
   return [...list].sort((a, b) => pinRank(a) - pinRank(b) || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
 }
 
+/** Built-in status labels offered in the picker; user-added labels extend these via settings. */
+const STATUS_LABEL_CHOICES = ['Idle', 'Starting', 'Working', 'Awaiting', 'Error', 'Stopped', 'PR', 'Merged', 'Todo'];
+
 export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const settings = useStore((s) => s.settings);
@@ -66,6 +66,8 @@ export function Sidebar() {
   const toast = useStore((s) => s.toast);
   const [query, setQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
+  // Drag-to-reorder state: which folder block is being dragged, and where it currently hovers.
+  const [drag, setDrag] = useState<{ root: string; over: string | null; after: boolean } | null>(null);
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -75,22 +77,74 @@ export function Sidebar() {
       const key = s.config.projectRoot;
       byProject.set(key, [...(byProject.get(key) ?? []), s]);
     }
-    const groups = [...byProject.entries()]
-      .map(([root, list]) => ({ root, list: sortSessionRows(list) }))
-      .sort((a, b) => Math.max(...b.list.map((x) => x.updatedAt)) - Math.max(...a.list.map((x) => x.updatedAt)));
+    const groups = [...byProject.entries()].map(([root, list]) => ({
+      root,
+      list: sortSessionRows(list)
+    }));
     if (!showArchived) {
       // A folder whose last active session was archived or deleted stays listed so a new
-      // session can still be added to it; empty folders sort alphabetically at the bottom.
+      // session can still be added to it.
       const empties = (settings?.folders ?? [])
         .filter((root) => !byProject.has(root) && (!q || root.toLowerCase().includes(q)))
-        .sort((a, b) => basename(a).localeCompare(basename(b)))
         .map((root) => ({ root, list: [] as SessionMeta[] }));
       groups.push(...empties);
     }
+    // Positioning is persistent: folders follow the manually saved order and stay put no
+    // matter which session was active last. Folders never positioned sort alphabetically
+    // after the positioned ones.
+    const order = settings?.folderOrder ?? [];
+    const pos = (root: string) => {
+      const i = order.indexOf(root);
+      return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+    };
+    groups.sort((a, b) => pos(a.root) - pos(b.root) || basename(a.root).localeCompare(basename(b.root)));
     return groups;
   }, [sessions, settings, query, showArchived]);
 
   const folderStyles = settings?.folderStyles ?? {};
+  const collapsed = settings?.collapsedFolders ?? [];
+
+  const toggleCollapsed = (root: string) => {
+    const cur = settings?.collapsedFolders ?? [];
+    const next = cur.includes(root) ? cur.filter((r) => r !== root) : [...cur, root];
+    void invoke('settings:update', { collapsedFolders: next });
+  };
+
+  /** Persist a drop of `from` next to `to` (before or after, by drop edge). */
+  const commitOrder = (from: string, to: string, after: boolean) => {
+    const roots = groups.map((g) => g.root);
+    const fromIdx = roots.indexOf(from);
+    const toBase = roots.indexOf(to);
+    if (from === to || fromIdx === -1 || toBase === -1) return;
+    roots.splice(fromIdx, 1);
+    const toIdx = roots.indexOf(to);
+    if (toIdx === -1) return;
+    roots.splice(after ? toIdx + 1 : toIdx, 0, from);
+    void invoke('settings:update', { folderOrder: roots });
+  };
+
+  const onDragStart = (e: React.DragEvent, root: string) => {
+    e.dataTransfer.effectAllowed = 'move';
+    // Firefox needs some payload before it will start a drag at all.
+    e.dataTransfer.setData('text/plain', root);
+    setDrag({ root, over: null, after: false });
+  };
+  const onDragOverGroup = (e: React.DragEvent, root: string) => {
+    if (!drag) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = e.currentTarget.getBoundingClientRect();
+    const after = e.clientY > rect.top + rect.height / 2;
+    if (drag.over !== root || drag.after !== after) setDrag({ ...drag, over: root, after });
+  };
+  const onDropGroup = (e: React.DragEvent, root: string) => {
+    if (!drag) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (root !== drag.root) commitOrder(drag.root, root, drag.after);
+    setDrag(null);
+  };
 
   // Pinned-section drag reorder: only pinned rows of the same folder accept a drop.
   const [dnd, setDnd] = useState<DndState>(DND_CLEAR);
@@ -158,12 +212,52 @@ export function Sidebar() {
           {running > 0 && <Badge tone="blue">{running} running</Badge>}
         </div>
       )}
-      <div className="sidebar-list">
+      <div
+        className="sidebar-list"
+        onDragOver={(e) => {
+          // Only the empty space below the last group lands here (group handlers stop
+          // propagation); treat it as "move to the end".
+          if (!drag) return;
+          e.preventDefault();
+          const last = groups[groups.length - 1];
+          if (last && (drag.over !== last.root || !drag.after)) setDrag({ ...drag, over: last.root, after: true });
+        }}
+        onDrop={(e) => {
+          if (!drag) return;
+          e.preventDefault();
+          if (drag.over && drag.over !== drag.root) commitOrder(drag.root, drag.over, drag.after);
+          setDrag(null);
+        }}
+      >
         {groups.length === 0 && <div className="sidebar-empty">{showArchived ? 'No archived sessions.' : 'No sessions yet. Create one to start.'}</div>}
-        {groups.map((g) => (
-          <div key={g.root} className="project-group">
-            <div className="project-header" title={g.root}>
-              <FolderStyleButton root={g.root} style={folderStyles[g.root]} onPick={(patch) => {
+        {groups.map((g) => {
+          const isCollapsed = collapsed.includes(g.root);
+          const dropMark = drag && drag.over === g.root && drag.root !== g.root ? (drag.after ? 'drop-after' : 'drop-before') : '';
+          return (
+            <div
+              key={g.root}
+              className={`project-group ${drag?.root === g.root ? 'dragging' : ''} ${dropMark}`}
+              onDragOver={(e) => onDragOverGroup(e, g.root)}
+              onDrop={(e) => onDropGroup(e, g.root)}
+            >
+              <div
+                className="project-header"
+                title={g.root}
+                draggable
+                onDragStart={(e) => onDragStart(e, g.root)}
+                onDragEnd={() => setDrag(null)}
+              >
+                <button
+                  type="button"
+                  className="project-fold-btn"
+                  title={isCollapsed ? 'Expand folder' : 'Collapse folder'}
+                  aria-label={isCollapsed ? `Expand ${basename(g.root)}` : `Collapse ${basename(g.root)}`}
+                  aria-expanded={!isCollapsed}
+                  onClick={() => toggleCollapsed(g.root)}
+                >
+                  <Icon name={isCollapsed ? 'chevronRight' : 'chevron'} size={12} />
+                </button>
+                <FolderStyleButton root={g.root} style={folderStyles[g.root]} onPick={(patch) => {
                 const next = { ...folderStyles };
                 if (patch) next[g.root] = { ...next[g.root], ...patch };
                 else delete next[g.root];
@@ -175,6 +269,7 @@ export function Sidebar() {
               >
                 {basename(g.root)}
               </span>
+              {isCollapsed && g.list.length > 0 && <span className="project-count">{g.list.length}</span>}
               <FolderBranch root={g.root} />
               <button
                 type="button"
@@ -185,20 +280,22 @@ export function Sidebar() {
               >
                 <Icon name="plus" size={13} />
               </button>
+              </div>
+              {!isCollapsed && g.list.map((s) => (
+                <SessionRow
+                  key={s.id}
+                  session={s}
+                  active={s.id === activeId && view === 'chat'}
+                  customLabels={settings?.customLabels ?? []}
+                  onSelect={() => void setActive(s.id)}
+                  toast={toast}
+                  dnd={dnd}
+                  dndHandlers={dndHandlers}
+                />
+              ))}
             </div>
-            {g.list.map((s) => (
-              <SessionRow
-                key={s.id}
-                session={s}
-                active={s.id === activeId && view === 'chat'}
-                onSelect={() => void setActive(s.id)}
-                toast={toast}
-                dnd={dnd}
-                dndHandlers={dndHandlers}
-              />
-            ))}
-          </div>
-        ))}
+          );
+        })}
       </div>
       <div className="sidebar-bottom">
         <button type="button" className={`sidebar-link ${showArchived ? 'active' : ''}`} onClick={() => setShowArchived((v) => !v)}>
@@ -227,9 +324,10 @@ type DndHandlers = {
   drop: (id: string) => void;
 };
 
-function SessionRow({ session: s, active, onSelect, toast, dnd, dndHandlers }: {
+function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dndHandlers }: {
   session: SessionMeta;
   active: boolean;
+  customLabels: string[];
   onSelect: () => void;
   toast: (t: string, k?: 'info' | 'success' | 'error') => void;
   dnd: DndState;
@@ -280,6 +378,12 @@ function SessionRow({ session: s, active, onSelect, toast, dnd, dndHandlers }: {
     });
     if (ok) void invoke('sessions:delete', { id: s.id, removeWorktree: !!s.worktreeBranch });
   };
+  // Picking the label that names the current status resets to auto instead of labeling it red.
+  const setStatusLabel = (label?: string, nextCustom?: string[]) => {
+    const picked = label && STATUS_LABELS[s.status] === label ? undefined : label;
+    void invoke('sessions:label', { id: s.id, label: picked });
+    if (nextCustom) void invoke('settings:update', { customLabels: nextCustom });
+  };
   // Only pinned rows can be dragged, and only while they are not being renamed.
   const canDrag = !!s.pinned && !s.archived && !renaming;
   const dragClass = dnd.dragId === s.id ? ' dragging' : '';
@@ -302,39 +406,23 @@ function SessionRow({ session: s, active, onSelect, toast, dnd, dndHandlers }: {
     >
       <div className="session-main">
         {renaming ? (
-          <div className="session-rename-wrap" onClick={(e) => e.stopPropagation()}>
-            <input
-              className="session-rename"
-              autoFocus
-              onFocus={(e) => e.currentTarget.select()}
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onBlur={commit}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void commit();
-                if (e.key === 'Escape') setRenaming(false);
-              }}
-              placeholder="Session label"
-            />
-            <div className="session-rename-suggest">
-              {PRESET_LABELS.map((label) => (
-                <button
-                  key={label}
-                  type="button"
-                  className={`suggest-chip ${title === label ? 'active' : ''}`}
-                  // Keep input focus so blur-commit doesn't fire before the click lands.
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => setTitle(label)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
+          <input
+            className="session-rename"
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void commit();
+              if (e.key === 'Escape') setRenaming(false);
+            }}
+            onClick={(e) => e.stopPropagation()}
+          />
         ) : (
           <div className="session-title">
             {s.pinned && <Icon name="pin" size={11} />}
-            <span className={s.userTitle ? 'user-titled' : ''} title="Click to rename" onClick={() => startRename()}>{s.title}</span>
+            <span title="Click to rename" onClick={() => startRename()}>{s.title}</span>
           </div>
         )}
         <div className="session-meta">
@@ -353,7 +441,11 @@ function SessionRow({ session: s, active, onSelect, toast, dnd, dndHandlers }: {
           {(s.queued ?? 0) > 0 && <span className="session-queued">+{s.queued}</span>}
         </div>
       </div>
-      <StatusLabel status={s.status} />
+      <div onClick={(e) => e.stopPropagation()}>
+        <Dropdown align="right" width={200} trigger={() => <StatusLabel status={s.status} label={s.statusLabel} />}>
+          {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
+        </Dropdown>
+      </div>
       <div className="row-actions" onClick={(e) => e.stopPropagation()}>
         {s.archived ? (
           <>
@@ -401,6 +493,37 @@ function SessionRow({ session: s, active, onSelect, toast, dnd, dndHandlers }: {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Status-label picker: built-in choices, user-added labels, an add field, and a reset. */
+function StatusLabelPicker({ session: s, customLabels, onPick, close }: { session: SessionMeta; customLabels: string[]; onPick: (label?: string, nextCustom?: string[]) => void; close: () => void }) {
+  const [draft, setDraft] = useState('');
+  const extras = customLabels.filter((l) => !STATUS_LABEL_CHOICES.some((c) => c.toLowerCase() === l.toLowerCase()));
+  const add = () => {
+    const label = draft.trim().slice(0, 24);
+    if (!label) return;
+    onPick(label, [...customLabels, label].filter((l, i, all) => all.findIndex((x) => x.toLowerCase() === l.toLowerCase()) === i).slice(0, 30));
+    setDraft('');
+    close();
+  };
+  return (
+    <div className="status-label-picker">
+      {[...STATUS_LABEL_CHOICES, ...extras].map((label) => (
+        <MenuItem key={label} active={s.statusLabel === label} onClick={() => { onPick(label); close(); }}>{label}</MenuItem>
+      ))}
+      <div className="status-label-add">
+        <input
+          placeholder="Add label"
+          value={draft}
+          maxLength={24}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') add(); }}
+        />
+        <Button size="sm" variant="ghost" icon="plus" aria-label="Add label" onClick={add} />
+      </div>
+      {s.statusLabel && <MenuItem onClick={() => { onPick(undefined); close(); }}>Reset to status</MenuItem>}
     </div>
   );
 }

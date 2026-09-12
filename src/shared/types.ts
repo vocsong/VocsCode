@@ -331,8 +331,6 @@ export interface GoalState {
 export interface SessionMeta {
   id: string;
   title: string;
-  /** True when the user set the title themselves (rename or new-session dialog); rendered in red. */
-  userTitle?: boolean;
   createdAt: number;
   updatedAt: number;
   config: SessionConfig;
@@ -341,6 +339,8 @@ export interface SessionMeta {
   worktreeBranch?: string;
   status: SessionStatus;
   statusDetail?: string;
+  /** User-picked display label for the status badge; shown instead of the status name until cleared. */
+  statusLabel?: string;
   harnessRef: HarnessRef;
   usage: UsageTotals;
   lastError?: string;
@@ -624,6 +624,12 @@ export interface AppSettings {
   folders: string[];
   /** Per-folder sidebar appearance keyed by project root. */
   folderStyles?: Record<string, FolderStyle>;
+  /** User-added labels offered in the status-label picker alongside the built-in statuses. */
+  customLabels?: string[];
+  /** Manual sidebar order for project folders; roots not listed sort alphabetically after. */
+  folderOrder?: string[];
+  /** Project roots whose sidebar folder block is collapsed. */
+  collapsedFolders?: string[];
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
 }
