@@ -286,6 +286,26 @@ h4 {
   gap: 10px;
   color: var(--fg-muted);
 }
+.boot-error {
+  flex-direction: column;
+  padding: 24px;
+  text-align: center;
+}
+.boot-error-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 560px;
+  color: var(--fg);
+}
+.boot-error-copy .icon {
+  color: var(--red);
+}
+.boot-error-detail {
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
 
 /* Title bar (frameless window chrome) */
 .titlebar {

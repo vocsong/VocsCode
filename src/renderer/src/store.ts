@@ -31,6 +31,8 @@ export interface Toast {
 
 interface State {
   booted: boolean;
+  /** Human-readable startup failure; when set, App shows a retry instead of an endless spinner. */
+  bootError: string | null;
   settings: AppSettings | null;
   sessions: SessionMeta[];
   activeId: string | null;
@@ -124,6 +126,14 @@ const pendingDeltas: SessionEventEnvelope[] = [];
 let flushScheduled = false;
 /** IPC listeners are registered once per page, even if React StrictMode runs boot() twice. */
 let subscribed = false;
+/** StrictMode can run App's mount effect twice; share one startup request between both calls. */
+let bootInFlight: Promise<void> | null = null;
+
+function bootErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'string' && error) return error;
+  return 'An unexpected error occurred while loading Vocs Code.';
+}
 
 function dropPendingDeltas(sessionId: string, itemId?: string): void {
   for (let i = pendingDeltas.length - 1; i >= 0; i--) {
@@ -161,6 +171,7 @@ async function applyNav(set: Setter, get: Getter, entry: NavEntry, index: number
 
 export const useStore = create<State>((set, get) => ({
   booted: false,
+  bootError: null,
   settings: null,
   sessions: [],
   activeId: null,
@@ -194,20 +205,32 @@ export const useStore = create<State>((set, get) => ({
   history: [],
   historyIndex: -1,
 
-  async boot() {
-    const [settings, sessions, terminals] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined), invoke('terminal:list', undefined)]);
-    set({ settings, sessions, terminals, terminalsLoaded: true, booted: true });
-    if (!subscribed) {
-      subscribed = true;
-      on('push:sessionsChanged', (list) => get().setSessions(list));
-      on('push:settingsChanged', (s) => get().setSettings(s));
-      on('push:sessionEvent', (env) => get().applyEvent(env));
-      on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId));
-      on('push:terminalsChanged', (list) => get().setTerminals(list));
-    }
-    const first = sessions.find((s) => !s.archived);
-    if (first) await get().setActive(first.id);
-    void get().refreshAvailability();
+  boot() {
+    if (bootInFlight) return bootInFlight;
+    if (get().booted && get().settings && !get().bootError) return Promise.resolve();
+    set({ bootError: null, booted: false });
+    bootInFlight = (async () => {
+      try {
+        const [settings, sessions, terminals] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined), invoke('terminal:list', undefined)]);
+        set({ settings, sessions, terminals, terminalsLoaded: true, booted: true });
+        if (!subscribed) {
+          subscribed = true;
+          on('push:sessionsChanged', (list) => get().setSessions(list));
+          on('push:settingsChanged', (s) => get().setSettings(s));
+          on('push:sessionEvent', (env) => get().applyEvent(env));
+          on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId));
+          on('push:terminalsChanged', (list) => get().setTerminals(list));
+        }
+        const first = sessions.find((s) => !s.archived);
+        if (first) await get().setActive(first.id);
+        void get().refreshAvailability();
+      } catch (error) {
+        set({ booted: false, bootError: bootErrorMessage(error) });
+      }
+    })().finally(() => {
+      bootInFlight = null;
+    });
+    return bootInFlight;
   },
 
   async setActive(id) {
