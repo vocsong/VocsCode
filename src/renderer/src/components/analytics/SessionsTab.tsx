@@ -4,7 +4,7 @@ import type { AnalyticsSummary, UsageSessionRecord } from '../../../../shared/ty
 import { speedTps } from '../../../../shared/usage-rollup';
 import { basename, fmtCost, fmtTokens, relTime } from '../../format';
 import { useStore } from '../../store';
-import { harnessShort } from '../Sidebar';
+import { harnessShort } from '../../format';
 import { Badge } from '../ui';
 import { Segmented } from './charts';
 import { fmtCompact, fmtTps, plural, SESSION_SORTS, sessionMatches, sessionTokens, sortSessions, type Scope, type SessionSort } from './model';
