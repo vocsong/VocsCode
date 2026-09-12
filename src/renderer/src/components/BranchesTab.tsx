@@ -198,11 +198,9 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
     );
   };
 
-  /** Prefills the composer with the issue so the agent can dig into it without leaving the desk. */
-  const askAgentAboutIssue = (issue: GitIssue) => {
-    useStore.getState().insertIntoComposer(
-      `Investigate issue #${issue.number} "${issue.title}" (${issue.url}): figure out the cause and propose a fix.`
-    );
+  /** Seeds the Ctrl+N quick picker with the issue so a session on it is two keystrokes away. */
+  const startSessionOnIssue = (issue: GitIssue) => {
+    useStore.getState().openQuickSession(true, `Fix issue #${issue.number} "${issue.title}" (${issue.url}): figure out the cause and implement a fix.`);
   };
 
   const newSessionOnBranch = async (b: GitBranchOverviewItem) => {
@@ -340,8 +338,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           setQuery={setIssueQuery}
           onRefresh={() => void refreshIssues()}
           onView={(issue) => void invoke('app:openExternal', { url: issue.url })}
-          onCopyUrl={(issue) => void navigator.clipboard.writeText(issue.url).then(() => toast(`Copied ${issue.url}`, 'success'))}
-          onAskAgent={askAgentAboutIssue}
+          onNewSession={startSessionOnIssue}
         />
       ) : view === 'prs' ? (
         <PrList
@@ -864,8 +861,7 @@ function IssueList({
   setQuery,
   onRefresh,
   onView,
-  onCopyUrl,
-  onAskAgent
+  onNewSession
 }: {
   data: GitIssueList | null;
   loading: boolean;
@@ -875,8 +871,7 @@ function IssueList({
   setQuery: (q: string) => void;
   onRefresh: () => void;
   onView: (issue: GitIssue) => void;
-  onCopyUrl: (issue: GitIssue) => void;
-  onAskAgent: (issue: GitIssue) => void;
+  onNewSession: (issue: GitIssue) => void;
 }) {
   const issues = data?.issues ?? [];
   const counts = {
@@ -930,11 +925,10 @@ function IssueList({
       )}
       {data && !data.error && !data.ghMissing && (
         <div className="branches-table">
-          <div className="branches-cols pr-cols">
+          <div className="branches-cols issue-cols">
+            <span>#</span>
             <span>Issue</span>
             <span>Author</span>
-            <span>Updated</span>
-            <span>Status</span>
             <span className="num">Actions</span>
           </div>
           {visible.map((issue) => (
@@ -942,8 +936,7 @@ function IssueList({
               key={issue.number}
               issue={issue}
               onView={() => onView(issue)}
-              onCopyUrl={() => onCopyUrl(issue)}
-              onAskAgent={() => onAskAgent(issue)}
+              onNewSession={() => onNewSession(issue)}
             />
           ))}
           {visible.length === 0 && <div className="muted pad">{issues.length === 0 ? 'No issues on GitHub for this repo.' : 'No issues match.'}</div>}
@@ -953,14 +946,17 @@ function IssueList({
   );
 }
 
-function IssueRow({ issue, onView, onCopyUrl, onAskAgent }: { issue: GitIssue; onView: () => void; onCopyUrl: () => void; onAskAgent: () => void }) {
-  const open = issue.state === 'OPEN';
+function IssueRow({ issue, onView, onNewSession }: { issue: GitIssue; onView: () => void; onNewSession: () => void }) {
   return (
-    <div className="branch-row pr-row">
+    <div className="branch-row pr-row issue-row">
+      <span className="issue-num mono" title={`Issue #${issue.number}`}>
+        #{issue.number}
+      </span>
       <div className="pr-title">
         <div className="pr-head">
-          <span className="mono muted">#{issue.number}</span>
-          <span title={issue.title}>{issue.title}</span>
+          <span className="issue-title" title={issue.title}>
+            {issue.title}
+          </span>
         </div>
         {(issue.labels?.length || issue.comments) && (
           <div className="pr-refs">
@@ -976,47 +972,9 @@ function IssueRow({ issue, onView, onCopyUrl, onAskAgent }: { issue: GitIssue; o
       <span className="pr-author muted small" title={issue.author}>
         {issue.author ?? '—'}
       </span>
-      <span className="muted small" title={issue.updatedAt ? new Date(issue.updatedAt).toLocaleString() : undefined}>
-        {issue.updatedAt ? relTime(issue.updatedAt) : '—'}
-      </span>
-      <span className="branch-status">{open ? <Badge tone="green">Open</Badge> : <Badge tone="purple">Closed</Badge>}</span>
       <div className="branch-actions">
         <Button variant="ghost" size="sm" icon="external" title={`Open issue #${issue.number} on GitHub`} onClick={onView} />
-        <Dropdown
-          align="right"
-          width={260}
-          trigger={() => <Button variant="ghost" size="sm" icon="more" title="Issue actions" aria-label={`Actions for issue #${issue.number}`} />}
-        >
-          {(close) => (
-            <>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  onView();
-                }}
-              >
-                View issue on GitHub
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  onAskAgent();
-                }}
-                hint="Prefill the composer"
-              >
-                Ask the agent about this issue
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  onCopyUrl();
-                }}
-              >
-                Copy issue link
-              </MenuItem>
-            </>
-          )}
-        </Dropdown>
+        <Button variant="ghost" size="sm" icon="plus" title="Start a session on this issue (pick a folder, Enter starts)" onClick={onNewSession} />
       </div>
     </div>
   );
