@@ -5,6 +5,7 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   AppSettings,
+  AutoCompactionThreshold,
   CreateSessionRequest,
   EffortLevel,
   GoalState,
@@ -20,12 +21,13 @@ import type {
   TranscriptItem,
   UserInput
 } from '../shared/types';
+import { autoCompactionThresholdLabel, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
-import { emptyUsage } from './models/static-models';
+import { emptyUsage, enrichModelContextWindows } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
 import type { SettingsStore } from './settings';
@@ -56,11 +58,18 @@ interface ActiveSession {
   dirty: Set<string>;
   lastAssistantText: string;
   starting: Promise<void> | null;
-  /** Last list the harness reported, before user overrides, so it can be re-published. */
+  /** Last list the harness reported, before app metadata and user overrides, so it can be re-published. */
   models: ModelInfo[] | null;
+  /** Prevent repeated automatic requests until reported context falls below the threshold. */
+  autoCompactionThreshold: AutoCompactionThreshold | undefined;
+  autoCompactionLatched: boolean;
+  autoCompactionRetryAt: number;
+  autoCompactionRetryTimer: NodeJS.Timeout | null;
+  compactionInFlight: Promise<boolean | void> | null;
 }
 
 const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
+const AUTO_COMPACTION_RETRY_MS = 30_000;
 
 export class SessionManager {
   /** How often a session parked on 'pr' re-checks whether its branch was merged. */
@@ -452,7 +461,20 @@ export class SessionManager {
     if (!meta) throw new Error('Session not found');
     const ctx = this.buildContext(meta, id);
     const adapter = createAdapter(meta.config.harness, ctx);
-    const active: ActiveSession = { adapter, approvals: new Map(), liveItems: new Map(), dirty: new Set(), lastAssistantText: '', starting: null, models: null };
+    const active: ActiveSession = {
+      adapter,
+      approvals: new Map(),
+      liveItems: new Map(),
+      dirty: new Set(),
+      lastAssistantText: '',
+      starting: null,
+      models: null,
+      autoCompactionThreshold: undefined,
+      autoCompactionLatched: false,
+      autoCompactionRetryAt: 0,
+      autoCompactionRetryTimer: null,
+      compactionInFlight: null
+    };
     this.active.set(id, active);
     meta.status = 'starting';
     meta.statusDetail = `Starting ${HARNESS_BY_ID[meta.config.harness].name}…`;
@@ -502,6 +524,10 @@ export class SessionManager {
       this.scheduleLlmTitle(id, placeholder, input.text);
     }
     const active = await this.ensureActive(id);
+    // Compaction can run without marking an adapter busy. Keep a new turn from reading or
+    // mutating its context until that operation has settled.
+    if (active.compactionInFlight) await active.compactionInFlight.catch(() => undefined);
+    if (this.active.get(id) !== active) throw new Error('Session stopped before the message could be sent.');
     await active.adapter.send(input);
   }
 
@@ -553,6 +579,7 @@ export class SessionManager {
     const active = this.active.get(id);
     if (!active) return;
     this.cancelApprovals(id, active, 'Session stopped');
+    if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
     this.active.delete(id);
     await this.flushLive(id, active);
     try {
@@ -625,8 +652,106 @@ export class SessionManager {
     const active = this.active.get(id);
     if (!active) return { ok: false, detail: 'Session is not running.' };
     if (!active.adapter.compact) return { ok: false, detail: 'This harness does not support compaction.' };
-    await active.adapter.compact();
-    return { ok: true };
+    if (active.compactionInFlight) return { ok: false, detail: 'Context compaction is already in progress.' };
+    const threshold = this.settings().autoCompactionThreshold;
+    const meta = this.get(id);
+    active.autoCompactionThreshold = threshold;
+    if (threshold && meta && hasReachedAutoCompactionThreshold(threshold, meta.usage)) active.autoCompactionLatched = true;
+    const operation = active.adapter.compact();
+    active.compactionInFlight = operation;
+    try {
+      const compacted = await operation;
+      if (compacted === false) {
+        active.autoCompactionLatched = false;
+        active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
+        this.scheduleAutoCompactionRetry(id, active);
+        return { ok: false, detail: 'There is not enough conversation history to compact yet.' };
+      }
+      return { ok: true };
+    } catch (e) {
+      active.autoCompactionLatched = false;
+      active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
+      this.scheduleAutoCompactionRetry(id, active);
+      throw e;
+    } finally {
+      if (active.compactionInFlight === operation) active.compactionInFlight = null;
+    }
+  }
+
+  /** Wait until adapter queue bookkeeping has settled, then compact once at a safe idle boundary. */
+  private scheduleAutoCompaction(id: string): void {
+    if (!this.settings().autoCompactionThreshold) return;
+    queueMicrotask(() => void this.maybeAutoCompact(id));
+  }
+
+  private scheduleAutoCompactionRetry(id: string, active: ActiveSession): void {
+    if (!this.settings().autoCompactionThreshold || active.autoCompactionRetryTimer) return;
+    const delay = Math.max(0, active.autoCompactionRetryAt - Date.now());
+    active.autoCompactionRetryTimer = setTimeout(() => {
+      active.autoCompactionRetryTimer = null;
+      if (this.active.get(id) === active) void this.maybeAutoCompact(id);
+    }, delay);
+    active.autoCompactionRetryTimer.unref?.();
+  }
+
+  private clearAutoCompactionRetry(active: ActiveSession): void {
+    if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
+    active.autoCompactionRetryTimer = null;
+    active.autoCompactionRetryAt = 0;
+  }
+
+  private async maybeAutoCompact(id: string): Promise<void> {
+    const active = this.active.get(id);
+    const meta = this.get(id);
+    const threshold = this.settings().autoCompactionThreshold;
+    if (!active || !meta || !threshold) return;
+    if (active.autoCompactionThreshold !== threshold) {
+      active.autoCompactionThreshold = threshold;
+      active.autoCompactionLatched = false;
+      this.clearAutoCompactionRetry(active);
+    }
+    if (!hasReachedAutoCompactionThreshold(threshold, meta.usage)) {
+      active.autoCompactionLatched = false;
+      this.clearAutoCompactionRetry(active);
+      return;
+    }
+    if (
+      !active.adapter.compact ||
+      active.autoCompactionLatched ||
+      active.compactionInFlight ||
+      active.starting ||
+      active.adapter.busy ||
+      meta.status !== 'idle' ||
+      (meta.queued ?? 0) > 0
+    ) {
+      return;
+    }
+    if (Date.now() < active.autoCompactionRetryAt) {
+      this.scheduleAutoCompactionRetry(id, active);
+      return;
+    }
+    active.autoCompactionLatched = true;
+    this.note(id, `Automatic context compaction requested at ${autoCompactionThresholdLabel(threshold)}.`);
+    const operation = active.adapter.compact();
+    active.compactionInFlight = operation;
+    try {
+      const compacted = await operation;
+      if (compacted === false) {
+        active.autoCompactionLatched = false;
+        active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
+        this.scheduleAutoCompactionRetry(id, active);
+        this.note(id, 'Automatic context compaction is waiting for more conversation history.');
+      }
+    } catch (e) {
+      active.autoCompactionLatched = false;
+      active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
+      this.scheduleAutoCompactionRetry(id, active);
+      const message = errorMessage(e);
+      this.deps.log('warn', `[${id}] automatic compaction failed: ${message}`);
+      this.note(id, `Automatic context compaction failed: ${message}`, 'warn');
+    } finally {
+      if (active.compactionInFlight === operation) active.compactionInFlight = null;
+    }
   }
 
   async clearTranscript(id: string): Promise<void> {
@@ -675,11 +800,13 @@ export class SessionManager {
 
   /** Central event sink: persists transcript, updates meta, forwards to renderer, drives goals. */
   private emit(sessionId: string, event: SessionEvent): void {
-    // Harness-reported capabilities pass through the user's corrections before anything sees them.
+    // Harness-reported catalogs gain only known provider metadata, then pass through user corrections.
     if (event.type === 'models') {
       const live = this.active.get(sessionId);
       if (live) live.models = event.models;
-      event = { ...event, models: applyModelOverrides(event.models, this.deps.settings.get().modelOverrides) };
+      const settings = this.deps.settings.get();
+      const models = enrichModelContextWindows(event.models, settings.providers);
+      event = { ...event, models: applyModelOverrides(models, settings.modelOverrides) };
     }
     const meta = this.get(sessionId);
     const active = this.active.get(sessionId);
@@ -735,7 +862,10 @@ export class SessionManager {
           // Status events are the live source of truth for the sidebar. Terminal statuses also
           // persist above, but every transition must be published immediately.
           this.pushSessions();
-          if (event.status === 'idle') this.scheduleGitStateCheck(meta.id);
+          if (event.status === 'idle') {
+            this.scheduleAutoCompaction(meta.id);
+            this.scheduleGitStateCheck(meta.id);
+          }
         }
         break;
       }
@@ -743,8 +873,21 @@ export class SessionManager {
         if (meta) {
           meta.usage = event.totals;
           this.deps.analytics.recordUsage(meta, event.totals);
+          const threshold = this.settings().autoCompactionThreshold;
+          if (active) {
+            if (active.autoCompactionThreshold !== threshold) {
+              active.autoCompactionThreshold = threshold;
+              active.autoCompactionLatched = false;
+              this.clearAutoCompactionRetry(active);
+            }
+            if (!threshold || !hasReachedAutoCompactionThreshold(threshold, event.totals)) {
+              active.autoCompactionLatched = false;
+              this.clearAutoCompactionRetry(active);
+            }
+          }
           this.schedulePersist(meta);
           this.pushSessions();
+          if (meta.status === 'idle') this.scheduleAutoCompaction(meta.id);
         }
         break;
       case 'meta':

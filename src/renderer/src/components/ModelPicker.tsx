@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { ModelInfo, ModelRef } from '../../../shared/types';
 import { invoke } from '../api';
+import { fmtTokens } from '../format';
 import { useStore } from '../store';
 import { Icon, Spinner } from './ui';
 
@@ -61,13 +62,15 @@ export function ModelPicker({
   const renderRow = (m: ModelInfo) => {
     const active = selected && selected.provider === m.provider && selected.model === m.id;
     const fav = rows.isFav(m);
+    const context = m.contextWindow && m.contextWindow > 0 && Number.isFinite(m.contextWindow) ? fmtTokens(m.contextWindow) : 'unknown';
+    const metadata = [`Context ${context}`, m.pricing ? `$${m.pricing.input}/$${m.pricing.output}` : undefined].filter(Boolean).join(' · ');
     return (
       <div key={`${m.provider}/${m.id}`} className={`mp-row ${active ? 'active' : ''}`}>
-        <button type="button" className="mp-select" onClick={() => onSelect(m)}>
+        <button type="button" className="mp-select" aria-pressed={!!active} onClick={() => onSelect(m)}>
           <span className="mp-name" title={`${m.provider}/${m.id}`}>
             {m.displayName}
           </span>
-          <span className="menu-item-hint">{m.pricing ? `$${m.pricing.input}/$${m.pricing.output}` : undefined}</span>
+          <span className="menu-item-hint" title={metadata}>{metadata}</span>
           {active && <Icon name="check" size={14} />}
         </button>
         <button
@@ -101,6 +104,7 @@ export function ModelPicker({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search models…"
+          aria-label="Search models"
           spellCheck={false}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {

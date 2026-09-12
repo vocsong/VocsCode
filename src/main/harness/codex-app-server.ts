@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
-import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
+import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { gateAction, OPTIONS_ALLOW_DENY } from './permissions';
@@ -103,6 +103,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   /** Totals when the current turn started; the turn item reports the delta. */
   private turnBase: UsageTotals | null = null;
   private models: ModelInfo[] = [];
+  private compactionWaiter: Deferred<void> | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
     this.totals = { ...ctx.session().usage };
@@ -128,6 +129,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     try {
       this.rpc.onStderr = (l) => this.ctx.log('debug', `[codex] ${l}`);
       this.rpc.onClose = (code) => {
+        this.compactionWaiter?.reject(new Error(`Codex stopped during context compaction (${code}).`));
         this._busy = false;
         this.ctx.emit({ type: 'status', status: 'stopped', detail: `codex app-server exited (${code})` });
       };
@@ -317,7 +319,10 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const n = p as { name?: string | null };
       if (n.name && /^New session|^Untitled/i.test(this.ctx.session().title)) this.ctx.updateMeta({ title: n.name });
     });
-    rpc.onNotification('thread/compacted', () => this.info('Codex compacted the conversation context.'));
+    rpc.onNotification('thread/compacted', () => {
+      this.info('Codex compacted the conversation context.');
+      this.compactionWaiter?.resolve();
+    });
     rpc.onNotification('model/rerouted', (p) => this.info(`Model rerouted: ${JSON.stringify(p)}`, 'warn'));
     rpc.onNotification('account/rateLimits/updated', (p) => this.ctx.log('debug', `[codex rate limits] ${JSON.stringify(p)}`));
   }
@@ -618,7 +623,18 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   async compact(): Promise<void> {
-    if (this.rpc && this.threadId) await withTimeout(this.rpc.request('thread/compact/start', { threadId: this.threadId }), 30_000, 'thread/compact/start');
+    if (!this.rpc || !this.threadId) throw new Error('Codex thread is not ready');
+    if (this.compactionWaiter) return withTimeout(this.compactionWaiter.promise, 180_000, 'Codex context compaction');
+    const waiter = deferred<void>();
+    // Process shutdown can reject this before compact/start's request rejects; mark it observed now.
+    void waiter.promise.catch(() => undefined);
+    this.compactionWaiter = waiter;
+    try {
+      await withTimeout(this.rpc.request('thread/compact/start', { threadId: this.threadId }), 30_000, 'thread/compact/start');
+      await withTimeout(waiter.promise, 180_000, 'Codex context compaction');
+    } finally {
+      if (this.compactionWaiter === waiter) this.compactionWaiter = null;
+    }
   }
 
   async listModels(): Promise<ModelInfo[]> {
@@ -634,6 +650,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   async dispose(): Promise<void> {
+    this.compactionWaiter?.reject(new Error('Codex stopped during context compaction.'));
     const rpc = this.rpc;
     this.rpc = null;
     if (!rpc) return;
