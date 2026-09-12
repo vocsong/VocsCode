@@ -24,6 +24,7 @@ import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readS
 import type { TerminalManager } from './terminal';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
+import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
 
 export interface IpcDeps {
   settings: SettingsStore;
@@ -392,26 +393,7 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:pullRequests', ({ sessionId }) => gitPullRequests(cwdOf(sessionId)));
   handle('git:issues', ({ sessionId }) => gitIssues(cwdOf(sessionId)));
 
-  handle('fs:list', async ({ sessionId, relPath }) => {
-    const root = cwdOf(sessionId);
-    const dir = relPath ? path.resolve(root, relPath) : root;
-    if (!dir.startsWith(path.resolve(root))) return [];
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    const out = [];
-    for (const e of entries) {
-      const abs = path.join(dir, e.name);
-      let size: number | undefined;
-      if (e.isFile()) {
-        try {
-          size = (await fs.stat(abs)).size;
-        } catch {
-          /* ignore */
-        }
-      }
-      out.push({ name: e.name, path: path.relative(root, abs), isDir: e.isDirectory(), size });
-    }
-    return out.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name));
-  });
+  handle('fs:list', ({ sessionId, relPath }) => listWorkspaceFiles(cwdOf(sessionId), relPath));
   handle('fs:search', async ({ sessionId, query, limit }) => {
     const root = cwdOf(sessionId);
     const q = query.toLowerCase();
@@ -437,14 +419,7 @@ export function registerIpc(deps: IpcDeps): void {
     await walk(root, '', 0);
     return out;
   });
-  handle('fs:read', async ({ sessionId, path: p, maxBytes }) => {
-    const root = cwdOf(sessionId);
-    if (isOutsideWorkspace(root, p, path)) return { content: '', truncated: false };
-    const abs = path.resolve(root, p);
-    const buf = await fs.readFile(abs);
-    const limit = Math.min(Math.max(0, maxBytes ?? 400_000), 2_000_000);
-    return { content: buf.subarray(0, limit).toString('utf8'), truncated: buf.length > limit };
-  });
+  handle('fs:read', ({ sessionId, path: p, maxBytes }) => readWorkspaceFile(cwdOf(sessionId), p, maxBytes));
 
   handle('terminal:list', () => terminals.list());
   handle('terminal:shells', () => terminals.shells());
