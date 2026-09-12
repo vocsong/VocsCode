@@ -189,6 +189,8 @@ export interface UsageDayDimensions {
   model: Record<string, UsageSlice>;
   project: Record<string, UsageSlice>;
   tool: Record<string, ToolUsage>;
+  /** Per-tool call counts keyed by model (`provider/model`), attributed to the model active when the call ran. */
+  modelTool: Record<string, Record<string, ToolUsage>>;
   file: Record<string, FileUsage>;
 }
 
@@ -213,6 +215,16 @@ export interface ToolUsage {
 }
 
 export interface ToolUsageRow extends ToolUsage {
+  name: string;
+}
+
+/** Tool-call rollup for one tool under one model. */
+export interface ModelToolRow extends ToolUsage {
+  /** `provider/model` of the session that made the call. */
+  key: string;
+  /** The model name alone. */
+  label: string;
+  /** Tool name. */
   name: string;
 }
 
@@ -294,6 +306,8 @@ export interface AnalyticsSummary {
   /** All-time tool-call totals and per-tool/per-file breakdowns, sorted by volume. */
   toolTotals: ToolUsage;
   tools: ToolUsageRow[];
+  /** Per-tool call counts per model, sorted by volume. */
+  modelTools: ModelToolRow[];
   files: FileUsageRow[];
   /** Sessions sorted by spend, highest first. */
   sessions: UsageSessionRecord[];

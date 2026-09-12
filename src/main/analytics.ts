@@ -6,6 +6,7 @@ import type {
   FileUsage,
   FileUsageRow,
   ModelRateRow,
+  ModelToolRow,
   SessionMeta,
   ToolUsage,
   ToolUsageRow,
@@ -32,11 +33,13 @@ interface AnalyticsFile {
   sessions: Record<string, UsageSessionRecord>;
   /** Completed tool calls per tool name. */
   tools: Record<string, ToolUsage>;
+  /** Completed tool calls per tool name, keyed by model (`provider/model`). */
+  modelTools: Record<string, Record<string, ToolUsage>>;
   /** File-change counts per path, aggregated from tool results. */
   files: Record<string, FileUsage>;
 }
 
-const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, files: {} };
+const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, files: {} };
 
 const EMPTY_USAGE: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
 
@@ -213,7 +216,7 @@ export function toolCallFromItem(item: Extract<TranscriptItem, { kind: 'tool' }>
   return { usage, changes };
 }
 
-export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, files: Record<string, FileUsage>, dayLimit: number, now: number): AnalyticsSummary {
+export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, modelTools: Record<string, Record<string, ToolUsage>>, files: Record<string, FileUsage>, dayLimit: number, now: number): AnalyticsSummary {
   const seed = (): UsageTotals => ({ ...EMPTY_USAGE });
   const sessionTotals = sessions.reduce<UsageTotals>((acc, s) => {
     addTotals(acc, s.usage);
@@ -285,6 +288,9 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
   const toolRows: ToolUsageRow[] = Object.entries(tools)
     .map(([name, usage]) => ({ name, ...usage }))
     .sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
+  const modelToolRows: ModelToolRow[] = Object.entries(modelTools)
+    .flatMap(([key, perTool]) => Object.entries(perTool).map(([name, usage]) => ({ key, label: key.slice(key.indexOf('/') + 1), name, ...usage })))
+    .sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
   const toolTotals: ToolUsage = Object.values(tools).reduce<ToolUsage>((acc, t) => {
     addToolUsage(acc, t);
     return acc;
@@ -319,6 +325,7 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     modelRates,
     toolTotals,
     tools: toolRows,
+    modelTools: modelToolRows,
     files: fileRows,
     sessions: sortedSessions,
     sessionCount: sessions.length,
@@ -335,7 +342,7 @@ export interface AnalyticsDeps {
 export type TranscriptReader = (sessionId: string) => Promise<TranscriptItem[]>;
 
 export class AnalyticsStore {
-  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, files: {} };
+  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, files: {} };
   private readonly file: string;
   private writeTimer: NodeJS.Timeout | null = null;
   private writeQueue: Promise<void> = Promise.resolve();
@@ -358,13 +365,14 @@ export class AnalyticsStore {
       recorded: stored?.recorded && typeof stored.recorded === 'object' ? stored.recorded : {},
       sessions: stored?.sessions && typeof stored.sessions === 'object' ? stored.sessions : {},
       tools: stored?.tools && typeof stored.tools === 'object' ? stored.tools : {},
+      modelTools: stored?.modelTools && typeof stored.modelTools === 'object' ? stored.modelTools : {},
       files: stored?.files && typeof stored.files === 'object' ? stored.files : {}
     };
     // Fields added after a file was written (speed samples, dimension slices) load as zero rather than NaN.
     for (const day of Object.values(this.data.days)) {
       for (const f of COUNTER_FIELDS) if (typeof day[f] !== 'number') day[f] = 0;
       if (day.by !== undefined && (typeof day.by !== 'object' || day.by === null)) delete day.by;
-      if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
+      if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'modelTool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
     }
     const estimated = this.estimateLegacyDays();
     if (estimated) this.deps.log('info', `analytics: estimated per-model slices for ${estimated} day(s) recorded before slice tracking`);
@@ -501,6 +509,12 @@ export class AnalyticsStore {
     addDay(day, { toolCalls: 1 });
     const by = (day.by ??= emptyDimensions());
     addToolUsage((by.tool[item.name] ??= emptyToolUsage()), parsed.usage);
+    // The snapshot knows which model the call belongs to; keep the per-model tool map in step.
+    const modelKey = session?.model ? `${session.provider ?? ''}/${session.model}` : undefined;
+    if (modelKey) {
+      addToolUsage(((this.data.modelTools[modelKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+      addToolUsage(((by.modelTool[modelKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+    }
     for (const [p, u] of Object.entries(parsed.changes)) addFileUsage((by.file[p] ??= emptyFileUsage()), u);
     // The snapshot knows which harness, model and project the call belongs to.
     if (session) attribute(day, { id: session.id, harness: session.harness, provider: session.provider, model: session.model, projectRoot: session.projectRoot }, { toolCalls: 1 });
@@ -537,6 +551,6 @@ export class AnalyticsStore {
   /** Summary over the last `dayLimit` days (0 = all time), with the preceding window for comparison. */
   summary(dayLimit = 30, now = Date.now()): AnalyticsSummary {
     const sessions = Object.values(this.data.sessions);
-    return summarize(sessions, this.data.days, this.data.tools, this.data.files, dayLimit, now);
+    return summarize(sessions, this.data.days, this.data.tools, this.data.modelTools, this.data.files, dayLimit, now);
   }
 }

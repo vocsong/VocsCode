@@ -53,6 +53,8 @@ describe('rollupDays', () => {
   ];
   days[1].usage.by!.tool = { Bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } };
   days[0].usage.by!.tool = { Bash: { calls: 2, errors: 0, declined: 1, durationMs: 0 }, Read: { calls: 4, errors: 0, declined: 0, durationMs: 0 } };
+  days[0].usage.by!.modelTool = { 'p/opus': { Bash: { calls: 2, errors: 0, declined: 1, durationMs: 0 } } };
+  days[1].usage.by!.modelTool = { 'p/opus': { Bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } }, 'p/glm': { Read: { calls: 1, errors: 1, declined: 0, durationMs: 0 } } };
   days[0].usage.by!.file = { 'a.ts': { adds: 1, updates: 2, deletes: 0, renames: 0 } };
   days[1].usage.by!.file = { 'a.ts': { adds: 0, updates: 1, deletes: 0, renames: 0 }, 'b.ts': { adds: 0, updates: 0, deletes: 0, renames: 0 } };
 
@@ -77,6 +79,10 @@ describe('rollupDays', () => {
       ['Read', 4, 0, 0]
     ]);
     expect(r.toolTotals).toEqual({ calls: 9, errors: 1, declined: 1, durationMs: 300 });
+    expect(r.modelTools.map((t) => [t.key, t.label, t.name, t.calls, t.errors])).toEqual([
+      ['p/opus', 'opus', 'Bash', 5, 1],
+      ['p/glm', 'glm', 'Read', 1, 1]
+    ]);
     expect(r.files).toEqual([{ path: 'a.ts', adds: 1, updates: 3, deletes: 0, renames: 0, total: 4 }]);
   });
 

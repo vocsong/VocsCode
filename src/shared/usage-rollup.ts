@@ -7,6 +7,7 @@ import type {
   AnalyticsDayPoint,
   FileUsage,
   FileUsageRow,
+  ModelToolRow,
   ToolUsage,
   ToolUsageRow,
   UsageBucket,
@@ -35,7 +36,7 @@ export function emptySlice(label: string): UsageSlice {
 }
 
 export function emptyDimensions(): UsageDayDimensions {
-  return { harness: {}, model: {}, project: {}, tool: {}, file: {} };
+  return { harness: {}, model: {}, project: {}, tool: {}, modelTool: {}, file: {} };
 }
 
 export function emptyToolUsage(): ToolUsage {
@@ -82,6 +83,8 @@ export interface RangeRollup {
   byProject: UsageBucket[];
   tools: ToolUsageRow[];
   toolTotals: ToolUsage;
+  /** Per-tool call counts keyed by model. */
+  modelTools: ModelToolRow[];
   files: FileUsageRow[];
   /** Distinct sessions that recorded usage on the days in range. */
   sessionIds: string[];
@@ -124,7 +127,9 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
   const attributed = emptyCounters();
   const ids = new Set<string>();
   const tools: Record<string, ToolUsage> = {};
+  const modelTools: Record<string, Record<string, ToolUsage>> = {};
   const files: Record<string, FileUsage> = {};
+  const modelToolLabels = new Map<string, string>();
   for (const d of days) {
     addCounters(totals, d.usage);
     const by = d.usage.by;
@@ -135,6 +140,10 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
       for (const id of s.sessions) ids.add(id);
     }
     for (const [name, t] of Object.entries(by.tool)) addToolUsage((tools[name] ??= emptyToolUsage()), t);
+    for (const [key, s] of Object.entries(by.model)) if (s.label) modelToolLabels.set(key, s.label);
+    for (const [key, perTool] of Object.entries(by.modelTool)) {
+      for (const [name, t] of Object.entries(perTool)) addToolUsage(((modelTools[key] ??= {})[name] ??= emptyToolUsage()), t);
+    }
     for (const [p, f] of Object.entries(by.file)) addFileUsage((files[p] ??= emptyFileUsage()), f);
   }
   const unattributed = emptyCounters();
@@ -154,6 +163,12 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
     .filter((f) => f.total > 0)
     .sort((a, b) => b.total - a.total || a.path.localeCompare(b.path));
 
+  const modelToolRows: ModelToolRow[] = Object.entries(modelTools)
+    .flatMap(([key, perTool]) =>
+      Object.entries(perTool).map(([name, usage]) => ({ key, label: modelToolLabels.get(key) || key.slice(key.indexOf('/') + 1), name, ...usage }))
+    )
+    .sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
+
   return {
     totals,
     byHarness: bucketsOf(days, 'harness'),
@@ -161,6 +176,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
     byProject: bucketsOf(days, 'project'),
     tools: toolRows,
     toolTotals,
+    modelTools: modelToolRows,
     files: fileRows,
     sessionIds: [...ids],
     unattributed,

@@ -100,8 +100,9 @@ describe('summarize', () => {
       rec('c', 'claude', usage({ costUsd: 0.5, inputTokens: 50, turns: 1 }), 'anthropic', 'opus', 2)
     ];
     const tools = { Read: { calls: 8, errors: 1, declined: 0, durationMs: 800 }, Bash: { calls: 6, errors: 0, declined: 1, durationMs: 900 } };
+    const modelTools = { 'openai/gpt': { Bash: { calls: 4, errors: 1, declined: 0, durationMs: 0 } }, 'anthropic/opus': { Read: { calls: 6, errors: 0, declined: 1, durationMs: 0 } } };
     const files = { 'src/a.ts': { adds: 1, updates: 3, deletes: 0, renames: 0 }, 'src/b.ts': { adds: 2, updates: 0, deletes: 1, renames: 0 } };
-    const s = summarize(sessions, {}, tools, files, 0, 0);
+    const s = summarize(sessions, {}, tools, modelTools, files, 0, 0);
     expect(s.totals.costUsd).toBeCloseTo(4.5);
     expect(s.totals.turns).toBe(7);
     expect(s.sessionCount).toBe(3);
@@ -120,6 +121,11 @@ describe('summarize', () => {
       ['Read', 8],
       ['Bash', 6]
     ]);
+    expect(s.modelTools.map((r) => [r.key, r.name, r.calls])).toEqual([
+      ['anthropic/opus', 'Read', 6],
+      ['openai/gpt', 'Bash', 4]
+    ]);
+    expect(s.modelTools[0].label).toBe('opus');
     expect(s.files[0]).toMatchObject({ path: 'src/a.ts', total: 4 });
   });
 
@@ -142,7 +148,7 @@ describe('summarize', () => {
       rec('c', usage({ costUsd: 0.5, turns: 2 }), 'local', 'llama'),
       rec('d', usage({ costUsd: 0.2, inputTokens: 1000 }), 'local', 'embed')
     ];
-    const s = summarize(sessions, {}, {}, {}, 0, 0);
+    const s = summarize(sessions, {}, {}, {}, {}, 0, 0);
     expect(s.modelRates.map((r) => r.key)).toEqual(['anthropic/opus', 'local/llama', 'local/embed', 'deepseek/chat']);
     const opus = s.modelRates.find((r) => r.key === 'anthropic/opus')!;
     expect(opus.tokens).toBe(200_000);
@@ -168,9 +174,9 @@ describe('summarize', () => {
       '2025-06-02': { ...emptyDay(), costUsd: 2 },
       '2025-05-01': { ...emptyDay(), costUsd: 4 }
     };
-    const s = summarize([], days, {}, {}, 7, now);
+    const s = summarize([], days, {}, {}, {}, 7, now);
     expect(s.days.map((d) => d.date)).toEqual(['2025-06-09']);
-    const all = summarize([], days, {}, {}, 0, now);
+    const all = summarize([], days, {}, {}, {}, 0, now);
     expect(all.days.map((d) => d.date)).toEqual(['2025-05-01', '2025-06-02', '2025-06-09']);
     expect(all.activeDays).toBe(3);
   });
@@ -404,6 +410,8 @@ describe('per-dimension day slices', () => {
     store.recordUsage(a2, usage({ costUsd: 1.5, turns: 2, inputTokens: 150 }), t0);
     store.recordTurn(a2, turn({ durationMs: 2_000, usage: { outputTokens: 100 } }), t0);
     store.recordToolCall('b', { id: 'x1', kind: 'tool', ts: 1, name: 'bash', status: 'done', durationMs: 10, changes: [{ path: 'f.ts', kind: 'update' }] }, t0);
+    // After the model switch the session's snapshot points at sonnet, so this error lands there.
+    store.recordToolCall('a', { id: 'x2', kind: 'tool', ts: 1, name: 'edit', status: 'error', durationMs: 5 }, t0);
     await store.flush();
 
     const fresh = new AnalyticsStore(dir, { log });
@@ -416,14 +424,26 @@ describe('per-dimension day slices', () => {
     expect(by?.model['anthropic/sonnet']).toMatchObject({ costUsd: 0.5, turns: 1, label: 'sonnet', durationMs: 2_000 });
     expect(by?.project['/repo-b']?.toolCalls).toBe(1);
     expect(by?.tool.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
+    expect(by?.modelTool['openrouter/glm']?.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
+    expect(by?.modelTool['anthropic/sonnet']?.edit).toEqual({ calls: 1, errors: 1, declined: 0, durationMs: 5 });
+    // The all-time per-model tool map survives the reload, keyed like the model slices.
+    expect(s.modelTools.map((x) => [x.key, x.name, x.calls]).sort()).toEqual([
+      ['anthropic/sonnet', 'edit', 1],
+      ['openrouter/glm', 'bash', 1]
+    ]);
+    expect(s.modelTools.find((x) => x.key === 'anthropic/sonnet')).toMatchObject({ label: 'sonnet', errors: 1 });
     expect(by?.file['f.ts']).toEqual({ adds: 0, updates: 1, deletes: 0, renames: 0 });
     // The range rollup rebuilds the totals from the slices with nothing left over.
     const r = rollupDays(s.days);
     expect(r.totals.costUsd).toBeCloseTo(3.5);
-    expect(r.totals.toolCalls).toBe(1);
+    expect(r.totals.toolCalls).toBe(2);
     expect(r.unattributed.costUsd).toBe(0);
     expect(r.sessionIds.sort()).toEqual(['a', 'b']);
     expect(r.byModel.map((x) => x.key)).toEqual(['openrouter/glm', 'anthropic/opus', 'anthropic/sonnet']);
+    expect(r.modelTools.map((x) => [x.key, x.name, x.calls])).toEqual([
+      ['anthropic/sonnet', 'edit', 1],
+      ['openrouter/glm', 'bash', 1]
+    ]);
   });
 
   it('backfills pre-existing sessions into slices and reports the window before the range', async () => {
