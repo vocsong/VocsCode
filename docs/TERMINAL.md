@@ -12,7 +12,7 @@ The Terminal tab in the side panel is a full terminal, not a command runner. Eac
 - **Find** (`Ctrl+F`, case / regex options), **Select all**, **Clear**, **Kill process** for a hung command, clickable URLs, 10 000 lines of scrollback by default.
 - **Send to agent.** The sparkle button puts the selection — or the last screenful of output — into the composer as a fenced block, so a failing build lands in the chat with one click. Output going idle also refreshes the Changes tab.
 - **From the composer.** Start a draft with `!` to run it as a shell command in the session's terminal instead of sending it to the agent: the command stays local, the Terminal tab opens on it, and the transcript is untouched.
-- **Shortcuts.** ``Ctrl+` `` focuses the terminal (again: back to the composer), ``Ctrl+Shift+` `` opens a new one, `Ctrl+Shift+C` / `Ctrl+Shift+V` copy and paste everywhere; on Windows/Linux `Ctrl+C` copies while text is selected (otherwise it interrupts) and `Ctrl+V` pastes. Right-click copies the selection or pastes. App chords (`Ctrl+N/K/B/J/,` and `Ctrl+1…9`) win over the shell.
+- **Shortcuts.** ``Ctrl+` `` focuses the terminal (again: back to the composer), ``Ctrl+Shift+` `` opens a new one, `Ctrl+Shift+C` / `Ctrl+Shift+V` copy and paste everywhere; on Windows/Linux `Ctrl+C` copies while text is selected (otherwise it interrupts) and `Ctrl+V` pastes. Right-click copies the selection or pastes. App chords (`Ctrl+N/K/B/J/,` and `Ctrl+1…9`) win over the shell, as do `Ctrl+Up/Down` and `Ctrl+Shift+Up/Down`, which navigate the session list and never reach the shell.
 
 ## Packaging
 
