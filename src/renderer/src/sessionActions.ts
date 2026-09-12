@@ -1,9 +1,42 @@
-/** Session actions shared by the sidebar rows and the header so both behave identically. */
-import type { SessionMeta } from '../../shared/types';
+/** Shared renderer actions for changing and archiving sessions. */
+import type { AppSettings, EffortLevel, SessionMeta } from '../../shared/types';
 import { invoke } from './api';
 import { askConfirm } from './components/ui';
 
 type Toast = (text: string, kind?: 'info' | 'success' | 'error') => void;
+
+let latestEffortSelection = 0;
+let effortPreferenceQueue: Promise<void> = Promise.resolve();
+
+function persistEffort(selection: number, effort: EffortLevel | undefined, patch: Partial<AppSettings> = {}): Promise<void> {
+  const update = effortPreferenceQueue.then(async () => {
+    if (selection !== latestEffortSelection) return;
+    await invoke('settings:update', { ...patch, defaultEffort: effort });
+  });
+  effortPreferenceQueue = update.catch(() => undefined);
+  return update;
+}
+
+/** Remembers a new-session or Settings choice in the same order as live effort changes. */
+export function rememberEffort(effort: EffortLevel | undefined, patch: Partial<AppSettings> = {}): Promise<void> {
+  return persistEffort(++latestEffortSelection, effort, patch);
+}
+
+/** Applies an effort to a session, then remembers it unless the user made a newer choice. */
+export async function setSessionEffort(id: string, effort: EffortLevel, toast: Toast): Promise<void> {
+  const selection = ++latestEffortSelection;
+  try {
+    await invoke('sessions:setEffort', { id, effort });
+  } catch (e) {
+    toast(`Reasoning effort switch failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    return;
+  }
+  try {
+    await persistEffort(selection, effort);
+  } catch (e) {
+    toast(`Reasoning effort changed, but could not be remembered: ${e instanceof Error ? e.message : String(e)}`, 'error');
+  }
+}
 
 /** Archive like the sidebar row does: a worktree is removed after confirmation; uncommitted changes block, then force. */
 export async function archiveSession(s: SessionMeta, toast: Toast) {

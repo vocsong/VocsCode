@@ -7,6 +7,7 @@ import { parseModelOverrideKey } from '../../../shared/model-overrides';
 import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
 import { BUILTIN_SHORTCUT_GROUPS, SHORTCUT_COMMANDS, accelFromEvent, formatAccelerator, isReservedAccel, shortcutCommandInfo, type ShortcutCommand } from '../../../shared/shortcuts';
 import { invoke, isMac, platform } from '../api';
+import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { systemPrefersDark } from '../theme';
 import { Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
@@ -124,7 +125,7 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
         </select>
       </Field>
       <Field label="Default reasoning effort">
-        <select value={settings.defaultEffort ?? ''} onChange={(e) => update({ defaultEffort: (e.target.value || undefined) as AppSettings['defaultEffort'] })}>
+        <select value={settings.defaultEffort ?? ''} onChange={(e) => void rememberEffort((e.target.value || undefined) as AppSettings['defaultEffort']).catch(() => undefined)}>
           <option value="">Harness default</option>
           {['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((l) => (
             <option key={l} value={l}>
