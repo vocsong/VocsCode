@@ -41,9 +41,8 @@ const PROMPT_SAMPLE_CHARS = 800;
  * returns null when no provider is usable or the call fails, leaving the
  * truncated-prompt placeholder in place.
  *
- * Prefers the session's own model when its provider is usable, so the title
- * comes from the same LLM the user picked; otherwise falls back to the first
- * usable enabled provider's default model.
+ * Prefers the configured utility model (or, failing that, the session's own
+ * provider when given) so background chores use a cheap model when possible.
  */
 export async function generateSessionTitle(
   prompt: string,

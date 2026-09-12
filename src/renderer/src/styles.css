@@ -2567,7 +2567,7 @@ body.resizing {
 }
 .branches-cols {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px 74px minmax(100px, 112px) 108px;
+  grid-template-columns: minmax(0, 1fr) 60px 72px minmax(100px, 112px) 108px;
   gap: 6px;
   padding: 5px 10px;
   border-bottom: 1px solid var(--border);
@@ -2583,7 +2583,7 @@ body.resizing {
 }
 .branch-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px 74px minmax(100px, 112px) 108px;
+  grid-template-columns: minmax(0, 1fr) 60px 72px minmax(100px, 112px) 108px;
   align-items: center;
   gap: 6px;
   padding: 5px 10px;
@@ -2591,7 +2591,7 @@ body.resizing {
 }
 .pr-cols,
 .pr-row {
-  grid-template-columns: minmax(0, 1fr) 72px 64px minmax(100px, 112px) 60px;
+  grid-template-columns: minmax(0, 1fr) 72px 60px minmax(100px, 112px) 60px;
 }
 /* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
 .branch-row > :nth-child(2) {

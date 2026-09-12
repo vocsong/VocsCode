@@ -508,9 +508,9 @@ export class SessionManager {
    * user has not renamed (or deleted) the session while the call was in flight.
    */
   private scheduleLlmTitle(id: string, placeholder: string, prompt: string): void {
-    const meta = this.get(id);
     // The cheap utility model is for background chores like this; the session's own model is
     // the fallback so titling still works before the user picks a utility model.
+    const meta = this.get(id);
     const preferred = this.settings().utilityModel ?? meta?.activeModel;
     void generateSessionTitle(prompt, this.settings().providers, this.deps.getSecret, preferred)
       .then((title) => {
