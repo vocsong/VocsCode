@@ -6,33 +6,40 @@ import type { FsEntry } from '../shared/types';
 const DEFAULT_MAX_BYTES = 400_000;
 const MAX_BYTES = 2_000_000;
 
-function resolveInWorkspace(root: string, target = ''): string | undefined {
-  const resolvedRoot = path.resolve(root);
-  const resolvedTarget = path.resolve(resolvedRoot, target);
-  const relative = path.relative(resolvedRoot, resolvedTarget);
-  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return undefined;
-  return resolvedTarget;
+function isWithin(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+async function resolveInWorkspace(root: string, target = ''): Promise<{ lexicalRoot: string; lexicalTarget: string; realTarget: string } | undefined> {
+  const lexicalRoot = path.resolve(root);
+  const lexicalTarget = path.resolve(lexicalRoot, target);
+  if (!isWithin(lexicalRoot, lexicalTarget)) return undefined;
+
+  const [realRoot, realTarget] = await Promise.all([fs.realpath(lexicalRoot), fs.realpath(lexicalTarget)]);
+  if (!isWithin(realRoot, realTarget)) return undefined;
+  return { lexicalRoot, lexicalTarget, realTarget };
 }
 
 export async function listWorkspaceFiles(root: string, relPath?: string): Promise<FsEntry[]> {
-  const dir = resolveInWorkspace(root, relPath);
-  if (!dir) return [];
+  const resolved = await resolveInWorkspace(root, relPath);
+  if (!resolved) return [];
 
-  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const entries = await fs.readdir(resolved.realTarget, { withFileTypes: true });
   const out: FsEntry[] = [];
   for (const entry of entries) {
-    const absolutePath = path.join(dir, entry.name);
+    const realPath = path.join(resolved.realTarget, entry.name);
     let size: number | undefined;
     if (entry.isFile()) {
       try {
-        size = (await fs.stat(absolutePath)).size;
+        size = (await fs.stat(realPath)).size;
       } catch {
         // The entry may disappear between readdir and stat.
       }
     }
     out.push({
       name: entry.name,
-      path: path.relative(path.resolve(root), absolutePath),
+      path: path.relative(resolved.lexicalRoot, path.join(resolved.lexicalTarget, entry.name)),
       isDir: entry.isDirectory(),
       size,
     });
@@ -41,12 +48,12 @@ export async function listWorkspaceFiles(root: string, relPath?: string): Promis
 }
 
 export async function readWorkspaceFile(root: string, target: string, maxBytes?: number): Promise<{ content: string; truncated: boolean }> {
-  const absolutePath = resolveInWorkspace(root, target);
-  if (!absolutePath) return { content: '', truncated: false };
+  const resolved = await resolveInWorkspace(root, target);
+  if (!resolved) return { content: '', truncated: false };
 
   const requestedMax = maxBytes ?? DEFAULT_MAX_BYTES;
   const limit = Math.min(Math.max(0, Math.trunc(requestedMax)), MAX_BYTES);
-  const handle = await fs.open(absolutePath, 'r');
+  const handle = await fs.open(resolved.realTarget, 'r');
   try {
     const initialSize = (await handle.stat()).size;
     const buffer = Buffer.alloc(Math.min(initialSize, limit));

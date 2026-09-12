@@ -53,6 +53,17 @@ describe('listWorkspaceFiles', () => {
     await expect(listWorkspaceFiles(root, path.join('..', 'proj2'))).resolves.toEqual([]);
     await expect(listWorkspaceFiles(root, sibling)).resolves.toEqual([]);
   });
+
+  it('rejects directory links that resolve outside the workspace', async () => {
+    const { root, sibling } = workspace();
+    await fs.mkdir(root, { recursive: true });
+    await fs.mkdir(sibling);
+    await fs.writeFile(path.join(sibling, 'outside.txt'), 'outside');
+    await fs.symlink(sibling, path.join(root, 'outside-link'), process.platform === 'win32' ? 'junction' : 'dir');
+
+    await expect(listWorkspaceFiles(root, 'outside-link')).resolves.toEqual([]);
+    await expect(readWorkspaceFile(root, path.join('outside-link', 'outside.txt'))).resolves.toEqual({ content: '', truncated: false });
+  });
 });
 
 describe('readWorkspaceFile', () => {
