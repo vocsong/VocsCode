@@ -9,6 +9,7 @@ describe('makeFileChange', () => {
     const added = makeFileChange('/workspace', '/workspace/src/new.ts', null, 'new\n', { newFileHeader: '(new file)' });
     expect(added).toMatchObject({ path: `src${path.sep}new.ts`, kind: 'add' });
     expect(added.diff).toContain('(new file)');
+    expect(makeFileChange('/workspace', 'src/new.ts', null, 'new\n', { oldFileName: '/dev/null' }).diff).toContain('--- /dev/null');
 
     const updated = makeFileChange('/workspace', '/workspace/src/new.ts', 'old\n', 'new\n');
     expect(updated).toMatchObject({ path: `src${path.sep}new.ts`, kind: 'update' });
