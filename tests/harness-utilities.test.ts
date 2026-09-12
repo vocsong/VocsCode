@@ -34,16 +34,22 @@ describe('TurnUsageTracker', () => {
     tracker.beginTurn();
     tracker.setCumulative({ inputTokens: 16, outputTokens: 7, costUsd: 0.8 });
     expect(tracker.finishTurn().usage).toMatchObject({ inputTokens: 6, outputTokens: 3 });
-    expect(tracker.finishTurn).toBeDefined();
+    // A duplicate completion event cannot create a phantom turn.
+    expect(tracker.finishTurn()).toEqual({ totals: expect.objectContaining({ turns: 2 }) });
     expect(tracker.snapshot().turns).toBe(2);
   });
 
-  it('keeps cumulative counters monotonic when a harness resets its report', () => {
+  it('rebases a reset cumulative counter without decreasing app totals', () => {
     const tracker = new TurnUsageTracker({ ...emptyUsage(), inputTokens: 20 });
     tracker.beginTurn();
     tracker.setCumulative({ inputTokens: 3 });
     expect(tracker.finishTurn().usage?.inputTokens).toBe(0);
     expect(tracker.snapshot().inputTokens).toBe(20);
+
+    tracker.beginTurn();
+    tracker.setCumulative({ inputTokens: 8 });
+    expect(tracker.finishTurn().usage?.inputTokens).toBe(5);
+    expect(tracker.snapshot().inputTokens).toBe(25);
   });
 
   it('adds per-step usage for adapters with non-cumulative responses', () => {

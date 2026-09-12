@@ -246,7 +246,11 @@ function installProcessErrorHandlers(): void {
   if (processErrorHandlersInstalled) return;
   processErrorHandlersInstalled = true;
   process.on('unhandledRejection', (reason) => log('warn', `unhandled rejection: ${formatProcessError(reason)}`));
-  process.on('uncaughtException', (error) => log('error', `uncaught exception: ${formatProcessError(error)}`));
+  process.on('uncaughtException', (error) => {
+    log('error', `uncaught exception: ${formatProcessError(error)}`);
+    if (app.isReady()) app.quit();
+    else process.exitCode = 1;
+  });
 }
 
 /** Resolve the same icon in development and in the packaged app's extra resources. */
