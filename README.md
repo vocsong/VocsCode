@@ -39,6 +39,7 @@ Everything technical lives here:
 | [Themes](docs/THEMES.md) | All 23 themes and how they're built |
 | [Testing & verification](docs/TESTING.md) | Dev commands, offline and live test suites |
 | [Operations](docs/OPERATIONS.md) | Log locations, environment variables |
+| [MCP support (plan)](docs/MCP.md) | Global and per-repo MCP servers: storage, per-harness injection, UI, trust model, phasing |
 
 ## Requirements
 
