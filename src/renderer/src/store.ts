@@ -1,6 +1,6 @@
 /** zustand store for session state, panel selection and toasts. Selectors must return stable references. */
 import { create } from 'zustand';
-import type { AppSettings, HarnessAvailability, HarnessId, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
+import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
@@ -88,7 +88,7 @@ interface State {
   startNewSession(root?: string | null): Promise<void>;
   openQuickSession(open: boolean): void;
   /** Starts a session for a known folder straight from settings defaults, skipping the dialog. */
-  createQuickSession(root: string): Promise<void>;
+  createQuickSession(root: string, first?: { prompt?: string; images?: ImageAttachment[] }): Promise<void>;
   openPalette(open: boolean): void;
   toggleThinking(): void;
   toast(text: string, kind?: Toast['kind']): void;
@@ -369,7 +369,7 @@ export const useStore = create<State>((set, get) => ({
   openQuickSession(quickSessionOpen) {
     set({ quickSessionOpen });
   },
-  async createQuickSession(root) {
+  async createQuickSession(root, first) {
     const settings = get().settings;
     if (!settings) return;
     const harness = settings.defaultHarness;
@@ -383,7 +383,11 @@ export const useStore = create<State>((set, get) => ({
       acpAgent: harness === 'acp' ? settings.acpAgents[0]?.id : undefined
     };
     try {
-      const meta = await invoke('sessions:create', { config });
+      const meta = await invoke('sessions:create', {
+        config,
+        initialPrompt: first?.prompt?.trim() || undefined,
+        initialImages: first?.images?.length ? first.images : undefined
+      });
       await get().setActive(meta.id);
     } catch (e) {
       get().toast(String((e as Error).message ?? e), 'error');
