@@ -3226,6 +3226,13 @@ body.resizing {
 .palette-item.active {
   background: var(--bg-active);
 }
+/* Quick-session picker: keep the full path from pushing the row wide. */
+.palette-item .qs-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46%;
+}
 
 /* Empty & toasts */
 .main-empty {
