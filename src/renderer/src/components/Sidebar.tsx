@@ -1,6 +1,6 @@
 /** Session list grouped by project, with live status badges per harness. */
 import React, { useMemo, useRef, useState } from 'react';
-import type { SessionMeta } from '../../../shared/types';
+import type { AppSettings, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, harnessShort, relTime } from '../format';
@@ -52,6 +52,64 @@ function pinRank(s: SessionMeta): number {
 /** Canonical display order for one folder's session list. */
 export function sortSessionRows(list: SessionMeta[]): SessionMeta[] {
   return [...list].sort((a, b) => pinRank(a) - pinRank(b) || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+}
+
+/** One folder in sidebar display order, with its non-archived session ids in row order. */
+export interface SidebarNavFolder {
+  root: string;
+  sessionIds: string[];
+}
+
+/**
+ * Sidebar display order (folders by saved order, sessions by sortSessionRows) mirrored as a pure
+ * model so keyboard navigation (Ctrl+Arrow) matches what the sidebar renders. Always reflects the
+ * default view: non-archived sessions, no search filter.
+ */
+export function sidebarNavModel(sessions: SessionMeta[], settings: AppSettings | null): SidebarNavFolder[] {
+  const visible = sessions.filter((s) => !s.archived);
+  const byProject = new Map<string, SessionMeta[]>();
+  for (const s of visible) byProject.set(s.config.projectRoot, [...(byProject.get(s.config.projectRoot) ?? []), s]);
+  const model = [...byProject.entries()].map(([root, list]) => ({
+    root,
+    sessionIds: sortSessionRows(list).map((s) => s.id)
+  }));
+  for (const root of settings?.folders ?? []) {
+    if (!byProject.has(root)) model.push({ root, sessionIds: [] });
+  }
+  const order = settings?.folderOrder ?? [];
+  const pos = (root: string) => {
+    const i = order.indexOf(root);
+    return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+  };
+  model.sort((a, b) => pos(a.root) - pos(b.root) || basename(a.root).localeCompare(basename(b.root)));
+  return model;
+}
+
+/** Flat session rows in visual order across all folders. */
+function flatRows(model: SidebarNavFolder[]): { sessionId: string; root: string }[] {
+  return model.flatMap((f) => f.sessionIds.map((sessionId) => ({ sessionId, root: f.root })));
+}
+
+/** Ctrl+Arrow: the session visually above/below the active one, wrapping at the ends. */
+export function nextSessionTarget(model: SidebarNavFolder[], activeId: string | null, down: boolean): { sessionId: string; root: string } | null {
+  const rows = flatRows(model);
+  if (rows.length === 0) return null;
+  const at = rows.findIndex((r) => r.sessionId === activeId);
+  if (at === -1) return down ? rows[0] : rows[rows.length - 1];
+  return rows[(at + (down ? 1 : -1) + rows.length) % rows.length];
+}
+
+/**
+ * Ctrl+Shift+Arrow: the first session of the folder below/above the active one, wrapping at the
+ * ends. Folders with no sessions are skipped (there is nothing to select in them).
+ */
+export function nextFolderTarget(model: SidebarNavFolder[], activeId: string | null, down: boolean): { sessionId: string; root: string } | null {
+  const withSessions = model.filter((f) => f.sessionIds.length > 0);
+  if (withSessions.length === 0) return null;
+  const at = withSessions.findIndex((f) => f.sessionIds.includes(activeId ?? ''));
+  if (at === -1) return { sessionId: withSessions[0].sessionIds[0], root: withSessions[0].root };
+  const folder = withSessions[(at + (down ? 1 : -1) + withSessions.length) % withSessions.length];
+  return { sessionId: folder.sessionIds[0], root: folder.root };
 }
 
 /** Built-in status labels offered in the picker; user-added labels extend these via settings. */
@@ -377,6 +435,7 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
   return (
     <div
       className={`session-row ${active ? 'active' : ''}${dragClass}${indicator}`}
+      data-session-id={s.id}
       draggable={canDrag}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move';
