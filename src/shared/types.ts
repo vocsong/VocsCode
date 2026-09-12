@@ -339,6 +339,8 @@ export interface SessionMeta {
   worktreeBranch?: string;
   status: SessionStatus;
   statusDetail?: string;
+  /** User-picked display label for the status badge; shown instead of the status name until cleared. */
+  statusLabel?: string;
   harnessRef: HarnessRef;
   usage: UsageTotals;
   lastError?: string;
@@ -620,6 +622,8 @@ export interface AppSettings {
   folders: string[];
   /** Per-folder sidebar appearance keyed by project root. */
   folderStyles?: Record<string, FolderStyle>;
+  /** User-added labels offered in the status-label picker alongside the built-in statuses. */
+  customLabels?: string[];
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
 }

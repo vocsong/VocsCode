@@ -7,7 +7,7 @@ import { basename, fmtCost, harnessShort, relTime } from '../format';
 import { useStore } from '../store';
 import { Resizer } from './Resizer';
 import { FolderBranch } from './FolderBranch';
-import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, StatusLabel } from './ui';
+import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
 import { ForkIntoItems } from './ForkInto';
 
 const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
@@ -34,6 +34,9 @@ const FOLDER_COLORS = [
   '#a3e635', '#fbbf24', '#facc15', '#fb923c', '#f97316', '#f87171', '#ef4444', '#fb7185',
   '#f472b6', '#e879f9', '#c084fc', '#a78bfa', '#818cf8', '#94a3b8', '#64748b', '#e2e8f0'
 ] as const;
+
+/** Built-in status labels offered in the picker; user-added labels extend these via settings. */
+const STATUS_LABEL_CHOICES = ['Idle', 'Starting', 'Working', 'Awaiting', 'Error', 'Stopped', 'PR', 'Merged', 'Todo'];
 
 export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
@@ -125,7 +128,7 @@ export function Sidebar() {
               </button>
             </div>
             {g.list.map((s) => (
-              <SessionRow key={s.id} session={s} active={s.id === activeId && view === 'chat'} onSelect={() => void setActive(s.id)} toast={toast} />
+              <SessionRow key={s.id} session={s} active={s.id === activeId && view === 'chat'} customLabels={settings?.customLabels ?? []} onSelect={() => void setActive(s.id)} toast={toast} />
             ))}
           </div>
         ))}
@@ -149,7 +152,7 @@ export function Sidebar() {
   );
 }
 
-function SessionRow({ session: s, active, onSelect, toast }: { session: SessionMeta; active: boolean; onSelect: () => void; toast: (t: string, k?: 'info' | 'success' | 'error') => void }) {
+function SessionRow({ session: s, active, customLabels, onSelect, toast }: { session: SessionMeta; active: boolean; customLabels: string[]; onSelect: () => void; toast: (t: string, k?: 'info' | 'success' | 'error') => void }) {
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(s.title);
   const h = HARNESS_BY_ID[s.config.harness];
@@ -160,6 +163,12 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
   const commit = async () => {
     setRenaming(false);
     if (title.trim() && title !== s.title) await invoke('sessions:rename', { id: s.id, title: title.trim() });
+  };
+  // Picking the label that names the current status resets to auto instead of labeling it red.
+  const setStatusLabel = (label?: string, nextCustom?: string[]) => {
+    const picked = label && STATUS_LABELS[s.status] === label ? undefined : label;
+    void invoke('sessions:label', { id: s.id, label: picked });
+    if (nextCustom) void invoke('settings:update', { customLabels: nextCustom });
   };
   return (
     <div className={`session-row ${active ? 'active' : ''}`} onClick={onSelect} onDoubleClick={startRename}>
@@ -200,7 +209,11 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
           {(s.queued ?? 0) > 0 && <span className="session-queued">+{s.queued}</span>}
         </div>
       </div>
-      <StatusLabel status={s.status} />
+      <div onClick={(e) => e.stopPropagation()}>
+        <Dropdown align="right" width={200} trigger={() => <StatusLabel status={s.status} label={s.statusLabel} />}>
+          {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
+        </Dropdown>
+      </div>
       <div onClick={(e) => e.stopPropagation()}>
         <Dropdown align="right" width={220} trigger={() => <button type="button" className="row-menu-btn" aria-label="Session menu"><Icon name="more" size={18} /></button>}>
           {(close) => (
@@ -260,6 +273,37 @@ function SessionRow({ session: s, active, onSelect, toast }: { session: SessionM
           )}
         </Dropdown>
       </div>
+    </div>
+  );
+}
+
+/** Status-label picker: built-in choices, user-added labels, an add field, and a reset. */
+function StatusLabelPicker({ session: s, customLabels, onPick, close }: { session: SessionMeta; customLabels: string[]; onPick: (label?: string, nextCustom?: string[]) => void; close: () => void }) {
+  const [draft, setDraft] = useState('');
+  const extras = customLabels.filter((l) => !STATUS_LABEL_CHOICES.some((c) => c.toLowerCase() === l.toLowerCase()));
+  const add = () => {
+    const label = draft.trim().slice(0, 24);
+    if (!label) return;
+    onPick(label, [...customLabels, label].filter((l, i, all) => all.findIndex((x) => x.toLowerCase() === l.toLowerCase()) === i).slice(0, 30));
+    setDraft('');
+    close();
+  };
+  return (
+    <div className="status-label-picker">
+      {[...STATUS_LABEL_CHOICES, ...extras].map((label) => (
+        <MenuItem key={label} active={s.statusLabel === label} onClick={() => { onPick(label); close(); }}>{label}</MenuItem>
+      ))}
+      <div className="status-label-add">
+        <input
+          placeholder="Add label"
+          value={draft}
+          maxLength={24}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') add(); }}
+        />
+        <Button size="sm" variant="ghost" icon="plus" aria-label="Add label" onClick={add} />
+      </div>
+      {s.statusLabel && <MenuItem onClick={() => { onPick(undefined); close(); }}>Reset to status</MenuItem>}
     </div>
   );
 }
