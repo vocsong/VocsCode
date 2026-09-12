@@ -771,6 +771,30 @@ export interface DoctorReport {
   userData: string;
 }
 
+/** Filters narrowing a session search to a subset of sessions. */
+export interface SearchFilters {
+  archived?: boolean;
+  harness?: HarnessId;
+  projectRoot?: string;
+}
+
+/** One deep-search hit: a title/goal match or a match inside a transcript item. */
+export interface SearchResult {
+  sessionId: string;
+  /** Transcript item id for deep hits; absent for title/goal matches (nothing to scroll to). */
+  itemId?: string;
+  kind: 'meta' | 'user' | 'assistant' | 'tool' | 'info';
+  ts: number;
+  /** Snippet with \u0001/\u0002 around the matched terms; the renderer turns them into <mark>. */
+  snippet: string;
+}
+
+export interface SearchResponse {
+  /** False when node:sqlite/FTS5 is unavailable in this runtime; deep search is disabled then. */
+  available: boolean;
+  results: SearchResult[];
+}
+
 export interface CreateSessionRequest {
   config: SessionConfig;
   title?: string;
