@@ -707,6 +707,14 @@ export async function worktreeAddForBranch(projectRoot: string, branch: string):
   return { path: wtPath, branch };
 }
 
+/** Thrown when a non-force worktree removal hits uncommitted changes; callers offer a force retry. */
+export class WorktreeDirtyError extends Error {
+  constructor(wtPath: string) {
+    super(`The worktree has modified or untracked files: ${wtPath}`);
+    this.name = 'WorktreeDirtyError';
+  }
+}
+
 export async function removeWorktree(projectRoot: string, wtPath: string, opts: { force?: boolean } = {}): Promise<void> {
   const root = await gitRoot(projectRoot);
   if (!root) return;
@@ -727,6 +735,7 @@ export async function removeWorktree(projectRoot: string, wtPath: string, opts: 
     const commonDir = probe.code === 0 ? path.resolve(probe.stdout.trim()) : '';
     const ours = eq(commonDir, path.resolve(root)) || eq(commonDir, path.resolve(root, '.git'));
     if (probe.code === 0 && ours) {
+      if (/contains modified or untracked files/.test(`${r.stderr}${r.stdout}`)) throw new WorktreeDirtyError(wtPath);
       throw new Error(`git worktree remove failed: ${r.stderr || r.stdout}`);
     }
     await git(root, ['worktree', 'prune']);

@@ -47,6 +47,8 @@ export interface Scope {
   activeDays: number;
   /** Usage recorded before per-model tracking existed: counted in the totals but in no breakdown. */
   unattributed?: UsageCounters;
+  /** Days in range whose breakdowns were estimated from session totals. */
+  estimatedDays: number;
 }
 
 const DAY_MS = 86_400_000;
@@ -76,7 +78,8 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
       files: summary.files,
       sessions: summary.sessions,
       sessionCount: summary.sessionCount,
-      activeDays: summary.activeDays
+      activeDays: summary.activeDays,
+      estimatedDays: days.filter((d) => d.usage.by?.estimated).length
     };
   }
   const r = rollupDays(days);
@@ -101,7 +104,8 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
     sessions,
     sessionCount: sessions.length,
     activeDays,
-    unattributed: COUNTER_FIELDS.some((f) => r.unattributed[f] > 0) ? r.unattributed : undefined
+    unattributed: COUNTER_FIELDS.some((f) => r.unattributed[f] > 0) ? r.unattributed : undefined,
+    estimatedDays: r.estimatedDays
   };
 }
 

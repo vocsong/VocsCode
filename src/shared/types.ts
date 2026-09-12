@@ -181,6 +181,8 @@ export interface UsageSlice extends UsageCounters {
 
 /** Per-dimension attribution of one day's usage; the bounded ranges of the dashboard are built from it. */
 export interface UsageDayDimensions {
+  /** Set when the slices were estimated from session totals for a day recorded before slice tracking. */
+  estimated?: boolean;
   harness: Record<string, UsageSlice>;
   /** Keyed `provider/model`, attributed to the model active when the usage was reported. */
   model: Record<string, UsageSlice>;
