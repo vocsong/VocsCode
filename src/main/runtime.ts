@@ -59,13 +59,13 @@ export function runCapture(
   cmd: string,
   args: string[],
   opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; input?: string } = {}
-): Promise<{ code: number | null; stdout: string; stderr: string }> {
+): Promise<{ code: number | null; stdout: string; stderr: string; timedOut?: boolean }> {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
     let settled = false;
     let timeout: NodeJS.Timeout | undefined;
-    const settle = (r: { code: number | null; stdout: string; stderr: string }) => {
+    const settle = (r: { code: number | null; stdout: string; stderr: string; timedOut?: boolean }) => {
       if (settled) return;
       settled = true;
       if (timeout) clearTimeout(timeout);
@@ -83,14 +83,11 @@ export function runCapture(
       return;
     }
     timeout = setTimeout(() => {
-      try {
-        killTree(child);
-      } catch {
-        /* ignore */
-      }
+      void killTree(child);
       // Grandchildren can inherit the pipes and keep stdio open (cmd.exe-wrapped shims on
-      // Windows); settle anyway so callers never hang on a killed child.
-      settle({ code: null, stdout, stderr: `${stderr}\ntimed out after ${opts.timeoutMs ?? 15_000}ms` });
+      // Windows); settle anyway so callers never hang on a killed child. timedOut marks the
+      // partial output as untrustworthy rather than a completed run.
+      settle({ code: null, stdout, stderr: `${stderr}\ntimed out after ${opts.timeoutMs ?? 15_000}ms`, timedOut: true });
     }, opts.timeoutMs ?? 15_000);
     child.stdout.on('data', (d) => (stdout += d.toString()));
     child.stderr.on('data', (d) => (stderr += d.toString()));
@@ -193,10 +190,10 @@ export class RuntimeResolver {
     if (preferBundled && bundled) return { path: bundled, source: 'bundled' };
 
     const sys = which(tool, this.appRuntimeBin());
-    // The Claude Agent SDK spawns the executable directly; an npm .cmd shim cannot be spawned
-    // without a shell on Windows, so prefer the bundled native binary in that case. Both read
-    // the same ~/.claude credentials.
-    if (tool === 'claude' && sys && /\.(cmd|bat)$/i.test(sys) && bundled && !systemOnly) return { path: bundled, source: 'bundled' };
+    // An npm .cmd shim needs a cmd.exe parent on Windows, which outlives a plain child.kill()
+    // and makes tree termination unreliable; prefer the bundled native binary when PATH only
+    // offers the shim. Both read the same credentials (~/.claude, ~/.codex).
+    if ((tool === 'claude' || tool === 'codex') && sys && /\.(cmd|bat)$/i.test(sys) && bundled && !systemOnly) return { path: bundled, source: 'bundled' };
     if (sys) return { path: sys, source: sys.startsWith(this.paths.appRuntimeDir) ? 'app-runtime' : 'system' };
     if (!systemOnly && bundled) return { path: bundled, source: 'bundled' };
     return null;
@@ -268,6 +265,18 @@ export class RuntimeResolver {
           };
         return { available: false, detail: 'Neither dsh nor npx found.', installHint: 'npm install -g @deepseek-ai/dsh' };
       }
+      case 'cursor': {
+        // The SDK ships with the app; only credentials are user-supplied. Cursor reads them from
+        // CURSOR_API_KEY or ~/.cursor/sdk/auth.json (Cursor.auth.login()), same as our key store.
+        const key = process.env.CURSOR_API_KEY;
+        const authed = key ? true : await cursorHasStoredLogin();
+        return {
+          available: true,
+          detail: 'Bundled @cursor/sdk (local runtime)',
+          authenticated: authed,
+          installHint: authed ? undefined : 'Add a Cursor API key under Settings → Providers, or sign in once with Cursor.auth.login().'
+        };
+      }
       case 'native':
         return { available: true, detail: 'Built in. Add an API key under Settings → Providers.', authenticated: 'unknown' };
     }
@@ -289,6 +298,12 @@ export class RuntimeResolver {
     });
     return { ok: r.code === 0, log: r.stdout + r.stderr };
   }
+}
+
+/** Cursor SDK stores a browser login's minted API key in ~/.cursor/sdk/auth.json. */
+export async function cursorHasStoredLogin(): Promise<boolean> {
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+  return exists(path.join(home, '.cursor', 'sdk', 'auth.json'));
 }
 
 export async function claudeHasCredentials(): Promise<boolean> {

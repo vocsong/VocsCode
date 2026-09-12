@@ -14,6 +14,7 @@ import type { SecretStore } from '../src/main/secrets';
 import type { SessionManager } from '../src/main/session-manager';
 import type { SessionMeta } from '../src/shared/types';
 import { SettingsStore } from '../src/main/settings';
+import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
 
 const dirs: string[] = [];
@@ -92,6 +93,7 @@ function stubDeps(overrides: Partial<Deps> = {}): { registry: HandlerRegistry; d
       install: async () => ({ ok: false, log: '' })
     } as unknown as RuntimeResolver,
     analytics: { summary: async () => ({ totals: ZERO_USAGE, speed: null, days: [] }) } as unknown as AnalyticsStore,
+    search: { search: async () => ({ items: [], total: 0 }) } as unknown as SearchIndex,
     log: (level, message) => logs.push([level, message]),
     push: (channel, payload) => pushes.push([channel, payload]),
     desktop: bridge,
@@ -180,6 +182,12 @@ describe('handler registry', () => {
     expect(created.id).toBe('s_test');
     expect(await registry.invoke('sessions:get', { id: 's_nope' })).toBeNull();
     await expect(registry.invoke('git:summary', { sessionId: 's_nope' })).rejects.toThrow('Session not found');
+  });
+
+  it('routes deep search through the search index', async () => {
+    const { registry } = stubDeps();
+    const res = (await registry.invoke('sessions:search', { q: 'needle' })) as { total: number };
+    expect(res.total).toBe(0);
   });
 
   it('caches harness availability across full-list calls', async () => {

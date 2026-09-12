@@ -3,14 +3,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { ImageLightbox, navigateLightbox } from '../src/renderer/src/components/ImageLightbox';
 import { UserMessage } from '../src/renderer/src/components/Transcript';
-import type { TranscriptItem } from '../src/shared/types';
+import type { ImageAttachment, TranscriptItem } from '../src/shared/types';
 
 afterEach(cleanup);
 
-const img = (data: string, name?: string) => ({ mimeType: 'image/png', data, name });
+const img = (data: string, name?: string): ImageAttachment => ({ mimeType: 'image/png', data, name });
 
-const userItem = (images: ReturnType<typeof img>[]): TranscriptItem =>
-  ({ kind: 'user', id: 'u1', text: 'hello', images }) as TranscriptItem;
+const userItem = (images: ImageAttachment[]): Extract<TranscriptItem, { kind: 'user' }> =>
+  ({ kind: 'user', id: 'u1', ts: 0, text: 'hello', images });
 
 describe('navigateLightbox', () => {
   it('wraps forwards and backwards within bounds', () => {

@@ -2,11 +2,11 @@
  * View model for the analytics dashboard: the scoped slice of a summary (all time or a bounded
  * range), the chart series derived from it, and the display formatters the tabs share.
  */
-import type { AnalyticsDayPoint, AnalyticsSummary, FileUsageRow, ToolUsage, ToolUsageRow, UsageBucket, UsageCounters, UsageSessionRecord } from '../../../../shared/types';
+import type { AnalyticsDayPoint, AnalyticsSummary, FileUsageRow, ModelToolRow, ToolUsage, ToolUsageRow, UsageBucket, UsageCounters, UsageSessionRecord } from '../../../../shared/types';
 import { addCounters, COUNTER_FIELDS, dimensionSeries, emptyCounters, fillDays, rollupDays, speedTps, totalTokens, type SliceDimension } from '../../../../shared/usage-rollup';
 import { basename, fmtCost, fmtTokens } from '../../format';
 import type { AnalyticsRange, AnalyticsTab } from '../../store';
-import { harnessShort } from '../Sidebar';
+import { harnessShort } from '../../format';
 
 export const RANGES: { value: AnalyticsRange; label: string }[] = [
   { value: 7, label: '7 days' },
@@ -40,6 +40,8 @@ export interface Scope {
   byProject: UsageBucket[];
   tools: ToolUsageRow[];
   toolTotals: ToolUsage;
+  /** Per-tool call counts keyed by model, sorted by volume. */
+  modelTools: ModelToolRow[];
   files: FileUsageRow[];
   /** Sessions active in range (all time: every recorded session), highest spend first. */
   sessions: UsageSessionRecord[];
@@ -47,6 +49,8 @@ export interface Scope {
   activeDays: number;
   /** Usage recorded before per-model tracking existed: counted in the totals but in no breakdown. */
   unattributed?: UsageCounters;
+  /** Days in range whose breakdowns were estimated from session totals. */
+  estimatedDays: number;
 }
 
 const DAY_MS = 86_400_000;
@@ -73,10 +77,12 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
       byProject: summary.byProject,
       tools: summary.tools,
       toolTotals: summary.toolTotals,
+      modelTools: summary.modelTools,
       files: summary.files,
       sessions: summary.sessions,
       sessionCount: summary.sessionCount,
-      activeDays: summary.activeDays
+      activeDays: summary.activeDays,
+      estimatedDays: days.filter((d) => d.usage.by?.estimated).length
     };
   }
   const r = rollupDays(days);
@@ -97,11 +103,13 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
     byProject: r.byProject,
     tools: r.tools,
     toolTotals: r.toolTotals,
+    modelTools: r.modelTools,
     files: r.files,
     sessions,
     sessionCount: sessions.length,
     activeDays,
-    unattributed: COUNTER_FIELDS.some((f) => r.unattributed[f] > 0) ? r.unattributed : undefined
+    unattributed: COUNTER_FIELDS.some((f) => r.unattributed[f] > 0) ? r.unattributed : undefined,
+    estimatedDays: r.estimatedDays
   };
 }
 
@@ -142,7 +150,7 @@ export const METRICS: Record<Metric, MetricDef> = {
 };
 
 /** Fixed colour slot per harness, so a harness keeps its colour whichever others are on screen. */
-export const HARNESS_ORDER = ['claude', 'codex', 'codex-exec', 'pi', 'acp', 'native'];
+export const HARNESS_ORDER = ['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'acp', 'native'];
 
 export function harnessColor(id: string): string {
   const i = HARNESS_ORDER.indexOf(id);
@@ -335,13 +343,14 @@ export function sessionTokens(s: UsageSessionRecord): number {
   return totalTokens(s.usage);
 }
 
-export type SessionSort = 'cost' | 'tokens' | 'turns' | 'toolCalls' | 'speed' | 'recent';
+export type SessionSort = 'cost' | 'tokens' | 'turns' | 'toolCalls' | 'duration' | 'speed' | 'recent';
 
 export const SESSION_SORTS: { value: SessionSort; label: string }[] = [
   { value: 'cost', label: 'Spend' },
   { value: 'tokens', label: 'Tokens' },
   { value: 'turns', label: 'Turns' },
   { value: 'toolCalls', label: 'Tool calls' },
+  { value: 'duration', label: 'Agent time' },
   { value: 'speed', label: 'Speed' },
   { value: 'recent', label: 'Last active' }
 ];
@@ -357,6 +366,8 @@ export function sortSessions(sessions: UsageSessionRecord[], sort: SessionSort):
         return s.usage.turns;
       case 'toolCalls':
         return s.toolCalls;
+      case 'duration':
+        return s.durationMs ?? 0;
       case 'speed':
         return speedTps(s.speed) ?? -1;
       default:

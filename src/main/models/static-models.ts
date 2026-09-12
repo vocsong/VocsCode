@@ -1,4 +1,4 @@
-import type { ModelInfo, UsageTotals } from '../../shared/types';
+import type { ModelInfo, ProviderConfig, UsageTotals } from '../../shared/types';
 
 /** Offline fallbacks with pricing (USD per 1M tokens). Live lists override these when available. */
 
@@ -27,6 +27,14 @@ export const OPENAI_STATIC_MODELS: ModelInfo[] = [
 /** Codex catalog (same slugs as OpenAI; Codex may expose more via model/list). */
 export const CODEX_STATIC_MODELS: ModelInfo[] = OPENAI_STATIC_MODELS.map((x) => ({ ...x, supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] }));
 
+/**
+ * Cursor offline fallback. The live catalog comes from Cursor.models.list(); 'auto' is the
+ * always-valid selection (Cursor routes to the best model per request).
+ */
+export const CURSOR_STATIC_MODELS: ModelInfo[] = [
+  { id: 'auto', provider: 'cursor', displayName: 'Auto', description: 'Cursor picks the best model for each request.', isDefault: true, supportsImages: true }
+];
+
 export const DEEPSEEK_STATIC_MODELS: ModelInfo[] = [
   m('deepseek', 'deepseek-v4-pro', 'DeepSeek V4 Pro', 1_000_000, { input: 0.435, output: 0.87, cacheRead: 0.003625 }, true),
   m('deepseek', 'deepseek-v4-flash', 'DeepSeek V4 Flash', 1_000_000, { input: 0.14, output: 0.28, cacheRead: 0.0028 }),
@@ -52,6 +60,38 @@ function m(provider: string, id: string, displayName: string, contextWindow: num
     supportedEfforts: provider === 'anthropic' ? ['low', 'medium', 'high', 'xhigh', 'max'] : ['minimal', 'low', 'medium', 'high', 'xhigh'],
     maxOutputTokens: provider === 'anthropic' ? 128_000 : undefined
   };
+}
+
+/** Fill sparse harness catalogs from the matching provider cache or the built-in catalog. */
+export function enrichModelContextWindows(models: ModelInfo[], providers: ProviderConfig[]): ModelInfo[] {
+  const providerModels = new Map(providers.map((p) => [p.id, p.models]));
+  return models.map((model) => {
+    if (validContextWindow(model.contextWindow)) return model;
+    const contextWindow = findContextWindow(model.provider, model.id, providerModels.get(model.provider));
+    return contextWindow ? { ...model, contextWindow } : model;
+  });
+}
+
+export function findContextWindow(provider: string, model: string, extra: ModelInfo[] = []): number | undefined {
+  const pool = [...extra.filter((x) => x.provider === provider), ...(STATIC_MODELS_BY_PROVIDER[provider] ?? [])].filter((x) => validContextWindow(x.contextWindow));
+  const exact = pool.find((x) => x.id === model);
+  if (exact) return exact.contextWindow;
+  const bare = model.split('/').pop() ?? model;
+  const bareExact = pool.find((x) => x.id === bare);
+  if (bareExact) return bareExact.contextWindow;
+  const fuzzy = pool
+    .filter((x) => bare.startsWith(x.id) && isSnapshotSuffix(bare.slice(x.id.length)))
+    .sort((a, b) => b.id.length - a.id.length)[0];
+  return fuzzy?.contextWindow;
+}
+
+function validContextWindow(value: number | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+/** Context variants can differ from their base model; only dated/latest snapshots inherit it. */
+function isSnapshotSuffix(suffix: string): boolean {
+  return /^[-._/](?:latest|\d{8}|\d{4}(?:[-._]\d{2}){1,2})$/i.test(suffix);
 }
 
 export function findPricing(provider: string, model: string, extra: ModelInfo[] = []): ModelInfo['pricing'] | undefined {

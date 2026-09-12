@@ -10,18 +10,21 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
+import { enrichModelContextWindows } from './models/static-models';
 import type { RuntimeResolver } from './runtime';
+import type { SearchIndex } from './search';
 import { which } from './runtime';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import type { SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
 import type { TerminalManager } from './terminal';
+import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
 
@@ -62,6 +65,8 @@ export interface HandlerDeps {
   terminals: TerminalManager;
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
+  /** Deep session search (FTS5); derived state, safe to rebuild. */
+  search: SearchIndex;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Push an async event to the connected client (the window today, remote clients later). */
   push: (channel: string, payload: unknown) => void;
@@ -191,7 +196,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   handle('providers:list', () => {
     const s = settings.get();
-    return s.providers.map((p) => ({ ...p, hasApiKey: secrets.has(p.id), models: applyModelOverrides(p.models.length ? p.models : fallbackModels(p), s.modelOverrides) }));
+    return s.providers.map((p) => {
+      const models = enrichModelContextWindows(p.models.length ? p.models : fallbackModels(p), s.providers);
+      return { ...p, hasApiKey: secrets.has(p.id), models: applyModelOverrides(models, s.modelOverrides) };
+    });
   });
   handle('providers:save', async (provider) => {
     const s = settings.get();
@@ -220,9 +228,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       const providers = s.providers.map((x) => (x.id === id ? { ...x, models, modelsUpdatedAt: Date.now() } : x));
       const next = await settings.update({ providers });
       deps.push(PUSH_CHANNELS.settingsChanged, next);
-      return { models: applyModelOverrides(models, next.modelOverrides) };
+      return { models: applyModelOverrides(enrichModelContextWindows(models, next.providers), next.modelOverrides) };
     } catch (e) {
-      return { models: applyModelOverrides(fallbackModels(p), s.modelOverrides), error: errorMessage(e) };
+      const models = enrichModelContextWindows(fallbackModels(p), s.providers);
+      return { models: applyModelOverrides(models, s.modelOverrides), error: errorMessage(e) };
     }
   });
   handle('providers:test', async ({ id }) => {
@@ -262,7 +271,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     );
     return out;
   });
-  handle('harness:models', async ({ harness }) => listHarnessModels({ harness, settings: settings.get(), runtime, getApiKey: (id) => secrets.get(id) }));
+  handle('harness:models', async ({ harness }) => {
+    const current = settings.get();
+    const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: (id) => secrets.get(id) });
+    return { ...result, models: enrichModelContextWindows(result.models, current.providers) };
+  });
   handle('harness:install', async ({ id }) => {
     const r = await runtime.install(id);
     availabilityCache.clear();
@@ -283,6 +296,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:create', (req) => sessions.create(req));
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
+  handle('sessions:search', (req) => deps.search.search(req));
   handle('sessions:delete', async ({ id, removeWorktree }) => {
     // Shells hold their cwd open; take them down before the worktree is removed.
     const t0 = Date.now();
@@ -292,8 +306,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (Date.now() - t0 >= SLOW_HANDLER_MS) deps.log('warn', `slow delete ${id}: terminals ${t1 - t0}ms, session ${Date.now() - t1}ms`);
   });
   handle('sessions:rename', ({ id, title }) => sessions.patch(id, { title }));
-  handle('sessions:archive', ({ id, archived, removeWorktree }) => sessions.setArchived(id, archived, removeWorktree));
-  handle('sessions:pin', ({ id, pinned }) => sessions.patch(id, { pinned }));
+  handle('sessions:label', ({ id, label }) => sessions.patch(id, { statusLabel: label?.trim() || undefined }));
+  handle('sessions:archive', ({ id, archived, removeWorktree, forceWorktree }) => sessions.setArchived(id, archived, removeWorktree, forceWorktree));
+  handle('sessions:pin', ({ id, pinned }) => sessions.setPinned(id, pinned));
+  handle('sessions:pinOrder', ({ ids }) => sessions.setPinOrder(ids));
   handle('sessions:send', ({ id, input }) => sessions.send(id, input));
   handle('sessions:interrupt', ({ id }) => sessions.interrupt(id));
   handle('sessions:stop', ({ id }) => sessions.stop(id));
@@ -313,7 +329,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     await fs.writeFile(res.filePath, md, 'utf8');
     return { path: res.filePath };
   });
-  handle('sessions:fork', ({ id }) => sessions.fork(id));
+  handle('sessions:fork', ({ id, harness }) => sessions.fork(id, harness));
   handle('sessions:moveTo', ({ id, cwd }) => sessions.moveTo(id, cwd));
   handle('sessions:goal', ({ id, action, objective, autoContinue, maxIterations }) => sessions.goal(id, action, { objective, autoContinue, maxIterations }));
 
@@ -332,7 +348,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return known ? gitFolderBranch(projectRoot) : {};
   });
   handle('git:summary', ({ sessionId }) => gitSummary(cwdOf(sessionId)));
-  handle('git:diff', async ({ sessionId, path: p, staged }) => ({ diff: await gitDiff(cwdOf(sessionId), p, staged) }));
+  handle('git:diff', async ({ sessionId, path: p, staged }) => gitDiff(cwdOf(sessionId), p, staged));
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
   handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));
@@ -388,27 +404,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:pruneWorktrees', ({ sessionId }) => gitPruneWorktrees(cwdOf(sessionId)));
   handle('git:fetchPrune', ({ sessionId }) => gitFetchPrune(cwdOf(sessionId)));
   handle('git:pullRequests', ({ sessionId }) => gitPullRequests(cwdOf(sessionId)));
+  handle('git:issues', ({ sessionId }) => gitIssues(cwdOf(sessionId)));
 
-  handle('fs:list', async ({ sessionId, relPath }) => {
-    const root = cwdOf(sessionId);
-    const dir = relPath ? path.resolve(root, relPath) : root;
-    if (!dir.startsWith(path.resolve(root))) return [];
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    const out = [];
-    for (const e of entries) {
-      const abs = path.join(dir, e.name);
-      let size: number | undefined;
-      if (e.isFile()) {
-        try {
-          size = (await fs.stat(abs)).size;
-        } catch {
-          /* ignore */
-        }
-      }
-      out.push({ name: e.name, path: path.relative(root, abs), isDir: e.isDirectory(), size });
-    }
-    return out.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name));
-  });
+  handle('fs:list', ({ sessionId, relPath }) => listWorkspaceFiles(cwdOf(sessionId), relPath));
   handle('fs:search', async ({ sessionId, query, limit }) => {
     const root = cwdOf(sessionId);
     const q = query.toLowerCase();
@@ -434,14 +432,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     await walk(root, '', 0);
     return out;
   });
-  handle('fs:read', async ({ sessionId, path: p, maxBytes }) => {
-    const root = cwdOf(sessionId);
-    if (isOutsideWorkspace(root, p, path)) return { content: '', truncated: false };
-    const abs = path.resolve(root, p);
-    const buf = await fs.readFile(abs);
-    const limit = Math.min(Math.max(0, maxBytes ?? 400_000), 2_000_000);
-    return { content: buf.subarray(0, limit).toString('utf8'), truncated: buf.length > limit };
-  });
+  handle('fs:read', ({ sessionId, path: p, maxBytes }) => readWorkspaceFile(cwdOf(sessionId), p, maxBytes));
 
   handle('terminal:list', () => terminals.list());
   handle('terminal:shells', () => terminals.shells());

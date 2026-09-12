@@ -1,16 +1,19 @@
 /** Prompt input: slash commands, @file mentions, and steer-vs-queue while a turn is running. */
 import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
-import { HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
+import { EFFORT_LEVELS, HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { fmtCost, fmtTokens } from '../format';
 import { useSessionModels } from '../models';
+import { setSessionEffort } from '../sessionActions';
 import { useStore } from '../store';
 import * as host from '../terminal/host';
 import { Button, Icon, Kbd } from './ui';
 
 export function Composer({ session }: { session: SessionMeta }) {
-  const [text, setText] = useState('');
+  const setDraft = useStore((s) => s.setDraft);
+  // Seed from the per-session draft kept in the store, so switching away and back preserves the text.
+  const [text, setText] = useState(() => useStore.getState().drafts[session.id] ?? '');
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [mention, setMention] = useState<{ query: string; start: number; results: string[]; index: number } | null>(null);
   const [slash, setSlash] = useState<{ query: string; index: number } | null>(null);
@@ -58,8 +61,18 @@ export function Composer({ session }: { session: SessionMeta }) {
   }, [text]);
 
   useEffect(() => {
-    ref.current?.focus();
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // Put the caret at the end of a restored draft so typing continues where it left off.
+    const end = el.value.length;
+    el.setSelectionRange(end, end);
   }, [session.id]);
+
+  // Mirror every draft change (typed, inserted, history-navigated, cleared after send) into the store.
+  useEffect(() => {
+    setDraft(session.id, text);
+  }, [text, session.id, setDraft]);
 
   // Text handed over from elsewhere (the terminal's "send to agent") lands below the current draft.
   useEffect(() => {
@@ -183,9 +196,21 @@ export function Composer({ session }: { session: SessionMeta }) {
         }
         await invoke('sessions:setPermissionMode', { id: session.id, mode: arg as PermissionMode });
         return true;
-      case 'effort':
-        await invoke('sessions:setEffort', { id: session.id, effort: arg as EffortLevel }).catch((e) => toast(String(e.message ?? e), 'error'));
+      case 'effort': {
+        if (!caps.effort) {
+          toast(`${harness.name} does not support reasoning effort.`, 'error');
+          return true;
+        }
+        const current = session.activeModel ?? session.config.model;
+        const currentInfo = models.find((m) => current && m.provider === current.provider && m.id === current.model);
+        const efforts = currentInfo?.supportedEfforts?.length ? currentInfo.supportedEfforts : EFFORT_LEVELS;
+        if (!efforts.includes(arg as EffortLevel)) {
+          toast(`Efforts: ${efforts.join(', ')}`, 'error');
+          return true;
+        }
+        await setSessionEffort(session.id, arg as EffortLevel, toast);
         return true;
+      }
       case 'goal': {
         const sub = rest[0];
         if (!sub || sub === 'status') {

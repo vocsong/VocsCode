@@ -20,7 +20,17 @@ export type ThemeId =
   | 'evergreen'
   | 'blossom'
   | 'graphite'
-  | 'ember';
+  | 'ember'
+  | 'ultraviolet'
+  | 'magma'
+  | 'lagoon'
+  | 'fjord'
+  | 'claret'
+  | 'citrine'
+  | 'cappuccino'
+  | 'meadow'
+  | 'porcelain'
+  | 'lavender';
 
 export type ThemeGroup = 'core' | 'navy' | 'futuristic' | 'light' | 'dark';
 
@@ -370,6 +380,296 @@ export const THEMES: ThemeDescriptor[] = [
       cyan: '#7fc2b4',
       userBubble: '#2c1f19',
       shadow: '0 10px 40px rgba(0, 0, 0, 0.7)'
+    }
+  },
+  {
+    id: 'ultraviolet',
+    name: 'Ultraviolet',
+    group: 'futuristic',
+    base: 'dark',
+    description: 'Black-violet with an electric lavender accent.',
+    palette: {
+      bg: '#120a24',
+      bgElev: '#1b1133',
+      bgSunken: '#0b0617',
+      bgHover: 'rgba(177, 140, 255, 0.09)',
+      bgActive: 'rgba(177, 140, 255, 0.16)',
+      fg: '#ede7fb',
+      fgMuted: '#a89ad0',
+      fgFaint: '#7a6ba8',
+      border: '#2a1d4d',
+      borderStrong: '#43306e',
+      accent: '#b18cff',
+      accentFg: '#14061f',
+      green: '#7be8a8',
+      amber: '#ffce6b',
+      red: '#ff6b8f',
+      blue: '#7d9bff',
+      purple: '#c79bff',
+      cyan: '#6be0f2',
+      userBubble: '#241742',
+      shadow: '0 10px 40px rgba(4, 0, 12, 0.7)'
+    }
+  },
+  {
+    id: 'magma',
+    name: 'Magma',
+    group: 'futuristic',
+    base: 'dark',
+    description: 'Charred black-brown split open by a lava-red accent.',
+    palette: {
+      bg: '#120808',
+      bgElev: '#1c1010',
+      bgSunken: '#090404',
+      bgHover: 'rgba(255, 71, 87, 0.09)',
+      bgActive: 'rgba(255, 71, 87, 0.16)',
+      fg: '#f5e0d8',
+      fgMuted: '#bd9a90',
+      fgFaint: '#8a6a62',
+      border: '#33201d',
+      borderStrong: '#4e322c',
+      accent: '#ff4757',
+      accentFg: '#2a0508',
+      green: '#9fca6f',
+      amber: '#ffb454',
+      red: '#ff7f66',
+      blue: '#8fa8e0',
+      purple: '#cf7fd0',
+      cyan: '#6fc9c0',
+      userBubble: '#241313',
+      shadow: '0 10px 40px rgba(0, 0, 0, 0.75)'
+    }
+  },
+  {
+    id: 'lagoon',
+    name: 'Lagoon',
+    group: 'dark',
+    base: 'dark',
+    description: 'Deep teal water with a coral-pink accent.',
+    palette: {
+      bg: '#06222a',
+      bgElev: '#0c2f3a',
+      bgSunken: '#03161c',
+      bgHover: 'rgba(255, 110, 169, 0.08)',
+      bgActive: 'rgba(255, 110, 169, 0.15)',
+      fg: '#ddf3f2',
+      fgMuted: '#8fb5b4',
+      fgFaint: '#5f8484',
+      border: '#16424c',
+      borderStrong: '#245e68',
+      accent: '#ff6ea9',
+      accentFg: '#2a0715',
+      green: '#5fd9a4',
+      amber: '#ffcb6b',
+      red: '#ff6b6b',
+      blue: '#63b7e8',
+      purple: '#b39ddb',
+      cyan: '#4fd8d0',
+      userBubble: '#0e3742',
+      shadow: '0 10px 40px rgba(0, 8, 12, 0.7)'
+    }
+  },
+  {
+    id: 'fjord',
+    name: 'Fjord',
+    group: 'dark',
+    base: 'dark',
+    description: 'Slate-blue nordic dark with a frost-blue accent.',
+    palette: {
+      bg: '#1e2630',
+      bgElev: '#293441',
+      bgSunken: '#151b23',
+      bgHover: 'rgba(136, 192, 208, 0.09)',
+      bgActive: 'rgba(136, 192, 208, 0.16)',
+      fg: '#dce5ec',
+      fgMuted: '#9aabb9',
+      fgFaint: '#6b7d8c',
+      border: '#37444f',
+      borderStrong: '#4d5f6e',
+      accent: '#88c0d0',
+      accentFg: '#10252b',
+      green: '#a3be8c',
+      amber: '#ebcb8b',
+      red: '#d08785',
+      blue: '#81a1c1',
+      purple: '#b48ead',
+      cyan: '#8fbcbb',
+      userBubble: '#2f3b49',
+      shadow: '0 10px 40px rgba(6, 10, 16, 0.65)'
+    }
+  },
+  {
+    id: 'claret',
+    name: 'Claret',
+    group: 'dark',
+    base: 'dark',
+    description: 'Deep wine-dark maroon with a rose accent.',
+    palette: {
+      bg: '#210d15',
+      bgElev: '#2e1520',
+      bgSunken: '#160810',
+      bgHover: 'rgba(242, 139, 155, 0.09)',
+      bgActive: 'rgba(242, 139, 155, 0.16)',
+      fg: '#f4e2e7',
+      fgMuted: '#bd93a1',
+      fgFaint: '#8c6575',
+      border: '#452030',
+      borderStrong: '#653247',
+      accent: '#f28b9b',
+      accentFg: '#2b0a12',
+      green: '#9ec98f',
+      amber: '#ecc37e',
+      red: '#f26d6d',
+      blue: '#92a8d8',
+      purple: '#c293d8',
+      cyan: '#86c5c9',
+      userBubble: '#381a26',
+      shadow: '0 10px 40px rgba(8, 0, 4, 0.7)'
+    }
+  },
+  {
+    id: 'citrine',
+    name: 'Citrine',
+    group: 'light',
+    base: 'light',
+    description: 'Pale citron paper with a dark-gold accent.',
+    palette: {
+      bg: '#faf8ea',
+      bgElev: '#fffef5',
+      bgSunken: '#f0ecd7',
+      bgHover: 'rgba(70, 62, 16, 0.06)',
+      bgActive: 'rgba(70, 62, 16, 0.11)',
+      fg: '#35321c',
+      fgMuted: '#75704a',
+      fgFaint: '#9e9878',
+      border: '#e2dcc0',
+      borderStrong: '#c4bb95',
+      accent: '#a07d10',
+      accentFg: '#fffdf0',
+      green: '#5c7f2e',
+      amber: '#8a6808',
+      red: '#b5342e',
+      blue: '#3568a8',
+      purple: '#7a4fa8',
+      cyan: '#1d7d8c',
+      userBubble: '#f0e9c8',
+      shadow: '0 8px 30px rgba(70, 62, 16, 0.16)'
+    }
+  },
+  {
+    id: 'cappuccino',
+    name: 'Cappuccino',
+    group: 'light',
+    base: 'light',
+    description: 'Frothed-milk warm gray with a coffee-brown accent.',
+    palette: {
+      bg: '#f3ede6',
+      bgElev: '#fbf8f4',
+      bgSunken: '#e8dfd5',
+      bgHover: 'rgba(70, 48, 32, 0.06)',
+      bgActive: 'rgba(70, 48, 32, 0.11)',
+      fg: '#3b2f26',
+      fgMuted: '#7c695a',
+      fgFaint: '#a5917f',
+      border: '#ddd0c2',
+      borderStrong: '#bfae9c',
+      accent: '#8a5a3b',
+      accentFg: '#fdf6ef',
+      green: '#55793f',
+      amber: '#a07424',
+      red: '#b04a3c',
+      blue: '#4a6d94',
+      purple: '#7d5a8c',
+      cyan: '#2e7d7d',
+      userBubble: '#ece0d2',
+      shadow: '0 8px 30px rgba(70, 48, 32, 0.16)'
+    }
+  },
+  {
+    id: 'meadow',
+    name: 'Meadow',
+    group: 'light',
+    base: 'light',
+    description: 'Soft grass-green paper with a forest accent.',
+    palette: {
+      bg: '#f0f6e9',
+      bgElev: '#fbfdf6',
+      bgSunken: '#e2edd6',
+      bgHover: 'rgba(36, 51, 28, 0.06)',
+      bgActive: 'rgba(36, 51, 28, 0.11)',
+      fg: '#24331c',
+      fgMuted: '#5c7048',
+      fgFaint: '#8a9a76',
+      border: '#d0e0bf',
+      borderStrong: '#aec494',
+      accent: '#3e7a3e',
+      accentFg: '#f4faf0',
+      green: '#3f8a35',
+      amber: '#a87b0a',
+      red: '#b83a30',
+      blue: '#3a6fae',
+      purple: '#7757b0',
+      cyan: '#157f88',
+      userBubble: '#e0eed0',
+      shadow: '0 8px 30px rgba(36, 51, 28, 0.16)'
+    }
+  },
+  {
+    id: 'porcelain',
+    name: 'Porcelain',
+    group: 'light',
+    base: 'light',
+    description: 'Cool glazed gray-white with a slate-blue accent.',
+    palette: {
+      bg: '#f1f4f7',
+      bgElev: '#fcfdfe',
+      bgSunken: '#e4e9ee',
+      bgHover: 'rgba(38, 49, 59, 0.06)',
+      bgActive: 'rgba(38, 49, 59, 0.11)',
+      fg: '#26313b',
+      fgMuted: '#5f7080',
+      fgFaint: '#8c9aa6',
+      border: '#d2dae1',
+      borderStrong: '#b2bfc9',
+      accent: '#46698c',
+      accentFg: '#f5f9fc',
+      green: '#3d7f5e',
+      amber: '#9a6d14',
+      red: '#ab3a44',
+      blue: '#3a6f9e',
+      purple: '#6f5a9e',
+      cyan: '#23747e',
+      userBubble: '#e2eaf1',
+      shadow: '0 8px 30px rgba(38, 49, 59, 0.15)'
+    }
+  },
+  {
+    id: 'lavender',
+    name: 'Lavender',
+    group: 'light',
+    base: 'light',
+    description: 'Soft lilac paper with a deep violet accent.',
+    palette: {
+      bg: '#f4f1fa',
+      bgElev: '#fdfcff',
+      bgSunken: '#e9e3f4',
+      bgHover: 'rgba(47, 37, 64, 0.06)',
+      bgActive: 'rgba(47, 37, 64, 0.11)',
+      fg: '#2f2540',
+      fgMuted: '#6c5f85',
+      fgFaint: '#998da9',
+      border: '#ddd4ea',
+      borderStrong: '#bfb2d6',
+      accent: '#7c4dbc',
+      accentFg: '#f8f4fd',
+      green: '#3f8a5e',
+      amber: '#a07414',
+      red: '#b83a56',
+      blue: '#5560c0',
+      purple: '#8a4fc0',
+      cyan: '#1d7d92',
+      userBubble: '#e9def5',
+      shadow: '0 8px 30px rgba(47, 37, 64, 0.16)'
     }
   }
 ];

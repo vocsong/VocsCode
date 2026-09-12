@@ -1,19 +1,32 @@
 # Themes
 
-Thirteen themes: **System**, **Light** and **Dark**, plus ten palettes grouped by family in the **View** menu and in the swatch picker under *Settings → General*.
+Twenty-three themes: the three core themes, **System**, **Light** and **Dark**, plus twenty data palettes grouped by family in the **View** menu and in the swatch picker under *Settings → General*.
 
-| Family | Theme | |
+| Family | Theme | Description |
 | --- | --- | --- |
-| Navy | **Midnight Navy** | deep classic navy, azure accent |
-| | **Abyss** | navy pushed to near-black, high contrast, aqua accent |
-| | **Blueprint** | navy ink on blue-tinted drafting paper — the light side of navy |
-| | **Admiral** | navy hull, parchment text, brass fittings |
-| Futuristic | **Nebula** | navy-indigo with neon cyan and magenta — animated |
-| Light | **Solarium** | warm sand paper, burnt-orange accent |
-| | **Blossom** | pale rose paper, plum accent |
-| Dark | **Evergreen** | dark conifer greens, mint accent |
-| | **Graphite** | achromatic — no hue in the chrome, only in status colors |
-| | **Ember** | charred warm dark, ember-orange accent |
+| Core | **System** | Follow the OS light/dark setting. |
+| | **Light** | The default neutral light palette. |
+| | **Dark** | The default neutral dark palette. |
+| Navy | **Midnight Navy** | Deep classic navy with a clear azure accent. |
+| | **Abyss** | Navy pushed to near-black, high contrast, aqua accent. |
+| | **Blueprint** | Navy ink on blue-tinted drafting paper — the light side of navy. |
+| | **Admiral** | Navy hull, parchment text, brass fittings. |
+| Futuristic | **Nebula** | Futuristic navy-indigo with neon cyan and magenta — animated. |
+| | **Ultraviolet** | Black-violet with an electric lavender accent. |
+| | **Magma** | Charred black-brown split open by a lava-red accent. |
+| Light | **Solarium** | Warm sand paper with a burnt-orange accent. |
+| | **Blossom** | Pale rose paper with a plum accent. |
+| | **Citrine** | Pale citron paper with a dark-gold accent. |
+| | **Cappuccino** | Frothed-milk warm gray with a coffee-brown accent. |
+| | **Meadow** | Soft grass-green paper with a forest accent. |
+| | **Porcelain** | Cool glazed gray-white with a slate-blue accent. |
+| | **Lavender** | Soft lilac paper with a deep violet accent. |
+| Dark | **Evergreen** | Dark conifer greens with a mint accent. |
+| | **Graphite** | Achromatic dark: no hue in the chrome, only in status colors. |
+| | **Ember** | Charred warm dark with an ember-orange accent. |
+| | **Lagoon** | Deep teal water with a coral-pink accent. |
+| | **Fjord** | Slate-blue nordic dark with a frost-blue accent. |
+| | **Claret** | Deep wine-dark maroon with a rose accent. |
 
 **Nebula** is the animated one: a drifting aurora and a sliding holographic grid behind frosted, translucent chrome, gradient sweeps across the wordmark and primary buttons, a light bar travelling along the title bar's edge, and glow on status lights, the selected session and focus rings. All of its motion stops under `prefers-reduced-motion`.
 

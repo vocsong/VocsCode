@@ -4,10 +4,10 @@ import type { AnalyticsSummary, UsageSessionRecord } from '../../../../shared/ty
 import { speedTps } from '../../../../shared/usage-rollup';
 import { basename, fmtCost, fmtTokens, relTime } from '../../format';
 import { useStore } from '../../store';
-import { harnessShort } from '../Sidebar';
+import { harnessShort } from '../../format';
 import { Badge } from '../ui';
 import { Segmented } from './charts';
-import { fmtCompact, fmtTps, plural, SESSION_SORTS, sessionMatches, sessionTokens, sortSessions, type Scope, type SessionSort } from './model';
+import { fmtCompact, fmtMs, fmtTps, plural, SESSION_SORTS, sessionMatches, sessionTokens, sortSessions, type Scope, type SessionSort } from './model';
 import { Footnotes } from './tiles';
 
 const PAGE = 100;
@@ -69,6 +69,7 @@ export function SessionList({ sessions, compact }: { sessions: UsageSessionRecor
           <span className="num">Tokens</span>
           <span className="num">Turns</span>
           <span className="num">Tools</span>
+          <span className="num">Time</span>
           <span className="num">Speed</span>
         </div>
       )}
@@ -94,6 +95,9 @@ export function SessionList({ sessions, compact }: { sessions: UsageSessionRecor
                 </span>
                 <span className="num">{fmtCompact(s.usage.turns)}</span>
                 <span className="num">{fmtCompact(s.toolCalls)}</span>
+                <span className="num" title={s.usage.turns > 0 && s.durationMs ? `avg turn ${fmtMs(s.durationMs / s.usage.turns)}` : undefined}>
+                  {fmtMs(s.durationMs ?? 0)}
+                </span>
                 <span className="num">{fmtTps(speedTps(s.speed))}</span>
               </>
             )}

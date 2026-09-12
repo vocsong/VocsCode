@@ -50,6 +50,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
       queued: 0
     };
     await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]), 'utf8');
+    await fs.writeFile(path.join(userData, 'settings.json'), JSON.stringify({ onboardingDone: true }), 'utf8');
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
@@ -77,6 +78,8 @@ describe.runIf(enabled)('model picker before the first message', () => {
     const text = await picker.innerText();
     expect(text).not.toContain('No models available');
     expect(text).not.toContain('Loading models');
+    expect(text).toContain('Context ');
+    expect(await picker.locator('.mp-row .menu-item-hint').count()).toBe(await picker.locator('.mp-row').count());
     await win.screenshot({ path: path.join(shots, 'models-01-fresh-session.png') });
 
     // Picking one sticks even with no process to tell about it.

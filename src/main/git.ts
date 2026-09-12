@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createTwoFilesPatch } from 'diff';
-import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitPrInfo, GitPullRequest, GitPullRequestList, GitSummary, GitWorktreeInfo } from '../shared/types';
+import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import { runCapture, which } from './runtime';
 import { exists } from './util/fs';
@@ -12,7 +12,32 @@ const ghBin = () => which('gh');
 
 const PR_URL = /https:\/\/[^\s/"]+\/[^\s]+\/pull\/\d+/;
 
-async function git(cwd: string, args: string[], timeoutMs = 20_000): Promise<{ code: number | null; stdout: string; stderr: string }> {
+type GitRun = { code: number | null; stdout: string; stderr: string; timedOut?: boolean };
+
+/** runCapture marks a killed process with timedOut; legacy fakes only carry the stderr marker. */
+const timedOut = (r: GitRun): boolean => r.timedOut === true || (r.code === null && /timed out after \d+ms/.test(r.stderr));
+
+const failure = (r: GitRun): string => (r.stderr || r.stdout).trim() || `git exited with ${r.code ?? 'no status'}`;
+
+/** A large diff deserves more headroom than status probes; a timeout still surfaces instead of truncating. */
+const DIFF_TIMEOUT_MS = 60_000;
+/** Cap the bytes read into the main process just to count untracked lines or synthesize a diff. */
+const MAX_UNTRACKED_COUNT_BYTES = 512 * 1024;
+const MAX_UNTRACKED_DIFF_BYTES = 500_000;
+const MAX_SINGLE_FILE_DIFF_BYTES = 2_000_000;
+
+/** Reads a file only when it is small enough; a multi-GB artifact is never buffered just to be sized. */
+async function readCapped(file: string, maxBytes: number): Promise<string | undefined> {
+  try {
+    const st = await fs.stat(file);
+    if (!st.isFile() || st.size > maxBytes) return undefined;
+    return await fs.readFile(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+async function git(cwd: string, args: string[], timeoutMs = 20_000): Promise<GitRun> {
   return runCapture(gitBin(), args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } });
 }
 
@@ -39,10 +64,18 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
     git(cwd, ['diff', '--numstat', 'HEAD']),
     git(cwd, ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'])
   ]);
+  const base = { isRepo: true as const, root, branch: branch.code === 0 ? branch.stdout.trim() || undefined : undefined };
+  // A partial status list is not usable: report the failure instead of rendering a subset of files.
+  if (status.code !== 0) {
+    return { ...base, files: [], error: timedOut(status) ? 'git status timed out — the change list could not be loaded. Refresh to retry.' : `git status failed: ${failure(status)}` };
+  }
   const counts = new Map<string, { additions: number; deletions: number }>();
-  for (const line of numstat.stdout.split('\n')) {
-    const m = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
-    if (m) counts.set(m[3].trim(), { additions: m[1] === '-' ? 0 : Number(m[1]), deletions: m[2] === '-' ? 0 : Number(m[2]) });
+  // On unborn branches numstat exits non-zero with no output, which is benign; only a timeout means bad counts.
+  if (!timedOut(numstat)) {
+    for (const line of numstat.stdout.split('\n')) {
+      const m = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+      if (m) counts.set(m[3].trim(), { additions: m[1] === '-' ? 0 : Number(m[1]), deletions: m[2] === '-' ? 0 : Number(m[2]) });
+    }
   }
   const files: GitFileStatus[] = [];
   for (const raw of status.stdout.split('\n')) {
@@ -56,12 +89,8 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
     const c = counts.get(p);
     let additions = c?.additions;
     if (st === '?' && additions === undefined) {
-      try {
-        const content = await fs.readFile(path.join(root, p), 'utf8');
-        additions = content.split('\n').length;
-      } catch {
-        /* binary or gone */
-      }
+      const content = await readCapped(path.join(root, p), MAX_UNTRACKED_COUNT_BYTES);
+      if (content !== undefined) additions = content.split('\n').length;
     }
     files.push({ path: p, status: st, staged: x !== ' ' && x !== '?', additions, deletions: c?.deletions });
   }
@@ -74,7 +103,8 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
       behind = Number(m[2]);
     }
   }
-  return { isRepo: true, root, branch: branch.stdout.trim() || undefined, files, ahead, behind };
+  const error = timedOut(numstat) ? 'Line counts are unavailable: git diff --numstat timed out.' : undefined;
+  return { ...base, files, ahead, behind, ...(error ? { error } : {}) };
 }
 
 /** PR/merge state of a session's branch, shown in the sidebar status labels. */
@@ -266,41 +296,39 @@ export async function branchGitState(cwd: string, branch: string, q: SessionPrQu
   return state;
 }
 
-export async function gitDiff(cwd: string, file?: string, staged = false): Promise<string> {
+export async function gitDiff(cwd: string, file?: string, staged = false): Promise<{ diff: string; error?: string }> {
   const root = await gitRoot(cwd);
-  if (!root) return '';
+  if (!root) return { diff: '' };
   if (file) {
-    if (isOutsideWorkspace(root, file, path)) return 'Path outside workspace';
+    if (isOutsideWorkspace(root, file, path)) return { diff: 'Path outside workspace' };
     const abs = path.join(root, file);
     const tracked = await git(cwd, ['ls-files', '--error-unmatch', '--', file]);
+    if (timedOut(tracked)) return { diff: '', error: `git timed out while checking ${file}.` };
     if (tracked.code !== 0) {
-      // Untracked: synthesize an add diff.
-      try {
-        const content = await fs.readFile(abs, 'utf8');
-        if (content.length > 2_000_000) return `Binary or very large file: ${file}`;
-        return createTwoFilesPatch('/dev/null', file, '', content, '', '', { context: 3 });
-      } catch {
-        return '';
-      }
+      // Untracked: synthesize an add diff, size-checked before reading.
+      const content = await readCapped(abs, MAX_SINGLE_FILE_DIFF_BYTES);
+      if (content === undefined) return { diff: '', error: `Binary or very large file: ${file}` };
+      return { diff: createTwoFilesPatch('/dev/null', file, '', content, '', '', { context: 3 }) };
     }
-    const r = await git(cwd, ['diff', ...(staged ? ['--cached'] : ['HEAD']), '--', file]);
-    return r.stdout;
+    const r = await git(cwd, ['diff', ...(staged ? ['--cached'] : ['HEAD']), '--', file], DIFF_TIMEOUT_MS);
+    if (timedOut(r)) return { diff: '', error: diffTimeoutMessage() };
+    return { diff: r.stdout };
   }
-  const r = await git(cwd, ['diff', ...(staged ? ['--cached'] : ['HEAD'])]);
+  const r = await git(cwd, ['diff', ...(staged ? ['--cached'] : ['HEAD'])], DIFF_TIMEOUT_MS);
+  if (timedOut(r)) return { diff: '', error: diffTimeoutMessage() };
   let out = r.stdout;
-  // Append untracked files.
+  // Append untracked files, capped before reading so a stray artifact cannot spike memory.
   const untracked = await git(cwd, ['ls-files', '--others', '--exclude-standard']);
+  if (timedOut(untracked)) return { diff: out, error: 'The untracked-file list timed out — new files may be missing from this diff.' };
   for (const f of untracked.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
-    try {
-      const content = await fs.readFile(path.join(root, f), 'utf8');
-      if (content.length > 500_000) continue;
-      out += createTwoFilesPatch('/dev/null', f, '', content, '', '', { context: 3 });
-    } catch {
-      /* skip */
-    }
+    const content = await readCapped(path.join(root, f), MAX_UNTRACKED_DIFF_BYTES);
+    if (content === undefined) continue;
+    out += createTwoFilesPatch('/dev/null', f, '', content, '', '', { context: 3 });
   }
-  return out;
+  return { diff: out };
 }
+
+const diffTimeoutMessage = (): string => 'git diff timed out — the changes are too large to render here. Use the terminal for the full diff.';
 
 export async function gitRevertFile(cwd: string, file: string): Promise<{ ok: boolean; error?: string }> {
   const root = await gitRoot(cwd);
@@ -491,6 +519,46 @@ export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> 
   }
 }
 
+const ISSUE_LIST_FIELDS = 'number,title,state,url,author,labels,comments,createdAt,updatedAt,closedAt';
+
+/** Pulls the repo's issues from GitHub (`gh issue list`, every state, newest first) for the Git panel's Issues view. */
+export async function gitIssues(cwd: string): Promise<GitIssueList> {
+  const fetchedAt = Date.now();
+  if (!ghBin()) return { issues: [], fetchedAt, ghMissing: true };
+  const root = await gitRoot(cwd);
+  if (!root) return { issues: [], fetchedAt, error: 'Not a git repository' };
+  const r = await gh(root, ['issue', 'list', '--state', 'all', '--limit', '100', '--json', ISSUE_LIST_FIELDS], 30_000);
+  if (r.code !== 0) return { issues: [], fetchedAt, error: (r.stderr || r.stdout).trim() || 'gh issue list failed' };
+  try {
+    const list = JSON.parse(r.stdout.trim()) as Record<string, unknown>[];
+    const issues: GitIssue[] = [];
+    for (const p of list) {
+      if (typeof p.number !== 'number' || typeof p.url !== 'string') continue;
+      const state = p.state === 'CLOSED' ? 'CLOSED' : 'OPEN';
+      const author = p.author && typeof p.author === 'object' ? (p.author as { login?: string; name?: string }) : undefined;
+      const issue: GitIssue = { number: p.number, title: typeof p.title === 'string' ? p.title : '', state, url: p.url };
+      if (author?.login || author?.name) issue.author = author.login || author.name;
+      if (Array.isArray(p.labels)) {
+        const labels = p.labels
+          .filter((l): l is { name?: string; color?: string } => !!l && typeof l === 'object')
+          .map((l) => ({ name: typeof l.name === 'string' ? l.name : '', color: typeof l.color === 'string' ? l.color : undefined }))
+          .filter((l) => l.name);
+        if (labels.length > 0) issue.labels = labels.map((l) => (l.color ? l : { name: l.name }));
+      }
+      if (typeof p.comments === 'number') issue.comments = p.comments;
+      const created = isoMs(p.createdAt), updated = isoMs(p.updatedAt), closed = isoMs(p.closedAt);
+      if (created !== undefined) issue.createdAt = created;
+      if (updated !== undefined) issue.updatedAt = updated;
+      if (closed !== undefined) issue.closedAt = closed;
+      issues.push(issue);
+    }
+    issues.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || b.number - a.number);
+    return { issues, fetchedAt };
+  } catch {
+    return { issues: [], fetchedAt, error: 'gh issue list returned something that is not JSON' };
+  }
+}
+
 export async function gitBranches(cwd: string): Promise<{ current?: string; branches: GitBranchInfo[] }> {
   const r = await git(cwd, ['branch', '--list', '--no-color']);
   if (r.code !== 0) return { branches: [] };
@@ -561,6 +629,9 @@ export async function gitBranchesOverview(cwd: string): Promise<GitBranchOvervie
     git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)']),
     gitPrMap(cwd)
   ]);
+  if (timedOut(refs)) {
+    return { isRepo: true, branches: [], worktrees: wt.worktrees, error: 'git for-each-ref timed out — the branch list could not be loaded. Refresh to retry.' };
+  }
   const names = refs.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean);
   const base = pickBase(names);
   const wtByBranch = new Map(wt.worktrees.filter((w) => w.branch).map((w) => [w.branch!, w.path]));
@@ -707,6 +778,14 @@ export async function worktreeAddForBranch(projectRoot: string, branch: string):
   return { path: wtPath, branch };
 }
 
+/** Thrown when a non-force worktree removal hits uncommitted changes; callers offer a force retry. */
+export class WorktreeDirtyError extends Error {
+  constructor(wtPath: string) {
+    super(`The worktree has modified or untracked files: ${wtPath}`);
+    this.name = 'WorktreeDirtyError';
+  }
+}
+
 export async function removeWorktree(projectRoot: string, wtPath: string, opts: { force?: boolean } = {}): Promise<void> {
   const root = await gitRoot(projectRoot);
   if (!root) return;
@@ -718,7 +797,22 @@ export async function removeWorktree(projectRoot: string, wtPath: string, opts: 
   const force = opts.force ?? true;
   // Without --force git refuses a worktree holding uncommitted changes; callers decide whether to surface that.
   const r = await git(root, force ? ['worktree', 'remove', '--force', wtPath] : ['worktree', 'remove', wtPath], 60_000);
-  if (r.code !== 0) throw new Error(`git worktree remove failed: ${r.stderr || r.stdout}`);
+  if (r.code !== 0) {
+    // A stale or foreign folder (registration pruned, .git link deleted, path drift, plain directory)
+    // cannot be removed as a worktree, and archive must not block on it: drop the registration and the
+    // folder directly. A folder that IS a worktree of this repo keeps its real error (dirty tree, ...).
+    const probe = await git(wtPath, ['rev-parse', '--git-common-dir']);
+    const eq = (a: string, b: string) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+    const commonDir = probe.code === 0 ? path.resolve(probe.stdout.trim()) : '';
+    const ours = eq(commonDir, path.resolve(root)) || eq(commonDir, path.resolve(root, '.git'));
+    if (probe.code === 0 && ours) {
+      if (/contains modified or untracked files/.test(`${r.stderr}${r.stdout}`)) throw new WorktreeDirtyError(wtPath);
+      throw new Error(`git worktree remove failed: ${r.stderr || r.stdout}`);
+    }
+    await git(root, ['worktree', 'prune']);
+    await fs.rm(wtPath, { recursive: true, force: true }).catch(() => undefined);
+    return;
+  }
   await git(root, ['worktree', 'prune']);
 }
 

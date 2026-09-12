@@ -2,8 +2,9 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import { EFFORT_LEVELS } from '../../shared/harness-meta';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
-import { killTree, spawnTool } from './spawn';
+import { shutdownChild, spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 
@@ -35,11 +36,7 @@ interface PiModel {
 }
 
 export function piModelToInfo(m: PiModel): ModelInfo {
-  const efforts = m.thinkingLevelMap
-    ? (Object.entries(m.thinkingLevelMap)
-        .filter(([, v]) => v !== null)
-        .map(([k]) => k) as EffortLevel[])
-    : undefined;
+  const efforts = piSupportedEfforts(m);
   return {
     id: m.id,
     provider: m.provider,
@@ -51,6 +48,23 @@ export function piModelToInfo(m: PiModel): ModelInfo {
     supportedEfforts: efforts && efforts.length ? efforts : undefined,
     pricing: m.cost ? { input: m.cost.input, output: m.cost.output, cacheRead: m.cost.cacheRead, cacheWrite: m.cost.cacheWrite } : undefined
   };
+}
+
+/**
+ * Mirrors pi's own getSupportedThinkingLevels: a level is hidden only by an explicit `null`, a
+ * missing standard level keeps the provider's default mapping, and the extended `xhigh`/`max`
+ * levels need an explicit mapping. `off` is dropped — leaving effort unset already runs the model
+ * default. Without a map we keep the full list; pi clamps anything the model cannot use.
+ */
+function piSupportedEfforts(m: PiModel): EffortLevel[] | undefined {
+  const map = m.thinkingLevelMap;
+  if (!m.reasoning || !map) return undefined;
+  return EFFORT_LEVELS.filter((level) => {
+    const mapped = map[level];
+    if (mapped === null) return false;
+    if (level === 'xhigh' || level === 'max') return mapped !== undefined;
+    return true;
+  });
 }
 
 function piThinkingLevel(effort: EffortLevel | undefined): string | undefined {
@@ -68,6 +82,9 @@ export class PiAdapter implements HarnessAdapter {
   private lastCost = 0;
   private lastTokens = { input: 0, output: 0 };
   private totals: UsageTotals;
+  /** stopReason/errorMessage of the last assistant message — pi reports turn failures here, not as events. */
+  private lastStopReason: string | null = null;
+  private lastErrorMessage: string | null = null;
   private models: ModelInfo[] = [];
   private nextId = 1;
   private exited = false;
@@ -176,9 +193,13 @@ export class PiAdapter implements HarnessAdapter {
         this.turnStartedAt = this.turnStartedAt || Date.now();
         this.ctx.emit({ type: 'status', status: 'running' });
         return;
-      case 'agent_end':
+      case 'agent_end': {
+        // A retry (or compaction) follows this run; wait for the final agent_end so the
+        // turn item reflects the whole prompt, not the failed attempt.
+        if ((ev as { willRetry?: boolean }).willRetry) return;
         void this.finishTurn();
         return;
+      }
       case 'turn_start':
       case 'turn_end':
         return;
@@ -206,7 +227,11 @@ export class PiAdapter implements HarnessAdapter {
         return;
       }
       case 'message_end': {
-        const msg = ev.message as { role?: string; content?: { type: string; text?: string; thinking?: string }[]; model?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } };
+        const msg = ev.message as { role?: string; content?: { type: string; text?: string; thinking?: string }[]; model?: string; stopReason?: string; errorMessage?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } };
+        if (msg?.role === 'assistant') {
+          this.lastStopReason = msg.stopReason ?? null;
+          this.lastErrorMessage = msg.errorMessage ?? null;
+        }
         if (msg?.role === 'assistant' && this.currentAssistant) {
           const a = this.currentAssistant;
           const text = (msg.content ?? []).filter((c) => c.type === 'text').map((c) => c.text ?? '').join('');
@@ -269,8 +294,10 @@ export class PiAdapter implements HarnessAdapter {
         this.info('Compacting context…');
         return;
       case 'compaction_end': {
-        const e = ev as { aborted?: boolean; result?: { tokensBefore?: number; estimatedTokensAfter?: number } };
-        this.info(e.aborted ? 'Compaction aborted.' : `Context compacted${e.result ? ` (${e.result.tokensBefore} → ~${e.result.estimatedTokensAfter} tokens)` : ''}.`);
+        const e = ev as { aborted?: boolean; errorMessage?: string; result?: { tokensBefore?: number; estimatedTokensAfter?: number } };
+        if (e.aborted) this.info('Compaction aborted.');
+        else if (e.errorMessage) this.info(e.errorMessage, 'error');
+        else this.info(`Context compacted${e.result ? ` (${e.result.tokensBefore} → ~${e.result.estimatedTokensAfter} tokens)` : ''}.`);
         return;
       }
       case 'auto_retry_start': {
@@ -432,7 +459,26 @@ export class PiAdapter implements HarnessAdapter {
     } catch (e) {
       this.ctx.log('debug', `get_session_stats failed: ${errorMessage(e)}`);
     }
-    this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'completed', durationMs: Date.now() - this.turnStartedAt, costUsd: turnCost, usage: turnUsage } });
+    // pi ends a failed turn with an assistant message (stopReason 'error'), not an error event.
+    const stopReason = this.lastStopReason;
+    const errorMsg = this.lastErrorMessage;
+    this.lastStopReason = null;
+    this.lastErrorMessage = null;
+    const failed = stopReason === 'error' && errorMsg;
+    if (failed) this.info(`Turn failed: ${errorMsg}`, 'error');
+    this.ctx.emit({
+      type: 'item.upsert',
+      item: {
+        id: shortId('turn_'),
+        kind: 'turn',
+        ts: Date.now(),
+        status: failed ? 'failed' : stopReason === 'aborted' ? 'interrupted' : 'completed',
+        durationMs: Date.now() - this.turnStartedAt,
+        costUsd: turnCost,
+        usage: turnUsage,
+        error: failed ? errorMsg : undefined
+      }
+    });
     this.turnStartedAt = 0;
     this.ctx.emit({ type: 'status', status: 'idle' });
   }
@@ -508,12 +554,7 @@ export class PiAdapter implements HarnessAdapter {
     const child = this.child;
     this.child = null;
     if (!child) return;
-    try {
-      child.stdin?.end();
-    } catch {
-      /* ignore */
-    }
-    setTimeout(() => killTree(child), 1500);
+    await shutdownChild(child, 1500);
   }
 }
 
@@ -539,11 +580,6 @@ export async function listPiModels(piPath: string, extraEnv: NodeJS.ProcessEnv =
   try {
     return await withTimeout(d.promise, 45_000, 'pi model list');
   } finally {
-    try {
-      child.stdin?.end();
-    } catch {
-      /* ignore */
-    }
-    setTimeout(() => killTree(child), 1000);
+    await shutdownChild(child, 1000);
   }
 }

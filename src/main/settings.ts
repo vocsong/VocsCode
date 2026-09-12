@@ -1,7 +1,9 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, FolderStyle, ModelRef, ProviderConfig } from '../shared/types';
+import { isAutoCompactionThreshold } from '../shared/compaction';
 import { pruneModelOverrides } from '../shared/model-overrides';
+import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
 import { readJson, writeJson } from './util/fs';
@@ -79,6 +81,16 @@ export const BUILTIN_PROVIDERS: ProviderConfig[] = [
     models: [],
     builtin: true,
     enabled: true
+  },
+  {
+    id: 'cursor',
+    kind: 'cursor',
+    name: 'Cursor',
+    hasApiKey: false,
+    envKey: 'CURSOR_API_KEY',
+    models: [],
+    builtin: true,
+    enabled: false
   },
   {
     id: 'deepseek',
@@ -175,6 +187,8 @@ export function defaultSettings(): AppSettings {
     defaultHarness: 'claude',
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
+    autoCompactionThreshold: undefined,
+    defaultUseWorktree: false,
     defaultModelByHarness: {},
     favoriteModels: [],
     notifications: true,
@@ -191,6 +205,10 @@ export function defaultSettings(): AppSettings {
     recentProjects: [],
     folders: [],
     folderStyles: {},
+    customLabels: [],
+    folderOrder: [],
+    collapsedFolders: [],
+    customShortcuts: {},
     goalDefaults: { autoContinue: true, maxIterations: 25 },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] }
   };
@@ -210,6 +228,19 @@ function normalizeFolderStyles(stored: unknown): Record<string, FolderStyle> {
   return out;
 }
 
+/** Keep only well-formed custom status labels (trimmed, non-empty, deduped, capped). */
+function normalizeCustomLabels(stored: unknown): string[] {
+  if (!Array.isArray(stored)) return [];
+  const out: string[] = [];
+  for (const raw of stored) {
+    if (typeof raw !== 'string') continue;
+    const label = raw.trim().slice(0, 24);
+    if (label && !out.some((l) => l.toLowerCase() === label.toLowerCase())) out.push(label);
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
 /** Merge stored settings over defaults, keeping builtin providers/agents present. */
 export function normalizeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
   const d = defaultSettings();
@@ -219,6 +250,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     ...stored,
     // A theme removed from the catalogue (or hand-edited into settings.json) falls back to 'system'.
     theme: isThemeId(stored.theme) ? stored.theme : d.theme,
+    autoCompactionThreshold: isAutoCompactionThreshold(stored.autoCompactionThreshold) ? stored.autoCompactionThreshold : undefined,
     binaries: { ...d.binaries, ...(stored.binaries ?? {}) },
     claude: { ...d.claude, ...(stored.claude ?? {}) },
     codex: { ...d.codex, ...(stored.codex ?? {}) },
@@ -227,10 +259,18 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
     folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    folderOrder: Array.isArray(stored.folderOrder) ? stored.folderOrder.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    collapsedFolders: Array.isArray(stored.collapsedFolders) ? stored.collapsedFolders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderStyles: normalizeFolderStyles(stored.folderStyles),
+    customLabels: normalizeCustomLabels(stored.customLabels),
+    customShortcuts: normalizeCustomShortcuts(stored.customShortcuts),
     favoriteModels: Array.isArray(stored.favoriteModels)
       ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
       : [],
+    utilityModel:
+      stored.utilityModel && typeof stored.utilityModel.provider === 'string' && typeof stored.utilityModel.model === 'string'
+        ? { provider: stored.utilityModel.provider, model: stored.utilityModel.model }
+        : undefined,
     modelOverrides: pruneModelOverrides(stored.modelOverrides),
     providers: [],
     acpAgents: []

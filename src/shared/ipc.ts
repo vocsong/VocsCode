@@ -9,6 +9,7 @@ import type {
   FsEntry,
   GitBranchInfo,
   GitBranchOverview,
+  GitIssueList,
   GitPullRequestList,
   GitSummary,
   GitWorktreeInfo,
@@ -19,6 +20,9 @@ import type {
   ModelRef,
   PermissionMode,
   ProviderConfig,
+  SearchFilters,
+  SearchResponse,
+  SearchResult,
   SessionEventEnvelope,
   SessionMeta,
   SkillHarness,
@@ -88,10 +92,15 @@ export interface IpcContract {
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
+  /** Deep search: session titles/goals plus full transcript content (FTS5 index in main). */
+  'sessions:search': [{ q: string; filters?: SearchFilters; limit?: number }, SearchResponse];
   'sessions:delete': [{ id: string; removeWorktree?: boolean }, void];
   'sessions:rename': [{ id: string; title: string }, SessionMeta];
-  'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean }, SessionMeta];
+  'sessions:label': [{ id: string; label?: string }, SessionMeta];
+  'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean; forceWorktree?: boolean }, SessionMeta];
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
+  /** Persists a pinned-section drag reorder: ids in their new display order. */
+  'sessions:pinOrder': [{ ids: string[] }, void];
   'sessions:send': [{ id: string; input: UserInput }, void];
   'sessions:interrupt': [{ id: string }, void];
   'sessions:stop': [{ id: string }, void];
@@ -101,7 +110,7 @@ export interface IpcContract {
   'sessions:compact': [{ id: string }, { ok: boolean; detail?: string }];
   'sessions:clearTranscript': [{ id: string }, void];
   'sessions:export': [{ id: string }, { path: string | null }];
-  'sessions:fork': [{ id: string }, SessionMeta | null];
+  'sessions:fork': [{ id: string; harness?: HarnessId }, SessionMeta | null];
   'sessions:moveTo': [{ id: string; cwd: string }, SessionMeta];
   'sessions:goal': [
     { id: string; action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update'; objective?: string; autoContinue?: boolean; maxIterations?: number },
@@ -114,7 +123,7 @@ export interface IpcContract {
 
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   'git:summary': [{ sessionId: string }, GitSummary];
-  'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string }];
+  'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string; error?: string }];
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:stageAll': [{ sessionId: string }, { ok: boolean; error?: string }];
   'git:commit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];
@@ -135,6 +144,8 @@ export interface IpcContract {
   'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];
   /** Pulls the repo's pull requests (all states) from GitHub through gh, for the Git panel's PR view. */
   'git:pullRequests': [{ sessionId: string }, GitPullRequestList];
+  /** Pulls the repo's issues (all states) from GitHub through gh, for the Git panel's Issues view. */
+  'git:issues': [{ sessionId: string }, GitIssueList];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];

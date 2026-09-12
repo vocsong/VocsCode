@@ -286,6 +286,26 @@ h4 {
   gap: 10px;
   color: var(--fg-muted);
 }
+.boot-error {
+  flex-direction: column;
+  padding: 24px;
+  text-align: center;
+}
+.boot-error-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 560px;
+  color: var(--fg);
+}
+.boot-error-copy .icon {
+  color: var(--red);
+}
+.boot-error-detail {
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
 
 /* Title bar (frameless window chrome) */
 .titlebar {
@@ -749,9 +769,15 @@ h4 {
   color: inherit;
 }
 .mp-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.mp-select .menu-item-hint {
+  flex-shrink: 0;
+  max-width: 52%;
 }
 .mp-star {
   border: none;
@@ -895,32 +921,20 @@ h4 {
   justify-content: space-between;
   padding: 12px 12px 8px;
 }
+.sidebar-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
 .brand {
   display: flex;
   align-items: center;
   gap: 8px;
   font-weight: 700;
-  font-size: 14px;
+  font-size: 17px;
 }
 .brand > .icon {
   color: var(--accent);
-}
-.sidebar-search {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0 12px 8px;
-  padding: 0 8px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
-}
-.sidebar-search input {
-  border: none;
-  background: none;
-  padding: 6px 0;
-  box-shadow: none;
 }
 .sidebar-summary {
   display: flex;
@@ -940,16 +954,59 @@ h4 {
 .project-group {
   margin-bottom: 8px;
 }
+/* The folder block's position is manual: dragging the header reorders the whole block. */
+.project-group.dragging {
+  opacity: 0.45;
+}
+.project-group.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.project-group.drop-after {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
 .project-header {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 8px 6px 4px;
-  font-size: 11px;
+  font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--fg-faint);
   font-weight: 600;
+  cursor: grab;
+}
+.project-header:active {
+  cursor: grabbing;
+}
+/* The header is a drag handle; its text must not start a text-selection drag instead. */
+.project-header * {
+  user-select: none;
+}
+.project-fold-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+.project-fold-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.project-count {
+  flex-shrink: 0;
+  color: var(--fg-faint);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
 }
 .project-icon-btn {
   display: inline-flex;
@@ -968,9 +1025,18 @@ h4 {
   background: var(--bg-hover);
 }
 .project-title {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-weight: inherit;
+  text-align: left;
+  cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.project-title:hover {
+  color: var(--fg);
 }
 /* A custom color reads quieter than the default hue on the dark sidebar; a hairline
    dark shadow restores edge contrast without looking like a glow. */
@@ -1126,6 +1192,24 @@ h4 {
   background: var(--bg-hover);
   opacity: 0.7;
 }
+.session-status.status-custom {
+  color: var(--red);
+  background: var(--red-soft);
+}
+.session-row .session-status {
+  cursor: pointer;
+}
+.status-label-add {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+}
+.status-label-add input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+}
 @keyframes status-fade {
   0%,
   100% {
@@ -1138,6 +1222,20 @@ h4 {
 .session-main {
   flex: 1;
   min-width: 0;
+}
+/* Right column: status pill with the last-updated time stacked beneath it. */
+.session-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.session-time {
+  font-size: 10px;
+  color: var(--fg-faint);
+  line-height: 1;
+  white-space: nowrap;
 }
 .session-title {
   display: flex;
@@ -1189,7 +1287,7 @@ h4 {
 .session-worktree-name {
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 90px;
+  max-width: 130px;
 }
 .session-rename {
   padding: 2px 6px;
@@ -1214,24 +1312,92 @@ h4 {
 .row-menu-btn:hover {
   background: var(--bg-active);
 }
+/* Row action icons: pin / fork / archive (restore / delete while archived). */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.1s ease, visibility 0.1s ease;
+}
+.session-row:hover .row-actions,
+.session-row.active .row-actions,
+.row-actions:focus-within {
+  visibility: visible;
+  opacity: 1;
+}
+.row-act-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.row-act-btn .icon {
+  stroke-width: 2;
+}
+.row-act-btn:hover {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.row-act-btn.is-pinned {
+  color: var(--accent);
+}
+.row-act-btn.danger:hover {
+  background: var(--red-soft);
+  color: var(--red);
+}
+/* Pinned-section drag reorder indicators. */
+.session-row.dragging {
+  opacity: 0.45;
+}
+.session-row.drag-above::before,
+.session-row.drag-below::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.session-row.drag-above::before {
+  top: -1px;
+}
+.session-row.drag-below::after {
+  bottom: -1px;
+}
 .sidebar-bottom {
   border-top: 1px solid var(--border);
   padding: 6px 8px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: wrap;
   gap: 2px;
 }
 .sidebar-link {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
   border: none;
   background: none;
-  padding: 7px 8px;
+  padding: 7px 6px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--fg-muted);
-  text-align: left;
+  text-align: center;
 }
 .sidebar-link:hover,
 .sidebar-link.active {
@@ -1239,31 +1405,31 @@ h4 {
   color: var(--fg);
 }
 
-/* Header */
+/* Header — two rows: title/identity on top, controls below. */
 .header {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 8px;
-  padding: 8px 12px;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 12px 7px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
-  min-height: 46px;
 }
 .header-title {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1 1 280px;
   overflow: hidden;
+  font-size: 12px;
+  line-height: 20px;
 }
 .header-name {
   font-weight: 600;
+  font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 34vw;
+  max-width: 55vw;
 }
 .header-path {
   display: inline-flex;
@@ -1300,6 +1466,19 @@ h4 {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+  min-width: 0;
+}
+.header-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   margin-left: auto;
   flex-shrink: 0;
 }
@@ -1737,6 +1916,39 @@ h4 {
 .plan-check {
   display: inline-block;
   width: 16px;
+}
+
+/* Run of consecutive shell commands, collapsed into one header */
+.tool-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.tool-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 6px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+.tool-group-head:hover {
+  background: var(--bg-hover);
+}
+.tool-group-running .tool-icon {
+  color: var(--blue);
+}
+.tool-group-body {
+  border-top: 1px solid var(--border);
+  background: var(--bg-sunken);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 /* Tool cards */
@@ -2369,9 +2581,9 @@ body.resizing {
 }
 .branches-cols {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 84px minmax(112px, 128px) 136px;
-  gap: 8px;
-  padding: 6px 10px;
+  grid-template-columns: minmax(0, 1fr) 60px 72px minmax(100px, 112px) 108px;
+  gap: 6px;
+  padding: 5px 10px;
   border-bottom: 1px solid var(--border);
   color: var(--fg-muted);
   font-size: 11px;
@@ -2385,15 +2597,36 @@ body.resizing {
 }
 .branch-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 84px minmax(112px, 128px) 136px;
+  grid-template-columns: minmax(0, 1fr) 60px 72px minmax(100px, 112px) 108px;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
+  gap: 6px;
+  padding: 5px 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 .pr-cols,
 .pr-row {
-  grid-template-columns: minmax(0, 1fr) 96px 84px minmax(112px, 128px) 72px;
+  grid-template-columns: minmax(0, 1fr) 72px 60px minmax(100px, 112px) 60px;
+}
+/* Issues table: dedicated #number column, tight author + actions, no updated/status columns. */
+.issue-cols,
+.issue-row {
+  grid-template-columns: 48px minmax(0, 1fr) 60px 56px;
+}
+.issue-title {
+  font-size: 12px;
+}
+/* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
+.branch-row > :nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-author {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .pr-title {
   display: flex;
@@ -2475,39 +2708,57 @@ body.resizing {
   gap: 2px;
   min-width: 0;
 }
+/* Icon-only buttons shrink here so up to four actions fit one line without wrapping. */
+.branch-actions .btn-sm {
+  padding: 3px 4px;
+}
+/* Secondary inline actions (open worktree / PR / delete) grouped so the compact
+   layout can collapse them into the ⋯ menu. */
+.branch-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
 
-/* Narrow panel: two-line rows — name + meta + behind/ahead, then status + actions —
-   so nothing overlaps or clips. The column header is meaningless here. */
+/* Narrow panel: keep the table layout and its column header, just drop the
+   Updated, Behind/Ahead and Status columns so the name keeps the width. */
 @container (max-width: 619.9px) {
-  .branches-cols {
+  .branches-cols:not(.issue-cols),
+  .branch-row:not(.issue-row),
+  .pr-cols,
+  .pr-row:not(.issue-row) {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .branches-cols:not(.issue-cols) > :nth-child(2),
+  .branches-cols:not(.issue-cols) > :nth-child(3),
+  .branches-cols:not(.issue-cols) > :nth-child(4),
+  .branch-row:not(.issue-row) > :nth-child(2),
+  .branch-row:not(.issue-row) > :nth-child(3),
+  .branch-row:not(.issue-row) > :nth-child(4) {
     display: none;
   }
-  .branch-row {
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    grid-template-areas:
-      'name meta num'
-      'status status actions';
-    row-gap: 3px;
-    padding: 7px 10px;
+  /* One line of actions even when the name column is squeezed. */
+  .branch-actions {
+    flex-wrap: nowrap;
   }
-  .branch-row > :nth-child(1) {
-    grid-area: name;
+  /* Issues keep their full header table at every width; the fixed columns just give
+     back some width (a flexible # column here would misalign rows against each other). */
+  .issue-cols,
+  .issue-row {
+    grid-template-columns: 40px minmax(0, 1fr) 52px 52px;
+    gap: 4px;
+    padding-left: 8px;
+    padding-right: 8px;
   }
-  .branch-row > :nth-child(2) {
-    grid-area: meta;
-    max-width: 45%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .branch-row > :nth-child(3) {
-    grid-area: num;
-  }
-  .branch-row > :nth-child(4) {
-    grid-area: status;
-  }
-  .branch-row > :nth-child(5) {
-    grid-area: actions;
+}
+/* Ultra-narrow: same header table, tighter still. */
+@container (max-width: 399.9px) {
+  .issue-cols,
+  .issue-row {
+    grid-template-columns: 36px minmax(0, 1fr) 44px 44px;
+    padding-left: 6px;
+    padding-right: 6px;
   }
 }
 .num {
@@ -2839,6 +3090,32 @@ body.resizing {
   unicode-bidi: plaintext;
   text-align: left;
 }
+.ns-col {
+  min-width: 0;
+}
+/* The model column matches the harness column's height (set in NewSessionDialog via ResizeObserver);
+   the model list is the flexible part and scrolls inside it. */
+.ns-col-model {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ns-col-model > * {
+  flex-shrink: 0;
+}
+.ns-col-model .field:has(.model-picker) {
+  flex: 1 1 0;
+  min-height: 0;
+}
+.ns-col-model .model-picker {
+  flex: 1;
+  min-height: 0;
+}
+.ns-col-model .mp-list {
+  flex: 1;
+  min-height: 48px;
+  max-height: none;
+}
 .harness-cards {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -3034,6 +3311,95 @@ body.resizing {
 }
 .palette-item.active {
   background: var(--bg-active);
+}
+/* Quick-session picker: optional first-prompt area between the header and the folder list. */
+.qs-prompt {
+  padding: 8px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.qs-prompt textarea {
+  width: 100%;
+  resize: none;
+  font-size: 13px;
+  padding: 8px 30px 8px 10px;
+}
+.qs-picked {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* Deep search modal (Ctrl+Shift+F): two-line rows with a highlighted snippet. */
+.search-palette {
+  width: 720px;
+}
+.search-item {
+  align-items: flex-start;
+}
+.search-item .icon {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.search-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.search-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-weight: 600;
+  min-width: 0;
+}
+.search-title .qs-root {
+  font-weight: 400;
+  color: var(--fg-muted);
+  flex: 1;
+}
+.search-snippet {
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-snippet mark {
+  background: rgba(255, 200, 0, 0.35);
+  color: inherit;
+  border-radius: 2px;
+}
+.search-archived {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+}
+.search-archived input {
+  width: auto;
+  margin: 0;
+}
+.search-hint {
+  padding: 6px 10px 4px;
+}
+/* Flash highlight on the transcript item a deep-search match jumped to. */
+.search-jump-hl {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+  transition: outline-color 1.2s ease 0.8s;
+}
+/* Quick-session picker: keep the full path from pushing the row wide. */
+.palette-item .qs-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46%;
 }
 
 /* Empty & toasts */
@@ -3364,6 +3730,9 @@ body.resizing {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  /* Keep the header rows out of the column's flex shrinking; tall tab content must
+     scroll inside .analytics-body, never squeeze the title or tab strip. */
+  flex-shrink: 0;
   padding: 10px 16px 8px;
   background: var(--bg-sunken);
 }
@@ -3385,6 +3754,9 @@ body.resizing {
   border-bottom: 1px solid var(--border);
   background: var(--bg-sunken);
   overflow-x: auto;
+  /* Reserve the horizontal-scrollbar space so toggling overflow can't change the row height. */
+  scrollbar-gutter: stable;
+  flex-shrink: 0;
 }
 .atab {
   display: inline-flex;
@@ -3397,7 +3769,8 @@ body.resizing {
   border-bottom: 2px solid transparent;
   color: var(--fg-muted);
   font-size: 12.5px;
-  font-weight: 500;
+  /* Same weight as .atab.active so switching tabs never reflows the row. */
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
@@ -3409,7 +3782,6 @@ body.resizing {
 .atab.active {
   color: var(--fg);
   border-bottom-color: var(--accent);
-  font-weight: 600;
 }
 .atab:focus-visible {
   outline: 2px solid var(--accent);
@@ -4080,7 +4452,7 @@ body.resizing {
 }
 .slist-row {
   display: grid;
-  grid-template-columns: minmax(200px, 1fr) 84px 84px 64px 64px 90px;
+  grid-template-columns: minmax(200px, 1fr) 84px 84px 64px 64px 76px 90px;
   align-items: center;
   gap: 12px;
   padding: 7px 10px;
@@ -4155,7 +4527,8 @@ body.resizing {
     grid-template-columns: minmax(160px, 1fr) 80px 80px 56px;
   }
   .slist:not(.compact) .slist-row > .num:nth-child(5),
-  .slist:not(.compact) .slist-row > .num:nth-child(6) {
+  .slist:not(.compact) .slist-row > .num:nth-child(6),
+  .slist:not(.compact) .slist-row > .num:nth-child(7) {
     display: none;
   }
 }
@@ -4220,6 +4593,23 @@ body.resizing {
   color: var(--fg);
   width: 170px;
   font-size: 12px;
+}
+.skills-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  overflow-x: auto;
+}
+.atab-count {
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+.atab.active .atab-count {
+  color: inherit;
 }
 .skills-body {
   display: grid;
@@ -4392,6 +4782,78 @@ body.resizing {
   flex-direction: column;
   gap: 12px;
 }
+
+/* Settings → Shortcuts */
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  margin-bottom: 6px;
+}
+.shortcut-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.shortcut-row-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.shortcut-row-desc {
+  margin-top: 1px;
+}
+.shortcut-add {
+  margin: 4px 0 2px;
+}
+.shortcut-capture {
+  min-width: 160px;
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: center;
+}
+.shortcut-warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--amber);
+  margin: 2px 0 0;
+}
+.shortcut-ref {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin: 12px 0;
+  overflow: hidden;
+}
+.shortcut-ref-title {
+  font-weight: 700;
+  font-size: 12px;
+  padding: 8px 12px 6px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
+}
+.shortcut-ref-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 12px;
+  font-size: 12.5px;
+}
+.shortcut-ref-row + .shortcut-ref-row {
+  border-top: 1px solid var(--border);
+}
+.shortcut-ref-keys {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
 @media (max-width: 1000px) {
   .skills-body {
     grid-template-columns: 1fr;
@@ -4399,4 +4861,27 @@ body.resizing {
   .skills-preview {
     display: none;
   }
+}
+
+/* First-run setup wizard */
+.onboarding-harness-list,
+.onboarding-key-row {
+  margin-top: 8px;
+}
+.onboarding-harness-row,
+.onboarding-key-row {
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.onboarding-harness-name {
+  min-width: 140px;
+  font-weight: 500;
+}
+.onboarding-model-picker {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
 }
