@@ -297,6 +297,20 @@ describe('model capability overrides', () => {
     expect(normalizeSettings({ theme: 'dark' }).folders).toEqual([]);
   });
 
+  it('normalizes folder order and collapsed roots to non-empty path strings', () => {
+    expect(defaultSettings().folderOrder).toEqual([]);
+    expect(defaultSettings().collapsedFolders).toEqual([]);
+    const s = normalizeSettings({
+      folderOrder: ['G:/proj/b', '', 42, 'G:/proj/a'],
+      collapsedFolders: ['G:/proj/a', 7, '']
+    } as never);
+    expect(s.folderOrder).toEqual(['G:/proj/b', 'G:/proj/a']);
+    expect(s.collapsedFolders).toEqual(['G:/proj/a']);
+    // Settings written before this feature existed have no such keys.
+    expect(normalizeSettings({ theme: 'dark' }).folderOrder).toEqual([]);
+    expect(normalizeSettings({ theme: 'dark' }).collapsedFolders).toEqual([]);
+  });
+
   it('normalizes folder styles to hex colors and known-shape icon names', () => {
     expect(defaultSettings().folderStyles).toEqual({});
     const s = normalizeSettings({
