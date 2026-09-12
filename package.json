@@ -10,11 +10,11 @@
   "author": "Vocs",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vocsong/Vocs-Code.git"
+    "url": "git+https://github.com/vocsong/VocsCode.git"
   },
-  "homepage": "https://github.com/vocsong/Vocs-Code#readme",
+  "homepage": "https://github.com/vocsong/VocsCode#readme",
   "bugs": {
-    "url": "https://github.com/vocsong/Vocs-Code/issues"
+    "url": "https://github.com/vocsong/VocsCode/issues"
   },
   "scripts": {
     "dev": "electron-vite dev",

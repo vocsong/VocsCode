@@ -12,7 +12,7 @@ import { GROUP_LABELS, GROUP_ORDER, THEMES } from '../../../shared/themes';
 import { Icon, MenuItem } from './ui';
 import { ForkIntoItems } from './ForkInto';
 
-const REPO = 'https://github.com/vocsong/Vocs-Code';
+const REPO = 'https://github.com/vocsong/VocsCode';
 
 const PANEL_TABS: { id: PanelTab; label: string }[] = [
   { id: 'changes', label: 'Changes' },
