@@ -2726,6 +2726,21 @@ body.resizing {
     display: none;
   }
 }
+/* Ultra-narrow panel: one line per row — name (+ badges) and the actions menu.
+   Updated time, behind/ahead and status are all reachable via the ⋯ menu or
+   tooltips, so they give their space back to the name. */
+@container (max-width: 399.9px) {
+  .branch-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'name actions';
+    row-gap: 0;
+  }
+  .branch-row > :nth-child(2),
+  .branch-row > :nth-child(3),
+  .branch-row > :nth-child(4) {
+    display: none;
+  }
+}
 .num {
   text-align: right;
   font-variant-numeric: tabular-nums;
