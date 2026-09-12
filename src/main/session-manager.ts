@@ -104,7 +104,8 @@ export class SessionManager {
       meta.id,
       setTimeout(() => {
         this.persistTimers.delete(meta.id);
-        if (this.deps.store.get(meta.id)) void this.deps.store.upsert(meta);
+        // Fire-and-forget: a failed index write must not become an unhandled rejection.
+        if (this.deps.store.get(meta.id)) Promise.resolve(this.deps.store.upsert(meta)).catch((e) => this.deps.log('warn', `meta persist failed: ${errorMessage(e)}`));
       }, 300)
     );
   }
