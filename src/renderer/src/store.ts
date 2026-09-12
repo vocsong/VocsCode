@@ -61,7 +61,7 @@ interface State {
   newSessionOpen: boolean;
   /** Project folder the new session dialog is targeting; null until a folder is picked. */
   newSessionRoot: string | null;
-  /** Ctrl+Shift+N quick picker: choose a known folder, then start a session with defaults. */
+  /** Ctrl+N quick picker: choose a known folder, then start a session with defaults. */
   quickSessionOpen: boolean;
   paletteOpen: boolean;
   showThinking: boolean;
