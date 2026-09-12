@@ -22,6 +22,7 @@ src/main
   secrets.ts      API keys encrypted at rest via Electron safeStorage
   terminal.ts     PTY tabs (node-pty) mirrored by headless xterm for snapshots, flow control, restore
   handlers.ts     transport-agnostic IPC handler registry (Electron-free, unit-tested in Node)
+  web-server.ts   localhost web client (VOCS_CODE_WEB=1): serves the built renderer, bridges the registry over WebSocket
   git.ts / settings.ts / store.ts / ipc.ts / index.ts   (ipc.ts binds handlers.ts to ipcMain)
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
