@@ -287,7 +287,8 @@ export function registerIpc(deps: IpcDeps): void {
     await sessions.delete(id, removeWorktree);
     if (Date.now() - t0 >= SLOW_IPC_MS) deps.log('warn', `slow delete ${id}: terminals ${t1 - t0}ms, session ${Date.now() - t1}ms`);
   });
-  handle('sessions:rename', ({ id, title }) => sessions.patch(id, { title, userTitle: true }));
+  handle('sessions:rename', ({ id, title }) => sessions.patch(id, { title }));
+  handle('sessions:label', ({ id, label }) => sessions.patch(id, { statusLabel: label?.trim() || undefined }));
   handle('sessions:archive', ({ id, archived, removeWorktree }) => sessions.setArchived(id, archived, removeWorktree));
   handle('sessions:pin', ({ id, pinned }) => sessions.patch(id, { pinned }));
   handle('sessions:send', ({ id, input }) => sessions.send(id, input));
