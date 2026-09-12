@@ -1,5 +1,6 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
 import React, { useEffect, useState } from 'react';
+import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
 import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
@@ -130,6 +131,22 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
           {['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((l) => (
             <option key={l} value={l}>
               {l}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field
+        label="Automatically compact context at"
+        hint="Checked after each turn. Vocs Code can request compaction from Claude, Codex, Pi and Native; other harnesses keep their own behavior, and any harness may compact earlier. Percentage presets require a reported context window."
+      >
+        <select
+          value={settings.autoCompactionThreshold ?? ''}
+          onChange={(e) => update({ autoCompactionThreshold: (e.target.value || undefined) as AppSettings['autoCompactionThreshold'] })}
+        >
+          <option value="">Harness default</option>
+          {AUTO_COMPACTION_PRESETS.map((preset) => (
+            <option key={preset.value} value={preset.value}>
+              {preset.label}
             </option>
           ))}
         </select>

@@ -13,6 +13,8 @@ export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-au
 
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
+export type AutoCompactionThreshold = '50%' | '75%' | '90%' | '100k' | '250k' | '500k' | '750k' | '1m';
+
 export type SessionStatus = 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped' | 'pr' | 'merged';
 
 export interface ModelInfo {
@@ -603,6 +605,8 @@ export interface AppSettings {
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
   defaultEffort?: EffortLevel;
+  /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */
+  autoCompactionThreshold?: AutoCompactionThreshold;
   /** Last chosen worktree isolation decision in the new-session dialog. */
   defaultUseWorktree?: boolean;
   defaultModelByHarness: Partial<Record<HarnessId, ModelRef>>;
