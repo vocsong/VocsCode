@@ -211,7 +211,9 @@ Web (browser)                Relay                      Desktop (host)
    relay, and requests a pairing code.
 2. **Code.** Relay returns a single-use code (`MVBT-K7Q2`, ~2^40 space, 8 chars from a
    32-symbol alphabet — no ambiguous glyphs) with a **5-minute TTL**, plus a QR payload
-   (`https://code.vocs.io/pair?code=…`). Desktop shows code + QR and a status line.
+   (`https://code.vocs.io/pair?code=…`). Desktop shows the QR **prominently** with the
+   code as fallback — scanning from a phone opens the web client pre-filled. QR
+   rendering is a small, accepted runtime dependency (§11).
 3. **Claim (web).** Logged-in user opens "Add a computer", enters the code or scans the
    QR. The browser generates its keypair and posts `{code, web_public_key, device_name}`
    to the relay. Relay rate-limits attempts per account/IP (the TTL plus single-use
@@ -293,9 +295,9 @@ pending approval, so neither a stolen token nor a compromised relay can forge an
 
 - Pairing itself (code + claim + confirm + handshake, both clients) ≈ **2–3 days inside
   P2**. The relay device registry + token service it requires is the real work (~1 wk).
-- Open: QR code mandatory or optional? Auto-approve subsequent devices for a known
-  account (later convenience, v1: no)? Where is the relay hosted (region/data-residency
-  requirements)? Email fallback auth in v1 or GitHub-only?
+- Open: auto-approve subsequent devices for a known account (later convenience, v1: no)?
+  Where is the relay hosted (region/data-residency requirements)? Email fallback auth in
+  v1 or GitHub-only?
 
 ## 7. Threat model
 
@@ -401,10 +403,16 @@ Cloud workspaces: separate track afterward.
 
 Pairing-level questions from §6.9:
 
-1. Is the QR code mandatory, or code-entry only?
-2. Auto-approve later devices for a known account (v1: no)?
-3. Where is the relay hosted (region / data-residency)?
-4. GitHub-only auth in v1, or email fallback too?
+- **QR prominent + code fallback.** The desktop renders the pairing code as a QR (small,
+  accepted runtime dependency); the 8-char code is always shown as fallback. Scanning
+  from a phone camera opens the web client pre-filled — the phone-pairing case matters
+  because the web client is fully responsive (§11).
+
+**Open (resolve one at a time, before P2):**
+
+1. Auto-approve later devices for a known account (v1: no)?
+2. Where is the relay hosted (region / data-residency)?
+3. GitHub-only auth in v1, or email fallback too?
 
 ## 12. The first PR (P0 sketch)
 
