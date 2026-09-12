@@ -257,6 +257,11 @@ export function McpTab({ session }: { session: SessionMeta }) {
                 </div>
               ))
             )}
+            {session.config.harness === 'codex-exec' && (
+              <div className="mcp-note pad-t">
+                <Icon name="alert" size={12} /> Codex loads these servers, but the exec SDK runs with approvals turned off and Codex declines every MCP tool call in that mode. Use the Codex (app-server) harness for a session that needs MCP tools.
+              </div>
+            )}
             <div className="muted small pad-t">
               Configured, not probed — {harnessName} connects when the session starts. Changes apply to the next session on this repo.
             </div>
