@@ -10,7 +10,9 @@ import * as host from '../terminal/host';
 import { Button, Icon, Kbd } from './ui';
 
 export function Composer({ session }: { session: SessionMeta }) {
-  const [text, setText] = useState('');
+  const setDraft = useStore((s) => s.setDraft);
+  // Seed from the per-session draft kept in the store, so switching away and back preserves the text.
+  const [text, setText] = useState(() => useStore.getState().drafts[session.id] ?? '');
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [mention, setMention] = useState<{ query: string; start: number; results: string[]; index: number } | null>(null);
   const [slash, setSlash] = useState<{ query: string; index: number } | null>(null);
@@ -60,6 +62,11 @@ export function Composer({ session }: { session: SessionMeta }) {
   useEffect(() => {
     ref.current?.focus();
   }, [session.id]);
+
+  // Mirror every draft change (typed, inserted, history-navigated, cleared after send) into the store.
+  useEffect(() => {
+    setDraft(session.id, text);
+  }, [text, session.id, setDraft]);
 
   // Text handed over from elsewhere (the terminal's "send to agent") lands below the current draft.
   useEffect(() => {
