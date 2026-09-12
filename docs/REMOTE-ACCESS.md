@@ -110,7 +110,8 @@ New pieces:
 1. **Desktop remote host** — `src/main/remote/`: outbound WSS client to the relay,
    opt-in, off by default. Exposes a *filtered* IPC surface (see §5).
 2. **Relay service** — stateful router: accounts, devices, presence, message routing.
-   Small stateless-ish service; one connection per desktop, N per account.
+   **Cloudflare Workers + Durable Objects** on the existing vocs.io Cloudflare account;
+   one DO per desktop connection, hibernation-friendly, no servers to patch.
 3. **Web client** — `code.vocs.io`: a distinct web shell around the reused renderer
    core — different `window.harness` transport, browser-native chrome (desktop
    titlebar/menu hidden in web builds), slim account/device header, code.vocs.io
@@ -178,7 +179,7 @@ root of trust.)
 | Account | code.vocs.io user id (GitHub OAuth; email fallback) | passwordless | relay DB |
 | Desktop host | device id + human name ("Work PC") | Ed25519 signing + X25519 key-agreement keypair | private half via `secrets.ts` (safeStorage) |
 | Web device | device id + human name ("Chrome on Windows") | Ed25519 signing + X25519 key-agreement keypair | non-extractable WebCrypto (IndexedDB) |
-| Relay | routing registry | public keys + token **hashes** only | relay DB |
+| Relay | routing registry | public keys + token **hashes** only | DO storage (Workers) |
 
 Token model: after pairing, both sides hold a random 256-bit refresh token (relay stores
 only its hash) plus short-lived (~1 h) access tokens bound to the device's public key.
@@ -240,7 +241,8 @@ Web (browser)                Relay                      Desktop (host)
 
 ### 6.4 What the relay stores
 
-- Accounts, devices (id, name, platform, public keys, token hashes, last seen, status).
+- Accounts, devices (id, name, platform, public keys, token hashes, last seen, status)
+  — held in Durable Object storage on the existing vocs.io Cloudflare account.
 - Routing state: which desktop is online for which account; short-lived queues of
   *encrypted* payloads pending delivery.
 - Pairing codes (hashed, TTL'd, single-use).
@@ -295,8 +297,7 @@ pending approval, so neither a stolen token nor a compromised relay can forge an
 
 - Pairing itself (code + claim + confirm + handshake, both clients) ≈ **2–3 days inside
   P2**. The relay device registry + token service it requires is the real work (~1 wk).
-- Open: where is the relay hosted (region/data-residency requirements)? Email fallback
-  auth in v1 or GitHub-only?
+- Open: email fallback auth in v1 or GitHub-only?
 
 ## 7. Threat model
 
@@ -416,8 +417,14 @@ Pairing-level questions from §6.9:
 
 **Open (resolve one at a time, before P2):**
 
-1. Where is the relay hosted (region / data-residency)?
-2. GitHub-only auth in v1, or email fallback too?
+- **Relay on Cloudflare Workers + Durable Objects** (vocs.io already runs on
+  Cloudflare). One DO per desktop connection, WebSocket-native, hibernation for idle
+  desktops, global anycast; the same deployment scales into the product/cloud track
+  without re-architecture.
+
+**Open (resolve one at a time, before P2):**
+
+1. GitHub-only auth in v1, or email fallback too?
 
 ## 12. The first PR (P0 sketch)
 
