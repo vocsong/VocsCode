@@ -13,6 +13,7 @@ const invokeMock = vi.fn().mockResolvedValue({});
 import { fireEvent, render, waitFor } from '@testing-library/react';
 import { Header } from '../src/renderer/src/components/Header';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
+import { rememberEffort, setSessionEffort } from '../src/renderer/src/sessionActions';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta } from '../src/shared/types';
 
@@ -30,8 +31,16 @@ const session = (id = 's_h', patch: Partial<SessionMeta> = {}): SessionMeta => (
 });
 
 function setup(patch: Partial<SessionMeta> = {}, withConfirm = false) {
-  invokeMock.mockClear();
-  useStore.setState({ activeId: 's_h', view: 'chat', panelOpen: true, showThinking: true });
+  invokeMock.mockReset();
+  invokeMock.mockResolvedValue({});
+  useStore.setState({
+    activeId: 's_h',
+    view: 'chat',
+    panelOpen: true,
+    showThinking: true,
+    toasts: [],
+    modelCatalog: { native: { models: [], loading: false } }
+  });
   return render(
     <>
       <Header session={session('s_h', patch)} />
@@ -86,6 +95,59 @@ describe('header actions', () => {
     expect(archive).toBeTruthy();
     fireEvent.click(archive);
     expect(invokeMock).toHaveBeenCalledWith('sessions:archive', { id: 's_h', archived: true });
+  });
+
+  it('remembers a successful reasoning effort switch for the next session', async () => {
+    const { container } = setup({ activeEffort: 'low' });
+    invokeMock.mockClear();
+    let resolveSwitch!: (value: unknown) => void;
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'sessions:setEffort') return new Promise((resolve) => { resolveSwitch = resolve; });
+      return Promise.resolve({});
+    });
+
+    fireEvent.click(container.querySelector('[title="Reasoning effort"]') as HTMLElement);
+    const high = [...document.querySelectorAll('.dropdown-menu .menu-item')].find((item) => item.textContent?.trim() === 'high') as HTMLElement;
+    fireEvent.click(high);
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sessions:setEffort', { id: 's_h', effort: 'high' }));
+    expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
+    resolveSwitch({});
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('settings:update', { defaultEffort: 'high' }));
+  });
+
+  it('does not remember a reasoning effort switch that fails', async () => {
+    const { container } = setup({ activeEffort: 'low' });
+    invokeMock.mockClear();
+    invokeMock.mockImplementation((channel: string) => channel === 'sessions:setEffort' ? Promise.reject(new Error('unsupported')) : Promise.resolve({}));
+
+    fireEvent.click(container.querySelector('[title="Reasoning effort"]') as HTMLElement);
+    const high = [...document.querySelectorAll('.dropdown-menu .menu-item')].find((item) => item.textContent?.trim() === 'high') as HTMLElement;
+    fireEvent.click(high);
+
+    await waitFor(() => expect(useStore.getState().toasts.some((toast) => toast.text.includes('unsupported'))).toBe(true));
+    expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
+  });
+
+  it('keeps the latest effort choice across live and new-session surfaces', async () => {
+    setup();
+    invokeMock.mockClear();
+    let resolveHigh!: (value: unknown) => void;
+    invokeMock.mockImplementation((channel: string, request: { effort?: string }) => {
+      if (channel === 'sessions:setEffort' && request.effort === 'high') return new Promise((resolve) => { resolveHigh = resolve; });
+      return Promise.resolve({});
+    });
+
+    const liveSwitch = setSessionEffort('s_h', 'high', vi.fn());
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sessions:setEffort', { id: 's_h', effort: 'high' }));
+    await rememberEffort('max');
+    resolveHigh({});
+    await liveSwitch;
+
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:setEffort' || channel === 'settings:update')).toEqual([
+      ['sessions:setEffort', { id: 's_h', effort: 'high' }],
+      ['settings:update', { defaultEffort: 'max' }]
+    ]);
   });
 
   it('worktree sessions confirm before archive removes the worktree', () => {
