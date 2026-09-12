@@ -361,7 +361,7 @@ export const useStore = create<State>((set, get) => ({
       for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
       const activeRemoved = !!s.activeId && !ids.has(s.activeId);
       if (activeRemoved) {
-        removedTitle = s.sessions.find((x) => x.id === s.activeId)?.title;
+        removedTitle = s.sessions.find((x) => x.id === s.activeId)?.title ?? s.activeId ?? 'active session';
         replacement = [...sessions]
           .filter((x) => !x.archived)
           .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id))[0];
@@ -379,12 +379,22 @@ export const useStore = create<State>((set, get) => ({
         delete models[id];
         delete drafts[id];
       }
-      return { sessions, transcripts, loaded, activeTerminal, models, drafts, activeId: replacement?.id ?? null };
+      return {
+        sessions,
+        transcripts,
+        loaded,
+        activeTerminal,
+        models,
+        drafts,
+        activeId: activeRemoved ? replacement?.id ?? null : s.activeId
+      };
     });
     if (removedTitle) {
       if (replacement) {
         get().toast(`Session "${removedTitle}" was removed; switched to "${replacement.title}".`, 'info');
-        void get().setActive(replacement.id);
+        // This is reconciliation from the main process, not user navigation: loading directly
+        // avoids adding a duplicate entry to the back/forward stack.
+        void get().loadTranscript(replacement.id).catch((error) => get().toast(error instanceof Error ? error.message : String(error), 'error'));
       } else {
         get().toast(`Session "${removedTitle}" was removed; no active sessions remain.`, 'info');
       }

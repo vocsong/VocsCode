@@ -36,7 +36,7 @@ export function FolderBranch({ root, expanded = true }: { root: string; expanded
     };
   }, [root, expanded]);
 
-  if (!head.branch) return null;
+  if (!expanded || !head.branch) return null;
   const label = head.detached ? `Detached HEAD (${head.branch})` : head.branch;
   return (
     <span className="project-branch" title={`Current checkout in ${root}: ${label}`}>

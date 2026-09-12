@@ -22,6 +22,7 @@ vi.mock('../src/renderer/src/terminal/host', () => ({
 import { Composer } from '../src/renderer/src/components/Composer';
 import { OnboardingWizard } from '../src/renderer/src/components/OnboardingWizard';
 import { SettingsView } from '../src/renderer/src/components/SettingsView';
+import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { TerminalPanel } from '../src/renderer/src/components/TerminalPanel';
 import * as host from '../src/renderer/src/terminal/host';
 import { useStore } from '../src/renderer/src/store';
@@ -102,5 +103,58 @@ describe('issue 140 renderer error states', () => {
     const view = render(<TerminalPanel session={session('s1')} />);
     view.unmount();
     expect(host.clearFind).toHaveBeenCalledWith('t1');
+  });
+
+  it('shows the fallback-secret warning in Providers', async () => {
+    const provider = {
+      id: 'openai',
+      kind: 'openai',
+      name: 'OpenAI',
+      baseUrl: 'https://one.example/v1',
+      hasApiKey: true,
+      models: [],
+      enabled: true
+    };
+    useStore.setState({ settings: { ...settings, providers: [provider] }, sessions: [] } as never);
+    invoke.mockImplementation((channel: string) => channel === 'secrets:status' ? Promise.resolve({ encryptionAvailable: false, hasFallback: true }) : Promise.resolve({}));
+    render(<SettingsView />);
+    fireEvent.click(screen.getByRole('button', { name: 'Providers & keys' }));
+    expect(await screen.findByText(/OS encryption is unavailable/)).toBeTruthy();
+  });
+
+  it('confirms a keyed provider endpoint change and does not save a cancelled draft', async () => {
+    const provider = {
+      id: 'openai',
+      kind: 'openai',
+      name: 'OpenAI',
+      baseUrl: 'https://one.example/v1',
+      hasApiKey: true,
+      models: [],
+      enabled: true
+    };
+    useStore.setState({ settings: { ...settings, providers: [provider] }, sessions: [] } as never);
+    render(
+      <>
+        <SettingsView />
+        <ConfirmHost />
+      </>
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Providers & keys' }));
+    const input = await screen.findByDisplayValue(provider.baseUrl);
+    fireEvent.change(input, { target: { value: 'https://two.example/v1' } });
+    fireEvent.blur(input);
+    expect(await screen.findByText(/Change the endpoint for OpenAI/)).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalledWith('providers:save', expect.anything());
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    });
+    expect((screen.getByDisplayValue(provider.baseUrl) as HTMLInputElement).value).toBe(provider.baseUrl);
+
+    fireEvent.change(screen.getByDisplayValue(provider.baseUrl), { target: { value: 'https://two.example/v1' } });
+    fireEvent.blur(screen.getByDisplayValue('https://two.example/v1'));
+    expect(await screen.findByText(/Change the endpoint for OpenAI/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Change endpoint' }));
+    await act(async () => undefined);
+    expect(invoke).toHaveBeenCalledWith('providers:save', expect.objectContaining({ id: 'openai', baseUrl: 'https://two.example/v1' }));
   });
 });

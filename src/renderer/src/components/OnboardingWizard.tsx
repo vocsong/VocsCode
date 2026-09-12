@@ -1,6 +1,6 @@
 /** First-run setup guide: harness check, provider API keys, and the utility model. */
 import React, { useEffect, useMemo, useState } from 'react';
-import type { AppSettings, HarnessAvailability, ModelInfo, ProviderConfig } from '../../../shared/types';
+import type { AppSettings, HarnessAvailability, ModelInfo, ProviderConfig, SecretStatus } from '../../../shared/types';
 import { HARNESSES } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { useStore } from '../store';
@@ -134,6 +134,18 @@ function ProviderKeys({ providers, onChanged }: { providers: ProviderConfig[]; o
   const toast = useStore((s) => s.toast);
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
   const [testing, setTesting] = useState<string | null>(null);
+  const [secretStatus, setSecretStatus] = useState<SecretStatus | null>(null);
+
+  const refreshSecretStatus = async () => {
+    try {
+      setSecretStatus(await invoke('secrets:status', undefined));
+    } catch {
+      // Advisory only; setup remains usable if an older main process lacks this endpoint.
+    }
+  };
+  useEffect(() => {
+    void refreshSecretStatus();
+  }, []);
 
   const save = async (p: ProviderConfig) => {
     const key = keyDrafts[p.id]?.trim();
@@ -141,6 +153,7 @@ function ProviderKeys({ providers, onChanged }: { providers: ProviderConfig[]; o
     await invoke('secrets:set', { providerId: p.id, apiKey: key });
     setKeyDrafts((d) => ({ ...d, [p.id]: '' }));
     onChanged(providers.map((x) => (x.id === p.id ? { ...x, hasApiKey: true } : x)));
+    await refreshSecretStatus();
   };
 
   const test = async (id: string) => {
@@ -157,6 +170,9 @@ function ProviderKeys({ providers, onChanged }: { providers: ProviderConfig[]; o
         Paste an API key for at least one provider — this is how the agents reach their models. Keys are stored in the OS keychain, never in settings or transcripts. You can
         skip this and add keys later under Settings → Providers &amp; keys.
       </p>
+      {secretStatus && !secretStatus.encryptionAvailable && secretStatus.hasFallback && (
+        <div className="info-line info-warn"><Icon name="alert" size={13} /> <span>OS encryption is unavailable. Stored provider keys use a less-protected local fallback; enable OS encryption or clear and re-enter them.</span></div>
+      )}
       {providers
         .filter((p) => p.builtin)
         .map((p) => (

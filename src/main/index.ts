@@ -48,6 +48,10 @@ let log: Logger = (level, message) => {
   else console.log(line);
 };
 
+// Install before the async startup chain so failures while loading settings, secrets, or the
+// window are captured by the console fallback and then automatically use the file logger.
+installProcessErrorHandlers();
+
 if (!app.requestSingleInstanceLock()) {
   log('warn', 'another Vocs Code instance is already running for this user-data directory; quitting');
   app.quit();
@@ -70,7 +74,6 @@ async function main(): Promise<void> {
   const userData = app.getPath('userData');
   const logger = createLogger(path.join(userData, 'logs'), isDev || !!process.env.VOCS_CODE_DEBUG);
   log = logger.log;
-  installProcessErrorHandlers();
   log('info', `Vocs Code ${app.getVersion()} starting (electron ${process.versions.electron}, ${process.platform} ${process.arch})`);
   // A blocked main process is a window that takes no input; leave a trace when that happens.
   watchEventLoop((level, message) => log(level, message));

@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { safeStorage } from 'electron';
+import type { SecretStatus } from '../shared/types';
 import { readJson, writeJson } from './util/fs';
 
 /**
@@ -44,12 +45,20 @@ export class SecretStore {
     return !!this.data[id];
   }
 
-  get hasFallback(): boolean {
-    return Object.values(this.data).some((value) => value.startsWith('b64:'));
+  get fallbackProviderIds(): string[] {
+    return Object.entries(this.data)
+      .filter(([, value]) => value.startsWith('b64:'))
+      .map(([id]) => id)
+      .sort();
   }
 
-  get status(): { encryptionAvailable: boolean; hasFallback: boolean } {
-    return { encryptionAvailable: this.encryptionAvailable, hasFallback: this.hasFallback };
+  get hasFallback(): boolean {
+    return this.fallbackProviderIds.length > 0;
+  }
+
+  get status(): SecretStatus {
+    const fallbackProviderIds = this.fallbackProviderIds;
+    return { encryptionAvailable: this.encryptionAvailable, hasFallback: fallbackProviderIds.length > 0, fallbackProviderIds };
   }
 
   private persist(): Promise<void> {

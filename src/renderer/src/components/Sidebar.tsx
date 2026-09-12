@@ -393,12 +393,21 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
 }) {
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(s.title);
+  const renameAction = useRef<'idle' | 'committed' | 'cancelled'>('idle');
   const h = HARNESS_BY_ID[s.config.harness];
   const startRename = () => {
     setTitle(s.title);
+    renameAction.current = 'idle';
     setRenaming(true);
   };
+  const cancelRename = () => {
+    renameAction.current = 'cancelled';
+    setTitle(s.title);
+    setRenaming(false);
+  };
   const commit = async () => {
+    if (renameAction.current !== 'idle') return;
+    renameAction.current = 'committed';
     setRenaming(false);
     if (title.trim() && title !== s.title) await invoke('sessions:rename', { id: s.id, title: title.trim() });
   };
@@ -442,7 +451,10 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
       onDragLeave={(e) => dndHandlers.leave(s.id, e)}
       onDrop={(e) => dndHandlers.drop(s.id)}
       onClick={onSelect}
-      onDoubleClick={startRename}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        startRename();
+      }}
     >
       <div className="session-main">
         {renaming ? (
@@ -452,12 +464,17 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
             onFocus={(e) => e.currentTarget.select()}
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            onBlur={commit}
+            onBlur={(e) => {
+              e.stopPropagation();
+              void commit();
+            }}
             onKeyDown={(e) => {
+              e.stopPropagation();
               if (e.key === 'Enter') void commit();
-              if (e.key === 'Escape') setRenaming(false);
+              if (e.key === 'Escape') cancelRename();
             }}
             onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
           />
         ) : (
           <div className="session-title">

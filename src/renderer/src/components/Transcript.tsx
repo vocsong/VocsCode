@@ -18,7 +18,7 @@ export type OnImageExpand = (images: LightboxImage[], index: number) => void;
 
 /** Terminal key events are handled by the terminal find bar, not the transcript finder. */
 export function isTerminalEventTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && !!target.closest('.term-view');
+  return target instanceof Element && !!target.closest('.term, .term-view');
 }
 
 /** Data-URL rendering for a transcript image attachment. */

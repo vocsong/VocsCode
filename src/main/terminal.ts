@@ -416,7 +416,7 @@ export class TerminalManager {
       await new Promise<void>((r) => t.screen.write('', r)); // output still queued in the parser must make it in
       const snapshot = t.serializer.serialize({ scrollback: this.deps.settings().scrollback });
       const data: Persisted = { info: { ...t.info, pid: undefined, exit: undefined, restored: true }, cols: t.cols, rows: t.rows, snapshot };
-      await writeJson(this.file(t.info.id), data).catch((e) => this.deps.log('warn', `terminal snapshot failed: ${errorMessage(e)}`));
+      await writeJson(this.file(t.info.id), data).catch((e) => this.deps.log('warn', `terminal snapshot failed for ${t.info.id} (${t.info.title}): ${errorMessage(e)}`));
     }
   }
 
