@@ -3,10 +3,11 @@ import type { AppSettings, HarnessId, ModelInfo } from '../../shared/types';
 import { applyModelOverrides } from '../../shared/model-overrides';
 import { errorMessage } from '../util/async';
 import type { RuntimeResolver } from '../runtime';
-import { ANTHROPIC_STATIC_MODELS, CODEX_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
+import { ANTHROPIC_STATIC_MODELS, CODEX_STATIC_MODELS, CURSOR_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
 import { AcpAdapter } from './acp';
 import { ClaudeAdapter } from './claude';
 import { CodexAppServerAdapter, listCodexModels } from './codex-app-server';
+import { CursorAdapter, cursorModelToInfo, listCursorModels } from './cursor';
 import { CodexExecAdapter } from './codex-exec';
 import { NativeAdapter } from './native';
 import { PiAdapter, listPiModels } from './pi';
@@ -20,6 +21,8 @@ export function createAdapter(id: HarnessId, ctx: HarnessContext): HarnessAdapte
       return new CodexAppServerAdapter(ctx);
     case 'codex-exec':
       return new CodexExecAdapter(ctx);
+    case 'cursor':
+      return new CursorAdapter(ctx);
     case 'pi':
       return new PiAdapter(ctx);
     case 'acp':
@@ -64,6 +67,15 @@ async function listHarnessModelsRaw(opts: {
           return { models: models.length ? models : CODEX_STATIC_MODELS };
         } catch (e) {
           return { models: CODEX_STATIC_MODELS, error: `model/list failed (${errorMessage(e)}); showing the built-in catalog.` };
+        }
+      }
+      case 'cursor': {
+        const key = await opts.getApiKey('cursor');
+        try {
+          const models = await listCursorModels(key);
+          return { models: models.length ? models : CURSOR_STATIC_MODELS };
+        } catch (e) {
+          return { models: CURSOR_STATIC_MODELS, error: `Cursor.models.list failed (${errorMessage(e)}); showing the built-in catalog.` };
         }
       }
       case 'pi': {

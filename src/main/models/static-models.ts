@@ -27,6 +27,14 @@ export const OPENAI_STATIC_MODELS: ModelInfo[] = [
 /** Codex catalog (same slugs as OpenAI; Codex may expose more via model/list). */
 export const CODEX_STATIC_MODELS: ModelInfo[] = OPENAI_STATIC_MODELS.map((x) => ({ ...x, supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] }));
 
+/**
+ * Cursor offline fallback. The live catalog comes from Cursor.models.list(); 'auto' is the
+ * always-valid selection (Cursor routes to the best model per request).
+ */
+export const CURSOR_STATIC_MODELS: ModelInfo[] = [
+  { id: 'auto', provider: 'cursor', displayName: 'Auto', description: 'Cursor picks the best model for each request.', isDefault: true, supportsImages: true }
+];
+
 export const DEEPSEEK_STATIC_MODELS: ModelInfo[] = [
   m('deepseek', 'deepseek-v4-pro', 'DeepSeek V4 Pro', 1_000_000, { input: 0.435, output: 0.87, cacheRead: 0.003625 }, true),
   m('deepseek', 'deepseek-v4-flash', 'DeepSeek V4 Flash', 1_000_000, { input: 0.14, output: 0.28, cacheRead: 0.0028 }),

@@ -80,6 +80,32 @@ export const HARNESSES: HarnessDescriptor[] = [
     }
   },
   {
+    id: 'cursor',
+    name: 'Cursor',
+    tagline: 'The Cursor agent, embedded',
+    vendor: 'Cursor / Anysphere',
+    description:
+      "Runs the Cursor agent loop through @cursor/sdk on your Cursor plan. Codebase indexing, MCP, skills and rules all apply. No interactive approvals: safety comes from Cursor's sandbox and Plan mode (a read-only tool allowlist).",
+    docsUrl: 'https://cursor.com/docs/api/sdk/typescript',
+    capabilities: {
+      streaming: true,
+      approvals: false,
+      steer: true,
+      queue: true,
+      interrupt: true,
+      liveModelSwitch: true,
+      effort: false,
+      images: true,
+      dropsUnsupportedImages: false,
+      resume: true,
+      fork: false,
+      plan: true,
+      costReporting: false,
+      permissionModes: ['plan', 'auto', 'full-auto'],
+      modelSource: 'harness'
+    }
+  },
+  {
     id: 'pi',
     name: 'Pi',
     tagline: 'Minimal, hackable, any provider',

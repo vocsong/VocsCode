@@ -13,13 +13,14 @@ const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neut
   claude: 'amber',
   codex: 'green',
   'codex-exec': 'green',
+  cursor: 'blue',
   pi: 'purple',
   acp: 'blue',
   native: 'neutral'
 };
 
 export function harnessShort(id: string): string {
-  return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
+  return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', cursor: 'Cursor', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
 }
 
 /** Icon choices for folder headers (names from the renderer icon set). */

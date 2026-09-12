@@ -115,7 +115,7 @@ describe('dimensionSeries', () => {
   });
 
   it('honours a fixed order for harnesses and omits Other when nothing was folded', () => {
-    const s = dimensionSeries(days, 'harness', (c) => c.costUsd, 6, ['claude', 'codex', 'codex-exec', 'pi', 'acp', 'native']);
+    const s = dimensionSeries(days, 'harness', (c) => c.costUsd, 6, ['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'acp', 'native']);
     expect(s.series.map((x) => x.key)).toEqual(['claude', 'pi', 'native']);
     expect(s.other).toBeUndefined();
   });
