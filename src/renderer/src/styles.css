@@ -900,7 +900,7 @@ h4 {
   align-items: center;
   gap: 8px;
   font-weight: 700;
-  font-size: 14px;
+  font-size: 17px;
 }
 .brand > .icon {
   color: var(--accent);
@@ -955,7 +955,7 @@ h4 {
   align-items: center;
   gap: 6px;
   padding: 8px 6px 4px;
-  font-size: 11px;
+  font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--fg-faint);
