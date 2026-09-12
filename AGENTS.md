@@ -44,7 +44,7 @@ VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
 Layering is enforced by convention and by `tsconfig` project boundaries:
 
 - `src/shared` — types, IPC contract, harness metadata, diff parser. **No runtime deps, no Electron imports**; importable from every process.
-- `src/main` — all privileged work. `harness/` holds one adapter per harness; `models/` provider clients; `util/` has no Electron imports so adapters stay unit-testable in Node.
+- `src/main` — all privileged work. `harness/` holds one adapter per harness; `models/` provider clients; `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
 - `src/preload` — the only bridge. Renderer calls go through `window.harness`; channels and payloads are defined once in `src/shared/ipc.ts`.
 - `src/renderer` — React 19 + zustand. **Never touches Node or Electron directly.** `terminal/host.ts` keeps xterm.js instances alive outside React.
 

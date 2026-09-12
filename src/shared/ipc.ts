@@ -181,9 +181,7 @@ export type PushPayloads = {
   'push:terminalsChanged': TerminalInfo[];
 };
 
-/** The API exposed on window.harness by the preload script. */
-export interface VocsCodeApi {
-  invoke<K extends IpcChannel>(channel: K, request: IpcRequest<K>): Promise<IpcResponse<K>>;
-  on<K extends keyof PushPayloads>(channel: K, listener: (payload: PushPayloads[K]) => void): () => void;
-  platform: string;
-}
+export type PushChannel = keyof PushPayloads;
+
+/** The API exposed on window.harness by the preload script — the shared Transport shape (see ./transport). */
+export type { Transport as VocsCodeApi } from './transport';
