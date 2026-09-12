@@ -92,6 +92,8 @@ export interface IpcContract {
   'sessions:rename': [{ id: string; title: string }, SessionMeta];
   'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean }, SessionMeta];
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
+  /** Persists a pinned-section drag reorder: ids in their new display order. */
+  'sessions:pinOrder': [{ ids: string[] }, void];
   'sessions:send': [{ id: string; input: UserInput }, void];
   'sessions:interrupt': [{ id: string }, void];
   'sessions:stop': [{ id: string }, void];
