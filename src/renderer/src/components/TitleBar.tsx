@@ -138,7 +138,7 @@ function FileMenu({ close }: { close: () => void }) {
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openPath', { path: session.cwd, sessionId: session.id }))}>
         Reveal project folder
       </MenuItem>
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openInEditor', { path: session.cwd }).then(fail))}>
+      <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openInEditor', { path: session.cwd, sessionId: session.id }).then(fail))}>
         Open in editor
       </MenuItem>
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openTerminal', { cwd: session.cwd }).then(fail))}>

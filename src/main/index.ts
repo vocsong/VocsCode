@@ -37,6 +37,7 @@ let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
 let terminals: TerminalManager | null = null;
 let webServer: WebServer | null = null;
+let processErrorHandlersInstalled = false;
 
 /** Console-only until userData is known (see main()), then also a rotating file under logs/. */
 let log: Logger = (level, message) => {
@@ -69,6 +70,7 @@ async function main(): Promise<void> {
   const userData = app.getPath('userData');
   const logger = createLogger(path.join(userData, 'logs'), isDev || !!process.env.VOCS_CODE_DEBUG);
   log = logger.log;
+  installProcessErrorHandlers();
   log('info', `Vocs Code ${app.getVersion()} starting (electron ${process.versions.electron}, ${process.platform} ${process.arch})`);
   // A blocked main process is a window that takes no input; leave a trace when that happens.
   watchEventLoop((level, message) => log(level, message));
@@ -203,10 +205,45 @@ async function main(): Promise<void> {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
-    // Drain debounced session-meta persists after the sessions themselves are stopped.
-    const drainSessions = sessions ? sessions.stopAll().then(() => sessions?.flushPendingPersists()).then(() => analytics.flush()) : Promise.resolve();
-    Promise.race([Promise.all([drainSessions, terminals?.shutdown(), Promise.resolve(search?.close()), Promise.resolve(webServer?.stop())]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
+    // Drain debounced session-meta persists after the sessions themselves are stopped. Restored
+    // terminal snapshots are written first, and the cap ensures a large terminal set cannot hold
+    // Electron open indefinitely.
+    const deadline = Date.now() + 4000;
+    const safe = async (label: string, task: Promise<unknown> | void | undefined): Promise<void> => {
+      try {
+        await task;
+      } catch (error) {
+        log('warn', `${label} during shutdown failed: ${formatProcessError(error)}`);
+      }
+    };
+    const drainSessions = sessions
+      ? sessions.stopAll().then(() => sessions?.flushPendingPersists()).then(() => analytics.flush())
+      : Promise.resolve();
+    const shutdown = Promise.all([
+      safe('session drain', drainSessions),
+      safe('terminal shutdown', terminals?.shutdown(deadline)),
+      safe('search close', search?.close()),
+      safe('web server stop', webServer?.stop())
+    ]);
+    const cap = new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 4000));
+    void Promise.race([shutdown.then(() => false), cap]).then((timedOut) => {
+      if (timedOut) log('warn', 'shutdown exceeded the 4s cap; exiting with any remaining state left for the next launch');
+      app.exit(0);
+    });
   });
+}
+
+function formatProcessError(error: unknown): string {
+  if (error instanceof Error) return error.stack ?? error.message;
+  return typeof error === 'string' ? error : String(error);
+}
+
+/** Keep process-level failures visible in packaged builds instead of leaving them in a console. */
+function installProcessErrorHandlers(): void {
+  if (processErrorHandlersInstalled) return;
+  processErrorHandlersInstalled = true;
+  process.on('unhandledRejection', (reason) => log('warn', `unhandled rejection: ${formatProcessError(reason)}`));
+  process.on('uncaughtException', (error) => log('error', `uncaught exception: ${formatProcessError(error)}`));
 }
 
 /** Resolve the same icon in development and in the packaged app's extra resources. */

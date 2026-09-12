@@ -104,7 +104,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
         </span>
         <span className="spacer" />
         <Button variant="ghost" size="sm" icon="refresh" onClick={() => void refresh()} title="Refresh" />
-        <Button variant="ghost" size="sm" icon="external" onClick={() => void invoke('app:openInEditor', { path: session.cwd })} title="Open in editor" />
+        <Button variant="ghost" size="sm" icon="external" onClick={() => void invoke('app:openInEditor', { path: session.cwd, sessionId: session.id })} title="Open in editor" />
       </div>
       {summary?.error && (
         <div className="callout warn" role="status">
@@ -234,7 +234,7 @@ function FilesTab({ session }: { session: SessionMeta }) {
                 title={mdView ? 'Show source' : 'Show markdown preview'}
               />
             )}
-            <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}` })} title="Open in editor" />
+            <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}`, sessionId: session.id })} title="Open in editor" />
             <Button size="sm" variant="ghost" icon="x" onClick={() => setPreview(null)} />
           </div>
           {isMd && mdView ? (
