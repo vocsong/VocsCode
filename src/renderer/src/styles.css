@@ -895,6 +895,11 @@ h4 {
   justify-content: space-between;
   padding: 12px 12px 8px;
 }
+.sidebar-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
 .brand {
   display: flex;
   align-items: center;
