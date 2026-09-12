@@ -127,11 +127,11 @@ function FileMenu({ close }: { close: () => void }) {
       <MenuItem hint={`${modKey}+N`} onClick={run(() => void st.startNewSession())}>
         New session
       </MenuItem>
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)))}>
+      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)).catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error')))}>
         Fork session
       </MenuItem>
       {session && <ForkIntoItems session={session} onForked={(f) => st.setActive(f.id)} />}
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:export', { id: session.id }).then((r) => r.path && st.toast(`Exported to ${r.path}`, 'success')))}>
+      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:export', { id: session.id }).then((r) => r.path && st.toast(`Exported to ${r.path}`, 'success')).catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error')))}>
         Export transcript…
       </MenuItem>
       <Sep />

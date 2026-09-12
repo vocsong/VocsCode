@@ -1,7 +1,7 @@
 /** Top-level layout: sidebar, transcript, composer and the right-hand panel. */
 import React, { useEffect } from 'react';
 import { invoke } from './api';
-import { useActiveSession, useStore } from './store';
+import { useActiveSession, useStore, toastError } from './store';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { CommandPalette } from './components/CommandPalette';
 import { Composer } from './components/Composer';
@@ -88,7 +88,7 @@ export function App() {
         if (target) {
           const collapsed = st.settings?.collapsedFolders ?? [];
           if (collapsed.includes(target.root)) void invoke('settings:update', { collapsedFolders: collapsed.filter((r) => r !== target.root) });
-          void st.setActive(target.sessionId);
+          void st.setActive(target.sessionId).catch(toastError);
           // The sidebar row may not be in view (long list, or folder just expanded above).
           requestAnimationFrame(() => document.querySelector(`[data-session-id="${CSS.escape(target.sessionId)}"]`)?.scrollIntoView({ block: 'nearest' }));
         }
@@ -97,7 +97,7 @@ export function App() {
         const target = list[Number(e.key) - 1];
         if (target) {
           e.preventDefault();
-          void st.setActive(target.id);
+          void st.setActive(target.id).catch(toastError);
         }
       } else if (mod && e.code === 'Backquote' && st.activeId && st.view === 'chat') {
         // Ctrl+` toggles focus between the terminal and the composer; Ctrl+Shift+` opens a new terminal.
