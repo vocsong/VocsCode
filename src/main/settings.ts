@@ -81,6 +81,16 @@ export const BUILTIN_PROVIDERS: ProviderConfig[] = [
     enabled: true
   },
   {
+    id: 'cursor',
+    kind: 'cursor',
+    name: 'Cursor',
+    hasApiKey: false,
+    envKey: 'CURSOR_API_KEY',
+    models: [],
+    builtin: true,
+    enabled: false
+  },
+  {
     id: 'deepseek',
     kind: 'deepseek',
     name: 'DeepSeek',
@@ -175,6 +185,7 @@ export function defaultSettings(): AppSettings {
     defaultHarness: 'claude',
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
+    defaultUseWorktree: false,
     defaultModelByHarness: {},
     favoriteModels: [],
     notifications: true,
