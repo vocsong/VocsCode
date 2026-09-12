@@ -4,10 +4,11 @@ import { invoke } from '../api';
 import { Icon } from './ui';
 
 /** The folder's checkout, independent of any session's isolated worktree. */
-export function FolderBranch({ root }: { root: string }) {
+export function FolderBranch({ root, expanded = true }: { root: string; expanded?: boolean }) {
   const [head, setHead] = useState<IpcResponse<'git:folderBranch'>>({});
 
   useEffect(() => {
+    if (!expanded) return;
     let disposed = false;
     let pending = false;
     setHead({});
@@ -33,7 +34,7 @@ export function FolderBranch({ root }: { root: string }) {
       window.removeEventListener('focus', refresh);
       document.removeEventListener('visibilitychange', refresh);
     };
-  }, [root]);
+  }, [root, expanded]);
 
   if (!head.branch) return null;
   const label = head.detached ? `Detached HEAD (${head.branch})` : head.branch;
