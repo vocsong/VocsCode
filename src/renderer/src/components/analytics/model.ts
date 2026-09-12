@@ -2,7 +2,7 @@
  * View model for the analytics dashboard: the scoped slice of a summary (all time or a bounded
  * range), the chart series derived from it, and the display formatters the tabs share.
  */
-import type { AnalyticsDayPoint, AnalyticsSummary, FileUsageRow, ToolUsage, ToolUsageRow, UsageBucket, UsageCounters, UsageSessionRecord } from '../../../../shared/types';
+import type { AnalyticsDayPoint, AnalyticsSummary, FileUsageRow, ModelToolRow, ToolUsage, ToolUsageRow, UsageBucket, UsageCounters, UsageSessionRecord } from '../../../../shared/types';
 import { addCounters, COUNTER_FIELDS, dimensionSeries, emptyCounters, fillDays, rollupDays, speedTps, totalTokens, type SliceDimension } from '../../../../shared/usage-rollup';
 import { basename, fmtCost, fmtTokens } from '../../format';
 import type { AnalyticsRange, AnalyticsTab } from '../../store';
@@ -40,6 +40,8 @@ export interface Scope {
   byProject: UsageBucket[];
   tools: ToolUsageRow[];
   toolTotals: ToolUsage;
+  /** Per-tool call counts keyed by model, sorted by volume. */
+  modelTools: ModelToolRow[];
   files: FileUsageRow[];
   /** Sessions active in range (all time: every recorded session), highest spend first. */
   sessions: UsageSessionRecord[];
@@ -75,6 +77,7 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
       byProject: summary.byProject,
       tools: summary.tools,
       toolTotals: summary.toolTotals,
+      modelTools: summary.modelTools,
       files: summary.files,
       sessions: summary.sessions,
       sessionCount: summary.sessionCount,
@@ -100,6 +103,7 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
     byProject: r.byProject,
     tools: r.tools,
     toolTotals: r.toolTotals,
+    modelTools: r.modelTools,
     files: r.files,
     sessions,
     sessionCount: sessions.length,

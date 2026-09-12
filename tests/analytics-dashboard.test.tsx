@@ -60,6 +60,7 @@ const summary: AnalyticsSummary = {
   modelRates: [{ key: 'p/opus', label: 'opus', usdPerMTok: 2, usdPerCall: 0.5, costUsd: 5, tokens: 2_500_000, calls: 10 }],
   toolTotals: { calls: 8, errors: 0, declined: 0, durationMs: 0 },
   tools: [{ name: 'Bash', calls: 8, errors: 0, declined: 0, durationMs: 0 }],
+  modelTools: [],
   files: [],
   sessions: [rec('s1', 'claude', 'opus', 5, 6), rec('s2', 'pi', 'glm', 1, 2), rec('s3', 'pi', 'glm', 0.5, 1)],
   sessionCount: 3,
@@ -131,6 +132,28 @@ describe('analytics dashboard', () => {
     expect(container.querySelectorAll('.slist-row.gone')).toHaveLength(1);
     fireEvent.click(rows[0]);
     await waitFor(() => expect(useStore.getState().activeId).toBe('s1'));
+  });
+
+  it("shows each model's per-tool error rates on the tools tab", async () => {
+    reset();
+    summary.modelTools = [
+      { key: 'p/opus', label: 'opus', name: 'Bash', calls: 10, errors: 2, declined: 0, durationMs: 0 },
+      { key: 'p/glm', label: 'glm', name: 'Bash', calls: 4, errors: 1, declined: 0, durationMs: 0 },
+      { key: 'p/glm', label: 'glm', name: 'Read', calls: 2, errors: 0, declined: 0, durationMs: 0 }
+    ];
+    const { container } = render(<AnalyticsDashboard />);
+    await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
+    fireEvent.click(container.querySelector("[data-tab='tools']") as HTMLButtonElement);
+    // The bounded range rolls its per-model tool slices up from the day buckets, so the card is empty
+    // until the stub days carry them; all time reads the summary directly.
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'All time') as HTMLButtonElement);
+    await waitFor(() => expect(container.textContent).toContain('Error rate by model'));
+    const table = Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === 'Tool') as HTMLTableElement;
+    expect(table).toBeTruthy();
+    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Tool', 'opus', 'glm']);
+    const bashRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('Bash')) as HTMLTableRowElement;
+    expect(bashRow.textContent).toContain('20%'); // 2 errors in 10 calls
+    expect(bashRow.textContent).toContain('25%'); // 1 error in 4 calls
   });
 
   it('lets the legend hide a series and every chart card swap to its table', async () => {
