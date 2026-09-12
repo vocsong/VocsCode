@@ -749,9 +749,15 @@ h4 {
   color: inherit;
 }
 .mp-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.mp-select .menu-item-hint {
+  flex-shrink: 0;
+  max-width: 52%;
 }
 .mp-star {
   border: none;

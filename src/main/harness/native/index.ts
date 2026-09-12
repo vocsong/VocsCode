@@ -2,7 +2,7 @@
 import path from 'node:path';
 import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../../shared/types';
 import { errorMessage, shortId, truncate } from '../../util/async';
-import { estimateCostUsd, findPricing, STATIC_MODELS_BY_PROVIDER } from '../../models/static-models';
+import { estimateCostUsd, findContextWindow, findPricing, STATIC_MODELS_BY_PROVIDER } from '../../models/static-models';
 import { resolveProviderApiKey } from '../../models/providers';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from '../permissions';
 import type { HarnessAdapter, HarnessContext } from '../types';
@@ -186,9 +186,10 @@ export class NativeAdapter implements HarnessAdapter {
         this.totals.cacheWriteTokens += result.usage.cacheWriteTokens;
         this.totals.reasoningTokens += result.usage.reasoningTokens;
         this.totals.costUsd += stepCost;
-        this.totals.contextTokens = result.usage.inputTokens + result.usage.cacheReadTokens + result.usage.outputTokens;
+        this.totals.contextTokens = result.usage.inputTokens + result.usage.cacheReadTokens + result.usage.cacheWriteTokens + result.usage.outputTokens;
         const info = provider.models.find((m) => m.id === model.model) ?? (STATIC_MODELS_BY_PROVIDER[provider.id] ?? []).find((m) => m.id === model.model);
-        if (info?.contextWindow) this.totals.contextWindow = info.contextWindow;
+        const contextWindow = info?.contextWindow ?? findContextWindow(provider.id, model.model, provider.models);
+        if (contextWindow) this.totals.contextWindow = contextWindow;
         this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
 
         this.history.push({
@@ -389,13 +390,13 @@ export class NativeAdapter implements HarnessAdapter {
     this.sessionAllowed.clear();
   }
 
-  async compact(): Promise<void> {
+  async compact(): Promise<boolean> {
     // Keep the last ~12 messages verbatim (cut only at a user message so tool_use/tool_result pairs stay
     // together) and summarize the rest into a single note.
-    if (this.history.length <= 14) return;
+    if (this.history.length <= 14) return false;
     let cut = this.history.length - 12;
     while (cut > 0 && this.history[cut].role !== 'user') cut--;
-    if (cut <= 1) return;
+    if (cut <= 1) return false;
     const keep = this.history.slice(cut);
     const dropped = this.history.slice(0, cut);
     const summary = dropped
@@ -404,6 +405,7 @@ export class NativeAdapter implements HarnessAdapter {
     this.history = [{ role: 'user', text: `Context summary of earlier conversation (compacted):\n${summary}` }, { role: 'assistant', text: 'Understood, continuing from the compacted context.', toolCalls: [] }, ...keep];
     await this.persist();
     this.ctx.emit({ type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Compacted ${dropped.length} earlier messages.` } });
+    return true;
   }
 
   async dispose(): Promise<void> {

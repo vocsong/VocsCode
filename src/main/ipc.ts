@@ -13,6 +13,7 @@ import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
+import { enrichModelContextWindows } from './models/static-models';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
 import { which } from './runtime';
@@ -190,7 +191,10 @@ export function registerIpc(deps: IpcDeps): void {
 
   handle('providers:list', () => {
     const s = settings.get();
-    return s.providers.map((p) => ({ ...p, hasApiKey: secrets.has(p.id), models: applyModelOverrides(p.models.length ? p.models : fallbackModels(p), s.modelOverrides) }));
+    return s.providers.map((p) => {
+      const models = enrichModelContextWindows(p.models.length ? p.models : fallbackModels(p), s.providers);
+      return { ...p, hasApiKey: secrets.has(p.id), models: applyModelOverrides(models, s.modelOverrides) };
+    });
   });
   handle('providers:save', async (provider) => {
     const s = settings.get();
@@ -219,9 +223,10 @@ export function registerIpc(deps: IpcDeps): void {
       const providers = s.providers.map((x) => (x.id === id ? { ...x, models, modelsUpdatedAt: Date.now() } : x));
       const next = await settings.update({ providers });
       pushToRenderer(deps.getWindow(), PUSH_CHANNELS.settingsChanged, next);
-      return { models: applyModelOverrides(models, next.modelOverrides) };
+      return { models: applyModelOverrides(enrichModelContextWindows(models, next.providers), next.modelOverrides) };
     } catch (e) {
-      return { models: applyModelOverrides(fallbackModels(p), s.modelOverrides), error: errorMessage(e) };
+      const models = enrichModelContextWindows(fallbackModels(p), s.providers);
+      return { models: applyModelOverrides(models, s.modelOverrides), error: errorMessage(e) };
     }
   });
   handle('providers:test', async ({ id }) => {
@@ -261,7 +266,11 @@ export function registerIpc(deps: IpcDeps): void {
     );
     return out;
   });
-  handle('harness:models', async ({ harness }) => listHarnessModels({ harness, settings: settings.get(), runtime, getApiKey: (id) => secrets.get(id) }));
+  handle('harness:models', async ({ harness }) => {
+    const current = settings.get();
+    const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: (id) => secrets.get(id) });
+    return { ...result, models: enrichModelContextWindows(result.models, current.providers) };
+  });
   handle('harness:install', async ({ id }) => {
     const r = await runtime.install(id);
     availabilityCache.clear();

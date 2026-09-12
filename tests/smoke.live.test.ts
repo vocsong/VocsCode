@@ -177,6 +177,9 @@ describe('live harness smoke', () => {
     const adapter = createAdapter('claude', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
+    const models = await adapter.listModels!();
+    expect(models.length).toBeGreaterThan(0);
+    expect(models.some((model) => model.contextWindow)).toBe(true);
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
     expect(assistantText(items)).toMatch(/PONG/i);
