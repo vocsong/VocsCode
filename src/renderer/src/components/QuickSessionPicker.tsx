@@ -1,4 +1,4 @@
-/** Ctrl+Shift+N quick picker: pick a known folder, start a session with defaults — keyboard only. */
+/** Ctrl+N quick picker: pick a known folder, start a session with defaults — keyboard only. */
 import React, { useEffect, useMemo, useState } from 'react';
 import { basename } from '../format';
 import { useStore } from '../store';

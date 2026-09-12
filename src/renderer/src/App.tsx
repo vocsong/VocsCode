@@ -45,14 +45,14 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       const st = useStore.getState();
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
-        // Ctrl+Shift+N: quick-pick a known folder, start with defaults. Plain Ctrl+N keeps the
-        // folder-picker flow (native picker, then the full new-session dialog).
-        e.preventDefault();
-        st.openQuickSession(true);
-      } else if (mod && e.key.toLowerCase() === 'n') {
+      if (mod && e.altKey && e.key.toLowerCase() === 'n') {
+        // Ctrl+Alt+N: folder-picker flow (native picker, then the full new-session dialog).
         e.preventDefault();
         void st.startNewSession();
+      } else if (mod && e.key.toLowerCase() === 'n') {
+        // Ctrl+N: quick-pick a known folder, start with defaults.
+        e.preventDefault();
+        st.openQuickSession(true);
       } else if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         st.openPalette(!st.paletteOpen);
@@ -162,7 +162,7 @@ export function App() {
                   </Button>
                 </div>
                 <p className="muted small">
-                  <Kbd>Ctrl+N</Kbd> new · <Kbd>Ctrl+Shift+N</Kbd> new in folder · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
+                  <Kbd>Ctrl+N</Kbd> new (quick) · <Kbd>Ctrl+Alt+N</Kbd> new in folder · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
                 </p>
               </EmptyState>
             </div>
