@@ -199,6 +199,12 @@ describe('settings normalization', () => {
     expect(s.providers.find((p) => p.id === 'custom')?.builtin).toBe(false);
     expect(s.acpAgents.length).toBe(d.acpAgents.length);
   });
+  it('remembers the worktree isolation decision and defaults it to off', () => {
+    expect(defaultSettings().defaultUseWorktree).toBe(false);
+    expect(normalizeSettings({ defaultUseWorktree: true }).defaultUseWorktree).toBe(true);
+    // Settings written before this key existed fall back to off.
+    expect(normalizeSettings({ theme: 'dark' }).defaultUseWorktree).toBe(false);
+  });
 });
 
 describe('pricing', () => {
