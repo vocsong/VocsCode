@@ -76,9 +76,13 @@ export function Transcript({ session }: { session: SessionMeta }) {
             <p>Send a message to start. Type <code>/</code> for commands, <code>@</code> to mention files, paste images to attach them.</p>
           </div>
         )}
-        {items.map((item) => (
-          <Item key={item.id} item={item} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} />
-        ))}
+        {groupTranscript(items).map((chunk) =>
+          chunk.kind === 'group' ? (
+            <ToolGroup key={chunk.id} items={chunk.items} />
+          ) : (
+            <Item key={chunk.item.id} item={chunk.item} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} />
+          )
+        )}
         {(session.status === 'running' || session.status === 'starting') && (
           <div className="working">
             <Spinner size={12} /> {session.status === 'starting' ? session.statusDetail ?? 'Starting…' : 'Working…'}
@@ -203,6 +207,71 @@ function AssistantMessage({ item, showThinking }: { item: Extract<TranscriptItem
 }
 
 const HINT_ICON: Record<string, string> = { execute: 'terminal', edit: 'edit', read: 'file', search: 'search', fetch: 'external', think: 'brain', mcp: 'bolt', agent: 'fork', other: 'bolt' };
+
+type ToolItem = Extract<TranscriptItem, { kind: 'tool' }>;
+
+/** Consecutive shell commands collapse into one group; everything else renders standalone. */
+export type RenderChunk =
+  | { kind: 'single'; item: TranscriptItem }
+  | { kind: 'group'; id: string; items: ToolItem[] };
+
+/** Group runs of adjacent execute tools (per nesting parent) into collapsible chunks. */
+export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
+  const chunks: RenderChunk[] = [];
+  let run: ToolItem[] = [];
+  let runId = '';
+  let runParent: string | null = null;
+  const flush = () => {
+    if (run.length === 1) chunks.push({ kind: 'single', item: run[0] });
+    else if (run.length > 1) chunks.push({ kind: 'group', id: runId, items: run });
+    run = [];
+  };
+  for (const item of items) {
+    if (item.kind === 'tool' && item.hint === 'execute') {
+      const parent = item.parentId ?? null;
+      if (run.length && runParent !== parent) flush();
+      if (!run.length) {
+        runId = item.id;
+        runParent = parent;
+      }
+      run.push(item);
+      continue;
+    }
+    flush();
+    chunks.push({ kind: 'single', item });
+  }
+  flush();
+  return chunks;
+}
+
+/** Collapsed "Ran n commands" header for a run of consecutive shell commands. */
+export function ToolGroup({ items }: { items: ToolItem[] }) {
+  // open === null means the user has not toggled; then follow running state so live output stays visible.
+  const [open, setOpen] = useState<boolean | null>(null);
+  const running = items.some((i) => i.status === 'running');
+  const expanded = open ?? running;
+  const failed = items.filter((i) => i.status === 'error' || i.status === 'declined').length;
+  const totalMs = items.reduce((sum, i) => sum + (i.durationMs ?? 0), 0);
+  return (
+    <div className={`tool-group ${running ? 'tool-group-running' : ''}`}>
+      <button type="button" className="tool-group-head" onClick={() => setOpen(!expanded)}>
+        <Icon name="terminal" size={14} className="tool-icon" />
+        <span className="tool-name">{running ? 'Running' : 'Ran'} {items.length} command{items.length === 1 ? '' : 's'}</span>
+        <span className="spacer" />
+        {failed ? <Badge tone="red">{failed} failed</Badge> : null}
+        {running ? <Spinner size={12} /> : totalMs ? <span className="muted small">{fmtDuration(totalMs)}</span> : null}
+        <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
+      </button>
+      {expanded && (
+        <div className="tool-group-body">
+          {items.map((i) => (
+            <ToolCard key={i.id} item={i} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function ToolCard({ item }: { item: Extract<TranscriptItem, { kind: 'tool' }> }) {
   const [open, setOpen] = useState(false);
