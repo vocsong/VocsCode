@@ -28,6 +28,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
   const loaded = useStore((s) => s.loaded[session.id]);
   const showThinking = useStore((s) => s.showThinking);
+  const jump = useStore((s) => s.searchJump);
   const ref = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
@@ -38,7 +39,8 @@ export function Transcript({ session }: { session: SessionMeta }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && !e.shiftKey) {
+        // Plain Ctrl+F: find in transcript. Ctrl+Shift+F is the global deep session search.
         e.preventDefault();
         setFindOpen(true);
       }
@@ -64,6 +66,19 @@ export function Transcript({ session }: { session: SessionMeta }) {
     setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
   };
 
+  // Jump-to-match from the deep search modal: scroll to the item and flash it. Waits for the
+  // transcript to load when the session was not the active one.
+  useEffect(() => {
+    if (!jump || jump.sessionId !== session.id || !loaded || !ref.current) return;
+    const el = ref.current.querySelector(`[data-item-id="${CSS.escape(jump.itemId)}"]`);
+    if (!el) return;
+    setStick(false);
+    el.scrollIntoView({ block: 'center' });
+    el.classList.add('search-jump-hl');
+    const t = setTimeout(() => el.classList.remove('search-jump-hl'), 2400);
+    return () => clearTimeout(t);
+  }, [jump, loaded, session.id]);
+
   const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
 
   return (
@@ -80,7 +95,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
           chunk.kind === 'group' ? (
             <ToolGroup key={chunk.id} entries={chunk.entries} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} />
           ) : (
-            <Item key={chunk.item.id} item={chunk.item} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} />
+            <Item key={chunk.item.id} item={chunk.item} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={chunk.item.id} />
           )
         )}
         {(session.status === 'running' || session.status === 'starting') && (
@@ -106,7 +121,16 @@ export function Transcript({ session }: { session: SessionMeta }) {
   );
 }
 
-const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand }: { item: TranscriptItem; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
+/** One transcript row; `dataItemId` anchors deep-search jumps to the exact item. */
+const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand, dataItemId }: { item: TranscriptItem; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand; dataItemId?: string }) {
+  return (
+    <div data-item-id={dataItemId}>
+      {renderItem(item, sessionId, showThinking, onImageExpand)}
+    </div>
+  );
+});
+
+function renderItem(item: TranscriptItem, sessionId: string, showThinking: boolean, onImageExpand: OnImageExpand) {
   switch (item.kind) {
     case 'user':
       return <UserMessage item={item} onImageExpand={onImageExpand} />;
@@ -150,7 +174,7 @@ const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand }
     default:
       return null;
   }
-});
+}
 
 export function UserMessage({ item, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; onImageExpand?: OnImageExpand }) {
   const images = item.images ?? [];
@@ -266,9 +290,12 @@ export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
 export function ToolGroup({ entries, sessionId, showThinking, onImageExpand }: { entries: TranscriptItem[]; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
   // open === null means the user has not toggled; then follow running state so live output stays visible.
   const [open, setOpen] = useState<boolean | null>(null);
+  // A deep-search jump into one of these commands forces the group open so the anchor exists.
+  const jump = useStore((s) => s.searchJump);
+  const jumpHere = !!jump && jump.sessionId === sessionId && entries.some((e) => e.id === jump.itemId);
   const commands = entries.filter((e): e is ToolItem => e.kind === 'tool');
   const running = commands.some((i) => i.status === 'running');
-  const expanded = open ?? running;
+  const expanded = jumpHere || (open ?? running);
   const failed = commands.filter((i) => i.status === 'error' || i.status === 'declined').length;
   const totalMs = commands.reduce((sum, i) => sum + (i.durationMs ?? 0), 0);
   return (
@@ -285,9 +312,9 @@ export function ToolGroup({ entries, sessionId, showThinking, onImageExpand }: {
         <div className="tool-group-body">
           {entries.map((e) =>
             e.kind === 'tool' ? (
-              <ToolCard key={e.id} item={e} />
+              <ToolCard key={e.id} item={e} dataItemId={e.id} />
             ) : (
-              <Item key={e.id} item={e} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} />
+              <Item key={e.id} item={e} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={e.id} />
             )
           )}
         </div>
@@ -296,12 +323,12 @@ export function ToolGroup({ entries, sessionId, showThinking, onImageExpand }: {
   );
 }
 
-function ToolCard({ item }: { item: Extract<TranscriptItem, { kind: 'tool' }> }) {
+function ToolCard({ item, dataItemId }: { item: Extract<TranscriptItem, { kind: 'tool' }>; dataItemId?: string }) {
   const [open, setOpen] = useState(false);
   const hasBody = !!item.output || !!(item.changes && item.changes.length) || item.input !== undefined;
   const statusTone = item.status === 'running' ? 'blue' : item.status === 'error' ? 'red' : item.status === 'declined' ? 'amber' : 'green';
   return (
-    <div className={`tool-card tool-${item.status} ${item.parentId ? 'tool-nested' : ''}`}>
+    <div data-item-id={dataItemId} className={`tool-card tool-${item.status} ${item.parentId ? 'tool-nested' : ''}`}>
       <button type="button" className="tool-head" onClick={() => hasBody && setOpen((o) => !o)}>
         <Icon name={HINT_ICON[item.hint ?? 'other']} size={14} className="tool-icon" />
         <span className="tool-name">{item.title ?? item.name}</span>

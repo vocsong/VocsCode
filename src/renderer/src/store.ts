@@ -64,6 +64,10 @@ interface State {
   /** Ctrl+N quick picker: choose a known folder, then start a session with defaults. */
   quickSessionOpen: boolean;
   paletteOpen: boolean;
+  /** Ctrl+Shift+F deep search modal over titles and transcript contents. */
+  searchOpen: boolean;
+  /** Pending jump-to-match: Transcript scrolls to the item once its session is loaded. */
+  searchJump: { sessionId: string; itemId: string; n: number } | null;
   showThinking: boolean;
   toasts: Toast[];
   changesVersion: number;
@@ -90,6 +94,9 @@ interface State {
   /** Starts a session for a known folder straight from settings defaults, skipping the dialog. */
   createQuickSession(root: string, first?: { prompt?: string; images?: ImageAttachment[] }): Promise<void>;
   openPalette(open: boolean): void;
+  openSearch(open: boolean): void;
+  /** Closes the search modal, activates the session and scrolls to the matched item. */
+  jumpToSearchMatch(sessionId: string, itemId?: string): void;
   toggleThinking(): void;
   toast(text: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
@@ -175,6 +182,8 @@ export const useStore = create<State>((set, get) => ({
   newSessionRoot: null,
   quickSessionOpen: false,
   paletteOpen: false,
+  searchOpen: false,
+  searchJump: null,
   showThinking: true,
   toasts: [],
   changesVersion: 0,
@@ -395,6 +404,13 @@ export const useStore = create<State>((set, get) => ({
   },
   openPalette(paletteOpen) {
     set({ paletteOpen });
+  },
+  openSearch(searchOpen) {
+    set({ searchOpen });
+  },
+  jumpToSearchMatch(sessionId, itemId) {
+    set((s) => ({ searchOpen: false, searchJump: itemId ? { sessionId, itemId, n: (s.searchJump?.n ?? 0) + 1 } : null }));
+    void get().setActive(sessionId);
   },
   toggleThinking() {
     set((s) => ({ showThinking: !s.showThinking }));
