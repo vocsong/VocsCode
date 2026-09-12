@@ -13,14 +13,13 @@ export function titleFromPrompt(text: string): string {
   return words.slice(0, 6).join(' ').slice(0, 60) || line.slice(0, 60);
 }
 
-/** Strips quoting/markdown/preamble from a raw model reply and clamps it to the same 6-word cap. */
+/** Strips quoting/preamble from a raw model reply and clamps it to the same 6-word cap. */
 export function sanitizeLlmTitle(raw: string): string | null {
   const line = raw
     .trim()
     .split('\n')[0]
-    .replace(/^[\s"'`#*]+|[\s"'`*]+$/g, '')
     .replace(/^(session|chat)?\s*(title|name)\s*:\s*/i, '')
-    .replace(/\.+$/, '')
+    .replace(/^[\s"'`#*]+|[\s"'`*.,!]+$/g, '')
     .trim();
   if (!line) return null;
   return titleFromPrompt(line) || null;

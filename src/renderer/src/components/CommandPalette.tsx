@@ -27,13 +27,13 @@ export function CommandPalette() {
   const cmds = useMemo<Cmd[]>(() => {
     const st = useStore.getState();
     const base: Cmd[] = [
-      { id: 'new', label: 'New session', hint: 'Ctrl+N', icon: 'plus', run: () => void st.startNewSession() },
-      { id: 'new-quick', label: 'New session in folder…', hint: 'Ctrl+Shift+N', icon: 'folder', run: () => st.openQuickSession(true) },
+      { id: 'new', label: 'New session in folder…', hint: 'Ctrl+Alt+N', icon: 'plus', run: () => void st.startNewSession() },
+      { id: 'new-quick', label: 'New session (quick picker)', hint: 'Ctrl+N', icon: 'folder', run: () => st.openQuickSession(true) },
       { id: 'settings', label: 'Open settings', hint: 'Ctrl+,', icon: 'settings', run: () => st.setView('settings') },
       { id: 'analytics', label: 'Open analytics dashboard', icon: 'chart', run: () => st.setView('analytics') },
       { id: 'skills', label: 'Open skills', icon: 'puzzle', run: () => st.setView('skills') },
-      { id: 'panel', label: 'Toggle side panel', hint: 'Ctrl+J', icon: 'layout', run: () => st.togglePanel() },
-      { id: 'sidebar', label: 'Toggle sidebar', hint: 'Ctrl+B', icon: 'sidebar', run: () => st.toggleSidebar() },
+      { id: 'panel', label: 'Toggle right side panel', hint: 'Ctrl+J', icon: 'layout', run: () => st.togglePanel() },
+      { id: 'sidebar', label: 'Toggle left sidebar', hint: 'Ctrl+B', icon: 'sidebar', run: () => st.toggleSidebar() },
       { id: 'changes', label: 'Show changes', icon: 'diff', run: () => st.setPanelTab('changes') },
       { id: 'goal', label: 'Show goal', icon: 'target', run: () => st.setPanelTab('goal') },
       { id: 'terminal', label: 'Show terminal', hint: 'Ctrl+`', icon: 'terminal', run: () => { st.setPanelTab('terminal'); st.focusTerminal(); } },

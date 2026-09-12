@@ -5,7 +5,7 @@
 ## Get started in one line
 
 ```bash
-git clone https://github.com/vocsong/Vocs-Code.git && cd Vocs-Code && npm run setup
+git clone https://github.com/vocsong/VocsCode.git && cd VocsCode && npm run setup
 ```
 
 That's it. It installs everything (including dev dependencies, even if your environment sets `NODE_ENV=production`) and launches the app with hot reload.
