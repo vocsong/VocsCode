@@ -20,6 +20,9 @@ import type {
   ModelRef,
   PermissionMode,
   ProviderConfig,
+  SearchFilters,
+  SearchResponse,
+  SearchResult,
   SessionEventEnvelope,
   SessionMeta,
   SkillHarness,
@@ -89,6 +92,8 @@ export interface IpcContract {
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
+  /** Deep search: session titles/goals plus full transcript content (FTS5 index in main). */
+  'sessions:search': [{ q: string; filters?: SearchFilters; limit?: number }, SearchResponse];
   'sessions:delete': [{ id: string; removeWorktree?: boolean }, void];
   'sessions:rename': [{ id: string; title: string }, SessionMeta];
   'sessions:label': [{ id: string; label?: string }, SessionMeta];
