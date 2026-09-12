@@ -1904,6 +1904,39 @@ h4 {
   width: 16px;
 }
 
+/* Run of consecutive shell commands, collapsed into one header */
+.tool-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.tool-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 6px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+.tool-group-head:hover {
+  background: var(--bg-hover);
+}
+.tool-group-running .tool-icon {
+  color: var(--blue);
+}
+.tool-group-body {
+  border-top: 1px solid var(--border);
+  background: var(--bg-sunken);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 /* Tool cards */
 .tool-card {
   border: 1px solid var(--border);
