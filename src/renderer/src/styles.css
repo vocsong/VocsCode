@@ -2857,6 +2857,32 @@ body.resizing {
   unicode-bidi: plaintext;
   text-align: left;
 }
+.ns-col {
+  min-width: 0;
+}
+/* The model column matches the harness column's height (set in NewSessionDialog via ResizeObserver);
+   the model list is the flexible part and scrolls inside it. */
+.ns-col-model {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ns-col-model > * {
+  flex-shrink: 0;
+}
+.ns-col-model .field:has(.model-picker) {
+  flex: 1 1 0;
+  min-height: 0;
+}
+.ns-col-model .model-picker {
+  flex: 1;
+  min-height: 0;
+}
+.ns-col-model .mp-list {
+  flex: 1;
+  min-height: 48px;
+  max-height: none;
+}
 .harness-cards {
   display: grid;
   grid-template-columns: 1fr 1fr;
