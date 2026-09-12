@@ -88,6 +88,10 @@ describe('rollupDays', () => {
     expect(r.byModel.reduce((a, b) => a + b.usage.costUsd, 0)).toBeCloseTo(6);
     // The day counters (6 + 7) exceed the per-tool rows (9), so the total follows the day counters.
     expect(r.toolTotals.calls).toBe(13);
+    expect(r.estimatedDays).toBe(0);
+    days[0].usage.by!.estimated = true;
+    expect(rollupDays(days).estimatedDays).toBe(1);
+    delete days[0].usage.by!.estimated;
   });
 });
 
