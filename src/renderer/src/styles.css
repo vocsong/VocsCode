@@ -1251,6 +1251,69 @@ h4 {
 .row-menu-btn:hover {
   background: var(--bg-active);
 }
+/* Row action icons: pin / fork / archive (restore / delete while archived). */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.1s ease, visibility 0.1s ease;
+}
+.session-row:hover .row-actions,
+.session-row.active .row-actions,
+.row-actions:focus-within {
+  visibility: visible;
+  opacity: 1;
+}
+.row-act-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.row-act-btn .icon {
+  stroke-width: 2;
+}
+.row-act-btn:hover {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.row-act-btn.is-pinned {
+  color: var(--accent);
+}
+.row-act-btn.danger:hover {
+  background: var(--red-soft);
+  color: var(--red);
+}
+/* Pinned-section drag reorder indicators. */
+.session-row.dragging {
+  opacity: 0.45;
+}
+.session-row.drag-above::before,
+.session-row.drag-below::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.session-row.drag-above::before {
+  top: -1px;
+}
+.session-row.drag-below::after {
+  bottom: -1px;
+}
 .sidebar-bottom {
   border-top: 1px solid var(--border);
   padding: 6px 8px;

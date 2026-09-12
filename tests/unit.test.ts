@@ -901,3 +901,60 @@ describe('pi credential detection', () => {
     expect(await withAgentDir(null)).toBe(false);
   });
 });
+
+describe('SessionManager pin ordering', () => {
+  const makeManager = (sessions: SessionMeta[]) => {
+    const upsert = vi.fn();
+    const store = { list: () => sessions, get: (id: string) => sessions.find((s) => s.id === id), upsert } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings(), update: async () => undefined } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    return { manager, upsert };
+  };
+  const pinnedSession = (id: string, patch: Partial<SessionMeta>): SessionMeta => ({
+    id,
+    title: id,
+    createdAt: 1_000,
+    updatedAt: 1_000,
+    config: { harness: 'native', projectRoot: 'G:/proj/a', permissionMode: 'ask' },
+    cwd: 'G:/proj/a',
+    status: 'idle',
+    harnessRef: {},
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
+    ...patch
+  });
+
+  it('setPinned stamps the pin time and never bumps updatedAt', async () => {
+    const s = pinnedSession('s_a', {});
+    const { manager } = makeManager([s]);
+    const before = s.updatedAt;
+    const pinned = await manager.setPinned(s.id, true);
+    expect(pinned.pinned).toBe(true);
+    expect(pinned.pinnedAt).toBeGreaterThan(0);
+    // The unpinned section orders by updatedAt, so pinning must not reshuffle it.
+    expect(pinned.updatedAt).toBe(before);
+    const unpinned = await manager.setPinned(s.id, false);
+    expect(unpinned.pinned).toBeUndefined();
+    expect(unpinned.pinnedAt).toBeUndefined();
+  });
+
+  it('setPinOrder rewrites pin stamps in display order and skips unknown ids', async () => {
+    const a = pinnedSession('s_a', { pinned: true, pinnedAt: 100 });
+    const b = pinnedSession('s_b', { pinned: true, pinnedAt: 200 });
+    const { manager, upsert } = makeManager([a, b]);
+    await manager.setPinOrder(['s_b', 's_a']);
+    // Small ordinals keep future pins (stamped with Date.now()) below the reordered section.
+    expect(b.pinnedAt).toBe(1);
+    expect(a.pinnedAt).toBe(2);
+    expect(upsert).toHaveBeenCalledTimes(2);
+    await expect(manager.setPinOrder(['s_missing'])).resolves.toBeUndefined();
+  });
+});
