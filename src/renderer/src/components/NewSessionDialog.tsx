@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
+import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
@@ -21,7 +22,7 @@ export function NewSessionDialog() {
   const projectRoot = useStore((s) => s.newSessionRoot) ?? activeSession?.config.projectRoot ?? '';
   const [harness, setHarness] = useState<HarnessId>(settings.defaultHarness);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(!!projectRoot);
   const [modelsError, setModelsError] = useState<string | undefined>();
   const [model, setModel] = useState<ModelRef | undefined>(settings.defaultModelByHarness[settings.defaultHarness]);
   const [effort, setEffort] = useState<EffortLevel | ''>(settings.defaultEffort ?? '');
@@ -71,7 +72,7 @@ export function NewSessionDialog() {
     let cancelled = false;
     setModels([]);
     setModelsError(undefined);
-    setModelsLoading(!projectRoot);
+    setModelsLoading(!!projectRoot);
     setModel(settings.defaultModelByHarness[harness]);
     if (!projectRoot) return;
     invoke('harness:models', { harness, acpAgent, projectRoot })
@@ -92,9 +93,17 @@ export function NewSessionDialog() {
   }, [harness, acpAgent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedModel = models.find((m) => model && m.id === model.model && m.provider === model.provider);
-  const effortOptions = selectedModel?.supportedEfforts?.length ? selectedModel.supportedEfforts : [...EFFORT_LEVELS];
+  const supportedEfforts = selectedModel?.supportedEfforts;
+  const effortOptions = supportedEfforts?.length ? supportedEfforts : [...EFFORT_LEVELS];
+  // Keep the remembered choice when possible; an incompatible model uses its own default instead
+  // of submitting a hidden, unsupported value.
+  let selectedEffort: EffortLevel | '' = effort;
+  if (effort && supportedEfforts?.length && !supportedEfforts.includes(effort)) {
+    selectedEffort = selectedModel?.defaultEffort && supportedEfforts.includes(selectedModel.defaultEffort) ? selectedModel.defaultEffort : '';
+  }
 
   const create = async () => {
+    if (modelsLoading) return;
     if (!projectRoot) {
       toast('Choose a project folder first.', 'error');
       return;
@@ -105,7 +114,7 @@ export function NewSessionDialog() {
         harness,
         projectRoot,
         model,
-        effort: effort || undefined,
+        effort: selectedEffort || undefined,
         permissionMode: mode,
         useWorktree,
         acpAgent: harness === 'acp' ? acpAgent : undefined,
@@ -113,8 +122,15 @@ export function NewSessionDialog() {
         maxBudgetUsd: maxBudget ? Number(maxBudget) : undefined,
         codexModelProvider: harness === 'codex' && customProvider.id && customProvider.baseUrl ? { id: customProvider.id, name: customProvider.name || customProvider.id, baseUrl: customProvider.baseUrl, envKey: customProvider.envKey || undefined, wireApi: 'chat' } : undefined
       };
+      // Persist before creation so an initial prompt also sees an explicit switch back to the
+      // harness default instead of inheriting the previously remembered effort.
+      await rememberEffort(selectedEffort || undefined, {
+        defaultHarness: harness,
+        defaultPermissionMode: mode,
+        defaultUseWorktree: useWorktree,
+        defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model }
+      });
       const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, initialImages: images.length ? images : undefined, goal: goal.trim() || undefined });
-      await invoke('settings:update', { defaultHarness: harness, defaultPermissionMode: mode, defaultUseWorktree: useWorktree, defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model } });
       close();
       await setActive(meta.id);
     } catch (e) {
@@ -125,7 +141,7 @@ export function NewSessionDialog() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !creating && projectRoot) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !creating && !modelsLoading && projectRoot) {
       e.preventDefault();
       void create();
     }
@@ -170,7 +186,7 @@ export function NewSessionDialog() {
           <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={create} disabled={creating || !projectRoot} title="Start from the prompt area with Enter">
+          <Button variant="primary" onClick={create} disabled={creating || modelsLoading || !projectRoot} title="Start from the prompt area with Enter">
             {creating ? <Spinner /> : <Icon name="play" />} Start session <Kbd>↵</Kbd>
           </Button>
         </>
@@ -228,7 +244,7 @@ export function NewSessionDialog() {
           </Field>
           <div className="row gap12">
             <Field label="Reasoning effort">
-              <select value={effort} onChange={(e) => setEffort(e.target.value as EffortLevel | '')} disabled={!descriptor.capabilities.effort}>
+              <select value={selectedEffort} onChange={(e) => setEffort(e.target.value as EffortLevel | '')} disabled={!descriptor.capabilities.effort}>
                 <option value="">Default</option>
                 {effortOptions.map((l) => (
                   <option key={l} value={l}>
