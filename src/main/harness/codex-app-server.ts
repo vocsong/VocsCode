@@ -5,7 +5,7 @@ import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred }
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { gateAction, OPTIONS_ALLOW_DENY } from './permissions';
-import { killTree, spawnTool } from './spawn';
+import { spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 
 /* ---- Minimal protocol shapes (from `codex app-server generate-ts`) ---- */
@@ -185,11 +185,10 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
     } catch (e) {
       // Handshake failed after spawn: tear the transport down so no app-server (with its
-      // injected API keys) is orphaned, then rethrow.
+      // injected API keys) is orphaned, then rethrow. close() awaits the tree kill.
       const rpc = this.rpc;
       this.rpc = null;
-      rpc?.close();
-      setTimeout(() => killTree(child), 2000);
+      await rpc?.close();
       throw e;
     }
   }
@@ -657,7 +656,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     try {
       if (this.threadId) await withTimeout(rpc.request('thread/unsubscribe', { threadId: this.threadId }), 2000, 'unsubscribe').catch(() => undefined);
     } finally {
-      rpc.close();
+      await rpc.close();
     }
   }
 }
@@ -689,7 +688,6 @@ export async function listCodexModels(codexPath: string): Promise<ModelInfo[]> {
     const res = await withTimeout(rpc.request<{ data: CodexModel[] }>('model/list', { limit: 100 }), 20_000, 'model/list');
     return res.data.map((m) => codexModelToInfo(m));
   } finally {
-    rpc.close();
-    setTimeout(() => killTree(child), 2000);
+    await rpc.close();
   }
 }

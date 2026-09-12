@@ -193,10 +193,10 @@ export class RuntimeResolver {
     if (preferBundled && bundled) return { path: bundled, source: 'bundled' };
 
     const sys = which(tool, this.appRuntimeBin());
-    // The Claude Agent SDK spawns the executable directly; an npm .cmd shim cannot be spawned
-    // without a shell on Windows, so prefer the bundled native binary in that case. Both read
-    // the same ~/.claude credentials.
-    if (tool === 'claude' && sys && /\.(cmd|bat)$/i.test(sys) && bundled && !systemOnly) return { path: bundled, source: 'bundled' };
+    // An npm .cmd shim needs a cmd.exe parent on Windows, which outlives a plain child.kill()
+    // and makes tree termination unreliable; prefer the bundled native binary when PATH only
+    // offers the shim. Both read the same credentials (~/.claude, ~/.codex).
+    if ((tool === 'claude' || tool === 'codex') && sys && /\.(cmd|bat)$/i.test(sys) && bundled && !systemOnly) return { path: bundled, source: 'bundled' };
     if (sys) return { path: sys, source: sys.startsWith(this.paths.appRuntimeDir) ? 'app-runtime' : 'system' };
     if (!systemOnly && bundled) return { path: bundled, source: 'bundled' };
     return null;
