@@ -4,7 +4,7 @@ import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, Tran
 import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
 import { JsonRpcStdioClient } from './jsonrpc';
-import { gateAction, OPTIONS_ALLOW_DENY } from './permissions';
+import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY } from './permissions';
 import { spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 
@@ -403,12 +403,28 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       return { decision: { denied: { rejection: d.note || 'User declined' } } };
     });
     rpc.onServerRequest('applyPatchApproval', async (p) => {
-      const n = p as { reason?: string; fileChanges?: Record<string, unknown> };
+      const n = p as { reason?: string; fileChanges?: Record<string, unknown>; grantRoot?: string | null };
       const mode = this.ctx.permissionMode();
       if (mode === 'plan') return { decision: { denied: { rejection: 'Plan mode' } } };
-      if (mode !== 'ask') return { decision: 'approved' };
       const files = Object.keys(n.fileChanges ?? {});
-      const d = await this.ctx.requestApproval({ kind: 'file_change', title: 'Apply file changes?', description: n.reason ?? files.join(', '), changes: files.map((f) => ({ path: f, kind: 'update' as const })), options: OPTIONS_ALLOW_DENY });
+      // This legacy request carries no item id, so resolve the affected paths here: the keys are
+      // the written paths and an update may also move a file to a new path. Like the fileChange
+      // handler, a patch that leaves the workspace always asks below full access.
+      const cwd = this.ctx.session().cwd;
+      const outsideWorkspace =
+        !!n.grantRoot ||
+        Object.entries(n.fileChanges ?? {}).some(([file, change]) => {
+          const move = (change as { move_path?: string | null } | null)?.move_path;
+          return isOutsideWorkspace(cwd, file, path) || (typeof move === 'string' && isOutsideWorkspace(cwd, move, path));
+        });
+      if (gateAction(mode, { mutating: true, isEdit: true, outsideWorkspace }) === 'allow') return { decision: 'approved' };
+      const d = await this.ctx.requestApproval({
+        kind: 'file_change',
+        title: 'Apply file changes?',
+        description: n.reason ?? (n.grantRoot ? `Requests write access under ${n.grantRoot}` : files.join(', ')),
+        changes: files.map((f) => ({ path: f, kind: 'update' as const })),
+        options: OPTIONS_ALLOW_DENY
+      });
       if (d.optionId === 'allow') return { decision: 'approved' };
       if (d.optionId === 'allow_session') return { decision: 'approved_for_session' };
       return { decision: { denied: { rejection: d.note || 'User declined' } } };
@@ -586,8 +602,12 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     this.turnBase = { ...this.totals };
     this.ctx.emit({ type: 'status', status: 'running' });
     try {
-      const res = await withTimeout(this.rpc.request<{ turn: { id: string } }>('turn/start', params), 300_000, 'turn/start');
-      this.turnId = res.turn.id;
+      // turn/start resolves when the server accepts the turn; the turn itself runs on and streams
+      // through notifications. No timeout: agentic turns routinely exceed five minutes, and the
+      // transport already rejects pending requests when the process exits.
+      const res = await this.rpc.request<{ turn: { id: string } }>('turn/start', params);
+      // A late response must not resurrect turnId after turn/completed cleared it.
+      if (this._busy) this.turnId = res.turn.id;
     } catch (e) {
       this._busy = false;
       this.ctx.emit({ type: 'status', status: 'idle' });
