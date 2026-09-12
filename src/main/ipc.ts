@@ -8,12 +8,13 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import type { RuntimeResolver } from './runtime';
+import type { SearchIndex } from './search';
 import { which } from './runtime';
 import type { SecretStore } from './secrets';
 import type { Logger } from './log';
@@ -31,6 +32,7 @@ export interface IpcDeps {
   terminals: TerminalManager;
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
+  search: SearchIndex;
   getWindow: () => BrowserWindow | null;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }
@@ -279,6 +281,7 @@ export function registerIpc(deps: IpcDeps): void {
   handle('sessions:create', (req) => sessions.create(req));
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
+  handle('sessions:search', (req) => deps.search.search(req));
   handle('sessions:delete', async ({ id, removeWorktree }) => {
     // Shells hold their cwd open; take them down before the worktree is removed.
     const t0 = Date.now();
@@ -387,6 +390,7 @@ export function registerIpc(deps: IpcDeps): void {
   handle('git:pruneWorktrees', ({ sessionId }) => gitPruneWorktrees(cwdOf(sessionId)));
   handle('git:fetchPrune', ({ sessionId }) => gitFetchPrune(cwdOf(sessionId)));
   handle('git:pullRequests', ({ sessionId }) => gitPullRequests(cwdOf(sessionId)));
+  handle('git:issues', ({ sessionId }) => gitIssues(cwdOf(sessionId)));
 
   handle('fs:list', async ({ sessionId, relPath }) => {
     const root = cwdOf(sessionId);

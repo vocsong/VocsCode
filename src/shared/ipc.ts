@@ -9,6 +9,7 @@ import type {
   FsEntry,
   GitBranchInfo,
   GitBranchOverview,
+  GitIssueList,
   GitPullRequestList,
   GitSummary,
   GitWorktreeInfo,
@@ -19,6 +20,9 @@ import type {
   ModelRef,
   PermissionMode,
   ProviderConfig,
+  SearchFilters,
+  SearchResponse,
+  SearchResult,
   SessionEventEnvelope,
   SessionMeta,
   SkillHarness,
@@ -88,6 +92,8 @@ export interface IpcContract {
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
+  /** Deep search: session titles/goals plus full transcript content (FTS5 index in main). */
+  'sessions:search': [{ q: string; filters?: SearchFilters; limit?: number }, SearchResponse];
   'sessions:delete': [{ id: string; removeWorktree?: boolean }, void];
   'sessions:rename': [{ id: string; title: string }, SessionMeta];
   'sessions:label': [{ id: string; label?: string }, SessionMeta];
@@ -138,6 +144,8 @@ export interface IpcContract {
   'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];
   /** Pulls the repo's pull requests (all states) from GitHub through gh, for the Git panel's PR view. */
   'git:pullRequests': [{ sessionId: string }, GitPullRequestList];
+  /** Pulls the repo's issues (all states) from GitHub through gh, for the Git panel's Issues view. */
+  'git:issues': [{ sessionId: string }, GitIssueList];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];

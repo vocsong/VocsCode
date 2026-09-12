@@ -10,6 +10,7 @@ import { NewSessionDialog } from './components/NewSessionDialog';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { QuickSessionPicker } from './components/QuickSessionPicker';
 import { RightPanel } from './components/RightPanel';
+import { SearchModal } from './components/SearchModal';
 import { SettingsView } from './components/SettingsView';
 import { nextFolderTarget, nextSessionTarget, sidebarNavModel, Sidebar } from './components/Sidebar';
 import { SkillsView } from './components/SkillsView';
@@ -30,6 +31,7 @@ export function App() {
   const newSessionOpen = useStore((s) => s.newSessionOpen);
   const quickSessionOpen = useStore((s) => s.quickSessionOpen);
   const paletteOpen = useStore((s) => s.paletteOpen);
+  const searchOpen = useStore((s) => s.searchOpen);
   const toasts = useStore((s) => s.toasts);
   const session = useActiveSession();
 
@@ -56,6 +58,10 @@ export function App() {
       } else if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         st.openPalette(!st.paletteOpen);
+      } else if (mod && e.shiftKey && e.key.toLowerCase() === 'f') {
+        // Ctrl+Shift+F: deep session search (titles, goals, transcript contents).
+        e.preventDefault();
+        st.openSearch(true);
       } else if (mod && e.key.toLowerCase() === 'b') {
         e.preventDefault();
         st.toggleSidebar();
@@ -104,7 +110,7 @@ export function App() {
       } else if (handleCustomShortcut(e)) {
         // A custom shortcut bound in Settings → Shortcuts consumed the key; the fixed
         // shortcuts above keep priority.
-      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && st.activeId) {
+      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && !st.searchOpen && st.activeId) {
         // Escape interrupts the agent only when nothing else would consume it: no open menu, dialog or
         // popover, and focus is on the page body or an empty composer.
         if (document.querySelector('.dropdown-menu, .modal, .popover, .session-rename, .find-bar')) return;
@@ -162,7 +168,7 @@ export function App() {
                   </Button>
                 </div>
                 <p className="muted small">
-                  <Kbd>Ctrl+N</Kbd> new (quick) · <Kbd>Ctrl+Alt+N</Kbd> new in folder · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
+                  <Kbd>Ctrl+N</Kbd> new (quick) · <Kbd>Ctrl+Alt+N</Kbd> new in folder · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+Shift+F</Kbd> search · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
                 </p>
               </EmptyState>
             </div>
@@ -174,6 +180,7 @@ export function App() {
       {!settings.onboardingDone && <OnboardingWizard />}
       {quickSessionOpen && <QuickSessionPicker />}
       {paletteOpen && <CommandPalette />}
+      {searchOpen && <SearchModal />}
       <ConfirmHost />
       <div className="toasts">
         {toasts.map((t) => (

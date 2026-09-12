@@ -124,14 +124,12 @@ export function Sidebar() {
   const setView = useStore((s) => s.setView);
   const view = useStore((s) => s.view);
   const toast = useStore((s) => s.toast);
-  const [query, setQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   // Drag-to-reorder state: which folder block is being dragged, and where it currently hovers.
   const [drag, setDrag] = useState<{ root: string; over: string | null; after: boolean } | null>(null);
 
   const groups = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const visible = sessions.filter((s) => (showArchived ? s.archived : !s.archived)).filter((s) => !q || s.title.toLowerCase().includes(q) || s.config.projectRoot.toLowerCase().includes(q));
+    const visible = sessions.filter((s) => (showArchived ? s.archived : !s.archived));
     const byProject = new Map<string, SessionMeta[]>();
     for (const s of visible) {
       const key = s.config.projectRoot;
@@ -145,7 +143,7 @@ export function Sidebar() {
       // A folder whose last active session was archived or deleted stays listed so a new
       // session can still be added to it.
       const empties = (settings?.folders ?? [])
-        .filter((root) => !byProject.has(root) && (!q || root.toLowerCase().includes(q)))
+        .filter((root) => !byProject.has(root))
         .map((root) => ({ root, list: [] as SessionMeta[] }));
       groups.push(...empties);
     }
@@ -159,7 +157,7 @@ export function Sidebar() {
     };
     groups.sort((a, b) => pos(a.root) - pos(b.root) || basename(a.root).localeCompare(basename(b.root)));
     return groups;
-  }, [sessions, settings, query, showArchived]);
+  }, [sessions, settings, showArchived]);
 
   const folderStyles = settings?.folderStyles ?? {};
   const collapsed = settings?.collapsedFolders ?? [];
@@ -258,11 +256,10 @@ export function Sidebar() {
           <Icon name="logo" size={22} />
           <span>Vocs Code</span>
         </div>
-        <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
-      </div>
-      <div className="sidebar-search">
-        <Icon name="search" size={14} />
-        <input placeholder="Search sessions" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <div className="sidebar-top-actions">
+          <Button variant="ghost" size="sm" icon="search" className="btn-icon" onClick={() => useStore.getState().openSearch(true)} title="Search sessions (Ctrl+Shift+F)" aria-label="Search sessions" />
+          <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
+        </div>
       </div>
       {(awaiting > 0 || running > 0) && (
         <div className="sidebar-summary">

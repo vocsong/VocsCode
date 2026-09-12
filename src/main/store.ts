@@ -15,6 +15,8 @@ export class SessionStore {
   private readonly indexFile: string;
   private sessions: SessionMeta[] = [];
   private writeQueue: Promise<void> = Promise.resolve();
+  /** Optional observers (the search indexer); set after construction to avoid a dependency cycle. */
+  hooks: { onAppend?: (sessionId: string, item: TranscriptItem) => void; onRewrite?: (sessionId: string) => void; onRemove?: (sessionId: string) => void } = {};
 
   constructor(userData: string) {
     this.root = path.join(userData, 'sessions');
@@ -57,6 +59,7 @@ export class SessionStore {
     this.sessions = this.sessions.filter((s) => s.id !== id);
     await this.flushIndex();
     await rmrf(this.sessionDir(id));
+    this.hooks.onRemove?.(id);
   }
 
   private flushIndex(): Promise<void> {
@@ -70,6 +73,7 @@ export class SessionStore {
 
   async appendTranscript(id: string, item: TranscriptItem): Promise<void> {
     await appendLine(path.join(this.sessionDir(id), 'transcript.jsonl'), JSON.stringify(item));
+    this.hooks.onAppend?.(id, item);
   }
 
   async readTranscript(id: string): Promise<TranscriptItem[]> {
@@ -89,6 +93,7 @@ export class SessionStore {
     const file = path.join(this.sessionDir(id), 'transcript.jsonl');
     await ensureDir(path.dirname(file));
     await fs.writeFile(file, items.map((i) => JSON.stringify(i)).join('\n') + (items.length ? '\n' : ''), 'utf8');
+    this.hooks.onRewrite?.(id);
   }
 
   async readNativeHistory<T>(id: string): Promise<T | null> {

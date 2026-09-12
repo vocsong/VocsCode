@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { gitCreatePr, gitMergePr, gitPrMap, gitPullRequests, gitUpdateBranch, worktreeAddForBranch } from '../src/main/git';
+import { gitCreatePr, gitIssues, gitMergePr, gitPrMap, gitPullRequests, gitUpdateBranch, worktreeAddForBranch } from '../src/main/git';
 
 const isWin = process.platform === 'win32';
 
@@ -19,6 +19,9 @@ const GH_SH = [
   '  \'pr view\')',
   '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
   '    echo "{\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"baseRefName\\":\\"$GH_BASE\\"}" ;;',
+  '  \'issue list\')',
+  '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
+  '    echo "[{\\\"number\\\":42,\\\"state\\\":\\\"${GH_ISSUE_STATE:-OPEN}\\\",\\\"url\\\":\\\"https://example.com/acme/repo/issues/42\\\",\\\"title\\\":\\\"Test issue\\\",\\\"labels\\\":[{\\\"name\\\":\\\"bug\\\",\\\"color\\\":\\\"ff0000\\\"}],\\\"comments\\\":2,\\\"author\\\":{\\\"login\\\":\\\"octocat\\\"}}]" ;;',
   'esac',
   'exit 0'
 ].join('\n');
@@ -33,6 +36,9 @@ const GH_CMD = [
   'if /i "%~1"=="pr" if /i "%~2"=="list" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
   'if /i "%~1"=="pr" if /i "%~2"=="list" echo [{"number":7,"state":"%GH_STATE%","headRefName":"%GH_HEAD%","baseRefName":"%GH_BASE%","url":"https://example.com/acme/repo/pull/7","title":"Test PR"}]',
   'if /i "%~1"=="pr" if /i "%~2"=="view" echo {"state":"%GH_STATE%","url":"https://example.com/acme/repo/pull/7","baseRefName":"%GH_BASE%"}',
+  'if "%GH_ISSUE_STATE%"=="" set "GH_ISSUE_STATE=OPEN"',
+  'if /i "%~1"=="issue" if /i "%~2"=="list" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
+  'if /i "%~1"=="issue" if /i "%~2"=="list" echo [{"number":42,"state":"%GH_ISSUE_STATE%","url":"https://example.com/acme/repo/issues/42","title":"Test issue","labels":[{"name":"bug","color":"ff0000"}],"comments":2,"author":{"login":"octocat"}}]',
   'exit /b 0'
 ].join('\r\n');
 
@@ -180,6 +186,42 @@ describe('git PR flow (/pr, /merge)', () => {
   it('reports a missing repository instead of calling gh', async () => {
     const list = await gitPullRequests(tmp);
     expect(list.prs).toEqual([]);
+    expect(list.error).toBe('Not a git repository');
+  });
+
+  it('pulls the repo-wide issue list for the Git panel', async () => {
+    const before = Date.now();
+    const list = await gitIssues(repo);
+    expect(list.ghMissing).toBeUndefined();
+    expect(list.error).toBeUndefined();
+    expect(list.fetchedAt).toBeGreaterThanOrEqual(before);
+    expect(list.issues).toEqual([
+      {
+        number: 42,
+        title: 'Test issue',
+        state: 'OPEN',
+        url: 'https://example.com/acme/repo/issues/42',
+        author: 'octocat',
+        labels: [{ name: 'bug', color: 'ff0000' }],
+        comments: 2
+      }
+    ]);
+  });
+
+  it('reports gh failing to list issues in its own words', async () => {
+    process.env.GH_VIEW_FAIL = '1';
+    try {
+      const list = await gitIssues(repo);
+      expect(list.issues).toEqual([]);
+      expect(list.error).toBeTruthy();
+    } finally {
+      delete process.env.GH_VIEW_FAIL;
+    }
+  });
+
+  it('reports a missing repository instead of calling gh for issues', async () => {
+    const list = await gitIssues(tmp);
+    expect(list.issues).toEqual([]);
     expect(list.error).toBe('Not a git repository');
   });
 

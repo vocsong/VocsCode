@@ -746,6 +746,30 @@ export interface GitPullRequestList {
   error?: string;
 }
 
+/** One issue of the session's GitHub repo, as `gh issue list` reports it (Issues view of the Git panel). */
+export interface GitIssue {
+  number: number;
+  title: string;
+  state: 'OPEN' | 'CLOSED';
+  url: string;
+  author?: string;
+  labels?: { name: string; color?: string }[];
+  comments?: number;
+  /** ms since epoch */
+  createdAt?: number;
+  updatedAt?: number;
+  closedAt?: number;
+}
+
+/** The issue list pulled from GitHub; `error` carries gh's own words when the pull failed (not logged in, no remote…). */
+export interface GitIssueList {
+  issues: GitIssue[];
+  /** When the list was pulled (ms since epoch). */
+  fetchedAt: number;
+  ghMissing?: boolean;
+  error?: string;
+}
+
 export interface GitBranchOverview {
   isRepo: boolean;
   base?: string;
@@ -769,6 +793,30 @@ export interface DoctorReport {
   harnesses: Record<HarnessId, HarnessAvailability>;
   providers: { id: string; name: string; hasKey: boolean; envKeyPresent: boolean }[];
   userData: string;
+}
+
+/** Filters narrowing a session search to a subset of sessions. */
+export interface SearchFilters {
+  archived?: boolean;
+  harness?: HarnessId;
+  projectRoot?: string;
+}
+
+/** One deep-search hit: a title/goal match or a match inside a transcript item. */
+export interface SearchResult {
+  sessionId: string;
+  /** Transcript item id for deep hits; absent for title/goal matches (nothing to scroll to). */
+  itemId?: string;
+  kind: 'meta' | 'user' | 'assistant' | 'tool' | 'info';
+  ts: number;
+  /** Snippet with \u0001/\u0002 around the matched terms; the renderer turns them into <mark>. */
+  snippet: string;
+}
+
+export interface SearchResponse {
+  /** False when node:sqlite/FTS5 is unavailable in this runtime; deep search is disabled then. */
+  available: boolean;
+  results: SearchResult[];
 }
 
 export interface CreateSessionRequest {

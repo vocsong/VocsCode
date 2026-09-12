@@ -895,6 +895,11 @@ h4 {
   justify-content: space-between;
   padding: 12px 12px 8px;
 }
+.sidebar-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
 .brand {
   display: flex;
   align-items: center;
@@ -904,23 +909,6 @@ h4 {
 }
 .brand > .icon {
   color: var(--accent);
-}
-.sidebar-search {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0 12px 8px;
-  padding: 0 8px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
-}
-.sidebar-search input {
-  border: none;
-  background: none;
-  padding: 6px 0;
-  box-shadow: none;
 }
 .sidebar-summary {
   display: flex;
@@ -2593,6 +2581,14 @@ body.resizing {
 .pr-row {
   grid-template-columns: minmax(0, 1fr) 72px 60px minmax(100px, 112px) 60px;
 }
+/* Issues table: dedicated #number column, tight author + actions, no updated/status columns. */
+.issue-cols,
+.issue-row {
+  grid-template-columns: 48px minmax(0, 1fr) 60px 56px;
+}
+.issue-title {
+  font-size: 12px;
+}
 /* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
 .branch-row > :nth-child(2) {
   min-width: 0;
@@ -2702,23 +2698,43 @@ body.resizing {
 /* Narrow panel: keep the table layout and its column header, just drop the
    Updated, Behind/Ahead and Status columns so the name keeps the width. */
 @container (max-width: 619.9px) {
-  .branches-cols,
-  .branch-row,
+  .branches-cols:not(.issue-cols),
+  .branch-row:not(.issue-row),
   .pr-cols,
-  .pr-row {
+  .pr-row:not(.issue-row) {
     grid-template-columns: minmax(0, 1fr) auto;
   }
-  .branches-cols > :nth-child(2),
-  .branches-cols > :nth-child(3),
-  .branches-cols > :nth-child(4),
-  .branch-row > :nth-child(2),
-  .branch-row > :nth-child(3),
-  .branch-row > :nth-child(4) {
+  .branches-cols:not(.issue-cols) > :nth-child(2),
+  .branches-cols:not(.issue-cols) > :nth-child(3),
+  .branches-cols:not(.issue-cols) > :nth-child(4),
+  .branch-row:not(.issue-row) > :nth-child(2),
+  .branch-row:not(.issue-row) > :nth-child(3),
+  .branch-row:not(.issue-row) > :nth-child(4) {
     display: none;
   }
   /* One line of actions even when the name column is squeezed. */
   .branch-actions {
     flex-wrap: nowrap;
+  }
+  /* Issues: number rides with the title, author folds under it, actions stay on the right. */
+  .issue-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      'num name actions'
+      'num author actions';
+  }
+  .issue-row > :nth-child(1) {
+    grid-area: num;
+  }
+  .issue-row > :nth-child(2) {
+    grid-area: name;
+    max-width: none;
+  }
+  .issue-row > :nth-child(3) {
+    grid-area: author;
+  }
+  .issue-row > :nth-child(4) {
+    grid-area: actions;
   }
 }
 .num {
@@ -3288,6 +3304,71 @@ body.resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+/* Deep search modal (Ctrl+Shift+F): two-line rows with a highlighted snippet. */
+.search-palette {
+  width: 720px;
+}
+.search-item {
+  align-items: flex-start;
+}
+.search-item .icon {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.search-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.search-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-weight: 600;
+  min-width: 0;
+}
+.search-title .qs-root {
+  font-weight: 400;
+  color: var(--fg-muted);
+  flex: 1;
+}
+.search-snippet {
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-snippet mark {
+  background: rgba(255, 200, 0, 0.35);
+  color: inherit;
+  border-radius: 2px;
+}
+.search-archived {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+}
+.search-archived input {
+  width: auto;
+  margin: 0;
+}
+.search-hint {
+  padding: 6px 10px 4px;
+}
+/* Flash highlight on the transcript item a deep-search match jumped to. */
+.search-jump-hl {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+  transition: outline-color 1.2s ease 0.8s;
 }
 /* Quick-session picker: keep the full path from pushing the row wide. */
 .palette-item .qs-root {
