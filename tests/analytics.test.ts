@@ -293,6 +293,11 @@ describe('output speed', () => {
     const sb = s.sessions.find((x) => x.id === 'b');
     expect(sa?.speed).toEqual({ tokens: 200, ms: 10_000 });
     expect(sb?.speed).toEqual({ tokens: 0, ms: 0 });
+    // Per-session wall time: 2k + 8k for a, 5k for b (interrupted turns count for nothing).
+    expect(sa?.durationMs).toBe(10_000);
+    expect(sb?.durationMs).toBe(5_000);
+    // Per-model buckets carry the wall time too, so avg turn = durationMs / turns is available.
+    expect(s.byModel.find((x) => x.key === 'anthropic/opus')).toMatchObject({ durationMs: 10_000 });
     expect(s.byHarness.find((x) => x.key === 'claude')?.speed).toEqual({ tokens: 200, ms: 10_000 });
     expect(s.byModel.find((x) => x.key === 'anthropic/opus')?.speed).toEqual({ tokens: 200, ms: 10_000 });
   });
@@ -378,10 +383,14 @@ describe('per-tool-call tracking', () => {
     const transcript: TranscriptItem[] = [
       toolItem('a', { name: 'Read' }),
       toolItem('b', { name: 'Read', durationMs: 100 }),
-      toolItem('c', { name: 'Bash', status: 'error', changes: [{ path: 'f.ts', kind: 'add' }] })
+      toolItem('c', { name: 'Bash', status: 'error', changes: [{ path: 'f.ts', kind: 'add' }] }),
+      turn({ id: 't1', durationMs: 2_500 }),
+      turn({ id: 't2', status: 'interrupted', durationMs: 9_000 })
     ];
     await store.load([m], async () => transcript);
     const s = store.summary(0, t0);
+    // Completed turns only: interrupted wall time is ignored.
+    expect(s.sessions[0].durationMs).toBe(2_500);
     expect(s.toolTotals.calls).toBe(3);
     expect(s.toolTotals.errors).toBe(1);
     expect(s.tools.map((t) => [t.name, t.calls])).toEqual([

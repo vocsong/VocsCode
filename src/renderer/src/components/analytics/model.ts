@@ -343,13 +343,14 @@ export function sessionTokens(s: UsageSessionRecord): number {
   return totalTokens(s.usage);
 }
 
-export type SessionSort = 'cost' | 'tokens' | 'turns' | 'toolCalls' | 'speed' | 'recent';
+export type SessionSort = 'cost' | 'tokens' | 'turns' | 'toolCalls' | 'duration' | 'speed' | 'recent';
 
 export const SESSION_SORTS: { value: SessionSort; label: string }[] = [
   { value: 'cost', label: 'Spend' },
   { value: 'tokens', label: 'Tokens' },
   { value: 'turns', label: 'Turns' },
   { value: 'toolCalls', label: 'Tool calls' },
+  { value: 'duration', label: 'Agent time' },
   { value: 'speed', label: 'Speed' },
   { value: 'recent', label: 'Last active' }
 ];
@@ -365,6 +366,8 @@ export function sortSessions(sessions: UsageSessionRecord[], sort: SessionSort):
         return s.usage.turns;
       case 'toolCalls':
         return s.toolCalls;
+      case 'duration':
+        return s.durationMs ?? 0;
       case 'speed':
         return speedTps(s.speed) ?? -1;
       default:
