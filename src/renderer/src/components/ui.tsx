@@ -4,6 +4,10 @@ import React, { useEffect, useRef, useState } from 'react';
 const ICONS: Record<string, string> = {
   logo: 'M6.4 7.2L12 17L17.6 7.2M9.2 19h5.6',
   plus: 'M12 5v14M5 12h14',
+  dollar: 'M12 2v20M17 5.5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6',
+  activity: 'M22 12h-4l-3 9L9 3l-3 9H2',
+  list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
+  table: 'M3 5h18v14H3zM3 10h18M3 15h18M9 5v14',
   settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm7.4-3a7.4 7.4 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7.6 7.6 0 0 0-1.7-1L15 3H9l-.3 2.6a7.6 7.6 0 0 0-1.7 1l-2.3-1-2 3.4 2 1.5a7.4 7.4 0 0 0 0 2l-2 1.5 2 3.4 2.3-1c.5.4 1.1.7 1.7 1L9 21h6l.3-2.6c.6-.3 1.2-.6 1.7-1l2.3 1 2-3.4-2-1.5c.1-.3.1-.7.1-1z',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z',
   terminal: 'M4 17l6-5-6-5M12 19h8',

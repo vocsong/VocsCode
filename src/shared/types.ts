@@ -151,8 +151,8 @@ export interface UsageTotals {
   contextTokens?: number;
 }
 
-/** Aggregated usage for one UTC day, as accumulated by the analytics store. */
-export interface UsageDay {
+/** The numeric usage counters shared by day buckets and their per-dimension slices. */
+export interface UsageCounters {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -162,7 +162,7 @@ export interface UsageDay {
   turns: number;
   /** Cumulative completed-turn wall time in ms. */
   durationMs: number;
-  /** Completed tool calls recorded this day. */
+  /** Completed tool calls recorded. */
   toolCalls: number;
   /**
    * Output tokens and wall time of completed turns that reported both, paired so that
@@ -170,6 +170,28 @@ export interface UsageDay {
    */
   speedTokens: number;
   speedMs: number;
+}
+
+/** Usage attributed to one harness, model or project within a day, plus the sessions that produced it. */
+export interface UsageSlice extends UsageCounters {
+  label: string;
+  sessions: string[];
+}
+
+/** Per-dimension attribution of one day's usage; the bounded ranges of the dashboard are built from it. */
+export interface UsageDayDimensions {
+  harness: Record<string, UsageSlice>;
+  /** Keyed `provider/model`, attributed to the model active when the usage was reported. */
+  model: Record<string, UsageSlice>;
+  project: Record<string, UsageSlice>;
+  tool: Record<string, ToolUsage>;
+  file: Record<string, FileUsage>;
+}
+
+/** Aggregated usage for one UTC day, as accumulated by the analytics store. */
+export interface UsageDay extends UsageCounters {
+  /** Absent on days recorded before per-dimension tracking existed: their usage is in the totals only. */
+  by?: UsageDayDimensions;
 }
 
 /** Output tokens and wall time of the turns that reported both; `tokens / ms * 1000` is tok/s. */
@@ -258,6 +280,8 @@ export interface AnalyticsSummary {
   speed: UsageSpeed;
   /** UTC days, ascending, filtered to the requested range. */
   days: AnalyticsDayPoint[];
+  /** Totals of the window of equal length just before the requested range; absent for all time. */
+  previous?: UsageCounters;
   byHarness: UsageBucket[];
   byModel: UsageBucket[];
   byProject: UsageBucket[];
