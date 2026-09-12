@@ -419,8 +419,6 @@ describe('SessionManager folder tracking', () => {
   });
 });
 
-});
-
 describe('SessionManager fork', () => {
   const sourceSession = (): SessionMeta => ({
     id: 's_src',
