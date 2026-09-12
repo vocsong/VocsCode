@@ -17,7 +17,7 @@ import type {
   UsageSpeed,
   UsageTotals
 } from '../shared/types';
-import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage } from '../shared/usage-rollup';
+import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, totalTokens } from '../shared/usage-rollup';
 import { readJson, writeJson } from './util/fs';
 
 export { emptyFileUsage, emptyToolUsage };
@@ -124,6 +124,62 @@ export function attribute(day: UsageDay, who: Attribution, delta: Partial<UsageC
   addSlice(by.harness, who.harness, who.harness, delta, who.id);
   if (who.model) addSlice(by.model, `${who.provider ?? ''}/${who.model}`, who.model, delta, who.id);
   addSlice(by.project, who.projectRoot, who.projectRoot, delta, who.id);
+}
+
+/**
+ * Splits `total` across `weights` proportionally. Integer splits use largest-remainder rounding so
+ * the parts add up to the total exactly; all-zero weights fall back to an even split.
+ */
+export function apportion(total: number, weights: number[], integer: boolean): number[] {
+  if (weights.length === 0 || !(total > 0)) return weights.map(() => 0);
+  const sum = weights.reduce((a, w) => a + Math.max(0, w), 0);
+  const w = sum > 0 ? weights.map((x) => Math.max(0, x) / sum) : weights.map(() => 1 / weights.length);
+  if (!integer) return w.map((x) => total * x);
+  const raw = w.map((x) => total * x);
+  const parts = raw.map(Math.floor);
+  let left = Math.round(total) - parts.reduce((a, b) => a + b, 0);
+  const order = raw.map((v, i) => [v - Math.floor(v), i] as const).sort((a, b) => b[0] - a[0]);
+  for (let k = 0; left > 0 && k < order.length; k++, left--) parts[order[k][1]] += 1;
+  return parts;
+}
+
+const INTEGER_FIELDS = new Set<keyof UsageCounters>(['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'turns', 'toolCalls']);
+
+/** Each session's own total of a counter, the weight used to share a legacy day's total between them. */
+function sessionWeight(s: UsageSessionRecord, f: keyof UsageCounters): number {
+  switch (f) {
+    case 'toolCalls':
+      return s.toolCalls;
+    case 'speedTokens':
+      return s.speed?.tokens ?? 0;
+    case 'speedMs':
+      return s.speed?.ms ?? 0;
+    case 'durationMs':
+      return s.usage.turns;
+    default:
+      return s.usage[f];
+  }
+}
+
+/**
+ * Estimates the slices of a day recorded before slice tracking from the sessions last active that
+ * day: every counter is shared between them in proportion to their own totals of it (falling back
+ * to spend, then an even split). The original backfill put a whole session on its last active day,
+ * so for sessions that lived within one day this reproduces exactly what live tracking would have.
+ */
+export function estimateDaySlices(day: UsageDay, sessions: UsageSessionRecord[]): boolean {
+  const active = sessions.filter((s) => s.usage.costUsd > 0 || s.usage.turns > 0 || s.toolCalls > 0 || totalTokens(s.usage) > 0);
+  if (day.by || active.length === 0) return false;
+  const shares: Partial<UsageCounters>[] = active.map(() => ({}));
+  for (const f of COUNTER_FIELDS) {
+    if (!(day[f] > 0)) continue;
+    let weights = active.map((s) => sessionWeight(s, f));
+    if (!weights.some((w) => w > 0)) weights = active.map((s) => s.usage.costUsd);
+    apportion(day[f], weights, INTEGER_FIELDS.has(f)).forEach((v, i) => (shares[i][f] = v));
+  }
+  day.by = { ...emptyDimensions(), estimated: true };
+  active.forEach((s, i) => attribute(day, { id: s.id, harness: s.harness, provider: s.provider, model: s.model, projectRoot: s.projectRoot }, shares[i]));
+  return true;
 }
 
 function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSessionRecord {
@@ -310,6 +366,8 @@ export class AnalyticsStore {
       if (day.by !== undefined && (typeof day.by !== 'object' || day.by === null)) delete day.by;
       if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
     }
+    const estimated = this.estimateLegacyDays();
+    if (estimated) this.deps.log('info', `analytics: estimated per-model slices for ${estimated} day(s) recorded before slice tracking`);
     let backfilled = 0;
     for (const meta of existing) {
       if (this.data.recorded[meta.id]) {
@@ -330,6 +388,50 @@ export class AnalyticsStore {
     }
     if (backfilled) this.deps.log('info', `analytics: backfilled ${backfilled} existing session(s)`);
     await this.flush();
+  }
+
+  /**
+   * One-time reconstruction of days written before slice tracking (see estimateDaySlices), using
+   * only the sessions already in the file. Their per-tool and per-file counts are the all-time maps
+   * minus whatever later days recorded live, shared between the legacy days by call volume. Runs
+   * before the session backfill, so newly seen sessions are attributed exactly on top.
+   */
+  private estimateLegacyDays(): number {
+    const legacy = Object.entries(this.data.days).filter(([, d]) => !d.by);
+    if (legacy.length === 0) return 0;
+    const byDay = new Map<string, UsageSessionRecord[]>();
+    for (const s of Object.values(this.data.sessions)) {
+      const key = dayKey(s.updatedAt);
+      byDay.set(key, [...(byDay.get(key) ?? []), s]);
+    }
+    const estimated = legacy.filter(([date, day]) => estimateDaySlices(day, byDay.get(date) ?? [])).map(([, day]) => day);
+    const weights = estimated.map((d) => d.toolCalls);
+    if (estimated.length > 0 && weights.some((w) => w > 0)) {
+      const knownTools: Record<string, ToolUsage> = {};
+      const knownFiles: Record<string, FileUsage> = {};
+      for (const d of Object.values(this.data.days)) {
+        if (!d.by || d.by.estimated) continue;
+        for (const [name, t] of Object.entries(d.by.tool)) addToolUsage((knownTools[name] ??= emptyToolUsage()), t);
+        for (const [p, f] of Object.entries(d.by.file)) addFileUsage((knownFiles[p] ??= emptyFileUsage()), f);
+      }
+      for (const [name, t] of Object.entries(this.data.tools)) {
+        const k = knownTools[name] ?? emptyToolUsage();
+        const parts = (['calls', 'errors', 'declined', 'durationMs'] as const).map((f) => apportion(Math.max(0, t[f] - k[f]), weights, f !== 'durationMs'));
+        estimated.forEach((d, i) => {
+          const share: ToolUsage = { calls: parts[0][i], errors: parts[1][i], declined: parts[2][i], durationMs: parts[3][i] };
+          if (share.calls > 0 || share.errors > 0 || share.declined > 0) d.by!.tool[name] = share;
+        });
+      }
+      for (const [p, f] of Object.entries(this.data.files)) {
+        const k = knownFiles[p] ?? emptyFileUsage();
+        const parts = (['adds', 'updates', 'deletes', 'renames'] as const).map((field) => apportion(Math.max(0, f[field] - k[field]), weights, true));
+        estimated.forEach((d, i) => {
+          const share: FileUsage = { adds: parts[0][i], updates: parts[1][i], deletes: parts[2][i], renames: parts[3][i] };
+          if (share.adds + share.updates + share.deletes + share.renames > 0) d.by!.file[p] = share;
+        });
+      }
+    }
+    return estimated.length;
   }
 
   /** Aggregates completed tool calls from an old transcript into the store, one-time per session. */

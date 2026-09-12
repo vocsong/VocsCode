@@ -4,7 +4,7 @@ import path from 'node:path';
 import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
-import { addDay, AnalyticsStore, dayKey, emptyDay, summarize, tokensPerSecond, toolCallFromItem, turnSpeed, usageDelta } from '../src/main/analytics';
+import { addDay, AnalyticsStore, apportion, dayKey, emptyDay, summarize, tokensPerSecond, toolCallFromItem, turnSpeed, usageDelta } from '../src/main/analytics';
 import { emptyUsage } from '../src/main/models/static-models';
 import { rollupDays } from '../src/shared/usage-rollup';
 import type { SessionMeta, TranscriptItem, UsageSessionRecord, UsageTotals } from '../src/shared/types';
@@ -462,5 +462,74 @@ describe('per-dimension day slices', () => {
     expect(r.totals.costUsd).toBeCloseTo(3);
     expect(r.unattributed).toMatchObject({ costUsd: 1, turns: 1, toolCalls: 3 });
     expect(r.byHarness).toHaveLength(1);
+  });
+});
+
+describe('legacy day estimation', () => {
+  it('splits totals proportionally, exactly for integer counters, with an even fallback for zero weights', () => {
+    expect(apportion(10, [1, 1, 1], true)).toEqual([4, 3, 3]);
+    expect(apportion(10, [1, 1, 1], true).reduce((a, b) => a + b, 0)).toBe(10);
+    expect(apportion(3, [2, 1], false)).toEqual([2, 1]);
+    expect(apportion(4, [0, 0], true)).toEqual([2, 2]);
+    expect(apportion(0, [5, 5], true)).toEqual([0, 0]);
+    expect(apportion(7, [], true)).toEqual([]);
+  });
+
+  it('reconstructs slices for pre-slice days from the sessions last active that day and shares tools and files by call volume', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    const rec = (id: string, harness: SessionMeta['config']['harness'], provider: string, model: string | undefined, projectRoot: string, u: UsageTotals, toolCalls: number, updatedAt: number, speed?: { tokens: number; ms: number }): UsageSessionRecord => ({ id, title: id, harness, provider, model, projectRoot, createdAt: updatedAt, updatedAt, usage: u, toolCalls, speed });
+    const sessions = {
+      a: rec('a', 'claude', 'anthropic', 'opus', '/p1', usage({ costUsd: 2, turns: 4, inputTokens: 200 }), 8, t0, { tokens: 60, ms: 2000 }),
+      b: rec('b', 'pi', 'openrouter', 'glm', '/p2', usage({ costUsd: 1, turns: 2, inputTokens: 100 }), 2, t0 + 3600_000, { tokens: 30, ms: 1000 }),
+      // Last active on another day: not a candidate for June 9.
+      c: rec('c', 'pi', 'openrouter', 'glm', '/p2', usage({ costUsd: 9, turns: 9 }), 9, Date.UTC(2025, 5, 3, 12)),
+      // Active that day but never used: carries no weight.
+      d: rec('d', 'native', 'deepseek', 'chat', '/p1', usage({}), 0, t0)
+    };
+    const legacy = { ...emptyDay(), costUsd: 3, turns: 6, inputTokens: 300, toolCalls: 10, durationMs: 6000, speedTokens: 90, speedMs: 3000 };
+    // A day that already has live slices keeps them; its tool counts are subtracted from the all-time map first.
+    const live = { ...emptyDay(), costUsd: 1, turns: 1, toolCalls: 4 };
+    const liveBy = { harness: { pi: { ...emptyDay(), costUsd: 1, turns: 1, toolCalls: 4, label: 'pi', sessions: ['c'] } }, model: {}, project: {}, tool: { Bash: { calls: 4, errors: 0, declined: 0, durationMs: 0 } }, file: {} };
+    const file = {
+      version: 1,
+      days: { '2025-06-09': legacy, '2025-06-01': { ...emptyDay(), costUsd: 5 }, '2025-06-10': { ...live, by: liveBy } },
+      recorded: Object.fromEntries(Object.values(sessions).map((s) => [s.id, s.usage])),
+      sessions,
+      tools: { Bash: { calls: 14, errors: 1, declined: 0, durationMs: 0 } },
+      files: { 'x.ts': { adds: 0, updates: 4, deletes: 0, renames: 0 } }
+    };
+    await fs.writeFile(path.join(dir, 'analytics.json'), JSON.stringify(file));
+    const store = new AnalyticsStore(dir, { log });
+    await store.load([]);
+    const s = store.summary(0, t0);
+    const day = s.days.find((d) => d.date === '2025-06-09')!.usage;
+    expect(day.by?.estimated).toBe(true);
+    expect(day.by?.harness.claude).toMatchObject({ costUsd: 2, turns: 4, inputTokens: 200, toolCalls: 8, durationMs: 4000, speedTokens: 60, speedMs: 2000, sessions: ['a'] });
+    expect(day.by?.harness.pi).toMatchObject({ costUsd: 1, turns: 2, inputTokens: 100, toolCalls: 2, durationMs: 2000, sessions: ['b'] });
+    expect(day.by?.harness.native).toBeUndefined();
+    expect(day.by?.model['anthropic/opus']).toMatchObject({ costUsd: 2, label: 'opus' });
+    expect(day.by?.project['/p2']).toMatchObject({ costUsd: 1, turns: 2 });
+    // 14 Bash calls all time, 4 recorded live on June 10: the other 10 (and the lone error) land on the legacy day.
+    expect(day.by?.tool.Bash).toEqual({ calls: 10, errors: 1, declined: 0, durationMs: 0 });
+    expect(day.by?.file['x.ts']).toEqual({ adds: 0, updates: 4, deletes: 0, renames: 0 });
+    // No session was last active on June 1, so it stays honestly unattributed.
+    expect(s.days.find((d) => d.date === '2025-06-01')!.usage.by).toBeUndefined();
+    const r = rollupDays(s.days);
+    expect(r.totals.costUsd).toBeCloseTo(9);
+    expect(r.unattributed.costUsd).toBeCloseTo(5);
+    expect(r.estimatedDays).toBe(1);
+    expect(r.byModel.map((b) => [b.key, b.usage.costUsd])).toEqual([
+      ['anthropic/opus', 2],
+      ['openrouter/glm', 1]
+    ]);
+
+    // The estimate is persisted and never repeated or doubled on the next load.
+    const again = new AnalyticsStore(dir, { log });
+    await again.load([]);
+    const day2 = again.summary(0, t0).days.find((d) => d.date === '2025-06-09')!.usage;
+    expect(day2.by?.estimated).toBe(true);
+    expect(day2.by?.harness.claude?.costUsd).toBeCloseTo(2);
+    expect(day2.by?.tool.Bash?.calls).toBe(10);
   });
 });
