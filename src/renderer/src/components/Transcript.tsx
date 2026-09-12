@@ -2,8 +2,10 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from '
 import type { ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
 import { fmtCost, fmtDuration, fmtRate, fmtTokens } from '../format';
-import { installMarkdownHandlers, renderMarkdown } from '../markdown';
+import { installMarkdownHandlers } from '../markdown';
 import { useStore } from '../store';
+import { chunkKey, estimateChunkHeight, windowRange, type RenderChunk } from '../transcript-window';
+import { useStreamingMarkdown } from '../use-streaming-markdown';
 import { DiffView } from './DiffView';
 import { ImageLightbox, type LightboxImage } from './ImageLightbox';
 import { TranscriptFind } from './TranscriptFind';
@@ -24,6 +26,9 @@ export function imageSrc(im: { mimeType: string; data: string }): string {
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
 const EMPTY: never[] = [];
 
+/** Below this many chunks the reconciliation cost is small enough to skip windowing entirely. */
+const VIRTUALIZE_MIN = 150;
+
 export function Transcript({ session }: { session: SessionMeta }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
   const loaded = useStore((s) => s.loaded[session.id]);
@@ -33,9 +38,83 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const [stick, setStick] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
   const [lightbox, setLightbox] = useState<ImageLightboxState | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(0);
+  const [measureVersion, setMeasureVersion] = useState(0);
+  const heights = useRef(new Map<string, number>());
+  const rowObserver = useRef<ResizeObserver | null>(null);
+  const scrollFrame = useRef(0);
   const onImageExpand = useCallback((images: LightboxImage[], index: number) => {
     setLightbox({ images, index });
   }, []);
+
+  const chunks = useMemo(() => groupTranscript(items), [items]);
+
+  // Track the viewport so the window can be sized. jsdom reports 0 and simply disables windowing.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => setViewportH(el.clientHeight);
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const keys = new Set(chunks.map(chunkKey));
+    for (const k of heights.current.keys()) if (!keys.has(k)) heights.current.delete(k);
+  }, [chunks]);
+
+  // Rendered rows report their height so unmeasured chunks can keep an estimate instead of the
+  // list measuring every historical chunk.
+  const measureRow = useCallback((key: string, el: HTMLElement) => {
+    el.dataset.rowKey = key;
+    if (typeof ResizeObserver !== 'undefined' && !rowObserver.current) {
+      rowObserver.current = new ResizeObserver((entries) => {
+        let changed = false;
+        for (const entry of entries) {
+          const k = (entry.target as HTMLElement).dataset.rowKey;
+          if (!k) continue;
+          const h = entry.borderBoxSize?.[0]?.blockSize ?? entry.target.getBoundingClientRect().height;
+          if (h > 0 && Math.abs((heights.current.get(k) ?? -1) - h) > 0.5) {
+            heights.current.set(k, h);
+            changed = true;
+          }
+        }
+        if (changed) setMeasureVersion((v) => v + 1);
+      });
+    }
+    rowObserver.current?.observe(el);
+    const initial = el.getBoundingClientRect().height;
+    if (initial > 0 && Math.abs((heights.current.get(key) ?? -1) - initial) > 0.5) {
+      heights.current.set(key, initial);
+      setMeasureVersion((v) => v + 1);
+    }
+    return () => rowObserver.current?.unobserve(el);
+  }, []);
+  useEffect(() => () => rowObserver.current?.disconnect(), []);
+
+  const tops = useMemo(() => {
+    const list = new Array<number>(chunks.length + 1);
+    let acc = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]!;
+      list[i] = acc;
+      acc += heights.current.get(chunkKey(chunk)) ?? estimateChunkHeight(chunk);
+    }
+    list[chunks.length] = acc;
+    return list;
+  }, [chunks, measureVersion]);
+
+  const jumpHere = !!jump && jump.sessionId === session.id;
+  // Windowing stays off while the find bar or a deep-search jump needs every row in the DOM.
+  // Until the viewport is measured, assume a screenful so a long transcript never mounts whole.
+  const effectiveViewport = viewportH > 0 ? viewportH : 600;
+  const virtual = chunks.length > VIRTUALIZE_MIN && !findOpen && !jumpHere;
+  const range = virtual ? windowRange(tops, scrollTop, effectiveViewport, 600) : { start: 0, end: chunks.length };
+  const visible = virtual ? chunks.slice(range.start, range.end) : chunks;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -58,13 +137,28 @@ export function Transcript({ session }: { session: SessionMeta }) {
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
     if (stick && !findOpen && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [items, stick, findOpen]);
+  }, [items, stick, findOpen, measureVersion]);
 
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
     setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+    if (typeof requestAnimationFrame !== 'function') {
+      setScrollTop(el.scrollTop);
+      return;
+    }
+    if (scrollFrame.current) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = 0;
+      setScrollTop(ref.current?.scrollTop ?? 0);
+    });
   };
+  useEffect(
+    () => () => {
+      if (scrollFrame.current) cancelAnimationFrame(scrollFrame.current);
+    },
+    []
+  );
 
   // Jump-to-match from the deep search modal: scroll to the item and flash it. Waits for the
   // transcript to load when the session was not the active one.
@@ -83,7 +177,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
 
   return (
     <div className="transcript-wrap">
-      <div className="transcript" ref={ref} onScroll={onScroll}>
+      <div className={`transcript ${virtual ? 'virtual' : ''}`} ref={ref} onScroll={onScroll}>
         {!loaded && <div className="transcript-loading"><Spinner /> Loading…</div>}
         {loaded && items.length === 0 && (
           <div className="transcript-empty">
@@ -91,13 +185,11 @@ export function Transcript({ session }: { session: SessionMeta }) {
             <p>Send a message to start. Type <code>/</code> for commands, <code>@</code> to mention files, paste images to attach them.</p>
           </div>
         )}
-        {groupTranscript(items).map((chunk) =>
-          chunk.kind === 'group' ? (
-            <ToolGroup key={chunk.id} entries={chunk.entries} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} />
-          ) : (
-            <Item key={chunk.item.id} item={chunk.item} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={chunk.item.id} />
-          )
-        )}
+        {virtual && range.start > 0 && <div className="transcript-spacer" style={{ height: tops[range.start] }} aria-hidden />}
+        {visible.map((chunk) => (
+          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} />
+        ))}
+        {virtual && range.end < chunks.length && <div className="transcript-spacer" style={{ height: tops[chunks.length]! - tops[range.end]! }} aria-hidden />}
         {(session.status === 'running' || session.status === 'starting') && (
           <div className="working">
             <Spinner size={12} /> {session.status === 'starting' ? session.statusDetail ?? 'Starting…' : 'Working…'}
@@ -126,6 +218,40 @@ const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand, 
   return (
     <div data-item-id={dataItemId}>
       {renderItem(item, sessionId, showThinking, onImageExpand)}
+    </div>
+  );
+});
+
+/**
+ * Measured wrapper around one chunk. When windowing is off it is a plain row; when on, its
+ * height feeds the offset table so off-screen chunks can stay unmounted.
+ */
+const TranscriptRow = memo(function TranscriptRow({
+  chunk,
+  sessionId,
+  showThinking,
+  onImageExpand,
+  measureRow
+}: {
+  chunk: RenderChunk;
+  sessionId: string;
+  showThinking: boolean;
+  onImageExpand: OnImageExpand;
+  measureRow: (key: string, el: HTMLElement) => () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const key = chunkKey(chunk);
+  useEffect(() => {
+    const el = ref.current;
+    return el ? measureRow(key, el) : undefined;
+  }, [key, measureRow]);
+  return (
+    <div className="transcript-row" ref={ref}>
+      {chunk.kind === 'group' ? (
+        <ToolGroup entries={chunk.entries} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} />
+      ) : (
+        <Item item={chunk.item} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={chunk.item.id} />
+      )}
     </div>
   );
 });
@@ -209,7 +335,7 @@ export function UserMessage({ item, onImageExpand }: { item: Extract<TranscriptI
 
 function AssistantMessage({ item, showThinking }: { item: Extract<TranscriptItem, { kind: 'assistant' }>; showThinking: boolean }) {
   const [open, setOpen] = useState(false);
-  const html = useMemo(() => renderMarkdown(item.text), [item.text]);
+  const html = useStreamingMarkdown(item.text, item.streaming);
   // With thinking hidden a thinking-only item has nothing left to show; rendering it anyway would
   // leave an empty row in the transcript.
   if (!item.text && !(item.thinking && showThinking)) return null;
@@ -233,11 +359,6 @@ function AssistantMessage({ item, showThinking }: { item: Extract<TranscriptItem
 const HINT_ICON: Record<string, string> = { execute: 'terminal', edit: 'edit', read: 'file', search: 'search', fetch: 'external', think: 'brain', mcp: 'bolt', agent: 'fork', other: 'bolt' };
 
 type ToolItem = Extract<TranscriptItem, { kind: 'tool' }>;
-
-/** A run of shell commands (with interleaved commentary) collapses into one group. */
-export type RenderChunk =
-  | { kind: 'single'; item: TranscriptItem }
-  | { kind: 'group'; id: string; entries: TranscriptItem[] };
 
 /** A run ends at user messages, approvals, turn boundaries, plans and non-command tools. */
 const breaksCommandRun = (item: TranscriptItem): boolean =>
