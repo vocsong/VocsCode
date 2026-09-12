@@ -66,7 +66,7 @@ export function Header({ session }: { session: SessionMeta }) {
         )}
         {session.statusDetail && busy && <span className="header-status muted">{session.statusDetail}</span>}
         <span className="spacer" />
-        <Button variant="ghost" size="sm" icon={showThinking ? 'eye' : 'eyeOff'} onClick={toggleThinking} title={showThinking ? 'Hide thinking' : 'Show thinking'} aria-label={showThinking ? 'Hide thinking' : 'Show thinking'} />
+        <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" aria-label="Toggle panel" />
       </div>
 
       <div className="header-controls">
@@ -129,6 +129,7 @@ export function Header({ session }: { session: SessionMeta }) {
         </div>
 
         <div className="header-actions">
+          <Button variant="ghost" size="sm" icon={showThinking ? 'eye' : 'eyeOff'} onClick={toggleThinking} title={showThinking ? 'Hide thinking' : 'Show thinking'} aria-label={showThinking ? 'Hide thinking' : 'Show thinking'} />
           <ForkIntoDropdown
             session={session}
             onForked={(f) => useStore.getState().setActive(f.id)}
@@ -142,7 +143,6 @@ export function Header({ session }: { session: SessionMeta }) {
             aria-label="Archive session"
             onClick={() => void archiveSession(session, toast)}
           />
-          <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" />
         </div>
       </div>
     </header>

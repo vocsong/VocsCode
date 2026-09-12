@@ -41,17 +41,25 @@ function setup(patch: Partial<SessionMeta> = {}, withConfirm = false) {
 }
 
 describe('header actions', () => {
-  it('keeps the thinking toggle in the title row and drops the 3-dot menu', () => {
+  it('keeps the panel toggle in the title row and drops the 3-dot menu', () => {
     const { container } = setup();
     const title = container.querySelector('.header-title') as HTMLElement;
-    expect(title.querySelector('[aria-label="Hide thinking"]')).toBeTruthy();
+    expect(title.querySelector('[aria-label="Toggle panel"]')).toBeTruthy();
     expect(container.querySelector('[aria-label="More"]')).toBeNull();
   });
 
-  it('toggles thinking from the title row', () => {
+  it('toggles thinking from the actions row, below the panel toggle', () => {
     const { container } = setup();
-    fireEvent.click(container.querySelector('.header-title [aria-label="Hide thinking"]') as HTMLElement);
+    const actions = container.querySelector('.header-actions') as HTMLElement;
+    // Order in the actions row: hide thinking, fork, archive.
+    const labels = [...actions.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') ?? '');
+    expect(labels[0]).toBe('Hide thinking');
+    expect(labels).toContain('Fork session');
+    expect(labels).toContain('Archive session');
+    fireEvent.click(actions.querySelector('[aria-label="Hide thinking"]') as HTMLElement);
     expect(useStore.getState().showThinking).toBe(false);
+    // The thinking toggle is not in the title row anymore.
+    expect((container.querySelector('.header-title') as HTMLElement).querySelector('[aria-label="Hide thinking"]')).toBeNull();
   });
 
   it('fork button opens the same harness menu as the sidebar row and forks', async () => {
