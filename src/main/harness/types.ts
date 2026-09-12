@@ -49,7 +49,8 @@ export interface HarnessAdapter {
   setModel(model: ModelRef): Promise<void>;
   setEffort(effort: EffortLevel): Promise<void>;
   setPermissionMode(mode: PermissionMode): Promise<void>;
-  compact?(): Promise<void>;
+  /** False means the adapter accepted the request but had too little context to reduce. */
+  compact?(): Promise<boolean | void>;
   listModels?(): Promise<ModelInfo[]>;
   dispose(): Promise<void>;
 }
