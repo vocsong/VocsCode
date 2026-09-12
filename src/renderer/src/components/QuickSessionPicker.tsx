@@ -10,10 +10,12 @@ import { Icon, Kbd } from './ui';
 export function QuickSessionPicker() {
   const sessions = useStore((s) => s.sessions);
   const settings = useStore((s) => s.settings);
+  /** A prompt seeded by the opener (e.g. from a GitHub issue); the picker starts on the prompt stage already filled. */
+  const prefill = useStore((s) => s.quickSessionPrefill);
   const close = () => useStore.getState().openQuickSession(false);
 
   const [picked, setPicked] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState('');
+  const [prompt, setPrompt] = useState(prefill ?? '');
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {

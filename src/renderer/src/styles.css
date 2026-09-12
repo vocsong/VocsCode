@@ -2581,6 +2581,14 @@ body.resizing {
 .pr-row {
   grid-template-columns: minmax(0, 1fr) 72px 60px minmax(100px, 112px) 60px;
 }
+/* Issues table: dedicated #number column, tight author + actions, no updated/status columns. */
+.issue-cols,
+.issue-row {
+  grid-template-columns: 48px minmax(0, 1fr) 60px 56px;
+}
+.issue-title {
+  font-size: 12px;
+}
 /* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
 .branch-row > :nth-child(2) {
   min-width: 0;
@@ -2724,6 +2732,26 @@ body.resizing {
   }
   .branch-actions .branch-inline {
     display: none;
+  }
+  /* Issues: number rides with the title, author folds under it, actions stay on the right. */
+  .issue-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      'num name actions'
+      'num author actions';
+  }
+  .issue-row > :nth-child(1) {
+    grid-area: num;
+  }
+  .issue-row > :nth-child(2) {
+    grid-area: name;
+    max-width: none;
+  }
+  .issue-row > :nth-child(3) {
+    grid-area: author;
+  }
+  .issue-row > :nth-child(4) {
+    grid-area: actions;
   }
 }
 /* Ultra-narrow panel: one line per row — name (+ badges) and the actions menu.
