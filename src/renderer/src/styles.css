@@ -2567,7 +2567,7 @@ body.resizing {
 }
 .branches-cols {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 84px minmax(112px, 128px) 136px;
+  grid-template-columns: minmax(0, 1fr) 72px 84px minmax(96px, 116px) 104px;
   gap: 8px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
@@ -2583,7 +2583,7 @@ body.resizing {
 }
 .branch-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 84px minmax(112px, 128px) 136px;
+  grid-template-columns: minmax(0, 1fr) 72px 84px minmax(96px, 116px) 104px;
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
@@ -2591,7 +2591,20 @@ body.resizing {
 }
 .pr-cols,
 .pr-row {
-  grid-template-columns: minmax(0, 1fr) 96px 84px minmax(112px, 128px) 72px;
+  grid-template-columns: minmax(0, 1fr) 80px 72px minmax(96px, 116px) 72px;
+}
+/* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
+.branch-row > :nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-author {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .pr-title {
   display: flex;
