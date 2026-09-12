@@ -3276,6 +3276,23 @@ body.resizing {
 .palette-item.active {
   background: var(--bg-active);
 }
+/* Quick-session picker: optional first-prompt area between the header and the folder list. */
+.qs-prompt {
+  padding: 8px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.qs-prompt textarea {
+  width: 100%;
+  resize: none;
+  font-size: 13px;
+  padding: 8px 30px 8px 10px;
+}
+.qs-picked {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 /* Quick-session picker: keep the full path from pushing the row wide. */
 .palette-item .qs-root {
   overflow: hidden;

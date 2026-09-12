@@ -36,15 +36,43 @@ describe('QuickSessionPicker', () => {
     expect(labels[labels.length - 1]).toContain('Browse for another folder');
   });
 
-  it('creates a session for the highlighted folder on Enter and closes', () => {
+  it('picks a folder on Enter, then creates the session on a second Enter', () => {
     const createQuickSession = vi.fn();
     const openQuickSession = vi.fn();
     seedStore({ createQuickSession, openQuickSession });
     render(<QuickSessionPicker />);
     fireEvent.keyDown(window, { key: 'ArrowDown' }); // alpha -> pinned
     fireEvent.keyDown(window, { key: 'Enter' });
-    expect(createQuickSession).toHaveBeenCalledWith('C:/work/pinned');
+    // Stage 2 shows the prompt area; nothing is created yet.
+    expect(createQuickSession).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText(/First prompt/)).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(createQuickSession).toHaveBeenCalledWith('C:/work/pinned', { prompt: '', images: [] });
     expect(openQuickSession).toHaveBeenCalledWith(false);
+  });
+
+  it('sends the typed prompt with the session and keeps Shift+Enter for newlines', () => {
+    const createQuickSession = vi.fn();
+    seedStore({ createQuickSession });
+    render(<QuickSessionPicker />);
+    fireEvent.click(screen.getByText('C:/work/pinned'));
+    const textarea = screen.getByPlaceholderText(/First prompt/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'Fix the flaky test' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
+    expect(createQuickSession).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(createQuickSession).toHaveBeenCalledWith('C:/work/pinned', { prompt: 'Fix the flaky test', images: [] });
+  });
+
+  it('backs out to the folder list on Escape while the prompt is empty', () => {
+    const openQuickSession = vi.fn();
+    seedStore({ openQuickSession });
+    render(<QuickSessionPicker />);
+    fireEvent.keyDown(window, { key: 'Enter' }); // pick the first folder
+    expect(screen.getByPlaceholderText(/First prompt/)).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(openQuickSession).not.toHaveBeenCalled();
+    expect(screen.getAllByRole('button').length).toBeGreaterThan(1);
   });
 
   it('falls back to the folder-picker flow for the browse row', () => {
