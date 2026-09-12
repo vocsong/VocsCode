@@ -21,6 +21,8 @@ import type {
   ProviderConfig,
   SessionEventEnvelope,
   SessionMeta,
+  SkillHarness,
+  SkillRootInfo,
   TranscriptItem,
   UserInput
 } from './types';
@@ -70,6 +72,17 @@ export interface IpcContract {
     { models: ModelInfo[]; error?: string }
   ];
   'harness:install': [{ id: 'pi' | 'dsh' | 'codex' | 'claude' }, { ok: boolean; log: string }];
+
+  /** Global skills (SKILL.md folders) per harness, for the Skills page. */
+  'skills:list': [void, SkillRootInfo[]];
+  /** Reads a skill's SKILL.md for the preview pane; `path` must be a known skill folder. */
+  'skills:read': [{ path: string }, { content: string; truncated: boolean }];
+  /** Opens a skill folder (or a skills root) in the system file manager. */
+  'skills:reveal': [{ path: string }, void];
+  'skills:create': [{ harness: SkillHarness; name: string; description: string }, { ok: boolean; path?: string; error?: string }];
+  /** Copies a skill folder into another harness's skills directory. */
+  'skills:copy': [{ path: string; toHarness: SkillHarness }, { ok: boolean; path?: string; error?: string }];
+  'skills:delete': [{ path: string }, { ok: boolean; error?: string }];
 
   'sessions:list': [void, SessionMeta[]];
   'sessions:create': [CreateSessionRequest, SessionMeta];
