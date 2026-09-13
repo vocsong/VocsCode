@@ -26,7 +26,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:test",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:test && npm run typecheck:relay",
     "test": "vitest run",
     "dist:win": "electron-vite build && electron-builder --win --config electron-builder.yml",
     "dist:dir": "electron-vite build && electron-builder --dir --config electron-builder.yml",
@@ -36,7 +36,8 @@
     "test:e2e:terminal": "vitest run tests/e2e.terminal.test.ts",
     "test:e2e:models": "vitest run tests/e2e.models.test.ts",
     "test:e2e:themes": "vitest run tests/e2e.themes.test.ts",
-    "test:smoke": "vitest run tests/smoke.live.test.ts"
+    "test:smoke": "vitest run tests/smoke.live.test.ts",
+    "typecheck:relay": "tsc --noEmit -p relay/tsconfig.json"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
@@ -65,6 +66,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260911.1",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
