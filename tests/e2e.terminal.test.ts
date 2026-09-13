@@ -86,6 +86,14 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
     watch(win);
     await win.waitForSelector('.brand', { timeout: 60_000 });
 
+    // The per-folder New session control must be findable before the pointer goes anywhere near
+    // it: a 0-opacity icon reads as absent to anyone scanning the sidebar.
+    const newSession = win.getByTestId('new-session').first();
+    await newSession.waitFor({ timeout: 60_000 });
+    expect(await newSession.evaluate((el) => getComputedStyle(el).opacity), 'the New session icon is visible without hover').toBe('1');
+    // And it reads as "new session" (a chat bubble with a plus), not a bare plus.
+    expect(await newSession.locator('svg').getAttribute('data-icon'), 'the New session control uses the session-plus icon').toBe('sessionPlus');
+
     try {
       // A session with no prompt: nothing is sent to a harness, so this runs without any API key.
       await openNewSession(win);

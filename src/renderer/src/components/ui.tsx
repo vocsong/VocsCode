@@ -4,6 +4,8 @@ import React, { useEffect, useId, useRef, useState } from 'react';
 const ICONS: Record<string, string> = {
   logo: 'M6.4 7.2L12 17L17.6 7.2M9.2 19h5.6',
   plus: 'M12 5v14M5 12h14',
+  // A speech bubble with a plus: "start a new session" rather than the generic "add".
+  sessionPlus: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM12 7v6M9 10h6',
   dollar: 'M12 2v20M17 5.5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6',
   activity: 'M22 12h-4l-3 9L9 3l-3 9H2',
   list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
@@ -98,7 +100,7 @@ const ICONS: Record<string, string> = {
 
 export function Icon({ name, size = 16, className, title }: { name: keyof typeof ICONS | string; size?: number; className?: string; title?: string }) {
   return (
-    <svg className={`icon ${className ?? ''}`} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden={title ? undefined : true}>
+    <svg className={`icon ${className ?? ''}`} data-icon={name} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden={title ? undefined : true}>
       {title && <title>{title}</title>}
       <path d={ICONS[name] ?? ICONS.info} />
     </svg>

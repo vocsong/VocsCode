@@ -1131,16 +1131,12 @@ h4 {
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--fg-faint);
+  color: var(--fg-muted);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
+  transition: background 0.1s ease, color 0.1s ease;
 }
-.project-group:hover .project-new-btn,
+.project-new-btn:hover,
 .project-new-btn:focus-visible {
-  opacity: 1;
-}
-.project-new-btn:hover {
   background: var(--bg-hover);
   color: var(--fg);
 }

@@ -329,7 +329,7 @@ export function Sidebar() {
                 aria-label={`New session in ${basename(g.root)}`}
                 onClick={() => void startNewSession(g.root)}
               >
-                <Icon name="plus" size={13} />
+                <Icon name="sessionPlus" size={14} />
               </button>
               </div>
               {!isCollapsed && g.list.map((s) => (
