@@ -1180,6 +1180,12 @@ h4 {
   background: var(--blue-soft);
   animation: status-fade 1.2s ease-in-out infinite;
 }
+/* Archiving reuses the Working blink but in amber so it reads as its own transient state. */
+.session-status.status-archiving {
+  color: var(--amber);
+  background: var(--amber-soft);
+  animation: status-fade 1.2s ease-in-out infinite;
+}
 .session-status.status-awaiting {
   color: var(--red);
   background: var(--red-soft);

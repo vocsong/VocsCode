@@ -96,8 +96,8 @@ describe('sidebar session actions', () => {
     fireEvent.click(archiveBtn);
     const pill = container.querySelector('.session-status') as HTMLElement;
     expect(pill.textContent).toBe('Archiving');
-    // Same class the Working pill uses, so it picks up the blinking animation.
-    expect(pill.className).toContain('status-running');
+    // Same blink animation family as the Working pill, but its own amber class.
+    expect(pill.className).toContain('status-archiving');
     resolveArchive({});
     await waitFor(() => expect((container.querySelector('.session-status') as HTMLElement).className).toContain('status-idle'));
   });
