@@ -29,10 +29,20 @@ interface RateMatrixRow extends RateCell {
   name: string;
 }
 
+/** `(errors/calls) rate` in its tone, or a dash when there were no calls. */
+function rateCellNode(cell: RateCell | undefined, key: string) {
+  const { text, tone, title } = rateCell(cell);
+  return (
+    <span key={key} title={title} style={tone ? { color: tone } : undefined}>
+      {text}
+    </span>
+  );
+}
+
 /**
  * Groups per-owner tool rows into a matrix: one row per owner (a model, or a harness and model), one
- * column per tool. Owners keep growing, so they take the rows and the table gets taller instead of
- * wider; case-insensitive tool names merge across harnesses. Cells read `(errors/calls) rate`.
+ * column per tool, plus a leading Total column that sums the row. Owners are sorted alphabetically
+ * by label; case-insensitive tool names merge across harnesses. Cells read `(errors/calls) rate`.
  */
 function rateMatrix<T extends RateMatrixRow>(rows: T[], rowHeader: string, owner: (r: T) => { key: string; label: string }): TableSpec | null {
   const owners = new Map<string, { label: string; calls: number; errors: number; tools: Map<string, RateCell> }>();
@@ -55,22 +65,16 @@ function rateMatrix<T extends RateMatrixRow>(rows: T[], rowHeader: string, owner
     tools.set(nameKey, t);
   }
   if (owners.size === 0) return null;
-  const sortedRows = [...owners.entries()].sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
+  const sortedRows = [...owners.entries()].sort((a, b) => a[1].label.localeCompare(b[1].label) || b[1].calls - a[1].calls || a[0].localeCompare(b[0]));
   const cols = [...tools.entries()].sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
   return {
-    columns: [{ label: rowHeader }, ...cols.map(([, t]) => ({ label: t.label, numeric: true }))],
+    columns: [{ label: rowHeader }, { label: 'Total', numeric: true }, ...cols.map(([, t]) => ({ label: t.label, numeric: true }))],
     rows: sortedRows.map(([key, m]) => [
       <span key={key} className="mono" title={m.label}>
         {m.label || key}
       </span>,
-      ...cols.map(([nameKey]) => {
-        const { text, tone, title } = rateCell(m.tools.get(nameKey));
-        return (
-          <span key={nameKey} title={title} style={tone ? { color: tone } : undefined}>
-            {text}
-          </span>
-        );
-      })
+      rateCellNode(m, 'total'),
+      ...cols.map(([nameKey]) => rateCellNode(m.tools.get(nameKey), nameKey))
     ])
   };
 }

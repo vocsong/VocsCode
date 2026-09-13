@@ -150,7 +150,7 @@ describe('analytics dashboard', () => {
       { key: 'p/astra', label: 'astra', name: 'bash', calls: 5, errors: 0, declined: 0, durationMs: 0 },
       { key: 'p/terra', label: 'terra', name: 'bash', calls: 2, errors: 0, declined: 0, durationMs: 0 },
       { key: 'anthropic/opus', label: 'opus', name: 'Bash', calls: 1, errors: 0, declined: 0, durationMs: 0 },
-      { key: 'p/fable', label: 'fable-5-1', name: 'Read', calls: 2, errors: 0, declined: 0, durationMs: 0 }
+      { key: 'p/fable', label: 'fable-5-1', name: 'Read', calls: 3, errors: 0, declined: 0, durationMs: 0 }
     ];
     const { container } = render(<AnalyticsDashboard />);
     await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
@@ -161,14 +161,15 @@ describe('analytics dashboard', () => {
     await waitFor(() => expect(container.textContent).toContain('Error rate by model'));
     const table = Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === 'Model') as HTMLTableElement;
     expect(table).toBeTruthy();
-    // Models are the rows and tools the columns, so adding a model makes the table taller, not wider.
-    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Model', 'bash', 'Read']);
+    // Models are the rows in alphabetical order and Total leads the tool columns.
+    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Model', 'Total', 'bash', 'Read']);
     expect(table.querySelectorAll('tbody tr')).toHaveLength(8);
+    expect(Array.from(table.querySelectorAll('tbody tr')).map((tr) => tr.querySelector('td')?.textContent)).toEqual(['astra', 'deepseek', 'fable-5-1', 'glm', 'luna', 'opus', 'sol', 'terra']);
     // Built-in names from Claude use title case, while Pi/native use lower case. They share columns.
     const solRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('sol')) as HTMLTableRowElement;
-    expect(Array.from(solRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['sol', '(2/10) 20%', '—']);
+    expect(Array.from(solRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['sol', '(2/10) 20%', '(2/10) 20%', '—']);
     const fableRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('fable-5-1')) as HTMLTableRowElement;
-    expect(Array.from(fableRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['fable-5-1', '(1/6) 17%', '(0/2) 0%']);
+    expect(Array.from(fableRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['fable-5-1', '(1/9) 11%', '(1/6) 17%', '(0/3) 0%']);
     expect(Array.from(table.querySelectorAll('tr')).filter((tr) => tr.textContent?.toLowerCase().startsWith('bash'))).toHaveLength(0);
     // No harness+model data in this stub: the sibling card says so instead of rendering an empty table.
     expect(container.textContent).toContain('No per-harness tool calls recorded yet');
@@ -191,14 +192,14 @@ describe('analytics dashboard', () => {
     await waitFor(() => expect(container.textContent).toContain('Error rate by harness + model'));
     const table = Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === 'Harness · model') as HTMLTableElement;
     expect(table).toBeTruthy();
-    // Same shape as the model table: harness+model rows, tool columns, `(errors/calls) rate` cells.
-    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Harness · model', 'bash', 'Read']);
+    // Same shape as the model table: harness+model rows alphabetical, tool columns, Total first.
+    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Harness · model', 'Total', 'bash', 'Read']);
     const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr) => Array.from(tr.querySelectorAll('td')).map((cell) => cell.textContent));
     expect(rows).toEqual([
-      ['Claude · opus', '(2/8) 25%', '(0/4) 0%'],
-      ['Pi · glm', '(2/5) 40%', '—'],
-      ['Codex · gpt', '—', '(0/3) 0%'],
-      ['Pi · opus', '(0/2) 0%', '—']
+      ['Claude · opus', '(2/12) 17%', '(2/8) 25%', '(0/4) 0%'],
+      ['Codex · gpt', '(0/3) 0%', '—', '(0/3) 0%'],
+      ['Pi · glm', '(2/5) 40%', '(2/5) 40%', '—'],
+      ['Pi · opus', '(0/2) 0%', '(0/2) 0%', '—']
     ]);
   });
 
