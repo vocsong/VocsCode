@@ -9,7 +9,7 @@ import { renderMarkdown } from './markdown';
 export const STREAM_MARKDOWN_INTERVAL_MS = 100;
 
 export function useStreamingMarkdown(text: string, streaming: boolean | undefined): string {
-  const [html, setHtml] = useState(() => renderMarkdown(text));
+  const [html, setHtml] = useState(() => renderMarkdown(text, { fileLinks: true }));
   const last = useRef({ text, at: Date.now() });
   useEffect(() => {
     if (last.current.text === text) return;
@@ -18,12 +18,12 @@ export function useStreamingMarkdown(text: string, streaming: boolean | undefine
     const dueIn = streaming ? Math.max(0, STREAM_MARKDOWN_INTERVAL_MS - (Date.now() - last.current.at)) : 0;
     if (dueIn === 0) {
       last.current = { text, at: Date.now() };
-      setHtml(renderMarkdown(text));
+      setHtml(renderMarkdown(text, { fileLinks: true }));
       return;
     }
     const t = setTimeout(() => {
       last.current = { text, at: Date.now() };
-      setHtml(renderMarkdown(text));
+      setHtml(renderMarkdown(text, { fileLinks: true }));
     }, dueIn);
     return () => clearTimeout(t);
   }, [text, streaming]);

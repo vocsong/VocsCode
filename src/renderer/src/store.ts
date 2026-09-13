@@ -16,6 +16,14 @@ export interface NavEntry {
   sessionId: string | null;
 }
 
+/** A path a transcript file link wants the Files tab to show; the Files tab clears it once opened. */
+export interface FileReveal {
+  sessionId: string;
+  path: string;
+  /** Line to scroll to when the mention carried one. */
+  line?: number;
+}
+
 /** A harness's model list fetched without a running session, so a not-yet-started session still has models. */
 export interface ModelCatalogEntry {
   models: ModelInfo[];
@@ -66,6 +74,8 @@ interface State {
   sidebarOpen: boolean;
   panelOpen: boolean;
   panelTab: PanelTab;
+  /** One-shot request to show a file in the Files tab, set by transcript file links. */
+  fileReveal: FileReveal | null;
   newSessionOpen: boolean;
   /** Project folder the new session dialog is targeting; null until a folder is picked. */
   newSessionRoot: string | null;
@@ -97,6 +107,9 @@ interface State {
   toggleSidebar(): void;
   togglePanel(open?: boolean): void;
   setPanelTab(t: PanelTab): void;
+  /** Opens the Files tab on a path (workspace-relative or absolute inside the session cwd). */
+  revealFile(sessionId: string, path: string, line?: number): void;
+  consumeFileReveal(): void;
   openNewSession(open: boolean): void;
   /** Opens the new session dialog for a folder; without one, asks the user to pick a project folder first. */
   startNewSession(root?: string | null): Promise<void>;
@@ -204,6 +217,7 @@ export const useStore = create<State>((set, get) => ({
   sidebarOpen: true,
   panelOpen: true,
   panelTab: 'changes',
+  fileReveal: null,
   newSessionOpen: false,
   newSessionRoot: null,
   quickSessionOpen: false,
@@ -443,6 +457,12 @@ export const useStore = create<State>((set, get) => ({
   },
   setPanelTab(panelTab) {
     set({ panelTab, panelOpen: true });
+  },
+  revealFile(sessionId, path, line) {
+    set({ fileReveal: line ? { sessionId, path, line } : { sessionId, path }, panelTab: 'files', panelOpen: true });
+  },
+  consumeFileReveal() {
+    set((s) => (s.fileReveal ? { fileReveal: null } : {}));
   },
   openNewSession(newSessionOpen) {
     set({ newSessionOpen });
