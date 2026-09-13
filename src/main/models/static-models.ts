@@ -35,6 +35,18 @@ export const CURSOR_STATIC_MODELS: ModelInfo[] = [
   { id: 'auto', provider: 'cursor', displayName: 'Auto', description: 'Cursor picks the best model for each request.', isDefault: true, supportsImages: true }
 ];
 
+/** Map a Cursor catalog entry to the app's ModelInfo. */
+export function cursorModelToInfo(m: { id: string; displayName?: string; description?: string }): ModelInfo {
+  return {
+    id: m.id,
+    provider: 'cursor',
+    displayName: m.displayName ?? m.id,
+    description: m.description,
+    supportsImages: true,
+    supportsReasoning: true
+  };
+}
+
 export const DEEPSEEK_STATIC_MODELS: ModelInfo[] = [
   m('deepseek', 'deepseek-v4-pro', 'DeepSeek V4 Pro', 1_000_000, { input: 0.435, output: 0.87, cacheRead: 0.003625 }, true),
   m('deepseek', 'deepseek-v4-flash', 'DeepSeek V4 Flash', 1_000_000, { input: 0.14, output: 0.28, cacheRead: 0.0028 }),

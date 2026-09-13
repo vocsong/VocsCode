@@ -7,6 +7,7 @@ import { parseUnifiedDiff } from '../src/shared/diff-parse';
 import { DANGEROUS_COMMAND_PATTERNS, isDangerousCommand } from '../src/main/harness/types';
 import { pickSessionModels } from '../src/renderer/src/models';
 import { DANGEROUS as PI_DANGEROUS_COMMAND_PATTERNS } from '../resources/pi/vocs-code-approvals';
+import { useStore } from '../src/renderer/src/store';
 import type { AppSettings, HarnessId, ModelInfo, SessionMeta } from '../src/shared/types';
 
 describe('dangerous command detection', () => {
@@ -292,6 +293,17 @@ describe('model list for a session whose harness has not started', () => {
     // An unrelated settings change must not throw the catalog away.
     useStore.getState().setSettings({ modelOverrides: { 'anthropic::claude-opus-5': { supportsImages: true } }, defaultEffort: 'high' } as never);
     expect(useStore.getState().modelCatalog.claude).toBeDefined();
+  });
+
+  it('selects the newest remaining active session when the active one is removed', async () => {
+    const toast = vi.fn();
+    const gone = { ...session('gone', 'claude'), title: 'Gone', updatedAt: 3000, createdAt: 3000 };
+    const old = { ...session('old', 'claude'), title: 'Old', updatedAt: 1000, createdAt: 1000 };
+    const newest = { ...session('newest', 'claude'), title: 'Newest', updatedAt: 2000, createdAt: 2000 };
+    useStore.setState({ sessions: [gone, old, newest], activeId: 'gone', loaded: { newest: true }, toast } as never);
+    useStore.getState().setSessions([old, newest]);
+    expect(useStore.getState().activeId).toBe('newest');
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining('switched to "Newest"'), 'info');
   });
 
   it('forgets a deleted session’s model list', async () => {

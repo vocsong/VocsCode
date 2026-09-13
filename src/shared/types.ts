@@ -61,6 +61,15 @@ export type ProviderKind =
   | 'mistral'
   | 'gemini-openai';
 
+export interface SecretStatus {
+  /** Whether the OS-backed safeStorage provider is available. */
+  encryptionAvailable: boolean;
+  /** Whether one or more stored values use the reversible fallback encoding. */
+  hasFallback: boolean;
+  /** Provider ids whose stored values use the reversible fallback encoding. */
+  fallbackProviderIds: string[];
+}
+
 export interface ProviderConfig {
   id: string;
   kind: ProviderKind;

@@ -21,7 +21,9 @@ src/main
   runtime.ts      binary discovery (PATH, app runtime dir, bundled), doctor, installer
   secrets.ts      API keys encrypted at rest via Electron safeStorage
   terminal.ts     PTY tabs (node-pty) mirrored by headless xterm for snapshots, flow control, restore
-  git.ts / settings.ts / store.ts / ipc.ts / index.ts
+  handlers.ts     transport-agnostic IPC handler registry (Electron-free, unit-tested in Node)
+  web-server.ts   localhost web client (VOCS_CODE_WEB=1): serves the built renderer, bridges the registry over WebSocket
+  git.ts / settings.ts / store.ts / ipc.ts / index.ts   (ipc.ts binds handlers.ts to ipcMain)
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
@@ -68,6 +70,7 @@ Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping c
 
 - API keys are encrypted with Electron `safeStorage` and never leave the machine except to the provider you configured.
 - The renderer runs sandboxed with context isolation; all privileged work happens in the main process behind a typed IPC contract.
+- ACP read requests intentionally allow the agent's `readTextFile` callback to open absolute paths, matching the read policy of the other harnesses; approvals gate writes and commands, not reads. Use ACP with an agent you trust if the machine contains sensitive files outside the project.
 - "Full access" disables every prompt and sandbox. Use it only in disposable environments.
 
 ## Usage analytics

@@ -21,6 +21,7 @@ import type {
   PermissionMode,
   ProviderConfig,
   SearchFilters,
+  SecretStatus,
   SearchResponse,
   SearchResult,
   SessionEventEnvelope,
@@ -41,12 +42,14 @@ export interface IpcContract {
   'app:doctor': [void, DoctorReport];
   'app:openExternal': [{ url: string }, void];
   'app:openPath': [{ path: string; sessionId: string }, void];
-  'app:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
+  'app:openInEditor': [{ path: string; sessionId: string; line?: number }, { ok: boolean; error?: string }];
   'app:openTerminal': [{ cwd: string }, { ok: boolean; error?: string }];
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];
   'app:notify': [{ title: string; body: string }, void];
   /** A renderer stall (long task, delayed input, timer drift) recorded in the main log. */
   'app:diag': [{ kind: 'longtask' | 'input-delay' | 'loop-lag'; ms: number; detail?: string }, void];
+  /** Opens a validated SKILL.md in the configured editor. */
+  'skills:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
 
   'window:toggleFullScreen': [void, void];
   'window:reload': [void, void];
@@ -60,6 +63,7 @@ export interface IpcContract {
   'secrets:set': [{ providerId: string; apiKey: string }, void];
   'secrets:clear': [{ providerId: string }, void];
   'secrets:has': [{ providerId: string }, boolean];
+  'secrets:status': [void, SecretStatus];
 
   'providers:list': [void, ProviderConfig[]];
   'providers:save': [ProviderConfig, ProviderConfig[]];
@@ -192,9 +196,7 @@ export type PushPayloads = {
   'push:terminalsChanged': TerminalInfo[];
 };
 
-/** The API exposed on window.harness by the preload script. */
-export interface VocsCodeApi {
-  invoke<K extends IpcChannel>(channel: K, request: IpcRequest<K>): Promise<IpcResponse<K>>;
-  on<K extends keyof PushPayloads>(channel: K, listener: (payload: PushPayloads[K]) => void): () => void;
-  platform: string;
-}
+export type PushChannel = keyof PushPayloads;
+
+/** The API exposed on window.harness by the preload script — the shared Transport shape (see ./transport). */
+export type { Transport as VocsCodeApi } from './transport';

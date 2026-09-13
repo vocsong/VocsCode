@@ -11,4 +11,6 @@ export function on<K extends keyof PushPayloads>(channel: K, listener: (payload:
 
 export const platform = typeof window !== 'undefined' && window.harness ? window.harness.platform : 'unknown';
 export const isMac = platform === 'darwin';
+/** Web build: the browser provides the chrome, so the in-app title bar stays hidden. */
+export const isWeb = platform === 'browser';
 export const modKey = isMac ? '⌘' : 'Ctrl';
