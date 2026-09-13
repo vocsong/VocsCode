@@ -510,7 +510,7 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
       <div className="session-side">
         <div onClick={(e) => e.stopPropagation()}>
           <Dropdown align="right" width={200} trigger={() => archiving
-            ? <span className="session-status status-running" title="Archiving…">Archiving</span>
+            ? <span className="session-status status-archiving" title="Archiving…">Archiving</span>
             : <StatusLabel status={s.status} label={s.statusLabel} />}>
             {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
           </Dropdown>
