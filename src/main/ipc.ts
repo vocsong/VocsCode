@@ -8,6 +8,7 @@ import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import type { SettingsStore } from './settings';
 import type { TerminalManager } from './terminal';
+import type { RemoteHost } from './remote/host';
 
 export interface IpcDeps {
   settings: SettingsStore;
@@ -17,6 +18,8 @@ export interface IpcDeps {
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
   search: SearchIndex;
+  /** Remote access host (docs/REMOTE-ACCESS.md), wired in index.ts. */
+  remote?: RemoteHost;
   /** Extra push sink for non-window clients (the localhost web server today, the relay later). */
   broadcast?: (channel: string, payload: unknown) => void;
   getWindow: () => BrowserWindow | null;
@@ -78,6 +81,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     runtime: deps.runtime,
     analytics: deps.analytics,
     search: deps.search,
+    remote: deps.remote,
     log: deps.log,
     push: (channel, payload) => {
       pushToRenderer(deps.getWindow(), channel, payload);

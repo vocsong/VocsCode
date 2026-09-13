@@ -20,6 +20,9 @@ import type {
   ModelRef,
   PermissionMode,
   ProviderConfig,
+  RemoteConfig,
+  RemoteDeviceInfo,
+  RemoteState,
   SearchFilters,
   SearchResponse,
   SearchResult,
@@ -121,6 +124,14 @@ export interface IpcContract {
 
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 
+  /** Remote access (docs/REMOTE-ACCESS.md). Enrollment + device tokens live in the secret store. */
+  'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[] }];
+  'remote:enable': [{ relayUrl: string; enrollToken: string }, RemoteState];
+  'remote:disable': [void, RemoteState];
+  'remote:pairStart': [{ hostName?: string }, { code: string; expiresAt: number }];
+  'remote:pairRespond': [{ decision: 'approve' | 'deny' }, void];
+  'remote:revoke': [{ deviceId: string }, void];
+
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   'git:summary': [{ sessionId: string }, GitSummary];
   'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string; error?: string }];
@@ -179,7 +190,8 @@ export const PUSH_CHANNELS = {
   settingsChanged: 'push:settingsChanged',
   focusSession: 'push:focusSession',
   terminalData: 'push:terminalData',
-  terminalsChanged: 'push:terminalsChanged'
+  terminalsChanged: 'push:terminalsChanged',
+  remoteState: 'push:remoteState'
 } as const;
 
 export type PushPayloads = {
@@ -190,6 +202,7 @@ export type PushPayloads = {
   /** Raw PTY output for one terminal; `seq` orders it against an attach snapshot. */
   'push:terminalData': { terminalId: string; seq: number; data: string };
   'push:terminalsChanged': TerminalInfo[];
+  'push:remoteState': RemoteState;
 };
 
 export type PushChannel = keyof PushPayloads;

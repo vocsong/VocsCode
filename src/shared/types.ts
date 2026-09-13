@@ -604,6 +604,8 @@ export interface AppSettings {
   theme: ThemeId;
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
+  /** Remote access (docs/REMOTE-ACCESS.md): outbound relay connection, off by default. */
+  remote: RemoteConfig;
   defaultEffort?: EffortLevel;
   /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */
   autoCompactionThreshold?: AutoCompactionThreshold;
@@ -796,6 +798,28 @@ export interface FsEntry {
   path: string;
   isDir: boolean;
   size?: number;
+}
+
+/** Remote access (docs/REMOTE-ACCESS.md §6): config + live state surfaced to the renderer. */
+export interface RemoteConfig {
+  enabled: boolean;
+  relayUrl?: string;
+}
+
+export interface RemoteState {
+  status: 'off' | 'connecting' | 'online' | 'error';
+  detail?: string;
+  pairing?: { code: string; expiresAt: number };
+  pendingRequest?: { code: string; name: string; platform: string };
+  onlineClients: string[];
+}
+
+export interface RemoteDeviceInfo {
+  deviceId: string;
+  kind: 'host' | 'web';
+  name: string;
+  platform: string;
+  lastSeen: number;
 }
 
 export interface DoctorReport {

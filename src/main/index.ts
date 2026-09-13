@@ -18,6 +18,7 @@ import { SessionManager } from './session-manager';
 import { SettingsStore } from './settings';
 import { SessionStore } from './store';
 import { TerminalManager } from './terminal';
+import { RemoteHost } from './remote/host';
 import { WebServer } from './web-server';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -37,6 +38,7 @@ let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
 let terminals: TerminalManager | null = null;
 let webServer: WebServer | null = null;
+let remoteHost: RemoteHost | null = null;
 
 /** Console-only until userData is known (see main()), then also a rotating file under logs/. */
 let log: Logger = (level, message) => {
@@ -134,6 +136,7 @@ async function main(): Promise<void> {
   const pushAll = (channel: string, payload: unknown) => {
     pushToRenderer(mainWindow, channel, payload);
     webServer?.broadcast(channel, payload);
+    void remoteHost?.broadcastPush(channel, payload);
   };
   terminals = new TerminalManager({
     dir: path.join(userData, 'terminals'),
@@ -145,6 +148,17 @@ async function main(): Promise<void> {
   });
   await terminals.load();
 
+  // Remote access (docs/REMOTE-ACCESS.md): the host needs the registry lazily, since
+  // registerIpc itself consumes the host to bind the remote:* channels.
+  let registryRef: import('./handlers').HandlerRegistry | null = null;
+  remoteHost = new RemoteHost({
+    registry: () => registryRef!,
+    secrets: { get: (key) => secrets.get(key), set: (key, value) => secrets.set(key, value) },
+    pushState: () => pushAll(PUSH_CHANNELS.remoteState, remoteHost!.state()),
+    log,
+    broadcast: (channel, payload) => void remoteHost?.broadcastPush(channel, payload)
+  });
+
   const registry = registerIpc({
     settings,
     secrets,
@@ -153,10 +167,21 @@ async function main(): Promise<void> {
     runtime,
     analytics,
     search,
-    broadcast: (channel, payload) => webServer?.broadcast(channel, payload),
+    remote: remoteHost,
+    broadcast: (channel, payload) => {
+      webServer?.broadcast(channel, payload);
+    },
     getWindow: () => mainWindow,
     log
   });
+  registryRef = registry;
+
+  // Resume remote access across restarts when it was left enabled.
+  const remoteConfig = settings.get().remote;
+  if (remoteConfig?.enabled && remoteConfig.relayUrl) {
+    const enrollToken = await secrets.get('remote-enroll');
+    if (enrollToken) await remoteHost.enable(remoteConfig.relayUrl, enrollToken);
+  }
 
   // Localhost web client (P1 dogfood, docs/REMOTE-ACCESS.md): explicit opt-in, dev-oriented.
   // Serves the built renderer (npm run build first) and bridges the same handler registry to a browser tab.
