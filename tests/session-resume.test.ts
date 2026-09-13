@@ -424,10 +424,30 @@ describe('native resume seam', () => {
     expect(h.readJson).toHaveBeenCalledWith('native-history.json');
     expect(h.writeJson).toHaveBeenCalledWith(
       'native-history.json',
-      expect.objectContaining({ version: 1, messages: expect.arrayContaining([expect.objectContaining({ role: 'tool', toolCallId: 'tool-1' })]) })
+      expect.objectContaining({ version: 2, messages: expect.arrayContaining([expect.objectContaining({ role: 'tool', toolCallId: 'tool-1' })]) })
     );
     expect(h.meta.harnessRef.nativeHistory).toBe(true);
     expect(h.events.some((e) => e.type === 'status' && e.status === 'idle')).toBe(true);
+    await adapter.dispose();
+  });
+
+  it('restores the checkpoint before a user message without retaining later context', async () => {
+    const h = makeAdapterCtx({ harness: 'native' });
+    const saved = {
+      version: 2,
+      messages: [{ role: 'user', text: 'before' }, { role: 'assistant', text: 'old branch', toolCalls: [] }],
+      boundaries: { u_edit: [{ role: 'user', text: 'before' }] }
+    };
+    h.readJson.mockImplementation(async (name: string) => (name === 'native-history.json' ? saved : null));
+
+    const adapter = new NativeAdapter(h.ctx);
+    await adapter.start();
+
+    await expect(adapter.rewindToUserMessage('u_edit')).resolves.toBe(true);
+    expect(h.writeJson).toHaveBeenLastCalledWith(
+      'native-history.json',
+      expect.objectContaining({ version: 2, messages: [{ role: 'user', text: 'before' }], boundaries: {} })
+    );
     await adapter.dispose();
   });
 });

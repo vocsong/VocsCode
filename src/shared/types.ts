@@ -401,6 +401,8 @@ export interface UserInput {
   text: string;
   images?: ImageAttachment[];
   mode?: SendMode;
+  /** Internal link to the persisted user item; adapters use it to checkpoint rewindable context. */
+  transcriptItemId?: string;
 }
 
 export interface FileChange {

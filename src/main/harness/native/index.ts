@@ -28,13 +28,16 @@ const HISTORY_FILE = 'native-history.json';
 const MAX_STEPS = 120;
 
 interface PersistedHistory {
-  version: 1;
+  version: 1 | 2;
   messages: NativeMessage[];
+  /** A history snapshot immediately before each app user message, keyed by transcript item id. */
+  boundaries?: Record<string, NativeMessage[]>;
 }
 
 export class NativeAdapter implements HarnessAdapter {
   readonly id = 'native' as const;
   private history: NativeMessage[] = [];
+  private boundaries: Record<string, NativeMessage[]> = {};
   private _busy = false;
   private abort: AbortController | null = null;
   private queue: UserInput[] = [];
@@ -60,6 +63,7 @@ export class NativeAdapter implements HarnessAdapter {
     const saved = await this.ctx.readJson<PersistedHistory>(HISTORY_FILE);
     if (saved?.messages) {
       this.history = saved.messages;
+      this.boundaries = saved.boundaries ?? {};
       // A crash or kill mid-tool-run can leave tool calls without results, which every provider rejects.
       if (this.repairDanglingToolCalls('The app was closed before this tool finished.')) await this.persist();
     }
@@ -108,8 +112,23 @@ export class NativeAdapter implements HarnessAdapter {
       return;
     }
     if (!this.model) throw new Error('No model selected. Add a provider API key in Settings and pick a model.');
+    if (input.transcriptItemId) this.boundaries[input.transcriptItemId] = structuredClone(this.history);
     this.history.push({ role: 'user', text: input.text, images: input.images });
     void this.runTurn();
+  }
+
+  async rewindToUserMessage(itemId: string): Promise<boolean> {
+    if (this._busy) return false;
+    const boundary = this.boundaries[itemId];
+    if (!boundary) return false;
+    this.history = structuredClone(boundary);
+    // Boundaries from the discarded branch might otherwise restore context that no longer exists.
+    this.boundaries = {};
+    this.queue = [];
+    this.steer = [];
+    this.ctx.updateMeta({ queued: 0 });
+    await this.persist();
+    return true;
   }
 
   private async runTurn(): Promise<void> {
@@ -135,6 +154,7 @@ export class NativeAdapter implements HarnessAdapter {
         // Steering messages are injected between steps.
         while (this.steer.length) {
           const s = this.steer.shift()!;
+          if (s.transcriptItemId) this.boundaries[s.transcriptItemId] = structuredClone(this.history);
           this.history.push({ role: 'user', text: `[steer] ${s.text}`, images: s.images });
           this.ctx.updateMeta({ queued: this.queue.length + this.steer.length });
         }
@@ -348,7 +368,7 @@ export class NativeAdapter implements HarnessAdapter {
   }
 
   private async persist(): Promise<void> {
-    await this.ctx.writeJson(HISTORY_FILE, { version: 1, messages: this.history } satisfies PersistedHistory);
+    await this.ctx.writeJson(HISTORY_FILE, { version: 2, messages: this.history, boundaries: this.boundaries } satisfies PersistedHistory);
   }
 
   /** Appends synthetic error results for tool calls that never received one. Returns true if anything changed. */
