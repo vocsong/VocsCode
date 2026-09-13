@@ -5,6 +5,7 @@ import { isEffortLevel } from '../../shared/harness-meta';
 import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
+import { toCodex } from '../mcp/effective';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY } from './permissions';
 import { spawnTool } from './spawn';
@@ -156,14 +157,20 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         approvalPolicy: approvalPolicyFor(mode),
         sandbox: sandboxModeFor(mode)
       };
+      const config: Record<string, unknown> = {};
       if (meta.config.codexModelProvider) {
         const p = meta.config.codexModelProvider;
-        common.config = {
-          model_providers: {
-            [p.id]: { name: p.name, base_url: p.baseUrl, env_key: p.envKey, wire_api: p.wireApi ?? 'chat' }
-          }
+        config.model_providers = {
+          [p.id]: { name: p.name, base_url: p.baseUrl, env_key: p.envKey, wire_api: p.wireApi ?? 'chat' }
         };
       }
+      // The app-server takes `config` over JSON-RPC, not argv, so resolved values may be inlined.
+      const mcp = await this.ctx.mcpServers().catch((e) => {
+        this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
+        return [];
+      });
+      if (mcp.length) config.mcp_servers = toCodex(mcp, 'inline').config;
+      if (Object.keys(config).length) common.config = config;
       let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null };
       if (meta.harnessRef.codexThreadId) {
         try {

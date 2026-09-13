@@ -129,6 +129,30 @@ describe('summarize', () => {
     expect(s.files[0]).toMatchObject({ path: 'src/a.ts', total: 4 });
   });
 
+  it('combines tool names that differ only by harness casing', () => {
+    const tools = {
+      Bash: { calls: 3, errors: 1, declined: 0, durationMs: 30 },
+      bash: { calls: 7, errors: 2, declined: 1, durationMs: 70 },
+      AskUserQuestion: { calls: 2, errors: 0, declined: 0, durationMs: 0 }
+    };
+    const modelTools = {
+      'anthropic/opus': {
+        Bash: { calls: 3, errors: 1, declined: 0, durationMs: 30 },
+        bash: { calls: 2, errors: 1, declined: 0, durationMs: 20 }
+      },
+      'openai/terra': { bash: { calls: 5, errors: 1, declined: 1, durationMs: 50 } }
+    };
+    const s = summarize([], {}, tools, modelTools, {}, 0, 0);
+    expect(s.tools).toEqual([
+      { name: 'bash', calls: 10, errors: 3, declined: 1, durationMs: 100 },
+      { name: 'AskUserQuestion', calls: 2, errors: 0, declined: 0, durationMs: 0 }
+    ]);
+    expect(s.modelTools.map((r) => [r.key, r.name, r.calls, r.errors])).toEqual([
+      ['anthropic/opus', 'bash', 5, 2],
+      ['openai/terra', 'bash', 5, 1]
+    ]);
+  });
+
   it('computes effective per-model rates, undefined while a denominator was never measured', () => {
     const rec = (id: string, u: UsageTotals, provider: string, model: string): UsageSessionRecord => ({
       id,
@@ -421,6 +445,8 @@ describe('per-dimension day slices', () => {
     store.recordToolCall('b', { id: 'x1', kind: 'tool', ts: 1, name: 'bash', status: 'done', durationMs: 10, changes: [{ path: 'f.ts', kind: 'update' }] }, t0);
     // After the model switch the session's snapshot points at sonnet, so this error lands there.
     store.recordToolCall('a', { id: 'x2', kind: 'tool', ts: 1, name: 'edit', status: 'error', durationMs: 5 }, t0);
+    // A model captured when the call began wins over a later session snapshot.
+    store.recordToolCall('a', { id: 'x3', kind: 'tool', ts: 1, name: 'Bash', status: 'done' }, t0, { provider: 'anthropic', model: 'opus' });
     await store.flush();
 
     const fresh = new AnalyticsStore(dir, { log });
@@ -429,7 +455,7 @@ describe('per-dimension day slices', () => {
     const by = s.days[0].usage.by;
     expect(by?.harness.claude).toMatchObject({ costUsd: 1.5, turns: 2, inputTokens: 150, durationMs: 2_000, speedTokens: 100, speedMs: 2_000, sessions: ['a'] });
     expect(by?.harness.pi).toMatchObject({ costUsd: 2, turns: 2, toolCalls: 1, sessions: ['b'] });
-    expect(by?.model['anthropic/opus']).toMatchObject({ costUsd: 1, turns: 1, label: 'opus' });
+    expect(by?.model['anthropic/opus']).toMatchObject({ costUsd: 1, turns: 1, toolCalls: 1, label: 'opus' });
     expect(by?.model['anthropic/sonnet']).toMatchObject({ costUsd: 0.5, turns: 1, label: 'sonnet', durationMs: 2_000 });
     expect(by?.project['/repo-b']?.toolCalls).toBe(1);
     expect(by?.tool.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
@@ -437,6 +463,7 @@ describe('per-dimension day slices', () => {
     expect(by?.modelTool['anthropic/sonnet']?.edit).toEqual({ calls: 1, errors: 1, declined: 0, durationMs: 5 });
     // The all-time per-model tool map survives the reload, keyed like the model slices.
     expect(s.modelTools.map((x) => [x.key, x.name, x.calls]).sort()).toEqual([
+      ['anthropic/opus', 'bash', 1],
       ['anthropic/sonnet', 'edit', 1],
       ['openrouter/glm', 'bash', 1]
     ]);
@@ -445,11 +472,12 @@ describe('per-dimension day slices', () => {
     // The range rollup rebuilds the totals from the slices with nothing left over.
     const r = rollupDays(s.days);
     expect(r.totals.costUsd).toBeCloseTo(3.5);
-    expect(r.totals.toolCalls).toBe(2);
+    expect(r.totals.toolCalls).toBe(3);
     expect(r.unattributed.costUsd).toBe(0);
     expect(r.sessionIds.sort()).toEqual(['a', 'b']);
     expect(r.byModel.map((x) => x.key)).toEqual(['openrouter/glm', 'anthropic/opus', 'anthropic/sonnet']);
     expect(r.modelTools.map((x) => [x.key, x.name, x.calls])).toEqual([
+      ['anthropic/opus', 'bash', 1],
       ['anthropic/sonnet', 'edit', 1],
       ['openrouter/glm', 'bash', 1]
     ]);
@@ -519,7 +547,7 @@ describe('legacy day estimation', () => {
     const legacy = { ...emptyDay(), costUsd: 3, turns: 6, inputTokens: 300, toolCalls: 10, durationMs: 6000, speedTokens: 90, speedMs: 3000 };
     // A day that already has live slices keeps them; its tool counts are subtracted from the all-time map first.
     const live = { ...emptyDay(), costUsd: 1, turns: 1, toolCalls: 4 };
-    const liveBy = { harness: { pi: { ...emptyDay(), costUsd: 1, turns: 1, toolCalls: 4, label: 'pi', sessions: ['c'] } }, model: {}, project: {}, tool: { Bash: { calls: 4, errors: 0, declined: 0, durationMs: 0 } }, file: {} };
+    const liveBy = { harness: { pi: { ...emptyDay(), costUsd: 1, turns: 1, toolCalls: 4, label: 'pi', sessions: ['c'] } }, model: {}, project: {}, tool: { bash: { calls: 4, errors: 0, declined: 0, durationMs: 0 } }, file: {} };
     const file = {
       version: 1,
       days: { '2025-06-09': legacy, '2025-06-01': { ...emptyDay(), costUsd: 5 }, '2025-06-10': { ...live, by: liveBy } },

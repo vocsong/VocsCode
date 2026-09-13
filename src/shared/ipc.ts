@@ -15,6 +15,11 @@ import type {
   GitWorktreeInfo,
   HarnessAvailability,
   HarnessId,
+  McpInspectResult,
+  McpProjectInfo,
+  McpProjectState,
+  McpServerDef,
+  McpStoreInfo,
   ModelInfo,
   ModelOverride,
   ModelRef,
@@ -91,6 +96,21 @@ export interface IpcContract {
   /** Copies a skill folder into another harness's skills directory. */
   'skills:copy': [{ path: string; toHarness: SkillHarness }, { ok: boolean; path?: string; error?: string }];
   'skills:delete': [{ path: string }, { ok: boolean; error?: string }];
+
+  /** Every harness's own global MCP store, for the MCP page's read-only tabs. */
+  'mcp:stores': [void, McpStoreInfo[]];
+  /** The repo file, the global list, the per-repo switches and what this session will get. */
+  'mcp:project': [{ sessionId: string }, McpProjectInfo];
+  /** Rewrites the `mcpServers` table of the session repo's `.mcp.json`. */
+  'mcp:project:save': [{ sessionId: string; servers: McpServerDef[] }, { ok: boolean; error?: string }];
+  /** Patches this repo's switches (`disabledGlobal` / `enabledRepo`) and returns the fresh view. */
+  'mcp:project:state': [{ sessionId: string; patch: McpProjectState }, McpProjectInfo];
+  /** Connects to one server, lists its tools and disconnects ("Test connection"). */
+  'mcp:inspect': [{ def: McpServerDef; sessionId?: string }, McpInspectResult];
+  /** Copies servers out of a harness-native store into the global list or the repo file. */
+  'mcp:import': [{ servers: McpServerDef[]; to: 'global' | 'repo'; sessionId?: string }, { ok: boolean; error?: string }];
+  /** Writes the session repo's servers out to `.cursor/mcp.json` for a Cursor session. */
+  'mcp:export': [{ sessionId: string; to: 'cursor' }, { ok: boolean; path?: string; error?: string }];
 
   'sessions:list': [void, SessionMeta[]];
   'sessions:create': [CreateSessionRequest, SessionMeta];
