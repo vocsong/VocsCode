@@ -38,11 +38,8 @@ let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
 let terminals: TerminalManager | null = null;
 let webServer: WebServer | null = null;
-<<<<<<< HEAD
 let remoteHost: RemoteHost | null = null;
-=======
 let processErrorHandlersInstalled = false;
->>>>>>> origin/develop
 
 /** Console-only until userData is known (see main()), then also a rotating file under logs/. */
 let log: Logger = (level, message) => {
