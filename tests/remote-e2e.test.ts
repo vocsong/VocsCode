@@ -169,7 +169,7 @@ describe('remote host end-to-end (fake relay, real core)', () => {
       }
     } as unknown as HandlerRegistry;
     const host = new RemoteHost({
-      registry,
+      registry: () => registry,
       secrets: { get: async () => undefined, set: async () => undefined },
       pushState: () => undefined,
       log: () => undefined,

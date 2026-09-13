@@ -196,6 +196,7 @@ export function defaultSettings(): AppSettings {
     notifications: true,
     soundOnApproval: false,
     binaries: {},
+    remote: { enabled: false },
     claude: { runtime: 'auto', useProviderKey: false, settingSources: ['user', 'project', 'local'] },
     codex: { runtime: 'auto' },
     pi: { extraArgs: [] },
