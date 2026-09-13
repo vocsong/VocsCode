@@ -13,7 +13,7 @@ Grab the latest installer from [Releases](https://github.com/vocsong/VocsCode/re
 | Windows 10+ | `Vocs-Code-<version>-win-x64.exe` |
 | macOS (Apple silicon) | `Vocs-Code-<version>-mac-arm64.dmg` |
 | macOS (Intel) | `Vocs-Code-<version>-mac-x64.dmg` |
-| Linux | `Vocs-Code-<version>-linux-x64.AppImage` |
+| Linux | `Vocs-Code-<version>-linux-x86_64.AppImage` |
 
 Installers are currently unsigned, so expect one first-run prompt: Windows SmartScreen → **More info → Run anyway**; macOS → right-click the app → **Open** the first time.
 
