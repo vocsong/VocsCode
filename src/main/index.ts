@@ -11,6 +11,7 @@ import { AnalyticsStore } from './analytics';
 import { watchEventLoop } from './diag';
 import { registerIpc, pushToRenderer } from './ipc';
 import { createLogger, type Logger } from './log';
+import { RendererRecovery } from './renderer-recovery';
 import { RuntimeResolver } from './runtime';
 import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
@@ -215,6 +216,13 @@ async function main(): Promise<void> {
   // buttons over it, so their colors have to follow the theme.
   nativeTheme.on('updated', applyChrome);
 
+  // GPU and utility processes share the window's fate; a dead one explains a blank or malformed
+  // window, and without a line here it is invisible. Normal exits are not news.
+  app.on('child-process-gone', (_event, details) => {
+    if (details.reason === 'clean-exit') return;
+    log('error', `child process gone: ${details.type} ${details.reason} (exit ${details.exitCode})`);
+  });
+
   // No native menu bar: File/Edit/View/Help live in the custom title bar. macOS keeps its
   // application menu because the system requires one for the app menu and standard shortcuts.
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
@@ -415,6 +423,24 @@ function createWindow(settings: SettingsStore, appRoot: string): void {
   };
   win.on('resize', debounce(saveBounds, 500));
   win.on('move', debounce(saveBounds, 500));
+
+  // A renderer that dies leaves a blank window and, without this, no record of why. Reload it
+  // (bounded) so a one-off crash self-heals and a crash loop says so in the log instead of
+  // reloading forever.
+  const recovery = new RendererRecovery({
+    log,
+    reload: () => {
+      if (!win.isDestroyed()) win.webContents.reload();
+    }
+  });
+  win.webContents.on('render-process-gone', (_event, details) => recovery.gone(details.reason, details.exitCode));
+  win.webContents.on('unresponsive', () => log('warn', 'renderer unresponsive — the window is not painting or taking input'));
+  win.webContents.on('responsive', () => log('info', 'renderer responsive again'));
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    // -3 is ERR_ABORTED: an in-page navigation (hash, redirect) that is not a failure.
+    if (isMainFrame && errorCode !== -3) log('error', `renderer failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
+  });
+  win.webContents.on('preload-error', (_event, preloadPath, error) => log('error', `preload script failed (${preloadPath}): ${error.stack ?? error.message}`));
 
   // A reload drops every xterm instance; stop streaming to it and let paused shells run until it re-attaches.
   win.webContents.on('did-start-loading', () => terminals?.detachAll());
