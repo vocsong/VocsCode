@@ -54,6 +54,52 @@ export function addToolUsage(into: ToolUsage, from: ToolUsage): void {
   into.durationMs += from.durationMs;
 }
 
+/** Case-insensitive identity for harness tool names (`Bash` and `bash` are the same tool). */
+export function toolNameKey(name: string): string {
+  return name.toLowerCase();
+}
+
+function preferredToolName(current: string, candidate: string, key: string): string {
+  if (candidate === key) return candidate;
+  return current || candidate;
+}
+
+/** Combines differently-cased spellings while retaining a harness-supplied display name. */
+export function toolUsageRows(tools: Record<string, ToolUsage>): ToolUsageRow[] {
+  const grouped = new Map<string, ToolUsageRow>();
+  for (const [name, usage] of Object.entries(tools)) {
+    const key = toolNameKey(name);
+    const row = grouped.get(key) ?? { name, ...emptyToolUsage() };
+    row.name = preferredToolName(row.name, name, key);
+    addToolUsage(row, usage);
+    grouped.set(key, row);
+  }
+  return [...grouped.values()].sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
+}
+
+/** Builds per-model rows with case-insensitive tool identity and optional model display labels. */
+export function modelToolUsageRows(modelTools: Record<string, Record<string, ToolUsage>>, modelLabels: ReadonlyMap<string, string> = new Map()): ModelToolRow[] {
+  const toolLabels = new Map<string, string>();
+  for (const perTool of Object.values(modelTools)) {
+    for (const name of Object.keys(perTool)) {
+      const nameKey = toolNameKey(name);
+      toolLabels.set(nameKey, preferredToolName(toolLabels.get(nameKey) ?? '', name, nameKey));
+    }
+  }
+  const rows: ModelToolRow[] = [];
+  for (const [key, perTool] of Object.entries(modelTools)) {
+    const grouped = new Map<string, ToolUsage>();
+    for (const [name, usage] of Object.entries(perTool)) {
+      const nameKey = toolNameKey(name);
+      const target = grouped.get(nameKey) ?? emptyToolUsage();
+      addToolUsage(target, usage);
+      grouped.set(nameKey, target);
+    }
+    for (const [nameKey, usage] of grouped) rows.push({ key, label: modelLabels.get(key) || key.slice(key.indexOf('/') + 1), name: toolLabels.get(nameKey) || nameKey, ...usage });
+  }
+  return rows.sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
+}
+
 export function addFileUsage(into: FileUsage, from: FileUsage): void {
   into.adds += from.adds;
   into.updates += from.updates;
@@ -151,9 +197,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
   for (const f of COUNTER_FIELDS) unattributed[f] = Math.max(0, totals[f] - attributed[f]);
   const estimatedDays = days.filter((d) => d.usage.by?.estimated).length;
 
-  const toolRows: ToolUsageRow[] = Object.entries(tools)
-    .map(([name, usage]) => ({ name, ...usage }))
-    .sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
+  const toolRows = toolUsageRows(tools);
   const toolTotals = toolRows.reduce<ToolUsage>((acc, t) => {
     addToolUsage(acc, t);
     return acc;
@@ -164,11 +208,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
     .filter((f) => f.total > 0)
     .sort((a, b) => b.total - a.total || a.path.localeCompare(b.path));
 
-  const modelToolRows: ModelToolRow[] = Object.entries(modelTools)
-    .flatMap(([key, perTool]) =>
-      Object.entries(perTool).map(([name, usage]) => ({ key, label: modelToolLabels.get(key) || key.slice(key.indexOf('/') + 1), name, ...usage }))
-    )
-    .sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
+  const modelToolRows = modelToolUsageRows(modelTools, modelToolLabels);
 
   return {
     totals,

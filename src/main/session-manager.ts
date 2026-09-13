@@ -55,6 +55,8 @@ interface ActiveSession {
   adapter: HarnessAdapter;
   approvals: Map<string, Deferred<ApprovalDecision>>;
   liveItems: Map<string, TranscriptItem>;
+  /** Model active when each running tool call began, retained until its terminal upsert. */
+  toolModels: Map<string, ModelRef>;
   dirty: Set<string>;
   lastAssistantText: string;
   starting: Promise<void> | null;
@@ -442,6 +444,9 @@ export class SessionManager {
         const m = this.get(id);
         if (!m) return;
         Object.assign(m, patch);
+        // A harness may discover its actual model only after startup. Refresh the analytics
+        // snapshot immediately so tool calls before the first usage update are not unattributed.
+        if ('activeModel' in patch) this.deps.analytics.touchSession(m);
         this.schedulePersist(m);
         this.pushSessions();
       },
@@ -465,6 +470,7 @@ export class SessionManager {
       adapter,
       approvals: new Map(),
       liveItems: new Map(),
+      toolModels: new Map(),
       dirty: new Set(),
       lastAssistantText: '',
       starting: null,
@@ -615,10 +621,12 @@ export class SessionManager {
   async setModel(id: string, model: ModelRef): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    const active = this.active.get(id);
+    // Do not publish or persist the requested model until the harness accepts the switch.
+    if (active) await active.adapter.setModel(model);
     meta.config.model = model;
     meta.activeModel = model;
-    const active = this.active.get(id);
-    if (active) await active.adapter.setModel(model);
+    this.deps.analytics.touchSession(meta);
     await this.deps.store.upsert(meta);
     this.pushSessions();
     return meta;
@@ -821,8 +829,17 @@ export class SessionManager {
         const streaming = item.kind === 'assistant' && item.streaming;
         if (!streaming || !active) this.appendTranscript(sessionId, item);
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
-        // Tool calls are recorded once, when they leave the running state.
-        if (item.kind === 'tool' && item.status !== 'running') this.deps.analytics.recordToolCall(sessionId, item);
+        if (item.kind === 'tool') {
+          // Keep the model from the start of the call: a model switch before its terminal upsert
+          // must not move the call to the newly selected model.
+          const toolModels = active ? (active.toolModels ??= new Map()) : undefined;
+          if (item.status === 'running' && meta?.activeModel && toolModels && !toolModels.has(item.id)) toolModels.set(item.id, meta.activeModel);
+          if (item.status !== 'running') {
+            const model = toolModels?.get(item.id);
+            toolModels?.delete(item.id);
+            this.deps.analytics.recordToolCall(sessionId, item, undefined, model);
+          }
+        }
         break;
       }
       case 'item.delta': {
