@@ -9,6 +9,11 @@ import { askConfirm, Badge, Button, Dropdown, EmptyState, Icon, MenuItem, Spinne
 /** Branches untouched for this long land in the Stale filter. */
 const STALE_DAYS = 14;
 
+/** Git panel background poll cadence: GitHub cannot push PR/issue changes to a desktop app, so ask on a timer. */
+const POLL_MS = 60_000;
+/** A refresh scheduled by a finished turn waits at least this long after the last poll, so a chatty session cannot hammer gh. */
+const ACTIVITY_REFRESH_MIN_MS = 20_000;
+
 type Filter = 'all' | 'stale' | 'merged';
 
 const FILTERS: { id: Filter; label: string }[] = [
@@ -54,65 +59,124 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   const [view, setView] = useState<View>('branches');
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
-  /** Pull requests are pulled from GitHub separately (slower, needs gh) and only once the PR view is opened. */
+  /** Pull requests are pulled from GitHub separately (slower, needs gh); loaded on open and kept fresh by the background poll. */
   const [prData, setPrData] = useState<GitPullRequestList | null>(null);
   const [prLoading, setPrLoading] = useState(false);
   const [prFilter, setPrFilter] = useState<PrFilter>('open');
   const [prQuery, setPrQuery] = useState('');
-  /** Issues likewise come from gh and only load once the Issues view is opened. */
+  /** Issues likewise come from gh; loaded on open and kept fresh by the background poll. */
   const [issueData, setIssueData] = useState<GitIssueList | null>(null);
   const [issueLoading, setIssueLoading] = useState(false);
   const [issueFilter, setIssueFilter] = useState<IssueFilter>('open');
   const [issueQuery, setIssueQuery] = useState('');
   /** The session this instance belongs to; async responses for other sessions are dropped. */
   const liveId = useRef(session.id);
+  /** Inputs the background poll reads; refreshed every render so the interval never acts on stale state. */
+  const pollState = useRef({ isRepo: false, ghMissing: false });
+  pollState.current = { isRepo: !!data?.isRepo, ghMissing: !!data?.ghMissing || !!prData?.ghMissing || !!issueData?.ghMissing };
+  const pollInFlight = useRef(false);
+  const lastPollAt = useRef(0);
+  const activityTimer = useRef<number | null>(null);
+  /** Previous turn status, so the panel can refresh once a turn ends (the app-level "git hook"). */
+  const prevStatus = useRef(session.status);
 
-  const refresh = async () => {
+  /** `background` refreshes stay silent: no spinner and no toast, so a transient gh failure leaves the last list on screen. */
+  const refresh = async (opts: { background?: boolean } = {}) => {
     const sid = session.id;
     try {
       const r = await invoke('git:branchesOverview', { sessionId: sid });
       if (liveId.current === sid) setData(r);
     } catch (e) {
-      if (liveId.current === sid) toast(String((e as Error).message ?? e), 'error');
+      if (liveId.current === sid && !opts.background) toast(String((e as Error).message ?? e), 'error');
     }
   };
-  const refreshPrs = async () => {
+  const refreshPrs = async (opts: { background?: boolean } = {}) => {
     const sid = session.id;
-    setPrLoading(true);
+    if (!opts.background) setPrLoading(true);
     try {
       const r = await invoke('git:pullRequests', { sessionId: sid });
       if (liveId.current === sid) setPrData(r);
     } catch (e) {
-      if (liveId.current === sid) toast(String((e as Error).message ?? e), 'error');
+      if (liveId.current === sid && !opts.background) toast(String((e as Error).message ?? e), 'error');
     } finally {
-      if (liveId.current === sid) setPrLoading(false);
+      if (liveId.current === sid && !opts.background) setPrLoading(false);
     }
   };
-  const refreshIssues = async () => {
+  const refreshIssues = async (opts: { background?: boolean } = {}) => {
     const sid = session.id;
-    setIssueLoading(true);
+    if (!opts.background) setIssueLoading(true);
     try {
       const r = await invoke('git:issues', { sessionId: sid });
       if (liveId.current === sid) setIssueData(r);
     } catch (e) {
-      if (liveId.current === sid) toast(String((e as Error).message ?? e), 'error');
+      if (liveId.current === sid && !opts.background) toast(String((e as Error).message ?? e), 'error');
     } finally {
-      if (liveId.current === sid) setIssueLoading(false);
+      if (liveId.current === sid && !opts.background) setIssueLoading(false);
     }
   };
+
+  /**
+   * GitHub-side PR/issue changes cannot be pushed to a desktop app, so the only way to see them
+   * is to ask again. One silent round over everything the panel has loaded; a hidden window or a
+   * non-repo folder skips it, and gh-less folders skip the two GitHub calls.
+   */
+  const poll = async () => {
+    const { isRepo, ghMissing } = pollState.current;
+    if (pollInFlight.current || document.visibilityState === 'hidden' || !isRepo) return;
+    pollInFlight.current = true;
+    lastPollAt.current = Date.now();
+    try {
+      const jobs = [refresh({ background: true })];
+      if (!ghMissing) jobs.push(refreshPrs({ background: true }), refreshIssues({ background: true }));
+      await Promise.all(jobs);
+    } finally {
+      pollInFlight.current = false;
+    }
+  };
+
   useEffect(() => {
     liveId.current = session.id;
+    prevStatus.current = session.status;
     setData(null);
     setPrData(null);
     setIssueData(null);
+    lastPollAt.current = Date.now();
     void refresh();
-    if (view === 'prs') void refreshPrs();
-    if (view === 'issues') void refreshIssues();
+    void refreshPrs();
+    void refreshIssues();
   }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Remote changes arrive between turns, so poll every minute while the tab is open. A hidden
+  // window skips the tick and catches up on focus/visibility instead, like the sidebar's folder branch.
   useEffect(() => {
-    if (view === 'prs' && !prData && !prLoading) void refreshPrs();
-    if (view === 'issues' && !issueData && !issueLoading) void refreshIssues();
-  }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
+    const timer = window.setInterval(() => void poll(), POLL_MS);
+    const onWake = () => {
+      if (document.visibilityState !== 'hidden') void poll();
+    };
+    window.addEventListener('focus', onWake);
+    document.addEventListener('visibilitychange', onWake);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onWake);
+      document.removeEventListener('visibilitychange', onWake);
+      if (activityTimer.current !== null) window.clearTimeout(activityTimer.current);
+    };
+  }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The app-level equivalent of a git hook: a finished turn is when the agent's commit / push /
+  // `gh pr create` has settled, so refresh shortly after — throttled so a chatty session cannot
+  // hammer gh between the timer's own ticks.
+  useEffect(() => {
+    const prev = prevStatus.current;
+    prevStatus.current = session.status;
+    if (prev === 'idle' || session.status !== 'idle') return;
+    if (activityTimer.current !== null) window.clearTimeout(activityTimer.current);
+    const wait = Math.max(2_000, ACTIVITY_REFRESH_MIN_MS - (Date.now() - lastPollAt.current));
+    activityTimer.current = window.setTimeout(() => {
+      activityTimer.current = null;
+      void poll();
+    }, wait);
+  }, [session.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Sessions rooted inside a worktree — removals must respect them. */
   const sessionsIn = (wtPath: string) => sessions.filter((s) => underPath(wtPath, s.cwd)).length;
@@ -325,9 +389,10 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           icon="refresh"
           disabled={prLoading || issueLoading}
           onClick={() => {
+            lastPollAt.current = Date.now();
             void refresh();
-            if (view === 'prs' || prData) void refreshPrs();
-            if (view === 'issues' || issueData) void refreshIssues();
+            void refreshPrs();
+            void refreshIssues();
           }}
           title={view === 'prs' ? 'Pull the PR list from GitHub again' : view === 'issues' ? 'Pull the issue list from GitHub again' : 'Refresh'}
         />
@@ -689,7 +754,7 @@ function PrList({
           ))}
         </div>
         {data && !data.error && !data.ghMissing && (
-          <span className="pr-pulled" title={new Date(data.fetchedAt).toLocaleString()}>
+          <span className="pr-pulled" title={`${new Date(data.fetchedAt).toLocaleString()} — refreshed automatically every minute`}>
             {loading ? 'Pulling from GitHub…' : `Pulled ${relTime(data.fetchedAt)}`}
           </span>
         )}
@@ -908,7 +973,7 @@ function IssueList({
           ))}
         </div>
         {data && !data.error && !data.ghMissing && (
-          <span className="pr-pulled" title={new Date(data.fetchedAt).toLocaleString()}>
+          <span className="pr-pulled" title={`${new Date(data.fetchedAt).toLocaleString()} — refreshed automatically every minute`}>
             {loading ? 'Pulling from GitHub…' : `Pulled ${relTime(data.fetchedAt)}`}
           </span>
         )}

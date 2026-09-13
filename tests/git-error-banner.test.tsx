@@ -54,6 +54,9 @@ describe('git error banners', () => {
       if (channel === 'git:branchesOverview') {
         return Promise.resolve({ isRepo: true, branches: [], worktrees: [], error: 'git for-each-ref timed out — the branch list could not be loaded. Refresh to retry.' });
       }
+      // The Git tab eagerly loads both GitHub lists on open; a missing body would crash the count render.
+      if (channel === 'git:pullRequests') return Promise.resolve({ prs: [], fetchedAt: Date.now() });
+      if (channel === 'git:issues') return Promise.resolve({ issues: [], fetchedAt: Date.now() });
       return Promise.resolve({});
     });
     useStore.setState({ panelTab: 'branches' });
