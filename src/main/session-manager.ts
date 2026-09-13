@@ -24,6 +24,7 @@ import type {
 import { autoCompactionThresholdLabel, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
+import { resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
@@ -430,6 +431,13 @@ export class SessionManager {
       permissionMode: () => (this.get(id) ?? meta).config.permissionMode,
       effort: () => (this.get(id) ?? meta).activeEffort ?? (this.get(id) ?? meta).config.effort ?? this.settings().defaultEffort,
       getApiKey: (providerId) => this.deps.getSecret(providerId),
+      mcpServers: () => {
+        const m = this.get(id) ?? meta;
+        return resolveForSession(
+          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness },
+          { getSecret: this.deps.getSecret, log: (level, message) => this.deps.log(level, `[${id}] ${message}`) }
+        );
+      },
       emit: (event) => this.emit(id, event),
       requestApproval: (draft) => this.requestApproval(id, draft),
       updateRef: (patch: Partial<HarnessRef>) => {

@@ -238,7 +238,8 @@ function makeAdapterCtx(opts: { harness: HarnessId; ref?: HarnessRef; permission
     updateMeta: (patch: Partial<SessionMeta>) => Object.assign(meta, patch),
     log: (level: string, message: string) => logs.push({ level, message }),
     readJson,
-    writeJson
+    writeJson,
+    mcpServers: async () => []
   } as unknown as HarnessContext;
   return { ctx, meta, events, items, logs, readJson, writeJson };
 }

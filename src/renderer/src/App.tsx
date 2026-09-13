@@ -13,6 +13,7 @@ import { RightPanel } from './components/RightPanel';
 import { SearchModal } from './components/SearchModal';
 import { SettingsView } from './components/SettingsView';
 import { nextFolderTarget, nextSessionTarget, sidebarNavModel, Sidebar } from './components/Sidebar';
+import { McpView } from './components/McpView';
 import { SkillsView } from './components/SkillsView';
 import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
@@ -169,6 +170,8 @@ export function App() {
             <AnalyticsDashboard />
           ) : view === 'skills' ? (
             <SkillsView />
+          ) : view === 'mcp' ? (
+            <McpView />
           ) : session ? (
             <>
               <Header session={session} />

@@ -144,6 +144,7 @@ function makeCtx(overrides: Partial<SessionMeta> = {}): { ctx: HarnessContext; m
     permissionMode: () => meta.config.permissionMode,
     effort: () => meta.config.effort,
     getApiKey: async (id) => (id === 'cursor' ? 'key-123' : undefined),
+    mcpServers: async () => [],
     emit: (event) => {
       events.push(event);
       if (event.type === 'item.upsert') items.set(event.item.id, event.item);

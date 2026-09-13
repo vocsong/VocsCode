@@ -367,6 +367,9 @@ export function Sidebar() {
         <button type="button" className={`sidebar-link ${view === 'skills' ? 'active' : ''}`} onClick={() => setView('skills')}>
           <Icon name="puzzle" size={14} /> Skills
         </button>
+        <button type="button" className={`sidebar-link ${view === 'mcp' ? 'active' : ''}`} onClick={() => setView('mcp')}>
+          <Icon name="server" size={14} /> MCP
+        </button>
         <button type="button" className={`sidebar-link ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
           <Icon name="settings" size={14} /> Settings
         </button>
