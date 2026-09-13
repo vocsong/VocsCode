@@ -6,6 +6,7 @@ import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore, type PanelTab } from '../store';
 import { BranchesTab } from './BranchesTab';
 import { DiffView } from './DiffView';
+import { McpTab } from './McpTab';
 import { Resizer } from './Resizer';
 import { TerminalPanel } from './TerminalPanel';
 import { Badge, Button, EmptyState, Field, Icon, Spinner, Toggle } from './ui';
@@ -18,6 +19,7 @@ const TABS: { id: PanelTab; label: string; icon: string }[] = [
   { id: 'files', label: 'Files', icon: 'folder' },
   { id: 'branches', label: 'Git', icon: 'branch' },
   { id: 'goal', label: 'Goal', icon: 'target' },
+  { id: 'mcp', label: 'MCP', icon: 'server' },
   { id: 'usage', label: 'Usage', icon: 'chart' },
   { id: 'terminal', label: 'Terminal', icon: 'terminal' }
 ];
@@ -43,6 +45,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
         {tab === 'files' && <FilesTab session={session} />}
         {tab === 'branches' && <BranchesTab session={session} />}
         {tab === 'goal' && <GoalTab session={session} />}
+        {tab === 'mcp' && <McpTab session={session} />}
         {tab === 'usage' && <UsageTab session={session} />}
         {tab === 'terminal' && <TerminalPanel session={session} />}
       </div>

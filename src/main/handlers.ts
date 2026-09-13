@@ -13,6 +13,7 @@ import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides
 import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
+import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import { enrichModelContextWindows } from './models/static-models';
@@ -21,7 +22,7 @@ import type { SearchIndex } from './search';
 import { which } from './runtime';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
-import type { SettingsStore } from './settings';
+import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
 import type { TerminalManager } from './terminal';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
@@ -317,6 +318,62 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('skills:create', (req) => createSkill(req));
   handle('skills:copy', (req) => copySkill(req));
   handle('skills:delete', ({ path: p }) => deleteSkill(p));
+
+  // MCP. Every definition coming back from the renderer goes through normalizeMcpServers first,
+  // so a malformed (or hostile) entry can never reach a harness or a file on disk.
+  const mcpScope = (sessionId: string) => {
+    const m = sessions.get(sessionId);
+    if (!m) throw new Error('Session not found');
+    return { settings: settings.get(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness };
+  };
+  handle('mcp:stores', () => globalStoreInfo());
+  handle('mcp:project', ({ sessionId }) => projectInfo(mcpScope(sessionId)));
+  handle('mcp:project:save', async ({ sessionId, servers }) => {
+    const scope = mcpScope(sessionId);
+    const r = await writeProjectMcp(scope.cwd, normalizeMcpServers(servers));
+    return { ok: r.ok, error: r.error };
+  });
+  handle('mcp:project:state', async ({ sessionId, patch }) => {
+    const scope = mcpScope(sessionId);
+    const next = normalizeMcpProjectState({ ...(settings.get().mcpProjectState ?? {}), [scope.projectRoot]: patch });
+    await settings.update({ mcpProjectState: next });
+    return projectInfo({ ...scope, settings: settings.get() });
+  });
+  handle('mcp:inspect', async ({ def, sessionId }) => {
+    const [checked] = normalizeMcpServers([def]);
+    if (!checked) return { ok: false, error: 'Incomplete server definition', tools: [], durationMs: 0 };
+    const resolved = await resolveVars(checked, { env: process.env, secret: (name) => secrets.get(secretKeyFor(name)) });
+    const cwd = sessionId ? sessions.get(sessionId)?.cwd : undefined;
+    return inspectServer(normalizeStdio(resolved.def, { which: (cmd) => which(cmd) }), { cwd });
+  });
+  handle('mcp:import', async ({ servers, to, sessionId }) => {
+    const incoming = normalizeMcpServers(servers);
+    if (!incoming.length) return { ok: false, error: 'Nothing to import' };
+    if (to === 'global') {
+      await settings.update({ mcpServers: mergeById(settings.get().mcpServers ?? [], incoming) });
+      return { ok: true };
+    }
+    if (!sessionId) return { ok: false, error: 'No session' };
+    const scope = mcpScope(sessionId);
+    const current = await readProjectMcp(scope.cwd);
+    if (current.error) return { ok: false, error: current.error };
+    const r = await writeProjectMcp(scope.cwd, mergeById(current.servers, incoming));
+    return { ok: r.ok, error: r.error };
+  });
+  handle('mcp:export', async ({ sessionId }) => {
+    const scope = mcpScope(sessionId);
+    const current = await readProjectMcp(scope.cwd);
+    if (current.error) return { ok: false, error: current.error };
+    const target = path.join(scope.cwd, '.cursor', 'mcp.json');
+    const existing = await readStore({ id: 'cursor', label: 'Cursor', path: target, format: 'json' });
+    try {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, JSON.stringify({ mcpServers: toMcpJsonTable(mergeById(existing.servers, current.servers)) }, null, 2) + '\n', 'utf8');
+      return { ok: true, path: target };
+    } catch (e) {
+      return { ok: false, error: errorMessage(e) };
+    }
+  });
 
   handle('sessions:list', () => sessions.list());
   handle('sessions:create', (req) => sessions.create(req));

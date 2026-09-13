@@ -182,7 +182,8 @@ function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode }
     updateMeta: (patch: Partial<SessionMeta>) => Object.assign(meta, patch),
     log: (level: string, message: string) => logs.push({ level, message }),
     readJson: async () => null,
-    writeJson: async () => undefined
+    writeJson: async () => undefined,
+    mcpServers: async () => []
   } as unknown as HarnessContext;
   const adapter = new AcpAdapter(ctx);
   const h: Harness = { adapter, agent, child, ctx, meta, events, items, approvals, logs };

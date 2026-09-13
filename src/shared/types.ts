@@ -100,6 +100,97 @@ export interface AcpAgentPreset {
   builtin?: boolean;
 }
 
+/** Transport an MCP server speaks. */
+export type McpTransport = 'stdio' | 'http' | 'sse';
+
+/**
+ * One MCP server, in the single shape both scopes use (see docs/MCP.md §4). Values in `env` and
+ * `headers` may carry `${VAR}` references; they are resolved at injection time from the process
+ * environment or the encrypted secret store under `mcp:<VAR>`, never stored resolved.
+ */
+export interface McpServerDef {
+  /** Stable key, and the name the harness sees (`mcp__<id>__<tool>`). */
+  id: string;
+  transport: McpTransport;
+  /** stdio */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** http / sse */
+  url?: string;
+  headers?: Record<string, string>;
+  /** Restrict to some harnesses; absent means every harness that can take it. */
+  harnesses?: HarnessId[];
+  /** Per-call timeout hint, passed through where the harness supports it. */
+  timeoutMs?: number;
+  description?: string;
+  /** Global list only: a master switch independent of the per-repo ones. */
+  disabled?: boolean;
+}
+
+/** Per-user switches for one project root. Repo-defined servers stay off until enabled here. */
+export interface McpProjectState {
+  /** Global server ids switched off for this repo. */
+  disabledGlobal?: string[];
+  /** Repo-file server ids the user has trusted here. */
+  enabledRepo?: string[];
+}
+
+export type McpScope = 'global' | 'repo';
+
+/** How a harness takes MCP servers: nothing, injected by us, run by us, or its own store. */
+export type McpSupport = 'none' | 'inject' | 'client' | 'inherit';
+
+/** Why a defined server is not part of a session's effective set. */
+export type McpSkipReason = 'disabled' | 'not-enabled' | 'shadowed' | 'harness-filtered' | 'not-injected';
+
+/** One row of the effective set for a session. */
+export interface McpEffectiveEntry {
+  def: McpServerDef;
+  scope: McpScope;
+  enabled: boolean;
+  reason?: McpSkipReason;
+}
+
+/** A harness-native MCP store on disk, read for the MCP page's tabs and the panel's Detected list. */
+export interface McpStoreInfo {
+  id: string;
+  label: string;
+  path: string;
+  /** `path` with the home directory shortened to `~`, for display. */
+  display: string;
+  exists: boolean;
+  servers: McpServerDef[];
+  error?: string;
+}
+
+/** Everything the right-panel MCP tab needs for one session. */
+export interface McpProjectInfo {
+  projectRoot: string;
+  /** Absolute path of the repo file, whether or not it exists yet. */
+  file: string;
+  display: string;
+  exists: boolean;
+  repo: McpServerDef[];
+  /** Set when the repo file could not be parsed; `repo` is then empty. */
+  error?: string;
+  global: McpServerDef[];
+  state: McpProjectState;
+  detected: McpStoreInfo[];
+  effective: McpEffectiveEntry[];
+  harness: HarnessId;
+  support: McpSupport;
+}
+
+/** Result of probing one server with the app's own MCP client ("Test connection"). */
+export interface McpInspectResult {
+  ok: boolean;
+  error?: string;
+  serverInfo?: { name: string; version?: string };
+  tools: { name: string; description?: string }[];
+  durationMs: number;
+}
+
 export interface SessionConfig {
   harness: HarnessId;
   /** Project root chosen by the user (the git repo or folder). */
@@ -584,6 +675,12 @@ export interface HarnessCapabilities {
   fork: boolean;
   plan: boolean;
   costReporting: boolean;
+  /**
+   * How MCP servers reach this harness. `inject`: we pass the effective set through its SDK or
+   * protocol. `client`: we run the MCP client ourselves and merge the tools in. `inherit`: the
+   * harness reads its own store and we only import/export. `none`: no way in.
+   */
+  mcp: McpSupport;
   /** Which app-level permission modes are meaningful. */
   permissionModes: PermissionMode[];
   /** Whether model selection is provider-scoped (native) or harness-provided list. */
@@ -647,6 +744,10 @@ export interface AppSettings {
     extraArgs: string[];
   };
   acpAgents: AcpAgentPreset[];
+  /** Global MCP servers, offered to every harness that can take them. */
+  mcpServers: McpServerDef[];
+  /** Per-user MCP switches keyed by project root; see McpProjectState. */
+  mcpProjectState?: Record<string, McpProjectState>;
   providers: ProviderConfig[];
   /** Capability corrections keyed by `provider/model`; see shared/model-overrides.ts. */
   modelOverrides: Record<string, ModelOverride>;
