@@ -172,10 +172,10 @@ describe('analytics dashboard', () => {
     expect(container.textContent).toContain('No per-harness tool calls recorded yet');
   });
 
-  it('shows the error rate of each harness and model pair, worst first', async () => {
+  it('shows the error rate by harness and model in the same matrix as the model table', async () => {
     reset();
     summary.harnessModelTools = [
-      { harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Bash', calls: 8, errors: 1, declined: 0, durationMs: 0 },
+      { harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Bash', calls: 8, errors: 2, declined: 0, durationMs: 0 },
       { harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Read', calls: 4, errors: 0, declined: 0, durationMs: 0 },
       { harness: 'pi', key: 'openrouter/glm', label: 'glm', name: 'bash', calls: 5, errors: 2, declined: 0, durationMs: 0 },
       { harness: 'codex', key: 'openai/gpt', label: 'gpt', name: 'Read', calls: 3, errors: 0, declined: 0, durationMs: 0 },
@@ -189,14 +189,14 @@ describe('analytics dashboard', () => {
     await waitFor(() => expect(container.textContent).toContain('Error rate by harness + model'));
     const table = Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === 'Harness · model') as HTMLTableElement;
     expect(table).toBeTruthy();
-    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Harness · model', 'Calls', 'Errors', 'Error rate']);
+    // Same shape as the model table: harness+model rows, tool columns, `(errors/calls) rate` cells.
+    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Harness · model', 'bash', 'Read']);
     const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr) => Array.from(tr.querySelectorAll('td')).map((cell) => cell.textContent));
-    // Worst rate first: Pi/glm 40%, Claude/opus 8.3% (Bash and Read combined), Pi/opus and Codex/gpt at 0%.
     expect(rows).toEqual([
-      ['Pi · glm', '5', '2', '40%'],
-      ['Claude · opus', '12', '1', '8.3%'],
-      ['Codex · gpt', '3', '0', '0%'],
-      ['Pi · opus', '2', '0', '0%']
+      ['Claude · opus', '(2/8) 25%', '(0/4) 0%'],
+      ['Pi · glm', '(2/5) 40%', '—'],
+      ['Codex · gpt', '—', '(0/3) 0%'],
+      ['Pi · opus', '(0/2) 0%', '—']
     ]);
   });
 

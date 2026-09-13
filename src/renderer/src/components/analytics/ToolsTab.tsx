@@ -25,35 +25,41 @@ function rateCell(cell: RateCell | undefined): { text: string; tone?: string; ti
   return { text: `(${cell.errors}/${cell.calls}) ${fmtPct(rate)}`, tone: rateTone(rate), title: `${plural(cell.errors, 'error')} in ${plural(cell.calls, 'call')}` };
 }
 
+interface RateMatrixRow extends RateCell {
+  name: string;
+}
+
 /**
- * Groups the per-model tool rows into a matrix: one row per model, one column per tool. Models grow
- * with every provider added, so they take the rows and the table gets taller instead of wider.
+ * Groups per-owner tool rows into a matrix: one row per owner (a model, or a harness and model), one
+ * column per tool. Owners keep growing, so they take the rows and the table gets taller instead of
+ * wider; case-insensitive tool names merge across harnesses. Cells read `(errors/calls) rate`.
  */
-function errorRateTable(modelTools: ModelToolRow[]): TableSpec | null {
-  const models = new Map<string, { label: string; calls: number; errors: number; tools: Map<string, RateCell> }>();
+function rateMatrix<T extends RateMatrixRow>(rows: T[], rowHeader: string, owner: (r: T) => { key: string; label: string }): TableSpec | null {
+  const owners = new Map<string, { label: string; calls: number; errors: number; tools: Map<string, RateCell> }>();
   const tools = new Map<string, { label: string; calls: number }>();
-  for (const r of modelTools) {
+  for (const r of rows) {
+    const { key, label } = owner(r);
     const nameKey = r.name.toLocaleLowerCase();
-    const m = models.get(r.key) ?? { label: r.label || r.key, calls: 0, errors: 0, tools: new Map() };
+    const m = owners.get(key) ?? { label, calls: 0, errors: 0, tools: new Map() };
     const cell = m.tools.get(nameKey) ?? { calls: 0, errors: 0 };
     cell.calls += r.calls;
     cell.errors += r.errors;
     m.tools.set(nameKey, cell);
     m.calls += r.calls;
     m.errors += r.errors;
-    models.set(r.key, m);
+    owners.set(key, m);
     const t = tools.get(nameKey) ?? { label: r.name, calls: 0 };
     // Prefer an all-lowercase spelling when one harness supplies it.
     if (r.name === nameKey) t.label = r.name;
     t.calls += r.calls;
     tools.set(nameKey, t);
   }
-  if (models.size === 0) return null;
-  const rows = [...models.entries()].sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
+  if (owners.size === 0) return null;
+  const sortedRows = [...owners.entries()].sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
   const cols = [...tools.entries()].sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
   return {
-    columns: [{ label: 'Model' }, ...cols.map(([, t]) => ({ label: t.label, numeric: true }))],
-    rows: rows.map(([key, m]) => [
+    columns: [{ label: rowHeader }, ...cols.map(([, t]) => ({ label: t.label, numeric: true }))],
+    rows: sortedRows.map(([key, m]) => [
       <span key={key} className="mono" title={m.label}>
         {m.label || key}
       </span>,
@@ -69,42 +75,14 @@ function errorRateTable(modelTools: ModelToolRow[]): TableSpec | null {
   };
 }
 
-/** One row per harness and model pair, worst error rate first; the tooltip breaks it down by tool. */
-function harnessModelRateTable(rows: HarnessModelToolRow[]): TableSpec | null {
-  interface Combo extends RateCell {
-    harness: string;
-    label: string;
-    tools: string[];
-  }
-  const combos = new Map<string, Combo>();
-  for (const r of rows) {
-    const comboKey = `${r.harness}|${r.key}`;
-    const c = combos.get(comboKey) ?? { harness: r.harness, label: r.label || r.key, calls: 0, errors: 0, tools: [] };
-    c.calls += r.calls;
-    c.errors += r.errors;
-    if (r.calls > 0) c.tools.push(`${r.name} ${r.errors}/${r.calls}`);
-    combos.set(comboKey, c);
-  }
-  if (combos.size === 0) return null;
-  const rate = (c: RateCell) => (c.calls > 0 ? c.errors / c.calls : -1);
-  const sorted = [...combos.entries()].sort((a, b) => rate(b[1]) - rate(a[1]) || b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
-  return {
-    columns: [{ label: 'Harness · model' }, { label: 'Calls', numeric: true }, { label: 'Errors', numeric: true }, { label: 'Error rate', numeric: true }],
-    rows: sorted.map(([comboKey, c]) => {
-      const ratio = c.calls > 0 ? c.errors / c.calls : null;
-      const tone = ratio === null ? undefined : rateTone(ratio);
-      return [
-        <span key={comboKey} className="mono" title={`${harnessShort(c.harness)} · ${c.label}`}>
-          {harnessShort(c.harness)} · {c.label}
-        </span>,
-        fmtCompact(c.calls),
-        fmtCompact(c.errors),
-        <span key="rate" title={c.tools.join(' · ') || 'No calls'} style={tone ? { color: tone } : undefined}>
-          {fmtPct(ratio)}
-        </span>
-      ];
-    })
-  };
+/** One row per model, one column per tool. */
+function errorRateTable(modelTools: ModelToolRow[]): TableSpec | null {
+  return rateMatrix(modelTools, 'Model', (r) => ({ key: r.key, label: r.label || r.key }));
+}
+
+/** The same matrix, one row per harness and model pair. */
+function harnessModelRateTable(harnessModelTools: HarnessModelToolRow[]): TableSpec | null {
+  return rateMatrix(harnessModelTools, 'Harness · model', (r) => ({ key: `${r.harness}|${r.key}`, label: `${harnessShort(r.harness)} · ${r.label || r.key}` }));
 }
 
 export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsSummary }) {
@@ -183,7 +161,7 @@ export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsS
           <DataTable table={errorRateTable(scope.modelTools)!} compact />
         )}
       </ChartCard>
-      <ChartCard title="Error rate by harness + model" subtitle={`Errors ÷ calls across every tool, worst rate first · ${scope.label}`}>
+      <ChartCard title="Error rate by harness + model" subtitle={`Errors ÷ calls for each tool, by the harness and model that made it · ${scope.label}`}>
         {scope.harnessModelTools.length === 0 ? (
           <div className="chart-empty">No per-harness tool calls recorded yet — filled by new tool calls.</div>
         ) : (
