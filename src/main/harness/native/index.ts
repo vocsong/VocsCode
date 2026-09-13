@@ -1,23 +1,24 @@
 /** Built-in agent loop adapter: drives a provider directly and runs the local tool set, with approvals gated in-process. */
-import path from 'node:path';
 import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UserInput } from '../../../shared/types';
 import { errorMessage, shortId, truncate } from '../../util/async';
 import { TurnUsageTracker } from '../../util/turn-usage';
 import { estimateCostUsd, findContextWindow, findPricing, STATIC_MODELS_BY_PROVIDER } from '../../models/static-models';
 import { resolveProviderApiKey } from '../../models/providers';
-import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from '../permissions';
+import { gateAction, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from '../permissions';
 import type { HarnessAdapter, HarnessContext } from '../types';
 import { anthropicStep, isAnthropicProvider, openaiStep, type NativeMessage, type StepResult } from './drivers';
 import { buildSystemPrompt } from './prompt';
 import {
   NATIVE_TOOLS,
   editFileTool,
+  fileVersionKey,
   globTool,
   grepTool,
   listDirTool,
   previewEdit,
   previewWrite,
   readFileTool,
+  requiresPathApproval,
   runBash,
   writeFileTool,
   MAX_OUTPUT,
@@ -45,6 +46,8 @@ export class NativeAdapter implements HarnessAdapter {
   private model: ModelRef | null = null;
   private effort: EffortLevel | undefined;
   private sessionAllowed = new Set<string>();
+  // Intentionally never persisted: resumed sessions must re-read before changing files.
+  private readVersions = new Map<string, { fingerprint: string; total: number; ranges: [number, number][] }>();
   private readonly usage: TurnUsageTracker;
   private started = false;
 
@@ -124,6 +127,7 @@ export class NativeAdapter implements HarnessAdapter {
     this.history = structuredClone(boundary);
     // Boundaries from the discarded branch might otherwise restore context that no longer exists.
     this.boundaries = {};
+    this.readVersions.clear();
     this.queue = [];
     this.steer = [];
     this.ctx.updateMeta({ queued: 0 });
@@ -274,6 +278,25 @@ export class NativeAdapter implements HarnessAdapter {
     };
     this.ctx.emit({ type: 'item.upsert', item: { ...item } });
     const finish = (res: ToolExecResult): ToolExecResult => {
+      if (!res.isError && !signal.aborted) {
+        const page = res.readCoverage;
+        if (page) {
+          const previous = this.readVersions.get(page.path);
+          const ranges: [number, number][] = previous?.fingerprint === page.fingerprint && previous.total === page.total ? [...previous.ranges] : [];
+          ranges.push([page.start, page.end]);
+          ranges.sort((a, b) => a[0] - b[0]);
+          const merged: [number, number][] = [];
+          for (const range of ranges) {
+            const last = merged.at(-1);
+            if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+            else merged.push([...range]);
+          }
+          this.readVersions.set(page.path, { fingerprint: page.fingerprint, total: page.total, ranges: merged });
+        } else if (res.fileVersion) {
+          const version = res.fileVersion;
+          this.readVersions.set(version.path, { fingerprint: version.fingerprint, total: version.total, ranges: [[0, version.total]] });
+        }
+      }
       item.output = res.output;
       item.status = res.isError ? 'error' : 'done';
       item.exitCode = res.exitCode;
@@ -291,7 +314,7 @@ export class NativeAdapter implements HarnessAdapter {
     if (def.mutating) {
       const mode: PermissionMode = this.ctx.permissionMode();
       const command = typeof args.command === 'string' ? (args.command as string) : undefined;
-      const outsideCwd = def.isEdit && typeof args.path === 'string' && isOutsideWorkspace(cwd, args.path as string, path);
+      const outsideCwd = def.isEdit && typeof args.path === 'string' && await requiresPathApproval(cwd, args.path);
       let verdict = gateAction(mode, { mutating: true, isEdit: def.isEdit, command, sessionAllowed: this.sessionAllowed.has(call.name) });
       if (outsideCwd && mode !== 'full-auto' && verdict === 'allow') verdict = 'ask';
       if (verdict === 'deny') {
@@ -316,7 +339,7 @@ export class NativeAdapter implements HarnessAdapter {
           cwd,
           input: args,
           changes,
-          description: outsideCwd ? 'This path is outside the project directory.' : undefined,
+          description: outsideCwd ? 'This path is outside the project directory or its physical containment could not be verified.' : undefined,
           toolItemId: item.id,
           options: OPTIONS_ALLOW_DENY
         });
@@ -332,6 +355,9 @@ export class NativeAdapter implements HarnessAdapter {
     }
 
     try {
+      if (signal.aborted) return finish({ output: 'Interrupted before execution.', isError: true });
+      const version = typeof args.path === 'string' ? this.readVersions.get(fileVersionKey(cwd, args.path)) : undefined;
+      const expected = version && version.ranges.length === 1 && version.ranges[0][0] === 0 && version.ranges[0][1] === version.total ? version.fingerprint : undefined;
       switch (call.name) {
         case 'bash':
           return finish(
@@ -348,15 +374,15 @@ export class NativeAdapter implements HarnessAdapter {
             })
           );
         case 'read_file':
-          return finish(await readFileTool(cwd, args as { path: string; offset?: number; limit?: number }));
+          return finish(await readFileTool(cwd, args as { path: string; offset?: number; limit?: number; byte_offset?: number }));
         case 'write_file':
-          return finish(await writeFileTool(cwd, args as { path: string; content: string }));
+          return finish(await writeFileTool(cwd, args as { path: string; content: string }, expected));
         case 'edit_file':
-          return finish(await editFileTool(cwd, args as { path: string; old_string: string; new_string: string; replace_all?: boolean }));
+          return finish(await editFileTool(cwd, args as { path: string; old_string: string; new_string: string; replace_all?: boolean }, expected));
         case 'list_dir':
           return finish(await listDirTool(cwd, args as { path?: string }));
         case 'glob':
-          return finish(await globTool(cwd, args as { pattern: string; path?: string }));
+          return finish(await globTool(cwd, args as { pattern: string; path?: string }, signal));
         case 'grep':
           return finish(await grepTool(cwd, args as { pattern: string; path?: string; glob?: string; max_results?: number }, signal));
         default:
@@ -427,6 +453,7 @@ export class NativeAdapter implements HarnessAdapter {
   }
 
   async dispose(): Promise<void> {
+    this.readVersions.clear();
     this.abort?.abort();
   }
 }

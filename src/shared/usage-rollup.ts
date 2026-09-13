@@ -7,6 +7,7 @@ import type {
   AnalyticsDayPoint,
   FileUsage,
   FileUsageRow,
+  HarnessToolRow,
   ModelToolRow,
   ToolUsage,
   ToolUsageRow,
@@ -36,7 +37,7 @@ export function emptySlice(label: string): UsageSlice {
 }
 
 export function emptyDimensions(): UsageDayDimensions {
-  return { harness: {}, model: {}, project: {}, tool: {}, modelTool: {}, file: {} };
+  return { harness: {}, model: {}, project: {}, tool: {}, modelTool: {}, harnessTool: {}, file: {} };
 }
 
 export function emptyToolUsage(): ToolUsage {
@@ -100,6 +101,11 @@ export function modelToolUsageRows(modelTools: Record<string, Record<string, Too
   return rows.sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
 }
 
+/** Harness identities stay distinct; only tool-name casing is combined, never aliases. */
+export function harnessToolUsageRows(harnessTools: Record<string, Record<string, ToolUsage>>): HarnessToolRow[] {
+  return modelToolUsageRows(harnessTools, new Map(Object.keys(harnessTools).map((key) => [key, key])));
+}
+
 export function addFileUsage(into: FileUsage, from: FileUsage): void {
   into.adds += from.adds;
   into.updates += from.updates;
@@ -131,6 +137,8 @@ export interface RangeRollup {
   toolTotals: ToolUsage;
   /** Per-tool call counts keyed by model. */
   modelTools: ModelToolRow[];
+  /** Live per-tool outcomes keyed by harness; legacy days contribute nothing. */
+  harnessTools: HarnessToolRow[];
   files: FileUsageRow[];
   /** Distinct sessions that recorded usage on the days in range. */
   sessionIds: string[];
@@ -175,6 +183,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
   const ids = new Set<string>();
   const tools: Record<string, ToolUsage> = {};
   const modelTools: Record<string, Record<string, ToolUsage>> = {};
+  const harnessTools: Record<string, Record<string, ToolUsage>> = {};
   const files: Record<string, FileUsage> = {};
   const modelToolLabels = new Map<string, string>();
   for (const d of days) {
@@ -190,6 +199,9 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
     for (const [key, s] of Object.entries(by.model)) if (s.label) modelToolLabels.set(key, s.label);
     for (const [key, perTool] of Object.entries(by.modelTool)) {
       for (const [name, t] of Object.entries(perTool)) addToolUsage(((modelTools[key] ??= {})[name] ??= emptyToolUsage()), t);
+    }
+    for (const [key, perTool] of Object.entries(by.harnessTool ?? {})) {
+      for (const [name, t] of Object.entries(perTool)) addToolUsage(((harnessTools[key] ??= {})[name] ??= emptyToolUsage()), t);
     }
     for (const [p, f] of Object.entries(by.file)) addFileUsage((files[p] ??= emptyFileUsage()), f);
   }
@@ -218,6 +230,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
     tools: toolRows,
     toolTotals,
     modelTools: modelToolRows,
+    harnessTools: harnessToolUsageRows(harnessTools),
     files: fileRows,
     sessionIds: [...ids],
     unattributed,

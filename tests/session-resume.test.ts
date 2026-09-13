@@ -166,7 +166,7 @@ class FakePiServer {
   private buf = '';
   private readonly handlers = new Map<string, (params: AnyRecord) => unknown>();
 
-  constructor(private readonly child: AnyRecord) {
+  constructor(private readonly child: AnyRecord, private readonly ready = true) {
     child.stdin.on('data', (d: Buffer) => this.onData(d.toString('utf8')));
   }
 
@@ -184,6 +184,12 @@ class FakePiServer {
       if (line) {
         const msg = JSON.parse(line) as AnyRecord;
         const data = this.handlers.get(msg.type as string)?.(msg) ?? {};
+        if (msg.type === 'get_state' && this.ready) {
+          for (const capability of ['approvals', 'tools']) {
+            const nonce = mocks.spawnCalls.at(-1)?.opts.env?.VOCS_CODE_PI_NONCE;
+            this.child.stdout.write(JSON.stringify({ type: 'extension_ui_request', method: 'notify', id: capability, message: 'VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce, capability, ready: true }) }) + '\n');
+          }
+        }
         this.child.stdout.write(JSON.stringify({ type: 'response', id: msg.id, success: true, data }) + '\n');
       }
       idx = this.buf.indexOf('\n');
@@ -358,6 +364,19 @@ describe('pi resume seam', () => {
   beforeEach(() => {
     mocks.spawnChildren.length = 0;
     mocks.spawnCalls.length = 0;
+  });
+
+  it('refuses a runtime without the required extension handshake before sending any prompt', async () => {
+    const h = makeAdapterCtx({ harness: 'pi', runtime: { resolve: () => ({ name: 'pi', path: 'C:/fake/pi.exe' }), resource: () => 'C:/fake/extension.ts' } });
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    new FakePiServer(child, false).respond('get_state', {});
+    const commands: string[] = [];
+    child.stdin.on('data', (data: Buffer) => commands.push(data.toString('utf8')));
+    const adapter = new PiAdapter(h.ctx);
+    await expect(adapter.send({ text: 'Must not execute' })).rejects.toThrow(/Missing readiness/);
+    expect(commands.some((c) => c.includes('"type":"prompt"'))).toBe(false);
+    expect(h.events.some((e) => e.type === 'status' && e.status === 'idle')).toBe(false);
   });
 
   it('passes the stored session file to the CLI as --session', async () => {

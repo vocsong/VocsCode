@@ -61,6 +61,7 @@ const summary: AnalyticsSummary = {
   toolTotals: { calls: 8, errors: 0, declined: 0, durationMs: 0 },
   tools: [{ name: 'Bash', calls: 8, errors: 0, declined: 0, durationMs: 0 }],
   modelTools: [],
+  harnessTools: [],
   files: [],
   sessions: [rec('s1', 'claude', 'opus', 5, 6), rec('s2', 'pi', 'glm', 1, 2), rec('s3', 'pi', 'glm', 0.5, 1)],
   sessionCount: 3,
@@ -75,7 +76,7 @@ const invokeMock = vi.fn().mockImplementation((channel: string) => Promise.resol
   on: vi.fn().mockReturnValue(() => undefined)
 };
 
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { fireEvent, render, waitFor, within } from '@testing-library/react';
 import { AnalyticsDashboard } from '../src/renderer/src/components/AnalyticsDashboard';
 import { useStore } from '../src/renderer/src/store';
 
@@ -165,6 +166,55 @@ describe('analytics dashboard', () => {
     expect(Array.from(table.querySelectorAll('tr')).filter((tr) => tr.textContent?.toLowerCase().startsWith('bash'))).toHaveLength(1);
     const readRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('Read')) as HTMLTableRowElement;
     expect(Array.from(readRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['Read', '—', '—', '(0/2) 0%', '—', '—', '—', '—', '—']);
+  });
+
+  it('shows exact harness/tool outcomes and executed-call rates for the selected dates and all time', async () => {
+    reset();
+    const old = sliced(10, [{ id: 's1', harness: 'claude', model: 'same', project: '/p', costUsd: 0, turns: 0 }]);
+    const recent = sliced(1, [
+      { id: 's1', harness: 'claude', model: 'same', project: '/p', costUsd: 0, turns: 0 },
+      { id: 's2', harness: 'pi', model: 'same', project: '/p', costUsd: 0, turns: 0 }
+    ]);
+    old.usage.by!.harnessTool = { claude: { Read: { calls: 3, errors: 1, declined: 1, durationMs: 0 } } };
+    recent.usage.by!.harnessTool = {
+      claude: { read: { calls: 3, errors: 1, declined: 1, durationMs: 0 } },
+      pi: { Read: { calls: 2, errors: 0, declined: 1, durationMs: 0 }, bash: { calls: 1, errors: 0, declined: 1, durationMs: 0 } }
+    };
+    const response: AnalyticsSummary = {
+      ...summary,
+      days: [old, recent],
+      harnessTools: [
+        { key: 'claude', label: 'claude', name: 'read', calls: 10, errors: 3, declined: 4, durationMs: 0 },
+        { key: 'pi', label: 'pi', name: 'read', calls: 2, errors: 0, declined: 1, durationMs: 0 },
+        { key: 'pi', label: 'pi', name: 'bash', calls: 1, errors: 0, declined: 1, durationMs: 0 }
+      ]
+    };
+    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? response : []));
+    const view = render(<AnalyticsDashboard />);
+    const ui = within(view.container);
+    const cells = () => within(ui.getByRole('table', { name: 'Harness/tool reliability' })).getAllByRole('row').slice(1).map((row) => within(row).getAllByRole('cell').map((cell) => cell.textContent));
+    try {
+      fireEvent.click(ui.getByRole('tab', { name: 'Tools & files' }));
+      await waitFor(() => expect(cells()).toEqual([
+        ['Claude', 'read', '6', '2', '2', '50%'],
+        ['Pi', 'read', '2', '0', '1', '0%'],
+        ['Pi', 'bash', '1', '0', '1', '—']
+      ]));
+      expect(ui.getByText(/Recorded since update/).textContent).toContain('same model and workload');
+      expect(ui.getByText(/Error rate = errors/).textContent).toContain('executed calls (calls − declined)');
+      fireEvent.click(ui.getByRole('radio', { name: '7 days' }));
+      await waitFor(() => expect(cells()[0]).toEqual(['Claude', 'read', '3', '1', '1', '50%']));
+      expect(invokeMock).toHaveBeenCalledWith('analytics:summary', { days: 7 });
+      expect(ui.getByText(`last 7 days · ${dateOf(6)} – ${dateOf(0)}`)).toBeTruthy();
+      fireEvent.click(ui.getByRole('radio', { name: 'All time' }));
+      await waitFor(() => expect(cells()[0]).toEqual(['Claude', 'read', '10', '3', '4', '50%']));
+      expect(invokeMock).toHaveBeenCalledWith('analytics:summary', { days: 0 });
+      fireEvent.click(ui.getByRole('radio', { name: '30 days' }));
+      await waitFor(() => expect(cells()[0]).toEqual(['Claude', 'read', '6', '2', '2', '50%']));
+    } finally {
+      view.unmount();
+      invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? summary : []));
+    }
   });
 
   it('lets the legend hide a series and every chart card swap to its table', async () => {

@@ -1,6 +1,7 @@
 /** Tools & files: call volume and reliability per tool, and the files the agents touched most. */
 import React, { useState } from 'react';
 import type { AnalyticsSummary, ModelToolRow } from '../../../../shared/types';
+import { harnessShort } from '../../format';
 import { Button } from '../ui';
 import { BarList, ChartCard, ColumnChart, DataTable, Legend, Meter, Segmented, seriesTable, StackedBar } from './charts';
 import { delta, FILE_KINDS, fmtCompact, fmtMs, fmtPct, plural, SPLITS, splitSeries, type Scope, type Split } from './model';
@@ -148,6 +149,33 @@ export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsS
           )}
         </ChartCard>
       </div>
+      <ChartCard title="Harness/tool reliability" subtitle={`${scope.label} · ${dates[0]} – ${dates[dates.length - 1]}`}>
+        <p className="muted small">Recorded since update; historical calls are not backfilled. Compare harnesses only with the same model and workload.</p>
+        <p className="muted small">Error rate = errors ÷ executed calls (calls − declined). No executed calls shows —. Tool names are grouped by casing, not aliases.</p>
+        {scope.harnessTools.length === 0 ? (
+          <div className="chart-empty">No per-harness tool calls recorded in this range.</div>
+        ) : (
+          <DataTable
+            ariaLabel="Harness/tool reliability"
+            compact
+            table={{
+              columns: [{ label: 'Harness' }, { label: 'Tool' }, { label: 'Calls', numeric: true }, { label: 'Errors', numeric: true }, { label: 'Declined', numeric: true }, { label: 'Error rate', numeric: true }],
+              rows: scope.harnessTools.map((r) => {
+                const executed = r.calls - r.declined;
+                const rate = executed > 0 ? r.errors / executed : null;
+                return [
+                  harnessShort(r.key),
+                  <span className="mono" title={r.name}>{r.name || '(unnamed)'}</span>,
+                  String(r.calls),
+                  String(r.errors),
+                  String(r.declined),
+                  <span title={`${r.errors} errors / ${executed} executed calls`} style={rate === null ? undefined : { color: rateTone(rate) }}>{fmtPct(rate)}</span>
+                ];
+              })
+            }}
+          />
+        )}
+      </ChartCard>
       <ChartCard title="Error rate by model" subtitle={`Errors ÷ calls for each tool, by the model that made it · ${scope.label}`}>
         {scope.modelTools.length === 0 ? (
           <div className="chart-empty">No per-model tool calls recorded yet — filled by new tool calls.</div>

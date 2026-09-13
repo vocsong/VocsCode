@@ -3,10 +3,10 @@ import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { addDay, AnalyticsStore, apportion, dayKey, emptyDay, summarize, tokensPerSecond, toolCallFromItem, turnSpeed, usageDelta } from '../src/main/analytics';
 import { emptyUsage } from '../src/main/models/static-models';
-import { rollupDays } from '../src/shared/usage-rollup';
+import { emptyDimensions, rollupDays } from '../src/shared/usage-rollup';
 import type { SessionMeta, TranscriptItem, UsageSessionRecord, UsageTotals } from '../src/shared/types';
 
 const dirs: string[] = [];
@@ -355,6 +355,139 @@ describe('per-tool-call tracking', () => {
     expect(toolCallFromItem(toolItem('t2'))?.usage).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 250 });
     expect(toolCallFromItem(toolItem('t3', { status: 'error' }))?.usage.errors).toBe(1);
     expect(toolCallFromItem(toolItem('t4', { status: 'declined', durationMs: undefined }))?.usage).toEqual({ calls: 1, errors: 0, declined: 1, durationMs: 0 });
+  });
+
+  it('records exact harness/tool outcomes once across calls and restart, without guessing an unknown harness', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    const activeModel = { provider: 'anthropic', model: 'same-model' };
+    const sessions = [meta('claude', 'claude', usage({}), { activeModel }), meta('pi', 'pi', usage({}), { activeModel })];
+    const store = new AnalyticsStore(dir, { log });
+    await store.load(sessions);
+    const calls = [
+      ['claude', toolItem('1', { name: 'Read' })],
+      ['claude', toolItem('2', { name: 'read', status: 'error' })],
+      ['claude', toolItem('3', { name: 'Read', status: 'declined' })],
+      ['pi', toolItem('1', { name: 'read' })],
+      ['pi', toolItem('2', { name: 'Read', status: 'declined' })],
+      ['unknown', toolItem('1', { name: 'Read', status: 'error' })]
+    ] as const;
+    for (const [id, item] of calls) {
+      store.recordToolCall(id, item, t0, activeModel);
+      store.recordToolCall(id, item, t0, activeModel);
+    }
+    store.recordToolCall('pi', toolItem('running', { status: 'running' }), t0);
+    await store.flush();
+    const fresh = new AnalyticsStore(dir, { log });
+    await fresh.load(sessions);
+    for (const [id, item] of calls) fresh.recordToolCall(id, item, t0 + 86_400_000, activeModel);
+    await fresh.flush();
+    const s = fresh.summary(0, t0);
+    expect(s.harnessTools).toEqual([
+      { key: 'claude', label: 'claude', name: 'read', calls: 3, errors: 1, declined: 1, durationMs: 750 },
+      { key: 'pi', label: 'pi', name: 'read', calls: 2, errors: 0, declined: 1, durationMs: 500 }
+    ]);
+    expect(rollupDays(s.days).harnessTools).toEqual(s.harnessTools);
+    expect(s.toolTotals).toEqual({ calls: 6, errors: 2, declined: 2, durationMs: 1500 });
+    expect(s.days.map((d) => [d.date, d.usage.toolCalls])).toEqual([['2025-06-09', 6]]);
+    expect(s.sessions.map((x) => x.toolCalls)).toEqual([3, 2]);
+    expect(s.modelTools).toEqual([{ key: 'anthropic/same-model', label: 'same-model', name: 'read', calls: 6, errors: 2, declined: 2, durationMs: 1500 }]);
+  });
+
+  it.each([false, true])('loads legacy aggregates without inventing harness errors or replaying old calls (existing slices: %s)', async (hasSlices) => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    const m = meta('old', 'pi', usage({ turns: 1 }), { updatedAt: t0 });
+    const old = toolItem('old-error', { name: 'Read', status: 'error' });
+    const by = emptyDimensions();
+    delete by.harnessTool;
+    await fs.writeFile(path.join(dir, 'analytics.json'), JSON.stringify({
+      version: 1,
+      days: { '2025-06-09': { ...emptyDay(), turns: 1, toolCalls: 1, by: hasSlices ? by : undefined } },
+      recorded: { old: m.usage },
+      sessions: { old: { id: 'old', title: 'old', harness: 'pi', projectRoot: '/repo', createdAt: t0, updatedAt: t0, usage: m.usage, toolCalls: 1 } },
+      tools: { Read: { calls: 1, errors: 1, declined: 0, durationMs: 250 } },
+      files: {}
+    }));
+    const store = new AnalyticsStore(dir, { log });
+    await store.load([m], async () => [old]);
+    expect(store.summary(0).harnessTools).toEqual([]);
+    expect(rollupDays(store.summary(0).days).harnessTools).toEqual([]);
+    if (hasSlices) expect(store.summary(0).days[0].usage.by?.harnessTool).toBeUndefined();
+    store.recordToolCall('old', old, t0);
+    store.recordToolCall('old', toolItem('new', { name: 'read', status: 'declined' }), t0 + 86_400_000);
+    await store.flush();
+    const fresh = new AnalyticsStore(dir, { log });
+    await fresh.load([m]);
+    fresh.recordToolCall('old', old, t0);
+    await fresh.flush();
+    const s = fresh.summary(0);
+    expect(s.toolTotals).toEqual({ calls: 2, errors: 1, declined: 1, durationMs: 500 });
+    expect(s.harnessTools).toEqual([{ key: 'pi', label: 'pi', name: 'read', calls: 1, errors: 0, declined: 1, durationMs: 250 }]);
+    expect(rollupDays(s.days.slice(0, 1)).harnessTools).toEqual([]);
+    expect(s.days.map((d) => d.usage.toolCalls)).toEqual([1, 1]);
+  });
+
+  it('keeps transcript backfill out of the new harness dimension', async () => {
+    const store = new AnalyticsStore(tmpDir(), { log });
+    const old = toolItem('old-error', { name: 'Read', status: 'error' });
+    await store.load([meta('old', 'claude', usage({}))], async () => [old]);
+    expect(store.summary(0).toolTotals.calls).toBe(1);
+    expect(store.summary(0).harnessTools).toEqual([]);
+    expect(rollupDays(store.summary(0).days).harnessTools).toEqual([]);
+    store.recordToolCall('old', old);
+    await store.flush();
+    expect(store.summary(0).toolTotals.calls).toBe(1);
+    expect(store.summary(0).harnessTools).toEqual([]);
+  });
+
+  it('bounds the persisted replay window while retaining in-process deduplication', async () => {
+    const dir = tmpDir();
+    const store = new AnalyticsStore(dir, { log });
+    await store.load([meta('s', 'pi', usage({}))]);
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    for (let i = 0; i < 10_001; i++) store.recordToolCall('s', toolItem(String(i)), t0);
+    // Eviction from disk's recent window must not regress the existing in-process guarantee.
+    store.recordToolCall('s', toolItem('0'), t0);
+    await store.flush();
+    const disk = JSON.parse(await fs.readFile(path.join(dir, 'analytics.json'), 'utf8'));
+    expect(disk.recordedTools).toHaveLength(10_000);
+    const fresh = new AnalyticsStore(dir, { log });
+    await fresh.load([]);
+    fresh.recordToolCall('s', toolItem('10000'), t0);
+    await fresh.flush();
+    expect(fresh.summary(0).harnessTools).toEqual([{ key: 'pi', label: 'pi', name: 'Bash', calls: 10_001, errors: 0, declined: 0, durationMs: 2_500_250 }]);
+    expect(fresh.summary(0).toolTotals.calls).toBe(10_001);
+  });
+
+  it('recovers a failed atomic write with counts and replay protection persisted together', async () => {
+    const dir = tmpDir();
+    const warn = vi.fn();
+    const store = new AnalyticsStore(dir, { log: warn });
+    await store.load([meta('s', 'pi', usage({}))]);
+    const item = toolItem('failure', { name: 'read', status: 'error' });
+    store.recordToolCall('s', item);
+    const rename = vi.spyOn(fs, 'rename').mockRejectedValueOnce(Object.assign(new Error('injected write failure'), { code: 'EIO' }));
+    try {
+      await store.flush();
+      expect(rename).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith('warn', expect.stringContaining('analytics write failed'));
+      const disk = JSON.parse(await fs.readFile(path.join(dir, 'analytics.json'), 'utf8'));
+      expect(disk.tools).toEqual({});
+    } finally {
+      rename.mockRestore();
+    }
+    store.recordToolCall('s', item);
+    await store.flush();
+    const fresh = new AnalyticsStore(dir, { log });
+    await fresh.load([]);
+    fresh.recordToolCall('s', item);
+    await fresh.flush();
+    const s = fresh.summary(0);
+    expect(s.toolTotals).toEqual({ calls: 1, errors: 1, declined: 0, durationMs: 250 });
+    expect(s.harnessTools).toEqual([{ key: 'pi', label: 'pi', name: 'read', calls: 1, errors: 1, declined: 0, durationMs: 250 }]);
+    expect(s.days.map((d) => d.usage.toolCalls)).toEqual([1]);
+    expect(s.sessions[0].toolCalls).toBe(1);
   });
 
   it('aggregates file changes by kind', () => {

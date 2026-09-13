@@ -23,6 +23,12 @@ export async function openNewSession(win: Page): Promise<void> {
   await win.waitForSelector('.modal');
 }
 
+/** Opens analytics through the sidebar rather than reaching into renderer state. */
+export async function openAnalytics(win: Page): Promise<void> {
+  await win.getByRole('button', { name: 'Analytics', exact: true }).click();
+  await win.getByRole('tablist', { name: 'Analytics sections' }).waitFor();
+}
+
 /**
  * Picks a model in the new-session dialog by `provider/id` — the title the picker puts on every
  * row, and the only part of it that is not a display name.

@@ -19,7 +19,7 @@ import type {
   UsageSpeed,
   UsageTotals
 } from '../shared/types';
-import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, modelToolUsageRows, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
+import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, harnessToolUsageRows, modelToolUsageRows, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
 import { readJson, writeJson } from './util/fs';
 
 export { emptyFileUsage, emptyToolUsage };
@@ -36,11 +36,18 @@ interface AnalyticsFile {
   tools: Record<string, ToolUsage>;
   /** Completed tool calls per tool name, keyed by model (`provider/model`). */
   modelTools: Record<string, Record<string, ToolUsage>>;
+  /** Live tool outcomes by known session harness; never reconstructed from legacy aggregates. */
+  harnessTools: Record<string, Record<string, ToolUsage>>;
+  /** Bounded recent-call replay protection, persisted atomically with the counters. */
+  recordedTools: string[];
   /** File-change counts per path, aggregated from tool results. */
   files: Record<string, FileUsage>;
 }
 
-const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, files: {} };
+const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessTools: {}, recordedTools: [], files: {} };
+
+/** Older calls remain deduped in memory; only this recent window survives restart. */
+const RECENT_TOOL_LIMIT = 10_000;
 
 const EMPTY_USAGE: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
 
@@ -218,7 +225,7 @@ export function toolCallFromItem(item: Extract<TranscriptItem, { kind: 'tool' }>
   return { usage, changes };
 }
 
-export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, modelTools: Record<string, Record<string, ToolUsage>>, files: Record<string, FileUsage>, dayLimit: number, now: number): AnalyticsSummary {
+export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, modelTools: Record<string, Record<string, ToolUsage>>, files: Record<string, FileUsage>, dayLimit: number, now: number, harnessTools: Record<string, Record<string, ToolUsage>> = {}): AnalyticsSummary {
   const seed = (): UsageTotals => ({ ...EMPTY_USAGE });
   const sessionTotals = sessions.reduce<UsageTotals>((acc, s) => {
     addTotals(acc, s.usage);
@@ -325,6 +332,7 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     toolTotals,
     tools: toolRows,
     modelTools: modelToolRows,
+    harnessTools: harnessToolUsageRows(harnessTools),
     files: fileRows,
     sessions: sortedSessions,
     sessionCount: sessions.length,
@@ -341,7 +349,7 @@ export interface AnalyticsDeps {
 export type TranscriptReader = (sessionId: string) => Promise<TranscriptItem[]>;
 
 export class AnalyticsStore {
-  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, files: {} };
+  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessTools: {}, recordedTools: [], files: {} };
   private readonly file: string;
   private writeTimer: NodeJS.Timeout | null = null;
   private writeQueue: Promise<void> = Promise.resolve();
@@ -365,13 +373,17 @@ export class AnalyticsStore {
       sessions: stored?.sessions && typeof stored.sessions === 'object' ? stored.sessions : {},
       tools: stored?.tools && typeof stored.tools === 'object' ? stored.tools : {},
       modelTools: stored?.modelTools && typeof stored.modelTools === 'object' ? stored.modelTools : {},
+      harnessTools: stored?.harnessTools && typeof stored.harnessTools === 'object' ? stored.harnessTools : {},
+      recordedTools: Array.isArray(stored?.recordedTools) ? stored.recordedTools.filter((key) => typeof key === 'string').slice(-RECENT_TOOL_LIMIT) : [],
       files: stored?.files && typeof stored.files === 'object' ? stored.files : {}
     };
+    this.recordedTools = new Set(this.data.recordedTools);
     // Fields added after a file was written (speed samples, dimension slices) load as zero rather than NaN.
     for (const day of Object.values(this.data.days)) {
       for (const f of COUNTER_FIELDS) if (typeof day[f] !== 'number') day[f] = 0;
       if (day.by !== undefined && (typeof day.by !== 'object' || day.by === null)) delete day.by;
       if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'modelTool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
+      if (day.by?.harnessTool !== undefined && (typeof day.by.harnessTool !== 'object' || day.by.harnessTool === null)) delete day.by.harnessTool;
     }
     const estimated = this.estimateLegacyDays();
     if (estimated) this.deps.log('info', `analytics: estimated per-model slices for ${estimated} day(s) recorded before slice tracking`);
@@ -380,6 +392,16 @@ export class AnalyticsStore {
       if (this.data.recorded[meta.id]) {
         // Still refresh the snapshot: the title/model may have changed since the last write.
         this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]);
+        // On upgrade, remember old call ids without replaying their already-counted outcomes.
+        if (!Array.isArray(stored?.recordedTools) && readTranscript) {
+          try {
+            for (const item of await readTranscript(meta.id)) {
+              if (item.kind === 'tool' && item.status !== 'running') this.rememberTool(JSON.stringify([meta.id, item.id]));
+            }
+          } catch {
+            this.deps.log('warn', `analytics: could not seed recent tool replay protection for ${meta.id}`);
+          }
+        }
         continue;
       }
       this.data.recorded[meta.id] = { ...meta.usage };
@@ -458,7 +480,7 @@ export class AnalyticsStore {
         continue;
       }
       if (item.kind !== 'tool' || item.status === 'running') continue;
-      this.recordToolCall(sessionId, item, dayTs);
+      this.collectToolCall(sessionId, item, dayTs, undefined, false);
       calls++;
     }
     if (durationMs > 0) {
@@ -503,11 +525,20 @@ export class AnalyticsStore {
 
   /** Records one completed tool call: per-tool counts, per-file changes and today's call volume. */
   recordToolCall(sessionId: string, item: Extract<TranscriptItem, { kind: 'tool' }>, now = Date.now(), activeModel?: ModelRef): void {
-    const parsed = toolCallFromItem(item);
-    if (!parsed) return;
-    const key = `${sessionId}:${item.id}`;
-    if (this.recordedTools.has(key)) return;
+    this.collectToolCall(sessionId, item, now, activeModel, true);
+  }
+
+  private rememberTool(key: string): boolean {
+    if (this.recordedTools.has(key)) return false;
     this.recordedTools.add(key);
+    this.data.recordedTools.push(key);
+    if (this.data.recordedTools.length > RECENT_TOOL_LIMIT) this.data.recordedTools.shift();
+    return true;
+  }
+
+  private collectToolCall(sessionId: string, item: Extract<TranscriptItem, { kind: 'tool' }>, now: number, activeModel: ModelRef | undefined, live: boolean): void {
+    const parsed = toolCallFromItem(item);
+    if (!parsed || !this.rememberTool(JSON.stringify([sessionId, item.id]))) return;
     const tool = (this.data.tools[item.name] ??= emptyToolUsage());
     addToolUsage(tool, parsed.usage);
     for (const [p, u] of Object.entries(parsed.changes)) {
@@ -519,6 +550,10 @@ export class AnalyticsStore {
     addDay(day, { toolCalls: 1 });
     const by = (day.by ??= emptyDimensions());
     addToolUsage((by.tool[item.name] ??= emptyToolUsage()), parsed.usage);
+    if (live && session) {
+      addToolUsage(((this.data.harnessTools[session.harness] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+      addToolUsage((((by.harnessTool ??= {})[session.harness] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+    }
     // Prefer the model captured when the call began; transcript backfills fall back to the session snapshot.
     const provider = activeModel?.provider ?? session?.provider;
     const model = activeModel?.model ?? session?.model;
@@ -562,6 +597,6 @@ export class AnalyticsStore {
   /** Summary over the last `dayLimit` days (0 = all time), with the preceding window for comparison. */
   summary(dayLimit = 30, now = Date.now()): AnalyticsSummary {
     const sessions = Object.values(this.data.sessions);
-    return summarize(sessions, this.data.days, this.data.tools, this.data.modelTools, this.data.files, dayLimit, now);
+    return summarize(sessions, this.data.days, this.data.tools, this.data.modelTools, this.data.files, dayLimit, now, this.data.harnessTools);
   }
 }

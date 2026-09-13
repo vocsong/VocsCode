@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
@@ -10,6 +11,15 @@ import { OPTIONS_ALLOW_DENY } from './permissions';
 import { TurnUsageTracker } from '../util/turn-usage';
 
 export const PI_APPROVAL_MARKER = 'VCODE_APPROVAL::';
+const PI_BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
+const PI_READY_MARKER = 'VCODE_PI_READY::';
+const PI_EXTENSION_ERROR_MARKER = 'VCODE_PI_ERROR::';
+const PI_TOOL_INPUT_MARKER = 'VCODE_PI_TOOL_INPUT::';
+const PI_TOOL_PROMPT = 'Pi tools: prefer path (file_path is accepted). edit uses edits[]; a single old_string/new_string pair is accepted, including empty new_string. replace_all:true is unsupported: use unique non-overlapping edits. bash timeout is seconds; timeout_ms explicitly means milliseconds. Never send both timeout fields or guess their units.';
+
+function toolPath(input: Record<string, unknown> | undefined): string | undefined {
+  return typeof input?.path === 'string' ? input.path : typeof input?.file_path === 'string' ? input.file_path : undefined;
+}
 
 /** Env var names pi understands for each of our provider ids. */
 const PI_ENV_KEYS: Record<string, string> = {
@@ -79,6 +89,7 @@ export class PiAdapter implements HarnessAdapter {
   private _busy = false;
   private currentAssistant: Extract<TranscriptItem, { kind: 'assistant' }> | null = null;
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
+  private declinedTools = new Set<string>();
   private turnStartedAt = 0;
   private readonly usage: TurnUsageTracker;
   /** stopReason/errorMessage of the last assistant message — pi reports turn failures here, not as events. */
@@ -88,6 +99,9 @@ export class PiAdapter implements HarnessAdapter {
   private nextId = 1;
   private exited = false;
   private modeFile: string | null = null;
+  private extensionNonce = '';
+  private extensionCapabilities = new Set<string>();
+  private extensionFailure: string | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
@@ -98,15 +112,20 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   async start(): Promise<void> {
+    this.extensionNonce = randomUUID();
+    this.extensionCapabilities.clear();
+    this.extensionFailure = null;
+    this.exited = false;
     const meta = this.ctx.session();
     const s = this.ctx.settings();
     const bin = this.ctx.runtime.resolve('pi');
     if (!bin) throw new Error('pi is not installed. Run `npm install -g @earendil-works/pi-coding-agent` or set the path in Settings.');
     const ext = this.ctx.runtime.resource('pi', 'vocs-code-approvals.ts');
+    const toolsExt = this.ctx.runtime.resource('pi', 'vocs-code-tools.ts');
     const sessionDir = path.join(this.ctx.sessionDir, 'pi');
     await fs.mkdir(sessionDir, { recursive: true });
 
-    const args = ['--mode', 'rpc', '-e', ext, '--session-dir', sessionDir];
+    const args = ['--mode', 'rpc', '-e', ext, '-e', toolsExt, '--session-dir', sessionDir];
     if (meta.harnessRef.piSessionFile) args.push('--session', meta.harnessRef.piSessionFile);
     if (meta.config.model) {
       if (meta.config.model.provider) args.push('--provider', meta.config.model.provider);
@@ -114,12 +133,14 @@ export class PiAdapter implements HarnessAdapter {
     }
     const level = piThinkingLevel(this.ctx.effort());
     if (level) args.push('--thinking', level);
+    // Pi accumulates this flag; separate arguments avoid introducing newlines into Windows cmd shims.
     if (meta.config.appendSystemPrompt) args.push('--append-system-prompt', meta.config.appendSystemPrompt);
+    args.push('--append-system-prompt', PI_TOOL_PROMPT);
     args.push(...(s.pi.extraArgs ?? []));
 
     this.modeFile = path.join(sessionDir, 'permission-mode.txt');
     await fs.writeFile(this.modeFile, this.ctx.permissionMode(), 'utf8');
-    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE: '1' };
+    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE: '1' };
     for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
       if (!env[envKey]) {
         const key = await this.ctx.getApiKey(pid);
@@ -135,6 +156,7 @@ export class PiAdapter implements HarnessAdapter {
     child.stderr?.on('data', (d: Buffer) => err.push(d));
     child.on('close', (code) => {
       this.exited = true;
+      this.extensionCapabilities.clear();
       this._busy = false;
       for (const d of this.pending.values()) d.reject(new Error(`pi exited (${code})`));
       this.pending.clear();
@@ -142,11 +164,26 @@ export class PiAdapter implements HarnessAdapter {
     });
     child.on('error', (e) => this.ctx.emit({ type: 'error', message: `pi failed to start: ${errorMessage(e)}`, fatal: true }));
 
-    const state = await withTimeout(this.request<{ model?: PiModel; thinkingLevel?: string; sessionFile?: string; sessionId?: string }>('get_state'), 60_000, 'pi get_state');
+    let state: { model?: PiModel; thinkingLevel?: string; sessionFile?: string; sessionId?: string };
+    try {
+      state = await withTimeout(this.request<typeof state>('get_state'), 60_000, 'pi get_state');
+      // session_start notifications are emitted before get_state is handled in RPC mode.
+      this.assertExtensionsReady();
+    } catch (error) {
+      await this.dispose();
+      throw error;
+    }
     if (state.sessionFile) this.ctx.updateRef({ piSessionFile: state.sessionFile });
     if (state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: isEffortLevel(state.thinkingLevel) ? state.thinkingLevel : undefined });
     this.ctx.emit({ type: 'status', status: 'idle' });
     void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
+  }
+
+  private assertExtensionsReady(): void {
+    const missing = ['approvals', 'tools'].filter((capability) => !this.extensionCapabilities.has(capability));
+    if (this.extensionFailure || missing.length) {
+      throw new Error(`Incompatible Pi runtime: Vocs Code requires working approvals and tool compatibility extensions (Pi 0.85.1 APIs). ${this.extensionFailure ?? `Missing readiness: ${missing.join(', ')}.`} Update Pi or disable conflicting extensions; no prompt was sent.`);
+    }
   }
 
   private write(cmd: Record<string, unknown>): void {
@@ -266,17 +303,18 @@ export class PiAdapter implements HarnessAdapter {
       case 'tool_execution_end': {
         const e = ev as { toolCallId: string; toolName: string; result?: { content?: { type: string; text?: string }[]; details?: Record<string, unknown> }; isError: boolean };
         const item = this.toolItems.get(e.toolCallId);
-        if (!item) return;
+        if (!item || item.status !== 'running') return;
+        const declined = this.declinedTools.delete(e.toolCallId);
         const text = (e.result?.content ?? []).map((c) => (c.type === 'text' ? c.text ?? '' : '[image]')).join('\n');
         item.output = truncate(text, 40_000);
-        item.status = e.isError ? 'error' : 'done';
+        item.status = e.isError ? declined ? 'declined' : 'error' : 'done';
         const details = e.result?.details;
-        if (details && typeof details.diff === 'string') {
-          const file = String((item.input as Record<string, unknown>)?.path ?? item.summary ?? '');
+        if (!e.isError && details && typeof details.diff === 'string') {
+          const file = toolPath(item.input as Record<string, unknown>) ?? item.summary ?? '';
           const changes: FileChange[] = [{ path: file, kind: 'update', diff: details.diff }];
           item.changes = changes;
-        } else if (item.name === 'write') {
-          item.changes = [{ path: String((item.input as Record<string, unknown>)?.path ?? ''), kind: 'update' }];
+        } else if (!e.isError && item.name === 'write') {
+          item.changes = [{ path: toolPath(item.input as Record<string, unknown>) ?? '', kind: 'update' }];
         }
         if (typeof details?.exitCode === 'number') item.exitCode = details.exitCode;
         this.ctx.emit({ type: 'item.upsert', item: { ...item } });
@@ -307,6 +345,10 @@ export class PiAdapter implements HarnessAdapter {
       }
       case 'extension_error': {
         const e = ev as { extensionPath?: string; error?: string };
+        if (!e.extensionPath || /vocs-code-(?:tools|approvals)\.[cm]?[jt]s$/.test(e.extensionPath)) {
+          this.extensionFailure = e.error ?? 'Required Pi extension failed.';
+          this.extensionCapabilities.clear();
+        }
         this.info(`Extension error (${e.extensionPath}): ${e.error}`, 'error');
         return;
       }
@@ -326,8 +368,8 @@ export class PiAdapter implements HarnessAdapter {
   private startTool(id: string, name: string, args: Record<string, unknown>): void {
     if (this.toolItems.has(id)) return;
     const summary =
-      typeof args?.command === 'string' ? (args.command as string) : typeof args?.path === 'string' ? (args.path as string) : typeof args?.pattern === 'string' ? (args.pattern as string) : truncate(JSON.stringify(args ?? {}), 200, '…');
-    const hint = name === 'bash' ? 'execute' : name === 'edit' || name === 'write' ? 'edit' : name === 'read' ? 'read' : name === 'grep' || name === 'find' || name === 'ls' ? 'search' : 'other';
+      typeof args?.command === 'string' ? (args.command as string) : toolPath(args) !== undefined ? toolPath(args) : typeof args?.pattern === 'string' ? (args.pattern as string) : truncate(JSON.stringify(args ?? {}), 200, '…');
+    const hint = name === 'bash' || name === 'powershell' ? 'execute' : name === 'edit' || name === 'write' ? 'edit' : name === 'read' ? 'read' : name === 'grep' || name === 'find' || name === 'ls' ? 'search' : 'other';
     const item: Extract<TranscriptItem, { kind: 'tool' }> = { id, kind: 'tool', ts: Date.now(), name, hint, input: args, summary, status: 'running' };
     this.toolItems.set(id, item);
     this.ctx.emit({ type: 'item.upsert', item });
@@ -351,7 +393,7 @@ export class PiAdapter implements HarnessAdapter {
       case 'select': {
         const title = req.title ?? '';
         if (title.startsWith(PI_APPROVAL_MARKER)) {
-          let payload: { tool: string; input: Record<string, unknown>; summary?: string } = { tool: 'tool', input: {} };
+          let payload: { tool: string; toolCallId?: string; input: Record<string, unknown>; summary?: string } = { tool: 'tool', input: {} };
           try {
             payload = JSON.parse(title.slice(PI_APPROVAL_MARKER.length));
           } catch {
@@ -363,15 +405,18 @@ export class PiAdapter implements HarnessAdapter {
             kind: command ? 'command' : isEdit ? 'file_change' : 'tool',
             title: command ? 'pi wants to run a command' : `pi wants to use ${payload.tool}`,
             toolName: payload.tool,
+            toolItemId: payload.toolCallId,
             command,
             cwd: this.ctx.session().cwd,
             input: payload.input,
             description: payload.summary,
-            changes: isEdit ? [{ path: String(payload.input?.path ?? ''), kind: 'update' }] : undefined,
+            changes: isEdit ? [{ path: toolPath(payload.input) ?? '', kind: 'update' }] : undefined,
             options: OPTIONS_ALLOW_DENY
           });
           const map: Record<string, string> = { allow: 'Allow once', allow_session: 'Allow for session', deny: 'Deny' };
-          respond({ value: map[decision.optionId] ?? 'Deny' });
+          const value = map[decision.optionId] ?? 'Deny';
+          if (value === 'Deny') this.markToolDeclined(payload.toolCallId, payload.tool);
+          respond({ value });
           return;
         }
         const decision = await this.ctx.requestApproval({
@@ -416,6 +461,16 @@ export class PiAdapter implements HarnessAdapter {
         return;
       }
       case 'notify':
+        if (req.message && this.handleExtensionNotification(req.message)) return;
+        if (req.message?.startsWith(PI_BLOCK_MARKER)) {
+          try {
+            const block = JSON.parse(req.message.slice(PI_BLOCK_MARKER.length)) as { toolCallId?: unknown; toolName?: unknown };
+            this.markToolDeclined(block.toolCallId, block.toolName);
+          } catch {
+            this.ctx.log('warn', 'pi: malformed tool-block notification');
+          }
+          return;
+        }
         if (req.message) this.info(req.message, req.notifyType === 'error' ? 'error' : req.notifyType === 'warning' ? 'warn' : 'info');
         return;
       default:
@@ -423,7 +478,45 @@ export class PiAdapter implements HarnessAdapter {
     }
   }
 
+  private handleExtensionNotification(message: string): boolean {
+    const marker = [PI_READY_MARKER, PI_EXTENSION_ERROR_MARKER, PI_TOOL_INPUT_MARKER].find((prefix) => message.startsWith(prefix));
+    if (!marker) return false;
+    try {
+      const payload = JSON.parse(message.slice(marker.length)) as Record<string, unknown>;
+      if (!payload || payload.version !== 1 || !this.extensionNonce || payload.nonce !== this.extensionNonce) return true;
+      if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools')) {
+        if (payload.ready === false) this.extensionCapabilities.delete(payload.capability);
+        else this.extensionCapabilities.add(payload.capability);
+      } else if (marker === PI_EXTENSION_ERROR_MARKER) {
+        this.extensionFailure = typeof payload.message === 'string' ? payload.message : 'Required Pi extension failed.';
+        this.extensionCapabilities.clear();
+      } else if (marker === PI_TOOL_INPUT_MARKER) {
+        this.updateToolInput(payload.toolCallId, payload.toolName, payload.input);
+      }
+    } catch {
+      this.ctx.log('warn', 'pi: malformed extension capability notification');
+    }
+    return true;
+  }
+
+  private updateToolInput(id: unknown, name: unknown, input: unknown): void {
+    if (typeof id !== 'string' || typeof name !== 'string' || !input || typeof input !== 'object' || Array.isArray(input)) return;
+    const item = this.toolItems.get(id);
+    if (!item || item.name !== name || item.status !== 'running') return;
+    const args = input as Record<string, unknown>;
+    item.input = args;
+    item.summary = typeof args.command === 'string' ? args.command : toolPath(args) ?? item.summary;
+    this.ctx.emit({ type: 'item.upsert', item: { ...item } });
+  }
+
+  private markToolDeclined(id: unknown, name: unknown): void {
+    if (typeof id !== 'string' || typeof name !== 'string') return;
+    const item = this.toolItems.get(id);
+    if (item?.status === 'running' && item.name === name) this.declinedTools.add(id);
+  }
+
   private async finishTurn(): Promise<void> {
+    this.declinedTools.clear();
     this._busy = false;
     if (this.currentAssistant) {
       this.currentAssistant.streaming = false;
@@ -486,6 +579,7 @@ export class PiAdapter implements HarnessAdapter {
 
   async send(input: UserInput): Promise<void> {
     if (!this.child) await this.start();
+    this.assertExtensionsReady();
     const images = (input.images ?? []).map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }));
     if (this._busy) {
       const type = input.mode === 'queue' ? 'follow_up' : 'steer';
@@ -548,6 +642,8 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   async dispose(): Promise<void> {
+    this.extensionCapabilities.clear();
+    this.declinedTools.clear();
     const child = this.child;
     this.child = null;
     if (!child) return;

@@ -17,6 +17,9 @@
  * A dangerous command always prompts below full access, even after "Allow for session".
  */
 
+import path from 'node:path';
+import { promises as fs } from 'node:fs';
+
 type Mode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-auto';
 
 interface ToolCallEventLike {
@@ -42,7 +45,9 @@ interface PiLike {
 }
 
 const MARKER = 'VCODE_APPROVAL::';
-const MUTATING = new Set(['bash', 'edit', 'write']);
+// Structured RPC notification, never inferred from model-visible error prose.
+const BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
+const MUTATING = new Set(['bash', 'powershell', 'edit', 'write']);
 const EDITS = new Set(['edit', 'write']);
 const MODES: Mode[] = ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'];
 
@@ -91,14 +96,39 @@ function readModeFromEnv(): Mode {
   return MODES.includes(m) ? m : 'ask';
 }
 
-function isOutsideCwd(cwd: string | undefined, target: unknown): boolean {
-  if (!cwd || typeof target !== 'string' || !target) return false;
-  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-  const isAbs = /^([a-z]:)?\//i.test(target.replace(/\\/g, '/'));
-  if (!isAbs) return target.replace(/\\/g, '/').split('/').includes('..');
-  const t = norm(target);
-  const c = norm(cwd);
-  return !(t === c || t.startsWith(c + '/'));
+async function isOutsideCwd(cwd: string | undefined, target: unknown): Promise<boolean> {
+  if (!cwd || typeof target !== 'string' || !target) return true;
+  // Pi expands these spellings itself. Require approval rather than checking a
+  // different, unexpanded Node path (including drive paths emitted by Git Bash).
+  if (/^(?:@|~|file:\/\/)/.test(target) || /[\u00a0\u2000-\u200a\u202f\u205f\u3000]/.test(target) ||
+      (process.platform === 'win32' && /^\/(?:mnt\/|cygdrive\/)?[a-z](?:\/|$)/i.test(target))) return true;
+  const inside = (root: string, file: string) => {
+    const rel = path.relative(root, file);
+    return rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+  };
+  const absolute = path.resolve(cwd, target);
+  if (!inside(path.resolve(cwd), absolute)) return true;
+  try {
+    const root = await fs.realpath(cwd);
+    // New files inherit the nearest existing parent's real location. A junction
+    // inside the workspace may point outside it, even when the suffix is new.
+    let parent = absolute;
+    while (true) {
+      try {
+        return !inside(root, await fs.realpath(parent));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true;
+        // A dangling link is not a nonexistent, safe child directory.
+        const entry = await fs.lstat(parent).catch(() => undefined);
+        if (entry) return true;
+        const next = path.dirname(parent);
+        if (next === parent) return true;
+        parent = next;
+      }
+    }
+  } catch {
+    return true;
+  }
 }
 
 export default function vocsCodeApprovals(pi: PiLike): void {
@@ -106,17 +136,28 @@ export default function vocsCodeApprovals(pi: PiLike): void {
   const sessionAllowed = new Set<string>();
   const modeFile = process.env.VOCS_CODE_MODE_FILE;
 
+  const readiness = (ctx: CtxLike, ready: boolean) => {
+    ctx.ui?.notify('VCODE_PI_READY::' + JSON.stringify({
+      version: 1, nonce: process.env.VOCS_CODE_PI_NONCE, capability: 'approvals', ready,
+    }), 'info');
+  };
+  pi.on('session_start', (_event, ctx) => readiness(ctx, true));
+  pi.on('session_shutdown', (_event, ctx) => readiness(ctx, false));
+
   const refreshMode = async () => {
     if (!modeFile) return;
     try {
-      const fs = await import('node:fs/promises');
       const txt = (await fs.readFile(modeFile, 'utf8')).trim() as Mode;
       if (MODES.includes(txt)) {
         if (txt !== mode) sessionAllowed.clear(); // grants do not survive a mode change
         mode = txt;
+      } else {
+        mode = 'ask';
+        sessionAllowed.clear();
       }
     } catch {
-      /* ignore */
+      mode = 'ask';
+      sessionAllowed.clear();
     }
   };
 
@@ -125,12 +166,18 @@ export default function vocsCodeApprovals(pi: PiLike): void {
     const tool = event.toolName;
     if (!MUTATING.has(tool)) return undefined;
     if (mode === 'full-auto') return undefined;
+    const decline = (reason: string) => {
+      if (event.toolCallId && ctx.ui?.notify) {
+        ctx.ui.notify(BLOCK_MARKER + JSON.stringify({ toolCallId: event.toolCallId, toolName: tool }), 'info');
+      }
+      return { block: true, reason };
+    };
     if (mode === 'plan') {
-      return { block: true, reason: 'Plan mode is active in Vocs Code: no file edits or shell commands. Describe the plan instead.' };
+      return decline('Plan mode is active in Vocs Code: no file edits or shell commands. Describe the plan instead.');
     }
     const command = typeof event.input?.command === 'string' ? (event.input.command as string) : undefined;
     const dangerous = !!command && isDangerous(command);
-    const outside = EDITS.has(tool) && isOutsideCwd(ctx.cwd ?? process.cwd(), event.input?.path);
+    const outside = EDITS.has(tool) && await isOutsideCwd(ctx.cwd ?? process.cwd(), event.input?.path);
     if (!dangerous && !outside) {
       if (mode === 'auto') return undefined;
       if (mode === 'accept-edits' && EDITS.has(tool)) return undefined;
@@ -142,14 +189,14 @@ export default function vocsCodeApprovals(pi: PiLike): void {
     }
 
     const summary = command ?? (typeof event.input?.path === 'string' ? (event.input.path as string) : '');
-    const payload = JSON.stringify({ tool, input: trimInput(event.input), summary: outside ? `${summary} (outside the project directory)` : summary });
+    const payload = JSON.stringify({ tool, toolCallId: event.toolCallId, input: trimInput(event.input), summary: outside ? `${summary} (outside the project directory)` : summary });
     const choice = await ctx.ui.select(MARKER + payload, ['Allow once', 'Allow for session', 'Deny']);
     if (choice === 'Allow once') return undefined;
     if (choice === 'Allow for session') {
       sessionAllowed.add(tool);
       return undefined;
     }
-    return { block: true, reason: 'The user declined this action in Vocs Code.' };
+    return decline('The user declined this action in Vocs Code.');
   });
 }
 

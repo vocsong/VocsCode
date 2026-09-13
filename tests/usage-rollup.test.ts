@@ -89,6 +89,28 @@ describe('rollupDays', () => {
     expect(r.files).toEqual([{ path: 'a.ts', adds: 1, updates: 3, deletes: 0, renames: 0, total: 4 }]);
   });
 
+  it('rolls up only recorded harness/tool slices in selected days, combining casing but not aliases', () => {
+    const older = sliced('2025-06-01', [{ id: 'c', harness: 'claude', model: 'same', project: '/p', costUsd: 0 }]);
+    const newer = sliced('2025-06-02', [{ id: 'p', harness: 'pi', model: 'same', project: '/p', costUsd: 0 }]);
+    older.usage.by!.harnessTool = { claude: { Read: { calls: 3, errors: 1, declined: 1, durationMs: 50 } } };
+    newer.usage.by!.harnessTool = {
+      claude: { read: { calls: 2, errors: 1, declined: 0, durationMs: 20 } },
+      pi: { Read: { calls: 1, errors: 0, declined: 1, durationMs: 0 }, read: { calls: 1, errors: 0, declined: 0, durationMs: 5 }, read_file: { calls: 1, errors: 1, declined: 0, durationMs: 10 } }
+    };
+    const legacy = sliced('2025-05-30', [{ id: 'old', harness: 'pi', model: 'same', project: '/p', costUsd: 1, toolCalls: 100 }]);
+    delete legacy.usage.by!.harnessTool;
+    legacy.usage.by!.tool = { Read: { calls: 100, errors: 80, declined: 10, durationMs: 0 } };
+    const rows = rollupDays([legacy, older, newer]).harnessTools;
+    expect(rows).toEqual([
+      { key: 'claude', label: 'claude', name: 'read', calls: 5, errors: 2, declined: 1, durationMs: 70 },
+      { key: 'pi', label: 'pi', name: 'read', calls: 2, errors: 0, declined: 1, durationMs: 5 },
+      { key: 'pi', label: 'pi', name: 'read_file', calls: 1, errors: 1, declined: 0, durationMs: 10 }
+    ]);
+    expect(rollupDays([newer]).harnessTools).toEqual([{ ...rows[0], calls: 2, errors: 1, declined: 0, durationMs: 20 }, rows[1], rows[2]]);
+    expect(rollupDays([legacy]).harnessTools).toEqual([]);
+    expect(legacy.usage.by?.harnessTool).toBeUndefined();
+  });
+
   it('keeps days recorded before slices existed in the totals and reports them as unattributed', () => {
     const legacy: AnalyticsDayPoint = { date: '2025-05-30', usage: day({ costUsd: 4, turns: 10, toolCalls: 7 }) };
     const r = rollupDays([legacy, ...days]);

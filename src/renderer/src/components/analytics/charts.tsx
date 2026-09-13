@@ -497,10 +497,10 @@ export interface TableSpec {
   rows: React.ReactNode[][];
 }
 
-export function DataTable({ table, compact }: { table: TableSpec; compact?: boolean }) {
+export function DataTable({ table, compact, ariaLabel }: { table: TableSpec; compact?: boolean; ariaLabel?: string }) {
   return (
     <div className="atable-wrap">
-      <table className={`atable ${compact ? 'compact' : ''}`}>
+      <table className={`atable ${compact ? 'compact' : ''}`} aria-label={ariaLabel}>
         <thead>
           <tr>
             {table.columns.map((c) => (

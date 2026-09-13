@@ -122,6 +122,17 @@ function assistantText(items: Map<string, TranscriptItem>): string {
 const PROMPT = 'Reply with exactly the single word PONG and nothing else. Do not use any tools.';
 const CONTINUE_PROMPT = 'Reply with exactly the single word PONG again and nothing else. Do not use any tools.';
 
+function assertSuccessfulTurn(items: Map<string, TranscriptItem>, events: SessionEvent[], reply: string): void {
+  expect(assistantText(items).trim()).toBe(reply);
+  const turns = [...items.values()].filter((i) => i.kind === 'turn');
+  expect(turns).toHaveLength(1);
+  expect(turns[0]).toMatchObject({ status: 'completed' });
+  expect(events.filter((e) => e.type === 'error')).toEqual([]);
+  const statuses = events.filter((e) => e.type === 'status');
+  expect(statuses.at(-1)).toMatchObject({ status: 'idle' });
+  expect(statuses.some((e) => e.status === 'error' || e.status === 'stopped')).toBe(false);
+}
+
 /**
  * Live resume round-trip: run one prompt, tear the adapter down, then rebuild from the same
  * session meta (which still carries the harness ref) and run a continuation prompt.
@@ -133,8 +144,9 @@ async function resumeRoundTrip(harness: HarnessId, refKey: keyof HarnessRef, ext
   await first.start();
   await first.send({ text: PROMPT });
   await waitTurn(170_000);
-  expect(assistantText(items)).toMatch(/PONG/i);
+  assertSuccessfulTurn(items, events, 'PONG');
   expect(meta.harnessRef[refKey]).toBeTruthy();
+  const originalRef = meta.harnessRef[refKey];
   await first.dispose();
 
   const second = createAdapter(harness, ctx);
@@ -145,14 +157,12 @@ async function resumeRoundTrip(harness: HarnessId, refKey: keyof HarnessRef, ext
     (e) => e.type === 'item.upsert' && e.item.kind === 'info' && e.item.level === 'warn' && /resum/i.test(e.item.text)
   );
   expect(resumeWarnings).toEqual([]);
-  const turnsBefore = [...items.values()].filter((i) => i.kind === 'turn').length;
+  items.clear();
+  events.length = 0;
   await second.send({ text: CONTINUE_PROMPT });
   await waitTurn(170_000);
-  const turnsAfter = [...items.values()].filter((i) => i.kind === 'turn').length;
-  expect(turnsAfter).toBeGreaterThan(turnsBefore);
-  // The continuation must have produced its own PONG, so the concatenated text has at least two.
-  expect((assistantText(items).match(/PONG/gi) ?? []).length).toBeGreaterThanOrEqual(2);
-  expect(meta.harnessRef[refKey]).toBeTruthy();
+  assertSuccessfulTurn(items, events, 'PONG');
+  expect(meta.harnessRef[refKey]).toBe(originalRef);
 }
 
 describe('live harness smoke', () => {
@@ -200,7 +210,7 @@ describe('live harness smoke', () => {
   });
 
   it.runIf(want('pi'))('pi rpc answers a prompt and lists models', async () => {
-    const { ctx, items, waitTurn, meta } = await makeCtx('pi');
+    const { ctx, items, waitTurn, meta, events } = await makeCtx('pi');
     const adapter = createAdapter('pi', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
@@ -208,7 +218,7 @@ describe('live harness smoke', () => {
     expect(models.length).toBeGreaterThan(0);
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
-    expect(assistantText(items)).toMatch(/PONG/i);
+    assertSuccessfulTurn(items, events, 'PONG');
     expect(meta.harnessRef.piSessionFile).toBeTruthy();
   });
 
@@ -265,35 +275,34 @@ describe('live harness smoke', () => {
     expect(assistantText(items)).toMatch(/PONG/i);
   });
 
-  it.runIf(want('native'))('native loop answers a prompt through an OpenAI-compatible provider', async (t) => {
+  it.runIf(want('native'))('native loop answers a prompt through an OpenAI-compatible provider', async () => {
     const provider = process.env.DEEPSEEK_API_KEY ? 'deepseek' : process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : null;
-    if (!provider) {
-      console.warn('native smoke skipped: no provider API key in env');
-      return t.skip();
-    }
+    if (!provider) throw new Error('Native smoke requested but no DEEPSEEK_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY is available.');
     const model = provider === 'deepseek' ? 'deepseek-v4-flash' : provider === 'openai' ? 'gpt-5.4-mini' : 'claude-sonnet-5';
-    const { ctx, items, waitTurn } = await makeCtx('native', { model: { provider, model } });
+    const { ctx, items, waitTurn, events } = await makeCtx('native', { model: { provider, model } });
     const adapter = createAdapter('native', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
-    expect(assistantText(items)).toMatch(/PONG/i);
+    assertSuccessfulTurn(items, events, 'PONG');
   });
 
-  it.runIf(want('native-tools'))('native loop uses tools with approvals', async (t) => {
+  it.runIf(want('native-tools'))('native loop uses tools with approvals', async () => {
     const provider = process.env.DEEPSEEK_API_KEY ? 'deepseek' : process.env.OPENAI_API_KEY ? 'openai' : null;
-    if (!provider) return t.skip();
+    if (!provider) throw new Error('Native tool smoke requested but no DEEPSEEK_API_KEY or OPENAI_API_KEY is available.');
     const model = provider === 'deepseek' ? 'deepseek-v4-flash' : 'gpt-5.4-mini';
-    const { ctx, items, waitTurn, meta } = await makeCtx('native', { model: { provider, model }, permissionMode: 'ask' });
+    const { ctx, items, waitTurn, meta, events } = await makeCtx('native', { model: { provider, model }, permissionMode: 'ask' });
     const adapter = createAdapter('native', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
-    await adapter.send({ text: 'Create a file named hello.txt containing the text "hello from vocs code" using the write_file tool, then read it back with read_file and confirm. Reply DONE at the end.' });
+    await adapter.send({ text: 'Call write_file exactly once to create hello.txt containing exactly hello from vocs code (no trailing newline). Then call read_file exactly once to read hello.txt. Do not call any other tools or narrate. Reply with exactly DONE.' });
     await waitTurn(170_000);
     const content = await fs.readFile(path.join(meta.cwd, 'hello.txt'), 'utf8');
-    expect(content).toMatch(/hello from vocs code/);
-    expect([...items.values()].some((i) => i.kind === 'approval' || (i.kind === 'tool' && i.name === 'write_file'))).toBe(true);
+    expect(content).toBe('hello from vocs code');
+    assertSuccessfulTurn(items, events, 'DONE');
+    const tools = [...items.values()].filter((i) => i.kind === 'tool');
+    expect(tools.map((i) => [i.name, i.status])).toEqual([['write_file', 'done'], ['read_file', 'done']]);
   });
 
   // Resume round-trips after a dispose (HARNESS_SMOKE_RESUME=1): a second adapter is built from
@@ -328,12 +337,9 @@ describe('live harness smoke', () => {
     await resumeRoundTrip('acp', 'acpSessionId', { acpAgent: process.env.HARNESS_SMOKE_ACP_AGENT ?? 'dsh' });
   });
 
-  it.runIf(wantResume('native'))('native resumes after dispose', async (t) => {
+  it.runIf(wantResume('native'))('native resumes after dispose', async () => {
     const provider = process.env.DEEPSEEK_API_KEY ? 'deepseek' : process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : null;
-    if (!provider) {
-      console.warn('native resume smoke skipped: no provider API key in env');
-      return t.skip();
-    }
+    if (!provider) throw new Error('Native resume smoke requested but no provider API key is available.');
     const model = provider === 'deepseek' ? 'deepseek-v4-flash' : provider === 'openai' ? 'gpt-5.4-mini' : 'claude-sonnet-5';
     await resumeRoundTrip('native', 'nativeHistory', { model: { provider, model } });
   });
