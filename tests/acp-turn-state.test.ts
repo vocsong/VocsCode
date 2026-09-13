@@ -182,7 +182,8 @@ function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode }
     updateMeta: (patch: Partial<SessionMeta>) => Object.assign(meta, patch),
     log: (level: string, message: string) => logs.push({ level, message }),
     readJson: async () => null,
-    writeJson: async () => undefined
+    writeJson: async () => undefined,
+    mcpServers: async () => []
   } as unknown as HarnessContext;
   const adapter = new AcpAdapter(ctx);
   const h: Harness = { adapter, agent, child, ctx, meta, events, items, approvals, logs };
@@ -264,6 +265,81 @@ describe('acp adapter', () => {
     await h.adapter.start();
     expect(h.agent.requests.some((r) => r.method === 'session/resume')).toBe(false);
     expect(h.meta.harnessRef.acpSessionId).toBe('sess-new');
+  });
+
+  it('decodes dsh-style tuple model values and maps refs back to the raw option value', async () => {
+    const h = makeHarness();
+    const configOptions = [
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: JSON.stringify(['deepseek-official', 'deepseek-v4-flash']),
+        options: [
+          {
+            group: 'deepseek-official',
+            name: 'DeepSeek',
+            options: [
+              { value: JSON.stringify(['deepseek-official', 'deepseek-v4-flash']), name: 'DeepSeek V4 Flash' },
+              { value: JSON.stringify(['deepseek-official', 'deepseek-v4-pro']), name: 'DeepSeek V4 Pro' }
+            ]
+          }
+        ]
+      },
+      {
+        id: 'reasoning_effort',
+        name: 'Reasoning effort',
+        category: 'thought_level',
+        type: 'select',
+        currentValue: 'high',
+        options: [{ value: 'high', name: 'High' }]
+      }
+    ];
+    h.agent.on('initialize', () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }));
+    h.agent.on('session/new', () => ({ sessionId: 'sess-dsh', configOptions }));
+    h.agent.on('session/set_config_option', (params: AnyRecord) => {
+      expect(params.value).toBe(JSON.stringify(['deepseek-official', 'deepseek-v4-pro']));
+      return { configOptions: [{ ...configOptions[0], currentValue: params.value }, configOptions[1]] };
+    });
+    await h.adapter.start();
+
+    // The catalog exposes clean provider/model refs, not the raw JSON tuples dsh sends.
+    const modelsEvent = h.events.find((e) => e.type === 'models') as AnyRecord;
+    expect(modelsEvent.models).toHaveLength(2);
+    expect(modelsEvent.models[0]).toMatchObject({ id: 'deepseek-v4-flash', provider: 'deepseek-official', displayName: 'DeepSeek V4 Flash' });
+    expect(h.meta.activeModel).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-flash' });
+    expect(h.meta.activeEffort).toBe('high');
+
+    await h.adapter.setModel({ provider: 'deepseek-official', model: 'deepseek-v4-pro' });
+    const setReq = h.agent.requests.find((r) => r.method === 'session/set_config_option');
+    expect(setReq?.params.configId).toBe('model');
+    expect(setReq?.params.value).toBe(JSON.stringify(['deepseek-official', 'deepseek-v4-pro']));
+    expect(h.meta.activeModel).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-pro' });
+    const modelsEvents = h.events.filter((e) => e.type === 'models') as AnyRecord[];
+    expect(modelsEvents.at(-1)!.models[1]).toMatchObject({ id: 'deepseek-v4-pro', isDefault: true });
+  });
+
+  it('keeps plain string model values untouched for agents that do not use tuples', async () => {
+    const h = makeHarness();
+    h.agent.on('initialize', () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }));
+    h.agent.on('session/new', () => ({
+      sessionId: 'sess-plain',
+      configOptions: [
+        {
+          id: 'model',
+          name: 'Model',
+          category: 'model',
+          type: 'select',
+          currentValue: 'gemini-2.5-pro',
+          options: [{ value: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' }]
+        }
+      ]
+    }));
+    await h.adapter.start();
+    const modelsEvent = h.events.find((e) => e.type === 'models') as AnyRecord;
+    expect(modelsEvent.models).toEqual([expect.objectContaining({ id: 'gemini-2.5-pro', provider: 'test-agent', displayName: 'Gemini 2.5 Pro' })]);
+    expect(h.meta.activeModel).toEqual({ provider: 'test-agent', model: 'gemini-2.5-pro' });
   });
 
   it('assembles assistant text and completes a prompt turn', async () => {

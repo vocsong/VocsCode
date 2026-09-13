@@ -6,6 +6,7 @@ import type {
   FileUsage,
   FileUsageRow,
   ModelRateRow,
+  ModelRef,
   ModelToolRow,
   SessionMeta,
   ToolUsage,
@@ -18,7 +19,7 @@ import type {
   UsageSpeed,
   UsageTotals
 } from '../shared/types';
-import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, totalTokens } from '../shared/usage-rollup';
+import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, modelToolUsageRows, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
 import { readJson, writeJson } from './util/fs';
 
 export { emptyFileUsage, emptyToolUsage };
@@ -287,12 +288,8 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     };
   });
 
-  const toolRows: ToolUsageRow[] = Object.entries(tools)
-    .map(([name, usage]) => ({ name, ...usage }))
-    .sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
-  const modelToolRows: ModelToolRow[] = Object.entries(modelTools)
-    .flatMap(([key, perTool]) => Object.entries(perTool).map(([name, usage]) => ({ key, label: key.slice(key.indexOf('/') + 1), name, ...usage })))
-    .sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
+  const toolRows: ToolUsageRow[] = toolUsageRows(tools);
+  const modelToolRows: ModelToolRow[] = modelToolUsageRows(modelTools);
   const toolTotals: ToolUsage = Object.values(tools).reduce<ToolUsage>((acc, t) => {
     addToolUsage(acc, t);
     return acc;
@@ -421,11 +418,12 @@ export class AnalyticsStore {
       const knownFiles: Record<string, FileUsage> = {};
       for (const d of Object.values(this.data.days)) {
         if (!d.by || d.by.estimated) continue;
-        for (const [name, t] of Object.entries(d.by.tool)) addToolUsage((knownTools[name] ??= emptyToolUsage()), t);
+        for (const [name, t] of Object.entries(d.by.tool)) addToolUsage((knownTools[toolNameKey(name)] ??= emptyToolUsage()), t);
         for (const [p, f] of Object.entries(d.by.file)) addFileUsage((knownFiles[p] ??= emptyFileUsage()), f);
       }
-      for (const [name, t] of Object.entries(this.data.tools)) {
-        const k = knownTools[name] ?? emptyToolUsage();
+      for (const t of toolUsageRows(this.data.tools)) {
+        const name = t.name;
+        const k = knownTools[toolNameKey(name)] ?? emptyToolUsage();
         const parts = (['calls', 'errors', 'declined', 'durationMs'] as const).map((f) => apportion(Math.max(0, t[f] - k[f]), weights, f !== 'durationMs'));
         estimated.forEach((d, i) => {
           const share: ToolUsage = { calls: parts[0][i], errors: parts[1][i], declined: parts[2][i], durationMs: parts[3][i] };
@@ -504,7 +502,7 @@ export class AnalyticsStore {
   }
 
   /** Records one completed tool call: per-tool counts, per-file changes and today's call volume. */
-  recordToolCall(sessionId: string, item: Extract<TranscriptItem, { kind: 'tool' }>, now = Date.now()): void {
+  recordToolCall(sessionId: string, item: Extract<TranscriptItem, { kind: 'tool' }>, now = Date.now(), activeModel?: ModelRef): void {
     const parsed = toolCallFromItem(item);
     if (!parsed) return;
     const key = `${sessionId}:${item.id}`;
@@ -521,15 +519,16 @@ export class AnalyticsStore {
     addDay(day, { toolCalls: 1 });
     const by = (day.by ??= emptyDimensions());
     addToolUsage((by.tool[item.name] ??= emptyToolUsage()), parsed.usage);
-    // The snapshot knows which model the call belongs to; keep the per-model tool map in step.
-    const modelKey = session?.model ? `${session.provider ?? ''}/${session.model}` : undefined;
+    // Prefer the model captured when the call began; transcript backfills fall back to the session snapshot.
+    const provider = activeModel?.provider ?? session?.provider;
+    const model = activeModel?.model ?? session?.model;
+    const modelKey = model ? `${provider ?? ''}/${model}` : undefined;
     if (modelKey) {
       addToolUsage(((this.data.modelTools[modelKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
       addToolUsage(((by.modelTool[modelKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
     }
     for (const [p, u] of Object.entries(parsed.changes)) addFileUsage((by.file[p] ??= emptyFileUsage()), u);
-    // The snapshot knows which harness, model and project the call belongs to.
-    if (session) attribute(day, { id: session.id, harness: session.harness, provider: session.provider, model: session.model, projectRoot: session.projectRoot }, { toolCalls: 1 });
+    if (session) attribute(day, { id: session.id, harness: session.harness, provider, model, projectRoot: session.projectRoot }, { toolCalls: 1 });
     this.scheduleWrite();
   }
 

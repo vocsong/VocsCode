@@ -526,7 +526,7 @@ export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> 
   }
 }
 
-const ISSUE_LIST_FIELDS = 'number,title,state,url,author,labels,comments,createdAt,updatedAt,closedAt';
+const ISSUE_LIST_FIELDS = 'number,title,state,url,author,body,labels,comments,createdAt,updatedAt,closedAt';
 
 /** Pulls the repo's issues from GitHub (`gh issue list`, every state, newest first) for the Git panel's Issues view. */
 export async function gitIssues(cwd: string): Promise<GitIssueList> {
@@ -545,6 +545,7 @@ export async function gitIssues(cwd: string): Promise<GitIssueList> {
       const author = p.author && typeof p.author === 'object' ? (p.author as { login?: string; name?: string }) : undefined;
       const issue: GitIssue = { number: p.number, title: typeof p.title === 'string' ? p.title : '', state, url: p.url };
       if (author?.login || author?.name) issue.author = author.login || author.name;
+      if (typeof p.body === 'string') issue.body = p.body;
       if (Array.isArray(p.labels)) {
         const labels = p.labels
           .filter((l): l is { name?: string; color?: string } => !!l && typeof l === 'object')

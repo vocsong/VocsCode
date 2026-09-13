@@ -76,6 +76,9 @@ export function runShortcutCommand(cmd: ShortcutCommand): void {
     case 'app.skills':
       st.setView('skills');
       break;
+    case 'app.mcp':
+      st.setView('mcp');
+      break;
     case 'app.back':
       void st.navBack();
       break;

@@ -21,7 +21,7 @@ const GH_SH = [
   '    echo "{\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"baseRefName\\":\\"$GH_BASE\\"}" ;;',
   '  \'issue list\')',
   '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
-  '    echo "[{\\\"number\\\":42,\\\"state\\\":\\\"${GH_ISSUE_STATE:-OPEN}\\\",\\\"url\\\":\\\"https://example.com/acme/repo/issues/42\\\",\\\"title\\\":\\\"Test issue\\\",\\\"labels\\\":[{\\\"name\\\":\\\"bug\\\",\\\"color\\\":\\\"ff0000\\\"}],\\\"comments\\\":2,\\\"author\\\":{\\\"login\\\":\\\"octocat\\\"}}]" ;;',
+  '    echo "[{\\\"number\\\":42,\\\"state\\\":\\\"${GH_ISSUE_STATE:-OPEN}\\\",\\\"url\\\":\\\"https://example.com/acme/repo/issues/42\\\",\\\"title\\\":\\\"Test issue\\\",\\\"body\\\":\\\"Full issue description\\\",\\\"labels\\\":[{\\\"name\\\":\\\"bug\\\",\\\"color\\\":\\\"ff0000\\\"}],\\\"comments\\\":2,\\\"author\\\":{\\\"login\\\":\\\"octocat\\\"}}]" ;;',
   'esac',
   'exit 0'
 ].join('\n');
@@ -38,7 +38,7 @@ const GH_CMD = [
   'if /i "%~1"=="pr" if /i "%~2"=="view" echo {"state":"%GH_STATE%","url":"https://example.com/acme/repo/pull/7","baseRefName":"%GH_BASE%"}',
   'if "%GH_ISSUE_STATE%"=="" set "GH_ISSUE_STATE=OPEN"',
   'if /i "%~1"=="issue" if /i "%~2"=="list" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
-  'if /i "%~1"=="issue" if /i "%~2"=="list" echo [{"number":42,"state":"%GH_ISSUE_STATE%","url":"https://example.com/acme/repo/issues/42","title":"Test issue","labels":[{"name":"bug","color":"ff0000"}],"comments":2,"author":{"login":"octocat"}}]',
+  'if /i "%~1"=="issue" if /i "%~2"=="list" echo [{"number":42,"state":"%GH_ISSUE_STATE%","url":"https://example.com/acme/repo/issues/42","title":"Test issue","body":"Full issue description","labels":[{"name":"bug","color":"ff0000"}],"comments":2,"author":{"login":"octocat"}}]',
   'exit /b 0'
 ].join('\r\n');
 
@@ -202,6 +202,7 @@ describe('git PR flow (/pr, /merge)', () => {
         state: 'OPEN',
         url: 'https://example.com/acme/repo/issues/42',
         author: 'octocat',
+        body: 'Full issue description',
         labels: [{ name: 'bug', color: 'ff0000' }],
         comments: 2
       }

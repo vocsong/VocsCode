@@ -1,0 +1,11 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "vocs-relay",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-01-15",
+  "assets": { "directory": "public" },
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  "vars": { "RELAY_ACCOUNT": "vocs-v1" }
+  // Secrets (wrangler secret put): ENROLL_TOKEN
+}

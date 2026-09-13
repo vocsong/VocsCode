@@ -13,6 +13,7 @@ import { RightPanel } from './components/RightPanel';
 import { SearchModal } from './components/SearchModal';
 import { SettingsView } from './components/SettingsView';
 import { nextFolderTarget, nextSessionTarget, sidebarNavModel, Sidebar } from './components/Sidebar';
+import { McpView } from './components/McpView';
 import { SkillsView } from './components/SkillsView';
 import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
@@ -28,6 +29,7 @@ export function App() {
   const settings = useStore((s) => s.settings);
   const view = useStore((s) => s.view);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
+  const toggleSidebar = useStore((s) => s.toggleSidebar);
   const panelOpen = useStore((s) => s.panelOpen);
   const newSessionOpen = useStore((s) => s.newSessionOpen);
   const quickSessionOpen = useStore((s) => s.quickSessionOpen);
@@ -159,6 +161,7 @@ export function App() {
     <div className="shell">
       <TitleBar />
       <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px` }}>
+        {sidebarOpen && <div className="sidebar-backdrop" onClick={toggleSidebar} />}
         {sidebarOpen && <Sidebar />}
         <main className="main">
           {view === 'settings' ? (
@@ -167,6 +170,8 @@ export function App() {
             <AnalyticsDashboard />
           ) : view === 'skills' ? (
             <SkillsView />
+          ) : view === 'mcp' ? (
+            <McpView />
           ) : session ? (
             <>
               <Header session={session} />

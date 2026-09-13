@@ -4,8 +4,8 @@ import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, Mode
 import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
-export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
-export type View = 'chat' | 'settings' | 'analytics' | 'skills';
+export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'mcp' | 'usage' | 'terminal';
+export type View = 'chat' | 'settings' | 'analytics' | 'skills' | 'mcp';
 export type AnalyticsTab = 'overview' | 'spend' | 'tokens' | 'activity' | 'tools' | 'sessions';
 /** Days in the analytics range; 0 is all time. */
 export type AnalyticsRange = 7 | 30 | 90 | 0;
@@ -55,6 +55,8 @@ interface State {
   drafts: Record<string, string>;
   /** Bumped to move keyboard focus into the active terminal. */
   terminalFocusNonce: number;
+  /** Sessions with an archive request in flight; rows show a blinking Archiving pill meanwhile. */
+  archiving: Record<string, true>;
   /** Text another part of the UI wants appended to the composer draft (e.g. terminal output). */
   composerInsert: { text: string; nonce: number } | null;
   view: View;
@@ -116,6 +118,7 @@ interface State {
   /** Upserts a renderer-local info line in a session's transcript; null text removes it. Not persisted by the main process. */
   setLocalInfo(sessionId: string, id: string, text: string | null, opts?: { level?: 'info' | 'warn' | 'error'; pending?: boolean }): void;
   setDraft(sessionId: string, text: string): void;
+  setArchiving(id: string, on: boolean): void;
   setTerminals(list: TerminalInfo[]): void;
   setActiveTerminal(sessionId: string, terminalId: string): void;
   focusTerminal(): void;
@@ -191,6 +194,7 @@ export const useStore = create<State>((set, get) => ({
   activeTerminal: {},
   drafts: {},
   terminalFocusNonce: 0,
+  archiving: {},
   composerInsert: null,
   view: 'chat',
   analyticsTab: 'overview',
@@ -545,6 +549,15 @@ export const useStore = create<State>((set, get) => ({
   },
   setDraft(sessionId, text) {
     set((s) => (s.drafts[sessionId] === text ? {} : { drafts: { ...s.drafts, [sessionId]: text } }));
+  },
+  setArchiving(id, on) {
+    set((s) => {
+      if (on === !!s.archiving[id]) return {};
+      const next = { ...s.archiving };
+      if (on) next[id] = true;
+      else delete next[id];
+      return { archiving: next };
+    });
   },
   setTerminals(terminals) {
     set({ terminals, terminalsLoaded: true });

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { Codex, type ModelReasoningEffort, type SandboxMode, type Thread, type ThreadEvent, type ThreadItem, type UserInput as CodexInput } from '@openai/codex-sdk';
 import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UserInput } from '../../shared/types';
 import { errorMessage, shortId, truncate } from '../util/async';
+import { toCodex } from '../mcp/effective';
 import { TurnUsageTracker } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { CODEX_STATIC_MODELS } from '../models/static-models';
@@ -57,7 +58,16 @@ export class CodexExecAdapter implements HarnessAdapter {
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     const key = await this.ctx.getApiKey('openai');
     if (key && !env.CODEX_API_KEY && !env.OPENAI_API_KEY) env.OPENAI_API_KEY = key;
-    this.codex = new Codex({ codexPathOverride: override, env });
+    // The exec SDK flattens `config` into `--config key=value` argv, which any process listing
+    // can read, so resolved secrets travel in the environment instead (docs/MCP.md §8).
+    const mcp = await this.ctx.mcpServers().catch((e) => {
+      this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
+      return [];
+    });
+    const { config: mcpServers, env: mcpEnv } = toCodex(mcp, 'env-ref');
+    Object.assign(env, mcpEnv);
+    const config = Object.keys(mcpServers).length ? { mcp_servers: mcpServers } : undefined;
+    this.codex = new Codex({ codexPathOverride: override, env, config });
     this.model = meta.config.model?.model;
     this.effort = this.ctx.effort();
     this.usage = new TurnUsageTracker(meta.usage);

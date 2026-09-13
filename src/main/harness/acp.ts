@@ -7,6 +7,7 @@ import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, ModelInfo
 import { isEffortLevel } from '../../shared/harness-meta';
 import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
 import { which } from '../runtime';
+import { toAcp } from '../mcp/effective';
 import { isDangerousCommand, type HarnessAdapter, type HarnessContext } from './types';
 import { isOutsideWorkspace } from './permissions';
 import { shutdownChild, spawnTool } from './spawn';
@@ -20,7 +21,7 @@ interface ConfigOptionLike {
   category?: string | null;
   type: 'select' | 'boolean';
   currentValue: string | boolean;
-  options?: { value?: string; name: string; description?: string | null; group?: string; options?: { value: string; name: string; description?: string | null }[] }[];
+  options?: { value?: string; name: string; description?: string | null; group?: string; options?: { value: string; name: string; description?: string | null; group?: string }[] }[];
 }
 
 const ACP_ENV_KEYS: Record<string, string> = {
@@ -34,13 +35,24 @@ const ACP_ENV_KEYS: Record<string, string> = {
   mistral: 'MISTRAL_API_KEY'
 };
 
-function flattenSelect(opt: ConfigOptionLike): { value: string; name: string; description?: string | null }[] {
-  const out: { value: string; name: string; description?: string | null }[] = [];
+function flattenSelect(opt: ConfigOptionLike): { value: string; name: string; description?: string | null; group?: string }[] {
+  const out: { value: string; name: string; description?: string | null; group?: string }[] = [];
   for (const o of opt.options ?? []) {
-    if (Array.isArray(o.options)) for (const g of o.options) out.push(g);
-    else if (typeof o.value === 'string') out.push({ value: o.value, name: o.name, description: o.description });
+    if (Array.isArray(o.options)) for (const g of o.options) out.push({ ...g, group: g.group ?? o.group });
+    else if (typeof o.value === 'string') out.push({ value: o.value, name: o.name, description: o.description, group: o.group });
   }
   return out;
+}
+
+/** dsh-style agents advertise model choices as JSON `[provider, model]` tuples; decode them. */
+function decodeAcpModelValue(value: string): { provider: string; model: string } | null {
+  try {
+    const v = JSON.parse(value) as unknown;
+    if (!Array.isArray(v) || v.length !== 2 || !v.every((x) => typeof x === 'string' && x.length > 0)) return null;
+    return { provider: v[0] as string, model: v[1] as string };
+  } catch {
+    return null;
+  }
 }
 
 export class AcpAdapter implements HarnessAdapter {
@@ -58,6 +70,8 @@ export class AcpAdapter implements HarnessAdapter {
   private turnStartedAt = 0;
   private sessionAllowedKinds = new Set<string>();
   private preset: AcpAgentPreset | null = null;
+  /** Clean ModelRef -> the agent's raw option value (tuple-advertising agents key choices by it). */
+  private modelValues = new Map<string, string>();
   private inflightPrompt: Promise<unknown> | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
@@ -140,17 +154,26 @@ export class AcpAdapter implements HarnessAdapter {
       this.caps = (init.agentCapabilities ?? {}) as Record<string, unknown>;
 
       const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { resume?: unknown; list?: unknown };
+      // HTTP and SSE entries are dropped unless the agent said it understands them.
+      const mcpCaps = (this.caps.mcpCapabilities ?? {}) as { http?: boolean; sse?: boolean };
+      const mcpServers = toAcp(
+        (await this.ctx.mcpServers().catch((e) => {
+          this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
+          return [];
+        })).map((r) => r.def),
+        mcpCaps
+      ) as unknown as acp.NewSessionRequest['mcpServers'];
       let res: { sessionId?: string; configOptions?: unknown[] | null; modes?: unknown } | null = null;
       if (meta.harnessRef.acpSessionId && sessionCaps.resume) {
         try {
-          const r = await withTimeout(this.conn.resumeSession({ sessionId: meta.harnessRef.acpSessionId, cwd: meta.cwd, mcpServers: [] } as acp.ResumeSessionRequest), 120_000, 'session/resume');
+          const r = await withTimeout(this.conn.resumeSession({ sessionId: meta.harnessRef.acpSessionId, cwd: meta.cwd, mcpServers } as acp.ResumeSessionRequest), 120_000, 'session/resume');
           res = { sessionId: meta.harnessRef.acpSessionId, configOptions: r.configOptions ?? null, modes: r.modes };
         } catch (e) {
           this.info(`Could not resume ACP session (${errorMessage(e)}); starting a new one.`, 'warn');
         }
       }
       if (!res) {
-        const r = await withTimeout(this.conn.newSession({ cwd: meta.cwd, mcpServers: [] }), 180_000, 'session/new');
+        const r = await withTimeout(this.conn.newSession({ cwd: meta.cwd, mcpServers }), 180_000, 'session/new');
         res = { sessionId: r.sessionId, configOptions: r.configOptions ?? null, modes: r.modes };
       }
       this.sessionId = res.sessionId ?? null;
@@ -184,16 +207,26 @@ export class AcpAdapter implements HarnessAdapter {
     const eff = this.effortOption();
     // Agents can advertise values the app does not model (none, auto, numeric levels); drop them at the boundary.
     const efforts = eff ? flattenSelect(eff).map((o) => o.value).filter(isEffortLevel) : undefined;
-    const models: ModelInfo[] = flattenSelect(opt).map((o) => ({
-      id: o.value,
-      provider: this.preset?.id ?? 'acp',
-      displayName: o.name || o.value,
-      description: o.description ?? undefined,
-      supportedEfforts: efforts,
-      isDefault: o.value === opt.currentValue
-    }));
+    this.modelValues.clear();
+    const models: ModelInfo[] = flattenSelect(opt).map((o) => {
+      // dsh-style agents advertise the route as a JSON [provider, model] tuple; expose the bare
+      // model id and real provider so model refs stay clean, and keep the raw value for setting.
+      const decoded = decodeAcpModelValue(o.value);
+      const info: ModelInfo = {
+        id: decoded?.model ?? o.value,
+        provider: decoded?.provider ?? this.preset?.id ?? 'acp',
+        displayName: o.name || decoded?.model || o.value,
+        description: o.description ?? undefined,
+        supportedEfforts: efforts,
+        isDefault: o.value === opt.currentValue
+      };
+      this.modelValues.set(`${info.provider}\u0000${info.id}`, o.value);
+      return info;
+    });
     this.ctx.emit({ type: 'models', models });
-    const current = models.find((m) => m.id === opt.currentValue);
+    const currentValue = typeof opt.currentValue === 'string' ? opt.currentValue : undefined;
+    const currentDecoded = currentValue ? decodeAcpModelValue(currentValue) : null;
+    const current = models.find((m) => (currentDecoded ? m.provider === currentDecoded.provider && m.id === currentDecoded.model : m.id === currentValue));
     if (current) this.ctx.updateMeta({ activeModel: { provider: current.provider, model: current.id } });
     if (eff && isEffortLevel(eff.currentValue)) this.ctx.updateMeta({ activeEffort: eff.currentValue });
   }
@@ -495,7 +528,12 @@ export class AcpAdapter implements HarnessAdapter {
   async setModel(model: ModelRef): Promise<void> {
     const opt = this.modelOption();
     if (!this.conn || !this.sessionId || !opt) throw new Error('This agent does not expose a model option.');
-    const res = await this.conn.setSessionConfigOption({ sessionId: this.sessionId, configId: opt.id, value: model.model } as acp.SetSessionConfigOptionRequest);
+    // Send the agent's raw option value: tuple-advertising agents (dsh) key their choices by it.
+    const raw =
+      this.modelValues.get(`${model.provider}\u0000${model.model}`) ??
+      [...this.modelValues.entries()].find(([k]) => k.endsWith(`\u0000${model.model}`))?.[1] ??
+      model.model;
+    const res = await this.conn.setSessionConfigOption({ sessionId: this.sessionId, configId: opt.id, value: raw } as acp.SetSessionConfigOptionRequest);
     this.configOptions = (res.configOptions ?? this.configOptions) as ConfigOptionLike[];
     this.ctx.updateMeta({ activeModel: model });
     this.publishModels();
@@ -518,7 +556,15 @@ export class AcpAdapter implements HarnessAdapter {
   async listModels(): Promise<ModelInfo[]> {
     const opt = this.modelOption();
     if (!opt) return [];
-    return flattenSelect(opt).map((o) => ({ id: o.value, provider: this.preset?.id ?? 'acp', displayName: o.name, description: o.description ?? undefined }));
+    return flattenSelect(opt).map((o) => {
+      const decoded = decodeAcpModelValue(o.value);
+      return {
+        id: decoded?.model ?? o.value,
+        provider: decoded?.provider ?? this.preset?.id ?? 'acp',
+        displayName: o.name || decoded?.model || o.value,
+        description: o.description ?? undefined
+      };
+    });
   }
 
   async dispose(): Promise<void> {

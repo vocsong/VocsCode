@@ -1,8 +1,10 @@
-# MCP support (plan)
+# MCP support
 
-Status: **exploration — surfaces decided, storage and phasing proposed. Global MCP
-servers get a sidebar page ("MCP", beside Skills); repo-level servers get a right-panel
-tab. Open decisions are listed in §11; the first PR is sketched in §12.**
+Status: **P0 shipped.** Global MCP servers have a sidebar page ("MCP", beside Skills);
+repo-level servers have a right-panel tab reading `<repo>/.mcp.json`. The effective set is
+injected into Claude, both Codex adapters and ACP agents; Cursor gets import/export; pi is
+marked unsupported. "Test connection" runs the app's own MCP client. §10 lists what P1 and
+P2 still hold — the native loop's client mode, live status, write-back to harness stores.
 
 ## 1. The idea
 
@@ -196,8 +198,13 @@ status request (`mcpServerStatus/list` or similar) to feed §7.2; if not, the ta
 "configured" only.
 
 **Codex exec** — `new Codex({ codexPathOverride, env, config: { mcp_servers } })`. The SDK
-flattens it to `--config` flags; secrets must therefore go through `env` +
-`bearer_token_env_var`, never inline (§8).
+flattens it to `--config` flags; secrets therefore go through `env_vars` and
+`env_http_headers`, never inline (§8). Verified live: Codex loads the servers, but this
+adapter runs with `approvalPolicy: 'never'` (it has no interactive approvals) and Codex
+answers every MCP tool call with "MCP tool call requires approval, but approval policy is
+never". So the tools are visible and unusable here; the panel says so and points at the
+app-server harness. Making them callable means auto-approving MCP tool calls in a
+harness with no approval UI, which is a permission decision for the user, not a P0 default.
 
 **ACP** — `newSession/resumeSession({ cwd, mcpServers: toAcp(effective) })`; env and
 headers become `[{ name, value }]` arrays; http/sse entries are dropped unless
@@ -345,55 +352,82 @@ native loop needs, so P1's native work is mostly the tool-list merge and the gat
 - Repo servers: right-panel tab (user, 2026-09-13).
 - No new runtime dependency: `@modelcontextprotocol/sdk` is already present.
 
-**Proposed — confirm or overrule**
+**Proposed here, shipped as specified in P0**
 
-1. **Repo file = `<repo>/.mcp.json`** in the Claude/Cursor shape (§5). Alternative:
-   `.vocs-code/mcp.json` with the git exclude narrowed to `.vocs-code/worktrees/`. The
-   first is shareable with plain Claude Code users and importable everywhere; the second
-   is unambiguously ours. Recommendation: `.mcp.json`.
-2. **Repo servers off until enabled per repo** (§8). Recommendation: yes — it costs one
-   click per server and removes the drive-by-execution risk.
-3. **Harness-native stores appear as read-only tabs on the MCP page in P0**, with
-   write-back ("Copy to Codex") in P1. Recommendation: yes, the Skills page set this
-   expectation.
-4. **Native loop MCP client in P1, not P0** — it is the only harness where we run the
-   client, and P0 already proves the model on four harnesses. Recommendation: P1.
-5. **Pi**: extension bridge in P2, or leave pi as "not supported" and rely on
-   `pi.extraArgs`? Recommendation: P2, low priority, revisit if pi gains native MCP.
-6. **Cursor**: inherit-only with import/export, no injection (the SDK has no seam).
-   Recommendation: accept.
+- Repo file is `<repo>/.mcp.json` in the Claude/Cursor shape (§5), not `.vocs-code/mcp.json`:
+  it is shareable with plain Claude Code users and importable everywhere.
+- Repo servers stay off until enabled per repo (§8).
+- Harness-native stores are read-only tabs on the MCP page in P0; write-back is P1.
+- The native loop's MCP client is P1. P0 ships the client for "Test connection" only.
+- Pi: extension bridge deferred to P2, `pi.extraArgs` remains the escape hatch.
+- Cursor: inherit-only with import/export, no injection (the SDK has no seam).
 
-**To verify live during P0** (not decisions, but they shape the Claude path)
+**Settled while building P0**
+
+- Injection is verified live end to end for **claude**, **codex** (app-server) and **acp**
+  (dsh): each connects to a server this app handed it and calls one of its tools. The
+  fixture stamps its output with a token that never appears in the prompt, so a model
+  cannot fake the round trip (`HARNESS_SMOKE_ONLY=mcp`, §10).
+- **codex-exec** loads the servers but cannot call them; see §6.
+- The ACP adapter reports an MCP tool call with the transcript name `other` rather than the
+  server-qualified name. Cosmetic, pre-existing in the ACP tool mapping, noted for P1.
+
+- Codex's TOML MCP keys are `command` / `args` / `env` / `env_vars` for stdio and
+  `url` / `http_headers` / `env_http_headers` / `bearer_token_env_var` for HTTP, plus
+  `startup_timeout_sec` / `tool_timeout_sec` / `enabled_tools` / `disabled_tools`
+  (read off the shipped `codex` binary). `env_http_headers` and `env_vars` are the
+  indirections the exec SDK path uses so no secret lands in `--config` argv.
+- The MCP SDK's own stdio transport goes through `cross-spawn`, so the app's client
+  survives a `.cmd` shim untouched. The harnesses do not, so `normalizeStdio` still
+  rewrites to `cmd /c <shim>`; `tests/mcp-client.test.ts` runs a real `.cmd` server to
+  prove that form works.
+
+**Still to verify live** (they shape the Claude path, not the design)
 
 - Whether an SDK `mcpServers` entry and a `.mcp.json` entry with the same name dedupe.
 - Whether `.mcp.json` servers load at all in SDK mode without `enableAllProjectMcpServers`.
-- Exact Codex TOML keys for HTTP auth (`bearer_token_env_var`, `http_headers`).
-- Which ACP agents accept `session/new.mcpServers` (dsh, pi-acp).
 - Whether Claude Code resolves `npx` shims itself on Windows.
 
-## 12. The first PR (P0 sketch)
+## 12. What P0 shipped
+
+Shipped exactly as sketched, file for file.
 
 - `src/shared/types.ts` — `McpTransport`, `McpServerDef`, `AppSettings.mcpServers`,
   `AppSettings.mcpProjectState`, `HarnessCapabilities.mcp`.
 - `src/shared/harness-meta.ts` — `mcp` on all seven descriptors.
-- `src/shared/ipc.ts` — `mcp:project:get { sessionId }` → `{ path, exists, servers,
-  detected[] , state }`; `mcp:project:save { sessionId, servers }`; `mcp:project:state
-  { root, patch }`; `mcp:native:list` → per-harness store contents; `mcp:inspect { def }`
-  → `{ ok, tools[], error? }`; `mcp:import { sessionId, from, ids }`.
+- `src/shared/ipc.ts` — `mcp:stores` → the harness-native global stores;
+  `mcp:project { sessionId }` → the repo file, the global list, the per-repo switches, the
+  detected project stores and the effective set with a reason per skipped row;
+  `mcp:project:save { sessionId, servers }`; `mcp:project:state { sessionId, patch }`;
+  `mcp:inspect { def, sessionId? }` → `{ ok, serverInfo?, tools[], error?, durationMs }`;
+  `mcp:import { servers, to, sessionId? }`; `mcp:export { sessionId, to: 'cursor' }`.
+  The global list is edited through the existing `settings:update`, so no channel of its
+  own. Every definition the renderer sends back goes through `normalizeMcpServers` before
+  it can reach a file or a harness.
 - `src/main/mcp/` — `file.ts` (`.mcp.json` + harness-native readers: JSON for Claude /
   Cursor / VS Code / Gemini, a minimal TOML `[mcp_servers.*]` reader for Codex),
   `effective.ts` (merge, `${VAR}`, shim normalisation, `toClaude/toCodex/toAcp`),
-  `client.ts` (MCP SDK wrapper for inspect; reused by native in P1). No Electron imports.
+  `client.ts` (MCP SDK wrapper for inspect; reused by native in P1), `index.ts` (the one
+  place that sees settings, the repo file and the secret store together). No Electron
+  imports; the MCP SDK is imported lazily so nothing loads until a server is probed.
 - `src/main/settings.ts` — defaults + explicit normalisation of the two new fields.
 - `src/main/session-manager.ts` — `ctx.mcpServers()` in `buildContext()`.
 - `src/main/harness/{claude,codex-app-server,codex-exec,acp}.ts` — the four injections.
-- `src/main/ipc.ts` — handlers; `settingsChanged` push on state changes.
+- `src/main/ipc.ts` — handlers. The state patch goes through `settings.update`, so the
+  existing `settingsChanged` push refreshes both surfaces.
 - `src/renderer/src/components/McpView.tsx` (page), `McpTab.tsx` (panel), shared
   `McpServerForm.tsx`; registrations in `store.ts`, `App.tsx`, `Sidebar.tsx`,
   `RightPanel.tsx`, `CommandPalette.tsx`, `shortcuts.ts`, `src/shared/shortcuts.ts`.
-- Tests — `tests/mcp.test.ts` (file round-trip, TOML reader, `${VAR}` resolution incl.
-  keychain fallback, Windows shim rewrite, dialect converters, off-until-enabled merge);
-  adapter option assertions for the four injections; `tests/sidebar-nav.test.tsx` and the
-  right-panel tab test extended; `tests/review-fixes.test.ts` for the gate.
+- Tests — `tests/mcp.test.ts` (store readers and the `.mcp.json` round trip, the Codex TOML
+  reader, the off-until-enabled merge, `${VAR}` resolution and its keychain fallback, the
+  Windows shim rewrite, all four dialects, settings normalisation);
+  `tests/mcp-client.test.ts` (the client against a real stdio server from
+  `tests/fixtures/`, including a `.cmd` shim on Windows); `tests/mcp-tab.test.tsx` (the
+  trust gate and the per-repo switches).
 - Docs — this file's status line, README docs table, `docs/ARCHITECTURE.md` harness
   matrix gains an MCP column.
+
+Not in P0, by design: the native loop still runs without MCP tools (its capability says
+`client`, and `resolveForSession` returns the list, but the tool merge is P1); Claude's
+`mcpServerStatus()` is not read yet, so the panel's "In this session" section says
+"configured, not probed"; the Codex app-server still hard-declines elicitation requests.

@@ -32,6 +32,7 @@ export function CommandPalette() {
       { id: 'settings', label: 'Open settings', hint: 'Ctrl+,', icon: 'settings', run: () => st.setView('settings') },
       { id: 'analytics', label: 'Open analytics dashboard', icon: 'chart', run: () => st.setView('analytics') },
       { id: 'skills', label: 'Open skills', icon: 'puzzle', run: () => st.setView('skills') },
+      { id: 'mcp', label: 'Open MCP servers', icon: 'server', run: () => st.setView('mcp') },
       { id: 'panel', label: 'Toggle right side panel', hint: 'Ctrl+J', icon: 'layout', run: () => st.togglePanel() },
       { id: 'sidebar', label: 'Toggle left sidebar', hint: 'Ctrl+B', icon: 'sidebar', run: () => st.toggleSidebar() },
       { id: 'changes', label: 'Show changes', icon: 'diff', run: () => st.setPanelTab('changes') },
