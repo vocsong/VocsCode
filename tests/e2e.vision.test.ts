@@ -12,6 +12,7 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
+import { openNewSession, pickModel, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -36,6 +37,7 @@ describe.runIf(enabled)('vision capability UI', () => {
     await fs.mkdir(project, { recursive: true });
     await fs.writeFile(path.join(project, 'README.md'), '# vision e2e\n');
     await fs.writeFile(imageFile, Buffer.from(PNG_BASE64, 'base64'));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
     await fs.mkdir(shots, { recursive: true });
 
     const env: Record<string, string> = {};
@@ -53,13 +55,9 @@ describe.runIf(enabled)('vision capability UI', () => {
     await win.waitForSelector('.brand', { timeout: 60_000 });
 
     // A DeepSeek model: the built-in catalog marks the whole provider text-only.
-    await win.click('.sidebar-top button:has-text("New")');
-    await win.waitForSelector('.modal');
-    await win.fill('.ns-grid input[placeholder*="repo"]', project);
+    await openNewSession(win);
     await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
-    const modelSelect = win.locator('.ns-grid .ns-col').nth(1).locator('select').first();
-    await modelSelect.locator('option').nth(1).waitFor({ state: 'attached', timeout: 60_000 });
-    await modelSelect.selectOption('deepseek::deepseek-v4-flash');
+    await pickModel(win, 'deepseek/deepseek-v4-flash');
     await win.fill('textarea[placeholder="What should the agent do?"]', 'hello');
     await win.click('button:has-text("Start session")');
     await win.waitForSelector('.header', { timeout: 30_000 });
