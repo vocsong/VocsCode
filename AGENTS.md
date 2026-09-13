@@ -13,6 +13,7 @@ Working agreements for agents in this repo: how to verify, what to touch, what t
 - **Dependencies.** Never add a runtime dependency without asking first. Dev-only tooling and new source files are fine when the task needs them.
 - **UI is open.** No mandated reuse rule: build new components and patterns when they are the better fit. The primitives in `components/ui.tsx` and the CSS variables in `styles.css` are available, not required. A UI library is still a runtime dependency — ask first (see Dependencies).
 - **Git history.** Work on your own agent branch (`<agent>/<slug>`, e.g. `pi/<slug>`). Rebase or force-push your own agent branch freely. Never rewrite `develop` or `master` history, and never force-push a branch you did not create (the permission gate still prompts for force-push below Full access).
+- **PR titles feed releases.** PRs are squash-merged into `develop`, so the PR title becomes the commit that release-please parses on `master` to write the changelog and pick version bumps. Titles must follow Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`, `ci:`, `refactor:`, `test:`) with imperative sentence case after the prefix. The `develop` → `master` ship PR is the one exception — rebase-merge it so the individual conventional commits land on master's first-parent chain where the bot parses them (a merge commit hides them under its PR title). See [docs/RELEASING.md](docs/RELEASING.md).
 - **Report tight.** The final write-up — and the PR description — is a short structured report, same shape every time, bullets only, no process narration:
   - **Task** — one-line recap of the original task as it was asked, so the report stands alone.
   - **Files** — files touched, grouped by what changed and why.
@@ -93,7 +94,7 @@ Touch all of these: add an adapter in `src/main/harness/<id>.ts`, register the c
 
 - TypeScript strict, ESM, 2-space indent, single quotes, semicolons, trailing commas. `@shared/*` (main) and `@renderer/*` (renderer) aliases are configured in `electron.vite.config.ts` and the tsconfigs.
 - Comments and file headers are short and explanatory; match the existing terse style rather than narrating every line.
-- Commit messages are imperative sentence case with no prefix (`Show the shell's directory in the terminal strip`).
+- Commit messages inside a PR are imperative sentence case with no prefix (`Show the shell's directory in the terminal strip`); the PR title — which becomes the squash-merge commit — is Conventional Commits (`feat: Show the shell's directory in the terminal strip`).
 - Keep platform-specific behavior tested on Windows and POSIX paths; the test suites branch on `process.platform` deliberately.
 
 ## Gotchas
