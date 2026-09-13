@@ -51,13 +51,21 @@ export function ModelPicker({
   const matches = (m: ModelInfo) =>
     !q || m.displayName.toLowerCase().includes(q) || m.id.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q);
 
+  // The current selection is pinned to the top of the list so it is always visible.
+  const selectedModel = useMemo(
+    () => (selected ? models.find((m) => m.provider === selected.provider && m.id === selected.model) : undefined),
+    [models, selected]
+  );
+  const isSelected = (m: ModelInfo) => !!selectedModel && m.provider === selectedModel.provider && m.id === selectedModel.id;
+
   const rows = useMemo(() => {
     // Keep only models that still exist in the current catalog, preserving stored order.
     const known = favorites.filter((f) => models.some((m) => m.provider === f.provider && m.id === f.model));
     const isFav = (m: ModelInfo) => known.some((f) => f.provider === m.provider && f.model === m.id);
-    const rest = models.filter((m) => !isFav(m));
+    const selectedKey = selectedModel ? `${selectedModel.provider}::${selectedModel.id}` : '';
+    const rest = models.filter((m) => !isFav(m) && `${m.provider}::${m.id}` !== selectedKey);
     return { known, isFav, rest };
-  }, [favorites, models]);
+  }, [favorites, models, selectedModel]);
 
   const renderRow = (m: ModelInfo) => {
     const active = selected && selected.provider === m.provider && selected.model === m.id;
@@ -89,11 +97,17 @@ export function ModelPicker({
     );
   };
 
-  const favRows = rows.known.map((f) => models.find((m) => m.provider === f.provider && m.id === f.model)!).filter(Boolean);
+  const favRows = rows.known
+    .map((f) => models.find((m) => m.provider === f.provider && m.id === f.model)!)
+    .filter(Boolean)
+    .filter((m) => !isSelected(m));
   const filteredFav = favRows.filter(matches);
   const groups = new Map<string, ModelInfo[]>();
   for (const m of rows.rest) if (matches(m)) groups.set(m.provider, [...(groups.get(m.provider) ?? []), m]);
-  const anyResults = filteredFav.length > 0 || groups.size > 0;
+  // When no explicit model is set, the "harness default" row is the current selection.
+  const pinDefault = !selected && !!clearOption && !q;
+  const pinned = !!selectedModel || pinDefault;
+  const anyResults = pinned || filteredFav.length > 0 || groups.size > 0;
 
   return (
     <div className="model-picker">
@@ -128,6 +142,19 @@ export function ModelPicker({
       {error && <div className="menu-empty">{error}</div>}
       {!loading && !error && !anyResults && <div className="menu-empty">{q ? `No models match “${query}”.` : emptyText}</div>}
       <div className="mp-list">
+        {pinned && (
+          <>
+            <div className="menu-group">Selected</div>
+            {selectedModel ? (
+              renderRow(selectedModel)
+            ) : (
+              <button type="button" className="menu-item active" onClick={() => onSelect(null)}>
+                <span className="menu-item-label">{clearOption!.label}</span>
+                <Icon name="check" size={14} />
+              </button>
+            )}
+          </>
+        )}
         {filteredFav.length > 0 && (
           <>
             <div className="menu-group">Favorites</div>
@@ -140,7 +167,7 @@ export function ModelPicker({
             {list.map(renderRow)}
           </div>
         ))}
-        {clearOption && !q && (
+        {clearOption && !q && !pinDefault && (
           <>
             <div className="menu-group">Other</div>
             <button type="button" className={`menu-item ${!selected ? 'active' : ''}`} onClick={() => onSelect(null)}>

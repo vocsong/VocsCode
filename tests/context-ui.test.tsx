@@ -54,6 +54,38 @@ describe('context window UI', () => {
     expect(screen.getByText('Context unknown')).toBeTruthy();
   });
 
+  it('pins the selected model to the top of the list, without duplicating it', () => {
+    const models: ModelInfo[] = [
+      { id: 'alpha', provider: 'acme', displayName: 'Alpha' },
+      { id: 'beta', provider: 'acme', displayName: 'Beta' },
+      { id: 'gamma', provider: 'other', displayName: 'Gamma' },
+    ];
+    const { container } = render(
+      <ModelPicker models={models} selected={{ provider: 'other', model: 'gamma' }} onSelect={vi.fn()} />
+    );
+
+    const groups = [...container.querySelectorAll('.mp-list > .menu-group, .mp-list > div > .menu-group')];
+    expect(groups[0]?.textContent).toBe('Selected');
+    const firstRow = container.querySelector('.mp-list .mp-row');
+    expect(firstRow?.querySelector('.mp-name')?.textContent).toBe('Gamma');
+    expect(firstRow?.querySelector('.mp-select')?.getAttribute('aria-pressed')).toBe('true');
+    // The selected model is pinned once, not repeated under its provider group.
+    expect(screen.getAllByText('Gamma')).toHaveLength(1);
+  });
+
+  it('pins the harness-default row when the current selection is default', () => {
+    const models: ModelInfo[] = [
+      { id: 'alpha', provider: 'acme', displayName: 'Alpha' },
+      { id: 'beta', provider: 'acme', displayName: 'Beta' },
+    ];
+    const { container } = render(<ModelPicker models={models} clearOption={{ label: 'Harness default' }} onSelect={vi.fn()} />);
+
+    expect(container.querySelector('.mp-list .menu-group')?.textContent).toBe('Selected');
+    const pinned = container.querySelector('.mp-list .menu-item.active');
+    expect(pinned?.textContent).toContain('Harness default');
+    expect(screen.getAllByText('Harness default')).toHaveLength(1);
+  });
+
   it('offers every requested auto-compaction preset and persists the selection', () => {
     render(<SettingsView />);
     const select = screen.getByText('Automatically compact context at').closest('label')?.querySelector('select') as HTMLSelectElement;
