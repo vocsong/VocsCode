@@ -3,8 +3,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { GitBranchOverview, GitBranchOverviewItem, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, GitWorktreeInfo, SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { basename, relTime } from '../format';
+import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
-import { askConfirm, Badge, Button, Dropdown, EmptyState, Icon, MenuItem, Spinner } from './ui';
+import { askConfirm, Badge, Button, Dropdown, EmptyState, Icon, MenuItem, Modal, Spinner } from './ui';
 
 /** Branches untouched for this long land in the Stale filter. */
 const STALE_DAYS = 14;
@@ -69,6 +70,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   const [issueLoading, setIssueLoading] = useState(false);
   const [issueFilter, setIssueFilter] = useState<IssueFilter>('open');
   const [issueQuery, setIssueQuery] = useState('');
+  const [selectedIssue, setSelectedIssue] = useState<GitIssue | null>(null);
   /** The session this instance belongs to; async responses for other sessions are dropped. */
   const liveId = useRef(session.id);
   /** Inputs the background poll reads; refreshed every render so the interval never acts on stale state. */
@@ -140,6 +142,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
     setData(null);
     setPrData(null);
     setIssueData(null);
+    setSelectedIssue(null);
     lastPollAt.current = Date.now();
     void refresh();
     void refreshPrs();
@@ -407,7 +410,8 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           query={issueQuery}
           setQuery={setIssueQuery}
           onRefresh={() => void refreshIssues()}
-          onView={(issue) => void invoke('app:openExternal', { url: issue.url })}
+          onOpen={(issue) => setSelectedIssue(issue)}
+          onViewExternal={(issue) => void invoke('app:openExternal', { url: issue.url })}
           onNewSession={startSessionOnIssue}
         />
       ) : view === 'prs' ? (
@@ -497,6 +501,20 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
             />
           ))}
         </div>
+      )}
+      {selectedIssue && (
+        <IssueDialog
+          issue={selectedIssue}
+          onClose={() => setSelectedIssue(null)}
+          onViewExternal={() => {
+            setSelectedIssue(null);
+            void invoke('app:openExternal', { url: selectedIssue.url });
+          }}
+          onNewSession={() => {
+            setSelectedIssue(null);
+            startSessionOnIssue(selectedIssue);
+          }}
+        />
       )}
     </div>
   );
@@ -933,7 +951,8 @@ function IssueList({
   query,
   setQuery,
   onRefresh,
-  onView,
+  onOpen,
+  onViewExternal,
   onNewSession
 }: {
   data: GitIssueList | null;
@@ -943,7 +962,8 @@ function IssueList({
   query: string;
   setQuery: (q: string) => void;
   onRefresh: () => void;
-  onView: (issue: GitIssue) => void;
+  onOpen: (issue: GitIssue) => void;
+  onViewExternal: (issue: GitIssue) => void;
   onNewSession: (issue: GitIssue) => void;
 }) {
   const issues = data?.issues ?? [];
@@ -1008,7 +1028,8 @@ function IssueList({
             <IssueRow
               key={issue.number}
               issue={issue}
-              onView={() => onView(issue)}
+              onOpen={() => onOpen(issue)}
+              onViewExternal={() => onViewExternal(issue)}
               onNewSession={() => onNewSession(issue)}
             />
           ))}
@@ -1019,37 +1040,95 @@ function IssueList({
   );
 }
 
-function IssueRow({ issue, onView, onNewSession }: { issue: GitIssue; onView: () => void; onNewSession: () => void }) {
+function IssueRow({ issue, onOpen, onViewExternal, onNewSession }: { issue: GitIssue; onOpen: () => void; onViewExternal: () => void; onNewSession: () => void }) {
+  const onRowClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('.branch-actions') || target.closest('.issue-open')) return;
+    onOpen();
+  };
   return (
-    <div className="branch-row pr-row issue-row">
+    <div className="branch-row pr-row issue-row" onClick={onRowClick}>
       <span className="issue-num mono" title={`Issue #${issue.number}`}>
         #{issue.number}
       </span>
-      <div className="pr-title">
-        <div className="pr-head">
+      <button type="button" className="pr-title issue-open" aria-label={`Read issue #${issue.number}: ${issue.title}`} onClick={onOpen}>
+        <span className="pr-head">
           <span className="issue-title" title={issue.title}>
             {issue.title}
           </span>
-        </div>
+        </span>
         {(issue.labels?.length || issue.comments) && (
-          <div className="pr-refs">
+          <span className="pr-refs">
             {(issue.labels ?? []).slice(0, 4).map((l) => (
               <Badge key={l.name} tone="neutral" title={`Label: ${l.name}`}>
                 {l.name}
               </Badge>
             ))}
             {!!issue.comments && <span className="muted small">{issue.comments} comment{issue.comments === 1 ? '' : 's'}</span>}
-          </div>
+          </span>
         )}
-      </div>
+      </button>
       <span className="pr-author muted small" title={issue.author}>
         {issue.author ?? '—'}
       </span>
       <div className="branch-actions">
-        <Button variant="ghost" size="sm" icon="external" title={`Open issue #${issue.number} on GitHub`} onClick={onView} />
+        <Button variant="ghost" size="sm" icon="external" title={`Open issue #${issue.number} on GitHub`} onClick={onViewExternal} />
         <Button variant="ghost" size="sm" icon="plus" title="Start a session on this issue (pick a folder, Enter starts)" onClick={onNewSession} />
       </div>
     </div>
+  );
+}
+
+function IssueDialog({
+  issue,
+  onClose,
+  onViewExternal,
+  onNewSession
+}: {
+  issue: GitIssue;
+  onClose: () => void;
+  onViewExternal: () => void;
+  onNewSession: () => void;
+}) {
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const bodyHtml = useMemo(() => renderMarkdown(issue.body ?? ''), [issue.body]);
+  useEffect(() => {
+    if (!bodyRef.current || !bodyHtml) return;
+    return installMarkdownHandlers(bodyRef.current, (url) => void invoke('app:openExternal', { url }));
+  }, [bodyHtml]);
+  const stateLabel = issue.state === 'OPEN' ? 'Open' : 'Closed';
+
+  return (
+    <Modal
+      title={<><span className="mono muted">#{issue.number}</span> {issue.title}</>}
+      onClose={onClose}
+      width={760}
+      footer={
+        <>
+          <Button variant="ghost" icon="external" onClick={onViewExternal}>
+            Open on GitHub
+          </Button>
+          <Button variant="primary" icon="plus" onClick={onNewSession}>
+            Start session
+          </Button>
+        </>
+      }
+    >
+      <div className="issue-dialog-meta">
+        <Badge tone={issue.state === 'OPEN' ? 'green' : 'neutral'}>{stateLabel}</Badge>
+        {issue.author && <span>Opened by <strong>{issue.author}</strong></span>}
+        {issue.comments !== undefined && <span>{issue.comments} comment{issue.comments === 1 ? '' : 's'}</span>}
+        {issue.createdAt !== undefined && <span title={new Date(issue.createdAt).toLocaleString()}>Opened {relTime(issue.createdAt)}</span>}
+        {issue.updatedAt !== undefined && <span title={new Date(issue.updatedAt).toLocaleString()}>Updated {relTime(issue.updatedAt)}</span>}
+        {issue.state === 'CLOSED' && issue.closedAt !== undefined && <span title={new Date(issue.closedAt).toLocaleString()}>Closed {relTime(issue.closedAt)}</span>}
+        {issue.labels?.map((label) => (
+          <Badge key={label.name} tone="neutral" title={`Label: ${label.name}`}>
+            {label.name}
+          </Badge>
+        ))}
+      </div>
+      {bodyHtml ? <div ref={bodyRef} className="md issue-dialog-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} /> : <p className="muted issue-dialog-empty">No description provided.</p>}
+    </Modal>
   );
 }
 
