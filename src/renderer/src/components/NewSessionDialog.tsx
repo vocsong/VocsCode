@@ -1,15 +1,19 @@
 /** New session dialog: project directory, harness, model, permission mode and worktree isolation. */
-import React, { useEffect, useState } from 'react';
-import type { EffortLevel, HarnessId, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
+import React, { useEffect, useRef, useState } from 'react';
+import type { EffortLevel, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
-import { invoke, modKey } from '../api';
+import { invoke } from '../api';
+import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
+import { fileToAttachment } from './Composer';
 
 export function NewSessionDialog() {
   const settings = useStore((s) => s.settings)!;
   const availability = useStore((s) => s.availability);
+  const availabilityError = useStore((s) => s.availabilityError);
+  const refreshAvailability = useStore((s) => s.refreshAvailability);
   const close = () => useStore.getState().openNewSession(false);
   const setActive = useStore((s) => s.setActive);
   const toast = useStore((s) => s.toast);
@@ -20,14 +24,15 @@ export function NewSessionDialog() {
   const projectRoot = useStore((s) => s.newSessionRoot) ?? activeSession?.config.projectRoot ?? '';
   const [harness, setHarness] = useState<HarnessId>(settings.defaultHarness);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(!!projectRoot);
   const [modelsError, setModelsError] = useState<string | undefined>();
   const [model, setModel] = useState<ModelRef | undefined>(settings.defaultModelByHarness[settings.defaultHarness]);
   const [effort, setEffort] = useState<EffortLevel | ''>(settings.defaultEffort ?? '');
   const [mode, setMode] = useState<PermissionMode>(settings.defaultPermissionMode);
-  const [useWorktree, setUseWorktree] = useState(false);
+  const [useWorktree, setUseWorktree] = useState(settings.defaultUseWorktree ?? false);
   const [acpAgent, setAcpAgent] = useState(settings.acpAgents[0]?.id ?? 'dsh');
   const [prompt, setPrompt] = useState('');
+  const [images, setImages] = useState<ImageAttachment[]>([]);
   const [goal, setGoal] = useState('');
   const [title, setTitle] = useState('');
   const [advanced, setAdvanced] = useState(false);
@@ -35,6 +40,28 @@ export function NewSessionDialog() {
   const [maxBudget, setMaxBudget] = useState('');
   const [customProvider, setCustomProvider] = useState({ id: '', name: '', baseUrl: '', envKey: '' });
   const [creating, setCreating] = useState(false);
+
+  // Focus the first-prompt textarea so typing can start immediately.
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    promptRef.current?.focus();
+  }, []);
+
+  // The model column keeps the harness column's height; the model list scrolls inside it.
+  const harnessColRef = useRef<HTMLElement>(null);
+  const modelColRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const left = harnessColRef.current;
+    const right = modelColRef.current;
+    if (!left || !right) return;
+    const apply = () => {
+      right.style.height = `${left.offsetHeight}px`;
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(left);
+    return () => ro.disconnect();
+  }, [harness, acpAgent]);
 
   const descriptor = HARNESSES.find((h) => h.id === harness)!;
   const modes = descriptor.capabilities.permissionModes;
@@ -47,7 +74,7 @@ export function NewSessionDialog() {
     let cancelled = false;
     setModels([]);
     setModelsError(undefined);
-    setModelsLoading(!projectRoot);
+    setModelsLoading(!!projectRoot);
     setModel(settings.defaultModelByHarness[harness]);
     if (!projectRoot) return;
     invoke('harness:models', { harness, acpAgent, projectRoot })
@@ -68,9 +95,17 @@ export function NewSessionDialog() {
   }, [harness, acpAgent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedModel = models.find((m) => model && m.id === model.model && m.provider === model.provider);
-  const effortOptions = selectedModel?.supportedEfforts?.length ? selectedModel.supportedEfforts : [...EFFORT_LEVELS];
+  const supportedEfforts = selectedModel?.supportedEfforts;
+  const effortOptions = supportedEfforts?.length ? supportedEfforts : [...EFFORT_LEVELS];
+  // Keep the remembered choice when possible; an incompatible model uses its own default instead
+  // of submitting a hidden, unsupported value.
+  let selectedEffort: EffortLevel | '' = effort;
+  if (effort && supportedEfforts?.length && !supportedEfforts.includes(effort)) {
+    selectedEffort = selectedModel?.defaultEffort && supportedEfforts.includes(selectedModel.defaultEffort) ? selectedModel.defaultEffort : '';
+  }
 
   const create = async () => {
+    if (modelsLoading) return;
     if (!projectRoot) {
       toast('Choose a project folder first.', 'error');
       return;
@@ -81,7 +116,7 @@ export function NewSessionDialog() {
         harness,
         projectRoot,
         model,
-        effort: effort || undefined,
+        effort: selectedEffort || undefined,
         permissionMode: mode,
         useWorktree,
         acpAgent: harness === 'acp' ? acpAgent : undefined,
@@ -89,8 +124,15 @@ export function NewSessionDialog() {
         maxBudgetUsd: maxBudget ? Number(maxBudget) : undefined,
         codexModelProvider: harness === 'codex' && customProvider.id && customProvider.baseUrl ? { id: customProvider.id, name: customProvider.name || customProvider.id, baseUrl: customProvider.baseUrl, envKey: customProvider.envKey || undefined, wireApi: 'chat' } : undefined
       };
-      const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, goal: goal.trim() || undefined });
-      await invoke('settings:update', { defaultHarness: harness, defaultPermissionMode: mode, defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model } });
+      // Persist before creation so an initial prompt also sees an explicit switch back to the
+      // harness default instead of inheriting the previously remembered effort.
+      await rememberEffort(selectedEffort || undefined, {
+        defaultHarness: harness,
+        defaultPermissionMode: mode,
+        defaultUseWorktree: useWorktree,
+        defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model }
+      });
+      const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, initialImages: images.length ? images : undefined, goal: goal.trim() || undefined });
       close();
       await setActive(meta.id);
     } catch (e) {
@@ -101,19 +143,42 @@ export function NewSessionDialog() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !creating && projectRoot) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !creating && !modelsLoading && projectRoot) {
       e.preventDefault();
       void create();
     }
   };
 
+  // Same image handling as the chat composer: pasted or picked screenshots ride along with the first prompt.
+  const onPaste = async (e: React.ClipboardEvent) => {
+    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    e.preventDefault();
+    const imgs = await Promise.all(files.map(fileToAttachment));
+    setImages((prev) => [...prev, ...imgs]);
+  };
+
+  const addFiles = async (list: FileList | null) => {
+    if (!list) return;
+    const imgs = await Promise.all([...list].filter((f) => f.type.startsWith('image/')).map(fileToAttachment));
+    setImages((prev) => [...prev, ...imgs]);
+  };
+
+  const titleEl = (
+    <span className="ns-header">
+      <span className="row gap8">
+        <Icon name="plus" /> New session
+      </span>
+      <span className="ns-header-root row gap6" title={projectRoot}>
+        <Icon name="folder" size={13} />
+        <span className="ns-root">{projectRoot || 'No folder selected'}</span>
+      </span>
+    </span>
+  );
+
   return (
     <Modal
-      title={
-        <span className="row gap8">
-          <Icon name="plus" /> New session
-        </span>
-      }
+      title={titleEl}
       onClose={close}
       width={860}
       footer={
@@ -123,21 +188,14 @@ export function NewSessionDialog() {
           <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={create} disabled={creating || !projectRoot} title={`Start from the prompt area with ${modKey}+Enter`}>
-            {creating ? <Spinner /> : <Icon name="play" />} Start session <Kbd>{modKey}+↵</Kbd>
+          <Button variant="primary" onClick={create} disabled={creating || modelsLoading || !projectRoot} title="Start from the prompt area with Enter">
+            {creating ? <Spinner /> : <Icon name="play" />} Start session <Kbd>↵</Kbd>
           </Button>
         </>
       }
     >
       <div className="ns-grid">
-        <section className="ns-col">
-          <Field label="Project folder">
-            <div className="row gap8">
-              <Icon name="folder" size={14} />
-              <span className="ns-root" title={projectRoot}>{projectRoot || 'No folder selected'}</span>
-            </div>
-          </Field>
-
+        <section className="ns-col" ref={harnessColRef}>
           <Field label="Harness">
             <div className="harness-cards">
               {HARNESSES.map((h) => {
@@ -146,7 +204,17 @@ export function NewSessionDialog() {
                   <button key={h.id} type="button" className={`harness-card ${harness === h.id ? 'active' : ''}`} onClick={() => setHarness(h.id)}>
                     <div className="harness-card-top">
                       <span className="harness-card-name">{h.name}</span>
-                      {av ? av.available ? <Badge tone={av.authenticated === false ? 'amber' : 'green'}>{av.authenticated === false ? 'not logged in' : av.version ? av.version.replace(/[^\d.]+.*$/, '') || 'ready' : 'ready'}</Badge> : <Badge tone="red">missing</Badge> : <Spinner size={10} />}
+                      {av ? av.available ? <Badge tone={av.authenticated === false ? 'amber' : 'green'}>{av.authenticated === false ? 'not logged in' : av.version ? av.version.replace(/[^\d.]+.*$/, '') || 'ready' : 'ready'}</Badge> : <Badge tone="red">missing</Badge> : availabilityError ? (
+                        <span
+                          className="link-btn"
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => { e.stopPropagation(); void refreshAvailability(); }}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); void refreshAvailability(); } }}
+                        >
+                          could not check — retry
+                        </span>
+                      ) : <Spinner size={10} />}
                     </div>
                     <div className="harness-card-tag">{h.tagline}</div>
                   </button>
@@ -175,7 +243,7 @@ export function NewSessionDialog() {
           )}
         </section>
 
-        <section className="ns-col">
+        <section className="ns-col ns-col-model" ref={modelColRef}>
           <Field label={<span className="row gap6">Model {modelsLoading && <Spinner size={11} />}</span>} hint={modelsError}>
             <ModelPicker
               models={models}
@@ -188,7 +256,7 @@ export function NewSessionDialog() {
           </Field>
           <div className="row gap12">
             <Field label="Reasoning effort">
-              <select value={effort} onChange={(e) => setEffort(e.target.value as EffortLevel | '')} disabled={!descriptor.capabilities.effort}>
+              <select value={selectedEffort} onChange={(e) => setEffort(e.target.value as EffortLevel | '')} disabled={!descriptor.capabilities.effort}>
                 <option value="">Default</option>
                 {effortOptions.map((l) => (
                   <option key={l} value={l}>
@@ -211,10 +279,32 @@ export function NewSessionDialog() {
           {!descriptor.capabilities.approvals && mode !== 'plan' && <div className="callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
 
           <Toggle checked={useWorktree} onChange={setUseWorktree} label={<span>Isolate in a git worktree <span className="muted">(new branch under .vocs-code/worktrees)</span></span>} />
+        </section>
 
-          <Field label="First prompt (optional)">
-            <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} placeholder="What should the agent do?" />
-          </Field>
+        <section className="ns-span2">
+          <div className="field">
+            <span className="field-label">First prompt (optional)</span>
+            {images.length > 0 && (
+              <div className="attachments ns-attachments">
+                {images.map((im, i) => (
+                  <div key={i} className="attachment">
+                    <img src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'image'} />
+                    <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove">
+                      <Icon name="x" size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="ns-prompt-box">
+              <textarea ref={promptRef} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
+              <label className="icon-btn ns-attach" title="Attach image">
+                <Icon name="image" size={14} />
+                <input type="file" accept="image/*" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
+              </label>
+            </div>
+            <span className="field-hint">Paste a screenshot or attach one with the button — it is sent with the first message.</span>
+          </div>
           <Field label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>} hint="A persistent objective. The session keeps continuing until the agent proves it is done or the iteration guard trips.">
             <textarea rows={2} value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="e.g. Make the test suite pass and open a PR" />
           </Field>

@@ -1,16 +1,20 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
-import React, { useEffect, useState } from 'react';
-import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig } from '../../../shared/types';
+import React, { useEffect, useRef, useState } from 'react';
+import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
+import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig, SecretStatus } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
 import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
+import { BUILTIN_SHORTCUT_GROUPS, SHORTCUT_COMMANDS, accelFromEvent, formatAccelerator, isReservedAccel, shortcutCommandInfo, type ShortcutCommand } from '../../../shared/shortcuts';
 import { invoke, isMac, platform } from '../api';
+import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { systemPrefersDark } from '../theme';
-import { Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
+import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
+import { ModelPicker } from './ModelPicker';
 
-type Section = 'general' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'about';
+type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'about';
 
 export function SettingsView() {
   const settings = useStore((s) => s.settings)!;
@@ -27,6 +31,7 @@ export function SettingsView() {
         {(
           [
             ['general', 'General', 'settings'],
+            ['shortcuts', 'Shortcuts', 'keyboard'],
             ['terminal', 'Terminal', 'terminal'],
             ['providers', 'Providers & keys', 'bolt'],
             ['harnesses', 'Harnesses', 'shield'],
@@ -41,6 +46,7 @@ export function SettingsView() {
       </div>
       <div className="settings-body">
         {section === 'general' && <General settings={settings} update={update} />}
+        {section === 'shortcuts' && <ShortcutsSection settings={settings} />}
         {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
         {section === 'providers' && <Providers settings={settings} />}
         {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
@@ -120,7 +126,7 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
         </select>
       </Field>
       <Field label="Default reasoning effort">
-        <select value={settings.defaultEffort ?? ''} onChange={(e) => update({ defaultEffort: (e.target.value || undefined) as AppSettings['defaultEffort'] })}>
+        <select value={settings.defaultEffort ?? ''} onChange={(e) => void rememberEffort((e.target.value || undefined) as AppSettings['defaultEffort']).catch(() => undefined)}>
           <option value="">Harness default</option>
           {['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((l) => (
             <option key={l} value={l}>
@@ -129,7 +135,24 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
           ))}
         </select>
       </Field>
+      <Field
+        label="Automatically compact context at"
+        hint="Checked after each turn. Vocs Code can request compaction from Claude, Codex, Pi and Native; other harnesses keep their own behavior, and any harness may compact earlier. Percentage presets require a reported context window."
+      >
+        <select
+          value={settings.autoCompactionThreshold ?? ''}
+          onChange={(e) => update({ autoCompactionThreshold: (e.target.value || undefined) as AppSettings['autoCompactionThreshold'] })}
+        >
+          <option value="">Harness default</option>
+          {AUTO_COMPACTION_PRESETS.map((preset) => (
+            <option key={preset.value} value={preset.value}>
+              {preset.label}
+            </option>
+          ))}
+        </select>
+      </Field>
       <Toggle checked={settings.notifications} onChange={(v) => update({ notifications: v })} label="Desktop notifications when a turn finishes or approval is needed (only while the window is unfocused)" />
+      <UtilityModelField settings={settings} update={update} />
       <h3>Goal defaults</h3>
       <Toggle checked={settings.goalDefaults.autoContinue} onChange={(v) => update({ goalDefaults: { ...settings.goalDefaults, autoContinue: v } })} label="Auto-continue goals after each turn" />
       <Field label="Iteration guard">
@@ -145,6 +168,31 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
 
 const FONT_SIZES = [10, 11, 12, 13, 14, 15, 16, 18, 20];
 const SCROLLBACKS = [1_000, 5_000, 10_000, 20_000, 50_000, 100_000];
+
+/** General → Utility model: the cheap model used for background chores like session titles. */
+function UtilityModelField({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+  const [providers, setProviders] = useState<ProviderConfig[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    void invoke('providers:list', undefined)
+      .then(setProviders)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, []);
+  const models = providers.filter((p) => p.enabled).flatMap((p) => p.models);
+  return (
+    <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions. Falls back to the session's own model when unset.">
+      {error && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {error}</span></div>}
+      <div className="onboarding-model-picker">
+        <ModelPicker
+          models={models}
+          selected={settings.utilityModel}
+          clearOption={{ label: 'Use the session model' }}
+          onSelect={(m) => update({ utilityModel: m ? { provider: m.provider, model: m.id } : undefined })}
+        />
+      </div>
+    </Field>
+  );
+}
 
 function TerminalSection({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   const t = settings.terminal;
@@ -227,10 +275,22 @@ function TerminalSection({ settings, update }: { settings: AppSettings; update: 
 
 function Providers({ settings }: { settings: AppSettings }) {
   const toast = useStore((s) => s.toast);
+  const [secretStatus, setSecretStatus] = useState<SecretStatus | null>(null);
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
   const [custom, setCustom] = useState({ id: '', name: '', baseUrl: '', envKey: '' });
+
+  const refreshSecretStatus = async () => {
+    try {
+      setSecretStatus(await invoke('secrets:status', undefined));
+    } catch {
+      // The warning is advisory; an unavailable status endpoint should not block provider setup.
+    }
+  };
+  useEffect(() => {
+    void refreshSecretStatus();
+  }, []);
 
   const save = async (p: ProviderConfig, patch: Partial<ProviderConfig>) => {
     await invoke('providers:save', { ...p, ...patch });
@@ -239,10 +299,16 @@ function Providers({ settings }: { settings: AppSettings }) {
     const k = keys[p.id];
     if (!k?.trim()) return;
     setBusy({ ...busy, [p.id]: 'saving' });
-    await invoke('secrets:set', { providerId: p.id, apiKey: k.trim() });
-    setKeys({ ...keys, [p.id]: '' });
-    setBusy({ ...busy, [p.id]: '' });
-    toast(`Saved key for ${p.name}`, 'success');
+    try {
+      await invoke('secrets:set', { providerId: p.id, apiKey: k.trim() });
+      setKeys({ ...keys, [p.id]: '' });
+      toast(`Saved key for ${p.name}`, 'success');
+      await refreshSecretStatus();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setBusy({ ...busy, [p.id]: '' });
+    }
   };
   const test = async (p: ProviderConfig) => {
     setBusy({ ...busy, [p.id]: 'testing' });
@@ -260,6 +326,9 @@ function Providers({ settings }: { settings: AppSettings }) {
     <div className="settings-section">
       <h2>Providers & API keys</h2>
       <p className="muted">Keys are encrypted with the OS keychain (DPAPI on Windows) and only sent to the provider you configure. Harnesses that bring their own login (Claude Code, Codex, pi, dsh) keep using it; keys here are a fallback and power the native loop.</p>
+      {secretStatus && !secretStatus.encryptionAvailable && secretStatus.hasFallback && (
+        <div className="info-line info-warn"><Icon name="alert" size={13} /> <span>OS encryption is unavailable. Stored provider keys use a local fallback and are less protected; enable OS encryption or clear and re-enter these keys.</span></div>
+      )}
       <HarnessLogins />
       {settings.providers.map((p) => (
         <div key={p.id} className={`provider-card ${p.enabled ? '' : 'disabled'}`}>
@@ -282,7 +351,14 @@ function Providers({ settings }: { settings: AppSettings }) {
                   Save key
                 </Button>
                 {p.hasApiKey && (
-                  <Button size="sm" variant="ghost" onClick={() => void invoke('secrets:clear', { providerId: p.id })}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={async () => {
+                      await invoke('secrets:clear', { providerId: p.id });
+                      await refreshSecretStatus();
+                    }}
+                  >
                     Clear
                   </Button>
                 )}
@@ -295,7 +371,7 @@ function Providers({ settings }: { settings: AppSettings }) {
               </div>
               <div className="row gap8">
                 <Field label="Base URL" inline>
-                  <input value={p.baseUrl ?? ''} onChange={(e) => void save(p, { baseUrl: e.target.value })} />
+                  <ProviderBaseUrl provider={p} onSave={(baseUrl) => save(p, { baseUrl })} />
                 </Field>
               </div>
             </div>
@@ -340,6 +416,66 @@ function Providers({ settings }: { settings: AppSettings }) {
       )}
       <ModelOverrides settings={settings} />
     </div>
+  );
+}
+
+/** Drafted URL field: existing keyed providers require an explicit confirmation before retargeting. */
+function ProviderBaseUrl({ provider, onSave }: { provider: ProviderConfig; onSave: (baseUrl: string) => Promise<void> }) {
+  const [draft, setDraft] = useState(provider.baseUrl ?? '');
+  const saved = useRef(provider.baseUrl ?? '');
+  const saving = useRef(false);
+
+  useEffect(() => {
+    if (saving.current) return;
+    const next = provider.baseUrl ?? '';
+    saved.current = next;
+    setDraft(next);
+  }, [provider.id, provider.baseUrl]);
+
+  const commit = async () => {
+    if (saving.current) return;
+    const next = draft.trim();
+    if (next === saved.current) {
+      if (next !== draft) setDraft(next);
+      return;
+    }
+    saving.current = true;
+    try {
+      if (provider.hasApiKey) {
+        const confirmed = await askConfirm({
+          title: `Change the endpoint for ${provider.name}?`,
+          body: 'This provider has a stored API key. Changing the base URL can send that key to a different service.',
+          confirmLabel: 'Change endpoint',
+          danger: true
+        });
+        if (!confirmed) {
+          setDraft(saved.current);
+          return;
+        }
+      }
+      await onSave(next);
+      saved.current = next;
+      setDraft(next);
+    } catch {
+      setDraft(saved.current);
+    } finally {
+      saving.current = false;
+    }
+  };
+
+  return (
+    <input
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => void commit()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          void commit();
+        }
+      }}
+    />
   );
 }
 
@@ -598,6 +734,129 @@ function AcpAgents({ settings, update }: { settings: AppSettings; update: (p: Pa
         </Button>
       )}
     </div>
+  );
+}
+
+/** Settings → Shortcuts: custom bindings for common functions, plus a read-only reference of the fixed ones. */
+function ShortcutsSection({ settings }: { settings: AppSettings }) {
+  const custom = settings.customShortcuts ?? {};
+  const [draft, setDraft] = useState<{ command: ShortcutCommand; accel: string | null }>({ command: 'session.archive', accel: null });
+  const entries = Object.entries(custom);
+
+  const save = (next: Record<string, ShortcutCommand>) => void invoke('settings:update', { customShortcuts: next });
+
+  const add = () => {
+    if (!draft.accel || isReservedAccel(draft.accel)) return;
+    // One binding per command: drop the command's previous accelerator, then bind the new one.
+    const next: Record<string, ShortcutCommand> = { ...custom };
+    for (const [accel, cmd] of Object.entries(next)) if (cmd === draft.command) delete next[accel];
+    next[draft.accel] = draft.command;
+    save(next);
+    setDraft({ ...draft, accel: null });
+  };
+
+  const reserved = !!draft.accel && isReservedAccel(draft.accel);
+  const replacedByAccel = draft.accel && custom[draft.accel] && custom[draft.accel] !== draft.command ? shortcutCommandInfo(custom[draft.accel]) : undefined;
+  const movedFrom = draft.accel ? Object.entries(custom).find(([, cmd]) => cmd === draft.command) : undefined;
+
+  return (
+    <div className="settings-section">
+      <h2>Shortcuts</h2>
+      <p className="muted">The built-in combinations below always work. Add your own bindings for common actions — they work app-wide, and session actions apply to the session you are on.</p>
+
+      <h3>Custom shortcuts</h3>
+      {entries.length === 0 && <p className="muted small">No custom shortcuts yet. Pick a command, press a key combination, then Add.</p>}
+      {entries.map(([accel, cmd]) => {
+        const info = shortcutCommandInfo(cmd);
+        return (
+          <div key={accel} className="shortcut-row">
+            <Icon name={info?.icon ?? 'bolt'} size={15} />
+            <div className="shortcut-row-main">
+              <div className="shortcut-row-title">{info?.label ?? cmd}</div>
+              <div className="shortcut-row-desc muted small">{info?.description}</div>
+            </div>
+            <Kbd>{formatAccelerator(accel, isMac)}</Kbd>
+            <Button size="sm" variant="ghost" icon="trash" title="Remove shortcut" onClick={() => {
+              const next = { ...custom };
+              delete next[accel];
+              save(next);
+            }} />
+          </div>
+        );
+      })}
+
+      <div className="row gap8 shortcut-add">
+        <select value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value as ShortcutCommand })} aria-label="Command">
+          {SHORTCUT_COMMANDS.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label}
+            </option>
+          ))}
+        </select>
+        <ShortcutCapture value={draft.accel} onChange={(accel) => setDraft({ ...draft, accel })} />
+        <Button size="sm" variant="primary" disabled={!draft.accel || reserved} onClick={add}>
+          Add
+        </Button>
+        {draft.accel && (
+          <Button size="sm" variant="ghost" icon="x" title="Clear captured keys" onClick={() => setDraft({ ...draft, accel: null })} />
+        )}
+      </div>
+      {draft.accel && reserved && (
+        <p className="shortcut-warn small">
+          <Icon name="alert" size={12} /> {formatAccelerator(draft.accel, isMac)} is reserved by a built-in shortcut — pick another combination.
+        </p>
+      )}
+      {draft.accel && !reserved && replacedByAccel && (
+        <p className="muted small">Replaces the custom binding for {replacedByAccel.label}.</p>
+      )}
+      {draft.accel && !reserved && !replacedByAccel && movedFrom && (
+        <p className="muted small">Moves the binding for {shortcutCommandInfo(movedFrom[1])?.label ?? movedFrom[1]} from {formatAccelerator(movedFrom[0], isMac)}.</p>
+      )}
+
+      <h3>Built-in shortcuts</h3>
+      <p className="muted small">Fixed combinations the app handles itself; custom bindings cannot take these.</p>
+      {BUILTIN_SHORTCUT_GROUPS.map((g) => (
+        <div key={g.title} className="shortcut-ref">
+          <div className="shortcut-ref-title">{g.title}</div>
+          {g.rows.map((r) => (
+            <div key={r.label} className="shortcut-ref-row">
+              <span>{r.label}</span>
+              <span className="shortcut-ref-keys">
+                {r.keys.map((k) => (
+                  <Kbd key={k}>{formatAccelerator(k, isMac)}</Kbd>
+                ))}
+              </span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );}
+
+/** Input that captures a pressed key combination into an accelerator; it never accumulates typed text. */
+function ShortcutCapture({ value, onChange }: { value: string | null; onChange: (accel: string | null) => void }) {
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Keep the capture from also reaching the global handler (Ctrl+N must not open a dialog mid-capture).
+    e.stopPropagation();
+    if (e.key === 'Tab') return;
+    e.preventDefault();
+    if (e.key === 'Backspace' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      onChange(null);
+      return;
+    }
+    const accel = accelFromEvent(e);
+    if (accel) onChange(accel);
+  };
+  return (
+    <input
+      className="shortcut-capture"
+      value={value ?? ''}
+      placeholder="Press keys…"
+      spellCheck={false}
+      aria-label="Key combination"
+      onKeyDown={onKey}
+      onChange={() => undefined}
+    />
   );
 }
 

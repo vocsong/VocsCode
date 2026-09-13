@@ -1,18 +1,22 @@
 /** Prompt input: slash commands, @file mentions, and steer-vs-queue while a turn is running. */
 import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
-import { HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
+import { EFFORT_LEVELS, HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { fmtCost, fmtTokens } from '../format';
 import { useSessionModels } from '../models';
+import { setSessionEffort } from '../sessionActions';
 import { useStore } from '../store';
 import * as host from '../terminal/host';
 import { Button, Icon, Kbd } from './ui';
 
 export function Composer({ session }: { session: SessionMeta }) {
-  const [text, setText] = useState('');
+  const setDraft = useStore((s) => s.setDraft);
+  // Seed from the per-session draft kept in the store, so switching away and back preserves the text.
+  const [text, setText] = useState(() => useStore.getState().drafts[session.id] ?? '');
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [mention, setMention] = useState<{ query: string; start: number; results: string[]; index: number } | null>(null);
+  const [mentionError, setMentionError] = useState<string | null>(null);
   const [slash, setSlash] = useState<{ query: string; index: number } | null>(null);
   const [history, setHistory] = useState<string[]>([]);
   const [histIdx, setHistIdx] = useState(-1);
@@ -58,8 +62,18 @@ export function Composer({ session }: { session: SessionMeta }) {
   }, [text]);
 
   useEffect(() => {
-    ref.current?.focus();
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // Put the caret at the end of a restored draft so typing continues where it left off.
+    const end = el.value.length;
+    el.setSelectionRange(end, end);
   }, [session.id]);
+
+  // Mirror every draft change (typed, inserted, history-navigated, cleared after send) into the store.
+  useEffect(() => {
+    setDraft(session.id, text);
+  }, [text, session.id, setDraft]);
 
   // Text handed over from elsewhere (the terminal's "send to agent") lands below the current draft.
   useEffect(() => {
@@ -80,6 +94,7 @@ export function Composer({ session }: { session: SessionMeta }) {
     // Debounced so typing does not fire an uncancellable full-tree walk per keystroke; results are
     // cleared while a search is in flight instead of seeding the popover with the previous query's.
     setMention((m) => (m ? { ...m, results: [], index: 0 } : m));
+    setMentionError(null);
     const query = mention.query;
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -87,7 +102,9 @@ export function Composer({ session }: { session: SessionMeta }) {
         .then((results) => {
           if (!cancelled) setMention((m) => (m && m.query === query ? { ...m, results, index: 0 } : m));
         })
-        .catch(() => undefined);
+        .catch(() => {
+          if (!cancelled) setMentionError('Search unavailable');
+        });
     }, 150);
     return () => {
       cancelled = true;
@@ -130,6 +147,7 @@ export function Composer({ session }: { session: SessionMeta }) {
     const clearDraft = () => {
       setText('');
       setMention(null);
+      setMentionError(null);
       setSlash(null);
       setHistIdx(-1);
     };
@@ -183,9 +201,21 @@ export function Composer({ session }: { session: SessionMeta }) {
         }
         await invoke('sessions:setPermissionMode', { id: session.id, mode: arg as PermissionMode });
         return true;
-      case 'effort':
-        await invoke('sessions:setEffort', { id: session.id, effort: arg as EffortLevel }).catch((e) => toast(String(e.message ?? e), 'error'));
+      case 'effort': {
+        if (!caps.effort) {
+          toast(`${harness.name} does not support reasoning effort.`, 'error');
+          return true;
+        }
+        const current = session.activeModel ?? session.config.model;
+        const currentInfo = models.find((m) => current && m.provider === current.provider && m.id === current.model);
+        const efforts = currentInfo?.supportedEfforts?.length ? currentInfo.supportedEfforts : EFFORT_LEVELS;
+        if (!efforts.includes(arg as EffortLevel)) {
+          toast(`Efforts: ${efforts.join(', ')}`, 'error');
+          return true;
+        }
+        await setSessionEffort(session.id, arg as EffortLevel, toast);
         return true;
+      }
       case 'goal': {
         const sub = rest[0];
         if (!sub || sub === 'status') {
@@ -204,6 +234,9 @@ export function Composer({ session }: { session: SessionMeta }) {
       }
       case 'diff':
         store.setPanelTab('changes');
+        return true;
+      case 'mcp':
+        store.setPanelTab('mcp');
         return true;
       case 'cost':
         toast(`${fmtCost(session.usage.costUsd)} · ${fmtTokens(session.usage.inputTokens)} in / ${fmtTokens(session.usage.outputTokens)} out · ${session.usage.turns} turns`, 'info');
@@ -229,7 +262,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         return true;
       }
       case 'open':
-        if (arg === 'editor') await invoke('app:openInEditor', { path: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
+        if (arg === 'editor') await invoke('app:openInEditor', { path: session.cwd, sessionId: session.id }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
         else if (arg === 'terminal') await invoke('app:openTerminal', { cwd: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
         else await invoke('app:openPath', { path: session.cwd, sessionId: session.id });
         return true;
@@ -241,18 +274,29 @@ export function Composer({ session }: { session: SessionMeta }) {
           toast('Usage: /pr <base branch> — pushes this branch and opens a PR into it.', 'error');
           return true;
         }
-        // Push + gh pr create can take tens of seconds; report progress in the transcript, not just a final toast.
+        // Push + gh pr create can take tens of seconds; show progress here, then let the main
+        // process's persistent transcript note carry the outcome (it survives a restart).
         const noteId = `local-pr-${session.id}`;
         store.setLocalInfo(session.id, noteId, `Pushing this branch and opening a PR into ${arg}…`, { pending: true });
-        const pr = await invoke('git:pr', { sessionId: session.id, base: arg }).catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }));
-        store.setLocalInfo(session.id, noteId, pr.ok ? `PR opened: ${pr.url ?? arg}` : pr.output ?? 'Failed to open the PR', { level: pr.ok ? 'info' : 'error' });
+        try {
+          await invoke('git:pr', { sessionId: session.id, base: arg });
+        } catch (e) {
+          store.setLocalInfo(session.id, noteId, `Failed to open the PR: ${String((e as Error).message ?? e)}`, { level: 'error' });
+          return true;
+        }
+        store.setLocalInfo(session.id, noteId, null);
         return true;
       }
       case 'merge': {
         const noteId = `local-merge-${session.id}`;
         store.setLocalInfo(session.id, noteId, 'Merging the open PR for this branch…', { pending: true });
-        const merged = await invoke('git:merge', { sessionId: session.id, base: arg || undefined }).catch((e): { ok: boolean; url?: string; output?: string } => ({ ok: false, output: String((e as Error).message ?? e) }));
-        store.setLocalInfo(session.id, noteId, merged.ok ? `Merged: ${merged.url ?? 'PR merged'}` : merged.output ?? 'Failed to merge the PR', { level: merged.ok ? 'info' : 'error' });
+        try {
+          await invoke('git:merge', { sessionId: session.id, base: arg || undefined });
+        } catch (e) {
+          store.setLocalInfo(session.id, noteId, `Failed to merge the PR: ${String((e as Error).message ?? e)}`, { level: 'error' });
+          return true;
+        }
+        store.setLocalInfo(session.id, noteId, null);
         return true;
       }
       case 'stop':
@@ -366,9 +410,11 @@ export function Composer({ session }: { session: SessionMeta }) {
 
   return (
     <div className="composer">
-      {mention && mention.results.length > 0 && (
+      {mention && (mention.results.length > 0 || mentionError) && (
         <div className="popover">
-          {mention.results.map((r, i) => (
+          {mentionError ? (
+            <div className="popover-item muted"><Icon name="alert" size={12} /> {mentionError}</div>
+          ) : mention.results.map((r, i) => (
             <button key={r} type="button" className={`popover-item mono ${i === mention.index ? 'active' : ''}`} onMouseDown={(e) => { e.preventDefault(); pickMention(r); }}>
               <Icon name="file" size={12} /> {r}
             </button>
@@ -457,7 +503,7 @@ export function Composer({ session }: { session: SessionMeta }) {
   );
 }
 
-async function fileToAttachment(f: File): Promise<ImageAttachment> {
+export async function fileToAttachment(f: File): Promise<ImageAttachment> {
   const buf = await f.arrayBuffer();
   let binary = '';
   const bytes = new Uint8Array(buf);

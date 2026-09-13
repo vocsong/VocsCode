@@ -1,27 +1,134 @@
-import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
-import { fmtCost, fmtDuration, fmtTokens } from '../format';
-import { installMarkdownHandlers, renderMarkdown } from '../markdown';
+import { fmtCost, fmtDuration, fmtRate, fmtTokens } from '../format';
+import { installMarkdownHandlers } from '../markdown';
 import { useStore } from '../store';
+import { chunkKey, estimateChunkHeight, windowRange, type RenderChunk } from '../transcript-window';
+import { useStreamingMarkdown } from '../use-streaming-markdown';
 import { DiffView } from './DiffView';
+import { ImageLightbox, type LightboxImage } from './ImageLightbox';
 import { TranscriptFind } from './TranscriptFind';
 import { Badge, Button, Icon, Spinner } from './ui';
+
+interface ImageLightboxState {
+  images: LightboxImage[];
+  index: number;
+}
+
+export type OnImageExpand = (images: LightboxImage[], index: number) => void;
+
+/** Terminal key events are handled by the terminal find bar, not the transcript finder. */
+export function isTerminalEventTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest('.term, .term-view');
+}
+
+/** Data-URL rendering for a transcript image attachment. */
+export function imageSrc(im: { mimeType: string; data: string }): string {
+  return `data:${im.mimeType};base64,${im.data}`;
+}
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
 const EMPTY: never[] = [];
 
+/** Below this many chunks the reconciliation cost is small enough to skip windowing entirely. */
+const VIRTUALIZE_MIN = 150;
+
 export function Transcript({ session }: { session: SessionMeta }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
   const loaded = useStore((s) => s.loaded[session.id]);
+  const transcriptError = useStore((s) => s.transcriptErrors[session.id]);
+  const loadTranscript = useStore((s) => s.loadTranscript);
   const showThinking = useStore((s) => s.showThinking);
+  const jump = useStore((s) => s.searchJump);
   const ref = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
+  const [lightbox, setLightbox] = useState<ImageLightboxState | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(0);
+  const [measureVersion, setMeasureVersion] = useState(0);
+  const heights = useRef(new Map<string, number>());
+  const rowObserver = useRef<ResizeObserver | null>(null);
+  const scrollFrame = useRef(0);
+  const onImageExpand = useCallback((images: LightboxImage[], index: number) => {
+    setLightbox({ images, index });
+  }, []);
+
+  const chunks = useMemo(() => groupTranscript(items), [items]);
+
+  // Track the viewport so the window can be sized. jsdom reports 0 and simply disables windowing.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => setViewportH(el.clientHeight);
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const keys = new Set(chunks.map(chunkKey));
+    for (const k of heights.current.keys()) if (!keys.has(k)) heights.current.delete(k);
+  }, [chunks]);
+
+  // Rendered rows report their height so unmeasured chunks can keep an estimate instead of the
+  // list measuring every historical chunk.
+  const measureRow = useCallback((key: string, el: HTMLElement) => {
+    el.dataset.rowKey = key;
+    if (typeof ResizeObserver !== 'undefined' && !rowObserver.current) {
+      rowObserver.current = new ResizeObserver((entries) => {
+        let changed = false;
+        for (const entry of entries) {
+          const k = (entry.target as HTMLElement).dataset.rowKey;
+          if (!k) continue;
+          const h = entry.borderBoxSize?.[0]?.blockSize ?? entry.target.getBoundingClientRect().height;
+          if (h > 0 && Math.abs((heights.current.get(k) ?? -1) - h) > 0.5) {
+            heights.current.set(k, h);
+            changed = true;
+          }
+        }
+        if (changed) setMeasureVersion((v) => v + 1);
+      });
+    }
+    rowObserver.current?.observe(el);
+    const initial = el.getBoundingClientRect().height;
+    if (initial > 0 && Math.abs((heights.current.get(key) ?? -1) - initial) > 0.5) {
+      heights.current.set(key, initial);
+      setMeasureVersion((v) => v + 1);
+    }
+    return () => rowObserver.current?.unobserve(el);
+  }, []);
+  useEffect(() => () => rowObserver.current?.disconnect(), []);
+
+  const tops = useMemo(() => {
+    const list = new Array<number>(chunks.length + 1);
+    let acc = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]!;
+      list[i] = acc;
+      acc += heights.current.get(chunkKey(chunk)) ?? estimateChunkHeight(chunk);
+    }
+    list[chunks.length] = acc;
+    return list;
+  }, [chunks, measureVersion]);
+
+  const jumpHere = !!jump && jump.sessionId === session.id;
+  // Windowing stays off while the find bar or a deep-search jump needs every row in the DOM.
+  // Until the viewport is measured, assume a screenful so a long transcript never mounts whole.
+  const effectiveViewport = viewportH > 0 ? viewportH : 600;
+  const virtual = chunks.length > VIRTUALIZE_MIN && !findOpen && !jumpHere;
+  const range = virtual ? windowRange(tops, scrollTop, effectiveViewport, 600) : { start: 0, end: chunks.length };
+  const visible = virtual ? chunks.slice(range.start, range.end) : chunks;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+      // Terminal owns Ctrl+F so its find bar opens instead of the transcript finder.
+      if (isTerminalEventTarget(e.target)) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && !e.shiftKey) {
+        // Plain Ctrl+F: find in transcript. Ctrl+Shift+F is the global deep session search.
         e.preventDefault();
         setFindOpen(true);
       }
@@ -39,35 +146,81 @@ export function Transcript({ session }: { session: SessionMeta }) {
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
     if (stick && !findOpen && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [items, stick, findOpen]);
+  }, [items, stick, findOpen, measureVersion]);
 
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
     setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+    if (typeof requestAnimationFrame !== 'function') {
+      setScrollTop(el.scrollTop);
+      return;
+    }
+    if (scrollFrame.current) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = 0;
+      setScrollTop(ref.current?.scrollTop ?? 0);
+    });
   };
+  useEffect(
+    () => () => {
+      if (scrollFrame.current) cancelAnimationFrame(scrollFrame.current);
+    },
+    []
+  );
+
+  // Jump-to-match from the deep search modal: scroll to the item and flash it. Waits for the
+  // transcript to load when the session was not the active one.
+  useEffect(() => {
+    if (!jump || jump.sessionId !== session.id || !loaded || !ref.current) return;
+    const el = ref.current.querySelector(`[data-item-id="${CSS.escape(jump.itemId)}"]`);
+    if (!el) return;
+    setStick(false);
+    el.scrollIntoView({ block: 'center' });
+    el.classList.add('search-jump-hl');
+    const t = setTimeout(() => el.classList.remove('search-jump-hl'), 2400);
+    return () => clearTimeout(t);
+  }, [jump, loaded, session.id]);
 
   const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
 
   return (
     <div className="transcript-wrap">
-      <div className="transcript" ref={ref} onScroll={onScroll}>
-        {!loaded && <div className="transcript-loading"><Spinner /> Loading…</div>}
+      <div className={`transcript ${virtual ? 'virtual' : ''}`} ref={ref} onScroll={onScroll}>
+        {!loaded && !transcriptError && <div className="transcript-loading"><Spinner /> Loading…</div>}
+        {!loaded && transcriptError && (
+          <div className="transcript-error callout warn" role="alert">
+            <div>Could not load this transcript.</div>
+            <div className="muted small">{transcriptError}</div>
+            <Button size="sm" variant="ghost" icon="refresh" onClick={() => void loadTranscript(session.id)}>
+              Retry
+            </Button>
+          </div>
+        )}
         {loaded && items.length === 0 && (
           <div className="transcript-empty">
             <Icon name="sparkles" size={28} />
             <p>Send a message to start. Type <code>/</code> for commands, <code>@</code> to mention files, paste images to attach them.</p>
           </div>
         )}
-        {items.map((item) => (
-          <Item key={item.id} item={item} sessionId={session.id} showThinking={showThinking} />
+        {virtual && range.start > 0 && <div className="transcript-spacer" style={{ height: tops[range.start] }} aria-hidden />}
+        {visible.map((chunk) => (
+          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} />
         ))}
+        {virtual && range.end < chunks.length && <div className="transcript-spacer" style={{ height: tops[chunks.length]! - tops[range.end]! }} aria-hidden />}
         {(session.status === 'running' || session.status === 'starting') && (
           <div className="working">
             <Spinner size={12} /> {session.status === 'starting' ? session.statusDetail ?? 'Starting…' : 'Working…'}
           </div>
         )}
       </div>
+      {lightbox && (
+        <ImageLightbox
+          images={lightbox.images}
+          index={lightbox.index}
+          onClose={() => setLightbox(null)}
+        />
+      )}
       <TranscriptFind open={findOpen} onClose={() => setFindOpen(false)} container={ref} revision={items} />
       {!stick && (
         <button type="button" className="jump-bottom" onClick={() => { setStick(true); if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }}>
@@ -78,10 +231,53 @@ export function Transcript({ session }: { session: SessionMeta }) {
   );
 }
 
-const Item = memo(function Item({ item, sessionId, showThinking }: { item: TranscriptItem; sessionId: string; showThinking: boolean }) {
+/** One transcript row; `dataItemId` anchors deep-search jumps to the exact item. */
+const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand, dataItemId }: { item: TranscriptItem; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand; dataItemId?: string }) {
+  return (
+    <div data-item-id={dataItemId}>
+      {renderItem(item, sessionId, showThinking, onImageExpand)}
+    </div>
+  );
+});
+
+/**
+ * Measured wrapper around one chunk. When windowing is off it is a plain row; when on, its
+ * height feeds the offset table so off-screen chunks can stay unmounted.
+ */
+const TranscriptRow = memo(function TranscriptRow({
+  chunk,
+  sessionId,
+  showThinking,
+  onImageExpand,
+  measureRow
+}: {
+  chunk: RenderChunk;
+  sessionId: string;
+  showThinking: boolean;
+  onImageExpand: OnImageExpand;
+  measureRow: (key: string, el: HTMLElement) => () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const key = chunkKey(chunk);
+  useEffect(() => {
+    const el = ref.current;
+    return el ? measureRow(key, el) : undefined;
+  }, [key, measureRow]);
+  return (
+    <div className="transcript-row" ref={ref}>
+      {chunk.kind === 'group' ? (
+        <ToolGroup entries={chunk.entries} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} />
+      ) : (
+        <Item item={chunk.item} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={chunk.item.id} />
+      )}
+    </div>
+  );
+});
+
+function renderItem(item: TranscriptItem, sessionId: string, showThinking: boolean, onImageExpand: OnImageExpand) {
   switch (item.kind) {
     case 'user':
-      return <UserMessage item={item} />;
+      return <UserMessage item={item} onImageExpand={onImageExpand} />;
     case 'assistant':
       return <AssistantMessage item={item} showThinking={showThinking} />;
     case 'tool':
@@ -100,6 +296,9 @@ const Item = memo(function Item({ item, sessionId, showThinking }: { item: Trans
           <span>{item.status === 'completed' ? 'Turn complete' : item.status === 'interrupted' ? 'Interrupted' : `Failed${item.error ? `: ${item.error}` : ''}`}</span>
           {item.durationMs ? <span>· {fmtDuration(item.durationMs)}</span> : null}
           {item.usage && (item.usage.inputTokens || item.usage.outputTokens) ? <span>· {fmtTokens(item.usage.inputTokens)} in / {fmtTokens(item.usage.outputTokens)} out</span> : null}
+          {item.status === 'completed' && fmtRate(item.usage?.outputTokens, item.durationMs) ? (
+            <span title="Output tokens per second of turn wall time (includes tool execution)">· {fmtRate(item.usage?.outputTokens, item.durationMs)}</span>
+          ) : null}
           {item.costUsd ? <span>· {fmtCost(item.costUsd)}</span> : null}
         </div>
       );
@@ -119,19 +318,32 @@ const Item = memo(function Item({ item, sessionId, showThinking }: { item: Trans
     default:
       return null;
   }
-});
+}
 
-function UserMessage({ item }: { item: Extract<TranscriptItem, { kind: 'user' }> }) {
+export function UserMessage({ item, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; onImageExpand?: OnImageExpand }) {
+  const images = item.images ?? [];
   return (
     <div className="msg msg-user">
       <div className="msg-bubble">
         {item.queuedAs && item.queuedAs !== 'now' && <Badge tone="blue">{item.queuedAs}</Badge>}
         <div className="msg-text">{item.text}</div>
-        {item.images?.length ? (
+        {images.length ? (
           <div className="msg-images">
-            {item.images.map((im, i) => (
-              <img key={i} src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'attachment'} />
-            ))}
+            {images.map((im, i) =>
+              onImageExpand ? (
+                <button
+                  key={i}
+                  type="button"
+                  className="msg-image-btn"
+                  aria-label={`Preview ${im.name ?? 'image'}`}
+                  onClick={() => onImageExpand(images.map((att) => ({ src: imageSrc(att), name: att.name })), i)}
+                >
+                  <img src={imageSrc(im)} alt={im.name ?? 'attachment'} draggable={false} />
+                </button>
+              ) : (
+                <img key={i} src={imageSrc(im)} alt={im.name ?? 'attachment'} />
+              )
+            )}
           </div>
         ) : null}
       </div>
@@ -141,7 +353,7 @@ function UserMessage({ item }: { item: Extract<TranscriptItem, { kind: 'user' }>
 
 function AssistantMessage({ item, showThinking }: { item: Extract<TranscriptItem, { kind: 'assistant' }>; showThinking: boolean }) {
   const [open, setOpen] = useState(false);
-  const html = useMemo(() => renderMarkdown(item.text), [item.text]);
+  const html = useStreamingMarkdown(item.text, item.streaming);
   // With thinking hidden a thinking-only item has nothing left to show; rendering it anyway would
   // leave an empty row in the transcript.
   if (!item.text && !(item.thinking && showThinking)) return null;
@@ -164,12 +376,98 @@ function AssistantMessage({ item, showThinking }: { item: Extract<TranscriptItem
 
 const HINT_ICON: Record<string, string> = { execute: 'terminal', edit: 'edit', read: 'file', search: 'search', fetch: 'external', think: 'brain', mcp: 'bolt', agent: 'fork', other: 'bolt' };
 
-function ToolCard({ item }: { item: Extract<TranscriptItem, { kind: 'tool' }> }) {
+type ToolItem = Extract<TranscriptItem, { kind: 'tool' }>;
+
+/** A run ends at user messages, approvals, turn boundaries, plans and non-command tools. */
+const breaksCommandRun = (item: TranscriptItem): boolean =>
+  (item.kind === 'tool' && item.hint !== 'execute') ||
+  item.kind === 'user' || item.kind === 'approval' || item.kind === 'turn' || item.kind === 'plan';
+
+/**
+ * Group execute tools (per nesting parent) into collapsible chunks. Assistant text, thinking
+ * and info lines between two commands are absorbed so commentary does not break the run;
+ * anything trailing the last command is popped back out so the turn's answer stays visible.
+ */
+export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
+  const isCmd = (item: TranscriptItem): item is ToolItem => item.kind === 'tool' && item.hint === 'execute';
+  const chunks: RenderChunk[] = [];
+  let run: TranscriptItem[] = [];
+  let runId = '';
+  let runParent: string | null = null;
+  const flush = () => {
+    if (run.length) {
+      const lastCmd = run.reduce((acc, it, idx) => (isCmd(it) ? idx : acc), -1);
+      const head = run.slice(0, lastCmd + 1);
+      const commands = head.filter(isCmd);
+      if (commands.length > 1) chunks.push({ kind: 'group', id: runId, entries: head });
+      else for (const it of head) chunks.push({ kind: 'single', item: it });
+      for (const it of run.slice(lastCmd + 1)) chunks.push({ kind: 'single', item: it });
+    }
+    run = [];
+  };
+  for (const item of items) {
+    if (isCmd(item)) {
+      const parent = item.parentId ?? null;
+      if (run.length && parent !== runParent) flush();
+      if (!run.length) {
+        runId = item.id;
+        runParent = parent;
+      }
+      run.push(item);
+    } else if (run.length && !breaksCommandRun(item)) {
+      run.push(item);
+    } else {
+      flush();
+      chunks.push({ kind: 'single', item });
+    }
+  }
+  flush();
+  return chunks;
+}
+
+/** Collapsed "Ran n commands" header for a run of shell commands, with interleaved commentary inside. */
+export function ToolGroup({ entries, sessionId, showThinking, onImageExpand }: { entries: TranscriptItem[]; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
+  // open === null means the user has not toggled; then follow running state so live output stays visible.
+  const [open, setOpen] = useState<boolean | null>(null);
+  // A deep-search jump into one of these commands forces the group open so the anchor exists.
+  const jump = useStore((s) => s.searchJump);
+  const jumpHere = !!jump && jump.sessionId === sessionId && entries.some((e) => e.id === jump.itemId);
+  const commands = entries.filter((e): e is ToolItem => e.kind === 'tool');
+  const running = commands.some((i) => i.status === 'running');
+  const expanded = jumpHere || (open ?? running);
+  const failed = commands.filter((i) => i.status === 'error' || i.status === 'declined').length;
+  const totalMs = commands.reduce((sum, i) => sum + (i.durationMs ?? 0), 0);
+  return (
+    <div className={`tool-group ${running ? 'tool-group-running' : ''}`}>
+      <button type="button" className="tool-group-head" onClick={() => setOpen(!expanded)}>
+        <Icon name="terminal" size={14} className="tool-icon" />
+        <span className="tool-name">{running ? 'Running' : 'Ran'} {commands.length} command{commands.length === 1 ? '' : 's'}</span>
+        <span className="spacer" />
+        {failed ? <Badge tone="red">{failed} failed</Badge> : null}
+        {running ? <Spinner size={12} /> : totalMs ? <span className="muted small">{fmtDuration(totalMs)}</span> : null}
+        <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
+      </button>
+      {expanded && (
+        <div className="tool-group-body">
+          {entries.map((e) =>
+            e.kind === 'tool' ? (
+              <ToolCard key={e.id} item={e} dataItemId={e.id} />
+            ) : (
+              <Item key={e.id} item={e} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={e.id} />
+            )
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolCard({ item, dataItemId }: { item: Extract<TranscriptItem, { kind: 'tool' }>; dataItemId?: string }) {
   const [open, setOpen] = useState(false);
   const hasBody = !!item.output || !!(item.changes && item.changes.length) || item.input !== undefined;
   const statusTone = item.status === 'running' ? 'blue' : item.status === 'error' ? 'red' : item.status === 'declined' ? 'amber' : 'green';
   return (
-    <div className={`tool-card tool-${item.status} ${item.parentId ? 'tool-nested' : ''}`}>
+    <div data-item-id={dataItemId} className={`tool-card tool-${item.status} ${item.parentId ? 'tool-nested' : ''}`}>
       <button type="button" className="tool-head" onClick={() => hasBody && setOpen((o) => !o)}>
         <Icon name={HINT_ICON[item.hint ?? 'other']} size={14} className="tool-icon" />
         <span className="tool-name">{item.title ?? item.name}</span>
