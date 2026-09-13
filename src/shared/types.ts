@@ -873,6 +873,8 @@ export interface GitIssue {
   state: 'OPEN' | 'CLOSED';
   url: string;
   author?: string;
+  /** Markdown description returned by GitHub. */
+  body?: string;
   labels?: { name: string; color?: string }[];
   comments?: number;
   /** ms since epoch */
