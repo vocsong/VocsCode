@@ -7,6 +7,7 @@ import type {
   AnalyticsDayPoint,
   FileUsage,
   FileUsageRow,
+  HarnessModelToolRow,
   ModelToolRow,
   ToolUsage,
   ToolUsageRow,
@@ -36,7 +37,7 @@ export function emptySlice(label: string): UsageSlice {
 }
 
 export function emptyDimensions(): UsageDayDimensions {
-  return { harness: {}, model: {}, project: {}, tool: {}, modelTool: {}, file: {} };
+  return { harness: {}, model: {}, project: {}, tool: {}, modelTool: {}, harnessModelTool: {}, file: {} };
 }
 
 export function emptyToolUsage(): ToolUsage {
@@ -77,17 +78,27 @@ export function toolUsageRows(tools: Record<string, ToolUsage>): ToolUsageRow[] 
   return [...grouped.values()].sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
 }
 
-/** Builds per-model rows with case-insensitive tool identity and optional model display labels. */
-export function modelToolUsageRows(modelTools: Record<string, Record<string, ToolUsage>>, modelLabels: ReadonlyMap<string, string> = new Map()): ModelToolRow[] {
+/** Owner key joining a harness to a model key in the per-harness model tool maps (`claude|anthropic/opus`). */
+export function harnessModelKey(harness: string, modelKey: string): string {
+  return `${harness}|${modelKey}`;
+}
+
+/** Splits `harness|provider/model`; harness ids never contain the separator. */
+function splitHarnessModelKey(ownerKey: string): [harness: string, modelKey: string] {
+  const i = ownerKey.indexOf('|');
+  return i === -1 ? [ownerKey, ''] : [ownerKey.slice(0, i), ownerKey.slice(i + 1)];
+}
+
+/** Groups each owner's tools under case-insensitive names, preferring a lowercase spelling when one exists. */
+function groupedOwnerTools(owners: Record<string, Record<string, ToolUsage>>): { ownerKey: string; tools: { name: string; usage: ToolUsage }[] }[] {
   const toolLabels = new Map<string, string>();
-  for (const perTool of Object.values(modelTools)) {
+  for (const perTool of Object.values(owners)) {
     for (const name of Object.keys(perTool)) {
       const nameKey = toolNameKey(name);
       toolLabels.set(nameKey, preferredToolName(toolLabels.get(nameKey) ?? '', name, nameKey));
     }
   }
-  const rows: ModelToolRow[] = [];
-  for (const [key, perTool] of Object.entries(modelTools)) {
+  return Object.entries(owners).map(([ownerKey, perTool]) => {
     const grouped = new Map<string, ToolUsage>();
     for (const [name, usage] of Object.entries(perTool)) {
       const nameKey = toolNameKey(name);
@@ -95,9 +106,29 @@ export function modelToolUsageRows(modelTools: Record<string, Record<string, Too
       addToolUsage(target, usage);
       grouped.set(nameKey, target);
     }
-    for (const [nameKey, usage] of grouped) rows.push({ key, label: modelLabels.get(key) || key.slice(key.indexOf('/') + 1), name: toolLabels.get(nameKey) || nameKey, ...usage });
+    return { ownerKey, tools: [...grouped].map(([nameKey, usage]) => ({ name: toolLabels.get(nameKey) || nameKey, usage })) };
+  });
+}
+
+/** Builds per-model rows with case-insensitive tool identity and optional model display labels. */
+export function modelToolUsageRows(modelTools: Record<string, Record<string, ToolUsage>>, modelLabels: ReadonlyMap<string, string> = new Map()): ModelToolRow[] {
+  const rows: ModelToolRow[] = [];
+  for (const { ownerKey, tools } of groupedOwnerTools(modelTools)) {
+    const label = modelLabels.get(ownerKey) || ownerKey.slice(ownerKey.indexOf('/') + 1);
+    for (const t of tools) rows.push({ key: ownerKey, label, name: t.name, ...t.usage });
   }
   return rows.sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
+}
+
+/** Builds per-harness-per-model rows from keys built by `harnessModelKey`. */
+export function harnessModelToolUsageRows(harnessModelTools: Record<string, Record<string, ToolUsage>>, modelLabels: ReadonlyMap<string, string> = new Map()): HarnessModelToolRow[] {
+  const rows: HarnessModelToolRow[] = [];
+  for (const { ownerKey, tools } of groupedOwnerTools(harnessModelTools)) {
+    const [harness, key] = splitHarnessModelKey(ownerKey);
+    const label = modelLabels.get(key) || key.slice(key.indexOf('/') + 1);
+    for (const t of tools) rows.push({ harness, key, label, name: t.name, ...t.usage });
+  }
+  return rows.sort((a, b) => b.calls - a.calls || a.harness.localeCompare(b.harness) || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
 }
 
 export function addFileUsage(into: FileUsage, from: FileUsage): void {
@@ -131,6 +162,8 @@ export interface RangeRollup {
   toolTotals: ToolUsage;
   /** Per-tool call counts keyed by model. */
   modelTools: ModelToolRow[];
+  /** Per-tool call counts keyed by harness and model. */
+  harnessModelTools: HarnessModelToolRow[];
   files: FileUsageRow[];
   /** Distinct sessions that recorded usage on the days in range. */
   sessionIds: string[];
@@ -175,6 +208,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
   const ids = new Set<string>();
   const tools: Record<string, ToolUsage> = {};
   const modelTools: Record<string, Record<string, ToolUsage>> = {};
+  const harnessModelTools: Record<string, Record<string, ToolUsage>> = {};
   const files: Record<string, FileUsage> = {};
   const modelToolLabels = new Map<string, string>();
   for (const d of days) {
@@ -190,6 +224,9 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
     for (const [key, s] of Object.entries(by.model)) if (s.label) modelToolLabels.set(key, s.label);
     for (const [key, perTool] of Object.entries(by.modelTool)) {
       for (const [name, t] of Object.entries(perTool)) addToolUsage(((modelTools[key] ??= {})[name] ??= emptyToolUsage()), t);
+    }
+    for (const [key, perTool] of Object.entries(by.harnessModelTool)) {
+      for (const [name, t] of Object.entries(perTool)) addToolUsage(((harnessModelTools[key] ??= {})[name] ??= emptyToolUsage()), t);
     }
     for (const [p, f] of Object.entries(by.file)) addFileUsage((files[p] ??= emptyFileUsage()), f);
   }
@@ -209,6 +246,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
     .sort((a, b) => b.total - a.total || a.path.localeCompare(b.path));
 
   const modelToolRows = modelToolUsageRows(modelTools, modelToolLabels);
+  const harnessModelToolRows = harnessModelToolUsageRows(harnessModelTools, modelToolLabels);
 
   return {
     totals,
@@ -218,6 +256,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
     tools: toolRows,
     toolTotals,
     modelTools: modelToolRows,
+    harnessModelTools: harnessModelToolRows,
     files: fileRows,
     sessionIds: [...ids],
     unattributed,
