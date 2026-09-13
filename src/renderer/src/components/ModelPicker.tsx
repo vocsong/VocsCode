@@ -51,19 +51,26 @@ export function ModelPicker({
   const matches = (m: ModelInfo) =>
     !q || m.displayName.toLowerCase().includes(q) || m.id.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q);
 
-  // The current selection is pinned to the top of the list so it is always visible.
-  const selectedModel = useMemo(
-    () => (selected ? models.find((m) => m.provider === selected.provider && m.id === selected.model) : undefined),
-    [models, selected]
-  );
+  // The current selection is pinned to the top of the list so it is always visible. It may no
+  // longer exist in the fetched catalog (provider not configured now, or a renamed model), so
+  // fall back to a synthetic row rather than dropping it from the list entirely.
+  const selectedModel = useMemo<ModelInfo | undefined>(() => {
+    if (!selected) return undefined;
+    return (
+      models.find((m) => m.provider === selected.provider && m.id === selected.model) ?? {
+        id: selected.model,
+        provider: selected.provider,
+        displayName: selected.model
+      }
+    );
+  }, [models, selected]);
   const isSelected = (m: ModelInfo) => !!selectedModel && m.provider === selectedModel.provider && m.id === selectedModel.id;
 
   const rows = useMemo(() => {
     // Keep only models that still exist in the current catalog, preserving stored order.
     const known = favorites.filter((f) => models.some((m) => m.provider === f.provider && m.id === f.model));
     const isFav = (m: ModelInfo) => known.some((f) => f.provider === m.provider && f.model === m.id);
-    const selectedKey = selectedModel ? `${selectedModel.provider}::${selectedModel.id}` : '';
-    const rest = models.filter((m) => !isFav(m) && `${m.provider}::${m.id}` !== selectedKey);
+    const rest = models.filter((m) => !isFav(m) && !isSelected(m));
     return { known, isFav, rest };
   }, [favorites, models, selectedModel]);
 

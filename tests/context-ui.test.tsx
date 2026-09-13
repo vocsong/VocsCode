@@ -73,6 +73,19 @@ describe('context window UI', () => {
     expect(screen.getAllByText('Gamma')).toHaveLength(1);
   });
 
+  it('pins a selected model that is no longer in the catalog', () => {
+    const models: ModelInfo[] = [{ id: 'alpha', provider: 'acme', displayName: 'Alpha' }];
+    const { container } = render(
+      <ModelPicker models={models} selected={{ provider: 'gone', model: 'removed-model' }} onSelect={vi.fn()} />
+    );
+
+    const rows = [...container.querySelectorAll('.mp-list .mp-row')];
+    expect(rows).toHaveLength(2);
+    expect(container.querySelector('.mp-list .menu-group')?.textContent).toBe('Selected');
+    expect(rows[0]?.querySelector('.mp-name')?.textContent).toBe('removed-model');
+    expect(rows[0]?.querySelector('.mp-select')?.getAttribute('aria-pressed')).toBe('true');
+  });
+
   it('pins the harness-default row when the current selection is default', () => {
     const models: ModelInfo[] = [
       { id: 'alpha', provider: 'acme', displayName: 'Alpha' },
