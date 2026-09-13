@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FsEntry, GitSummary, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
+import { workspaceRelativePath } from '../file-refs';
 import { fmtCost, fmtDuration, fmtRate, fmtTokens, speedOfTurns } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
-import { useStore, type PanelTab } from '../store';
+import { useStore, type FileReveal, type PanelTab } from '../store';
 import { BranchesTab } from './BranchesTab';
 import { DiffView } from './DiffView';
 import { McpTab } from './McpTab';
@@ -186,16 +187,81 @@ function FilesTab({ session }: { session: SessionMeta }) {
   /** Markdown files open in rendered preview; the toggle flips back to the raw text. */
   const [mdView, setMdView] = useState(false);
   const mdBody = useRef<HTMLDivElement | null>(null);
+  const preBody = useRef<HTMLPreElement | null>(null);
   const toast = useStore((s) => s.toast);
+  const reveal = useStore((s) => s.fileReveal);
+  /** Line to scroll the raw preview to once the file content is on screen. */
+  const [scrollLine, setScrollLine] = useState<number | null>(null);
   /** The session this component instance currently belongs to; responses from other sessions are dropped. */
   const liveId = useRef(session.id);
+  /** Monotonic read id so a slow earlier read cannot overwrite a file opened after it. */
+  const readSeq = useRef(0);
+  /** StrictMode runs mount effects twice; the same reveal must not start two reads. */
+  const consumedReveal = useRef<FileReveal | null>(null);
+
+  const openFile = async (rel: string, line?: number) => {
+    const sid = session.id;
+    const seq = ++readSeq.current;
+    try {
+      const r = await invoke('fs:read', { sessionId: sid, path: rel, maxBytes: 200_000 });
+      if (liveId.current !== sid || readSeq.current !== seq) return;
+      const p = rel.replace(/\\/g, '/');
+      setPreview({ path: p, ...r });
+      setMdView(/\.(?:md|markdown)$/i.test(p));
+      setScrollLine(line && line > 0 ? line : null);
+    } catch (err) {
+      if (liveId.current === sid && readSeq.current === seq) toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
   useEffect(() => {
     liveId.current = session.id;
+    readSeq.current += 1;
     setPath('');
     setEntries([]);
     setPreview(null);
     setMdView(false);
+    setScrollLine(null);
   }, [session.id]);
+  // A transcript file link asks for one path; list its folder and preview it, then clear the request
+  // so remounting the tab does not reopen a file the user has since navigated away from.
+  useEffect(() => {
+    if (!reveal || reveal.sessionId !== session.id || consumedReveal.current === reveal) return;
+    consumedReveal.current = reveal;
+    useStore.getState().consumeFileReveal();
+    const rel = workspaceRelativePath(session.cwd, reveal.path);
+    if (rel === null) {
+      toast(`Cannot open files outside ${session.cwd}`, 'error');
+      return;
+    }
+    const dir = /[\\/]$/.test(reveal.path.trim());
+    const clean = rel.replace(/\/+$/, '');
+    if (dir || clean === '') {
+      setPreview(null);
+      setPath(clean);
+      return;
+    }
+    const slash = clean.lastIndexOf('/');
+    setPath(slash >= 0 ? clean.slice(0, slash) : '');
+    void openFile(clean, reveal.line);
+  }, [reveal, session.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Once the raw preview is mounted, bring the mentioned line into view. The pre grows with its
+  // content, so the panel body is what actually scrolls.
+  useEffect(() => {
+    if (scrollLine === null) return;
+    const pre = preBody.current;
+    if (!pre) return;
+    const lineHeight = Number.parseFloat(getComputedStyle(pre).lineHeight) || 18;
+    const scroller = pre.closest('.panel-body') as HTMLElement | null;
+    const offset = (scrollLine - 1) * lineHeight - (scroller?.clientHeight ?? pre.clientHeight) / 2;
+    if (scroller && scroller.scrollHeight > scroller.clientHeight) {
+      const preTop = pre.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+      scroller.scrollTop = Math.max(0, preTop + offset);
+    } else {
+      pre.scrollTop = Math.max(0, offset);
+    }
+    setScrollLine(null);
+  }, [scrollLine, preview, mdView]);
   useEffect(() => {
     const sid = session.id;
     let stale = false;
@@ -211,11 +277,15 @@ function FilesTab({ session }: { session: SessionMeta }) {
     };
   }, [session.id, path]); // eslint-disable-line react-hooks/exhaustive-deps
   const isMd = !!preview && /\.(?:md|markdown)$/i.test(preview.path);
-  const mdHtml = useMemo(() => (isMd && preview ? renderMarkdown(preview.content) : ''), [isMd, preview]);
+  const mdHtml = useMemo(() => (isMd && preview ? renderMarkdown(preview.content, { fileLinks: true }) : ''), [isMd, preview]);
   useEffect(() => {
     if (!mdView || !mdBody.current) return;
-    return installMarkdownHandlers(mdBody.current, (url) => void invoke('app:openExternal', { url }));
-  }, [mdView, mdHtml]);
+    return installMarkdownHandlers(
+      mdBody.current,
+      (url) => void invoke('app:openExternal', { url }),
+      (p, line) => useStore.getState().revealFile(session.id, p, line)
+    );
+  }, [mdView, mdHtml, session.id]);
   const crumbs = path.split(/[\\/]/).filter(Boolean);
   return (
     <div className="files">
@@ -248,7 +318,7 @@ function FilesTab({ session }: { session: SessionMeta }) {
           {isMd && mdView ? (
             <div ref={mdBody} className="md file-md" dangerouslySetInnerHTML={{ __html: mdHtml }} />
           ) : (
-            <pre className="mono">{preview.content}{preview.truncated ? '\n… (truncated)' : ''}</pre>
+            <pre className="mono" ref={preBody}>{preview.content}{preview.truncated ? '\n… (truncated)' : ''}</pre>
           )}
         </div>
       ) : (
@@ -260,18 +330,7 @@ function FilesTab({ session }: { session: SessionMeta }) {
               className="file-row"
               onClick={async () => {
                 if (e.isDir) setPath(e.path.replace(/\\/g, '/'));
-                else {
-                  const sid = session.id;
-                  try {
-                    const r = await invoke('fs:read', { sessionId: sid, path: e.path, maxBytes: 200_000 });
-                    if (liveId.current !== sid) return;
-                    const p = e.path.replace(/\\/g, '/');
-                    setPreview({ path: p, ...r });
-                    setMdView(/\.(?:md|markdown)$/i.test(p));
-                  } catch (err) {
-                    if (liveId.current === sid) toast(err instanceof Error ? err.message : String(err), 'error');
-                  }
-                }
+                else void openFile(e.path);
               }}
             >
               <Icon name={e.isDir ? 'folder' : 'file'} size={13} />

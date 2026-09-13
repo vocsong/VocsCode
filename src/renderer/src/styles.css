@@ -1868,6 +1868,21 @@ h4 {
   padding: 1px 5px;
   border-radius: 4px;
 }
+/* A file mentioned in a reply: clicking opens it in the Files panel. */
+.md code.file-ref,
+.md a.file-ref {
+  cursor: pointer;
+  text-decoration: none;
+  border-bottom: 1px dotted var(--border-strong);
+}
+.md code.file-ref:hover,
+.md code.file-ref:focus-visible,
+.md a.file-ref:hover,
+.md a.file-ref:focus-visible {
+  color: var(--accent);
+  border-bottom-color: currentColor;
+  outline: none;
+}
 .md pre code {
   background: none;
   padding: 0;
