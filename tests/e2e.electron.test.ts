@@ -11,6 +11,7 @@ import { createRequire } from 'node:module';
 import { execSync } from 'node:child_process';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
+import { openNewSession, pickModel, seedSettings } from './e2e-ui';
 
 const enabled = process.env.HARNESS_E2E === '1';
 const harness = process.env.HARNESS_E2E_HARNESS ?? 'native';
@@ -55,6 +56,7 @@ describe.runIf(enabled)('electron e2e', () => {
       /* git optional */
     }
     await fs.mkdir(shots, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
@@ -77,7 +79,7 @@ describe.runIf(enabled)('electron e2e', () => {
     await win.screenshot({ path: path.join(shots, 'e2e-01-empty.png') });
 
     try {
-      await runScenario(win, project);
+      await runScenario(win);
     } catch (e) {
       await win.screenshot({ path: path.join(shots, `e2e-fail-${harness}.png`) }).catch(() => undefined);
       const toasts = await win.locator('.toast').allInnerTexts().catch(() => []);
@@ -88,20 +90,14 @@ describe.runIf(enabled)('electron e2e', () => {
   });
 });
 
-async function runScenario(win: Page, project: string): Promise<void> {
+async function runScenario(win: Page): Promise<void> {
   // New session dialog
-  await win.click('.sidebar-top button:has-text("New")');
-  await win.waitForSelector('.modal');
-  await win.fill('.ns-grid input[placeholder*="repo"]', project);
+  await openNewSession(win);
   const cardName = CARD_NAMES[harness] ?? 'Native loop';
   await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: new RegExp(`^${escapeRe(cardName)}$`) }) }).click();
-  const right = win.locator('.ns-grid .ns-col').nth(1);
-  const modelSelect = right.locator('select').first();
-  // The renderer CSP forbids eval, so wait with a locator instead of page.waitForFunction.
-  await modelSelect.locator('option').nth(1).waitFor({ state: 'attached', timeout: 60_000 });
   if (harness === 'native') {
-    const wanted = process.env.DEEPSEEK_API_KEY ? 'deepseek::deepseek-v4-flash' : process.env.OPENAI_API_KEY ? 'openai::gpt-5.4-mini' : 'anthropic::claude-sonnet-5';
-    await modelSelect.selectOption(wanted);
+    const wanted = process.env.DEEPSEEK_API_KEY ? 'deepseek/deepseek-v4-flash' : process.env.OPENAI_API_KEY ? 'openai/gpt-5.4-mini' : 'anthropic/claude-sonnet-5';
+    await pickModel(win, wanted);
   }
   await win.fill('textarea[placeholder="What should the agent do?"]', 'Reply with exactly the single word PONG and nothing else. Do not use tools.');
   await win.screenshot({ path: path.join(shots, `e2e-02-${harness}-dialog.png`) });
