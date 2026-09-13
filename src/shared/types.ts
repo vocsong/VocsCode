@@ -465,6 +465,11 @@ export interface SessionMeta {
   /** User-picked display label for the status badge; shown instead of the status name until cleared. */
   statusLabel?: string;
   harnessRef: HarnessRef;
+  /**
+   * Set on a cross-harness fork: the copied transcript is written to `fork-context.md` and prefixed
+   * to the next user message so the new harness starts with the prior conversation, then cleared.
+   */
+  pendingForkContext?: boolean;
   usage: UsageTotals;
   lastError?: string;
   /** Current model as reported by the harness (may differ from config after live switch). */
