@@ -4900,3 +4900,49 @@ body.resizing {
   border-radius: 8px;
   padding: 4px;
 }
+
+/* ---- Web shell + small screens (docs/REMOTE-ACCESS.md P1) ---- */
+
+/* Web build: a subtle product badge at the bar's right end (the browser owns the chrome). */
+.web-badge {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--fg-muted);
+  user-select: none;
+  pointer-events: none;
+}
+
+@media (max-width: 900px) {
+  /* The sidebar becomes an overlay drawer instead of squeezing the transcript. */
+  .sidebar {
+    position: fixed;
+    top: var(--titlebar);
+    bottom: 0;
+    left: 0;
+    width: min(var(--sidebar), 84vw);
+    z-index: 40;
+    border-right: 1px solid var(--border);
+    box-shadow: 0 0 40px rgb(0 0 0 / 0.45);
+  }
+  .sidebar-backdrop {
+    position: fixed;
+    top: var(--titlebar);
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 39;
+    background: rgb(0 0 0 / 0.45);
+  }
+  /* Touch-friendly targets on small screens. */
+  .titlebar-btn {
+    min-width: 40px;
+    min-height: 34px;
+  }
+}
