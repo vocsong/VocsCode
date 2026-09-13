@@ -220,21 +220,23 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       const electronApp = app;
       const mainPid = await electronApp.evaluate(() => process.pid);
       await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.webContents.forcefullyCrashRenderer());
-      await expect
-        .poll(
-          async () =>
-            electronApp.evaluate(async ({ BrowserWindow }) => {
-              const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-              if (!wc || wc.isDestroyed() || wc.isLoading()) return false;
-              try {
-                return (await wc.executeJavaScript("Boolean(document.querySelector('.brand'))")) === true;
-              } catch {
-                return false;
-              }
-            }),
-          { timeout: 60_000 }
-        )
-        .toBe(true);
+      // A call issued while the old renderer is gone and the reload has not produced a new one never
+      // settles — Electron drops it instead of rejecting it — so bound every attempt and let the poll
+      // try again. Left unbounded, a single dropped call hangs the test instead of failing it.
+      const brandPainted = (): Promise<boolean> =>
+        Promise.race([
+          electronApp.evaluate(async ({ BrowserWindow }) => {
+            const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+            if (!wc || wc.isDestroyed() || wc.isLoading()) return false;
+            try {
+              return (await wc.executeJavaScript("Boolean(document.querySelector('.brand'))")) === true;
+            } catch {
+              return false;
+            }
+          }),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2_000))
+        ]);
+      await expect.poll(brandPainted, { timeout: 60_000 }).toBe(true);
       expect(await electronApp.evaluate(() => process.pid)).toBe(mainPid);
       expect(mainLog.join('')).toMatch(/ERROR renderer process gone: crashed/);
     } catch (e) {
