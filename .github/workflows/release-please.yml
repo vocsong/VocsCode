@@ -1,0 +1,27 @@
+name: release-please
+
+# Watches master (the release gate). Squash-merged PRs from develop land there
+# with conventional titles; this bot turns them into a release PR that bumps
+# package.json, writes CHANGELOG.md, and — on merge — tags vX.Y.Z and creates
+# the GitHub Release. See docs/RELEASING.md.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          release-type: node
+          target-branch: master
+          # A PAT is needed so the tag push can trigger the release build
+          # workflow; events created by the default github-actions token do not
+          # trigger other workflows. Without the secret this falls back to the
+          # default token and the build must be dispatched manually.
+          token: ${{ secrets.RELEASE_PAT || github.token }}

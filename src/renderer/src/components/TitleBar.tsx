@@ -5,13 +5,13 @@
  * reserves that space; on macOS the traffic lights sit in the padded left edge instead.
  */
 import React, { useEffect, useRef, useState } from 'react';
-import { invoke, isMac, modKey } from '../api';
+import { invoke, isMac, isWeb, modKey } from '../api';
 import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
-import { GROUP_LABELS, GROUP_ORDER, THEMES } from '../../../shared/themes';
 import { Icon, MenuItem } from './ui';
+import { ForkIntoItems } from './ForkInto';
 
-const REPO = 'https://github.com/vocsong/Vocs-Code';
+const REPO = 'https://github.com/vocsong/VocsCode';
 
 const PANEL_TABS: { id: PanelTab; label: string }[] = [
   { id: 'changes', label: 'Changes' },
@@ -33,7 +33,7 @@ export function TitleBar() {
   const title = view === 'settings' ? 'Settings · Vocs Code' : session ? `${session.title} · Vocs Code` : 'Vocs Code';
 
   return (
-    <div className={`titlebar ${isMac ? 'titlebar-mac' : ''}`}>
+    <div className={`titlebar ${isMac ? 'titlebar-mac' : ''} ${isWeb ? 'titlebar-web' : ''}`}>
       <div className="titlebar-lead">
         <TitleBarButton icon="sidebar" label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} hint={`${modKey}+B`} onClick={toggleSidebar} />
         <TitleBarButton icon="arrowLeft" label="Back" hint={isMac ? '⌘[' : 'Alt+←'} disabled={!canBack} onClick={() => void navBack()} />
@@ -43,7 +43,7 @@ export function TitleBar() {
       <div className="titlebar-title" title={title}>
         {title}
       </div>
-      <div className="titlebar-tail" />
+      <div className="titlebar-tail">{isWeb && <span className="web-badge">web</span>}</div>
     </div>
   );
 }
@@ -127,17 +127,18 @@ function FileMenu({ close }: { close: () => void }) {
       <MenuItem hint={`${modKey}+N`} onClick={run(() => void st.startNewSession())}>
         New session
       </MenuItem>
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)))}>
+      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)).catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error')))}>
         Fork session
       </MenuItem>
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:export', { id: session.id }).then((r) => r.path && st.toast(`Exported to ${r.path}`, 'success')))}>
+      {session && <ForkIntoItems session={session} onForked={(f) => st.setActive(f.id)} />}
+      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:export', { id: session.id }).then((r) => r.path && st.toast(`Exported to ${r.path}`, 'success')).catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error')))}>
         Export transcript…
       </MenuItem>
       <Sep />
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openPath', { path: session.cwd, sessionId: session.id }))}>
         Reveal project folder
       </MenuItem>
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openInEditor', { path: session.cwd }).then(fail))}>
+      <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openInEditor', { path: session.cwd, sessionId: session.id }).then(fail))}>
         Open in editor
       </MenuItem>
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openTerminal', { cwd: session.cwd }).then(fail))}>
@@ -197,7 +198,6 @@ function ViewMenu({ close }: { close: () => void }) {
   const panelOpen = useStore((s) => s.panelOpen);
   const panelTab = useStore((s) => s.panelTab);
   const showThinking = useStore((s) => s.showThinking);
-  const theme = useStore((s) => s.settings?.theme ?? 'system');
   const st = useStore.getState();
   const run = (fn: () => void) => () => {
     close();
@@ -229,39 +229,7 @@ function ViewMenu({ close }: { close: () => void }) {
         Thinking
       </MenuItem>
       <Sep />
-      <MenuItem hint={`${modKey}++`} onClick={run(() => void invoke('window:zoom', { direction: 'in' }))}>
-        Zoom in
-      </MenuItem>
-      <MenuItem hint={`${modKey}+-`} onClick={run(() => void invoke('window:zoom', { direction: 'out' }))}>
-        Zoom out
-      </MenuItem>
-      <MenuItem hint={`${modKey}+0`} onClick={run(() => void invoke('window:zoom', { direction: 'reset' }))}>
-        Reset zoom
-      </MenuItem>
-      <Sep />
-      <MenuItem hint={isMac ? '⌃⌘F' : 'F11'} onClick={run(() => void invoke('window:toggleFullScreen', undefined))}>
-        Full screen
-      </MenuItem>
-      <MenuItem onClick={run(() => void invoke('window:reload', undefined))}>Reload</MenuItem>
-      <MenuItem hint={isMac ? '⌥⌘I' : 'Ctrl+Shift+I'} onClick={run(() => void invoke('window:toggleDevTools', undefined))}>
-        Developer tools
-      </MenuItem>
-      {/* Last, because the catalogue is long and this panel scrolls. */}
-      <Sep />
-      {GROUP_ORDER.map((group) => (
-        <React.Fragment key={group}>
-          <div className="menu-group">{group === 'core' ? 'Theme' : `Theme — ${GROUP_LABELS[group]}`}</div>
-          {THEMES.filter((t) => t.group === group).map((t) => (
-            <MenuItem
-              key={t.id}
-              active={theme === t.id}
-              onClick={run(() => void invoke('settings:update', { theme: t.id }).then((s) => st.setSettings(s)))}
-            >
-              {t.name}
-            </MenuItem>
-          ))}
-        </React.Fragment>
-      ))}
+      <MenuItem onClick={run(() => st.setView('settings'))}>Theme</MenuItem>
     </>
   );
 }

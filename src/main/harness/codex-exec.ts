@@ -2,8 +2,10 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Codex, type ModelReasoningEffort, type SandboxMode, type Thread, type ThreadEvent, type ThreadItem, type UserInput as CodexInput } from '@openai/codex-sdk';
-import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UserInput } from '../../shared/types';
 import { errorMessage, shortId, truncate } from '../util/async';
+import { toCodex } from '../mcp/effective';
+import { TurnUsageTracker } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { CODEX_STATIC_MODELS } from '../models/static-models';
 
@@ -35,9 +37,12 @@ export class CodexExecAdapter implements HarnessAdapter {
   private model: string | undefined;
   private effort: EffortLevel | undefined;
   private items = new Map<string, TranscriptItem>();
-  private totals: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
+  private turnStartedAt = 0;
+  private usage: TurnUsageTracker;
 
-  constructor(private readonly ctx: HarnessContext) {}
+  constructor(private readonly ctx: HarnessContext) {
+    this.usage = new TurnUsageTracker(ctx.session().usage);
+  }
 
   get busy(): boolean {
     return this._busy;
@@ -53,10 +58,19 @@ export class CodexExecAdapter implements HarnessAdapter {
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     const key = await this.ctx.getApiKey('openai');
     if (key && !env.CODEX_API_KEY && !env.OPENAI_API_KEY) env.OPENAI_API_KEY = key;
-    this.codex = new Codex({ codexPathOverride: override, env });
+    // The exec SDK flattens `config` into `--config key=value` argv, which any process listing
+    // can read, so resolved secrets travel in the environment instead (docs/MCP.md §8).
+    const mcp = await this.ctx.mcpServers().catch((e) => {
+      this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
+      return [];
+    });
+    const { config: mcpServers, env: mcpEnv } = toCodex(mcp, 'env-ref');
+    Object.assign(env, mcpEnv);
+    const config = Object.keys(mcpServers).length ? { mcp_servers: mcpServers } : undefined;
+    this.codex = new Codex({ codexPathOverride: override, env, config });
     this.model = meta.config.model?.model;
     this.effort = this.ctx.effort();
-    this.totals = { ...meta.usage };
+    this.usage = new TurnUsageTracker(meta.usage);
     this.ensureThread();
     this.ctx.emit({ type: 'status', status: 'idle' });
   }
@@ -91,6 +105,8 @@ export class CodexExecAdapter implements HarnessAdapter {
     this._busy = true;
     this.abort = new AbortController();
     const startedAt = Date.now();
+    this.turnStartedAt = startedAt;
+    this.usage.beginTurn();
     this.ctx.emit({ type: 'status', status: 'running' });
     void (async () => {
       try {
@@ -108,7 +124,9 @@ export class CodexExecAdapter implements HarnessAdapter {
         }
       } catch (e) {
         const aborted = this.abort?.signal.aborted;
-        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: aborted ? 'interrupted' : 'failed', durationMs: Date.now() - startedAt, error: aborted ? undefined : errorMessage(e) } });
+        const completed = this.usage.finishTurn();
+        this.ctx.emit({ type: 'usage', totals: completed.totals });
+        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: aborted ? 'interrupted' : 'failed', durationMs: Date.now() - startedAt, usage: completed.usage, error: aborted ? undefined : errorMessage(e) } });
       } finally {
         this._busy = false;
         this.abort = null;
@@ -137,19 +155,28 @@ export class CodexExecAdapter implements HarnessAdapter {
         return;
       case 'turn.completed': {
         const u = ev.usage;
-        this.totals.inputTokens += u.input_tokens;
-        this.totals.outputTokens += u.output_tokens;
-        this.totals.cacheReadTokens += u.cached_input_tokens;
-        this.totals.cacheWriteTokens += u.cache_write_input_tokens;
-        this.totals.reasoningTokens += u.reasoning_output_tokens;
-        this.totals.turns += 1;
-        this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
-        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'completed', usage: { inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheReadTokens: u.cached_input_tokens, reasoningTokens: u.reasoning_output_tokens } } });
+        this.usage.addUsage({ inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheReadTokens: u.cached_input_tokens, cacheWriteTokens: u.cache_write_input_tokens, reasoningTokens: u.reasoning_output_tokens });
+        const completed = this.usage.finishTurn();
+        this.ctx.emit({ type: 'usage', totals: completed.totals });
+        this.ctx.emit({
+          type: 'item.upsert',
+          item: {
+            id: shortId('turn_'),
+            kind: 'turn',
+            ts: Date.now(),
+            status: 'completed',
+            durationMs: Date.now() - this.turnStartedAt,
+            usage: completed.usage
+          }
+        });
         return;
       }
-      case 'turn.failed':
-        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'failed', error: ev.error.message } });
+      case 'turn.failed': {
+        const completed = this.usage.finishTurn();
+        this.ctx.emit({ type: 'usage', totals: completed.totals });
+        this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'failed', durationMs: Date.now() - this.turnStartedAt, usage: completed.usage, error: ev.error.message } });
         return;
+      }
       case 'error':
         this.ctx.emit({ type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'error', text: ev.message } });
         return;

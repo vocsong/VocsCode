@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { which, runCapture } = vi.hoisted(() => ({ which: vi.fn(), runCapture: vi.fn() }));
@@ -103,7 +104,7 @@ describe('gitBranchesOverview', () => {
     expect(fix.merged).toBe(true);
     expect(fix.behind).toBe(12);
     expect(fix.ahead).toBe(3);
-    expect(fix.worktreePath).toContain('worktrees' + '\\' + 'fix');
+    expect(fix.worktreePath).toContain('worktrees' + path.sep + 'fix');
     expect(fix.lastCommitSubject).toBe('Fix the bug');
 
     const cur = byName.get('vocscode/current')!;
@@ -116,5 +117,31 @@ describe('gitBranchesOverview', () => {
     const old = byName.get('stale-old')!;
     expect(old.merged).toBe(true);
     expect(old.upstream).toBeUndefined();
+  });
+
+  it('attaches GitHub PR state when gh is available', async () => {
+    which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : cmd === 'gh' ? '/usr/bin/gh' : null));
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });
+    gitReply(['worktree', 'list', '--porcelain'], { code: 0, stdout: WORKTREE_LIST });
+    gitReply(['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)'], { code: 0, stdout: REFS });
+    gitReply(['rev-list', '--left-right', '--count', 'develop...harness/fix'], { code: 0, stdout: '12\t3\n' });
+    gitReply(['rev-list', '--left-right', '--count', 'develop...vocscode/current'], { code: 0, stdout: '4\t1\n' });
+    gitReply(['rev-list', '--left-right', '--count', 'develop...stale-old'], { code: 0, stdout: '20\t0\n' });
+    gitReply(['merge-base', '--is-ancestor', 'harness/fix', 'develop'], { code: 0 });
+    gitReply(['merge-base', '--is-ancestor', 'vocscode/current', 'develop'], { code: 1 });
+    gitReply(['merge-base', '--is-ancestor', 'stale-old', 'develop'], { code: 0 });
+    replies.set(
+      '/usr/bin/gh ' + JSON.stringify(['pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,headRefName,state,url,title']),
+      { code: 0, stdout: JSON.stringify([
+        { number: 21, headRefName: 'harness/fix', state: 'MERGED', url: 'https://example.com/acme/repo/pull/21' },
+        { number: 22, headRefName: 'vocscode/current', state: 'OPEN', url: 'https://example.com/acme/repo/pull/22', title: 'Current work' }
+      ]), stderr: '' }
+    );
+
+    const r = await gitBranchesOverview('C:/repo/.vocs-code/worktrees/current');
+    const byName = new Map(r.branches.map((b) => [b.name, b]));
+    expect(byName.get('harness/fix')!.pr).toEqual({ number: 21, state: 'MERGED', url: 'https://example.com/acme/repo/pull/21' });
+    expect(byName.get('vocscode/current')!.pr).toEqual({ number: 22, state: 'OPEN', url: 'https://example.com/acme/repo/pull/22', title: 'Current work' });
+    expect(byName.get('stale-old')!.pr).toBeUndefined();
   });
 });

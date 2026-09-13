@@ -1,12 +1,15 @@
 /** Owns sessions: transcripts, approvals, goals, worktrees, and resuming a session after a restart. */
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
   ApprovalDecision,
   ApprovalRequest,
   AppSettings,
+  AutoCompactionThreshold,
   CreateSessionRequest,
   EffortLevel,
   GoalState,
+  HarnessId,
   HarnessRef,
   ModelInfo,
   ModelRef,
@@ -18,11 +21,14 @@ import type {
   TranscriptItem,
   UserInput
 } from '../shared/types';
+import { autoCompactionThresholdLabel, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
+import { resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
-import { branchGitState, createWorktree, gitRoot, removeWorktree, restoreWorktree, slugify, worktreeInfo, type BranchGitState } from './git';
-import { emptyUsage } from './models/static-models';
+import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
+import { tokensPerSecond, turnSpeed } from './analytics';
+import { emptyUsage, enrichModelContextWindows } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
 import type { SettingsStore } from './settings';
@@ -30,6 +36,9 @@ import type { SessionStore } from './store';
 import type { AnalyticsStore } from './analytics';
 import { deferred, errorMessage, shortId, type Deferred } from './util/async';
 import { readJson, writeJson } from './util/fs';
+import { generateSessionTitle, titleFromPrompt } from './session-title';
+
+export { titleFromPrompt };
 
 export interface SessionManagerDeps {
   store: SessionStore;
@@ -47,14 +56,23 @@ interface ActiveSession {
   adapter: HarnessAdapter;
   approvals: Map<string, Deferred<ApprovalDecision>>;
   liveItems: Map<string, TranscriptItem>;
+  /** Model active when each running tool call began, retained until its terminal upsert. */
+  toolModels: Map<string, ModelRef>;
   dirty: Set<string>;
   lastAssistantText: string;
   starting: Promise<void> | null;
-  /** Last list the harness reported, before user overrides, so it can be re-published. */
+  /** Last list the harness reported, before app metadata and user overrides, so it can be re-published. */
   models: ModelInfo[] | null;
+  /** Prevent repeated automatic requests until reported context falls below the threshold. */
+  autoCompactionThreshold: AutoCompactionThreshold | undefined;
+  autoCompactionLatched: boolean;
+  autoCompactionRetryAt: number;
+  autoCompactionRetryTimer: NodeJS.Timeout | null;
+  compactionInFlight: Promise<boolean | void> | null;
 }
 
 const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
+const AUTO_COMPACTION_RETRY_MS = 30_000;
 
 export class SessionManager {
   /** How often a session parked on 'pr' re-checks whether its branch was merged. */
@@ -70,9 +88,11 @@ export class SessionManager {
 
   list(): SessionMeta[] {
     const list = this.deps.store.list();
-    // Sessions restored while parked on a PR resume polling for their merge.
+    // Sessions restored while parked on a PR resume polling for their merge. A harness that
+    // died while the app was closed ('stopped') gets its git-derived status re-checked once,
+    // so a quit that killed the harness does not erase a parked pr/merged badge for good.
     for (const s of list) {
-      if (s.status === 'pr' && !this.gitStateChecked.has(s.id)) {
+      if ((s.status === 'pr' || s.status === 'stopped') && !this.gitStateChecked.has(s.id)) {
         this.gitStateChecked.add(s.id);
         this.scheduleGitStateCheck(s.id);
       }
@@ -101,7 +121,8 @@ export class SessionManager {
       meta.id,
       setTimeout(() => {
         this.persistTimers.delete(meta.id);
-        if (this.deps.store.get(meta.id)) void this.deps.store.upsert(meta);
+        // Fire-and-forget: a failed index write must not become an unhandled rejection.
+        if (this.deps.store.get(meta.id)) Promise.resolve(this.deps.store.upsert(meta)).catch((e) => this.deps.log('warn', `meta persist failed: ${errorMessage(e)}`));
       }, 300)
     );
   }
@@ -129,6 +150,11 @@ export class SessionManager {
     this.scheduleGitStateCheck(id, 1_000);
   }
 
+  /** Appends a persistent info line to a session's transcript (renderer-visible, survives restart). */
+  note(id: string, text: string, level: 'info' | 'warn' | 'error' = 'info'): void {
+    this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level, text } });
+  }
+
   /** Reflects the session branch's PR/merge state in the sidebar status label. */
   private async checkGitState(id: string, recheck: boolean): Promise<void> {
     const meta = this.get(id);
@@ -136,7 +162,15 @@ export class SessionManager {
     if (!this.gitStateCheckable(meta.status)) return;
     let state: BranchGitState;
     try {
-      state = await branchGitState(meta.cwd, meta.worktreeBranch);
+      const others = this.deps.store.list().filter((s) => s.id !== id && s.worktreeBranch).map((s) => s.worktreeBranch!);
+      const q: SessionPrQuery = {
+        prRefs: await this.sessionPrRefs(id),
+        excludeBranches: others,
+        extraRoots: await this.knownRepoRoots(id),
+        createdAfter: meta.createdAt,
+        updatedBefore: meta.updatedAt
+      };
+      state = await branchGitState(meta.cwd, meta.worktreeBranch, q);
     } catch (e) {
       this.deps.log('warn', `pr/merge status check failed: ${errorMessage(e)}`);
       return;
@@ -144,7 +178,10 @@ export class SessionManager {
     // The check can take seconds over the network; the session may have moved on.
     if (!this.gitStateCheckable(meta.status)) return;
     const next: SessionStatus = state.merged ? 'merged' : state.pr ? 'pr' : 'idle';
-    if (meta.status === next || meta.status === 'merged' || meta.status === 'error' || meta.status === 'stopped') return;
+    if (meta.status === next || meta.status === 'merged' || meta.status === 'error') return;
+    // A stopped harness stays stopped unless the branch is actually pr/merged: git evidence
+    // may upgrade the status, never downgrade it back to idle.
+    if (meta.status === 'stopped' && next === 'idle') return;
     meta.status = next;
     meta.statusDetail = undefined;
     this.schedulePersist(meta);
@@ -153,10 +190,47 @@ export class SessionManager {
     if (next === 'pr' && recheck) this.scheduleGitStateCheck(id, SessionManager.GIT_STATE_RECHECK_MS);
   }
 
-  /** Only idle/pr sessions take a label update; live or already-final statuses are left alone. */
+  /** Only idle/pr/stopped sessions take a label update; live or already-final statuses are left alone. */
   private gitStateCheckable(status: SessionStatus): boolean {
-    return status === 'idle' || status === 'pr' || status === 'merged';
+    return status === 'idle' || status === 'pr' || status === 'merged' || status === 'stopped';
   }
+
+  /**
+   * PRs this session itself referenced (the agent's report links the PR) — the strongest
+   * session→PR signal, since agents may push their own branch instead of the session
+   * worktree branch, and may even work in a different repo than the session's cwd.
+   */
+  async sessionPrRefs(id: string): Promise<PrRef[]> {
+    let raw = '';
+    try {
+      raw = await fs.readFile(path.join(this.deps.store.sessionDir(id), 'transcript.jsonl'), 'utf8');
+    } catch {
+      return [];
+    }
+    const out: PrRef[] = [];
+    for (const m of raw.matchAll(/github\.com[/:]([\w.-]+)\/([\w.-]+?)\/pull\/(\d+)/g)) {
+      const ref: PrRef = { repo: `${m[1]}/${m[2]}`, number: Number(m[3]) };
+      if (!out.some((p) => p.repo === ref.repo && p.number === ref.number)) out.push(ref);
+    }
+    return out;
+  }
+
+  /** Git roots of other sessions' repos (cached per cwd), for resolving transcript PRs from a foreign repo. */
+  async knownRepoRoots(excludeId: string): Promise<string[]> {
+    const roots = new Set<string>();
+    for (const s of this.deps.store.list()) {
+      if (s.id === excludeId || s.archived) continue;
+      let root = this.repoRootCache.get(s.cwd);
+      if (root === undefined) {
+        root = (await gitRoot(s.cwd).catch(() => null)) ?? '';
+        this.repoRootCache.set(s.cwd, root);
+      }
+      if (root) roots.add(root);
+    }
+    return [...roots];
+  }
+
+  private repoRootCache = new Map<string, string>();
 
   /** Persists every debounced meta update immediately (used on quit so trailing edits are not lost). */
   async flushPendingPersists(): Promise<void> {
@@ -176,13 +250,26 @@ export class SessionManager {
     const cfg = req.config;
     let cwd = cfg.projectRoot;
     let worktreeBranch: string | undefined;
-    if (cfg.useWorktree) {
+    if (req.checkoutBranch) {
+      // Reuse an existing worktree on the branch; otherwise create one for it.
+      if (!/^[\w][\w./-]*$/.test(req.checkoutBranch)) throw new Error('Invalid branch name');
+      const wts = await gitWorktrees(cfg.projectRoot);
+      const existing = wts.worktrees.find((w) => w.branch === req.checkoutBranch);
+      if (existing) {
+        cwd = existing.path;
+        worktreeBranch = req.checkoutBranch;
+      } else {
+        const wt = await worktreeAddForBranch(cfg.projectRoot, req.checkoutBranch);
+        cwd = wt.path;
+        worktreeBranch = wt.branch;
+      }
+    } else if (cfg.useWorktree) {
       const wt = await createWorktree(cfg.projectRoot, slugify(req.title || req.initialPrompt || id));
       cwd = wt.path;
       worktreeBranch = wt.branch;
     }
     const s = this.settings();
-    const title = req.title?.trim() || (req.initialPrompt ? req.initialPrompt.trim().split('\n')[0].slice(0, 60) : 'New session');
+    const title = req.title?.trim() || (req.initialPrompt ? titleFromPrompt(req.initialPrompt) : 'New session');
     const meta: SessionMeta = {
       id,
       title,
@@ -216,9 +303,14 @@ export class SessionManager {
     const folders = s.folders.includes(cfg.projectRoot) ? s.folders : [...s.folders, cfg.projectRoot];
     await this.deps.settings.update({ recentProjects: recent, folders });
     this.pushSessions();
-    if (req.initialPrompt?.trim()) {
-      const prompt = meta.goal ? `${req.initialPrompt.trim()}\n\nActive goal: ${meta.goal.objective}` : req.initialPrompt.trim();
-      void this.send(id, { text: prompt }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+    const promptText = req.initialPrompt?.trim() ?? '';
+    const initialImages = req.initialImages?.length ? req.initialImages : undefined;
+    if (promptText || initialImages) {
+      // A user-supplied title stands; otherwise the prompt-derived one is only a placeholder
+      // until the one-shot LLM title call lands.
+      if (!req.title?.trim() && promptText) this.scheduleLlmTitle(id, title, promptText);
+      const prompt = meta.goal && promptText ? `${promptText}\n\nActive goal: ${meta.goal.objective}` : promptText;
+      void this.send(id, { text: prompt, images: initialImages }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     } else if (meta.goal) {
       void this.send(id, { text: this.goalKickoffPrompt(meta.goal) }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     }
@@ -231,11 +323,12 @@ export class SessionManager {
 
   async delete(id: string, removeWt = false): Promise<void> {
     const meta = this.get(id);
+    if (!meta) return;
     const t0 = Date.now();
     await this.stop(id);
     this.cancelPersist(id);
     const tStop = Date.now();
-    if (meta?.worktreeBranch && removeWt) {
+    if (meta.worktreeBranch && removeWt) {
       try {
         await removeWorktree(meta.config.projectRoot, meta.cwd);
       } catch (e) {
@@ -258,14 +351,51 @@ export class SessionManager {
     return meta;
   }
 
+  /**
+   * Pins a session to the top of its folder; the first pin sits on top, later pins below it.
+   * Pin state must not bump updatedAt: the unpinned section orders by it, and pinning or
+   * reordering pins must not reshuffle the rest of the list.
+   */
+  async setPinned(id: string, pinned: boolean): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (pinned) {
+      meta.pinned = true;
+      meta.pinnedAt = Date.now();
+    } else {
+      meta.pinned = undefined;
+      delete meta.pinnedAt;
+    }
+    await this.deps.store.upsert(meta);
+    this.pushSessions();
+    return meta;
+  }
+
+  /** Persists a pinned-section drag reorder: ids in display order get ascending pin stamps. */
+  async setPinOrder(ids: string[]): Promise<void> {
+    let changed = false;
+    for (let i = 0; i < ids.length; i++) {
+      const meta = this.get(ids[i]);
+      if (!meta || !meta.pinned) continue;
+      // Small ordinals keep future pins (stamped with Date.now()) below the reordered section.
+      const pinnedAt = i + 1;
+      if (meta.pinnedAt === pinnedAt) continue;
+      meta.pinnedAt = pinnedAt;
+      await this.deps.store.upsert(meta);
+      changed = true;
+    }
+    if (changed) this.pushSessions();
+  }
+
   /** Archives a session; with `removeWt` it also deletes the worktree (the branch is kept so unarchive can restore it). */
-  async setArchived(id: string, archived: boolean, removeWt = false): Promise<SessionMeta> {
+  async setArchived(id: string, archived: boolean, removeWt = false, forceWt = false): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     if (archived && removeWt && meta.worktreeBranch) {
       await this.stop(id);
-      // Non-force: a worktree with uncommitted changes is refused, and the error reaches the renderer's toast.
-      await removeWorktree(meta.config.projectRoot, meta.cwd, { force: false });
+      // Non-force by default: a worktree with uncommitted changes is refused (WorktreeDirtyError);
+      // the renderer confirms discarding and retries with forceWorktree.
+      await removeWorktree(meta.config.projectRoot, meta.cwd, { force: forceWt });
     }
     if (!archived && meta.worktreeBranch) {
       // The worktree may have been removed while archived; recreate it so the session can start again.
@@ -279,6 +409,7 @@ export class SessionManager {
   }
 
   transcript(id: string): Promise<TranscriptItem[]> {
+    if (!this.get(id)) return Promise.reject(new Error('Session not found'));
     return this.deps.store.readTranscript(id).then((items) => {
       const live = this.active.get(id)?.liveItems;
       if (!live) return items;
@@ -302,6 +433,13 @@ export class SessionManager {
       permissionMode: () => (this.get(id) ?? meta).config.permissionMode,
       effort: () => (this.get(id) ?? meta).activeEffort ?? (this.get(id) ?? meta).config.effort ?? this.settings().defaultEffort,
       getApiKey: (providerId) => this.deps.getSecret(providerId),
+      mcpServers: () => {
+        const m = this.get(id) ?? meta;
+        return resolveForSession(
+          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness },
+          { getSecret: this.deps.getSecret, log: (level, message) => this.deps.log(level, `[${id}] ${message}`) }
+        );
+      },
       emit: (event) => this.emit(id, event),
       requestApproval: (draft) => this.requestApproval(id, draft),
       updateRef: (patch: Partial<HarnessRef>) => {
@@ -314,6 +452,9 @@ export class SessionManager {
         const m = this.get(id);
         if (!m) return;
         Object.assign(m, patch);
+        // A harness may discover its actual model only after startup. Refresh the analytics
+        // snapshot immediately so tool calls before the first usage update are not unattributed.
+        if ('activeModel' in patch) this.deps.analytics.touchSession(m);
         this.schedulePersist(m);
         this.pushSessions();
       },
@@ -333,7 +474,21 @@ export class SessionManager {
     if (!meta) throw new Error('Session not found');
     const ctx = this.buildContext(meta, id);
     const adapter = createAdapter(meta.config.harness, ctx);
-    const active: ActiveSession = { adapter, approvals: new Map(), liveItems: new Map(), dirty: new Set(), lastAssistantText: '', starting: null, models: null };
+    const active: ActiveSession = {
+      adapter,
+      approvals: new Map(),
+      liveItems: new Map(),
+      toolModels: new Map(),
+      dirty: new Set(),
+      lastAssistantText: '',
+      starting: null,
+      models: null,
+      autoCompactionThreshold: undefined,
+      autoCompactionLatched: false,
+      autoCompactionRetryAt: 0,
+      autoCompactionRetryTimer: null,
+      compactionInFlight: null
+    };
     this.active.set(id, active);
     meta.status = 'starting';
     meta.statusDetail = `Starting ${HARNESS_BY_ID[meta.config.harness].name}…`;
@@ -376,12 +531,39 @@ export class SessionManager {
     const userItem: TranscriptItem = { id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text, images: input.images, queuedAs: input.mode };
     this.emit(id, { type: 'item.upsert', item: userItem });
     if (meta.title === 'New session' && input.text.trim()) {
-      meta.title = input.text.trim().split('\n')[0].slice(0, 60);
+      const placeholder = titleFromPrompt(input.text);
+      meta.title = placeholder;
       this.schedulePersist(meta);
       this.pushSessions();
+      this.scheduleLlmTitle(id, placeholder, input.text);
     }
     const active = await this.ensureActive(id);
+    // Compaction can run without marking an adapter busy. Keep a new turn from reading or
+    // mutating its context until that operation has settled.
+    if (active.compactionInFlight) await active.compactionInFlight.catch(() => undefined);
+    if (this.active.get(id) !== active) throw new Error('Session stopped before the message could be sent.');
     await active.adapter.send(input);
+  }
+
+  /**
+   * Replaces a prompt-derived placeholder title with an LLM-generated one, as long as the
+   * user has not renamed (or deleted) the session while the call was in flight.
+   */
+  private scheduleLlmTitle(id: string, placeholder: string, prompt: string): void {
+    // The cheap utility model is for background chores like this; the session's own model is
+    // the fallback so titling still works before the user picks a utility model.
+    const meta = this.get(id);
+    const preferred = this.settings().utilityModel ?? meta?.activeModel;
+    void generateSessionTitle(prompt, this.settings().providers, this.deps.getSecret, preferred, this.deps.log)
+      .then((title) => {
+        if (!title || title === placeholder) return;
+        const meta = this.get(id);
+        if (!meta || meta.title !== placeholder) return;
+        meta.title = title;
+        this.schedulePersist(meta);
+        this.pushSessions();
+      })
+      .catch(() => undefined);
   }
 
   /** Denies every pending approval and records the decision on its transcript card. */
@@ -411,6 +593,7 @@ export class SessionManager {
     const active = this.active.get(id);
     if (!active) return;
     this.cancelApprovals(id, active, 'Session stopped');
+    if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
     this.active.delete(id);
     await this.flushLive(id, active);
     try {
@@ -420,8 +603,11 @@ export class SessionManager {
     }
     const meta = this.get(id);
     if (meta) {
-      meta.status = 'idle';
-      meta.statusDetail = undefined;
+      // Stopping the harness does not change the branch's git state either.
+      if (meta.status !== 'pr' && meta.status !== 'merged') {
+        meta.status = 'idle';
+        meta.statusDetail = undefined;
+      }
       meta.queued = 0;
       await this.deps.store.upsert(meta);
       this.pushSessions();
@@ -443,10 +629,12 @@ export class SessionManager {
   async setModel(id: string, model: ModelRef): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    const active = this.active.get(id);
+    // Do not publish or persist the requested model until the harness accepts the switch.
+    if (active) await active.adapter.setModel(model);
     meta.config.model = model;
     meta.activeModel = model;
-    const active = this.active.get(id);
-    if (active) await active.adapter.setModel(model);
+    this.deps.analytics.touchSession(meta);
     await this.deps.store.upsert(meta);
     this.pushSessions();
     return meta;
@@ -480,11 +668,110 @@ export class SessionManager {
     const active = this.active.get(id);
     if (!active) return { ok: false, detail: 'Session is not running.' };
     if (!active.adapter.compact) return { ok: false, detail: 'This harness does not support compaction.' };
-    await active.adapter.compact();
-    return { ok: true };
+    if (active.compactionInFlight) return { ok: false, detail: 'Context compaction is already in progress.' };
+    const threshold = this.settings().autoCompactionThreshold;
+    const meta = this.get(id);
+    active.autoCompactionThreshold = threshold;
+    if (threshold && meta && hasReachedAutoCompactionThreshold(threshold, meta.usage)) active.autoCompactionLatched = true;
+    const operation = active.adapter.compact();
+    active.compactionInFlight = operation;
+    try {
+      const compacted = await operation;
+      if (compacted === false) {
+        active.autoCompactionLatched = false;
+        active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
+        this.scheduleAutoCompactionRetry(id, active);
+        return { ok: false, detail: 'There is not enough conversation history to compact yet.' };
+      }
+      return { ok: true };
+    } catch (e) {
+      active.autoCompactionLatched = false;
+      active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
+      this.scheduleAutoCompactionRetry(id, active);
+      throw e;
+    } finally {
+      if (active.compactionInFlight === operation) active.compactionInFlight = null;
+    }
+  }
+
+  /** Wait until adapter queue bookkeeping has settled, then compact once at a safe idle boundary. */
+  private scheduleAutoCompaction(id: string): void {
+    if (!this.settings().autoCompactionThreshold) return;
+    queueMicrotask(() => void this.maybeAutoCompact(id));
+  }
+
+  private scheduleAutoCompactionRetry(id: string, active: ActiveSession): void {
+    if (!this.settings().autoCompactionThreshold || active.autoCompactionRetryTimer) return;
+    const delay = Math.max(0, active.autoCompactionRetryAt - Date.now());
+    active.autoCompactionRetryTimer = setTimeout(() => {
+      active.autoCompactionRetryTimer = null;
+      if (this.active.get(id) === active) void this.maybeAutoCompact(id);
+    }, delay);
+    active.autoCompactionRetryTimer.unref?.();
+  }
+
+  private clearAutoCompactionRetry(active: ActiveSession): void {
+    if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
+    active.autoCompactionRetryTimer = null;
+    active.autoCompactionRetryAt = 0;
+  }
+
+  private async maybeAutoCompact(id: string): Promise<void> {
+    const active = this.active.get(id);
+    const meta = this.get(id);
+    const threshold = this.settings().autoCompactionThreshold;
+    if (!active || !meta || !threshold) return;
+    if (active.autoCompactionThreshold !== threshold) {
+      active.autoCompactionThreshold = threshold;
+      active.autoCompactionLatched = false;
+      this.clearAutoCompactionRetry(active);
+    }
+    if (!hasReachedAutoCompactionThreshold(threshold, meta.usage)) {
+      active.autoCompactionLatched = false;
+      this.clearAutoCompactionRetry(active);
+      return;
+    }
+    if (
+      !active.adapter.compact ||
+      active.autoCompactionLatched ||
+      active.compactionInFlight ||
+      active.starting ||
+      active.adapter.busy ||
+      meta.status !== 'idle' ||
+      (meta.queued ?? 0) > 0
+    ) {
+      return;
+    }
+    if (Date.now() < active.autoCompactionRetryAt) {
+      this.scheduleAutoCompactionRetry(id, active);
+      return;
+    }
+    active.autoCompactionLatched = true;
+    this.note(id, `Automatic context compaction requested at ${autoCompactionThresholdLabel(threshold)}.`);
+    const operation = active.adapter.compact();
+    active.compactionInFlight = operation;
+    try {
+      const compacted = await operation;
+      if (compacted === false) {
+        active.autoCompactionLatched = false;
+        active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
+        this.scheduleAutoCompactionRetry(id, active);
+        this.note(id, 'Automatic context compaction is waiting for more conversation history.');
+      }
+    } catch (e) {
+      active.autoCompactionLatched = false;
+      active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
+      this.scheduleAutoCompactionRetry(id, active);
+      const message = errorMessage(e);
+      this.deps.log('warn', `[${id}] automatic compaction failed: ${message}`);
+      this.note(id, `Automatic context compaction failed: ${message}`, 'warn');
+    } finally {
+      if (active.compactionInFlight === operation) active.compactionInFlight = null;
+    }
   }
 
   async clearTranscript(id: string): Promise<void> {
+    if (!this.get(id)) throw new Error('Session not found');
     const active = this.active.get(id);
     if (active) active.liveItems.clear();
     await this.deps.store.rewriteTranscript(id, []);
@@ -529,11 +816,13 @@ export class SessionManager {
 
   /** Central event sink: persists transcript, updates meta, forwards to renderer, drives goals. */
   private emit(sessionId: string, event: SessionEvent): void {
-    // Harness-reported capabilities pass through the user's corrections before anything sees them.
+    // Harness-reported catalogs gain only known provider metadata, then pass through user corrections.
     if (event.type === 'models') {
       const live = this.active.get(sessionId);
       if (live) live.models = event.models;
-      event = { ...event, models: applyModelOverrides(event.models, this.deps.settings.get().modelOverrides) };
+      const settings = this.deps.settings.get();
+      const models = enrichModelContextWindows(event.models, settings.providers);
+      event = { ...event, models: applyModelOverrides(models, settings.modelOverrides) };
     }
     const meta = this.get(sessionId);
     const active = this.active.get(sessionId);
@@ -548,8 +837,17 @@ export class SessionManager {
         const streaming = item.kind === 'assistant' && item.streaming;
         if (!streaming || !active) this.appendTranscript(sessionId, item);
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
-        // Tool calls are recorded once, when they leave the running state.
-        if (item.kind === 'tool' && item.status !== 'running') this.deps.analytics.recordToolCall(sessionId, item);
+        if (item.kind === 'tool') {
+          // Keep the model from the start of the call: a model switch before its terminal upsert
+          // must not move the call to the newly selected model.
+          const toolModels = active ? (active.toolModels ??= new Map()) : undefined;
+          if (item.status === 'running' && meta?.activeModel && toolModels && !toolModels.has(item.id)) toolModels.set(item.id, meta.activeModel);
+          if (item.status !== 'running') {
+            const model = toolModels?.get(item.id);
+            toolModels?.delete(item.id);
+            this.deps.analytics.recordToolCall(sessionId, item, undefined, model);
+          }
+        }
         break;
       }
       case 'item.delta': {
@@ -566,8 +864,13 @@ export class SessionManager {
       case 'status': {
         if (meta) {
           if (event.status === 'idle' && active && active.approvals.size) break; // still awaiting
-          meta.status = event.status;
-          meta.statusDetail = event.detail;
+          // The harness process exiting says nothing about the branch's git state: a session
+          // parked on pr/merged keeps its git-derived status instead of flipping to stopped.
+          const gitParked = event.status === 'stopped' && (meta.status === 'pr' || meta.status === 'merged');
+          if (!gitParked) {
+            meta.status = event.status;
+            meta.statusDetail = event.detail;
+          }
           if (event.status === 'idle' || event.status === 'stopped' || event.status === 'error') {
             if (active) {
               void this.flushLive(sessionId, active).catch((e) => this.deps.log('warn', `live flush failed: ${errorMessage(e)}`));
@@ -584,7 +887,10 @@ export class SessionManager {
           // Status events are the live source of truth for the sidebar. Terminal statuses also
           // persist above, but every transition must be published immediately.
           this.pushSessions();
-          if (event.status === 'idle') this.scheduleGitStateCheck(meta.id);
+          if (event.status === 'idle') {
+            this.scheduleAutoCompaction(meta.id);
+            this.scheduleGitStateCheck(meta.id);
+          }
         }
         break;
       }
@@ -592,8 +898,21 @@ export class SessionManager {
         if (meta) {
           meta.usage = event.totals;
           this.deps.analytics.recordUsage(meta, event.totals);
+          const threshold = this.settings().autoCompactionThreshold;
+          if (active) {
+            if (active.autoCompactionThreshold !== threshold) {
+              active.autoCompactionThreshold = threshold;
+              active.autoCompactionLatched = false;
+              this.clearAutoCompactionRetry(active);
+            }
+            if (!threshold || !hasReachedAutoCompactionThreshold(threshold, event.totals)) {
+              active.autoCompactionLatched = false;
+              this.clearAutoCompactionRetry(active);
+            }
+          }
           this.schedulePersist(meta);
           this.pushSessions();
+          if (meta.status === 'idle') this.scheduleAutoCompaction(meta.id);
         }
         break;
       case 'meta':
@@ -644,7 +963,7 @@ export class SessionManager {
   }
 
   private onTurnFinished(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>): void {
-    if (turn.status === 'completed') this.deps.analytics.recordTurn(meta, turn.durationMs ?? 0);
+    this.deps.analytics.recordTurn(meta, turn);
     const active = this.active.get(meta.id);
     if (this.settings().notifications && turn.status !== 'interrupted') {
       this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);
@@ -765,15 +1084,17 @@ export class SessionManager {
     return meta;
   }
 
-  async fork(id: string): Promise<SessionMeta | null> {
+  async fork(id: string, harness?: HarnessId): Promise<SessionMeta | null> {
     const src = this.get(id);
     if (!src) return null;
     const items = await this.transcript(id);
     const nid = shortId('s_');
+    const cross = !!harness && harness !== src.config.harness;
+    const target = cross ? harness! : src.config.harness;
     const meta: SessionMeta = {
       ...structuredClone(src),
       id: nid,
-      title: `${src.title} (fork)`,
+      title: cross ? `${src.title} (fork → ${HARNESS_BY_ID[target].name})` : `${src.title} (fork)`,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       status: 'idle',
@@ -781,18 +1102,51 @@ export class SessionManager {
       queued: 0,
       harnessRef: {},
       goal: undefined,
-      // The fork shares the directory but does not own the original's worktree (deleting it must not remove that).
-      worktreeBranch: undefined
+      // A fresh fork starts unpinned and active, never in the archive.
+      pinned: undefined,
+      pinnedAt: undefined,
+      archived: undefined
     };
-    // Carry harness state where the harness supports it.
-    if (src.config.harness === 'claude' && src.harnessRef.claudeSessionId) meta.harnessRef = { claudeSessionId: src.harnessRef.claudeSessionId, forkOnResume: true } as HarnessRef;
-    if (src.config.harness === 'native') {
-      const hist = await this.deps.store.readNativeHistory(id);
-      if (hist) await this.deps.store.writeNativeHistory(nid, hist);
-      meta.harnessRef = { nativeHistory: true };
+    if (cross) {
+      // A different harness cannot resume the source's provider session: it starts fresh in the
+      // same directory/worktree. The copied transcript is carried over for reference only.
+      const s = this.settings();
+      meta.config = {
+        ...src.config,
+        harness: target,
+        model: s.defaultModelByHarness[target],
+        acpAgent: undefined,
+        codexModelProvider: undefined,
+        // Already living in the source's directory; no new worktree for the fork.
+        useWorktree: false
+      };
+      meta.activeModel = meta.config.model;
+      meta.activeEffort = undefined;
+      // The fork keeps the same worktree/branch as the session it was forked from.
+      meta.worktreeBranch = src.worktreeBranch;
+    } else {
+      // The fork shares the directory but does not own the original's worktree (deleting it must not remove that).
+      meta.worktreeBranch = undefined;
+      // Carry harness state where the harness supports it.
+      if (src.config.harness === 'claude' && src.harnessRef.claudeSessionId) meta.harnessRef = { claudeSessionId: src.harnessRef.claudeSessionId, forkOnResume: true } as HarnessRef;
+      if (src.config.harness === 'native') {
+        const hist = await this.deps.store.readNativeHistory(id);
+        if (hist) await this.deps.store.writeNativeHistory(nid, hist);
+        meta.harnessRef = { nativeHistory: true };
+      }
     }
     await this.deps.store.upsert(meta);
-    await this.deps.store.rewriteTranscript(nid, items.filter((i) => !(i.kind === 'approval' && !i.decision)));
+    const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision));
+    if (cross) {
+      keep.push({
+        id: shortId('i_'),
+        kind: 'info',
+        ts: Date.now(),
+        level: 'info',
+        text: `Forked from ${HARNESS_BY_ID[src.config.harness].name} into ${HARNESS_BY_ID[target].name} in the same directory${meta.worktreeBranch ? ` (branch ${meta.worktreeBranch})` : ''}. The new harness starts with a fresh context — the transcript above is carried over for reference.`
+      });
+    }
+    await this.deps.store.rewriteTranscript(nid, keep);
     this.pushSessions();
     return meta;
   }
@@ -821,7 +1175,7 @@ export class SessionManager {
           lines.push(`> ${it.level}: ${it.text}`, '');
           break;
         case 'turn':
-          lines.push(`---`, `_Turn ${it.status}${it.durationMs ? ` in ${(it.durationMs / 1000).toFixed(1)}s` : ''}${it.costUsd ? `, $${it.costUsd.toFixed(4)}` : ''}_`, '');
+          lines.push(`---`, `_Turn ${it.status}${it.durationMs ? ` in ${(it.durationMs / 1000).toFixed(1)}s` : ''}${speedLabel(it)}${it.costUsd ? `, $${it.costUsd.toFixed(4)}` : ''}_`, '');
           break;
         case 'plan':
           lines.push('### Plan', ...it.entries.map((e) => `- [${e.status === 'completed' ? 'x' : ' '}] ${e.content}`), '');
@@ -834,4 +1188,10 @@ export class SessionManager {
   async projectRootFor(cwd: string): Promise<string | null> {
     return gitRoot(cwd);
   }
+}
+
+/** `, 12.3 tok/s` for the markdown export, or '' when the turn has no speed sample. */
+function speedLabel(turn: Extract<TranscriptItem, { kind: 'turn' }>): string {
+  const tps = tokensPerSecond(turnSpeed(turn) ?? undefined);
+  return tps ? `, ${tps.toFixed(1)} tok/s` : '';
 }

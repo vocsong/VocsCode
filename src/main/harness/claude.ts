@@ -1,7 +1,6 @@
 /** Claude Agent SDK adapter: streaming query() turns, canUseTool approvals and file-change hooks, normalized to SessionEvents. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { createTwoFilesPatch } from 'diff';
 import {
   query,
   type CanUseTool,
@@ -14,7 +13,11 @@ import {
   type SDKUserMessage
 } from '@anthropic-ai/claude-agent-sdk';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
-import { AsyncQueue, errorMessage, shortId, truncate } from '../util/async';
+import { toClaude } from '../mcp/effective';
+import { findContextWindow } from '../models/static-models';
+import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
+import { makeFileChange } from '../util/file-changes';
+import { TurnUsageTracker } from '../util/turn-usage';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
 import type { HarnessAdapter, HarnessContext } from './types';
 
@@ -106,11 +109,14 @@ export class ClaudeAdapter implements HarnessAdapter {
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
   private fileSnapshots = new Map<string, string | null>();
   private turnStartedAt = 0;
-  private lastCost = 0;
+  private readonly usage: TurnUsageTracker;
   private started = false;
   private modelsEmitted = false;
+  private compactionWaiter: Deferred<void> | null = null;
 
-  constructor(private readonly ctx: HarnessContext) {}
+  constructor(private readonly ctx: HarnessContext) {
+    this.usage = new TurnUsageTracker(ctx.session().usage);
+  }
 
   get busy(): boolean {
     return this._busy;
@@ -166,6 +172,16 @@ export class ClaudeAdapter implements HarnessAdapter {
     if (this.started) return;
     this.started = true;
     const options = this.buildOptions();
+    // `strictMcpConfig` stays unset on purpose: the user's own ~/.claude.json and plugin servers
+    // must keep working alongside the ones this app injects. With 'project' in settingSources
+    // Claude also reads <cwd>/.mcp.json itself, so a repo server this app passes is declared
+    // twice under one name; injecting it is still the reliable route, because Claude's
+    // project-scope trust prompt has no interactive path in SDK mode (docs/MCP.md §11).
+    const mcp = await this.ctx.mcpServers().catch((e) => {
+      this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
+      return [];
+    });
+    if (mcp.length) options.mcpServers = toClaude(mcp.map((r) => r.def));
     const s = this.ctx.settings();
     if (s.claude.useProviderKey) {
       const key = await this.ctx.getApiKey('anthropic');
@@ -173,6 +189,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
     this.q = query({ prompt: this.input, options });
     this.pump = this.consume(this.q).catch((e) => {
+      this.compactionWaiter?.reject(e instanceof Error ? e : new Error(errorMessage(e)));
       this.ctx.emit({ type: 'error', message: `Claude harness stopped: ${errorMessage(e)}`, fatal: true });
       this.ctx.emit({ type: 'status', status: 'error', detail: errorMessage(e) });
     });
@@ -271,9 +288,7 @@ export class ClaudeAdapter implements HarnessAdapter {
           after = e.replace_all ? after.split(oldS).join(newS) : after.replace(oldS, newS);
         }
       } else return undefined;
-      const rel = path.relative(this.ctx.session().cwd, abs) || file;
-      const diff = createTwoFilesPatch(rel, rel, before ?? '', after, before === null ? '(new file)' : '', '', { context: 3 });
-      return [{ path: rel, kind: before === null ? 'add' : 'update', diff }];
+      return [makeFileChange(this.ctx.session().cwd, file, before, after, { newFileHeader: '(new file)' })];
     } catch {
       return undefined;
     }
@@ -305,11 +320,10 @@ export class ClaudeAdapter implements HarnessAdapter {
         this.fileSnapshots.delete(input.tool_use_id);
         try {
           const after = await fs.readFile(abs, 'utf8');
-          const rel = path.relative(this.ctx.session().cwd, abs) || file;
-          const diff = createTwoFilesPatch(rel, rel, before ?? '', after, '', '', { context: 3 });
+          const change = makeFileChange(this.ctx.session().cwd, file, before, after);
           const item = this.toolItems.get(input.tool_use_id);
           if (item) {
-            item.changes = [{ path: rel, kind: before === null || before === undefined ? 'add' : 'update', diff }];
+            item.changes = [change];
             this.ctx.emit({ type: 'item.upsert', item: { ...item } });
           }
         } catch {
@@ -322,6 +336,7 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   private async consume(q: Query): Promise<void> {
     for await (const msg of q) this.handle(msg, q);
+    this.compactionWaiter?.reject(new Error('Claude Code stopped during context compaction.'));
     this._busy = false;
     this.ctx.emit({ type: 'status', status: 'stopped', detail: 'Claude Code process ended' });
   }
@@ -336,15 +351,21 @@ export class ClaudeAdapter implements HarnessAdapter {
           if (!this.modelsEmitted) {
             this.modelsEmitted = true;
             q.supportedModels()
-              .then((models) => this.ctx.emit({ type: 'models', models: models.map(toModelInfo) }))
+              .then((models) => this.ctx.emit({ type: 'models', models: models.map(claudeModelToInfo) }))
               .catch(() => {
                 // Retry on the next init so the model picker is not permanently empty.
                 this.modelsEmitted = false;
               });
           }
-        } else if (msg.subtype === 'compact_boundary' || (msg as { subtype?: string }).subtype === 'status') {
-          const m = msg as { subtype: string; compact_result?: string };
-          if (m.compact_result) this.info(`Context compaction ${m.compact_result}.`);
+        } else if (msg.subtype === 'compact_boundary') {
+          if (msg.compact_metadata.trigger === 'manual') this.compactionWaiter?.resolve();
+        } else if ((msg as { subtype?: string }).subtype === 'status') {
+          const m = msg as { compact_result?: 'success' | 'failed'; compact_error?: string };
+          if (m.compact_result) {
+            this.info(`Context compaction ${m.compact_result}.`, m.compact_result === 'failed' ? 'warn' : 'info');
+            if (m.compact_result === 'failed') this.compactionWaiter?.reject(new Error(m.compact_error || 'Claude context compaction failed.'));
+            else this.compactionWaiter?.resolve();
+          }
         } else if ((msg as { subtype?: string }).subtype === 'permission_denied') {
           const m = msg as { tool_name: string };
           this.info(`Tool ${m.tool_name} was auto-denied by the harness.`, 'warn');
@@ -352,6 +373,7 @@ export class ClaudeAdapter implements HarnessAdapter {
         return;
       }
       case 'stream_event': {
+        this.markTurnStarted();
         if (msg.parent_tool_use_id) return; // nested subagent streams are summarized via tool items
         const ev = msg.event as { type: string; index?: number; content_block?: ContentBlockLike; delta?: { type: string; text?: string; thinking?: string } };
         if (ev.type === 'message_start') this.ensureAssistant();
@@ -368,6 +390,7 @@ export class ClaudeAdapter implements HarnessAdapter {
         return;
       }
       case 'assistant': {
+        this.markTurnStarted();
         const content = (msg.message.content ?? []) as ContentBlockLike[];
         for (const block of content) {
           if (block.type === 'text' && !msg.parent_tool_use_id) {
@@ -416,26 +439,38 @@ export class ClaudeAdapter implements HarnessAdapter {
       case 'result': {
         this.finishAssistant();
         this._busy = false;
-        const usage: Partial<UsageTotals> = {};
+        let usage: Partial<UsageTotals> | undefined;
         const mu = (msg as { modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number; contextWindow: number }> }).modelUsage;
+        let trackerTurn: ReturnType<TurnUsageTracker['finishTurn']>;
+        if (typeof msg.total_cost_usd === 'number') this.usage.setCumulative({ costUsd: msg.total_cost_usd });
         if (mu) {
-          const totals: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
+          const cumulative: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
           for (const v of Object.values(mu)) {
-            totals.inputTokens += v.inputTokens;
-            totals.outputTokens += v.outputTokens;
-            totals.cacheReadTokens += v.cacheReadInputTokens;
-            totals.cacheWriteTokens += v.cacheCreationInputTokens;
-            totals.costUsd += v.costUSD;
-            totals.contextWindow = v.contextWindow || totals.contextWindow;
+            cumulative.inputTokens += v.inputTokens;
+            cumulative.outputTokens += v.outputTokens;
+            cumulative.cacheReadTokens += v.cacheReadInputTokens;
+            cumulative.cacheWriteTokens += v.cacheCreationInputTokens;
+            cumulative.costUsd += v.costUSD;
+            cumulative.contextWindow = v.contextWindow || cumulative.contextWindow;
           }
-          totals.turns = this.ctx.session().usage.turns + 1;
           const u = (msg as { usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }).usage;
-          if (u) totals.contextTokens = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-          this.ctx.emit({ type: 'usage', totals });
-          Object.assign(usage, totals);
+          this.usage.setCumulative({
+            inputTokens: cumulative.inputTokens,
+            outputTokens: cumulative.outputTokens,
+            cacheReadTokens: cumulative.cacheReadTokens,
+            cacheWriteTokens: cumulative.cacheWriteTokens,
+            costUsd: cumulative.costUsd,
+            contextWindow: cumulative.contextWindow,
+            contextTokens: u ? (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) : undefined
+          });
         }
-        const turnCost = Math.max(0, (msg.total_cost_usd ?? 0) - this.lastCost);
-        this.lastCost = msg.total_cost_usd ?? this.lastCost;
+        // Finish even when the SDK omitted modelUsage: total_cost_usd is still useful, and the
+        // tracker must close its baseline so the next streamed turn starts cleanly.
+        trackerTurn = this.usage.finishTurn();
+        const turnUsage = trackerTurn.usage;
+        if (mu) usage = turnUsage ? { inputTokens: turnUsage.inputTokens, outputTokens: turnUsage.outputTokens, cacheReadTokens: turnUsage.cacheReadTokens, cacheWriteTokens: turnUsage.cacheWriteTokens } : undefined;
+        if (mu || typeof msg.total_cost_usd === 'number') this.ctx.emit({ type: 'usage', totals: trackerTurn.totals });
+        const turnCost = turnUsage?.costUsd ?? 0;
         const turnMsg = msg as { is_error?: boolean; terminal_reason?: string };
         const isError = turnMsg.is_error || msg.subtype !== 'success';
         const interrupted = turnMsg.terminal_reason === 'aborted_streaming' || turnMsg.terminal_reason === 'aborted_tools';
@@ -477,6 +512,16 @@ export class ClaudeAdapter implements HarnessAdapter {
     this.ctx.emit({ type: 'item.upsert', item: { id: a.id, kind: 'assistant', ts: Date.now(), text: a.text, thinking: a.thinking || undefined, model, streaming: false } });
   }
 
+  /** The CLI can begin a turn on its own — queued/steered messages (e.g. right after an interrupt)
+   *  run without a send() call — so turn start must also be observed from the message stream. */
+  private markTurnStarted(): void {
+    if (this._busy) return;
+    this._busy = true;
+    this.usage.beginTurn();
+    this.turnStartedAt = Date.now();
+    this.ctx.emit({ type: 'status', status: 'running' });
+  }
+
   private info(text: string, level: 'info' | 'warn' | 'error' = 'info'): void {
     this.ctx.emit({ type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level, text } });
   }
@@ -495,6 +540,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     } as unknown as SDKUserMessage;
     if (!this._busy) {
       this._busy = true;
+      this.usage.beginTurn();
       this.turnStartedAt = Date.now();
       this.ctx.emit({ type: 'status', status: 'running' });
     }
@@ -532,15 +578,29 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   async compact(): Promise<void> {
-    await this.send({ text: '/compact' });
+    if (this.compactionWaiter) {
+      await withTimeout(this.compactionWaiter.promise, 120_000, 'Claude context compaction');
+      return;
+    }
+    const waiter = deferred<void>();
+    // Process shutdown can reject this before send() reaches its next microtask; mark it observed now.
+    void waiter.promise.catch(() => undefined);
+    this.compactionWaiter = waiter;
+    try {
+      await this.send({ text: '/compact' });
+      await withTimeout(waiter.promise, 120_000, 'Claude context compaction');
+    } finally {
+      if (this.compactionWaiter === waiter) this.compactionWaiter = null;
+    }
   }
 
   async listModels(): Promise<ModelInfo[]> {
     if (!this.q) return [];
-    return (await this.q.supportedModels()).map(toModelInfo);
+    return (await this.q.supportedModels()).map(claudeModelToInfo);
   }
 
   async dispose(): Promise<void> {
+    this.compactionWaiter?.reject(new Error('Claude context compaction was cancelled.'));
     this.input.close();
     this.abort.abort();
     try {
@@ -552,8 +612,17 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 }
 
-function toModelInfo(m: { value: string; displayName: string; description?: string; resolvedModel?: string }): ModelInfo {
-  return { id: m.value, provider: 'anthropic', displayName: m.displayName || m.value, description: m.description, supportsImages: true, supportsReasoning: true, supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] };
+export function claudeModelToInfo(m: { value: string; displayName: string; description?: string; resolvedModel?: string }): ModelInfo {
+  return {
+    id: m.value,
+    provider: 'anthropic',
+    displayName: m.displayName || m.value,
+    description: m.description,
+    contextWindow: findContextWindow('anthropic', m.resolvedModel ?? m.value),
+    supportsImages: true,
+    supportsReasoning: true,
+    supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max']
+  };
 }
 
 function extractText(content: unknown): string {

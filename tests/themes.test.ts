@@ -78,9 +78,9 @@ function distance(a: string, b: string): number {
 }
 
 describe('theme catalogue', () => {
-  it('has the three built-ins plus ten data-driven themes, with unique ids and names', () => {
+  it('has the three built-ins plus twenty data-driven themes, with unique ids and names', () => {
     expect(THEMES.filter((t) => !t.palette).map((t) => t.id)).toEqual(['system', 'light', 'dark']);
-    expect(CUSTOM).toHaveLength(10);
+    expect(CUSTOM).toHaveLength(20);
     expect(new Set(THEME_IDS).size).toBe(THEMES.length);
     expect(new Set(THEMES.map((t) => t.name)).size).toBe(THEMES.length);
   });
@@ -88,7 +88,7 @@ describe('theme catalogue', () => {
   it('puts every theme in a known group and leans navy', () => {
     for (const t of THEMES) expect(GROUP_ORDER).toContain(t.group);
     expect(CUSTOM.filter((t) => t.group === 'navy')).toHaveLength(4);
-    // Nebula is navy-indigo too, so five of the ten new themes are navy-family.
+    // Nebula, Ultraviolet and Magma are futuristic, so seven of the twenty data themes are navy-family.
     expect(CUSTOM.filter((t) => t.group === 'navy' || t.group === 'futuristic').length).toBeGreaterThanOrEqual(5);
   });
 
@@ -338,5 +338,26 @@ describe('color helpers', () => {
     expect(withAlpha('#4d9dff', 0.35)).toBe('#4d9dff59');
     expect(withAlpha('#4d9dff', 1)).toBe('#4d9dffff');
     expect(withAlpha('rgba(0, 0, 0, 0.5)', 0.35)).toBe('rgba(0, 0, 0, 0.5)');
+  });
+});
+
+describe('chart series tokens', () => {
+  it('gives every data-driven theme the slots of its light/dark base, and the built-ins declare them in styles.css', async () => {
+    const { CHART_SERIES } = await import('../src/shared/themes');
+    expect(CHART_SERIES.light).toHaveLength(6);
+    expect(new Set(CHART_SERIES.light).size).toBe(6);
+    expect(CHART_SERIES.dark).toHaveLength(6);
+    const css = themeCss();
+    for (const t of THEMES) {
+      if (!t.palette) continue;
+      const start = css.indexOf(`[data-theme='${t.id}']`);
+      expect(start).toBeGreaterThan(-1);
+      const block = css.slice(start, css.indexOf('}', start));
+      const base = t.base === 'light' ? 'light' : 'dark';
+      CHART_SERIES[base].forEach((hex, i) => expect(block).toContain(`--chart-${i + 1}: ${hex};`));
+    }
+    const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'styles.css'), 'utf8');
+    CHART_SERIES.light.forEach((hex, i) => expect(styles).toContain(`--chart-${i + 1}: ${hex};`));
+    CHART_SERIES.dark.forEach((hex, i) => expect(styles).toContain(`--chart-${i + 1}: ${hex};`));
   });
 });

@@ -317,6 +317,8 @@ function keyHandler(inst: Instance, e: KeyboardEvent): boolean {
   const key = e.key.toLowerCase();
   const mod = isMac ? e.metaKey : e.ctrlKey;
   if (mod && !e.altKey && (APP_CHORDS.has(key) || /^[1-9]$/.test(e.key) || e.code === 'Backquote')) return false;
+  // Ctrl+Up/Down (+Shift) navigate sessions app-wide (App.tsx), never reach the shell.
+  if ((e.ctrlKey || (isMac && e.metaKey)) && !e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return false;
   if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return false;
   if (mod && key === 'f') {
     findHandler?.(inst.id);

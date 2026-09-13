@@ -1,6 +1,6 @@
 /** Electron entry point: app lifecycle, window creation, logging, and the headless debug hooks documented in the README. */
 import { spawn } from 'node:child_process';
-import { readdirSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, shell } from 'electron';
@@ -12,11 +12,13 @@ import { watchEventLoop } from './diag';
 import { registerIpc, pushToRenderer } from './ipc';
 import { createLogger, type Logger } from './log';
 import { RuntimeResolver } from './runtime';
+import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
 import { SettingsStore } from './settings';
 import { SessionStore } from './store';
 import { TerminalManager } from './terminal';
+import { WebServer } from './web-server';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged && !!process.env.ELECTRON_RENDERER_URL;
@@ -34,6 +36,8 @@ if (process.env.VOCS_CODE_USER_DATA) app.setPath('userData', process.env.VOCS_CO
 let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
 let terminals: TerminalManager | null = null;
+let webServer: WebServer | null = null;
+let processErrorHandlersInstalled = false;
 
 /** Console-only until userData is known (see main()), then also a rotating file under logs/. */
 let log: Logger = (level, message) => {
@@ -43,6 +47,10 @@ let log: Logger = (level, message) => {
   else if (level === 'warn') console.warn(line);
   else console.log(line);
 };
+
+// Install before the async startup chain so failures while loading settings, secrets, or the
+// window are captured by the console fallback and then automatically use the file logger.
+installProcessErrorHandlers();
 
 if (!app.requestSingleInstanceLock()) {
   log('warn', 'another Vocs Code instance is already running for this user-data directory; quitting');
@@ -78,6 +86,15 @@ async function main(): Promise<void> {
   const analytics = new AnalyticsStore(userData, { log });
   await analytics.load(store.list(), (id) => store.readTranscript(id));
 
+  // Deep search index: derived from transcripts, so it lives beside them and rebuilds itself.
+  const search = new SearchIndex(userData, { store, log });
+  await search.init();
+  store.hooks = {
+    onAppend: (id, item) => search.indexItem(id, item),
+    onRewrite: (id) => search.resyncSession(id),
+    onRemove: (id) => search.dropSession(id)
+  };
+
   // out/main/index.js → two levels up is the app root both in development and inside app.asar.
   // (app.getAppPath() returns out/main when launched as `electron out/main/index.js`.)
   const appRoot = path.resolve(here, '..', '..');
@@ -97,8 +114,11 @@ async function main(): Promise<void> {
     runtime,
     analytics,
     getSecret: (id) => secrets.get(id),
-    pushEvent: (env: SessionEventEnvelope) => pushToRenderer(mainWindow, PUSH_CHANNELS.sessionEvent, env),
-    pushSessions: (list: SessionMeta[]) => pushToRenderer(mainWindow, PUSH_CHANNELS.sessionsChanged, list),
+    pushEvent: (env: SessionEventEnvelope) => pushAll(PUSH_CHANNELS.sessionEvent, env),
+    pushSessions: (list: SessionMeta[]) => {
+      search.syncMeta(list);
+      pushAll(PUSH_CHANNELS.sessionsChanged, list);
+    },
     notify: (sessionId, title, body) => {
       if (!settings.get().notifications) return;
       if (mainWindow?.isFocused()) return;
@@ -107,7 +127,7 @@ async function main(): Promise<void> {
       n.on('click', () => {
         mainWindow?.show();
         mainWindow?.focus();
-        pushToRenderer(mainWindow, PUSH_CHANNELS.focusSession, { sessionId });
+        pushAll(PUSH_CHANNELS.focusSession, { sessionId });
       });
       n.show();
     },
@@ -115,17 +135,45 @@ async function main(): Promise<void> {
   });
 
   const sessionsRef = sessions;
+  // One push fan-out for the window and web clients alike.
+  const pushAll = (channel: string, payload: unknown) => {
+    pushToRenderer(mainWindow, channel, payload);
+    webServer?.broadcast(channel, payload);
+  };
   terminals = new TerminalManager({
     dir: path.join(userData, 'terminals'),
     settings: () => settings.get().terminal,
     version: app.getVersion(),
     cwdOf: (id) => sessionsRef.get(id)?.cwd,
-    push: (channel, payload) => pushToRenderer(mainWindow, channel, payload),
+    push: pushAll,
     log
   });
   await terminals.load();
 
-  registerIpc({ settings, secrets, sessions, terminals, runtime, analytics, getWindow: () => mainWindow, log });
+  const registry = registerIpc({
+    settings,
+    secrets,
+    sessions,
+    terminals,
+    runtime,
+    analytics,
+    search,
+    broadcast: (channel, payload) => webServer?.broadcast(channel, payload),
+    getWindow: () => mainWindow,
+    log
+  });
+
+  // Localhost web client (P1 dogfood, docs/REMOTE-ACCESS.md): explicit opt-in, dev-oriented.
+  // Serves the built renderer (npm run build first) and bridges the same handler registry to a browser tab.
+  if (process.env.VOCS_CODE_WEB === '1') {
+    webServer = new WebServer({
+      registry,
+      staticDir: path.join(appRoot, 'out', 'renderer'),
+      port: Number(process.env.VOCS_CODE_WEB_PORT) || 5177,
+      log
+    });
+    await webServer.start();
+  }
 
   settings.onChange((s) => {
     currentTheme = s.theme;
@@ -160,9 +208,48 @@ async function main(): Promise<void> {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
-    // Drain debounced session-meta persists after the sessions themselves are stopped.
-    const drainSessions = sessions ? sessions.stopAll().then(() => sessions?.flushPendingPersists()).then(() => analytics.flush()) : Promise.resolve();
-    Promise.race([Promise.all([drainSessions, terminals?.shutdown()]), new Promise((r) => setTimeout(r, 4000))]).finally(() => app.exit(0));
+    // Drain debounced session-meta persists after the sessions themselves are stopped. Restored
+    // terminal snapshots are written first, and the cap ensures a large terminal set cannot hold
+    // Electron open indefinitely.
+    const deadline = Date.now() + 4000;
+    const safe = async (label: string, task: Promise<unknown> | void | undefined): Promise<void> => {
+      try {
+        await task;
+      } catch (error) {
+        log('warn', `${label} during shutdown failed: ${formatProcessError(error)}`);
+      }
+    };
+    const drainSessions = sessions
+      ? sessions.stopAll().then(() => sessions?.flushPendingPersists()).then(() => analytics.flush())
+      : Promise.resolve();
+    const shutdown = Promise.all([
+      safe('session drain', drainSessions),
+      safe('terminal shutdown', terminals?.shutdown(deadline)),
+      safe('search close', search?.close()),
+      safe('web server stop', webServer?.stop())
+    ]);
+    const cap = new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 4000));
+    void Promise.race([shutdown.then(() => false), cap]).then((timedOut) => {
+      if (timedOut) log('warn', 'shutdown exceeded the 4s cap; exiting with any remaining state left for the next launch');
+      app.exit(0);
+    });
+  });
+}
+
+function formatProcessError(error: unknown): string {
+  if (error instanceof Error) return error.stack ?? error.message;
+  return typeof error === 'string' ? error : String(error);
+}
+
+/** Keep process-level failures visible in packaged builds instead of leaving them in a console. */
+function installProcessErrorHandlers(): void {
+  if (processErrorHandlersInstalled) return;
+  processErrorHandlersInstalled = true;
+  process.on('unhandledRejection', (reason) => log('warn', `unhandled rejection: ${formatProcessError(reason)}`));
+  process.on('uncaughtException', (error) => {
+    log('error', `uncaught exception: ${formatProcessError(error)}`);
+    if (app.isReady()) app.quit();
+    else process.exitCode = 1;
   });
 }
 
@@ -215,13 +302,22 @@ function reconcileDevShortcut(appRoot: string): void {
     // No Start Menu directory; nothing to reconcile.
   }
   try {
-    shell.writeShortcutLink(path.join(menu, `${APP_NAME}.lnk`), 'replace', {
+    // iconIndex is required: writeShortcutLink silently drops `icon` without it, and a shortcut
+    // without an icon leaves the taskbar (which resolves the window's AUMID to this shortcut)
+    // showing a blank page icon.
+    const options = {
       target: process.execPath,
       cwd: appRoot,
       description: APP_NAME,
       icon: appIconPath(appRoot),
+      iconIndex: 0,
       appUserModelId: APP_ID
-    });
+    };
+    const lnk = path.join(menu, `${APP_NAME}.lnk`);
+    // 'replace' only overwrites an existing shortcut; fall back to 'create' on the first run.
+    if (!shell.writeShortcutLink(lnk, existsSync(lnk) ? 'replace' : 'create', options)) {
+      log('warn', 'could not write the dev Start Menu shortcut; taskbar icon may fall back to Electron\'s');
+    }
   } catch {
     // Best effort: without the shortcut the registry DisplayName above still names the taskbar menu.
   }

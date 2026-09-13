@@ -9,17 +9,30 @@ import type {
   FsEntry,
   GitBranchInfo,
   GitBranchOverview,
+  GitIssueList,
+  GitPullRequestList,
   GitSummary,
   GitWorktreeInfo,
   HarnessAvailability,
   HarnessId,
+  McpInspectResult,
+  McpProjectInfo,
+  McpProjectState,
+  McpServerDef,
+  McpStoreInfo,
   ModelInfo,
   ModelOverride,
   ModelRef,
   PermissionMode,
   ProviderConfig,
+  SearchFilters,
+  SecretStatus,
+  SearchResponse,
+  SearchResult,
   SessionEventEnvelope,
   SessionMeta,
+  SkillHarness,
+  SkillRootInfo,
   TranscriptItem,
   UserInput
 } from './types';
@@ -34,12 +47,14 @@ export interface IpcContract {
   'app:doctor': [void, DoctorReport];
   'app:openExternal': [{ url: string }, void];
   'app:openPath': [{ path: string; sessionId: string }, void];
-  'app:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
+  'app:openInEditor': [{ path: string; sessionId: string; line?: number }, { ok: boolean; error?: string }];
   'app:openTerminal': [{ cwd: string }, { ok: boolean; error?: string }];
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];
   'app:notify': [{ title: string; body: string }, void];
   /** A renderer stall (long task, delayed input, timer drift) recorded in the main log. */
   'app:diag': [{ kind: 'longtask' | 'input-delay' | 'loop-lag'; ms: number; detail?: string }, void];
+  /** Opens a validated SKILL.md in the configured editor. */
+  'skills:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
 
   'window:toggleFullScreen': [void, void];
   'window:reload': [void, void];
@@ -53,6 +68,7 @@ export interface IpcContract {
   'secrets:set': [{ providerId: string; apiKey: string }, void];
   'secrets:clear': [{ providerId: string }, void];
   'secrets:has': [{ providerId: string }, boolean];
+  'secrets:status': [void, SecretStatus];
 
   'providers:list': [void, ProviderConfig[]];
   'providers:save': [ProviderConfig, ProviderConfig[]];
@@ -70,14 +86,45 @@ export interface IpcContract {
   ];
   'harness:install': [{ id: 'pi' | 'dsh' | 'codex' | 'claude' }, { ok: boolean; log: string }];
 
+  /** Global skills (SKILL.md folders) per harness, for the Skills page. */
+  'skills:list': [void, SkillRootInfo[]];
+  /** Reads a skill's SKILL.md for the preview pane; `path` must be a known skill folder. */
+  'skills:read': [{ path: string }, { content: string; truncated: boolean }];
+  /** Opens a skill folder (or a skills root) in the system file manager. */
+  'skills:reveal': [{ path: string }, void];
+  'skills:create': [{ harness: SkillHarness; name: string; description: string }, { ok: boolean; path?: string; error?: string }];
+  /** Copies a skill folder into another harness's skills directory. */
+  'skills:copy': [{ path: string; toHarness: SkillHarness }, { ok: boolean; path?: string; error?: string }];
+  'skills:delete': [{ path: string }, { ok: boolean; error?: string }];
+
+  /** Every harness's own global MCP store, for the MCP page's read-only tabs. */
+  'mcp:stores': [void, McpStoreInfo[]];
+  /** The repo file, the global list, the per-repo switches and what this session will get. */
+  'mcp:project': [{ sessionId: string }, McpProjectInfo];
+  /** Rewrites the `mcpServers` table of the session repo's `.mcp.json`. */
+  'mcp:project:save': [{ sessionId: string; servers: McpServerDef[] }, { ok: boolean; error?: string }];
+  /** Patches this repo's switches (`disabledGlobal` / `enabledRepo`) and returns the fresh view. */
+  'mcp:project:state': [{ sessionId: string; patch: McpProjectState }, McpProjectInfo];
+  /** Connects to one server, lists its tools and disconnects ("Test connection"). */
+  'mcp:inspect': [{ def: McpServerDef; sessionId?: string }, McpInspectResult];
+  /** Copies servers out of a harness-native store into the global list or the repo file. */
+  'mcp:import': [{ servers: McpServerDef[]; to: 'global' | 'repo'; sessionId?: string }, { ok: boolean; error?: string }];
+  /** Writes the session repo's servers out to `.cursor/mcp.json` for a Cursor session. */
+  'mcp:export': [{ sessionId: string; to: 'cursor' }, { ok: boolean; path?: string; error?: string }];
+
   'sessions:list': [void, SessionMeta[]];
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
+  /** Deep search: session titles/goals plus full transcript content (FTS5 index in main). */
+  'sessions:search': [{ q: string; filters?: SearchFilters; limit?: number }, SearchResponse];
   'sessions:delete': [{ id: string; removeWorktree?: boolean }, void];
   'sessions:rename': [{ id: string; title: string }, SessionMeta];
-  'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean }, SessionMeta];
+  'sessions:label': [{ id: string; label?: string }, SessionMeta];
+  'sessions:archive': [{ id: string; archived: boolean; removeWorktree?: boolean; forceWorktree?: boolean }, SessionMeta];
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
+  /** Persists a pinned-section drag reorder: ids in their new display order. */
+  'sessions:pinOrder': [{ ids: string[] }, void];
   'sessions:send': [{ id: string; input: UserInput }, void];
   'sessions:interrupt': [{ id: string }, void];
   'sessions:stop': [{ id: string }, void];
@@ -87,7 +134,7 @@ export interface IpcContract {
   'sessions:compact': [{ id: string }, { ok: boolean; detail?: string }];
   'sessions:clearTranscript': [{ id: string }, void];
   'sessions:export': [{ id: string }, { path: string | null }];
-  'sessions:fork': [{ id: string }, SessionMeta | null];
+  'sessions:fork': [{ id: string; harness?: HarnessId }, SessionMeta | null];
   'sessions:moveTo': [{ id: string; cwd: string }, SessionMeta];
   'sessions:goal': [
     { id: string; action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update'; objective?: string; autoContinue?: boolean; maxIterations?: number },
@@ -98,24 +145,31 @@ export interface IpcContract {
 
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 
+  'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   'git:summary': [{ sessionId: string }, GitSummary];
-  'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string }];
+  'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string; error?: string }];
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:stageAll': [{ sessionId: string }, { ok: boolean; error?: string }];
   'git:commit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];
-  /** Pushes the session's branch and opens a GitHub PR into `base` (needs gh). */
-  'git:pr': [{ sessionId: string; base: string }, { ok: boolean; url?: string; output?: string }];
-  /** Merges the open PR for the session's branch; `base`, when given, must match the PR's target. */
-  'git:merge': [{ sessionId: string; base?: string }, { ok: boolean; url?: string; output?: string }];
+  /** Pushes the session's branch (or `head`, without checking it out) and opens a GitHub PR into `base` (needs gh). */
+  'git:pr': [{ sessionId: string; base: string; head?: string }, { ok: boolean; url?: string; output?: string }];
+  /** Merges the open PR for the session's branch (or `head`); `base`, when given, must match the PR's target. */
+  'git:merge': [{ sessionId: string; base?: string; head?: string }, { ok: boolean; url?: string; output?: string }];
   'git:branches': [{ sessionId: string }, { current?: string; branches: GitBranchInfo[] }];
   'git:worktrees': [{ sessionId: string }, { current: string; worktrees: GitWorktreeInfo[] }];
   'git:checkout': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
   /** Branches-panel housekeeping: per-branch age, ahead/behind, merged state and worktree binding. */
   'git:branchesOverview': [{ sessionId: string }, GitBranchOverview];
   'git:deleteBranch': [{ sessionId: string; branch: string; force?: boolean }, { ok: boolean; error?: string }];
+  /** Fast-forwards a local branch to its upstream, whether or not it is checked out. */
+  'git:updateBranch': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
   'git:removeWorktree': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:pruneWorktrees': [{ sessionId: string }, { ok: boolean; output: string }];
   'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];
+  /** Pulls the repo's pull requests (all states) from GitHub through gh, for the Git panel's PR view. */
+  'git:pullRequests': [{ sessionId: string }, GitPullRequestList];
+  /** Pulls the repo's issues (all states) from GitHub through gh, for the Git panel's Issues view. */
+  'git:issues': [{ sessionId: string }, GitIssueList];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];
@@ -162,9 +216,7 @@ export type PushPayloads = {
   'push:terminalsChanged': TerminalInfo[];
 };
 
-/** The API exposed on window.harness by the preload script. */
-export interface VocsCodeApi {
-  invoke<K extends IpcChannel>(channel: K, request: IpcRequest<K>): Promise<IpcResponse<K>>;
-  on<K extends keyof PushPayloads>(channel: K, listener: (payload: PushPayloads[K]) => void): () => void;
-  platform: string;
-}
+export type PushChannel = keyof PushPayloads;
+
+/** The API exposed on window.harness by the preload script — the shared Transport shape (see ./transport). */
+export type { Transport as VocsCodeApi } from './transport';

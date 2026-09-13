@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FsEntry, GitSummary, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
-import { fmtCost, fmtDuration, fmtTokens } from '../format';
+import { fmtCost, fmtDuration, fmtRate, fmtTokens, speedOfTurns } from '../format';
+import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore, type PanelTab } from '../store';
 import { BranchesTab } from './BranchesTab';
 import { DiffView } from './DiffView';
+import { McpTab } from './McpTab';
 import { Resizer } from './Resizer';
 import { TerminalPanel } from './TerminalPanel';
 import { Badge, Button, EmptyState, Field, Icon, Spinner, Toggle } from './ui';
@@ -15,8 +17,9 @@ const EMPTY: never[] = [];
 const TABS: { id: PanelTab; label: string; icon: string }[] = [
   { id: 'changes', label: 'Changes', icon: 'diff' },
   { id: 'files', label: 'Files', icon: 'folder' },
-  { id: 'branches', label: 'Branches', icon: 'branch' },
+  { id: 'branches', label: 'Git', icon: 'branch' },
   { id: 'goal', label: 'Goal', icon: 'target' },
+  { id: 'mcp', label: 'MCP', icon: 'server' },
   { id: 'usage', label: 'Usage', icon: 'chart' },
   { id: 'terminal', label: 'Terminal', icon: 'terminal' }
 ];
@@ -42,6 +45,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
         {tab === 'files' && <FilesTab session={session} />}
         {tab === 'branches' && <BranchesTab session={session} />}
         {tab === 'goal' && <GoalTab session={session} />}
+        {tab === 'mcp' && <McpTab session={session} />}
         {tab === 'usage' && <UsageTab session={session} />}
         {tab === 'terminal' && <TerminalPanel session={session} />}
       </div>
@@ -56,6 +60,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
   const [summary, setSummary] = useState<GitSummary | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [diff, setDiff] = useState('');
+  const [diffError, setDiffError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [commitMsg, setCommitMsg] = useState('');
   /** The session this component instance currently belongs to; async writes compare against it. */
@@ -71,6 +76,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
       const d = await invoke('git:diff', { sessionId: sid, path: selected ?? undefined });
       if (liveId.current !== sid) return;
       setDiff(d.diff);
+      setDiffError(d.error ?? null);
     } catch (e) {
       if (liveId.current === sid) toast(String((e as Error).message ?? e), 'error');
     } finally {
@@ -81,6 +87,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
     liveId.current = session.id;
     setSelected(null);
     setDiff('');
+    setDiffError(null);
     setSummary(null);
   }, [session.id]);
   useEffect(() => {
@@ -100,8 +107,18 @@ function ChangesTab({ session }: { session: SessionMeta }) {
         </span>
         <span className="spacer" />
         <Button variant="ghost" size="sm" icon="refresh" onClick={() => void refresh()} title="Refresh" />
-        <Button variant="ghost" size="sm" icon="external" onClick={() => void invoke('app:openInEditor', { path: session.cwd })} title="Open in editor" />
+        <Button variant="ghost" size="sm" icon="external" onClick={() => void invoke('app:openInEditor', { path: session.cwd, sessionId: session.id })} title="Open in editor" />
       </div>
+      {summary?.error && (
+        <div className="callout warn" role="status">
+          {summary.error}
+        </div>
+      )}
+      {diffError && diffError !== summary?.error && (
+        <div className="callout warn" role="status">
+          {diffError}
+        </div>
+      )}
       {files.length > 0 && (
         <div className="file-list">
           <button type="button" className={`file-row ${selected === null ? 'active' : ''}`} onClick={() => setSelected(null)}>
@@ -120,7 +137,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
       )}
       <div className="changes-diff">
         {loading && <Spinner />}
-        {!loading && files.length === 0 && <div className="muted pad">Working tree clean.</div>}
+        {!loading && !summary?.error && files.length === 0 && <div className="muted pad">Working tree clean.</div>}
         {!loading && files.length > 0 && (
           <DiffView
             diff={diff}
@@ -148,11 +165,16 @@ function ChangesTab({ session }: { session: SessionMeta }) {
   );
 
   async function doCommit() {
-    const r = await invoke('git:commit', { sessionId: session.id, message: commitMsg.trim() });
-    toast(r.ok ? 'Committed' : r.output, r.ok ? 'success' : 'error');
-    if (r.ok) {
-      setCommitMsg('');
-      void refresh();
+    try {
+      const r = await invoke('git:commit', { sessionId: session.id, message: commitMsg.trim() });
+      toast(r.ok ? 'Committed' : r.output, r.ok ? 'success' : 'error');
+      if (r.ok) {
+        setCommitMsg('');
+        void refresh();
+      }
+    } catch (e) {
+      // Keep the typed message so the user can retry after the IPC failure.
+      toast(e instanceof Error ? e.message : String(e), 'error');
     }
   }
 }
@@ -161,6 +183,9 @@ function FilesTab({ session }: { session: SessionMeta }) {
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [preview, setPreview] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
+  /** Markdown files open in rendered preview; the toggle flips back to the raw text. */
+  const [mdView, setMdView] = useState(false);
+  const mdBody = useRef<HTMLDivElement | null>(null);
   const toast = useStore((s) => s.toast);
   /** The session this component instance currently belongs to; responses from other sessions are dropped. */
   const liveId = useRef(session.id);
@@ -169,6 +194,7 @@ function FilesTab({ session }: { session: SessionMeta }) {
     setPath('');
     setEntries([]);
     setPreview(null);
+    setMdView(false);
   }, [session.id]);
   useEffect(() => {
     const sid = session.id;
@@ -184,6 +210,12 @@ function FilesTab({ session }: { session: SessionMeta }) {
       stale = true;
     };
   }, [session.id, path]); // eslint-disable-line react-hooks/exhaustive-deps
+  const isMd = !!preview && /\.(?:md|markdown)$/i.test(preview.path);
+  const mdHtml = useMemo(() => (isMd && preview ? renderMarkdown(preview.content) : ''), [isMd, preview]);
+  useEffect(() => {
+    if (!mdView || !mdBody.current) return;
+    return installMarkdownHandlers(mdBody.current, (url) => void invoke('app:openExternal', { url }));
+  }, [mdView, mdHtml]);
   const crumbs = path.split(/[\\/]/).filter(Boolean);
   return (
     <div className="files">
@@ -201,10 +233,23 @@ function FilesTab({ session }: { session: SessionMeta }) {
           <div className="file-preview-head">
             <span className="mono">{preview.path}</span>
             <span className="spacer" />
-            <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}` })} title="Open in editor" />
+            {isMd && (
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={mdView ? 'file' : 'eye'}
+                onClick={() => setMdView((v) => !v)}
+                title={mdView ? 'Show source' : 'Show markdown preview'}
+              />
+            )}
+            <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}`, sessionId: session.id })} title="Open in editor" />
             <Button size="sm" variant="ghost" icon="x" onClick={() => setPreview(null)} />
           </div>
-          <pre className="mono">{preview.content}{preview.truncated ? '\n… (truncated)' : ''}</pre>
+          {isMd && mdView ? (
+            <div ref={mdBody} className="md file-md" dangerouslySetInnerHTML={{ __html: mdHtml }} />
+          ) : (
+            <pre className="mono">{preview.content}{preview.truncated ? '\n… (truncated)' : ''}</pre>
+          )}
         </div>
       ) : (
         <div className="file-list">
@@ -216,8 +261,16 @@ function FilesTab({ session }: { session: SessionMeta }) {
               onClick={async () => {
                 if (e.isDir) setPath(e.path.replace(/\\/g, '/'));
                 else {
-                  const r = await invoke('fs:read', { sessionId: session.id, path: e.path, maxBytes: 200_000 });
-                  setPreview({ path: e.path.replace(/\\/g, '/'), ...r });
+                  const sid = session.id;
+                  try {
+                    const r = await invoke('fs:read', { sessionId: sid, path: e.path, maxBytes: 200_000 });
+                    if (liveId.current !== sid) return;
+                    const p = e.path.replace(/\\/g, '/');
+                    setPreview({ path: p, ...r });
+                    setMdView(/\.(?:md|markdown)$/i.test(p));
+                  } catch (err) {
+                    if (liveId.current === sid) toast(err instanceof Error ? err.message : String(err), 'error');
+                  }
                 }
               }}
             >
@@ -280,11 +333,14 @@ function UsageTab({ session }: { session: SessionMeta }) {
   const u = session.usage;
   const ctxPct = u.contextWindow && u.contextTokens ? Math.min(100, (u.contextTokens / u.contextWindow) * 100) : null;
   const maxCost = Math.max(0.0001, ...turns.map((t) => t.costUsd ?? 0));
+  const speed = useMemo(() => speedOfTurns(turns), [turns]);
+  const rate = fmtRate(speed.tokens, speed.ms);
   return (
     <div className="usage pad">
       <div className="stat-grid">
         <Stat label="Cost" value={fmtCost(u.costUsd)} />
         <Stat label="Turns" value={String(u.turns)} />
+        {rate && <Stat label="Output speed" value={rate} title="Output tokens per second of turn wall time, averaged over completed turns (includes tool execution)" />}
         <Stat label="Input" value={fmtTokens(u.inputTokens)} />
         <Stat label="Output" value={fmtTokens(u.outputTokens)} />
         <Stat label="Cache read" value={fmtTokens(u.cacheReadTokens)} />
@@ -312,12 +368,15 @@ function UsageTab({ session }: { session: SessionMeta }) {
       {turns.length === 0 && <div className="muted small">No completed turns yet.</div>}
       <div className="turn-bars">
         {turns.slice(-40).map((t) => (
-          <div key={t.id} className="turn-bar-row" title={`${fmtDuration(t.durationMs)} · ${fmtCost(t.costUsd)} · ${fmtTokens(t.usage?.inputTokens)} in / ${fmtTokens(t.usage?.outputTokens)} out`}>
+          <div key={t.id} className="turn-bar-row" title={`${fmtDuration(t.durationMs)} · ${fmtCost(t.costUsd)} · ${fmtTokens(t.usage?.inputTokens)} in / ${fmtTokens(t.usage?.outputTokens)} out${t.status === 'completed' && fmtRate(t.usage?.outputTokens, t.durationMs) ? ` · ${fmtRate(t.usage?.outputTokens, t.durationMs)}` : ''}`}>
             <span className={`turn-bar-status st-${t.status}`} />
             <span className="turn-bar">
               <span style={{ width: `${Math.max(2, ((t.costUsd ?? 0) / maxCost) * 100)}%` }} />
             </span>
-            <span className="muted small mono">{fmtCost(t.costUsd)} · {fmtDuration(t.durationMs)}</span>
+            <span className="muted small mono">
+              {fmtCost(t.costUsd)} · {fmtDuration(t.durationMs)}
+              {t.status === 'completed' && fmtRate(t.usage?.outputTokens, t.durationMs) ? ` · ${fmtRate(t.usage?.outputTokens, t.durationMs)}` : ''}
+            </span>
           </div>
         ))}
       </div>
@@ -325,9 +384,9 @@ function UsageTab({ session }: { session: SessionMeta }) {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <div className="stat">
+    <div className="stat" title={title}>
       <div className="stat-value">{value}</div>
       <div className="stat-label">{label}</div>
     </div>

@@ -4,13 +4,16 @@
  */
 import type { TerminalSettings } from './terminal';
 import type { ThemeId } from './themes';
+import type { ShortcutCommand } from './shortcuts';
 
-export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'pi' | 'acp' | 'native';
+export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'native';
 
 /** App-level permission modes, mapped per harness (see harness-meta.ts). */
 export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-auto';
 
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export type AutoCompactionThreshold = '50%' | '75%' | '90%' | '100k' | '250k' | '500k' | '750k' | '1m';
 
 export type SessionStatus = 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped' | 'pr' | 'merged';
 
@@ -48,6 +51,7 @@ export type ProviderKind =
   | 'anthropic'
   | 'openai'
   | 'openai-compatible'
+  | 'cursor'
   | 'deepseek'
   | 'openrouter'
   | 'ollama'
@@ -56,6 +60,15 @@ export type ProviderKind =
   | 'xai'
   | 'mistral'
   | 'gemini-openai';
+
+export interface SecretStatus {
+  /** Whether the OS-backed safeStorage provider is available. */
+  encryptionAvailable: boolean;
+  /** Whether one or more stored values use the reversible fallback encoding. */
+  hasFallback: boolean;
+  /** Provider ids whose stored values use the reversible fallback encoding. */
+  fallbackProviderIds: string[];
+}
 
 export interface ProviderConfig {
   id: string;
@@ -87,6 +100,97 @@ export interface AcpAgentPreset {
   builtin?: boolean;
 }
 
+/** Transport an MCP server speaks. */
+export type McpTransport = 'stdio' | 'http' | 'sse';
+
+/**
+ * One MCP server, in the single shape both scopes use (see docs/MCP.md §4). Values in `env` and
+ * `headers` may carry `${VAR}` references; they are resolved at injection time from the process
+ * environment or the encrypted secret store under `mcp:<VAR>`, never stored resolved.
+ */
+export interface McpServerDef {
+  /** Stable key, and the name the harness sees (`mcp__<id>__<tool>`). */
+  id: string;
+  transport: McpTransport;
+  /** stdio */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** http / sse */
+  url?: string;
+  headers?: Record<string, string>;
+  /** Restrict to some harnesses; absent means every harness that can take it. */
+  harnesses?: HarnessId[];
+  /** Per-call timeout hint, passed through where the harness supports it. */
+  timeoutMs?: number;
+  description?: string;
+  /** Global list only: a master switch independent of the per-repo ones. */
+  disabled?: boolean;
+}
+
+/** Per-user switches for one project root. Repo-defined servers stay off until enabled here. */
+export interface McpProjectState {
+  /** Global server ids switched off for this repo. */
+  disabledGlobal?: string[];
+  /** Repo-file server ids the user has trusted here. */
+  enabledRepo?: string[];
+}
+
+export type McpScope = 'global' | 'repo';
+
+/** How a harness takes MCP servers: nothing, injected by us, run by us, or its own store. */
+export type McpSupport = 'none' | 'inject' | 'client' | 'inherit';
+
+/** Why a defined server is not part of a session's effective set. */
+export type McpSkipReason = 'disabled' | 'not-enabled' | 'shadowed' | 'harness-filtered' | 'not-injected';
+
+/** One row of the effective set for a session. */
+export interface McpEffectiveEntry {
+  def: McpServerDef;
+  scope: McpScope;
+  enabled: boolean;
+  reason?: McpSkipReason;
+}
+
+/** A harness-native MCP store on disk, read for the MCP page's tabs and the panel's Detected list. */
+export interface McpStoreInfo {
+  id: string;
+  label: string;
+  path: string;
+  /** `path` with the home directory shortened to `~`, for display. */
+  display: string;
+  exists: boolean;
+  servers: McpServerDef[];
+  error?: string;
+}
+
+/** Everything the right-panel MCP tab needs for one session. */
+export interface McpProjectInfo {
+  projectRoot: string;
+  /** Absolute path of the repo file, whether or not it exists yet. */
+  file: string;
+  display: string;
+  exists: boolean;
+  repo: McpServerDef[];
+  /** Set when the repo file could not be parsed; `repo` is then empty. */
+  error?: string;
+  global: McpServerDef[];
+  state: McpProjectState;
+  detected: McpStoreInfo[];
+  effective: McpEffectiveEntry[];
+  harness: HarnessId;
+  support: McpSupport;
+}
+
+/** Result of probing one server with the app's own MCP client ("Test connection"). */
+export interface McpInspectResult {
+  ok: boolean;
+  error?: string;
+  serverInfo?: { name: string; version?: string };
+  tools: { name: string; description?: string }[];
+  durationMs: number;
+}
+
 export interface SessionConfig {
   harness: HarnessId;
   /** Project root chosen by the user (the git repo or folder). */
@@ -106,6 +210,38 @@ export interface SessionConfig {
   codexModelProvider?: { id: string; name: string; baseUrl: string; envKey?: string; wireApi?: 'chat' | 'responses' };
 }
 
+/** Harnesses that load a global skills directory (see main/skills.ts). */
+export type SkillHarness = 'claude' | 'codex' | 'pi';
+
+/** One installed skill: a directory with a SKILL.md carrying name/description frontmatter. */
+export interface SkillInfo {
+  /** Frontmatter name; falls back to the folder name. */
+  name: string;
+  description: string;
+  /** Absolute path of the skill directory. */
+  path: string;
+  /** Absolute path of SKILL.md; null when the folder has none. */
+  file: string | null;
+  /** Last modification of SKILL.md; 0 when missing. */
+  mtimeMs: number;
+  /** Set when the folder has no readable SKILL.md, with the reason. */
+  broken?: string;
+}
+
+/** A harness's global skills directory and the skills found in it. */
+export interface SkillRootInfo {
+  harness: SkillHarness;
+  /** Human label; the Codex directory also serves the codex-exec harness. */
+  label: string;
+  /** Absolute path of the skills directory. */
+  path: string;
+  /** Same path with the home directory shortened to `~`, for display. */
+  display: string;
+  /** False when the directory does not exist yet. */
+  exists: boolean;
+  skills: SkillInfo[];
+}
+
 export interface UsageTotals {
   inputTokens: number;
   outputTokens: number;
@@ -119,8 +255,8 @@ export interface UsageTotals {
   contextTokens?: number;
 }
 
-/** Aggregated usage for one UTC day, as accumulated by the analytics store. */
-export interface UsageDay {
+/** The numeric usage counters shared by day buckets and their per-dimension slices. */
+export interface UsageCounters {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -130,8 +266,46 @@ export interface UsageDay {
   turns: number;
   /** Cumulative completed-turn wall time in ms. */
   durationMs: number;
-  /** Completed tool calls recorded this day. */
+  /** Completed tool calls recorded. */
   toolCalls: number;
+  /**
+   * Output tokens and wall time of completed turns that reported both, paired so that
+   * `speedTokens / speedMs` is a true average output speed (tokens per ms).
+   */
+  speedTokens: number;
+  speedMs: number;
+}
+
+/** Usage attributed to one harness, model or project within a day, plus the sessions that produced it. */
+export interface UsageSlice extends UsageCounters {
+  label: string;
+  sessions: string[];
+}
+
+/** Per-dimension attribution of one day's usage; the bounded ranges of the dashboard are built from it. */
+export interface UsageDayDimensions {
+  /** Set when the slices were estimated from session totals for a day recorded before slice tracking. */
+  estimated?: boolean;
+  harness: Record<string, UsageSlice>;
+  /** Keyed `provider/model`, attributed to the model active when the usage was reported. */
+  model: Record<string, UsageSlice>;
+  project: Record<string, UsageSlice>;
+  tool: Record<string, ToolUsage>;
+  /** Per-tool call counts keyed by model (`provider/model`), attributed to the model active when the call ran. */
+  modelTool: Record<string, Record<string, ToolUsage>>;
+  file: Record<string, FileUsage>;
+}
+
+/** Aggregated usage for one UTC day, as accumulated by the analytics store. */
+export interface UsageDay extends UsageCounters {
+  /** Absent on days recorded before per-dimension tracking existed: their usage is in the totals only. */
+  by?: UsageDayDimensions;
+}
+
+/** Output tokens and wall time of the turns that reported both; `tokens / ms * 1000` is tok/s. */
+export interface UsageSpeed {
+  tokens: number;
+  ms: number;
 }
 
 /** Tool-call rollup per tool name. */
@@ -143,6 +317,16 @@ export interface ToolUsage {
 }
 
 export interface ToolUsageRow extends ToolUsage {
+  name: string;
+}
+
+/** Tool-call rollup for one tool under one model. */
+export interface ModelToolRow extends ToolUsage {
+  /** `provider/model` of the session that made the call. */
+  key: string;
+  /** The model name alone. */
+  label: string;
+  /** Tool name. */
   name: string;
 }
 
@@ -172,6 +356,10 @@ export interface UsageSessionRecord {
   usage: UsageTotals;
   /** Completed tool calls recorded for this session. */
   toolCalls: number;
+  /** Cumulative completed-turn wall time in ms; absent in records written before it was tracked. */
+  durationMs?: number;
+  /** Output speed sample for this session; absent in records written before speed was tracked. */
+  speed?: UsageSpeed;
 }
 
 /** Usage rollup for one dimension (harness, model, project). */
@@ -180,7 +368,26 @@ export interface UsageBucket {
   label: string;
   usage: UsageTotals;
   toolCalls: number;
+  /** Cumulative completed-turn wall time in ms, so `durationMs / turns` is the average turn. */
+  durationMs: number;
   sessions: number;
+  speed: UsageSpeed;
+}
+
+/** Effective per-model pricing rates, blended from measured usage. */
+export interface ModelRateRow {
+  key: string;
+  label: string;
+  /** Effective blended cost per 1,000,000 tokens (input + output + cache), or undefined when no tokens were measured. */
+  usdPerMTok?: number;
+  /** Effective cost per model call (one turn), or undefined when no turns were measured. */
+  usdPerCall?: number;
+  /** All-time spend attributed to the model. */
+  costUsd: number;
+  /** All-time tokens (input + output + cache) attributed to the model. */
+  tokens: number;
+  /** All-time model calls (turns) attributed to the model. */
+  calls: number;
 }
 
 export interface AnalyticsDayPoint {
@@ -191,14 +398,22 @@ export interface AnalyticsDayPoint {
 export interface AnalyticsSummary {
   /** All-time totals across every recorded session, including deleted ones. */
   totals: UsageTotals;
+  /** All-time output speed sample (completed turns that reported tokens and duration). */
+  speed: UsageSpeed;
   /** UTC days, ascending, filtered to the requested range. */
   days: AnalyticsDayPoint[];
+  /** Totals of the window of equal length just before the requested range; absent for all time. */
+  previous?: UsageCounters;
   byHarness: UsageBucket[];
   byModel: UsageBucket[];
   byProject: UsageBucket[];
+  /** Effective $/M tokens and $/call per model, sorted by spend. */
+  modelRates: ModelRateRow[];
   /** All-time tool-call totals and per-tool/per-file breakdowns, sorted by volume. */
   toolTotals: ToolUsage;
   tools: ToolUsageRow[];
+  /** Per-tool call counts per model, sorted by volume. */
+  modelTools: ModelToolRow[];
   files: FileUsageRow[];
   /** Sessions sorted by spend, highest first. */
   sessions: UsageSessionRecord[];
@@ -212,6 +427,8 @@ export interface HarnessRef {
   claudeSessionId?: string;
   /** Codex thread id (thread/resume). */
   codexThreadId?: string;
+  /** Cursor agent id (Agent.resume); bc- prefixed ids are cloud agents. */
+  cursorAgentId?: string;
   /** Pi session file path. */
   piSessionFile?: string;
   /** ACP session id. */
@@ -245,6 +462,8 @@ export interface SessionMeta {
   worktreeBranch?: string;
   status: SessionStatus;
   statusDetail?: string;
+  /** User-picked display label for the status badge; shown instead of the status name until cleared. */
+  statusLabel?: string;
   harnessRef: HarnessRef;
   usage: UsageTotals;
   lastError?: string;
@@ -253,6 +472,8 @@ export interface SessionMeta {
   activeEffort?: EffortLevel;
   goal?: GoalState;
   pinned?: boolean;
+  /** Epoch ms when pinned; pinned rows sort by it ascending (first pin on top). Rewritten on drag-reorder. */
+  pinnedAt?: number;
   archived?: boolean;
   /** Number of queued (steer/follow-up) messages waiting. */
   queued?: number;
@@ -454,6 +675,12 @@ export interface HarnessCapabilities {
   fork: boolean;
   plan: boolean;
   costReporting: boolean;
+  /**
+   * How MCP servers reach this harness. `inject`: we pass the effective set through its SDK or
+   * protocol. `client`: we run the MCP client ourselves and merge the tools in. `inherit`: the
+   * harness reads its own store and we only import/export. `none`: no way in.
+   */
+  mcp: McpSupport;
   /** Which app-level permission modes are meaningful. */
   permissionModes: PermissionMode[];
   /** Whether model selection is provider-scoped (native) or harness-provided list. */
@@ -470,12 +697,24 @@ export interface HarnessDescriptor {
   docsUrl?: string;
 }
 
+/** Sidebar appearance override for one project folder. */
+export interface FolderStyle {
+  /** Hex color (e.g. `#5b9bf8`) tinting the folder icon and title. */
+  color?: string;
+  /** Icon name from the renderer's icon set (e.g. `folder`, `bolt`). */
+  icon?: string;
+}
+
 export interface AppSettings {
   version: 1;
   theme: ThemeId;
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
   defaultEffort?: EffortLevel;
+  /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */
+  autoCompactionThreshold?: AutoCompactionThreshold;
+  /** Last chosen worktree isolation decision in the new-session dialog. */
+  defaultUseWorktree?: boolean;
   defaultModelByHarness: Partial<Record<HarnessId, ModelRef>>;
   /** Starred models, always listed first in the model pickers. */
   favoriteModels: ModelRef[];
@@ -505,6 +744,10 @@ export interface AppSettings {
     extraArgs: string[];
   };
   acpAgents: AcpAgentPreset[];
+  /** Global MCP servers, offered to every harness that can take them. */
+  mcpServers: McpServerDef[];
+  /** Per-user MCP switches keyed by project root; see McpProjectState. */
+  mcpProjectState?: Record<string, McpProjectState>;
   providers: ProviderConfig[];
   /** Capability corrections keyed by `provider/model`; see shared/model-overrides.ts. */
   modelOverrides: Record<string, ModelOverride>;
@@ -514,8 +757,22 @@ export interface AppSettings {
   recentProjects: string[];
   /** Project folders that stay in the sidebar even when they have no sessions left. */
   folders: string[];
+  /** Per-folder sidebar appearance keyed by project root. */
+  folderStyles?: Record<string, FolderStyle>;
+  /** User-added labels offered in the status-label picker alongside the built-in statuses. */
+  customLabels?: string[];
+  /** Manual sidebar order for project folders; roots not listed sort alphabetically after. */
+  folderOrder?: string[];
+  /** Project roots whose sidebar folder block is collapsed. */
+  collapsedFolders?: string[];
+  /** Extra keyboard shortcuts keyed by canonical accelerator (e.g. 'Ctrl+Alt+A'); see shared/shortcuts.ts. */
+  customShortcuts?: Record<string, ShortcutCommand>;
   goalDefaults: { autoContinue: boolean; maxIterations: number };
   terminal: TerminalSettings;
+  /** Cheap model for background tasks (session titles, summaries). Unset until the user picks one. */
+  utilityModel?: ModelRef;
+  /** Set once the first-run setup guide has been completed. */
+  onboardingDone?: boolean;
 }
 
 export interface GitFileStatus {
@@ -534,6 +791,8 @@ export interface GitSummary {
   files: GitFileStatus[];
   ahead?: number;
   behind?: number;
+  /** Set when git could not produce a trustworthy summary (timeout/corrupt repo); the file list may be empty or incomplete. */
+  error?: string;
 }
 
 export interface GitBranchInfo {
@@ -566,6 +825,71 @@ export interface GitBranchOverviewItem {
   upstreamBehind?: number;
   /** Set when the branch is checked out in a worktree. */
   worktreePath?: string;
+  /** GitHub PR attached to this branch, when gh is available. */
+  pr?: GitPrInfo;
+}
+
+/** A GitHub PR whose head is a local branch. */
+export interface GitPrInfo {
+  number: number;
+  state: 'OPEN' | 'MERGED' | 'CLOSED';
+  url: string;
+  title?: string;
+}
+
+/** One pull request of the session's GitHub repo, as `gh pr list` reports it (PR view of the Git panel). */
+export interface GitPullRequest {
+  number: number;
+  title: string;
+  state: 'OPEN' | 'MERGED' | 'CLOSED';
+  isDraft?: boolean;
+  headRefName?: string;
+  baseRefName?: string;
+  url: string;
+  author?: string;
+  /** ms since epoch */
+  createdAt?: number;
+  updatedAt?: number;
+  mergedAt?: number;
+  /** GitHub's review decision: APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED or empty. */
+  reviewDecision?: string;
+  additions?: number;
+  deletions?: number;
+}
+
+/** The PR list pulled from GitHub; `error` carries gh's own words when the pull failed (not logged in, no remote…). */
+export interface GitPullRequestList {
+  prs: GitPullRequest[];
+  /** When the list was pulled (ms since epoch). */
+  fetchedAt: number;
+  ghMissing?: boolean;
+  error?: string;
+}
+
+/** One issue of the session's GitHub repo, as `gh issue list` reports it (Issues view of the Git panel). */
+export interface GitIssue {
+  number: number;
+  title: string;
+  state: 'OPEN' | 'CLOSED';
+  url: string;
+  author?: string;
+  /** Markdown description returned by GitHub. */
+  body?: string;
+  labels?: { name: string; color?: string }[];
+  comments?: number;
+  /** ms since epoch */
+  createdAt?: number;
+  updatedAt?: number;
+  closedAt?: number;
+}
+
+/** The issue list pulled from GitHub; `error` carries gh's own words when the pull failed (not logged in, no remote…). */
+export interface GitIssueList {
+  issues: GitIssue[];
+  /** When the list was pulled (ms since epoch). */
+  fetchedAt: number;
+  ghMissing?: boolean;
+  error?: string;
 }
 
 export interface GitBranchOverview {
@@ -573,6 +897,10 @@ export interface GitBranchOverview {
   base?: string;
   branches: GitBranchOverviewItem[];
   worktrees: GitWorktreeInfo[];
+  /** True when the GitHub CLI is unavailable; PR actions are hidden in the Branches panel. */
+  ghMissing?: boolean;
+  /** Set when the branch list could not be read in full (e.g. git timed out). */
+  error?: string;
 }
 
 export interface FsEntry {
@@ -591,10 +919,38 @@ export interface DoctorReport {
   userData: string;
 }
 
+/** Filters narrowing a session search to a subset of sessions. */
+export interface SearchFilters {
+  archived?: boolean;
+  harness?: HarnessId;
+  projectRoot?: string;
+}
+
+/** One deep-search hit: a title/goal match or a match inside a transcript item. */
+export interface SearchResult {
+  sessionId: string;
+  /** Transcript item id for deep hits; absent for title/goal matches (nothing to scroll to). */
+  itemId?: string;
+  kind: 'meta' | 'user' | 'assistant' | 'tool' | 'info';
+  ts: number;
+  /** Snippet with \u0001/\u0002 around the matched terms; the renderer turns them into <mark>. */
+  snippet: string;
+}
+
+export interface SearchResponse {
+  /** False when node:sqlite/FTS5 is unavailable in this runtime; deep search is disabled then. */
+  available: boolean;
+  results: SearchResult[];
+}
+
 export interface CreateSessionRequest {
   config: SessionConfig;
   title?: string;
   initialPrompt?: string;
+  /** Screenshots attached in the new-session dialog, sent together with the initial prompt. */
+  initialImages?: ImageAttachment[];
   goal?: string;
+  /** Start the session in a worktree on this existing branch (reusing one when it exists). */
+  checkoutBranch?: string;
 }
 

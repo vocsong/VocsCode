@@ -1,0 +1,47 @@
+name: release
+
+# Builds the installers for a version tag and attaches them to the GitHub
+# Release. Triggered by the tag release-please pushes (v*), or dispatched
+# manually with a tag when the default-token recursion rule blocked it.
+# See docs/RELEASING.md.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: --win
+          - os: macos-latest
+            target: --mac
+          - os: ubuntu-latest
+            target: --linux
+    runs-on: ${{ matrix.os }}
+    env:
+      # No signing certs yet; skip the identity search so mac builds don't fail.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --include=dev
+      - run: npx electron-vite build
+      - run: npx electron-builder ${{ matrix.target }} --config electron-builder.yml --publish always
+        env:
+          GH_TOKEN: ${{ github.token }}

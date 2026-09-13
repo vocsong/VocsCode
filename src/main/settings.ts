@@ -1,9 +1,13 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
-import type { AcpAgentPreset, AppSettings, ModelRef, ProviderConfig } from '../shared/types';
+import type { AcpAgentPreset, AppSettings, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, ProviderConfig } from '../shared/types';
+import { isAutoCompactionThreshold } from '../shared/compaction';
+import { HARNESSES, isEffortLevel } from '../shared/harness-meta';
 import { pruneModelOverrides } from '../shared/model-overrides';
+import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
+import { isValidServerId } from './mcp/file';
 import { readJson, writeJson } from './util/fs';
 
 export const BUILTIN_ACP_AGENTS: AcpAgentPreset[] = [
@@ -79,6 +83,16 @@ export const BUILTIN_PROVIDERS: ProviderConfig[] = [
     models: [],
     builtin: true,
     enabled: true
+  },
+  {
+    id: 'cursor',
+    kind: 'cursor',
+    name: 'Cursor',
+    hasApiKey: false,
+    envKey: 'CURSOR_API_KEY',
+    models: [],
+    builtin: true,
+    enabled: false
   },
   {
     id: 'deepseek',
@@ -172,9 +186,11 @@ export function defaultSettings(): AppSettings {
   return {
     version: 1,
     theme: 'system',
-    defaultHarness: 'claude',
+    defaultHarness: 'pi',
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
+    autoCompactionThreshold: undefined,
+    defaultUseWorktree: false,
     defaultModelByHarness: {},
     favoriteModels: [],
     notifications: true,
@@ -184,15 +200,106 @@ export function defaultSettings(): AppSettings {
     codex: { runtime: 'auto' },
     pi: { extraArgs: [] },
     acpAgents: BUILTIN_ACP_AGENTS.map((a) => ({ ...a })),
+    mcpServers: [],
+    mcpProjectState: {},
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
     modelOverrides: {},
     sidebarWidth: 280,
     panelWidth: 420,
     recentProjects: [],
     folders: [],
+    folderStyles: {},
+    customLabels: [],
+    folderOrder: [],
+    collapsedFolders: [],
+    customShortcuts: {},
     goalDefaults: { autoContinue: true, maxIterations: 25 },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] }
   };
+}
+
+/** Keep only well-formed folder style entries (hex colors, sane icon names). */
+function normalizeFolderStyles(stored: unknown): Record<string, FolderStyle> {
+  if (!stored || typeof stored !== 'object') return {};
+  const out: Record<string, FolderStyle> = {};
+  for (const [root, raw] of Object.entries(stored as Record<string, unknown>)) {
+    if (!root || !raw || typeof raw !== 'object') continue;
+    const s = raw as Record<string, unknown>;
+    const color = typeof s.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(s.color) ? s.color : undefined;
+    const icon = typeof s.icon === 'string' && /^[a-z][a-z-]{0,23}$/.test(s.icon) ? s.icon : undefined;
+    if (color || icon) out[root] = { ...(color ? { color } : {}), ...(icon ? { icon } : {}) };
+  }
+  return out;
+}
+
+/** Keep only well-formed custom status labels (trimmed, non-empty, deduped, capped). */
+function normalizeCustomLabels(stored: unknown): string[] {
+  if (!Array.isArray(stored)) return [];
+  const out: string[] = [];
+  for (const raw of stored) {
+    if (typeof raw !== 'string') continue;
+    const label = raw.trim().slice(0, 24);
+    if (label && !out.some((l) => l.toLowerCase() === label.toLowerCase())) out.push(label);
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
+/** Keep only well-formed MCP server definitions; a malformed entry must not reach a harness. */
+export function normalizeMcpServers(stored: unknown): McpServerDef[] {
+  if (!Array.isArray(stored)) return [];
+  const out: McpServerDef[] = [];
+  for (const raw of stored) {
+    if (!raw || typeof raw !== 'object') continue;
+    const s = raw as Record<string, unknown>;
+    const id = typeof s.id === 'string' ? s.id.trim() : '';
+    if (!isValidServerId(id) || out.some((x) => x.id === id)) continue;
+    const transport: McpTransport = s.transport === 'http' || s.transport === 'sse' ? s.transport : 'stdio';
+    const def: McpServerDef = { id, transport };
+    if (transport === 'stdio') {
+      if (typeof s.command !== 'string' || !s.command.trim()) continue;
+      def.command = s.command;
+      if (Array.isArray(s.args)) def.args = s.args.filter((a): a is string => typeof a === 'string');
+      def.env = strMap(s.env);
+    } else {
+      if (typeof s.url !== 'string' || !/^https?:\/\//i.test(s.url)) continue;
+      def.url = s.url;
+      def.headers = strMap(s.headers);
+    }
+    if (Array.isArray(s.harnesses)) {
+      const ids = s.harnesses.filter((h): h is HarnessId => typeof h === 'string' && HARNESSES.some((d) => d.id === h));
+      if (ids.length) def.harnesses = ids;
+    }
+    if (typeof s.timeoutMs === 'number' && s.timeoutMs > 0) def.timeoutMs = Math.round(s.timeoutMs);
+    if (typeof s.description === 'string' && s.description.trim()) def.description = s.description.trim();
+    if (s.disabled === true) def.disabled = true;
+    out.push(def);
+  }
+  return out;
+}
+
+function strMap(v: unknown): Record<string, string> | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) if (k.trim() && typeof val === 'string') out[k] = val;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Per-repo MCP switches: string id lists, keyed by absolute project root. */
+export function normalizeMcpProjectState(stored: unknown): Record<string, McpProjectState> {
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
+  const ids = (v: unknown): string[] => (Array.isArray(v) ? [...new Set(v.filter((x): x is string => typeof x === 'string' && !!x))] : []);
+  const out: Record<string, McpProjectState> = {};
+  for (const [root, raw] of Object.entries(stored as Record<string, unknown>)) {
+    if (!root || !raw || typeof raw !== 'object') continue;
+    const s = raw as Record<string, unknown>;
+    const disabledGlobal = ids(s.disabledGlobal);
+    const enabledRepo = ids(s.enabledRepo);
+    if (disabledGlobal.length || enabledRepo.length) {
+      out[root] = { ...(disabledGlobal.length ? { disabledGlobal } : {}), ...(enabledRepo.length ? { enabledRepo } : {}) };
+    }
+  }
+  return out;
 }
 
 /** Merge stored settings over defaults, keeping builtin providers/agents present. */
@@ -204,6 +311,9 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     ...stored,
     // A theme removed from the catalogue (or hand-edited into settings.json) falls back to 'system'.
     theme: isThemeId(stored.theme) ? stored.theme : d.theme,
+    autoCompactionThreshold: isAutoCompactionThreshold(stored.autoCompactionThreshold) ? stored.autoCompactionThreshold : undefined,
+    // An effort level removed from the app (or a harness-specific value written by an older build) falls back to the harness default.
+    defaultEffort: isEffortLevel(stored.defaultEffort) ? stored.defaultEffort : undefined,
     binaries: { ...d.binaries, ...(stored.binaries ?? {}) },
     claude: { ...d.claude, ...(stored.claude ?? {}) },
     codex: { ...d.codex, ...(stored.codex ?? {}) },
@@ -212,10 +322,21 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
     folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    folderOrder: Array.isArray(stored.folderOrder) ? stored.folderOrder.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    collapsedFolders: Array.isArray(stored.collapsedFolders) ? stored.collapsedFolders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    folderStyles: normalizeFolderStyles(stored.folderStyles),
+    customLabels: normalizeCustomLabels(stored.customLabels),
+    customShortcuts: normalizeCustomShortcuts(stored.customShortcuts),
     favoriteModels: Array.isArray(stored.favoriteModels)
       ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
       : [],
+    utilityModel:
+      stored.utilityModel && typeof stored.utilityModel.provider === 'string' && typeof stored.utilityModel.model === 'string'
+        ? { provider: stored.utilityModel.provider, model: stored.utilityModel.model }
+        : undefined,
     modelOverrides: pruneModelOverrides(stored.modelOverrides),
+    mcpServers: normalizeMcpServers(stored.mcpServers),
+    mcpProjectState: normalizeMcpProjectState(stored.mcpProjectState),
     providers: [],
     acpAgents: []
   };

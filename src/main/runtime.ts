@@ -55,31 +55,67 @@ export function which(cmd: string, extraDirs: string[] = []): string | null {
   return null;
 }
 
+export const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
+
+export interface CaptureResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  /** True when stdout or stderr reached MAX_CAPTURE_BYTES. */
+  truncated?: boolean;
+  /** True when the child was killed by the capture timeout. */
+  timedOut?: boolean;
+}
+
 export function runCapture(
   cmd: string,
   args: string[],
   opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; input?: string } = {}
-): Promise<{ code: number | null; stdout: string; stderr: string }> {
+): Promise<CaptureResult> {
   return new Promise((resolve) => {
-    let stdout = '';
-    let stderr = '';
+    const stdout = { chunks: [] as Buffer[], bytes: 0, truncated: false };
+    const stderr = { chunks: [] as Buffer[], bytes: 0, truncated: false };
     let settled = false;
     let timeout: NodeJS.Timeout | undefined;
-    const settle = (r: { code: number | null; stdout: string; stderr: string }) => {
+    const append = (target: typeof stdout, data: unknown): void => {
+      if (target.bytes >= MAX_CAPTURE_BYTES) {
+        target.truncated = true;
+        return;
+      }
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+      const remaining = MAX_CAPTURE_BYTES - target.bytes;
+      if (chunk.byteLength > remaining) {
+        target.chunks.push(chunk.subarray(0, remaining));
+        target.bytes = MAX_CAPTURE_BYTES;
+        target.truncated = true;
+      } else {
+        target.chunks.push(chunk);
+        target.bytes += chunk.byteLength;
+      }
+    };
+    const text = (target: typeof stdout): string => Buffer.concat(target.chunks, target.bytes).toString('utf8');
+    const result = (code: number | null, extraStderr?: string, timedOut = false): CaptureResult => {
+      if (extraStderr) append(stderr, extraStderr);
+      const out: CaptureResult = { code, stdout: text(stdout), stderr: text(stderr) };
+      if (stdout.truncated || stderr.truncated) out.truncated = true;
+      if (timedOut) out.timedOut = true;
+      return out;
+    };
+    const settle = (code: number | null, extraStderr?: string, timedOut = false): void => {
       if (settled) return;
       settled = true;
       if (timeout) clearTimeout(timeout);
-      resolve(r);
+      resolve(result(code, extraStderr, timedOut));
     };
     let child;
     try {
       child = spawnTool(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env });
     } catch (e) {
-      settle({ code: null, stdout: '', stderr: String(e) });
+      settle(null, String(e));
       return;
     }
     if (!child.stdout || !child.stderr || !child.stdin) {
-      settle({ code: null, stdout: '', stderr: 'no stdio' });
+      settle(null, 'no stdio');
       return;
     }
     timeout = setTimeout(() => {
@@ -90,12 +126,13 @@ export function runCapture(
       }
       // Grandchildren can inherit the pipes and keep stdio open (cmd.exe-wrapped shims on
       // Windows); settle anyway so callers never hang on a killed child.
-      settle({ code: null, stdout, stderr: `${stderr}\ntimed out after ${opts.timeoutMs ?? 15_000}ms` });
+      // Mark partial output as untrustworthy rather than a completed run.
+      settle(null, `\ntimed out after ${opts.timeoutMs ?? 15_000}ms`, true);
     }, opts.timeoutMs ?? 15_000);
-    child.stdout.on('data', (d) => (stdout += d.toString()));
-    child.stderr.on('data', (d) => (stderr += d.toString()));
-    child.on('error', (e) => settle({ code: null, stdout, stderr: stderr + String(e) }));
-    child.on('close', (code) => settle({ code, stdout, stderr }));
+    child.stdout.on('data', (d) => append(stdout, d));
+    child.stderr.on('data', (d) => append(stderr, d));
+    child.on('error', (e) => settle(null, String(e)));
+    child.on('close', (code) => settle(code));
     // A dead pipe must not surface as an uncaught exception.
     child.stdin.on('error', () => undefined);
     if (opts.input !== undefined) child.stdin.end(opts.input);
@@ -268,6 +305,18 @@ export class RuntimeResolver {
           };
         return { available: false, detail: 'Neither dsh nor npx found.', installHint: 'npm install -g @deepseek-ai/dsh' };
       }
+      case 'cursor': {
+        // The SDK ships with the app; only credentials are user-supplied. Cursor reads them from
+        // CURSOR_API_KEY or ~/.cursor/sdk/auth.json (Cursor.auth.login()), same as our key store.
+        const key = process.env.CURSOR_API_KEY;
+        const authed = key ? true : await cursorHasStoredLogin();
+        return {
+          available: true,
+          detail: 'Bundled @cursor/sdk (local runtime)',
+          authenticated: authed,
+          installHint: authed ? undefined : 'Add a Cursor API key under Settings → Providers, or sign in once with Cursor.auth.login().'
+        };
+      }
       case 'native':
         return { available: true, detail: 'Built in. Add an API key under Settings → Providers.', authenticated: 'unknown' };
     }
@@ -289,6 +338,12 @@ export class RuntimeResolver {
     });
     return { ok: r.code === 0, log: r.stdout + r.stderr };
   }
+}
+
+/** Cursor SDK stores a browser login's minted API key in ~/.cursor/sdk/auth.json. */
+export async function cursorHasStoredLogin(): Promise<boolean> {
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+  return exists(path.join(home, '.cursor', 'sdk', 'auth.json'));
 }
 
 export async function claudeHasCredentials(): Promise<boolean> {

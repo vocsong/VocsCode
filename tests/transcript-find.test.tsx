@@ -1,15 +1,29 @@
 /** @vitest-environment jsdom */
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render } from '@testing-library/react';
+import { isTerminalEventTarget } from '../src/renderer/src/components/Transcript';
 import { TranscriptFind, search } from '../src/renderer/src/components/TranscriptFind';
 
-function html(s: string): HTMLElement {
+function html(s: string): HTMLDivElement {
   const div = document.createElement('div');
   div.innerHTML = s;
   return div;
 }
 
 const textOf = (m: Range[]) => m.map((r) => r.toString()).join('');
+
+describe('transcript keyboard routing', () => {
+  it('recognizes terminal descendants so Ctrl+F is left to the terminal bar', () => {
+    const terminal = document.createElement('div');
+    terminal.className = 'term-view';
+    const textarea = document.createElement('textarea');
+    terminal.append(textarea);
+    document.body.append(terminal);
+    expect(isTerminalEventTarget(textarea)).toBe(true);
+    expect(isTerminalEventTarget(document.createElement('div'))).toBe(false);
+    terminal.remove();
+  });
+});
 
 describe('transcript find search', () => {
   it('finds case-insensitive matches and reports them in document order', () => {
