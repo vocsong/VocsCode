@@ -537,6 +537,41 @@ export class SessionManager {
       this.pushSessions();
       this.scheduleLlmTitle(id, placeholder, input.text);
     }
+    await this.dispatchInput(id, { ...input, transcriptItemId: userItem.id });
+  }
+
+  /** Replaces a sent prompt only when its adapter can restore a durable pre-message checkpoint. */
+  async editAndResend(id: string, userItemId: string, input: UserInput): Promise<TranscriptItem[]> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (!input.text.trim() && !input.images?.length) throw new Error('Message cannot be empty');
+    if (meta.status === 'running' || meta.status === 'starting' || meta.status === 'awaiting') throw new Error('Wait for the current turn to finish before editing a message');
+
+    const items = await this.deps.store.readTranscript(id);
+    const index = items.findIndex((item) => item.id === userItemId && item.kind === 'user');
+    if (index < 0) throw new Error('Message no longer exists in this transcript');
+    const previous = items[index] as Extract<TranscriptItem, { kind: 'user' }>;
+    const active = await this.ensureActive(id);
+    if (active.compactionInFlight || active.approvals.size || active.adapter.busy) throw new Error('Wait for the current session activity to finish before editing a message');
+    if (!active.adapter.rewindToUserMessage) throw new Error('This harness does not support editing past messages yet');
+    if (!(await active.adapter.rewindToUserMessage(userItemId))) throw new Error('This message can no longer be rewound');
+
+    const revised: TranscriptItem = {
+      ...previous,
+      text: input.text,
+      images: input.images ?? previous.images,
+      queuedAs: 'now'
+    };
+    // Context is now safely at the same boundary, so the persistence rewrite cannot diverge.
+    active.liveItems.clear();
+    active.dirty.clear();
+    active.lastAssistantText = '';
+    await this.deps.store.rewriteTranscript(id, [...items.slice(0, index), revised]);
+    await this.dispatchInput(id, { text: revised.text, images: revised.images, mode: 'now', transcriptItemId: userItemId });
+    return this.transcript(id);
+  }
+
+  private async dispatchInput(id: string, input: UserInput): Promise<void> {
     const active = await this.ensureActive(id);
     // Compaction can run without marking an adapter busy. Keep a new turn from reading or
     // mutating its context until that operation has settled.

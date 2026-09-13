@@ -115,6 +115,8 @@ interface State {
   /** Fetches one harness's model catalog, at most once per harness until the model overrides change. */
   ensureModelCatalog(harness: HarnessId): Promise<void>;
   clearTranscriptLocal(id: string): void;
+  /** Replaces a loaded transcript after a server-side rewrite (for example, editing a past prompt). */
+  replaceTranscript(id: string, items: TranscriptItem[]): void;
   /** Upserts a renderer-local info line in a session's transcript; null text removes it. Not persisted by the main process. */
   setLocalInfo(sessionId: string, id: string, text: string | null, opts?: { level?: 'info' | 'warn' | 'error'; pending?: boolean }): void;
   setDraft(sessionId: string, text: string): void;
@@ -524,6 +526,10 @@ export const useStore = create<State>((set, get) => ({
   },
   clearTranscriptLocal(id) {
     set((s) => ({ transcripts: { ...s.transcripts, [id]: [] } }));
+  },
+  replaceTranscript(id, items) {
+    dropPendingDeltas(id);
+    set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
   },
   setLocalInfo(sessionId, id, text, opts) {
     set((s) => {
