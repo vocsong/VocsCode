@@ -28,10 +28,13 @@ async function waitForFile(file: string, ms: number): Promise<string> {
   const until = Date.now() + ms;
   while (Date.now() < until) {
     try {
-      return await fs.readFile(file, 'utf8');
+      const text = await fs.readFile(file, 'utf8');
+      // A shell redirect creates the file before it writes the line, so wait for content too.
+      if (text.length) return text;
     } catch {
-      await new Promise((r) => setTimeout(r, 200));
+      /* not there yet */
     }
+    await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error(`timed out waiting for ${file}`);
 }
