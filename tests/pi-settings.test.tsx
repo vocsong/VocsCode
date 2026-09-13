@@ -17,11 +17,24 @@ function setup(over: Partial<PiSetup> = {}): PiSetup {
     agentDir: 'C:/pi/agent',
     settingsPath: 'C:/pi/agent/settings.json',
     preferences: {},
+    piAvailable: true,
     resources: [
       { type: 'extensions', name: 'goal.ts', path: 'C:/pi/agent/extensions/goal.ts', enabled: true, forced: false },
       { type: 'skills', name: 'demo', description: 'Demo the thing', path: 'C:/pi/agent/skills/demo/SKILL.md', enabled: true, forced: false },
       { type: 'themes', name: 'custom', path: 'C:/pi/agent/themes/custom.json', enabled: true, forced: true }
     ],
+    packages: [
+      {
+        source: 'git:github.com/tintinweb/pi-subagents',
+        kind: 'git',
+        path: 'C:/pi/agent/git/github.com/tintinweb/pi-subagents',
+        installed: true,
+        autoload: true,
+        resources: [{ type: 'extensions', name: 'src/index.ts', path: 'C:/pi/agent/git/github.com/tintinweb/pi-subagents/src/index.ts', enabled: true, forced: false }]
+      }
+    ],
+    agents: [{ name: 'Explore', description: 'Read-only search', model: 'deepseek/deepseek-v4-pro', path: 'C:/pi/agent/agents/Explore.md' }],
+    subagents: { reportUsage: true },
     promptFiles: [
       { name: 'AGENTS.md', path: 'C:/pi/agent/AGENTS.md', exists: true, content: '# rules\n' },
       { name: 'APPEND_SYSTEM.md', path: 'C:/pi/agent/APPEND_SYSTEM.md', exists: false, content: '' },
@@ -40,6 +53,16 @@ function mockBackend(): PiSetup {
       current = setup({
         resources: current.resources.map((r) => (r.path === req.path ? { ...r, enabled: req.enabled as boolean, forced: true } : r))
       });
+      return current;
+    }
+    if (channel === 'pi:package:resource') {
+      current = setup({
+        packages: current.packages.map((p) => (p.source === req.source ? { ...p, resources: p.resources.map((r) => (r.path === req.path ? { ...r, enabled: req.enabled as boolean, forced: true } : r)) } : p))
+      });
+      return current;
+    }
+    if (channel === 'pi:subagents') {
+      current = setup({ subagents: { ...current.subagents, ...(req as Partial<PiSetup['subagents']>) } });
       return current;
     }
     if (channel === 'pi:preferences') {
@@ -83,6 +106,30 @@ describe('PiSection', () => {
     fireEvent.click(row.querySelector('input[type="checkbox"]')!);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pi:resource', { type: 'skills', path: 'C:/pi/agent/skills/demo/SKILL.md', enabled: false }));
     await waitFor(() => expect(row.className).toContain('disabled'));
+  });
+
+  it('lists package resources and toggles them through the package filter channel', async () => {
+    mockBackend();
+    render(<PiSection />);
+    await screen.findByText('git:github.com/tintinweb/pi-subagents');
+    const row = screen.getByText('src/index.ts', { selector: 'strong' }).closest('.pi-resource')!;
+    fireEvent.click(row.querySelector('input[type="checkbox"]')!);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('pi:package:resource', {
+        source: 'git:github.com/tintinweb/pi-subagents',
+        type: 'extensions',
+        path: 'C:/pi/agent/git/github.com/tintinweb/pi-subagents/src/index.ts',
+        enabled: false
+      })
+    );
+  });
+
+  it('writes subagent settings and lists on-disk agents', async () => {
+    mockBackend();
+    render(<PiSection />);
+    await screen.findByText('Read-only search');
+    fireEvent.click(screen.getByLabelText('Show estimated cost next to subagent token counts'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pi:subagents', { showCost: true }));
   });
 
   it('saves a selected preference value', async () => {

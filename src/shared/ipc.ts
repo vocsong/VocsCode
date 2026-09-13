@@ -25,10 +25,12 @@ import type {
   ModelOverride,
   ModelRef,
   PermissionMode,
+  PiCommandResult,
   PiPreferencesPatch,
   PiPromptName,
   PiResourceType,
   PiSetup,
+  PiSubagentsPatch,
   ProviderConfig,
   RemoteConfig,
   RemoteDeviceInfo,
@@ -113,6 +115,15 @@ export interface IpcContract {
   'pi:preferences': [PiPreferencesPatch, PiSetup];
   'pi:resource': [{ type: PiResourceType; path: string; enabled: boolean }, PiSetup];
   'pi:prompt:write': [{ name: PiPromptName; content: string }, PiSetup];
+  /** Installs a package through the user's pi binary (git clone / npm install happen there). */
+  'pi:package:install': [{ source: string }, PiCommandResult];
+  'pi:package:remove': [{ source: string }, PiCommandResult];
+  /** No source updates every installed package. */
+  'pi:package:update': [{ source?: string }, PiCommandResult];
+  /** Toggles one package resource with pi's own `+`/`-` package filters. */
+  'pi:package:resource': [{ source: string; type: PiResourceType; path: string; enabled: boolean }, PiSetup];
+  /** Curated global pi-subagents settings (subagents.json). */
+  'pi:subagents': [PiSubagentsPatch, PiSetup];
   /** Opens a pi config file in the configured editor; `path` must resolve inside the agent dir. */
   'pi:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
   /** Opens the agent dir (or a file inside it) in the OS file manager. */

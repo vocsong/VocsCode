@@ -5772,3 +5772,22 @@ body.resizing {
   opacity: 0.6;
   cursor: default;
 }
+.pi-package-install {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.pi-package-install input {
+  flex: 1;
+}
+.pi-package-log {
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  margin: 4px 0 0;
+  width: 100%;
+}
+.pi-package .provider-body {
+  padding-top: 0;
+}

@@ -92,7 +92,8 @@ function stubDeps(overrides: Partial<Deps> = {}): { registry: HandlerRegistry; d
     terminals: { list: () => [] } as unknown as TerminalManager,
     runtime: {
       availability: async () => ({ available: true }),
-      install: async () => ({ ok: false, log: '' })
+      install: async () => ({ ok: false, log: '' }),
+      resolve: () => null
     } as unknown as RuntimeResolver,
     analytics: { summary: async () => ({ totals: ZERO_USAGE, speed: null, days: [] }) } as unknown as AnalyticsStore,
     search: { search: async () => ({ items: [], total: 0 }) } as unknown as SearchIndex,
@@ -340,5 +341,39 @@ describe('pi config handlers', () => {
     const r = (await registry.invoke('pi:openInEditor', { path: path.join(agentDir, '..', 'secret.txt') })) as { ok: boolean; error?: string };
     expect(r).toEqual({ ok: false, error: 'Path is outside the pi agent dir' });
     await expect(registry.invoke('pi:prompt:write', { name: 'NOTES.md' as never, content: 'x' })).rejects.toThrow('Unknown prompt file');
+  });
+
+  it('runs package commands through the injected runner and rejects bad sources before it', async () => {
+    const calls: string[][] = [];
+    const agentDir = tmpDir('pi-agent');
+    fsSync.writeFileSync(path.join(agentDir, 'settings.json'), '{}', 'utf8');
+    const store = new PiConfigStore({
+      env: { PI_CODING_AGENT_DIR: agentDir },
+      home: agentDir,
+      runPi: async (args) => {
+        calls.push(args);
+        return { ok: true, code: 0, log: 'ok' };
+      }
+    });
+    const { registry } = stubDeps({ piConfig: store });
+    await registry.invoke('pi:package:install', { source: 'git:github.com/user/repo' });
+    await registry.invoke('pi:package:remove', { source: 'npm:foo' });
+    await registry.invoke('pi:package:update', {});
+    expect(calls).toEqual([
+      ['install', 'git:github.com/user/repo'],
+      ['remove', 'npm:foo'],
+      ['update', '--extensions']
+    ]);
+    await expect(registry.invoke('pi:package:install', { source: '-l' })).rejects.toThrow('Invalid package source');
+    expect(calls).toHaveLength(3);
+  });
+
+  it('rejects an invalid subagents patch without writing the file', async () => {
+    const agentDir = tmpDir('pi-agent');
+    fsSync.writeFileSync(path.join(agentDir, 'settings.json'), '{}', 'utf8');
+    const store = new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir }, home: agentDir });
+    const { registry } = stubDeps({ piConfig: store });
+    await expect(registry.invoke('pi:subagents', { maxSubagentDepth: 99 })).rejects.toThrow('Invalid value');
+    await expect(fs.access(path.join(agentDir, 'subagents.json'))).rejects.toThrow();
   });
 });

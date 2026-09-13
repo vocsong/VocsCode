@@ -25,7 +25,7 @@ import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
-import { PiConfigStore } from './pi-config';
+import { PiConfigStore, runPiCommand } from './pi-config';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
@@ -92,7 +92,19 @@ const SLOW_HANDLER_MS = 1000;
 
 export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const { settings, secrets, sessions, terminals, runtime } = deps;
-  const piConfig = deps.piConfig ?? new PiConfigStore({ log: deps.log });
+  const piConfig =
+    deps.piConfig ??
+    new PiConfigStore({
+      log: deps.log,
+      piBinary: () => runtime.resolve('pi')?.path ?? null,
+      runPi: (args) => {
+        const piPath = runtime.resolve('pi')?.path;
+        if (!piPath) return Promise.resolve({ ok: false, code: null, log: '', error: 'pi is not installed — install it from Settings → Harnesses first.' });
+        // cwd is the app's userData, never a project: pi install writes global settings, and a
+        // repo's .pi/ must not influence the command.
+        return runPiCommand(args, { piPath, cwd: deps.desktop.userDataPath(), log: deps.log });
+      }
+    });
   const handlers = new Map<IpcChannel, (req: never) => unknown>();
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
 
@@ -370,6 +382,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('pi:preferences', (patch) => piConfig.updatePreferences(patch));
   handle('pi:resource', ({ type, path: p, enabled }) => piConfig.setResourceEnabled(type, p, enabled));
   handle('pi:prompt:write', ({ name, content }) => piConfig.writePrompt(name, content));
+  handle('pi:package:install', ({ source }) => piConfig.installPackage(source));
+  handle('pi:package:remove', ({ source }) => piConfig.removePackage(source));
+  handle('pi:package:update', ({ source }) => piConfig.updatePackages(source));
+  handle('pi:package:resource', ({ source, type, path: p, enabled }) => piConfig.setPackageResourceEnabled(source, type, p, enabled));
+  handle('pi:subagents', (patch) => piConfig.updateSubagents(patch));
   handle('pi:openInEditor', async ({ path: p, line }) => {
     const target = piConfig.resolveAgentPath(p);
     if (!target) return { ok: false, error: 'Path is outside the pi agent dir' };
