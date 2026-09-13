@@ -26,3 +26,18 @@ export function isOpenAiWireProvider(provider: Pick<ProviderConfig, 'kind'>): bo
 export function isCodexBuiltinProvider(id: string | undefined): boolean {
   return !id || id === 'openai' || id === 'codex';
 }
+
+/** Anthropic's own endpoint; anything else on an anthropic-kind provider is a third-party gateway. */
+export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com';
+
+/** Provider kinds that speak the Anthropic wire protocol. Claude Code can be pointed at these. */
+export function isAnthropicWireProvider(provider: Pick<ProviderConfig, 'kind'>): boolean {
+  return provider.kind === 'anthropic';
+}
+
+/** An anthropic-kind provider aimed somewhere other than Anthropic itself (GLM, Kimi, LiteLLM, …). */
+export function isAnthropicGateway(provider: Pick<ProviderConfig, 'kind' | 'baseUrl'> | undefined): boolean {
+  if (!provider) return false;
+  const baseUrl = (provider.baseUrl ?? '').trim().replace(/\/+$/, '');
+  return isAnthropicWireProvider(provider) && !!baseUrl && baseUrl !== ANTHROPIC_DEFAULT_BASE_URL;
+}

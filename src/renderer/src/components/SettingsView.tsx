@@ -1,7 +1,7 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
 import React, { useEffect, useRef, useState } from 'react';
 import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
-import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig, RemoteDeviceInfo, RemoteState, SecretStatus } from '../../../shared/types';
+import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ModelInfo, ProviderConfig, ProviderKind, RemoteDeviceInfo, RemoteState, SecretStatus } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
@@ -281,7 +281,7 @@ function Providers({ settings }: { settings: AppSettings }) {
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
-  const [custom, setCustom] = useState({ id: '', name: '', baseUrl: '', envKey: '' });
+  const [custom, setCustom] = useState({ id: '', name: '', baseUrl: '', envKey: '', kind: 'openai-compatible' as ProviderKind });
 
   const refreshSecretStatus = async () => {
     try {
@@ -376,13 +376,14 @@ function Providers({ settings }: { settings: AppSettings }) {
                   <ProviderBaseUrl provider={p} onSave={(baseUrl) => save(p, { baseUrl })} />
                 </Field>
               </div>
+              <ProviderModels provider={p} onSave={(models) => save(p, { models })} />
             </div>
           )}
         </div>
       ))}
       {adding ? (
         <div className="provider-card">
-          <div className="provider-head"><span className="provider-name">New OpenAI-compatible provider</span></div>
+          <div className="provider-head"><span className="provider-name">New provider</span></div>
           <div className="provider-body">
             <div className="row gap8">
               <input placeholder="id (letters, dashes)" value={custom.id} onChange={(e) => setCustom({ ...custom, id: e.target.value.replace(/[^a-z0-9-]/gi, '').toLowerCase() })} />
@@ -392,15 +393,21 @@ function Providers({ settings }: { settings: AppSettings }) {
               <input placeholder="Base URL (…/v1)" value={custom.baseUrl} onChange={(e) => setCustom({ ...custom, baseUrl: e.target.value })} />
               <input placeholder="Env var for key (optional)" value={custom.envKey} onChange={(e) => setCustom({ ...custom, envKey: e.target.value })} />
             </div>
+            <Field label="Kind" inline hint={custom.kind === 'anthropic' ? 'Claude Code runs on this endpoint, so its models appear for the Claude harness.' : 'OpenAI-compatible endpoints power the native harness.'}>
+              <select value={custom.kind} onChange={(e) => setCustom({ ...custom, kind: e.target.value as ProviderKind })}>
+                <option value="openai-compatible">OpenAI-compatible</option>
+                <option value="anthropic">Anthropic-compatible (Claude Code)</option>
+              </select>
+            </Field>
             <div className="row gap8">
               <Button
                 variant="primary"
                 size="sm"
                 disabled={!custom.id || !custom.baseUrl}
                 onClick={async () => {
-                  await invoke('providers:save', { id: custom.id, kind: 'openai-compatible', name: custom.name || custom.id, baseUrl: custom.baseUrl, envKey: custom.envKey || undefined, hasApiKey: false, models: [], enabled: true });
+                  await invoke('providers:save', { id: custom.id, kind: custom.kind, name: custom.name || custom.id, baseUrl: custom.baseUrl, envKey: custom.envKey || undefined, hasApiKey: false, models: [], enabled: true });
                   setAdding(false);
-                  setCustom({ id: '', name: '', baseUrl: '', envKey: '' });
+                  setCustom({ id: '', name: '', baseUrl: '', envKey: '', kind: 'openai-compatible' });
                 }}
               >
                 Add provider
@@ -413,11 +420,44 @@ function Providers({ settings }: { settings: AppSettings }) {
         </div>
       ) : (
         <Button icon="plus" onClick={() => setAdding(true)}>
-          Add OpenAI-compatible provider
+          Add provider
         </Button>
       )}
       <ModelOverrides settings={settings} />
     </div>
+  );
+}
+
+/** Manual model ids for an endpoint that publishes no /v1/models catalog (gateways, local hosts). */
+function ProviderModels({ provider, onSave }: { provider: ProviderConfig; onSave: (models: ModelInfo[]) => Promise<void> }) {
+  const [draft, setDraft] = useState('');
+  const add = async () => {
+    const id = draft.trim();
+    if (!id || provider.models.some((m) => m.id === id)) return;
+    await onSave([...provider.models, { id, provider: provider.id, displayName: id }]);
+    setDraft('');
+  };
+  return (
+    <>
+      <div className="row gap8">
+        <Field label="Models" inline hint="Add ids for endpoints with no catalog; the harness refresh replaces this list.">
+          <input placeholder="Add a model id" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void add()} />
+        </Field>
+        <Button size="sm" variant="ghost" onClick={() => void add()} disabled={!draft.trim()}>
+          Add
+        </Button>
+      </div>
+      {provider.models.length > 0 && (
+        <div className="chips">
+          {provider.models.slice(0, 12).map((m) => (
+            <button key={m.id} type="button" className="chip" title={`Remove ${m.id}`} onClick={() => void onSave(provider.models.filter((x) => x.id !== m.id))}>
+              {m.id} ×
+            </button>
+          ))}
+          {provider.models.length > 12 && <span className="muted small">+{provider.models.length - 12} more</span>}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -655,8 +695,8 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
           <option value="bundled">Bundled runtime only</option>
         </select>
       </Field>
-      <Toggle checked={settings.claude.useProviderKey} onChange={(v) => update({ claude: { ...settings.claude, useProviderKey: v } })} label="Use the Anthropic provider's endpoint and key instead of the Claude Code login" />
-      <p className="muted small">Claude Code runs against any Anthropic-compatible endpoint. Point the Anthropic provider at that gateway (Settings → Providers → Base URL, plus its key), then turn this on to send the base URL and key to Claude Code. Refresh that provider's Models to list its catalog in the model picker; a gateway that publishes no catalog can still be typed into the picker. With the default Anthropic URL it just passes the stored API key.</p>
+      <Toggle checked={settings.claude.useProviderKey} onChange={(v) => update({ claude: { ...settings.claude, useProviderKey: v } })} label="Pass the stored Anthropic API key to Anthropic's own endpoint" />
+      <p className="muted small">Claude Code runs against any Anthropic-compatible endpoint. Add one under Providers with Kind <strong>Anthropic-compatible</strong> plus its key; its models then appear for this harness, and picking one wires that endpoint automatically. Endpoints that publish no catalog can have model ids added there. This toggle only affects Anthropic's own endpoint: on sends the stored API key, off keeps the Claude Code login.</p>
       {bin('claude', 'claude path override')}
       <h3>Codex</h3>
       <Field label="Runtime">

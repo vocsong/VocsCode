@@ -3,7 +3,8 @@ import type { AppSettings, HarnessId, ModelInfo } from '../../shared/types';
 import { applyModelOverrides } from '../../shared/model-overrides';
 import { errorMessage } from '../util/async';
 import type { RuntimeResolver } from '../runtime';
-import { ANTHROPIC_STATIC_MODELS, CODEX_STATIC_MODELS, CURSOR_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
+import { CODEX_STATIC_MODELS, CURSOR_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
+import { claudeNativeModels, mergeClaudeCatalog } from '../models/claude-catalog';
 import { mergeCodexCatalog } from '../models/codex-catalog';
 import { AcpAdapter } from './acp';
 import { ClaudeAdapter } from './claude';
@@ -55,10 +56,8 @@ async function listHarnessModelsRaw(opts: {
   const { harness, settings, runtime } = opts;
   try {
     switch (harness) {
-      case 'claude': {
-        const p = settings.providers.find((x) => x.id === 'anthropic');
-        return { models: p?.models.length ? p.models : ANTHROPIC_STATIC_MODELS };
-      }
+      case 'claude':
+        return { models: mergeClaudeCatalog(claudeNativeModels(settings), settings) };
       case 'codex':
       case 'codex-exec': {
         const native = await codexNativeModels(runtime);

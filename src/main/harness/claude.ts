@@ -12,9 +12,10 @@ import {
   type SDKMessage,
   type SDKUserMessage
 } from '@anthropic-ai/claude-agent-sdk';
-import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { toClaude } from '../mcp/effective';
 import { findContextWindow } from '../models/static-models';
+import { isAnthropicGateway, isAnthropicWireProvider } from '../../shared/providers';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -104,6 +105,11 @@ export class ClaudeAdapter implements HarnessAdapter {
   private pump: Promise<void> | null = null;
   private _busy = false;
   private sessionId: string | undefined;
+  /** Anthropic-compatible provider this process was started against; its endpoint is fixed for the process lifetime. */
+  private providerId: string | undefined;
+  /** True when the endpoint is a third-party gateway, whose catalog the settings own — the SDK's
+   *  Anthropic model list must not replace it. */
+  private gateway = false;
   private sessionAllowed = new Set<string>();
   private currentAssistant: { id: string; text: string; thinking: string } | null = null;
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
@@ -183,14 +189,17 @@ export class ClaudeAdapter implements HarnessAdapter {
     });
     if (mcp.length) options.mcpServers = toClaude(mcp.map((r) => r.def));
     const s = this.ctx.settings();
+    const provider = claudeProviderFor(s, this.ctx.session().config.model ?? this.ctx.session().activeModel);
+    if (provider) this.providerId = provider.id;
+    this.gateway = isAnthropicGateway(provider);
+    const key = provider ? await this.ctx.getApiKey(provider.id) : undefined;
+    const overlay = claudeProviderEnv(s, provider, key);
     let auth = 'login';
-    if (s.claude.useProviderKey) {
-      const key = await this.ctx.getApiKey('anthropic');
-      const overlay = claudeProviderEnv(s, key);
+    if (Object.keys(overlay).length) {
       options.env = { ...(options.env ?? {}), ...overlay };
-      auth = overlay.ANTHROPIC_BASE_URL ? `endpoint=${overlay.ANTHROPIC_BASE_URL}` : key ? 'stored-key' : 'login';
+      auth = overlay.ANTHROPIC_BASE_URL ? `endpoint=${overlay.ANTHROPIC_BASE_URL}` : 'stored-key';
     }
-    this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${s.claude.useProviderKey ? ` auth=${auth}` : ''}`);
+    this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${provider ? ` auth=${auth} provider=${provider.id}` : ''}`);
     this.q = query({ prompt: this.input, options });
     this.pump = this.consume(this.q).catch((e) => {
       this.compactionWaiter?.reject(e instanceof Error ? e : new Error(errorMessage(e)));
@@ -352,8 +361,8 @@ export class ClaudeAdapter implements HarnessAdapter {
         if (msg.subtype === 'init') {
           this.sessionId = msg.session_id;
           this.ctx.updateRef({ claudeSessionId: msg.session_id });
-          if (msg.model) this.ctx.updateMeta({ activeModel: { provider: 'anthropic', model: msg.model } });
-          if (!this.modelsEmitted) {
+          if (msg.model) this.ctx.updateMeta({ activeModel: { provider: this.providerId ?? 'anthropic', model: msg.model } });
+          if (!this.modelsEmitted && !this.gateway) {
             this.modelsEmitted = true;
             q.supportedModels()
               .then((models) => this.ctx.emit({ type: 'models', models: models.map(claudeModelToInfo) }))
@@ -562,6 +571,11 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   async setModel(model: ModelRef): Promise<void> {
+    // The SDK process keeps one endpoint for its lifetime; a model from another provider would be
+    // sent to the wrong API. Require a new session instead of silently misrouting it.
+    if (this.providerId && model.provider !== this.providerId) {
+      throw new Error(`This session runs on the ${this.providerId} endpoint. Start a new session to use models from ${model.provider}.`);
+    }
     await this.q?.setModel(model.model);
     this.ctx.updateMeta({ activeModel: model });
   }
@@ -618,18 +632,32 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 }
 
+/** Anthropic's own endpoint is the only non-gateway anthropic-kind provider. */
+function normalizeBaseUrl(baseUrl: string | undefined): string {
+  return (baseUrl ?? '').trim().replace(/\/+$/, '');
+}
+
+/** The Anthropic-compatible provider that backs a Claude session: the provider its model came from
+ *  when that provider can host Claude Code, else the built-in Anthropic provider. */
+export function claudeProviderFor(settings: AppSettings, model: ModelRef | undefined): ProviderConfig | undefined {
+  const compatible = settings.providers.filter(isAnthropicWireProvider);
+  return compatible.find((p) => p.id === model?.provider) ?? compatible.find((p) => p.id === 'anthropic') ?? compatible[0];
+}
+
 /**
- * Claude Code can drive any Anthropic-compatible endpoint, so the Anthropic provider's base URL
- * and stored key are handed over when the user opts in (Settings → Harnesses → Claude). A
- * non-default endpoint is a third-party gateway (GLM, Kimi, DeepSeek, a LiteLLM proxy, …); those
- * take a bearer token, so the key fills ANTHROPIC_AUTH_TOKEN and an inherited x-api-key is cleared
- * rather than sent alongside it. An empty overlay means "keep Claude Code's own login".
+ * Env overlay that points Claude Code at an Anthropic-compatible provider. A gateway is wired from
+ * its base URL automatically (a stored key becomes a bearer token, and an inherited Anthropic
+ * x-api-key is cleared so it is not sent to the gateway). Anthropic's own endpoint passes the
+ * stored key only when the user opted in, and otherwise leaves Claude Code's login alone.
  */
-export function claudeProviderEnv(settings: AppSettings, apiKey: string | undefined): Record<string, string | undefined> {
-  if (!settings.claude.useProviderKey || !apiKey) return {};
-  const baseUrl = (settings.providers?.find((p) => p.id === 'anthropic')?.baseUrl ?? '').trim().replace(/\/+$/, '');
-  if (!baseUrl || baseUrl === 'https://api.anthropic.com') return { ANTHROPIC_API_KEY: apiKey };
-  return { ANTHROPIC_API_KEY: undefined, ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: apiKey };
+export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, apiKey: string | undefined): Record<string, string | undefined> {
+  if (!provider) return {};
+  if (isAnthropicGateway(provider)) {
+    const overlay: Record<string, string | undefined> = { ANTHROPIC_API_KEY: undefined, ANTHROPIC_BASE_URL: normalizeBaseUrl(provider.baseUrl) };
+    if (apiKey) overlay.ANTHROPIC_AUTH_TOKEN = apiKey;
+    return overlay;
+  }
+  return settings.claude.useProviderKey && apiKey ? { ANTHROPIC_API_KEY: apiKey } : {};
 }
 
 export function claudeModelToInfo(m: { value: string; displayName: string; description?: string; resolvedModel?: string }): ModelInfo {
