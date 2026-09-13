@@ -2,6 +2,7 @@
 import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, FolderStyle, ModelRef, ProviderConfig } from '../shared/types';
 import { isAutoCompactionThreshold } from '../shared/compaction';
+import { isEffortLevel } from '../shared/harness-meta';
 import { pruneModelOverrides } from '../shared/model-overrides';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
@@ -251,6 +252,8 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     // A theme removed from the catalogue (or hand-edited into settings.json) falls back to 'system'.
     theme: isThemeId(stored.theme) ? stored.theme : d.theme,
     autoCompactionThreshold: isAutoCompactionThreshold(stored.autoCompactionThreshold) ? stored.autoCompactionThreshold : undefined,
+    // An effort level removed from the app (or a harness-specific value written by an older build) falls back to the harness default.
+    defaultEffort: isEffortLevel(stored.defaultEffort) ? stored.defaultEffort : undefined,
     binaries: { ...d.binaries, ...(stored.binaries ?? {}) },
     claude: { ...d.claude, ...(stored.claude ?? {}) },
     codex: { ...d.codex, ...(stored.codex ?? {}) },

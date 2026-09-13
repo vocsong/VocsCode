@@ -395,6 +395,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
               <BranchRow
                 key={b.name}
                 b={b}
+                sessionId={session.id}
                 base={data.base}
                 ghMissing={data.ghMissing}
                 onDelete={() => void deleteBranch(b)}
@@ -426,7 +427,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
               current={pathEq(wt.path, session.cwd)}
               sessions={sessionsIn(wt.path)}
               branchSessions={wt.branch ? branchSessionCount.get(wt.branch) ?? 0 : 0}
-              onOpen={() => void invoke('app:openInEditor', { path: wt.path })}
+              onOpen={() => void invoke('app:openInEditor', { path: wt.path, sessionId: session.id })}
               onRemove={() => void removeWorktree(wt)}
             />
           ))}
@@ -438,6 +439,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
 
 function BranchRow({
   b,
+  sessionId,
   base,
   ghMissing,
   onDelete,
@@ -450,6 +452,7 @@ function BranchRow({
   onAskAgent
 }: {
   b: GitBranchOverviewItem;
+  sessionId: string;
   base?: string;
   ghMissing?: boolean;
   onDelete: () => void;
@@ -507,7 +510,7 @@ function BranchRow({
       <div className="branch-actions">
         <span className="branch-inline">
           {b.worktreePath && (
-            <Button variant="ghost" size="sm" icon="external" title={`Open worktree ${basename(b.worktreePath)}`} onClick={() => void invoke('app:openInEditor', { path: b.worktreePath! })} />
+            <Button variant="ghost" size="sm" icon="external" title={`Open worktree ${basename(b.worktreePath)}`} onClick={() => void invoke('app:openInEditor', { path: b.worktreePath!, sessionId })} />
           )}
           {!ghMissing && !b.isBase &&
             (hasOpenPr ? (
@@ -536,7 +539,7 @@ function BranchRow({
                 <MenuItem
                   onClick={() => {
                     close();
-                    void invoke('app:openInEditor', { path: b.worktreePath! });
+                    void invoke('app:openInEditor', { path: b.worktreePath!, sessionId });
                   }}
                   hint={basename(b.worktreePath)}
                 >

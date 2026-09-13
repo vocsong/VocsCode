@@ -27,6 +27,12 @@ describe('quoteWin', () => {
     expect(quoteWin('trail\\ ')).toBe('"trail\\ "');
     expect(quoteWin('C:\\dir with space\\')).toBe('"C:\\dir with space\\\\"');
   });
+
+  it('rejects cmd.exe expansion and command-separator characters', () => {
+    expect(() => quoteWin('100% complete')).toThrow(/percent/);
+    expect(() => quoteWin('line\nnext')).toThrow(/newline/);
+    expect(() => quoteWin('line\rnext')).toThrow(/newline/);
+  });
 });
 
 describe('fmtRate / speedOfTurns', () => {

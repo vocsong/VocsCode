@@ -367,8 +367,10 @@ export const useStore = create<State>((set, get) => ({
     });
   },
   setSessions(sessions) {
+    const ids = new Set(sessions.map((x) => x.id));
+    let replacement: SessionMeta | undefined;
+    let removedTitle: string | undefined;
     set((s) => {
-      const ids = new Set(sessions.map((x) => x.id));
       const removed = new Set<string>();
       for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.loaded)) if (!ids.has(id)) removed.add(id);
@@ -376,10 +378,14 @@ export const useStore = create<State>((set, get) => ({
       for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
-      // A removed session cannot stay active; fall back to the first remaining live session so the
-      // app does not sit on an empty shell while other sessions still exist.
-      const activeId = s.activeId && !ids.has(s.activeId) ? sessions.find((x) => !x.archived)?.id ?? null : s.activeId;
-      if (removed.size === 0) return { sessions, activeId };
+      const activeRemoved = !!s.activeId && !ids.has(s.activeId);
+      if (activeRemoved) {
+        removedTitle = s.sessions.find((x) => x.id === s.activeId)?.title ?? s.activeId ?? 'active session';
+        replacement = [...sessions]
+          .filter((x) => !x.archived)
+          .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id))[0];
+      }
+      if (removed.size === 0 && !activeRemoved) return { sessions };
       const transcripts = { ...s.transcripts };
       const loaded = { ...s.loaded };
       const transcriptErrors = { ...s.transcriptErrors };
@@ -394,8 +400,27 @@ export const useStore = create<State>((set, get) => ({
         delete models[id];
         delete drafts[id];
       }
-      return { sessions, transcripts, loaded, transcriptErrors, activeTerminal, models, drafts, activeId };
+      return {
+        sessions,
+        transcripts,
+        loaded,
+        transcriptErrors,
+        activeTerminal,
+        models,
+        drafts,
+        activeId: activeRemoved ? replacement?.id ?? null : s.activeId
+      };
     });
+    if (removedTitle) {
+      if (replacement) {
+        get().toast(`Session "${removedTitle}" was removed; switched to "${replacement.title}".`, 'info');
+        // This is reconciliation from the main process, not user navigation: loading directly
+        // avoids adding a duplicate entry to the back/forward stack.
+        void get().loadTranscript(replacement.id).catch((error) => get().toast(error instanceof Error ? error.message : String(error), 'error'));
+      } else {
+        get().toast(`Session "${removedTitle}" was removed; no active sessions remain.`, 'info');
+      }
+    }
   },
   setView(view) {
     set({ view });
