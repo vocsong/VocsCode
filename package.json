@@ -36,6 +36,7 @@
     "test:e2e:terminal": "vitest run tests/e2e.terminal.test.ts",
     "test:e2e:models": "vitest run tests/e2e.models.test.ts",
     "test:e2e:themes": "vitest run tests/e2e.themes.test.ts",
+    "test:e2e:ci": "node scripts/e2e-guard.mjs tests/e2e.vision.test.ts tests/e2e.themes.test.ts tests/e2e.models.test.ts tests/e2e.terminal.test.ts",
     "test:smoke": "vitest run tests/smoke.live.test.ts",
     "typecheck:relay": "tsc --noEmit -p relay/tsconfig.json"
   },

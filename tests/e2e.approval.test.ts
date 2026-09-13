@@ -76,7 +76,7 @@ describe.runIf(enabled)('electron e2e: approvals', () => {
     await win.waitForSelector('.changes, .empty', { timeout: 10_000 }); // no git repo here → empty state
     await win.screenshot({ path: path.join(shots, 'e2e-06-approval-applied.png') });
     // Header shows the session title next to the status dot (layout regression check).
-    const title = await win.locator('.header-name').innerText();
+    const title = await win.getByTestId('session-title').innerText();
     expect(title.length).toBeGreaterThan(3);
   });
 });
