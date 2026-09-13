@@ -111,7 +111,7 @@ async function runScenario(win: Page): Promise<void> {
 
   // Header pills reflect model + mode; usage pill exists; Changes tab renders git state.
   expect(await win.locator('.pill').count()).toBeGreaterThanOrEqual(3);
-  const title = await win.locator('.header-name').innerText();
+  const title = await win.getByTestId('session-title').innerText();
   expect(title.length).toBeGreaterThan(3);
   await win.click('.panel-tab:has-text("Changes")');
   await win.waitForSelector('.changes', { timeout: 10_000 });
@@ -122,7 +122,7 @@ async function runScenario(win: Page): Promise<void> {
   await win.screenshot({ path: path.join(shots, `e2e-04-${harness}-usage.png`) });
 
   // Session persisted in the sidebar; transcript contains the reply exactly once (no delta duplication).
-  const rows = await win.locator('.session-row').count();
+  const rows = await win.getByTestId('session-row').count();
   expect(rows).toBe(1);
   const reply = await win.locator('.msg-assistant .md').first().innerText();
   expect(reply.trim()).toMatch(/^PONG[.!]?$/i);

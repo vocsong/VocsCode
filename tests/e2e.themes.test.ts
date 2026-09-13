@@ -10,12 +10,11 @@
  */
 import os from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import { openNewSession, seedSettings } from './e2e-ui';
+import { decodePng, type Frame, openNewSession, pixelDelta, seedSettings } from './e2e-ui';
 import { GROUP_ORDER, THEMES } from '../src/shared/themes';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -34,9 +33,13 @@ afterAll(async () => {
  */
 const SIDEBAR = { x: 0, y: 0, width: 280, height: 260 };
 
-function digest(buf: Buffer): string {
-  return createHash('sha256').update(buf).digest('hex').slice(0, 16);
-}
+/**
+ * Two frames count as the same skin below this fraction of differing pixels. Antialiasing of the
+ * wordmark and the folder row's chevron drifts by +/-1 between paints (single-digit pixel counts,
+ * ~0.01%), while a real theme switch repaints the whole region. Hashing the bytes instead made
+ * "this theme is static" fail on four stray pixels.
+ */
+const SAME = 0.005;
 
 describe.runIf(enabled)('theme catalogue (e2e)', () => {
   it('paints a distinct window for every theme, and animates only Nebula', async () => {
@@ -83,12 +86,13 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
      * so a fixed delay fingerprints a half-applied theme. Nebula never settles; it comes back with
      * the last frame after the cap, which is all its animation check needs.
      */
-    const settle = async (): Promise<string> => {
-      let prev = digest(await win.screenshot({ clip: SIDEBAR }));
+    const shot = async (): Promise<Frame> => decodePng(await win.screenshot({ clip: SIDEBAR }));
+    const settle = async (): Promise<Frame> => {
+      let prev = await shot();
       for (let i = 0; i < 20; i++) {
         await new Promise((r) => setTimeout(r, 200));
-        const next = digest(await win.screenshot({ clip: SIDEBAR }));
-        if (next === prev) return next;
+        const next = await shot();
+        if (pixelDelta(prev, next) <= SAME) return next;
         prev = next;
       }
       return prev;
@@ -102,32 +106,38 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
       await settle();
     };
 
-    const fingerprints = new Map<string, string>();
+    const frames = new Map<string, Frame>();
     for (const [i, theme] of grouped.entries()) {
       await pick(theme.name, theme.id);
       await win.screenshot({ path: path.join(shots, `theme-${String(i).padStart(2, '0')}-${theme.id}.png`) });
-      fingerprints.set(theme.id, digest(await win.screenshot({ clip: SIDEBAR })));
+      frames.set(theme.id, await shot());
     }
 
-    // 'system' has no palette of its own; it has to look exactly like whichever built-in the OS asks for.
-    expect([fingerprints.get('light'), fingerprints.get('dark')]).toContain(fingerprints.get('system'));
+    // 'system' has no palette of its own; it has to look like whichever built-in the OS asks for.
+    const vsLight = pixelDelta(frames.get('system')!, frames.get('light')!);
+    const vsDark = pixelDelta(frames.get('system')!, frames.get('dark')!);
+    expect(Math.min(vsLight, vsDark), `system vs light=${vsLight}, vs dark=${vsDark}`).toBeLessThanOrEqual(SAME);
 
     // Every other theme repaints the window differently — no two are the same skin.
-    const named = [...fingerprints].filter(([id]) => id !== 'system');
-    expect(new Set(named.map(([, hash]) => hash)).size, JSON.stringify(named)).toBe(named.length);
+    const named = [...frames].filter(([id]) => id !== 'system');
+    for (let i = 0; i < named.length; i++) {
+      for (let j = i + 1; j < named.length; j++) {
+        const d = pixelDelta(named[i]![1], named[j]![1]);
+        expect(d, `${named[i]![0]} and ${named[j]![0]} paint the same window`).toBeGreaterThan(SAME);
+      }
+    }
 
     // Nebula's aurora, grid and gradient sweeps keep moving while the app sits idle...
     await pick('Nebula', 'nebula');
-    const nebulaA = digest(await win.screenshot({ clip: SIDEBAR }));
+    const nebulaA = await shot();
     await new Promise((r) => setTimeout(r, 1500));
-    const nebulaB = digest(await win.screenshot({ clip: SIDEBAR }));
-    expect(nebulaB, 'Nebula should still be animating').not.toBe(nebulaA);
+    expect(pixelDelta(nebulaA, await shot()), 'Nebula should still be animating').toBeGreaterThan(SAME);
 
-    // ...while a static theme is pixel-stable over the same window.
+    // ...while a static theme is stable over the same window, bar glyph antialiasing.
     await pick('Midnight Navy', 'midnight');
-    const midnightA = digest(await win.screenshot({ clip: SIDEBAR }));
+    const midnightA = await shot();
     await new Promise((r) => setTimeout(r, 1500));
-    expect(digest(await win.screenshot({ clip: SIDEBAR })), 'Midnight Navy should be static').toBe(midnightA);
+    expect(pixelDelta(midnightA, await shot()), 'Midnight Navy should be static').toBeLessThanOrEqual(SAME);
 
     // The choice survives as a plain id in settings.json.
     const stored = JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8')) as { theme: string };
@@ -150,7 +160,7 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
     await win.waitForTimeout(1500);
 
     const term = win.locator('.term-view');
-    const screens = new Map<string, string>();
+    const screens = new Map<string, Frame>();
     for (const id of ['midnight', 'blueprint', 'ember', 'nebula'] as const) {
       const name = THEMES.find((t) => t.id === id)?.name as string;
       // The View menu offers one "Theme" item that opens Settings; the catalogue itself lives there.
@@ -164,8 +174,14 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
       await win.waitForSelector('.term-view .xterm', { timeout: 20_000 });
       await win.waitForTimeout(500);
       await win.screenshot({ path: path.join(shots, `theme-terminal-${id}.png`) });
-      screens.set(id, digest(await term.screenshot()));
+      screens.set(id, decodePng(await term.screenshot()));
     }
-    expect(new Set(screens.values()).size, JSON.stringify([...screens])).toBe(screens.size);
+    const painted = [...screens];
+    for (let i = 0; i < painted.length; i++) {
+      for (let j = i + 1; j < painted.length; j++) {
+        const d = pixelDelta(painted[i]![1], painted[j]![1]);
+        expect(d, `terminal looks the same under ${painted[i]![0]} and ${painted[j]![0]}`).toBeGreaterThan(SAME);
+      }
+    }
   }, 240_000);
 });
