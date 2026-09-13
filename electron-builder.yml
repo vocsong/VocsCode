@@ -36,9 +36,14 @@ nsis:
   shortcutName: Vocs Code
 mac:
   icon: resources/icons/vocs-code.icns
-  target: [dmg]
+  target:
+    - target: dmg
+      # Ship both silicon generations; CI builds both on the arm64 runner.
+      arch: [x64, arm64]
   category: public.app-category.developer-tools
+  artifactName: Vocs-Code-${version}-mac-${arch}.${ext}
 linux:
   icon: resources/icons/vocs-code.png
   target: [AppImage]
   category: Development
+  artifactName: Vocs-Code-${version}-linux-${arch}.${ext}
