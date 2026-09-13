@@ -186,7 +186,7 @@ export function defaultSettings(): AppSettings {
   return {
     version: 1,
     theme: 'system',
-    defaultHarness: 'claude',
+    defaultHarness: 'pi',
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
     autoCompactionThreshold: undefined,
