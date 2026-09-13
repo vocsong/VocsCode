@@ -39,7 +39,7 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 
 | Harness | Engine | Approvals | Models | MCP |
 | --- | --- | --- | --- | --- |
-| **Claude Agent SDK** | `@anthropic-ai/claude-agent-sdk` (Claude Code loop, hooks, MCP, checkpoints) | interactive (`canUseTool`) | Claude's catalog plus every enabled Anthropic-compatible provider; the endpoint follows the selected model's provider, with Bedrock/Vertex/Foundry via env | injected (`options.mcpServers`) |
+| **Claude Agent SDK** | `@anthropic-ai/claude-agent-sdk` (Claude Code loop, hooks, MCP, checkpoints) | interactive (`canUseTool`) | Claude's catalog plus every provider with an Anthropic-format endpoint (OpenRouter, DeepSeek, or an anthropic-kind gateway); the endpoint follows the selected model's provider, with Bedrock/Vertex/Foundry via env | injected (`options.mcpServers`) |
 | **Codex (app-server)** | `codex app-server` JSON-RPC — the same engine as the Codex desktop app | interactive (command + file-change requests), steer, interrupt | Codex's `model/list` plus every enabled OpenAI-wire provider (OpenRouter, DeepSeek, Groq, …), registered per session as a `model_providers` entry using the Responses API | injected (`config.mcp_servers`) |
 | **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | Codex catalog | injected (`config.mcp_servers`; secrets via the environment) — Codex declines MCP tool calls under this adapter's `approvalPolicy: never` |
 | **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan | inherited — Cursor reads its own `mcp.json`; import/export only |

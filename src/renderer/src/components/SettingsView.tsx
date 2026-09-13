@@ -696,7 +696,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
         </select>
       </Field>
       <Toggle checked={settings.claude.useProviderKey} onChange={(v) => update({ claude: { ...settings.claude, useProviderKey: v } })} label="Pass the stored Anthropic API key to Anthropic's own endpoint" />
-      <p className="muted small">Claude Code runs against any Anthropic-compatible endpoint. Add one under Providers with Kind <strong>Anthropic-compatible</strong> plus its key; its models then appear for this harness, and picking one wires that endpoint automatically. Endpoints that publish no catalog can have model ids added there. This toggle only affects Anthropic's own endpoint: on sends the stored API key, off keeps the Claude Code login.</p>
+      <p className="muted small">Claude Code runs against any provider that publishes an Anthropic-format endpoint. OpenRouter and DeepSeek do, so once their key is stored their catalogs appear for this harness automatically and the endpoint follows the model you pick. Anything else can be added under Providers with Kind <strong>Anthropic-compatible</strong>. This toggle only affects Anthropic's own endpoint: on sends the stored API key, off keeps the Claude Code login.</p>
       {bin('claude', 'claude path override')}
       <h3>Codex</h3>
       <Field label="Runtime">

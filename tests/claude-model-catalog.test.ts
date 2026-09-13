@@ -46,6 +46,28 @@ describe('Claude model catalog', () => {
     expect(r.models.some((m) => m.id === 'claude-sonnet-5' && m.provider === 'anthropic')).toBe(true);
   });
 
+  it('lists a vendor\u2019s own Anthropic-format catalog (OpenRouter, DeepSeek)', async () => {
+    const r = await list([
+      provider({ id: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com' }),
+      provider({
+        id: 'openrouter',
+        kind: 'openrouter',
+        name: 'OpenRouter',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        models: [{ id: 'z-ai/glm-4.6', provider: 'openrouter', displayName: 'GLM 4.6' }]
+      }),
+      provider({
+        id: 'deepseek',
+        kind: 'deepseek',
+        name: 'DeepSeek',
+        baseUrl: 'https://api.deepseek.com',
+        models: [{ id: 'deepseek-v4-pro', provider: 'deepseek', displayName: 'DeepSeek V4 Pro' }]
+      })
+    ]);
+    expect(r.models.find((m) => m.id === 'z-ai/glm-4.6')?.provider).toBe('openrouter');
+    expect(r.models.find((m) => m.id === 'deepseek-v4-pro')?.provider).toBe('deepseek');
+  });
+
   it('ignores disabled providers and providers that cannot host Claude Code', async () => {
     const r = await list([
       provider({ id: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com' }),

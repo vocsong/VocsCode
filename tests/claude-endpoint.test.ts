@@ -13,6 +13,8 @@ import { ClaudeAdapter, claudeProviderEnv, claudeProviderFor } from '../src/main
 
 const ANTHROPIC: ProviderConfig = { id: 'anthropic', kind: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com', hasApiKey: false, models: [], enabled: true };
 const GATEWAY: ProviderConfig = { id: 'zai', kind: 'anthropic', name: 'Z.AI (GLM)', baseUrl: 'https://api.z.ai/api/anthropic', hasApiKey: false, models: [], enabled: true };
+const OPENROUTER: ProviderConfig = { id: 'openrouter', kind: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', hasApiKey: false, models: [], enabled: true };
+const DEEPSEEK: ProviderConfig = { id: 'deepseek', kind: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', hasApiKey: false, models: [], enabled: true };
 const OPENAI: ProviderConfig = { id: 'openai', kind: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', hasApiKey: false, models: [], enabled: true };
 
 function settings(opts: { useProviderKey?: boolean; providers?: ProviderConfig[] } = {}): AppSettings {
@@ -75,6 +77,7 @@ afterEach(() => {
 describe('Claude provider resolution', () => {
   it('uses the provider the model came from', () => {
     expect(claudeProviderFor(settings({ providers: [ANTHROPIC, GATEWAY] }), { provider: 'zai', model: 'glm-4.6' })?.id).toBe('zai');
+    expect(claudeProviderFor(settings({ providers: [ANTHROPIC, OPENROUTER] }), { provider: 'openrouter', model: 'z-ai/glm-4.6' })?.id).toBe('openrouter');
   });
 
   it('falls back to the built-in Anthropic provider for an unknown or absent provider', () => {
@@ -109,6 +112,19 @@ describe('Claude endpoint env', () => {
       ANTHROPIC_API_KEY: undefined,
       ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic'
     });
+  });
+
+  it('routes a mapped vendor to its own Anthropic endpoint with a bearer token', () => {
+    expect(claudeProviderEnv(settings(), OPENROUTER, 'sk-or')).toEqual({
+      ANTHROPIC_API_KEY: undefined,
+      ANTHROPIC_BASE_URL: 'https://openrouter.ai/api',
+      ANTHROPIC_AUTH_TOKEN: 'sk-or'
+    });
+    expect(claudeProviderEnv(settings(), DEEPSEEK, 'sk-ds').ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic');
+  });
+
+  it('leaves a provider with no Anthropic route alone', () => {
+    expect(claudeProviderEnv(settings(), OPENAI, 'sk-openai')).toEqual({});
   });
 
   it('normalizes a trailing slash and does nothing without a provider', () => {

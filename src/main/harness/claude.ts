@@ -15,7 +15,7 @@ import {
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { toClaude } from '../mcp/effective';
 import { findContextWindow } from '../models/static-models';
-import { isAnthropicGateway, isAnthropicWireProvider } from '../../shared/providers';
+import { anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvider, isClaudeGatewayProvider } from '../../shared/providers';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -191,8 +191,11 @@ export class ClaudeAdapter implements HarnessAdapter {
     const s = this.ctx.settings();
     const provider = claudeProviderFor(s, this.ctx.session().config.model ?? this.ctx.session().activeModel);
     if (provider) this.providerId = provider.id;
-    this.gateway = isAnthropicGateway(provider);
-    const key = provider ? await this.ctx.getApiKey(provider.id) : undefined;
+    this.gateway = isClaudeGatewayProvider(provider);
+    const stored = provider ? await this.ctx.getApiKey(provider.id) : undefined;
+    // A provider whose key lives in its env var has to be handed over explicitly: the child inherits
+    // the process env, but ANTHROPIC_AUTH_TOKEN is what the gateway reads.
+    const key = stored ?? (provider?.envKey ? process.env[provider.envKey] : undefined);
     const overlay = claudeProviderEnv(s, provider, key);
     let auth = 'login';
     if (Object.keys(overlay).length) {
@@ -632,28 +635,24 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 }
 
-/** Anthropic's own endpoint is the only non-gateway anthropic-kind provider. */
-function normalizeBaseUrl(baseUrl: string | undefined): string {
-  return (baseUrl ?? '').trim().replace(/\/+$/, '');
-}
-
-/** The Anthropic-compatible provider that backs a Claude session: the provider its model came from
- *  when that provider can host Claude Code, else the built-in Anthropic provider. */
+/** The Claude-capable provider that backs a session: the provider its model came from when that
+ *  provider can host Claude Code, else the built-in Anthropic provider. */
 export function claudeProviderFor(settings: AppSettings, model: ModelRef | undefined): ProviderConfig | undefined {
-  const compatible = settings.providers.filter(isAnthropicWireProvider);
-  return compatible.find((p) => p.id === model?.provider) ?? compatible.find((p) => p.id === 'anthropic') ?? compatible[0];
+  const capable = settings.providers.filter(isClaudeCapableProvider);
+  return capable.find((p) => p.id === model?.provider) ?? capable.find((p) => p.id === 'anthropic') ?? capable[0];
 }
 
 /**
- * Env overlay that points Claude Code at an Anthropic-compatible provider. A gateway is wired from
- * its base URL automatically (a stored key becomes a bearer token, and an inherited Anthropic
- * x-api-key is cleared so it is not sent to the gateway). Anthropic's own endpoint passes the
- * stored key only when the user opted in, and otherwise leaves Claude Code's login alone.
+ * Env overlay that points Claude Code at a provider's Anthropic-format endpoint. Every non-Anthropic
+ * route is wired from that base URL automatically (a stored key becomes a bearer token, and an
+ * inherited Anthropic x-api-key is cleared so it is not sent to the gateway). Anthropic's own
+ * endpoint passes the stored key only when the user opted in, and otherwise keeps the login.
  */
 export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, apiKey: string | undefined): Record<string, string | undefined> {
   if (!provider) return {};
-  if (isAnthropicGateway(provider)) {
-    const overlay: Record<string, string | undefined> = { ANTHROPIC_API_KEY: undefined, ANTHROPIC_BASE_URL: normalizeBaseUrl(provider.baseUrl) };
+  const baseUrl = anthropicBaseUrlFor(provider);
+  if (baseUrl && baseUrl !== ANTHROPIC_DEFAULT_BASE_URL) {
+    const overlay: Record<string, string | undefined> = { ANTHROPIC_API_KEY: undefined, ANTHROPIC_BASE_URL: baseUrl };
     if (apiKey) overlay.ANTHROPIC_AUTH_TOKEN = apiKey;
     return overlay;
   }

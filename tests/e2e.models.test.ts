@@ -144,8 +144,8 @@ describe.runIf(enabled)('model picker before the first message', () => {
   }, 180_000);
 
   it('offers an Anthropic-compatible provider\u2019s models to the Claude harness', async () => {
-    // Claude Code only speaks the Anthropic API, so a gateway has to be added as an
-    // Anthropic-compatible provider; its models must then be selectable in the new-session dialog.
+    // Claude Code only speaks the Anthropic API: a mapped vendor (OpenRouter, DeepSeek) or an added
+    // Anthropic-compatible gateway has to appear in the new-session dialog for the Claude harness.
     const tmp = path.join(os.tmpdir(), `vocs-code-claude-models-${Date.now()}`);
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -163,15 +163,27 @@ describe.runIf(enabled)('model picker before the first message', () => {
       models: [{ id: 'glm-4.6', provider: 'zai', displayName: 'GLM-4.6' }],
       enabled: true
     };
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { providers: [gateway] }), 'utf8');
+    const openrouter: ProviderConfig = {
+      id: 'openrouter',
+      kind: 'openrouter',
+      name: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      hasApiKey: false,
+      models: [{ id: 'z-ai/glm-4.6', provider: 'openrouter', displayName: 'GLM 4.6' }],
+      enabled: true
+    };
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { providers: [gateway, openrouter] }), 'utf8');
 
     const win = await launch(userData);
     await openNewSession(win);
     await pickHarness(win, /^Claude Agent SDK$/);
-    await pickModel(win, 'zai/glm-4.6');
-
     const picker = win.locator('.ns-col-model .model-picker');
-    await expect.poll(async () => picker.locator('.mp-row.active .mp-name[title="zai/glm-4.6"]').count(), { timeout: 10_000 }).toBe(1);
-    await win.screenshot({ path: path.join(shots, 'models-03-claude-gateway.png') });
+    await picker.locator('.mp-row').first().waitFor({ timeout: 60_000 });
+    await expect.poll(async () => picker.locator('.mp-name[title="zai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
+    await expect.poll(async () => picker.locator('.mp-name[title="openrouter/z-ai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
+    await pickModel(win, 'openrouter/z-ai/glm-4.6');
+
+    await expect.poll(async () => picker.locator('.mp-row.active .mp-name[title="openrouter/z-ai/glm-4.6"]').count(), { timeout: 10_000 }).toBe(1);
+    await win.screenshot({ path: path.join(shots, 'models-03-claude-providers.png') });
   }, 180_000);
 });

@@ -35,7 +35,7 @@ export const HARNESSES: HarnessDescriptor[] = [
     tagline: 'Claude Code harness, embedded',
     vendor: 'Anthropic',
     description:
-      'Runs the Claude Code agent loop through @anthropic-ai/claude-agent-sdk with the full built-in tool set, hooks, MCP, and file checkpointing. Uses your Claude Code login (system CLI), an Anthropic API key, or any Anthropic-compatible provider added under Settings → Providers.',
+      'Runs the Claude Code agent loop through @anthropic-ai/claude-agent-sdk with the full built-in tool set, hooks, MCP, and file checkpointing. Uses your Claude Code login (system CLI), an Anthropic API key, or the Anthropic-format catalog of a configured provider — OpenRouter and DeepSeek publish one, and any vendor can be added as an Anthropic-compatible provider.',
     docsUrl: 'https://code.claude.com/docs/en/agent-sdk/typescript',
     capabilities: {
       streaming: true,
