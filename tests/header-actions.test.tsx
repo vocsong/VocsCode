@@ -60,6 +60,21 @@ describe('header actions', () => {
     expect(container.querySelector('[aria-label="More"]')).toBeNull();
   });
 
+  it('shows the harness label in the controls row, left of the model pill, with the session row tone', () => {
+    const { container } = setup({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    const pills = container.querySelector('.header-pills') as HTMLElement;
+    const label = pills.querySelector('.badge') as HTMLElement;
+    expect(label).toBeTruthy();
+    expect(label.textContent).toContain('Claude');
+    // Same tone class the sidebar session row uses for this harness.
+    expect(label.classList.contains('badge-amber')).toBe(true);
+    // Ordered before the model selector pill in the same row.
+    const model = pills.querySelector('[title="Model"]') as HTMLElement;
+    expect(label.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // No longer in the title row.
+    expect((container.querySelector('.header-title') as HTMLElement).querySelector('.badge')).toBeNull();
+  });
+
   it('toggles thinking from the actions row, below the panel toggle', () => {
     const { container } = setup();
     const actions = container.querySelector('.header-actions') as HTMLElement;

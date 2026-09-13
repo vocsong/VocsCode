@@ -2,7 +2,7 @@ import React from 'react';
 import type { ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
-import { basename, fmtCost, fmtTokens, harnessShort } from '../format';
+import { basename, fmtCost, fmtTokens, harnessShort, harnessTone } from '../format';
 import { archiveSession, setSessionEffort } from '../sessionActions';
 import { useSessionModels } from '../models';
 import { useGitSummary } from '../gitReads';
@@ -48,10 +48,6 @@ export function Header({ session }: { session: SessionMeta }) {
         <span className="header-name" data-testid="session-title" title={session.title}>
           {session.title}
         </span>
-        <Badge tone="neutral" title={h.name}>
-          {harnessShort(session.config.harness)}
-          {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
-        </Badge>
         <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
           <Icon name="folder" size={12} /> {basename(session.cwd)}
         </button>
@@ -67,6 +63,10 @@ export function Header({ session }: { session: SessionMeta }) {
 
       <div className="header-controls">
         <div className="header-pills">
+        <Badge tone={harnessTone(session.config.harness)} title={h.name}>
+          {harnessShort(session.config.harness)}
+          {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
+        </Badge>
         <Dropdown align="right" width={380} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {current?.model ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
           {(close) => (
             <ModelPicker
