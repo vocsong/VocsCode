@@ -10,6 +10,7 @@ const invokeMock = vi.fn();
 };
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { ErrorBoundary } from '../src/renderer/src/ErrorBoundary';
 import { OnboardingWizard } from '../src/renderer/src/components/OnboardingWizard';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { Sidebar } from '../src/renderer/src/components/Sidebar';
@@ -67,6 +68,31 @@ afterEach(() => {
 });
 
 const toastTexts = () => useStore.getState().toasts.map((t) => t.text);
+
+describe('render errors', () => {
+  it('shows a reload screen and reports the exception instead of leaving a blank window', async () => {
+    const Boom = (): React.ReactNode => {
+      throw new Error('kaboom');
+    };
+    // React logs the caught render error to console.error; keep the test output clean.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      render(
+        <ErrorBoundary>
+          <Boom />
+        </ErrorBoundary>
+      );
+      expect(screen.getByText('The interface hit an error')).toBeTruthy();
+      expect(screen.getByText('kaboom')).toBeTruthy();
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('app:rendererError', expect.objectContaining({ message: 'kaboom' })));
+
+      fireEvent.click(screen.getByText('Reload'));
+      expect(invokeMock).toHaveBeenCalledWith('window:reload', undefined);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+});
 
 describe('availability check failures', () => {
   it('records the failure, renders a retry, and clears the error on a successful retry', async () => {
