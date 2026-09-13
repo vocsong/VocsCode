@@ -125,6 +125,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const custom = await this.ctx.getApiKey(meta.config.codexModelProvider.id);
       if (custom) env[meta.config.codexModelProvider.envKey] = custom;
     }
+    this.ctx.log('info', `spawning codex app-server: ${bin.path} (${bin.source} runtime) in ${meta.cwd}`);
     const child = spawnTool(bin.path, ['app-server'], { cwd: meta.cwd, env });
     this.rpc = new JsonRpcStdioClient(child);
     try {

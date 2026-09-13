@@ -22,11 +22,26 @@ interface LongTaskEntry extends PerformanceEntry {
   attribution?: { containerType?: string; containerName?: string; containerSrc?: string }[];
 }
 
-let started = false;
+/** A component erroring on every render must not turn into a log flood. */
+const MAX_ERROR_REPORTS_PER_MINUTE = 20;
 
-/** An exception the renderer caught (React error boundary, global handler) goes to the main log. */
+let started = false;
+let errorReports = 0;
+let errorWindowStart = 0;
+
+/** An exception the renderer caught (React error boundary, global handler) goes to the main log. Never throws. */
 export function reportRendererError(message: string, stack?: string, source?: string): void {
-  void invoke('app:rendererError', { message: message.slice(0, 2000), stack: stack?.slice(0, 8000), source }).catch(() => undefined);
+  const now = Date.now();
+  if (now - errorWindowStart > 60_000) {
+    errorWindowStart = now;
+    errorReports = 0;
+  }
+  if (++errorReports > MAX_ERROR_REPORTS_PER_MINUTE) return;
+  try {
+    void invoke('app:rendererError', { message: message.slice(0, 2000), stack: stack?.slice(0, 8000), source }).catch(() => undefined);
+  } catch {
+    /* no bridge (tests, a torn-down window) */
+  }
 }
 
 export function startDiagnostics(): void {

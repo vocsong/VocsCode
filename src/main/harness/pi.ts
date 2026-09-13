@@ -127,6 +127,8 @@ export class PiAdapter implements HarnessAdapter {
       }
     }
 
+    // Which binary answered is the first question when pi misbehaves; the args carry no secrets (env does).
+    this.ctx.log('info', `spawning pi: ${bin.path} (${bin.source} runtime) in ${meta.cwd}`);
     const child = spawnTool(bin.path, args, { cwd: meta.cwd, env });
     this.child = child;
     const splitter = new LineSplitter((line) => this.handleLine(line));

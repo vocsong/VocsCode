@@ -202,6 +202,7 @@ export class CursorAdapter implements HarnessAdapter {
         const agent = await Agent.resume(resumeId, opts);
         this.agent = agent;
         this.ctx.updateRef({ cursorAgentId: agent.agentId });
+        this.ctx.log('info', `cursor agent ${agent.agentId} resumed (mode=${opts.mode}, model=${this.model ? JSON.stringify(this.model) : 'default'})`);
         return agent;
       } catch (e) {
         // A stale/missing stored agent must not wedge the session: drop the id and start fresh.
@@ -212,6 +213,7 @@ export class CursorAdapter implements HarnessAdapter {
     const agent = await Agent.create(opts);
     this.agent = agent;
     this.ctx.updateRef({ cursorAgentId: agent.agentId });
+    this.ctx.log('info', `cursor agent ${agent.agentId} created (mode=${opts.mode}, sandbox=${opts.local?.sandboxOptions?.enabled ? 'on' : 'off'})`);
     return agent;
   }
 

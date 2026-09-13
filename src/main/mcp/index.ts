@@ -46,12 +46,14 @@ export async function resolveForSession(scope: SessionScope, deps: McpHostDeps):
   const globals = scope.settings.mcpServers ?? [];
   const repo = await readProjectMcp(scope.cwd);
   const chosen = effectiveServers({ global: globals, repo: repo.servers, state: stateFor(scope.settings, scope.projectRoot), harness: scope.harness, support });
+  if (repo.error) deps.log?.('warn', `mcp: ${repo.file} could not be used: ${repo.error}`);
   const out: ResolvedServer[] = [];
   for (const def of chosen) {
     const resolved = await resolveVars(def, { env: process.env, secret: (name) => deps.getSecret(secretKeyFor(name)) });
     if (resolved.missing.length) deps.log?.('warn', `mcp ${def.id}: no value for ${resolved.missing.join(', ')}`);
     out.push({ ...resolved, def: normalizeStdio(resolved.def, { which: (cmd) => which(cmd) }) });
   }
+  if (out.length) deps.log?.('debug', `mcp: ${out.length} server(s) for ${scope.harness} (${support}): ${out.map((r) => r.def.id).join(', ')}`);
   return out;
 }
 

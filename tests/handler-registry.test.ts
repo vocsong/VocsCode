@@ -110,9 +110,17 @@ describe('handler registry', () => {
     fsSync.writeFileSync(path.join(ws, 'sub', 'b.txt'), 'world', 'utf8');
   });
 
-  it('rejects unknown channels', async () => {
-    const { registry } = stubDeps();
+  it('rejects unknown channels and leaves a log line', async () => {
+    const { registry, logs } = stubDeps();
     await expect(registry.invoke('nope:channel', {})).rejects.toThrow('Unknown channel');
+    expect(logs).toContainEqual(['warn', 'ipc: unknown channel nope:channel']);
+  });
+
+  it('logs a failing handler by channel and error, never by request payload', async () => {
+    const { registry, logs } = stubDeps();
+    await expect(registry.invoke('mcp:project', { sessionId: 's_missing' })).rejects.toThrow('Session not found');
+    expect(logs).toContainEqual(['warn', 'ipc mcp:project failed: Session not found']);
+    expect(logs.some(([, m]) => m.includes('s_missing'))).toBe(false);
   });
 
   it('serves a representative set of channels', () => {

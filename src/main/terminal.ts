@@ -257,6 +257,7 @@ export class TerminalManager {
       try {
         this.spawnInto(t, resolveShell(this.deps.settings(), t.info.shell));
       } catch (e) {
+        // spawnInto already logged the cause; the tab shows it too so the user is not left with a blank screen.
         this.feed(t, `\x1b[31m${errorMessage(e)}\x1b[0m\r\n`);
         t.info.exit = { code: -1 };
       }
@@ -322,12 +323,15 @@ export class TerminalManager {
   /** Force-kills the shell and its children; the tab stays so the output can still be read. */
   kill(id: string): void {
     const t = this.must(id);
-    if (t.pty) killProcessTree(t.pty);
+    if (!t.pty) return;
+    this.deps.log('info', `terminal ${id} (${t.info.shellName}, pid ${t.info.pid ?? '?'}): killing the shell and its process tree`);
+    killProcessTree(t.pty);
   }
 
   /** Starts a fresh shell in the same tab, in the directory the old one reported last. */
   restart(id: string): TerminalInfo {
     const t = this.must(id);
+    this.deps.log('info', `terminal ${id} (${t.info.shellName}): restart requested`);
     if (t.pty) {
       const old = t.pty;
       t.gen++; // the old exit handler must not close or annotate the tab
@@ -357,7 +361,8 @@ export class TerminalManager {
     for (const d of t.disposables) d.dispose();
     t.screen.dispose();
     this.pushList();
-    await fs.rm(this.file(id), { force: true }).catch(() => undefined);
+    this.deps.log('debug', `terminal ${id} (${t.info.shellName}) closed`);
+    await fs.rm(this.file(id), { force: true }).catch((e) => this.deps.log('debug', `terminal ${id}: could not remove its snapshot file: ${errorMessage(e)}`));
   }
 
   clear(id: string): void {
@@ -425,21 +430,30 @@ export class TerminalManager {
     let files: string[] = [];
     try {
       files = (await fs.readdir(this.deps.dir)).filter((f) => f.endsWith('.json'));
-    } catch {
+    } catch (e) {
+      // No directory yet on a fresh profile; anything else means the snapshots are unreachable.
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') this.deps.log('warn', `could not read persisted terminals from ${this.deps.dir}: ${errorMessage(e)}`);
       return;
     }
     const restore = this.deps.settings().restoreOnStartup;
+    let restored = 0;
+    let dropped = 0;
     for (const f of files) {
       const full = path.join(this.deps.dir, f);
-      const data = await readJson<Persisted | undefined>(full, undefined);
+      const data = await readJson<Persisted | undefined>(full, undefined, { log: this.deps.log });
       if (!restore || !data?.info?.id || !this.deps.cwdOf(data.info.sessionId)) {
-        await fs.rm(full, { force: true }).catch(() => undefined);
+        dropped++;
+        await fs.rm(full, { force: true }).catch((err) => this.deps.log('debug', `could not remove stale terminal snapshot ${full}: ${errorMessage(err)}`));
         continue;
       }
       const t = this.newTerm({ ...data.info, pid: undefined, exit: undefined, restored: true }, data.cols || 80, data.rows || 24);
       t.screen.write(data.snapshot ?? '');
       t.seq = 1;
       this.terms.set(t.info.id, t);
+      restored++;
+    }
+    if (restored || dropped) {
+      this.deps.log('info', `restored ${restored} terminal tab(s) from the previous run${dropped ? `; dropped ${dropped} snapshot(s) ${restore ? 'whose session no longer exists' : 'because restore on startup is off'}` : ''}`);
     }
   }
 
@@ -482,13 +496,23 @@ export class TerminalManager {
   }
 
   private spawnInto(t: Term, shell: ResolvedShell): void {
-    const spawn = this.deps.spawn ?? loadPty().spawn;
+    let spawn: PtySpawn;
+    try {
+      spawn = this.deps.spawn ?? loadPty().spawn;
+    } catch (e) {
+      // Every terminal on this machine is broken, not just this tab: that is an error, not a warning.
+      this.deps.log('error', errorMessage(e));
+      throw e;
+    }
     let proc: IPty;
     try {
       proc = spawn(shell.file, shell.args, { name: 'xterm-256color', cols: t.cols, rows: t.rows, cwd: t.info.cwd, env: terminalEnv(process.env, this.deps.version) });
     } catch (e) {
-      throw new Error(`Could not start ${shell.name} (${shell.file}) in ${t.info.cwd}: ${errorMessage(e)}`);
+      const message = `Could not start ${shell.name} (${shell.file}) in ${t.info.cwd}: ${errorMessage(e)}`;
+      this.deps.log('warn', `terminal ${t.info.id}: ${message}`);
+      throw new Error(message);
     }
+    this.deps.log('debug', `terminal ${t.info.id}: started ${shell.name} (${shell.file}) pid ${proc.pid || '?'} in ${t.info.cwd}`);
     const gen = ++t.gen;
     t.pty = proc;
     t.shellFile = shell.file;
@@ -517,6 +541,7 @@ export class TerminalManager {
         void this.close(t.info.id);
         return;
       }
+      this.deps.log('info', `terminal ${t.info.id} (${shell.name}) exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}`);
       this.feed(t, `\r\n\x1b[2m[process exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}]\x1b[0m\r\n`);
       this.pushList();
     });

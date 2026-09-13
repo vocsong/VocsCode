@@ -1,23 +1,37 @@
 /** Filesystem helpers shared by the main process: JSON and JSONL persistence, and path containment checks. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import type { Logger } from '../log';
+
+export interface ReadOptions {
+  /** Where to report a quarantined or unreadable file; a store silently falling back to empty is a support nightmare. */
+  log?: Logger;
+}
 
 export async function ensureDir(dir: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true });
 }
 
-export async function readJson<T>(file: string, fallback: T): Promise<T> {
+export async function readJson<T>(file: string, fallback: T, options: ReadOptions = {}): Promise<T> {
   try {
     const raw = await fs.readFile(file, 'utf8');
     return JSON.parse(raw) as T;
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return fallback;
+    const reason = e instanceof Error ? e.message : String(e);
+    if (code) {
+      // Not corruption but an unreadable file (permissions, a lock): there is nothing to quarantine.
+      options.log?.('warn', `could not read ${file} (${code}); using defaults: ${reason}`);
+      return fallback;
+    }
     // Corrupt JSON: keep a backup and return fallback rather than crashing the app.
+    const backup = `${file}.corrupt-${Date.now()}`;
     try {
-      await fs.copyFile(file, `${file}.corrupt-${Date.now()}`);
-    } catch {
-      /* ignore */
+      await fs.copyFile(file, backup);
+      options.log?.('warn', `${file} is not valid JSON (${reason}); moved a copy to ${backup} and using defaults`);
+    } catch (copyError) {
+      options.log?.('warn', `${file} is not valid JSON (${reason}) and could not be backed up (${copyError instanceof Error ? copyError.message : String(copyError)}); using defaults`);
     }
     return fallback;
   }
@@ -89,21 +103,25 @@ export async function appendLine(file: string, line: string): Promise<void> {
   await fs.appendFile(file, line + '\n', 'utf8');
 }
 
-export async function readJsonl<T>(file: string): Promise<T[]> {
+export async function readJsonl<T>(file: string, options: ReadOptions = {}): Promise<T[]> {
   try {
     const raw = await fs.readFile(file, 'utf8');
     const out: T[] = [];
+    let skipped = 0;
     for (const line of raw.split('\n')) {
       const t = line.trim();
       if (!t) continue;
       try {
         out.push(JSON.parse(t) as T);
       } catch {
-        /* skip bad line */
+        skipped++; // a torn last line after a crash is expected; anything more is worth a look
       }
     }
+    if (skipped) options.log?.('warn', `${file}: skipped ${skipped} unparsable line(s) out of ${out.length + skipped}`);
     return out;
-  } catch {
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') options.log?.('warn', `could not read ${file}: ${e instanceof Error ? e.message : String(e)}`);
     return [];
   }
 }

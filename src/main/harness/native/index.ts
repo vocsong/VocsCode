@@ -69,6 +69,8 @@ export class NativeAdapter implements HarnessAdapter {
     }
     this.model = meta.activeModel ?? meta.config.model ?? this.defaultModel();
     this.effort = this.ctx.effort();
+    this.ctx.log('info', `native loop: model=${this.model ? `${this.model.provider}/${this.model.model}` : 'none configured'}${this.effort ? ` effort=${this.effort}` : ''}, ${this.history.length} history message(s) restored`);
+    if (!this.model) this.ctx.log('warn', 'native loop has no usable model: no enabled provider with a key; the first message will fail');
     if (this.model) this.ctx.updateMeta({ activeModel: this.model });
     this.ctx.updateRef({ nativeHistory: true });
     this.ctx.emit({ type: 'status', status: 'idle' });

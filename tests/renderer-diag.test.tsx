@@ -1,5 +1,6 @@
 /** Loop-lag reporting (src/renderer/src/diag.ts): a visible window reports a real stall, a hidden
- *  window stays quiet, and becoming visible again does not report the whole hidden period.
+ *  window stays quiet, and becoming visible again does not report the whole hidden period. Error
+ *  reports are capped per minute so a render loop cannot flood the main log.
  *  @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -59,5 +60,19 @@ describe('loop-lag reporting', () => {
     now = 3_600_250;
     await vi.advanceTimersByTimeAsync(250);
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('renderer error reporting', () => {
+  it('caps reports so a component erroring on every render does not flood the log', async () => {
+    const { reportRendererError } = await import('../src/renderer/src/diag');
+    for (let i = 0; i < 40; i++) reportRendererError(`repeat ${i}`, 'Error: repeat\n  at render');
+    const reports = invokeMock.mock.calls.filter(([channel]) => channel === 'app:rendererError');
+    expect(reports).toHaveLength(20);
+    expect(reports[0][1]).toEqual({ message: 'repeat 0', stack: 'Error: repeat\n  at render', source: undefined });
+    // A new minute opens a new budget.
+    vi.setSystemTime(Date.now() + 61_000);
+    reportRendererError('later');
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'app:rendererError')).toHaveLength(21);
   });
 });

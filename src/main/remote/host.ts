@@ -106,15 +106,19 @@ export class RemoteHost {
   async enable(relayUrl: string, enrollToken: string): Promise<void> {
     this.generation++;
     await this.disable();
-    this.creds = (await this.loadCreds()) ?? { identity: await generateIdentity(), relayUrl, enrollToken, clients: {} };
+    const stored = await this.loadCreds();
+    this.creds = stored ?? { identity: await generateIdentity(), relayUrl, enrollToken, clients: {} };
     this.creds.relayUrl = relayUrl;
     if (enrollToken) this.creds.enrollToken = enrollToken;
     await this.saveCreds();
+    // The relay URL is configuration; tokens and keys stay out of the log.
+    this.deps.log('info', `remote: enabled for ${relayUrl} (${stored ? `${Object.keys(stored.clients).length} paired device(s)` : 'new identity'}${this.creds.deviceId ? ', enrolled' : ', not yet enrolled'})`);
     await this.connect();
   }
 
   async disable(): Promise<void> {
     this.generation++; // cancels any pending reconnect timer
+    if (this.status !== 'off') this.deps.log('info', `remote: disabled (${this.sessions.size} client session(s) dropped)`);
     this.ws?.close();
     this.ws = null;
     this.sessions.clear();
@@ -186,6 +190,7 @@ export class RemoteHost {
     try {
       return JSON.parse(raw) as HostCredentials;
     } catch {
+      this.deps.log('warn', 'remote: stored host credentials are unreadable; a new identity will be generated and every device must pair again');
       return null;
     }
   }
@@ -204,16 +209,19 @@ export class RemoteHost {
     this.ws = ws;
     ws.on('open', () => {
       this.status = this.creds?.deviceId ? 'online' : 'connecting';
+      this.deps.log('info', `remote: relay connection open (${this.creds?.deviceId ? 'online' : 'awaiting enrollment'})`);
       this.push();
     });
     ws.on('message', (data) => void this.onMessage(String(data)));
-    ws.on('close', () => {
+    ws.on('close', (code: number) => {
       // Only the current socket's close counts: a stale socket (closed on reconnect)
       // must not clobber the new connection or wipe live sessions.
       if (this.ws !== ws) return;
       this.ws = null;
+      const dropped = this.sessions.size;
       this.sessions.clear();
       if (this.status !== 'off') {
+        this.deps.log('info', `remote: relay connection closed (code ${code}${dropped ? `, ${dropped} client session(s) dropped` : ''}); reconnecting in 3s`);
         this.status = 'connecting';
         this.push();
         const gen = this.generation;
@@ -223,6 +231,7 @@ export class RemoteHost {
       }
     });
     ws.on('error', (e: Error) => {
+      this.deps.log('warn', `remote: relay connection error: ${e.message}`);
       this.status = 'error';
       this.detail = e.message;
       this.push();
@@ -234,17 +243,20 @@ export class RemoteHost {
     try {
       msg = JSON.parse(raw) as WsMessage;
     } catch {
+      this.deps.log('debug', 'remote: dropped a non-JSON relay message');
       return;
     }
     switch (msg.t) {
       case 'pair.request': {
         this.pendingRequest = { code: String(msg.code), name: String(msg.name ?? ''), platform: String(msg.platform ?? '') };
+        this.deps.log('info', `remote: pairing request from "${this.pendingRequest.name}" (${this.pendingRequest.platform}); awaiting the user's decision`);
         this.push();
         return;
       }
       case 'pair.result': {
         this.pendingRequest = undefined;
         this.pairing = undefined;
+        this.deps.log('info', `remote: pairing ${msg.decision === 'approve' ? 'approved' : 'denied'}${msg.webDeviceId ? ` for device ${msg.webDeviceId}` : ''}`);
         if (msg.decision === 'approve' && msg.hostToken && msg.hostDeviceId && msg.webDeviceId && msg.webPub && this.creds) {
           this.creds.deviceId = msg.hostDeviceId;
           this.creds.deviceToken = msg.hostToken;
@@ -266,7 +278,7 @@ export class RemoteHost {
         return;
       }
       case 'client.gone': {
-        if (msg.client) this.sessions.delete(String(msg.client));
+        if (msg.client && this.sessions.delete(String(msg.client))) this.deps.log('info', `remote: client ${msg.client} disconnected (${this.sessions.size} online)`);
         this.push();
         return;
       }
@@ -278,13 +290,18 @@ export class RemoteHost {
   private async onHandshake(from: string, payload: unknown): Promise<void> {
     if (!this.creds) return;
     const expected = this.creds.clients[from];
-    if (!expected) return;
+    if (!expected) {
+      // The relay routed a device this host never paired with (or one that was revoked).
+      this.deps.log('warn', `remote: ignored a handshake from unpaired device ${from}`);
+      return;
+    }
     try {
       const session = await hostAccept(this.creds.identity, payload as never, expected);
       this.sessions.set(from, { key: session.key, salt: session.salt, out: 0, identity: expected });
       this.ws?.send(JSON.stringify({ t: 'hs', to: from, seq: 0, payload: session.reply }));
+      this.deps.log('info', `remote: client ${from} connected (${this.sessions.size} online)`);
     } catch (e) {
-      this.deps.log('warn', `remote handshake failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.deps.log('warn', `remote handshake failed for ${from}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -303,6 +320,8 @@ export class RemoteHost {
       // Approvals are signed inside the e2e channel (§6.8): only a paired device key resolves.
       const signedOk = inner.channel !== 'approvals:respond' || (!!inner.sig && (await verify(session.identity, inner.request, inner.sig)));
       if (!allowed || !signedOk) {
+        // A paired client asking for a local-only channel is either an outdated web build or a probe.
+        this.deps.log('warn', `remote: refused ${inner.channel} from ${from} (${allowed ? 'missing or invalid approval signature' : 'channel not available remotely'})`);
         await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: 'channel not available remotely' });
         return;
       }

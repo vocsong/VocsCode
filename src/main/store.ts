@@ -1,5 +1,6 @@
 import path from 'node:path';
 import type { SessionMeta, TranscriptItem } from '../shared/types';
+import type { Logger } from './log';
 import { appendLine, ensureDir, exists, readJson, readJsonl, rmrf, writeJson } from './util/fs';
 import { promises as fs } from 'node:fs';
 
@@ -29,24 +30,34 @@ export class SessionStore {
   private transcriptWrites = new Map<string, Promise<void>>();
   /** Optional observers (the search indexer); set after construction to avoid a dependency cycle. */
   hooks: { onAppend?: (sessionId: string, item: TranscriptItem) => void; onRewrite?: (sessionId: string) => void; onRemove?: (sessionId: string) => void } = {};
+  private readonly log: Logger;
 
-  constructor(userData: string) {
+  constructor(userData: string, log: Logger = () => undefined) {
     this.root = path.join(userData, 'sessions');
     this.indexFile = path.join(userData, 'sessions.json');
+    this.log = log;
   }
 
   async load(): Promise<SessionMeta[]> {
     await ensureDir(this.root);
-    const loaded = await readJson<SessionMeta[]>(this.indexFile, []);
+    const loaded = await readJson<SessionMeta[]>(this.indexFile, [], { log: this.log });
     // A valid-JSON but wrong-shaped file must not abort boot; fall back to an empty index.
+    if (!Array.isArray(loaded)) this.log('warn', `${this.indexFile} is not a session list; starting with no sessions`);
     this.sessions = Array.isArray(loaded)
       ? loaded.filter((s): s is SessionMeta => !!s && typeof s === 'object' && isValidSessionId(s.id))
       : [];
+    const dropped = Array.isArray(loaded) ? loaded.length - this.sessions.length : 0;
+    if (dropped) this.log('warn', `${this.indexFile}: dropped ${dropped} malformed session entr${dropped === 1 ? 'y' : 'ies'}`);
     // Any session that was running when the app closed is now idle.
+    let reset = 0;
     for (const s of this.sessions) {
-      if (s.status === 'running' || s.status === 'awaiting' || s.status === 'starting') s.status = 'idle';
+      if (s.status === 'running' || s.status === 'awaiting' || s.status === 'starting') {
+        s.status = 'idle';
+        reset++;
+      }
       s.queued = 0;
     }
+    this.log('info', `loaded ${this.sessions.length} session(s)${reset ? `; ${reset} were still running at the last shutdown and are now idle` : ''}`);
     return this.sessions;
   }
 
@@ -100,7 +111,7 @@ export class SessionStore {
     // A renderer can request the transcript right after a pushed event promised it an item;
     // without this wait the snapshot read can race the pending append and drop that item.
     await (this.transcriptWrites.get(id) ?? Promise.resolve());
-    const rows = await readJsonl<TranscriptItem>(path.join(this.sessionDir(id), 'transcript.jsonl'));
+    const rows = await readJsonl<TranscriptItem>(path.join(this.sessionDir(id), 'transcript.jsonl'), { log: this.log });
     // Collapse upserts: keep insertion order of first occurrence, latest content.
     const order: string[] = [];
     const byId = new Map<string, TranscriptItem>();
@@ -132,7 +143,7 @@ export class SessionStore {
   async readNativeHistory<T>(id: string): Promise<T | null> {
     const file = path.join(this.sessionDir(id), 'native-history.json');
     if (!(await exists(file))) return null;
-    return readJson<T | null>(file, null);
+    return readJson<T | null>(file, null, { log: this.log });
   }
 
   async writeNativeHistory(id: string, history: unknown): Promise<void> {

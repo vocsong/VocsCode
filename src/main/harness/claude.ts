@@ -187,6 +187,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       const key = await this.ctx.getApiKey('anthropic');
       if (key) options.env = { ...(options.env ?? {}), ANTHROPIC_API_KEY: key };
     }
+    this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${s.claude.useProviderKey ? ' auth=stored-key' : ''}`);
     this.q = query({ prompt: this.input, options });
     this.pump = this.consume(this.q).catch((e) => {
       this.compactionWaiter?.reject(e instanceof Error ? e : new Error(errorMessage(e)));
@@ -326,8 +327,9 @@ export class ClaudeAdapter implements HarnessAdapter {
             item.changes = [change];
             this.ctx.emit({ type: 'item.upsert', item: { ...item } });
           }
-        } catch {
-          /* ignore */
+        } catch (e) {
+          // The edit itself succeeded (Claude ran it); only the diff preview is lost.
+          this.ctx.log('debug', `no diff preview for ${file}: ${errorMessage(e)}`);
         }
       }
     }
@@ -352,9 +354,10 @@ export class ClaudeAdapter implements HarnessAdapter {
             this.modelsEmitted = true;
             q.supportedModels()
               .then((models) => this.ctx.emit({ type: 'models', models: models.map(claudeModelToInfo) }))
-              .catch(() => {
+              .catch((e) => {
                 // Retry on the next init so the model picker is not permanently empty.
                 this.modelsEmitted = false;
+                this.ctx.log('debug', `supportedModels failed (${errorMessage(e)}); retrying on the next init`);
               });
           }
         } else if (msg.subtype === 'compact_boundary') {

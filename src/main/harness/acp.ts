@@ -124,6 +124,8 @@ export class AcpAdapter implements HarnessAdapter {
         }
       }
     }
+    // Preset args are user-visible configuration, not secrets (keys travel in env).
+    this.ctx.log('info', `spawning ACP agent ${preset.id}: ${command} ${args.join(' ')} in ${meta.cwd}`);
     const child = spawnTool(command, args, { cwd: meta.cwd, env });
     this.child = child;
     child.stderr?.on('data', (d: Buffer) => this.ctx.log('debug', `[acp:${preset.id}] ${d.toString().trimEnd()}`));
@@ -201,7 +203,7 @@ export class AcpAdapter implements HarnessAdapter {
       // Apply the configured model / effort if the agent exposes them.
       if (meta.config.model?.model) await this.setModel(meta.config.model).catch((e) => this.ctx.log('warn', `setModel: ${errorMessage(e)}`));
       const effort = this.ctx.effort();
-      if (effort) await this.setEffort(effort).catch(() => undefined);
+      if (effort) await this.setEffort(effort).catch((e) => this.ctx.log('debug', `setEffort(${effort}) not applied: ${errorMessage(e)}`));
     } catch (e) {
       // Handshake failed: tear the agent down so it cannot linger holding injected API keys.
       await this.killChild();
