@@ -79,6 +79,8 @@ export class RemoteHost {
   private pairing: { code: string; expiresAt: number } | undefined;
   private pendingRequest: { code: string; name: string; platform: string } | undefined;
   private readonly sessions = new Map<string, Session>();
+  /** Bumped on enable/disable so a pending reconnect timer can be invalidated. */
+  private generation = 0;
 
   constructor(
     private readonly deps: {
@@ -102,6 +104,7 @@ export class RemoteHost {
   }
 
   async enable(relayUrl: string, enrollToken: string): Promise<void> {
+    this.generation++;
     await this.disable();
     this.creds = (await this.loadCreds()) ?? { identity: await generateIdentity(), relayUrl, enrollToken, clients: {} };
     this.creds.relayUrl = relayUrl;
@@ -111,6 +114,7 @@ export class RemoteHost {
   }
 
   async disable(): Promise<void> {
+    this.generation++; // cancels any pending reconnect timer
     this.ws?.close();
     this.ws = null;
     this.sessions.clear();
@@ -212,7 +216,10 @@ export class RemoteHost {
       if (this.status !== 'off') {
         this.status = 'connecting';
         this.push();
-        setTimeout(() => void this.connect(), 3000);
+        const gen = this.generation;
+        setTimeout(() => {
+          if (gen === this.generation) void this.connect();
+        }, 3000);
       }
     });
     ws.on('error', (e: Error) => {

@@ -207,13 +207,17 @@ v1 account model: **accounts-lite** — a single provisioned account, no signup 
 billing flow. The device registry and routing are account-keyed from day one, so
 productizing later means adding signup + billing, not rework.
 
-**Status:** P0 and P1 implemented. P2 core implemented and integration-tested end-to-end
-(`tests/remote-e2e.test.ts`, real host against a fake relay running the real core):
-relay (`relay/` — Worker + Hub Durable Object, pairing registry, multi-host routing,
-offline queueing), desktop remote host (`src/main/remote/host.ts`, opt-in, filtered
-channel surface, stale-socket-safe reconnect), e2e crypto (`src/shared/crypto.ts`).
-Remaining P2: settings/IPC surface for enable + pairing UI, the relay-served web client
-(login + pairing screens), deploy to code.vocs.io.
+**Status:** P0 and P1 implemented. P2 implemented: relay (`relay/` — Worker + Hub Durable
+Object, pairing registry, multi-host routing, offline queueing, static web client served
+at the relay root), desktop remote host (`src/main/remote/host.ts`, opt-in, filtered
+channel surface, stale-socket-safe reconnect), e2e crypto (`src/shared/crypto.ts`),
+Settings UI (enable, pairing code display, pending-request approval, device revocation),
+relay web client (pairing screen + read-only sessions/transcripts/approvals), and a
+full-loop integration test (`tests/remote-e2e.test.ts`, real host + fake relay + real
+core; `tests/web-client.test.ts` drives the same loop through RelayClient's API).
+Remaining: real deployment (`cd relay && npx wrangler deploy`, secrets) — needs the
+Cloudflare account; QR pairing (deferred until the production relay URL exists); session
+creation UX without native dialogs (P3).
 
 Implementation notes: crypto primitives are P-256 ECDSA + ECDH, HKDF-SHA-256 and
 AES-256-GCM — all via WebCrypto so the identical module runs in Node and browsers with
