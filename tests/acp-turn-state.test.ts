@@ -5,10 +5,12 @@
  * dispatch are exercised; only the child process is fake.
  */
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as acp from '@agentclientprotocol/sdk';
 import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
+import type { ResolvedServer } from '../src/main/mcp/effective';
 import type { HarnessRef, PermissionMode, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { emptyUsage } from '../src/main/models/static-models';
 import { defaultSettings } from '../src/main/settings';
@@ -265,6 +267,35 @@ describe('acp adapter', () => {
     await h.adapter.start();
     expect(h.agent.requests.some((r) => r.method === 'session/resume')).toBe(false);
     expect(h.meta.harnessRef.acpSessionId).toBe('sess-new');
+  });
+
+  it('resolves a relative MCP command to an absolute path and skips the ones it cannot', async () => {
+    const h = makeHarness();
+    // The wrapped form normalizeStdio leaves on Windows is a bare `cmd`; ACP rejects any bare command.
+    const shell = process.platform === 'win32' ? 'cmd' : 'sh';
+    const servers: ResolvedServer[] = [
+      { def: { id: 'gitnexus', transport: 'stdio', command: shell, args: ['/c', 'npx', '-y', 'gitnexus@latest', 'mcp'] }, missing: [], secretEnvKeys: [], secretHeaderKeys: [] },
+      { def: { id: 'ghost', transport: 'stdio', command: 'vocs-code-mcp-not-installed' }, missing: [], secretEnvKeys: [], secretHeaderKeys: [] }
+    ];
+    h.ctx.mcpServers = async () => servers;
+    // dsh fails session/new outright on a relative command; the handshake must still complete.
+    h.agent.on('initialize', () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }));
+    h.agent.on('session/new', (params) => {
+      for (const [i, s] of (params.mcpServers as AnyRecord[]).entries()) {
+        if (!path.isAbsolute(s.command as string)) throw new Error(`mcpServers[${i}].command must be an absolute path`);
+      }
+      return { sessionId: 'sess-mcp' };
+    });
+
+    await h.adapter.start();
+
+    const req = h.agent.requests.find((r) => r.method === 'session/new');
+    const sent = req?.params.mcpServers as AnyRecord[];
+    expect(sent.map((s) => s.name)).toEqual(['gitnexus']);
+    expect(path.isAbsolute(sent[0].command)).toBe(true);
+    expect(h.meta.harnessRef.acpSessionId).toBe('sess-mcp');
+    expect(infoTexts(h.items, 'warn').some((t) => /ghost/.test(t))).toBe(true);
+    expect(h.events.at(-1)).toEqual({ type: 'status', status: 'idle' });
   });
 
   it('decodes dsh-style tuple model values and maps refs back to the raw option value', async () => {
