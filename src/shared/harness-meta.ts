@@ -2,6 +2,33 @@ import type { EffortLevel, HarnessDescriptor, HarnessId, PermissionMode } from '
 
 export const HARNESSES: HarnessDescriptor[] = [
   {
+    id: 'pi',
+    name: 'Pi',
+    tagline: 'Minimal, hackable, any provider',
+    vendor: 'Mario Zechner / community',
+    description:
+      "Runs the pi coding agent in RPC mode. Model-agnostic through pi's provider registry (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, Ollama, custom). Approvals are added by a bundled pi extension.",
+    docsUrl: 'https://github.com/badlogic/pi-mono',
+    capabilities: {
+      streaming: true,
+      approvals: true,
+      steer: true,
+      queue: true,
+      interrupt: true,
+      liveModelSwitch: true,
+      effort: true,
+      images: true,
+      dropsUnsupportedImages: true,
+      resume: true,
+      fork: true,
+      plan: true,
+      costReporting: true,
+      mcp: 'none',
+      permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
+      modelSource: 'harness'
+    }
+  },
+  {
     id: 'claude',
     name: 'Claude Agent SDK',
     tagline: 'Claude Code harness, embedded',
@@ -106,33 +133,6 @@ export const HARNESSES: HarnessDescriptor[] = [
       costReporting: false,
       mcp: 'inherit',
       permissionModes: ['plan', 'auto', 'full-auto'],
-      modelSource: 'harness'
-    }
-  },
-  {
-    id: 'pi',
-    name: 'Pi',
-    tagline: 'Minimal, hackable, any provider',
-    vendor: 'Mario Zechner / community',
-    description:
-      "Runs the pi coding agent in RPC mode. Model-agnostic through pi's provider registry (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, Ollama, custom). Approvals are added by a bundled pi extension.",
-    docsUrl: 'https://github.com/badlogic/pi-mono',
-    capabilities: {
-      streaming: true,
-      approvals: true,
-      steer: true,
-      queue: true,
-      interrupt: true,
-      liveModelSwitch: true,
-      effort: true,
-      images: true,
-      dropsUnsupportedImages: true,
-      resume: true,
-      fork: true,
-      plan: true,
-      costReporting: true,
-      mcp: 'none',
-      permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
   },
