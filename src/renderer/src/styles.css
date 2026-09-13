@@ -1555,6 +1555,17 @@ h4 {
      transcript overflows, leaving stray hairlines instead of cards. */
   flex-shrink: 0;
 }
+/* Virtual mode turns the flex gap into per-row padding so measured row heights match the offsets. */
+.transcript.virtual {
+  gap: 0;
+}
+.transcript.virtual > .transcript-row {
+  padding-bottom: 10px;
+}
+.transcript-spacer {
+  pointer-events: none;
+  flex-shrink: 0;
+}
 .transcript-loading,
 .transcript-empty {
   color: var(--fg-muted);

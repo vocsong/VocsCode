@@ -5,7 +5,7 @@ import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, harnessShort, relTime } from '../format';
 import { archiveSession } from '../sessionActions';
-import { useStore } from '../store';
+import { useStore, toastError } from '../store';
 import { Resizer } from './Resizer';
 import { FolderBranch } from './FolderBranch';
 import { ForkIntoDropdown } from './ForkInto';
@@ -345,7 +345,7 @@ export function Sidebar() {
                   session={s}
                   active={s.id === activeId && view === 'chat'}
                   customLabels={settings?.customLabels ?? []}
-                  onSelect={() => void setActive(s.id)}
+                  onSelect={() => void setActive(s.id).catch(toastError)}
                   toast={toast}
                   dnd={dnd}
                   dndHandlers={dndHandlers}
@@ -409,7 +409,12 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
     if (renameAction.current !== 'idle') return;
     renameAction.current = 'committed';
     setRenaming(false);
-    if (title.trim() && title !== s.title) await invoke('sessions:rename', { id: s.id, title: title.trim() });
+    if (!title.trim() || title === s.title) return;
+    try {
+      await invoke('sessions:rename', { id: s.id, title: title.trim() });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    }
   };
   const deleteRow = async () => {
     const ok = await askConfirm({
