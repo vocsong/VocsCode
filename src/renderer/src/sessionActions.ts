@@ -2,6 +2,7 @@
 import type { AppSettings, EffortLevel, SessionMeta } from '../../shared/types';
 import { invoke } from './api';
 import { askConfirm } from './components/ui';
+import { useStore } from './store';
 
 type Toast = (text: string, kind?: 'info' | 'success' | 'error') => void;
 
@@ -48,6 +49,9 @@ export async function archiveSession(s: SessionMeta, toast: Toast) {
       danger: true
     });
     if (!ok) return;
+    // The row stays visible with a blinking Archiving pill until the main process reports back.
+    const setArchiving = (on: boolean) => useStore.getState().setArchiving(s.id, on);
+    setArchiving(true);
     try {
       await invoke('sessions:archive', { id: s.id, archived: true, removeWorktree: true });
       toast('Worktree removed; the branch is kept', 'success');
@@ -71,8 +75,13 @@ export async function archiveSession(s: SessionMeta, toast: Toast) {
       } catch (e2) {
         toast(e2 instanceof Error ? e2.message : String(e2), 'error');
       }
+    } finally {
+      setArchiving(false);
     }
     return;
   }
-  void invoke('sessions:archive', { id: s.id, archived: true });
+  useStore.getState().setArchiving(s.id, true);
+  void invoke('sessions:archive', { id: s.id, archived: true })
+    .catch((e: unknown) => toast(e instanceof Error ? e.message : String(e), 'error'))
+    .finally(() => useStore.getState().setArchiving(s.id, false));
 }
