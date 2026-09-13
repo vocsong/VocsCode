@@ -333,6 +333,7 @@ export function Sidebar() {
               <button
                 type="button"
                 className="project-new-btn"
+                data-testid="new-session"
                 title={`New session in ${basename(g.root)}`}
                 aria-label={`New session in ${basename(g.root)}`}
                 onClick={() => void startNewSession(g.root)}
@@ -451,6 +452,7 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
   return (
     <div
       className={`session-row ${active ? 'active' : ''}${dragClass}${indicator}`}
+      data-testid="session-row"
       data-session-id={s.id}
       draggable={canDrag}
       onDragStart={(e) => {
