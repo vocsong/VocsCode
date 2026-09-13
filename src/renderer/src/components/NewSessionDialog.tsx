@@ -12,6 +12,8 @@ import { fileToAttachment } from './Composer';
 export function NewSessionDialog() {
   const settings = useStore((s) => s.settings)!;
   const availability = useStore((s) => s.availability);
+  const availabilityError = useStore((s) => s.availabilityError);
+  const refreshAvailability = useStore((s) => s.refreshAvailability);
   const close = () => useStore.getState().openNewSession(false);
   const setActive = useStore((s) => s.setActive);
   const toast = useStore((s) => s.toast);
@@ -202,7 +204,17 @@ export function NewSessionDialog() {
                   <button key={h.id} type="button" className={`harness-card ${harness === h.id ? 'active' : ''}`} onClick={() => setHarness(h.id)}>
                     <div className="harness-card-top">
                       <span className="harness-card-name">{h.name}</span>
-                      {av ? av.available ? <Badge tone={av.authenticated === false ? 'amber' : 'green'}>{av.authenticated === false ? 'not logged in' : av.version ? av.version.replace(/[^\d.]+.*$/, '') || 'ready' : 'ready'}</Badge> : <Badge tone="red">missing</Badge> : <Spinner size={10} />}
+                      {av ? av.available ? <Badge tone={av.authenticated === false ? 'amber' : 'green'}>{av.authenticated === false ? 'not logged in' : av.version ? av.version.replace(/[^\d.]+.*$/, '') || 'ready' : 'ready'}</Badge> : <Badge tone="red">missing</Badge> : availabilityError ? (
+                        <span
+                          className="link-btn"
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => { e.stopPropagation(); void refreshAvailability(); }}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); void refreshAvailability(); } }}
+                        >
+                          could not check — retry
+                        </span>
+                      ) : <Spinner size={10} />}
                     </div>
                     <div className="harness-card-tag">{h.tagline}</div>
                   </button>

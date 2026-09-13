@@ -5,7 +5,7 @@ import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, harnessShort, relTime } from '../format';
 import { archiveSession } from '../sessionActions';
-import { useStore } from '../store';
+import { useStore, toastError } from '../store';
 import { Resizer } from './Resizer';
 import { FolderBranch } from './FolderBranch';
 import { ForkIntoDropdown } from './ForkInto';
@@ -124,6 +124,7 @@ export function Sidebar() {
   const setView = useStore((s) => s.setView);
   const view = useStore((s) => s.view);
   const toast = useStore((s) => s.toast);
+  const archiving = useStore((s) => s.archiving);
   const [showArchived, setShowArchived] = useState(false);
   // Drag-to-reorder state: which folder block is being dragged, and where it currently hovers.
   const [drag, setDrag] = useState<{ root: string; over: string | null; after: boolean } | null>(null);
@@ -328,10 +329,11 @@ export function Sidebar() {
                 {basename(g.root)}
               </button>
               {isCollapsed && g.list.length > 0 && <span className="project-count">{g.list.length}</span>}
-              <FolderBranch root={g.root} />
+              <FolderBranch root={g.root} expanded={!isCollapsed} />
               <button
                 type="button"
                 className="project-new-btn"
+                data-testid="new-session"
                 title={`New session in ${basename(g.root)}`}
                 aria-label={`New session in ${basename(g.root)}`}
                 onClick={() => void startNewSession(g.root)}
@@ -345,7 +347,8 @@ export function Sidebar() {
                   session={s}
                   active={s.id === activeId && view === 'chat'}
                   customLabels={settings?.customLabels ?? []}
-                  onSelect={() => void setActive(s.id)}
+                  archiving={!!archiving[s.id]}
+                  onSelect={() => void setActive(s.id).catch(toastError)}
                   toast={toast}
                   dnd={dnd}
                   dndHandlers={dndHandlers}
@@ -365,6 +368,9 @@ export function Sidebar() {
         <button type="button" className={`sidebar-link ${view === 'skills' ? 'active' : ''}`} onClick={() => setView('skills')}>
           <Icon name="puzzle" size={14} /> Skills
         </button>
+        <button type="button" className={`sidebar-link ${view === 'mcp' ? 'active' : ''}`} onClick={() => setView('mcp')}>
+          <Icon name="server" size={14} /> MCP
+        </button>
         <button type="button" className={`sidebar-link ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
           <Icon name="settings" size={14} /> Settings
         </button>
@@ -382,10 +388,12 @@ type DndHandlers = {
   drop: (id: string) => void;
 };
 
-function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dndHandlers }: {
+function SessionRow({ session: s, active, customLabels, archiving, onSelect, toast, dnd, dndHandlers }: {
   session: SessionMeta;
   active: boolean;
   customLabels: string[];
+  /** An archive request is in flight; the status pill shows a blinking Archiving state meanwhile. */
+  archiving: boolean;
   onSelect: () => void;
   toast: (t: string, k?: 'info' | 'success' | 'error') => void;
   dnd: DndState;
@@ -393,14 +401,28 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
 }) {
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(s.title);
+  const renameAction = useRef<'idle' | 'committed' | 'cancelled'>('idle');
   const h = HARNESS_BY_ID[s.config.harness];
   const startRename = () => {
     setTitle(s.title);
+    renameAction.current = 'idle';
     setRenaming(true);
   };
-  const commit = async () => {
+  const cancelRename = () => {
+    renameAction.current = 'cancelled';
+    setTitle(s.title);
     setRenaming(false);
-    if (title.trim() && title !== s.title) await invoke('sessions:rename', { id: s.id, title: title.trim() });
+  };
+  const commit = async () => {
+    if (renameAction.current !== 'idle') return;
+    renameAction.current = 'committed';
+    setRenaming(false);
+    if (!title.trim() || title === s.title) return;
+    try {
+      await invoke('sessions:rename', { id: s.id, title: title.trim() });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    }
   };
   const deleteRow = async () => {
     const ok = await askConfirm({
@@ -430,6 +452,7 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
   return (
     <div
       className={`session-row ${active ? 'active' : ''}${dragClass}${indicator}`}
+      data-testid="session-row"
       data-session-id={s.id}
       draggable={canDrag}
       onDragStart={(e) => {
@@ -442,7 +465,10 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
       onDragLeave={(e) => dndHandlers.leave(s.id, e)}
       onDrop={(e) => dndHandlers.drop(s.id)}
       onClick={onSelect}
-      onDoubleClick={startRename}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        startRename();
+      }}
     >
       <div className="session-main">
         {renaming ? (
@@ -452,17 +478,22 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
             onFocus={(e) => e.currentTarget.select()}
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            onBlur={commit}
+            onBlur={(e) => {
+              e.stopPropagation();
+              void commit();
+            }}
             onKeyDown={(e) => {
+              e.stopPropagation();
               if (e.key === 'Enter') void commit();
-              if (e.key === 'Escape') setRenaming(false);
+              if (e.key === 'Escape') cancelRename();
             }}
             onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
           />
         ) : (
           <div className="session-title">
             {s.pinned && <Icon name="pin" size={11} />}
-            <span title="Click to rename" onClick={() => startRename()}>{s.title}</span>
+            <span title="Click to rename" onClick={(e) => { e.stopPropagation(); startRename(); }}>{s.title}</span>
           </div>
         )}
         <div className="session-meta">
@@ -483,7 +514,9 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
       {/* Time clicks must bubble to the row so they select the session; only the status pill swallows them. */}
       <div className="session-side">
         <div onClick={(e) => e.stopPropagation()}>
-          <Dropdown align="right" width={200} trigger={() => <StatusLabel status={s.status} label={s.statusLabel} />}>
+          <Dropdown align="right" width={200} trigger={() => archiving
+            ? <span className="session-status status-running" title="Archiving…">Archiving</span>
+            : <StatusLabel status={s.status} label={s.statusLabel} />}>
             {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
           </Dropdown>
         </div>

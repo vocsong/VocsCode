@@ -52,10 +52,10 @@ describe('rollupDays', () => {
     ]),
     sliced('2025-06-02', [{ id: 'a', harness: 'claude', model: 'opus', project: '/p1', costUsd: 3, turns: 2, durationMs: 3000, speed: [100, 8000] }])
   ];
-  days[1].usage.by!.tool = { Bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } };
+  days[1].usage.by!.tool = { bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } };
   days[0].usage.by!.tool = { Bash: { calls: 2, errors: 0, declined: 1, durationMs: 0 }, Read: { calls: 4, errors: 0, declined: 0, durationMs: 0 } };
   days[0].usage.by!.modelTool = { 'p/opus': { Bash: { calls: 2, errors: 0, declined: 1, durationMs: 0 } } };
-  days[1].usage.by!.modelTool = { 'p/opus': { Bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } }, 'p/glm': { Read: { calls: 1, errors: 1, declined: 0, durationMs: 0 } } };
+  days[1].usage.by!.modelTool = { 'p/opus': { bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } }, 'p/glm': { Read: { calls: 1, errors: 1, declined: 0, durationMs: 0 } } };
   days[0].usage.by!.file = { 'a.ts': { adds: 1, updates: 2, deletes: 0, renames: 0 } };
   days[1].usage.by!.file = { 'a.ts': { adds: 0, updates: 1, deletes: 0, renames: 0 }, 'b.ts': { adds: 0, updates: 0, deletes: 0, renames: 0 } };
 
@@ -78,12 +78,12 @@ describe('rollupDays', () => {
   it('merges per-tool and per-file slices across days, dropping files with no changes', () => {
     const r = rollupDays(days);
     expect(r.tools.map((t) => [t.name, t.calls, t.errors, t.declined])).toEqual([
-      ['Bash', 5, 1, 1],
+      ['bash', 5, 1, 1],
       ['Read', 4, 0, 0]
     ]);
     expect(r.toolTotals).toEqual({ calls: 9, errors: 1, declined: 1, durationMs: 300 });
     expect(r.modelTools.map((t) => [t.key, t.label, t.name, t.calls, t.errors])).toEqual([
-      ['p/opus', 'opus', 'Bash', 5, 1],
+      ['p/opus', 'opus', 'bash', 5, 1],
       ['p/glm', 'glm', 'Read', 1, 1]
     ]);
     expect(r.files).toEqual([{ path: 'a.ts', adds: 1, updates: 3, deletes: 0, renames: 0, total: 4 }]);

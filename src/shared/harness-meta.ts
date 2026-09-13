@@ -1,6 +1,33 @@
-import type { HarnessDescriptor, HarnessId, PermissionMode } from './types';
+import type { EffortLevel, HarnessDescriptor, HarnessId, PermissionMode } from './types';
 
 export const HARNESSES: HarnessDescriptor[] = [
+  {
+    id: 'pi',
+    name: 'Pi',
+    tagline: 'Minimal, hackable, any provider',
+    vendor: 'Mario Zechner / community',
+    description:
+      "Runs the pi coding agent in RPC mode. Model-agnostic through pi's provider registry (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, Ollama, custom). Approvals are added by a bundled pi extension.",
+    docsUrl: 'https://github.com/badlogic/pi-mono',
+    capabilities: {
+      streaming: true,
+      approvals: true,
+      steer: true,
+      queue: true,
+      interrupt: true,
+      liveModelSwitch: true,
+      effort: true,
+      images: true,
+      dropsUnsupportedImages: true,
+      resume: true,
+      fork: true,
+      plan: true,
+      costReporting: true,
+      mcp: 'none',
+      permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
+      modelSource: 'harness'
+    }
+  },
   {
     id: 'claude',
     name: 'Claude Agent SDK',
@@ -23,6 +50,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -49,6 +77,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: false,
+      mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -75,6 +104,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: false,
       costReporting: false,
+      mcp: 'inject',
       permissionModes: ['plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
@@ -101,33 +131,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: true,
       costReporting: false,
+      mcp: 'inherit',
       permissionModes: ['plan', 'auto', 'full-auto'],
-      modelSource: 'harness'
-    }
-  },
-  {
-    id: 'pi',
-    name: 'Pi',
-    tagline: 'Minimal, hackable, any provider',
-    vendor: 'Mario Zechner / community',
-    description:
-      "Runs the pi coding agent in RPC mode. Model-agnostic through pi's provider registry (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, Ollama, custom). Approvals are added by a bundled pi extension.",
-    docsUrl: 'https://github.com/badlogic/pi-mono',
-    capabilities: {
-      streaming: true,
-      approvals: true,
-      steer: true,
-      queue: true,
-      interrupt: true,
-      liveModelSwitch: true,
-      effort: true,
-      images: true,
-      dropsUnsupportedImages: true,
-      resume: true,
-      fork: true,
-      plan: true,
-      costReporting: true,
-      permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
   },
@@ -153,6 +158,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: true,
       costReporting: false,
+      mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'acp-config'
     }
@@ -178,6 +184,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      mcp: 'client',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'providers'
     }
@@ -218,6 +225,11 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, { label: string; sho
 
 export const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
+/** Harnesses advertise levels beyond ours (Codex has `ultra`/`persistent`); only known levels may enter the app's effort state. */
+export function isEffortLevel(value: unknown): value is EffortLevel {
+  return typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
 export const SLASH_COMMANDS: { name: string; description: string; args?: string }[] = [
   { name: 'help', description: 'Show available commands and shortcuts' },
   { name: 'model', description: 'Switch model for this session', args: '<provider/model>' },
@@ -229,6 +241,7 @@ export const SLASH_COMMANDS: { name: string; description: string; args?: string 
     args: '[objective|status|pause|resume|clear|complete]'
   },
   { name: 'diff', description: 'Open the Changes panel' },
+  { name: 'mcp', description: 'Open the MCP panel for this repo' },
   { name: 'cost', description: 'Show token usage and cost for this session' },
   { name: 'compact', description: 'Ask the harness to compact its context (where supported)' },
   { name: 'clear', description: 'Clear the visible transcript (keeps harness state)' },

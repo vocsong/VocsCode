@@ -26,6 +26,7 @@ export type ShortcutCommand =
   | 'app.settings'
   | 'app.analytics'
   | 'app.skills'
+  | 'app.mcp'
   | 'app.back'
   | 'app.forward';
 
@@ -59,6 +60,7 @@ export const SHORTCUT_COMMANDS: ShortcutCommandInfo[] = [
   { id: 'app.settings', label: 'Open settings', description: 'Go to the settings screen.', icon: 'settings' },
   { id: 'app.analytics', label: 'Open analytics', description: 'Go to the analytics dashboard.', icon: 'chart' },
   { id: 'app.skills', label: 'Open skills', description: 'Go to the skills screen.', icon: 'puzzle' },
+  { id: 'app.mcp', label: 'Open MCP servers', description: 'Go to the global MCP servers screen.', icon: 'server' },
   { id: 'app.back', label: 'Back', description: 'Go back in view history.', icon: 'arrowLeft' },
   { id: 'app.forward', label: 'Forward', description: 'Go forward in view history.', icon: 'arrowRight' }
 ];

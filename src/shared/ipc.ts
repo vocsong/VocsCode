@@ -15,6 +15,11 @@ import type {
   GitWorktreeInfo,
   HarnessAvailability,
   HarnessId,
+  McpInspectResult,
+  McpProjectInfo,
+  McpProjectState,
+  McpServerDef,
+  McpStoreInfo,
   ModelInfo,
   ModelOverride,
   ModelRef,
@@ -24,6 +29,7 @@ import type {
   RemoteDeviceInfo,
   RemoteState,
   SearchFilters,
+  SecretStatus,
   SearchResponse,
   SearchResult,
   SessionEventEnvelope,
@@ -44,12 +50,14 @@ export interface IpcContract {
   'app:doctor': [void, DoctorReport];
   'app:openExternal': [{ url: string }, void];
   'app:openPath': [{ path: string; sessionId: string }, void];
-  'app:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
+  'app:openInEditor': [{ path: string; sessionId: string; line?: number }, { ok: boolean; error?: string }];
   'app:openTerminal': [{ cwd: string }, { ok: boolean; error?: string }];
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];
   'app:notify': [{ title: string; body: string }, void];
   /** A renderer stall (long task, delayed input, timer drift) recorded in the main log. */
   'app:diag': [{ kind: 'longtask' | 'input-delay' | 'loop-lag'; ms: number; detail?: string }, void];
+  /** Opens a validated SKILL.md in the configured editor. */
+  'skills:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
 
   'window:toggleFullScreen': [void, void];
   'window:reload': [void, void];
@@ -63,6 +71,7 @@ export interface IpcContract {
   'secrets:set': [{ providerId: string; apiKey: string }, void];
   'secrets:clear': [{ providerId: string }, void];
   'secrets:has': [{ providerId: string }, boolean];
+  'secrets:status': [void, SecretStatus];
 
   'providers:list': [void, ProviderConfig[]];
   'providers:save': [ProviderConfig, ProviderConfig[]];
@@ -91,6 +100,21 @@ export interface IpcContract {
   'skills:copy': [{ path: string; toHarness: SkillHarness }, { ok: boolean; path?: string; error?: string }];
   'skills:delete': [{ path: string }, { ok: boolean; error?: string }];
 
+  /** Every harness's own global MCP store, for the MCP page's read-only tabs. */
+  'mcp:stores': [void, McpStoreInfo[]];
+  /** The repo file, the global list, the per-repo switches and what this session will get. */
+  'mcp:project': [{ sessionId: string }, McpProjectInfo];
+  /** Rewrites the `mcpServers` table of the session repo's `.mcp.json`. */
+  'mcp:project:save': [{ sessionId: string; servers: McpServerDef[] }, { ok: boolean; error?: string }];
+  /** Patches this repo's switches (`disabledGlobal` / `enabledRepo`) and returns the fresh view. */
+  'mcp:project:state': [{ sessionId: string; patch: McpProjectState }, McpProjectInfo];
+  /** Connects to one server, lists its tools and disconnects ("Test connection"). */
+  'mcp:inspect': [{ def: McpServerDef; sessionId?: string }, McpInspectResult];
+  /** Copies servers out of a harness-native store into the global list or the repo file. */
+  'mcp:import': [{ servers: McpServerDef[]; to: 'global' | 'repo'; sessionId?: string }, { ok: boolean; error?: string }];
+  /** Writes the session repo's servers out to `.cursor/mcp.json` for a Cursor session. */
+  'mcp:export': [{ sessionId: string; to: 'cursor' }, { ok: boolean; path?: string; error?: string }];
+
   'sessions:list': [void, SessionMeta[]];
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
@@ -105,6 +129,8 @@ export interface IpcContract {
   /** Persists a pinned-section drag reorder: ids in their new display order. */
   'sessions:pinOrder': [{ ids: string[] }, void];
   'sessions:send': [{ id: string; input: UserInput }, void];
+  /** Replaces a sent message, discards its later transcript items, and runs it again. */
+  'sessions:editAndResend': [{ id: string; userItemId: string; input: UserInput }, TranscriptItem[]];
   'sessions:interrupt': [{ id: string }, void];
   'sessions:stop': [{ id: string }, void];
   'sessions:setModel': [{ id: string; model: ModelRef }, SessionMeta];

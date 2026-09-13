@@ -3,12 +3,15 @@
  * machine. Skipped unless HARNESS_SMOKE=1. Individual harnesses can be selected with
  * HARNESS_SMOKE_ONLY=codex,pi,... Each test sends one prompt asking for the literal token
  * PONG and asserts the adapter produced an assistant item containing it plus a turn item.
+ * HARNESS_SMOKE_ONLY=mcp drives one harness (HARNESS_SMOKE_MCP_HARNESS, default claude) with an
+ * injected MCP server and asserts it actually called a tool from it.
  */
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
-import type { ApprovalDecision, HarnessId, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { ApprovalDecision, HarnessId, HarnessRef, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { ResolvedServer } from '../src/main/mcp/effective';
 import { createAdapter } from '../src/main/harness/registry';
 import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
 import { RuntimeResolver } from '../src/main/runtime';
@@ -18,6 +21,8 @@ import { emptyUsage } from '../src/main/models/static-models';
 const enabled = process.env.HARNESS_SMOKE === '1';
 const only = (process.env.HARNESS_SMOKE_ONLY ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 const want = (id: string) => enabled && (only.length === 0 || only.includes(id));
+// Resume round-trips cost a second turn per harness, so they stay behind their own flag.
+const wantResume = (id: string) => want(id) && process.env.HARNESS_SMOKE_RESUME === '1';
 
 const appRoot = path.resolve(__dirname, '..');
 const tmpRoot = path.join(os.tmpdir(), `vocs-code-smoke-${Date.now()}`);
@@ -28,7 +33,7 @@ afterAll(async () => {
   await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
 });
 
-async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']> = {}) {
+async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']> = {}, mcp: ResolvedServer[] = []) {
   const cwd = path.join(tmpRoot, harness);
   await fs.mkdir(cwd, { recursive: true });
   await fs.writeFile(path.join(cwd, 'README.md'), '# smoke\n');
@@ -58,6 +63,7 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
     permissionMode: () => meta.config.permissionMode,
     effort: () => meta.config.effort,
     getApiKey: async () => undefined,
+    mcpServers: async () => mcp,
     emit: (event) => {
       events.push(event);
       if (event.type === 'item.upsert') items.set(event.item.id, event.item);
@@ -114,6 +120,40 @@ function assistantText(items: Map<string, TranscriptItem>): string {
 }
 
 const PROMPT = 'Reply with exactly the single word PONG and nothing else. Do not use any tools.';
+const CONTINUE_PROMPT = 'Reply with exactly the single word PONG again and nothing else. Do not use any tools.';
+
+/**
+ * Live resume round-trip: run one prompt, tear the adapter down, then rebuild from the same
+ * session meta (which still carries the harness ref) and run a continuation prompt.
+ */
+async function resumeRoundTrip(harness: HarnessId, refKey: keyof HarnessRef, extra: Partial<SessionMeta['config']> = {}): Promise<void> {
+  const { ctx, meta, events, items, waitTurn } = await makeCtx(harness, extra);
+  const first = createAdapter(harness, ctx);
+  cleanups.push(() => first.dispose());
+  await first.start();
+  await first.send({ text: PROMPT });
+  await waitTurn(170_000);
+  expect(assistantText(items)).toMatch(/PONG/i);
+  expect(meta.harnessRef[refKey]).toBeTruthy();
+  await first.dispose();
+
+  const second = createAdapter(harness, ctx);
+  cleanups.push(() => second.dispose());
+  await second.start();
+  // A rejected resume falls back to a fresh session with a warning; that must not happen here.
+  const resumeWarnings = events.filter(
+    (e) => e.type === 'item.upsert' && e.item.kind === 'info' && e.item.level === 'warn' && /resum/i.test(e.item.text)
+  );
+  expect(resumeWarnings).toEqual([]);
+  const turnsBefore = [...items.values()].filter((i) => i.kind === 'turn').length;
+  await second.send({ text: CONTINUE_PROMPT });
+  await waitTurn(170_000);
+  const turnsAfter = [...items.values()].filter((i) => i.kind === 'turn').length;
+  expect(turnsAfter).toBeGreaterThan(turnsBefore);
+  // The continuation must have produced its own PONG, so the concatenated text has at least two.
+  expect((assistantText(items).match(/PONG/gi) ?? []).length).toBeGreaterThanOrEqual(2);
+  expect(meta.harnessRef[refKey]).toBeTruthy();
+}
 
 describe('live harness smoke', () => {
   it.runIf(want('codex'))('codex app-server answers a prompt', async () => {
@@ -186,6 +226,34 @@ describe('live harness smoke', () => {
     expect(meta.harnessRef.claudeSessionId).toBeTruthy();
   });
 
+  // Proves the injection path end to end rather than only at the dialect converter: the harness
+  // must connect to a server this app handed it and call one of its tools. Runs against the
+  // offline fixture server in tests/fixtures, so only the model call costs anything.
+  // Verified for claude, codex and acp. codex-exec fails here on purpose: it loads the server,
+  // but that adapter runs with approvalPolicy 'never' and Codex declines MCP tool calls in that
+  // mode ("MCP tool call requires approval, but approval policy is never").
+  it.runIf(want('mcp'))('a harness loads an MCP server this app injected', async () => {
+    const harness = (process.env.HARNESS_SMOKE_MCP_HARNESS ?? 'claude') as HarnessId;
+    const def = {
+      id: 'smokefixture',
+      transport: 'stdio' as const,
+      command: process.execPath,
+      args: [path.resolve(__dirname, 'fixtures/mcp-echo-server.mjs')]
+    };
+    const extra = harness === 'acp' ? { acpAgent: process.env.HARNESS_SMOKE_ACP_AGENT ?? 'dsh' } : {};
+    const { ctx, items, waitTurn } = await makeCtx(harness, extra, [{ def, missing: [], secretEnvKeys: [], secretHeaderKeys: [] }]);
+    const adapter = createAdapter(harness, ctx);
+    cleanups.push(() => adapter.dispose());
+    await adapter.start();
+    await adapter.send({ text: 'Call the echo tool from the smokefixture MCP server with the text ping, then reply with its exact output and nothing else.' });
+    await waitTurn(170_000);
+    // Harnesses name MCP tool calls differently (Claude uses mcp__<server>__<tool>, ACP reports
+    // its own kind), so the proof is the stamp the fixture adds: it is nowhere in the prompt, so
+    // only a real round trip to the server can put it in the answer.
+    expect([...items.values()].some((i) => i.kind === 'tool')).toBe(true);
+    expect(assistantText(items)).toContain('VOCSMCP9137');
+  });
+
   it.runIf(want('acp'))('deepseek harness over ACP answers a prompt', async () => {
     const { ctx, items, waitTurn, meta } = await makeCtx('acp', { acpAgent: process.env.HARNESS_SMOKE_ACP_AGENT ?? 'dsh' });
     const adapter = createAdapter('acp', ctx);
@@ -226,5 +294,47 @@ describe('live harness smoke', () => {
     const content = await fs.readFile(path.join(meta.cwd, 'hello.txt'), 'utf8');
     expect(content).toMatch(/hello from vocs code/);
     expect([...items.values()].some((i) => i.kind === 'approval' || (i.kind === 'tool' && i.name === 'write_file'))).toBe(true);
+  });
+
+  // Resume round-trips after a dispose (HARNESS_SMOKE_RESUME=1): a second adapter is built from
+  // the same session meta, so its start() must resume the persisted harness ref rather than
+  // silently starting fresh. A fresh start would still answer PONG, so the tests also assert the
+  // ref is unchanged after the continuation turn.
+  it.runIf(wantResume('codex'))('codex app-server resumes after dispose', async () => {
+    await resumeRoundTrip('codex', 'codexThreadId');
+  });
+
+  it.runIf(wantResume('codex-exec'))('codex exec resumes after dispose', async () => {
+    await resumeRoundTrip('codex-exec', 'codexThreadId');
+  });
+
+  it.runIf(wantResume('cursor'))('cursor resumes after dispose', async (t) => {
+    if (!process.env.CURSOR_API_KEY) {
+      console.warn('cursor resume smoke skipped: no CURSOR_API_KEY in env');
+      return t.skip();
+    }
+    await resumeRoundTrip('cursor', 'cursorAgentId');
+  });
+
+  it.runIf(wantResume('pi'))('pi resumes after dispose', async () => {
+    await resumeRoundTrip('pi', 'piSessionFile');
+  });
+
+  it.runIf(wantResume('claude'))('claude resumes after dispose', async () => {
+    await resumeRoundTrip('claude', 'claudeSessionId');
+  });
+
+  it.runIf(wantResume('acp'))('acp resumes after dispose', async () => {
+    await resumeRoundTrip('acp', 'acpSessionId', { acpAgent: process.env.HARNESS_SMOKE_ACP_AGENT ?? 'dsh' });
+  });
+
+  it.runIf(wantResume('native'))('native resumes after dispose', async (t) => {
+    const provider = process.env.DEEPSEEK_API_KEY ? 'deepseek' : process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : null;
+    if (!provider) {
+      console.warn('native resume smoke skipped: no provider API key in env');
+      return t.skip();
+    }
+    const model = provider === 'deepseek' ? 'deepseek-v4-flash' : provider === 'openai' ? 'gpt-5.4-mini' : 'claude-sonnet-5';
+    await resumeRoundTrip('native', 'nativeHistory', { model: { provider, model } });
   });
 });

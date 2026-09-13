@@ -51,6 +51,18 @@ describe('QuickSessionPicker', () => {
     expect(openQuickSession).toHaveBeenCalledWith(false);
   });
 
+  it('keeps the capture listener installed while the prompt changes', () => {
+    const add = vi.spyOn(window, 'addEventListener');
+    seedStore();
+    render(<QuickSessionPicker />);
+    const keydownListeners = () => add.mock.calls.filter(([type]) => type === 'keydown');
+    expect(keydownListeners()).toHaveLength(1);
+    fireEvent.click(screen.getByText('C:/work/pinned'));
+    fireEvent.change(screen.getByPlaceholderText(/First prompt/), { target: { value: 'first prompt' } });
+    expect(keydownListeners()).toHaveLength(1);
+    add.mockRestore();
+  });
+
   it('sends the typed prompt with the session and keeps Shift+Enter for newlines', () => {
     const createQuickSession = vi.fn();
     seedStore({ createQuickSession });

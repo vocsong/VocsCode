@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { which, runCapture } = vi.hoisted(() => ({ which: vi.fn(), runCapture: vi.fn() }));
@@ -103,7 +104,7 @@ describe('gitBranchesOverview', () => {
     expect(fix.merged).toBe(true);
     expect(fix.behind).toBe(12);
     expect(fix.ahead).toBe(3);
-    expect(fix.worktreePath).toContain('worktrees' + '\\' + 'fix');
+    expect(fix.worktreePath).toContain('worktrees' + path.sep + 'fix');
     expect(fix.lastCommitSubject).toBe('Fix the bug');
 
     const cur = byName.get('vocscode/current')!;

@@ -1,0 +1,59 @@
+# Continuous verification for PRs into develop: the AGENTS.md gate plus the e2e tiers that need no
+# provider credit. The live smoke/e2e tiers stay manual — they spend money and need a logged-in
+# runtime — so they are deliberately absent here.
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast gate, and the one place the POSIX branches of the path-handling suites get exercised.
+  gate:
+    name: typecheck · test · build (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # NODE_ENV=production would drop every devDependency.
+      - run: npm ci --include=dev
+        env:
+          NODE_ENV: development
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # Windows is the app's primary target (ConPTY, the NSIS installer, the unpacked node-pty binaries),
+  # so the Electron suites run there.
+  e2e:
+    name: e2e, no provider credit (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --include=dev
+        env:
+          NODE_ENV: development
+      - run: npm run build
+      # Fails if a suite reports skipped: a green-but-dark run must not pass.
+      - run: npm run test:e2e:ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-screenshots
+          path: tests/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7

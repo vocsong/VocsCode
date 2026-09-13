@@ -23,6 +23,11 @@ asarUnpack:
   - node_modules/@lydell/**
 # Every native dependency ships prebuilt (@lydell/node-pty); nothing needs a compiler at install time.
 npmRebuild: false
+# Publish to the published release the tag points at (default 'draft' skips when the
+# release already exists). Also emits latest.yml for a future electron-updater.
+publish:
+  provider: github
+  releaseType: release
 win:
   icon: resources/icons/vocs-code.ico
   target:
@@ -36,9 +41,14 @@ nsis:
   shortcutName: Vocs Code
 mac:
   icon: resources/icons/vocs-code.icns
-  target: [dmg]
+  target:
+    - target: dmg
+      # Ship both silicon generations; CI builds both on the arm64 runner.
+      arch: [x64, arm64]
   category: public.app-category.developer-tools
+  artifactName: Vocs-Code-${version}-mac-${arch}.${ext}
 linux:
   icon: resources/icons/vocs-code.png
   target: [AppImage]
   category: Development
+  artifactName: Vocs-Code-${version}-linux-${arch}.${ext}

@@ -27,6 +27,19 @@ describe('folder branch in the sidebar', () => {
     expect(invoke).toHaveBeenCalledWith('git:folderBranch', { projectRoot: 'G:\\Vocs-Code' });
   });
 
+  it('does not poll while collapsed, then resumes polling when expanded', async () => {
+    const view = render(<FolderBranch root="/repo" expanded={false} />);
+    await act(async () => {});
+    expect(invoke).not.toHaveBeenCalled();
+    view.rerender(<FolderBranch root="/repo" expanded />);
+    await act(async () => {});
+    expect(invoke).toHaveBeenCalledWith('git:folderBranch', { projectRoot: '/repo' });
+    invoke.mockClear();
+    await act(async () => { vi.advanceTimersByTime(10_000); });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    view.unmount();
+  });
+
   it('refreshes external checkouts on the timer and on focus, then cleans up', async () => {
     const view = render(<FolderBranch root="/repo" />);
     await act(async () => {});

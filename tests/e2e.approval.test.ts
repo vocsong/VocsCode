@@ -9,6 +9,7 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication } from 'playwright-core';
+import { openNewSession, pickModel, seedSettings } from './e2e-ui';
 
 const wantE2E = process.env.HARNESS_E2E === '1';
 const hasProviderKey = !!(process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY);
@@ -38,6 +39,7 @@ describe.runIf(enabled)('electron e2e: approvals', () => {
     await fs.mkdir(project, { recursive: true });
     await fs.writeFile(path.join(project, 'README.md'), '# approval project\n');
     await fs.mkdir(shots, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== 'ELECTRON_RUN_AS_NODE' && k !== 'ANTHROPIC_BASE_URL' && k !== 'CLAUDECODE' && !k.startsWith('CLAUDE_CODE_')) env[k] = v;
@@ -47,16 +49,11 @@ describe.runIf(enabled)('electron e2e: approvals', () => {
     const win = await app.firstWindow();
     await win.waitForSelector('.brand', { timeout: 60_000 });
 
-    await win.click('.sidebar-top button:has-text("New")');
-    await win.waitForSelector('.modal');
-    await win.fill('.ns-grid input[placeholder*="repo"]', project);
+    await openNewSession(win);
     await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
-    const right = win.locator('.ns-grid .ns-col').nth(1);
-    const modelSelect = right.locator('select').first();
-    await modelSelect.locator('option').nth(1).waitFor({ state: 'attached', timeout: 60_000 });
-    await modelSelect.selectOption(process.env.DEEPSEEK_API_KEY ? 'deepseek::deepseek-v4-flash' : 'openai::gpt-5.4-mini');
-    // Permissions select is the third select in the right column (model, effort, permissions).
-    await right.locator('select').nth(2).selectOption('ask');
+    await pickModel(win, process.env.DEEPSEEK_API_KEY ? 'deepseek/deepseek-v4-flash' : 'openai/gpt-5.4-mini');
+    // Permissions is the second select in the model column (effort, permissions).
+    await win.locator('.ns-col-model select').nth(1).selectOption('ask');
     await win.fill('textarea[placeholder="What should the agent do?"]', 'Use the write_file tool to create a file named approved.txt containing exactly: approved by vocs code. Do not run any other tool. Then reply DONE.');
     await win.click('button:has-text("Start session")');
 
@@ -79,7 +76,7 @@ describe.runIf(enabled)('electron e2e: approvals', () => {
     await win.waitForSelector('.changes, .empty', { timeout: 10_000 }); // no git repo here → empty state
     await win.screenshot({ path: path.join(shots, 'e2e-06-approval-applied.png') });
     // Header shows the session title next to the status dot (layout regression check).
-    const title = await win.locator('.header-name').innerText();
+    const title = await win.getByTestId('session-title').innerText();
     expect(title.length).toBeGreaterThan(3);
   });
 });

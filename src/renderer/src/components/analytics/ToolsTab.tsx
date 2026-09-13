@@ -18,6 +18,10 @@ interface RateCell {
   errors: number;
 }
 
+interface ToolTotal extends RateCell {
+  label: string;
+}
+
 /** Groups the per-model tool rows into a matrix: one row per tool, one column per model. */
 function errorRateTable(modelTools: ModelToolRow[]): { columns: { label: string; numeric?: boolean }[]; rows: React.ReactNode[][] } | null {
   const models = new Map<string, RateCell & { label: string }>();
@@ -28,38 +32,43 @@ function errorRateTable(modelTools: ModelToolRow[]): { columns: { label: string;
     models.set(r.key, m);
   }
   if (models.size === 0) return null;
-  // Top models by call volume, the rest folded into one column so the table stays readable.
-  const ranked = [...models.entries()].sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
-  const cols = [...ranked.slice(0, 6).map(([key, m]) => ({ key, label: m.label }))];
-  if (ranked.length > 6) cols.push({ key: '__other', label: `Other (${ranked.length - 6})` });
-  const perModel = new Map<string, Map<string, ModelToolRow>>();
+  // Keep every model visible. The table scrolls horizontally when it outgrows the card.
+  const cols = [...models.entries()]
+    .sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label))
+    .map(([key, m]) => ({ key, label: m.label }));
+  // Defensively compare names case-insensitively too, so older/stubbed summaries cannot split
+  // Bash/bash into separate rows.
+  const perModel = new Map<string, Map<string, RateCell>>();
+  const totals = new Map<string, ToolTotal>();
   for (const r of modelTools) {
-    if (!cols.some((c) => c.key === r.key)) continue;
-    const m = perModel.get(r.key) ?? new Map<string, ModelToolRow>();
-    m.set(r.name, r);
+    const nameKey = r.name.toLocaleLowerCase();
+    const m = perModel.get(r.key) ?? new Map<string, RateCell>();
+    const cell = m.get(nameKey) ?? { calls: 0, errors: 0 };
+    cell.calls += r.calls;
+    cell.errors += r.errors;
+    m.set(nameKey, cell);
     perModel.set(r.key, m);
-  }
-  const totals = new Map<string, RateCell>();
-  for (const r of modelTools) {
-    const t = totals.get(r.name) ?? { calls: 0, errors: 0 };
+    const t = totals.get(nameKey) ?? { label: r.name, calls: 0, errors: 0 };
+    // Prefer an all-lowercase spelling when one harness supplies it.
+    if (r.name === nameKey) t.label = r.name;
     t.calls += r.calls;
     t.errors += r.errors;
-    totals.set(r.name, t);
+    totals.set(nameKey, t);
   }
-  const names = [...totals.entries()].sort((a, b) => b[1].calls - a[1].calls || a[0].localeCompare(b[0])).map(([n]) => n);
-  const cell = (r: ModelToolRow | undefined) => {
+  const tools = [...totals.entries()].sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
+  const cell = (r: RateCell | undefined) => {
     if (!r || !(r.calls > 0)) return { text: '—', tone: undefined, title: 'No calls' };
     const rate = r.errors / r.calls;
-    return { text: fmtPct(rate), tone: rateTone(rate), title: `${plural(r.errors, 'error')} in ${plural(r.calls, 'call')}` };
+    return { text: `(${r.errors}/${r.calls}) ${fmtPct(rate)}`, tone: rateTone(rate), title: `${plural(r.errors, 'error')} in ${plural(r.calls, 'call')}` };
   };
   return {
     columns: [{ label: 'Tool' }, ...cols.map((c) => ({ label: c.label, numeric: true }))],
-    rows: names.map((name) => [
-      <span key={name} className="mono" title={name}>
-        {name || '(unnamed)'}
+    rows: tools.map(([nameKey, tool]) => [
+      <span key={nameKey} className="mono" title={tool.label}>
+        {tool.label || '(unnamed)'}
       </span>,
       ...cols.map((c) => {
-        const { text, tone, title } = cell(perModel.get(c.key)?.get(name));
+        const { text, tone, title } = cell(perModel.get(c.key)?.get(nameKey));
         return (
           <span key={c.key} title={title} style={tone ? { color: tone } : undefined}>
             {text}
@@ -112,7 +121,7 @@ export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsS
       </div>
 
       <div className="agrid agrid-2">
-        <ChartCard title="Calls by tool" subtitle="Names are the harness’s own, so Bash and bash are different tools">
+        <ChartCard title="Calls by tool" subtitle="Equivalent names from different harnesses are combined">
           <BarList rows={scope.tools.map((x) => ({ key: x.name, label: x.name || '(unnamed)', value: x.calls, sub: toolSub(x) }))} format={fmtCompact} limit={10} emptyText="No tool calls recorded yet." />
         </ChartCard>
         <ChartCard title="Files changed" subtitle={`Most edited first · ${scope.label}`}>

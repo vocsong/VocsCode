@@ -1,7 +1,7 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
-import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig, RemoteDeviceInfo, RemoteState } from '../../../shared/types';
+import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig, RemoteDeviceInfo, RemoteState, SecretStatus } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
@@ -11,7 +11,7 @@ import { invoke, isMac, on, platform } from '../api';
 import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { systemPrefersDark } from '../theme';
-import { Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
+import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
 
 type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'remote' | 'about';
@@ -174,12 +174,16 @@ const SCROLLBACKS = [1_000, 5_000, 10_000, 20_000, 50_000, 100_000];
 /** General → Utility model: the cheap model used for background chores like session titles. */
 function UtilityModelField({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    void invoke('providers:list', undefined).then(setProviders).catch(() => undefined);
+    void invoke('providers:list', undefined)
+      .then(setProviders)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
   const models = providers.filter((p) => p.enabled).flatMap((p) => p.models);
   return (
     <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions. Falls back to the session's own model when unset.">
+      {error && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {error}</span></div>}
       <div className="onboarding-model-picker">
         <ModelPicker
           models={models}
@@ -273,10 +277,22 @@ function TerminalSection({ settings, update }: { settings: AppSettings; update: 
 
 function Providers({ settings }: { settings: AppSettings }) {
   const toast = useStore((s) => s.toast);
+  const [secretStatus, setSecretStatus] = useState<SecretStatus | null>(null);
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
   const [custom, setCustom] = useState({ id: '', name: '', baseUrl: '', envKey: '' });
+
+  const refreshSecretStatus = async () => {
+    try {
+      setSecretStatus(await invoke('secrets:status', undefined));
+    } catch {
+      // The warning is advisory; an unavailable status endpoint should not block provider setup.
+    }
+  };
+  useEffect(() => {
+    void refreshSecretStatus();
+  }, []);
 
   const save = async (p: ProviderConfig, patch: Partial<ProviderConfig>) => {
     await invoke('providers:save', { ...p, ...patch });
@@ -285,10 +301,16 @@ function Providers({ settings }: { settings: AppSettings }) {
     const k = keys[p.id];
     if (!k?.trim()) return;
     setBusy({ ...busy, [p.id]: 'saving' });
-    await invoke('secrets:set', { providerId: p.id, apiKey: k.trim() });
-    setKeys({ ...keys, [p.id]: '' });
-    setBusy({ ...busy, [p.id]: '' });
-    toast(`Saved key for ${p.name}`, 'success');
+    try {
+      await invoke('secrets:set', { providerId: p.id, apiKey: k.trim() });
+      setKeys({ ...keys, [p.id]: '' });
+      toast(`Saved key for ${p.name}`, 'success');
+      await refreshSecretStatus();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setBusy({ ...busy, [p.id]: '' });
+    }
   };
   const test = async (p: ProviderConfig) => {
     setBusy({ ...busy, [p.id]: 'testing' });
@@ -306,6 +328,9 @@ function Providers({ settings }: { settings: AppSettings }) {
     <div className="settings-section">
       <h2>Providers & API keys</h2>
       <p className="muted">Keys are encrypted with the OS keychain (DPAPI on Windows) and only sent to the provider you configure. Harnesses that bring their own login (Claude Code, Codex, pi, dsh) keep using it; keys here are a fallback and power the native loop.</p>
+      {secretStatus && !secretStatus.encryptionAvailable && secretStatus.hasFallback && (
+        <div className="info-line info-warn"><Icon name="alert" size={13} /> <span>OS encryption is unavailable. Stored provider keys use a local fallback and are less protected; enable OS encryption or clear and re-enter these keys.</span></div>
+      )}
       <HarnessLogins />
       {settings.providers.map((p) => (
         <div key={p.id} className={`provider-card ${p.enabled ? '' : 'disabled'}`}>
@@ -328,7 +353,14 @@ function Providers({ settings }: { settings: AppSettings }) {
                   Save key
                 </Button>
                 {p.hasApiKey && (
-                  <Button size="sm" variant="ghost" onClick={() => void invoke('secrets:clear', { providerId: p.id })}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={async () => {
+                      await invoke('secrets:clear', { providerId: p.id });
+                      await refreshSecretStatus();
+                    }}
+                  >
                     Clear
                   </Button>
                 )}
@@ -341,7 +373,7 @@ function Providers({ settings }: { settings: AppSettings }) {
               </div>
               <div className="row gap8">
                 <Field label="Base URL" inline>
-                  <input value={p.baseUrl ?? ''} onChange={(e) => void save(p, { baseUrl: e.target.value })} />
+                  <ProviderBaseUrl provider={p} onSave={(baseUrl) => save(p, { baseUrl })} />
                 </Field>
               </div>
             </div>
@@ -386,6 +418,66 @@ function Providers({ settings }: { settings: AppSettings }) {
       )}
       <ModelOverrides settings={settings} />
     </div>
+  );
+}
+
+/** Drafted URL field: existing keyed providers require an explicit confirmation before retargeting. */
+function ProviderBaseUrl({ provider, onSave }: { provider: ProviderConfig; onSave: (baseUrl: string) => Promise<void> }) {
+  const [draft, setDraft] = useState(provider.baseUrl ?? '');
+  const saved = useRef(provider.baseUrl ?? '');
+  const saving = useRef(false);
+
+  useEffect(() => {
+    if (saving.current) return;
+    const next = provider.baseUrl ?? '';
+    saved.current = next;
+    setDraft(next);
+  }, [provider.id, provider.baseUrl]);
+
+  const commit = async () => {
+    if (saving.current) return;
+    const next = draft.trim();
+    if (next === saved.current) {
+      if (next !== draft) setDraft(next);
+      return;
+    }
+    saving.current = true;
+    try {
+      if (provider.hasApiKey) {
+        const confirmed = await askConfirm({
+          title: `Change the endpoint for ${provider.name}?`,
+          body: 'This provider has a stored API key. Changing the base URL can send that key to a different service.',
+          confirmLabel: 'Change endpoint',
+          danger: true
+        });
+        if (!confirmed) {
+          setDraft(saved.current);
+          return;
+        }
+      }
+      await onSave(next);
+      saved.current = next;
+      setDraft(next);
+    } catch {
+      setDraft(saved.current);
+    } finally {
+      saving.current = false;
+    }
+  };
+
+  return (
+    <input
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => void commit()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          void commit();
+        }
+      }}
+    />
   );
 }
 

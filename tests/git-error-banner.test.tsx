@@ -9,7 +9,7 @@ const invokeMock = vi.fn();
   on: vi.fn().mockReturnValue(() => undefined)
 };
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta } from '../src/shared/types';
@@ -54,10 +54,55 @@ describe('git error banners', () => {
       if (channel === 'git:branchesOverview') {
         return Promise.resolve({ isRepo: true, branches: [], worktrees: [], error: 'git for-each-ref timed out — the branch list could not be loaded. Refresh to retry.' });
       }
+      // The Git tab eagerly loads both GitHub lists on open; a missing body would crash the count render.
+      if (channel === 'git:pullRequests') return Promise.resolve({ prs: [], fetchedAt: Date.now() });
+      if (channel === 'git:issues') return Promise.resolve({ issues: [], fetchedAt: Date.now() });
       return Promise.resolve({});
     });
     useStore.setState({ panelTab: 'branches' });
     render(<RightPanel session={session} />);
     expect(await screen.findByText(/for-each-ref timed out/)).toBeTruthy();
+  });
+
+  it('opens the full issue in a dialog and closes it from the backdrop', async () => {
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'git:branchesOverview') return Promise.resolve({ isRepo: true, branches: [], worktrees: [] });
+      if (channel === 'git:pullRequests') return Promise.resolve({ fetchedAt: 1, prs: [] });
+      if (channel === 'git:issues') {
+        return Promise.resolve({
+          fetchedAt: 1,
+          issues: [
+            {
+              number: 42,
+              title: 'Test issue',
+              state: 'OPEN',
+              url: 'https://example.com/acme/repo/issues/42',
+              author: 'octocat',
+              body: '## Details\n\nThis is the complete issue description.',
+              labels: [{ name: 'bug' }],
+              comments: 2
+            }
+          ]
+        });
+      }
+      return Promise.resolve({});
+    });
+    useStore.setState({ panelTab: 'branches' });
+    render(<RightPanel session={session} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Issues/ }));
+    fireEvent.click(await screen.findByTitle('Open issue #42 on GitHub'));
+    expect(invokeMock).toHaveBeenCalledWith('app:openExternal', { url: 'https://example.com/acme/repo/issues/42' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    fireEvent.click(await screen.findByText('Test issue'));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain('This is the complete issue description.');
+    expect(screen.getByRole('button', { name: 'Open on GitHub' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Start session' })).toBeTruthy();
+
+    fireEvent.mouseDown(dialog.parentElement!);
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

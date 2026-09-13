@@ -2,10 +2,10 @@
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { createTwoFilesPatch } from 'diff';
 import type { FileChange } from '../../../shared/types';
 import { which } from '../../runtime';
 import { truncate } from '../../util/async';
+import { makeFileChange } from '../../util/file-changes';
 import { killTree } from '../spawn';
 
 export interface NativeToolDef {
@@ -272,9 +272,8 @@ export async function writeFileTool(cwd: string, args: { path: string; content: 
   }
   await fs.mkdir(path.dirname(abs), { recursive: true });
   await atomicWrite(abs, args.content);
-  const rel = path.relative(cwd, abs) || args.path;
-  const diff = createTwoFilesPatch(rel, rel, before ?? '', args.content, '', '', { context: 3 });
-  return { output: `Wrote ${args.content.length} characters to ${rel}.`, isError: false, changes: [{ path: rel, kind: before === null ? 'add' : 'update', diff }] };
+  const change = makeFileChange(cwd, abs, before, args.content);
+  return { output: `Wrote ${args.content.length} characters to ${change.path}.`, isError: false, changes: [change] };
 }
 
 export async function previewWrite(cwd: string, args: { path: string; content: string }): Promise<FileChange[]> {
@@ -285,8 +284,7 @@ export async function previewWrite(cwd: string, args: { path: string; content: s
   } catch {
     before = null;
   }
-  const rel = path.relative(cwd, abs) || args.path;
-  return [{ path: rel, kind: before === null ? 'add' : 'update', diff: createTwoFilesPatch(rel, rel, before ?? '', args.content, '', '', { context: 3 }) }];
+  return [makeFileChange(cwd, abs, before, args.content)];
 }
 
 export async function previewEdit(cwd: string, args: { path: string; old_string: string; new_string: string; replace_all?: boolean }): Promise<{ changes?: FileChange[]; error?: string; after?: string }> {
@@ -302,8 +300,7 @@ export async function previewEdit(cwd: string, args: { path: string; old_string:
   if (count === 0) return { error: 'old_string was not found in the file. Re-read the file and try again with exact text.' };
   if (count > 1 && !args.replace_all) return { error: `old_string matches ${count} times; include more context or set replace_all.` };
   const after = args.replace_all ? before.split(args.old_string).join(args.new_string) : before.replace(args.old_string, args.new_string);
-  const rel = path.relative(cwd, abs) || args.path;
-  return { after, changes: [{ path: rel, kind: 'update', diff: createTwoFilesPatch(rel, rel, before, after, '', '', { context: 3 }) }] };
+  return { after, changes: [makeFileChange(cwd, abs, before, after)] };
 }
 
 export async function editFileTool(cwd: string, args: { path: string; old_string: string; new_string: string; replace_all?: boolean }): Promise<ToolExecResult> {

@@ -4,8 +4,8 @@ import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, Mode
 import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
-export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
-export type View = 'chat' | 'settings' | 'analytics' | 'skills';
+export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'mcp' | 'usage' | 'terminal';
+export type View = 'chat' | 'settings' | 'analytics' | 'skills' | 'mcp';
 export type AnalyticsTab = 'overview' | 'spend' | 'tokens' | 'activity' | 'tools' | 'sessions';
 /** Days in the analytics range; 0 is all time. */
 export type AnalyticsRange = 7 | 30 | 90 | 0;
@@ -38,10 +38,14 @@ interface State {
   activeId: string | null;
   transcripts: Record<string, TranscriptItem[]>;
   loaded: Record<string, boolean>;
+  /** Last transcript load failure per session; the transcript pane offers a retry instead of spinning forever. */
+  transcriptErrors: Record<string, string>;
   models: Record<string, ModelInfo[]>;
   /** Per-harness catalog, keyed by harness id, used until that session's process reports its own list. */
   modelCatalog: Partial<Record<HarnessId, ModelCatalogEntry>>;
   availability: Partial<Record<HarnessId, HarnessAvailability>>;
+  /** Set when the last availability check failed; setup surfaces a retry instead of an endless spinner. */
+  availabilityError: string | null;
   /** Every session's terminals, as the main process reports them; the xterm instances live in terminal/host.ts. */
   terminals: TerminalInfo[];
   terminalsLoaded: boolean;
@@ -51,6 +55,8 @@ interface State {
   drafts: Record<string, string>;
   /** Bumped to move keyboard focus into the active terminal. */
   terminalFocusNonce: number;
+  /** Sessions with an archive request in flight; rows show a blinking Archiving pill meanwhile. */
+  archiving: Record<string, true>;
   /** Text another part of the UI wants appended to the composer draft (e.g. terminal output). */
   composerInsert: { text: string; nonce: number } | null;
   view: View;
@@ -109,9 +115,12 @@ interface State {
   /** Fetches one harness's model catalog, at most once per harness until the model overrides change. */
   ensureModelCatalog(harness: HarnessId): Promise<void>;
   clearTranscriptLocal(id: string): void;
+  /** Replaces a loaded transcript after a server-side rewrite (for example, editing a past prompt). */
+  replaceTranscript(id: string, items: TranscriptItem[]): void;
   /** Upserts a renderer-local info line in a session's transcript; null text removes it. Not persisted by the main process. */
   setLocalInfo(sessionId: string, id: string, text: string | null, opts?: { level?: 'info' | 'warn' | 'error'; pending?: boolean }): void;
   setDraft(sessionId: string, text: string): void;
+  setArchiving(id: string, on: boolean): void;
   setTerminals(list: TerminalInfo[]): void;
   setActiveTerminal(sessionId: string, terminalId: string): void;
   focusTerminal(): void;
@@ -177,14 +186,17 @@ export const useStore = create<State>((set, get) => ({
   activeId: null,
   transcripts: {},
   loaded: {},
+  transcriptErrors: {},
   models: {},
   modelCatalog: {},
   availability: {},
+  availabilityError: null,
   terminals: [],
   terminalsLoaded: false,
   activeTerminal: {},
   drafts: {},
   terminalFocusNonce: 0,
+  archiving: {},
   composerInsert: null,
   view: 'chat',
   analyticsTab: 'overview',
@@ -218,7 +230,7 @@ export const useStore = create<State>((set, get) => ({
           on('push:sessionsChanged', (list) => get().setSessions(list));
           on('push:settingsChanged', (s) => get().setSettings(s));
           on('push:sessionEvent', (env) => get().applyEvent(env));
-          on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId));
+          on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId).catch(toastError));
           on('push:terminalsChanged', (list) => get().setTerminals(list));
         }
         const first = sessions.find((s) => !s.archived);
@@ -253,10 +265,22 @@ export const useStore = create<State>((set, get) => ({
 
   async loadTranscript(id) {
     if (get().loaded[id]) return;
-    const items = await invoke('sessions:transcript', { id });
-    // The snapshot already contains any streamed text; deltas still queued for it would duplicate.
-    dropPendingDeltas(id);
-    set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
+    // Clear any previous failure so a retry shows the spinner again, not a stale error.
+    set((s) => {
+      if (!(id in s.transcriptErrors)) return {};
+      const transcriptErrors = { ...s.transcriptErrors };
+      delete transcriptErrors[id];
+      return { transcriptErrors };
+    });
+    try {
+      const items = await invoke('sessions:transcript', { id });
+      // The snapshot already contains any streamed text; deltas still queued for it would duplicate.
+      dropPendingDeltas(id);
+      set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
+    } catch (e) {
+      // Never throw: the transcript pane stays mounted with a retry instead of loading forever.
+      set((s) => ({ transcriptErrors: { ...s.transcriptErrors, [id]: e instanceof Error ? e.message : String(e) } }));
+    }
   },
 
   applyEvent(env) {
@@ -349,31 +373,60 @@ export const useStore = create<State>((set, get) => ({
     });
   },
   setSessions(sessions) {
+    const ids = new Set(sessions.map((x) => x.id));
+    let replacement: SessionMeta | undefined;
+    let removedTitle: string | undefined;
     set((s) => {
-      const ids = new Set(sessions.map((x) => x.id));
       const removed = new Set<string>();
       for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.loaded)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.transcriptErrors)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
-      if (removed.size === 0) return { sessions };
+      const activeRemoved = !!s.activeId && !ids.has(s.activeId);
+      if (activeRemoved) {
+        removedTitle = s.sessions.find((x) => x.id === s.activeId)?.title ?? s.activeId ?? 'active session';
+        replacement = [...sessions]
+          .filter((x) => !x.archived)
+          .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id))[0];
+      }
+      if (removed.size === 0 && !activeRemoved) return { sessions };
       const transcripts = { ...s.transcripts };
       const loaded = { ...s.loaded };
+      const transcriptErrors = { ...s.transcriptErrors };
       const activeTerminal = { ...s.activeTerminal };
       const models = { ...s.models };
       const drafts = { ...s.drafts };
       for (const id of removed) {
         delete transcripts[id];
         delete loaded[id];
+        delete transcriptErrors[id];
         delete activeTerminal[id];
         delete models[id];
         delete drafts[id];
       }
-      // A removed session cannot stay active; drop it and let the caller pick a new one.
-      const activeId = s.activeId && ids.has(s.activeId) ? s.activeId : null;
-      return { sessions, transcripts, loaded, activeTerminal, models, drafts, activeId };
+      return {
+        sessions,
+        transcripts,
+        loaded,
+        transcriptErrors,
+        activeTerminal,
+        models,
+        drafts,
+        activeId: activeRemoved ? replacement?.id ?? null : s.activeId
+      };
     });
+    if (removedTitle) {
+      if (replacement) {
+        get().toast(`Session "${removedTitle}" was removed; switched to "${replacement.title}".`, 'info');
+        // This is reconciliation from the main process, not user navigation: loading directly
+        // avoids adding a duplicate entry to the back/forward stack.
+        void get().loadTranscript(replacement.id).catch((error) => get().toast(error instanceof Error ? error.message : String(error), 'error'));
+      } else {
+        get().toast(`Session "${removedTitle}" was removed; no active sessions remain.`, 'info');
+      }
+    }
   },
   setView(view) {
     set({ view });
@@ -437,7 +490,7 @@ export const useStore = create<State>((set, get) => ({
   },
   jumpToSearchMatch(sessionId, itemId) {
     set((s) => ({ searchOpen: false, searchJump: itemId ? { sessionId, itemId, n: (s.searchJump?.n ?? 0) + 1 } : null }));
-    void get().setActive(sessionId);
+    void get().setActive(sessionId).catch(toastError);
   },
   toggleThinking() {
     set((s) => ({ showThinking: !s.showThinking }));
@@ -453,9 +506,9 @@ export const useStore = create<State>((set, get) => ({
   async refreshAvailability() {
     try {
       const availability = await invoke('harness:availability', undefined);
-      set({ availability });
-    } catch {
-      /* ignore */
+      set({ availability, availabilityError: null });
+    } catch (e) {
+      set({ availabilityError: e instanceof Error ? e.message : String(e) });
     }
   },
 
@@ -473,6 +526,10 @@ export const useStore = create<State>((set, get) => ({
   },
   clearTranscriptLocal(id) {
     set((s) => ({ transcripts: { ...s.transcripts, [id]: [] } }));
+  },
+  replaceTranscript(id, items) {
+    dropPendingDeltas(id);
+    set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
   },
   setLocalInfo(sessionId, id, text, opts) {
     set((s) => {
@@ -499,6 +556,15 @@ export const useStore = create<State>((set, get) => ({
   setDraft(sessionId, text) {
     set((s) => (s.drafts[sessionId] === text ? {} : { drafts: { ...s.drafts, [sessionId]: text } }));
   },
+  setArchiving(id, on) {
+    set((s) => {
+      if (on === !!s.archiving[id]) return {};
+      const next = { ...s.archiving };
+      if (on) next[id] = true;
+      else delete next[id];
+      return { archiving: next };
+    });
+  },
   setTerminals(terminals) {
     set({ terminals, terminalsLoaded: true });
   },
@@ -515,6 +581,11 @@ export const useStore = create<State>((set, get) => ({
     set({ composerInsert: null });
   }
 }));
+
+/** Reports a rejected fire-and-forget action as an error toast instead of an unhandled rejection. */
+export function toastError(error: unknown): void {
+  useStore.getState().toast(error instanceof Error ? error.message : String(error), 'error');
+}
 
 export function useActiveSession(): SessionMeta | undefined {
   return useStore((s) => s.sessions.find((x) => x.id === s.activeId));
