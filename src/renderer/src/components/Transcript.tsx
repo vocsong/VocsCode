@@ -54,6 +54,8 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const onImageExpand = useCallback((images: LightboxImage[], index: number) => {
     setLightbox({ images, index });
   }, []);
+  /** Inline file references (`\`src/store.ts\``) open in the Files tab of the right panel. */
+  const openFile = useCallback((path: string, line?: number) => useStore.getState().revealFile(session.id, path, line), [session.id]);
 
   const chunks = useMemo(() => groupTranscript(items), [items]);
 
@@ -140,8 +142,8 @@ export function Transcript({ session }: { session: SessionMeta }) {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    return installMarkdownHandlers(el, (url) => void invoke('app:openExternal', { url }));
-  }, []);
+    return installMarkdownHandlers(el, (url) => void invoke('app:openExternal', { url }), openFile);
+  }, [openFile]);
 
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {

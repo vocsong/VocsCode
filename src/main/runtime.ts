@@ -24,7 +24,27 @@ export interface RuntimePaths {
 
 export type ToolName = 'claude' | 'codex' | 'pi' | 'dsh' | 'npx' | 'gemini';
 
+/**
+ * Resolved PATH scans are memoized per command: one boot performs dozens of lookups (every git/gh
+ * call plus one per harness probe) and each miss walks every PATH dir × every PATHEXT extension.
+ * On Windows that is hundreds of synchronous stats per scan, which is seconds of frozen main
+ * thread on a cold start. `clearWhichCache` drops the memo once a tool is installed mid-session.
+ */
+const whichCache = new Map<string, string | null>();
+
+export function clearWhichCache(): void {
+  whichCache.clear();
+}
+
 export function which(cmd: string, extraDirs: string[] = []): string | null {
+  const key = extraDirs.length ? `${cmd}\u0000${extraDirs.join('\u0000')}` : cmd;
+  if (whichCache.has(key)) return whichCache.get(key) as string | null;
+  const resolved = whichScan(cmd, extraDirs);
+  whichCache.set(key, resolved);
+  return resolved;
+}
+
+function whichScan(cmd: string, extraDirs: string[] = []): string | null {
   if (path.isAbsolute(cmd)) {
     try {
       if (statSync(cmd).isFile()) return cmd;
@@ -56,6 +76,33 @@ export function which(cmd: string, extraDirs: string[] = []): string | null {
 }
 
 export const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Version/login probes memoized per (binary, args) for a short window: one boot refresh probes the
+ * same binary for several harness ids ('codex' and 'codex-exec' share `codex --version` + `login
+ * status`), and every probe is a subprocess that costs hundreds of ms under real-time antivirus.
+ */
+const probeCache = new Map<string, { at: number; result: CaptureResult }>();
+const probePending = new Map<string, Promise<CaptureResult>>();
+const PROBE_TTL_MS = 60_000;
+
+async function probeOnce(cmd: string, args: string[], timeoutMs: number): Promise<CaptureResult> {
+  const key = `${cmd}\u0000${args.join('\u0000')}`;
+  const cached = probeCache.get(key);
+  if (cached && Date.now() - cached.at < PROBE_TTL_MS) return cached.result;
+  // Concurrent callers share one probe; 'codex' and 'codex-exec' refresh together at boot.
+  let pending = probePending.get(key);
+  if (!pending) {
+    pending = runCapture(cmd, args, { timeoutMs })
+      .then((result) => {
+        probeCache.set(key, { at: Date.now(), result });
+        probePending.delete(key);
+        return result;
+      });
+    probePending.set(key, pending);
+  }
+  return pending;
+}
 
 export interface CaptureResult {
   code: number | null;
@@ -249,7 +296,7 @@ export class RuntimeResolver {
       case 'claude': {
         const bin = this.resolve('claude');
         if (!bin) return { available: false, detail: 'No Claude Code runtime found.', installHint: 'npm install -g @anthropic-ai/claude-code' };
-        const v = await runCapture(bin.path, ['--version'], { timeoutMs: 20_000 });
+        const v = await probeOnce(bin.path, ['--version'], 20_000);
         const authenticated = await claudeHasCredentials();
         return {
           available: v.code === 0,
@@ -263,8 +310,8 @@ export class RuntimeResolver {
       case 'codex-exec': {
         const bin = this.resolve('codex');
         if (!bin) return { available: false, detail: 'Codex CLI not found.', installHint: 'npm install -g @openai/codex' };
-        const v = await runCapture(bin.path, ['--version'], { timeoutMs: 20_000 });
-        const login = await runCapture(bin.path, ['login', 'status'], { timeoutMs: 20_000 });
+        const v = await probeOnce(bin.path, ['--version'], 20_000);
+        const login = await probeOnce(bin.path, ['login', 'status'], 20_000);
         const text = login.stdout + login.stderr;
         const loggedIn = /logged in/i.test(text) && !/not logged in/i.test(text);
         return {
@@ -278,7 +325,7 @@ export class RuntimeResolver {
       case 'pi': {
         const bin = this.resolve('pi');
         if (!bin) return { available: false, detail: 'pi not found on PATH.', installHint: 'npm install -g @earendil-works/pi-coding-agent' };
-        const v = await runCapture(bin.path, ['--version'], { timeoutMs: 20_000 });
+        const v = await probeOnce(bin.path, ['--version'], 20_000);
         const authenticated = await piHasCredentials();
         return { available: v.code === 0, version: v.stdout.trim() || undefined, binaryPath: bin.path, authenticated };
       }
@@ -286,7 +333,7 @@ export class RuntimeResolver {
         const dsh = this.resolve('dsh');
         const npx = this.resolve('npx');
         if (dsh) {
-          const v = await runCapture(dsh.path, ['--version'], { timeoutMs: 30_000 });
+          const v = await probeOnce(dsh.path, ['--version'], 30_000);
           return {
             available: true,
             version: v.stdout.trim() || undefined,
@@ -336,6 +383,8 @@ export class RuntimeResolver {
     const r = await runCapture(npm, ['install', '-g', '--prefix', this.paths.appRuntimeDir, `${pkg}@latest`], {
       timeoutMs: 600_000
     });
+    // The install put a new binary in the runtime dir; drop the memoized misses so it is found.
+    if (r.code === 0) clearWhichCache();
     return { ok: r.code === 0, log: r.stdout + r.stderr };
   }
 }

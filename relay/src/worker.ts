@@ -89,8 +89,10 @@ export class Hub {
   }
 
   private async authDevice(request: Request): Promise<{ deviceId: string }> {
-    const token = bearer(request);
-    const deviceId = new URL(request.url).searchParams.get('device') ?? '';
+    // Browsers cannot set custom WS headers, so the device token may ride in the query.
+    const url = new URL(request.url);
+    const token = bearer(request) || url.searchParams.get('token') || '';
+    const deviceId = url.searchParams.get('device') ?? '';
     await verifyDeviceToken(this.store, { accountId: this.env.RELAY_ACCOUNT, deviceId, token }, Date.now());
     return { deviceId };
   }

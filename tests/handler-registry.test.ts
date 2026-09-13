@@ -123,20 +123,6 @@ describe('handler registry', () => {
     expect(logs.some(([, m]) => m.includes('s_missing'))).toBe(false);
   });
 
-  it('writes renderer-reported failures to the log with a bounded length and a checked level', async () => {
-    const { registry, logs } = stubDeps();
-    await registry.invoke('app:log', { level: 'error', message: 'Uncaught TypeError: x is not a function\n    at App.tsx:1' });
-    expect(logs).toContainEqual(['error', '[renderer] Uncaught TypeError: x is not a function\n    at App.tsx:1']);
-    await registry.invoke('app:log', { level: 'debug' as never, message: 'x'.repeat(10_000) });
-    const last = logs[logs.length - 1];
-    expect(last[0]).toBe('warn');
-    expect(last[1].length).toBe('[renderer] '.length + 4000);
-    const before = logs.length;
-    await registry.invoke('app:log', { level: 'error', message: '   ' });
-    await registry.invoke('app:log', { level: 'error', message: 42 as never });
-    expect(logs.length).toBe(before);
-  });
-
   it('serves a representative set of channels', () => {
     const { registry } = stubDeps();
     const channels = registry.channels();
@@ -232,6 +218,14 @@ describe('handler registry', () => {
     const { registry, logs } = stubDeps();
     await registry.invoke('sessions:send', { id: 's_test', input: { text: 'hi' } });
     expect(logs.some(([level, msg]) => level === 'warn' && msg.includes('slow ipc sessions:send'))).toBe(true);
+  });
+
+  it('records renderer errors in the main log', async () => {
+    const { registry, logs } = stubDeps();
+    await registry.invoke('app:rendererError', { message: 'TypeError: boom', stack: 'Error: boom\n  at render', source: 'App.tsx:12' });
+    const line = logs.find(([level]) => level === 'error');
+    expect(line?.[1]).toContain('renderer error at App.tsx:12: TypeError: boom');
+    expect(line?.[1]).toContain('at render');
   });
 });
 

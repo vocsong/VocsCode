@@ -25,6 +25,7 @@ import type { SessionManager } from './session-manager';
 import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
 import type { TerminalManager } from './terminal';
+import type { RemoteHost } from './remote/host';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
@@ -68,6 +69,8 @@ export interface HandlerDeps {
   analytics: AnalyticsStore;
   /** Deep session search (FTS5); derived state, safe to rebuild. */
   search: SearchIndex;
+  /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
+  remote?: RemoteHost;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Push an async event to the connected client (the window today, remote clients later). */
   push: (channel: string, payload: unknown) => void;
@@ -82,8 +85,6 @@ export interface HandlerRegistry {
 
 /** A handler holding the host process this long has already frozen the UI; say so. */
 const SLOW_HANDLER_MS = 1000;
-/** Longest renderer-reported log line kept; a stack trace fits, a runaway string does not. */
-const RENDERER_LOG_MAX_CHARS = 4000;
 
 export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const { settings, secrets, sessions, terminals, runtime } = deps;
@@ -181,11 +182,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('app:diag', ({ kind, ms, detail }) => {
     deps.log('warn', `renderer ${kind} ${ms}ms${detail ? ` (${detail})` : ''}`);
   });
-  // The renderer's own failures. Bounded and level-checked: a compromised or looping client must
-  // not be able to fill the log or forge an arbitrary level.
-  handle('app:log', ({ level, message }) => {
-    if (typeof message !== 'string' || !message.trim()) return;
-    deps.log(level === 'error' ? 'error' : 'warn', `[renderer] ${message.slice(0, RENDERER_LOG_MAX_CHARS)}`);
+  // Exceptions are invisible once the renderer window is blank; they belong in the same log as
+  // everything else, clipped so one runaway stack cannot fill it.
+  handle('app:rendererError', ({ message, stack, source }) => {
+    const where = source ? ` at ${source}` : '';
+    const trace = stack ? `\n${stack.slice(0, 4000)}` : '';
+    deps.log('error', `renderer error${where}: ${message.slice(0, 2000)}${trace}`);
   });
   handle('app:notify', async ({ title, body }) => {
     if (typeof title !== 'string' || typeof body !== 'string') return;
@@ -440,6 +442,37 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:goal', ({ id, action, objective, autoContinue, maxIterations }) => sessions.goal(id, action, { objective, autoContinue, maxIterations }));
 
   handle('approvals:respond', ({ sessionId, requestId, decision }) => sessions.respondApproval(sessionId, requestId, decision));
+
+  // Remote access (docs/REMOTE-ACCESS.md). The enrollment and device tokens live in the
+  // secret store, never in settings; enable() stores them and opens the relay socket.
+  if (deps.remote) {
+    const remote = deps.remote;
+    handle('remote:get', async () => ({
+      config: settings.get().remote ?? { enabled: false },
+      state: remote.state(),
+      devices: settings.get().remote?.enabled ? await remote.listDevices() : []
+    }));
+    handle('remote:enable', async ({ relayUrl, enrollToken }) => {
+      await secrets.set('remote-enroll', enrollToken);
+      await settings.update({ remote: { enabled: true, relayUrl } });
+      await remote.enable(relayUrl, enrollToken);
+      return remote.state();
+    });
+    handle('remote:disable', async () => {
+      await settings.update({ remote: { enabled: false } });
+      await remote.disable();
+      return remote.state();
+    });
+    handle('remote:pairStart', ({ hostName }) => remote.startPairing(hostName || 'This computer'));
+    handle('remote:pairRespond', ({ decision }) => {
+      remote.respondPairing(decision);
+      return undefined;
+    });
+    handle('remote:revoke', async ({ deviceId }) => {
+      await remote.revokeDevice(deviceId);
+      return undefined;
+    });
+  }
 
   // `days: 0` is all time; only an absent request falls back to the 30-day default.
   handle('analytics:summary', (req) => deps.analytics.summary(req && typeof req === 'object' && typeof req.days === 'number' ? Math.max(0, req.days) : 30));

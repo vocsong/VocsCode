@@ -10,124 +10,7 @@ import { claimPairing, pollPairing, resolvePairing, startPairing, verifyDeviceTo
 import { clientFinish, createHello, generateIdentity, openFrame, publicOf, sealFrame, type PublicIdentity } from '../src/shared/crypto';
 import type { HandlerRegistry } from '../src/main/handlers';
 
-const ENROLL = 'enroll-secret';
-
-function memStore(): RelayStore {
-  const map = new Map<string, unknown>();
-  return {
-    get: async <T,>(k: string) => map.get(k) as T | undefined,
-    put: async (k, v) => void map.set(k, v),
-    delete: async (k) => void map.delete(k),
-    list: async <T,>(prefix: string) => [...map.entries()].filter(([k]) => k.startsWith(prefix)) as Array<[string, T]>
-  };
-}
-
-/** Minimal hub over the real core: REST pairing + WS routing, metadata only. */
-class FakeRelay {
-  readonly store: RelayStore = memStore();
-  private sockets = new Map<WsLike, { role: 'host' | 'client'; id: string }>();
-  private server: http.Server | null = null;
-  private wss = new WebSocketServer({ noServer: true });
-
-  async start(): Promise<number> {
-    const server = http.createServer((req, res) => void this.rest(req, res));
-    server.on('upgrade', (req, socket, head) => this.upgrade(req, socket, head));
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    this.server = server;
-    return (server.address() as { port: number }).port;
-  }
-
-  async stop(): Promise<void> {
-    this.server?.close();
-    this.server?.closeAllConnections();
-  }
-
-  private async rest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? '/', 'http://x');
-    const body = await new Promise<string>((r) => {
-      let s = '';
-      req.on('data', (c) => (s += c));
-      req.on('end', () => r(s));
-    });
-    const reply = (v: unknown, status = 200) => {
-      res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(v));
-    };
-    const auth = (req.headers.authorization ?? '').replace('Bearer ', '');
-    if (url.pathname === '/v1/pair/start' && req.method === 'POST') {
-      if (auth !== ENROLL) return reply({ error: 'forbidden' }, 403);
-      const parsed = JSON.parse(body) as { hostPub: PublicIdentity; name: string; platform: string };
-      return reply(await startPairing(this.store, { accountId: 'a', hostName: parsed.name, hostPlatform: parsed.platform, hostPub: parsed.hostPub }, Date.now()));
-    }
-    if (url.pathname === '/v1/pair/claim' && req.method === 'POST') {
-      const parsed = JSON.parse(body) as { code: string; webPub: PublicIdentity; name: string };
-      await claimPairing(this.store, { code: parsed.code, webName: parsed.name, webPlatform: 'node-test', webPub: parsed.webPub }, Date.now());
-      for (const [ws, meta] of this.sockets) if (meta.role === 'host') ws.send(JSON.stringify({ t: 'pair.request', code: parsed.code, name: parsed.name, platform: 'node-test' }));
-      return reply({ ok: true });
-    }
-    if (url.pathname === '/v1/pair/poll' && req.method === 'GET') {
-      return reply(await pollPairing(this.store, url.searchParams.get('code') ?? '', Date.now()));
-    }
-    reply({ error: 'not found' }, 404);
-  }
-
-  private upgrade(req: http.IncomingMessage, socket: import('node:stream').Duplex, head: Buffer): void {
-    const url = new URL(req.url ?? '/', 'http://x');
-    const auth = (req.headers.authorization ?? '').replace('Bearer ', '');
-    const fail = (): void => { socket.destroy(); };
-    if (url.pathname === '/v1/ws/host') {
-      if (url.searchParams.get('device') === 'enrolling') {
-        if (auth !== ENROLL) return fail();
-        return this.accept(socket, head, 'host', 'enrolling', req);
-      }
-      void verifyDeviceToken(this.store, { accountId: 'a', deviceId: url.searchParams.get('device') ?? '', token: auth }, Date.now())
-        .then((device) => this.accept(socket, head, 'host', device.deviceId, req))
-        .catch(fail);
-      return;
-    }
-    if (url.pathname === '/v1/ws/client') {
-      void verifyDeviceToken(this.store, { accountId: 'a', deviceId: url.searchParams.get('device') ?? '', token: auth }, Date.now())
-        .then((device) => this.accept(socket, head, 'client', device.deviceId, req))
-        .catch(fail);
-      return;
-    }
-    fail();
-  }
-
-  private accept(socket: import('node:stream').Duplex, head: Buffer, role: 'host' | 'client', id: string, req: http.IncomingMessage): void {
-    this.wss.handleUpgrade(req, socket, head, (ws) => {
-      this.sockets.set(ws, { role, id });
-      ws.on('message', (data) => this.route(ws, String(data)));
-      ws.on('close', () => this.sockets.delete(ws));
-    });
-  }
-
-  /** Hub routing: host frames carry `to`; client frames go to their bound host. */
-  private route(ws: WsLike, raw: string): void {
-    const meta = this.sockets.get(ws);
-    if (!meta) return;
-    const msg = JSON.parse(raw) as Record<string, unknown>;
-    if (msg.t === 'pair.respond') {
-      void (async () => {
-        const result = await resolvePairing(this.store, { code: String(msg.code), decision: msg.decision as 'approve' | 'deny' }, Date.now());
-        if ('denied' in result) return;
-        ws.send(JSON.stringify({ t: 'pair.result', code: msg.code, decision: msg.decision, hostToken: result.hostToken, hostDeviceId: result.hostDeviceId, webDeviceId: result.webDeviceId, webPub: result.webPub }));
-      })();
-      return;
-    }
-    if (meta.role === 'host') {
-      // host → client: deliver to the addressed web device.
-      for (const [peer, peerMeta] of this.sockets) {
-        if (peerMeta.role === 'client' && peerMeta.id === msg.to) peer.send(JSON.stringify({ t: msg.t, from: meta.id, seq: msg.seq, payload: msg.payload }));
-      }
-      return;
-    }
-    // client → host: deliver to the host the client greeted.
-    for (const [peer, peerMeta] of this.sockets) {
-      if (peerMeta.role === 'host') peer.send(JSON.stringify({ t: msg.t, from: meta.id, seq: msg.seq, payload: msg.payload }));
-    }
-  }
-}
+import { ENROLL, FakeRelay } from './fake-relay';
 
 function waitFrame(ws: WsLike, match: (m: Record<string, unknown>) => boolean): Promise<Record<string, unknown>> {
   return new Promise((resolve) => {
@@ -169,7 +52,7 @@ describe('remote host end-to-end (fake relay, real core)', () => {
       }
     } as unknown as HandlerRegistry;
     const host = new RemoteHost({
-      registry,
+      registry: () => registry,
       secrets: { get: async () => undefined, set: async () => undefined },
       pushState: () => undefined,
       log: () => undefined,

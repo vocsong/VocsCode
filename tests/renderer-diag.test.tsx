@@ -1,49 +1,78 @@
-/** Renderer failures reach the main log through app:log, bounded so a render loop cannot flood it. */
-/** @vitest-environment jsdom */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+/** Loop-lag reporting (src/renderer/src/diag.ts): a visible window reports a real stall, a hidden
+ *  window stays quiet, and becoming visible again does not report the whole hidden period. Error
+ *  reports are capped per minute so a render loop cannot flood the main log.
+ *  @vitest-environment jsdom */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const invokeMock = vi.fn().mockResolvedValue(undefined);
+const invokeMock = vi.fn();
 (window as unknown as { harness: unknown }).harness = {
   platform: 'win32',
   invoke: invokeMock,
   on: vi.fn().mockReturnValue(() => undefined)
 };
 
-import { describeThrown, reportRendererError, startDiagnostics } from '../src/renderer/src/diag';
+type Hidden = { hidden: boolean };
 
-const logCalls = () => invokeMock.mock.calls.filter(([channel]) => channel === 'app:log');
+beforeEach(() => {
+  vi.resetModules();
+  invokeMock.mockReset();
+  invokeMock.mockResolvedValue(undefined);
+  vi.useFakeTimers();
+});
 
-describe('renderer diagnostics', () => {
-  beforeEach(() => {
-    invokeMock.mockClear();
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  delete (document as unknown as Partial<Hidden>).hidden;
+});
+
+describe('loop-lag reporting', () => {
+  it('reports a stall while visible and ignores the throttled ticks of a hidden window', async () => {
+    let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const { startDiagnostics } = await import('../src/renderer/src/diag');
     startDiagnostics();
+
+    now = 5_000;
+    await vi.advanceTimersByTimeAsync(250);
+    expect(invokeMock).toHaveBeenCalledWith('app:diag', expect.objectContaining({ kind: 'loop-lag', ms: 4_750 }));
+
+    invokeMock.mockClear();
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    now = 65_000;
+    await vi.advanceTimersByTimeAsync(250);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it('forwards uncaught exceptions with their stack and source location', () => {
-    const error = new Error('render exploded');
-    window.dispatchEvent(new ErrorEvent('error', { message: 'render exploded', error, filename: 'app://renderer/index.js', lineno: 12, colno: 7 }));
-    const calls = logCalls();
-    expect(calls).toHaveLength(1);
-    const [, payload] = calls[0] as [string, { level: string; message: string }];
-    expect(payload.level).toBe('error');
-    expect(payload.message).toMatch(/^uncaught exception: Error: render exploded/);
-    expect(payload.message).toContain('(app://renderer/index.js:12:7)');
-  });
+  it('does not report the hidden period as lag once the window is visible again', async () => {
+    let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const { startDiagnostics } = await import('../src/renderer/src/diag');
+    startDiagnostics();
 
-  it('forwards unhandled promise rejections, describing non-Error reasons too', () => {
-    const rejection = new Event('unhandledrejection') as Event & { reason: unknown };
-    rejection.reason = { code: 'EPIPE' };
-    window.dispatchEvent(rejection);
-    const [, payload] = logCalls()[0] as [string, { level: string; message: string }];
-    expect(payload).toEqual({ level: 'error', message: 'unhandled rejection: {"code":"EPIPE"}' });
-    expect(describeThrown('plain string')).toBe('plain string');
-    expect(describeThrown(new TypeError('bad'))).toMatch(/^TypeError: bad/);
-  });
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    now = 3_600_000;
+    await vi.advanceTimersByTimeAsync(250);
 
-  it('caps reports so a component erroring on every render does not flood the log', () => {
-    for (let i = 0; i < 40; i++) reportRendererError('warn', `repeat ${i}`);
-    // The two tests above already consumed reports inside the same minute; the cap is 20 total.
-    expect(logCalls().length).toBeLessThanOrEqual(20);
-    expect(logCalls().length).toBeGreaterThan(0);
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+    document.dispatchEvent(new Event('visibilitychange'));
+    invokeMock.mockClear();
+    now = 3_600_250;
+    await vi.advanceTimersByTimeAsync(250);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('renderer error reporting', () => {
+  it('caps reports so a component erroring on every render does not flood the log', async () => {
+    const { reportRendererError } = await import('../src/renderer/src/diag');
+    for (let i = 0; i < 40; i++) reportRendererError(`repeat ${i}`, 'Error: repeat\n  at render');
+    const reports = invokeMock.mock.calls.filter(([channel]) => channel === 'app:rendererError');
+    expect(reports).toHaveLength(20);
+    expect(reports[0][1]).toEqual({ message: 'repeat 0', stack: 'Error: repeat\n  at render', source: undefined });
+    // A new minute opens a new budget.
+    vi.setSystemTime(Date.now() + 61_000);
+    reportRendererError('later');
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'app:rendererError')).toHaveLength(21);
   });
 });

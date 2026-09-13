@@ -12,6 +12,7 @@ import { watchEventLoop } from './diag';
 import { setGitLog } from './git';
 import { registerIpc, pushToRenderer } from './ipc';
 import { createLogger, describeError, type Logger } from './log';
+import { RendererRecovery } from './renderer-recovery';
 import { RuntimeResolver } from './runtime';
 import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
@@ -19,6 +20,7 @@ import { SessionManager } from './session-manager';
 import { SettingsStore } from './settings';
 import { SessionStore } from './store';
 import { TerminalManager } from './terminal';
+import { RemoteHost } from './remote/host';
 import { WebServer } from './web-server';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -38,6 +40,7 @@ let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
 let terminals: TerminalManager | null = null;
 let webServer: WebServer | null = null;
+let remoteHost: RemoteHost | null = null;
 let processErrorHandlersInstalled = false;
 
 /** Console-only until userData is known (see main()), then also a rotating file under logs/. */
@@ -148,6 +151,7 @@ async function main(): Promise<void> {
   const pushAll = (channel: string, payload: unknown) => {
     pushToRenderer(mainWindow, channel, payload);
     webServer?.broadcast(channel, payload);
+    void remoteHost?.broadcastPush(channel, payload);
   };
   terminals = new TerminalManager({
     dir: path.join(userData, 'terminals'),
@@ -159,6 +163,17 @@ async function main(): Promise<void> {
   });
   await terminals.load();
 
+  // Remote access (docs/REMOTE-ACCESS.md): the host needs the registry lazily, since
+  // registerIpc itself consumes the host to bind the remote:* channels.
+  let registryRef: import('./handlers').HandlerRegistry | null = null;
+  remoteHost = new RemoteHost({
+    registry: () => registryRef!,
+    secrets: { get: (key) => secrets.get(key), set: (key, value) => secrets.set(key, value) },
+    pushState: () => pushAll(PUSH_CHANNELS.remoteState, remoteHost!.state()),
+    log,
+    broadcast: (channel, payload) => void remoteHost?.broadcastPush(channel, payload)
+  });
+
   const registry = registerIpc({
     settings,
     secrets,
@@ -167,10 +182,21 @@ async function main(): Promise<void> {
     runtime,
     analytics,
     search,
-    broadcast: (channel, payload) => webServer?.broadcast(channel, payload),
+    remote: remoteHost,
+    broadcast: (channel, payload) => {
+      webServer?.broadcast(channel, payload);
+    },
     getWindow: () => mainWindow,
     log
   });
+  registryRef = registry;
+
+  // Resume remote access across restarts when it was left enabled.
+  const remoteConfig = settings.get().remote;
+  if (remoteConfig?.enabled && remoteConfig.relayUrl) {
+    const enrollToken = await secrets.get('remote-enroll');
+    if (enrollToken) await remoteHost.enable(remoteConfig.relayUrl, enrollToken);
+  }
 
   // Localhost web client (P1 dogfood, docs/REMOTE-ACCESS.md): explicit opt-in, dev-oriented.
   // Serves the built renderer (npm run build first) and bridges the same handler registry to a browser tab.
@@ -198,6 +224,13 @@ async function main(): Promise<void> {
   // The window is frameless with an in-app title bar; on Windows/Linux the OS still paints the caption
   // buttons over it, so their colors have to follow the theme.
   nativeTheme.on('updated', applyChrome);
+
+  // GPU and utility processes share the window's fate; a dead one explains a blank or malformed
+  // window, and without a line here it is invisible. Normal exits are not news.
+  app.on('child-process-gone', (_event, details) => {
+    if (details.reason === 'clean-exit') return;
+    log('error', `child process gone: ${details.type} ${details.reason} (exit ${details.exitCode})`);
+  });
 
   // No native menu bar: File/Edit/View/Help live in the custom title bar. macOS keeps its
   // application menu because the system requires one for the app menu and standard shortcuts.
@@ -270,8 +303,10 @@ function installAppProcessHandlers(): void {
     const level = details.reason === 'clean-exit' || details.reason === 'killed' ? 'info' : 'error';
     log(level, `${details.type} process gone: ${details.reason}${details.exitCode !== undefined ? ` (exit code ${details.exitCode})` : ''}${details.name ? ` [${details.name}]` : ''}${details.serviceName ? ` service=${details.serviceName}` : ''}`);
   });
-  app.on('render-process-gone', (_e, _contents, details) => {
-    // Also reported per window below; this catches webContents that are not the main window.
+  app.on('render-process-gone', (_e, contents, details) => {
+    // The main window's renderer is reported (and reloaded) by RendererRecovery; this catches any
+    // other webContents.
+    if (contents === mainWindow?.webContents) return;
     log('error', `a renderer process is gone: ${details.reason} (exit code ${details.exitCode})`);
   });
 }
@@ -409,17 +444,8 @@ function createWindow(settings: SettingsStore, appRoot: string): void {
     log('debug', 'window closed');
     mainWindow = null;
   });
-  // The failures a user reports as "the app went blank / froze / never loaded", each with its cause.
-  win.webContents.on('render-process-gone', (_e, details) => {
-    log('error', `renderer process gone: ${details.reason} (exit code ${details.exitCode}); the window is blank until it is reloaded`);
-  });
-  win.on('unresponsive', () => log('warn', 'the window became unresponsive (renderer not answering); see the renderer stall lines above'));
-  win.on('responsive', () => log('info', 'the window is responsive again'));
-  win.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    // -3 is ABORTED: a navigation superseded by another, not a failure.
-    if (errorCode === -3 || !isMainFrame) return;
-    log('error', `renderer failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
-  });
+  // A preload failure leaves the renderer with no IPC bridge; the crash, stall and load-failure
+  // handlers live with the recovery wiring below.
   win.webContents.on('preload-error', (_e, preloadPath, error) => {
     log('error', `preload script ${preloadPath} failed; the renderer has no IPC bridge: ${describeError(error)}`);
   });
@@ -432,6 +458,24 @@ function createWindow(settings: SettingsStore, appRoot: string): void {
   };
   win.on('resize', debounce(saveBounds, 500));
   win.on('move', debounce(saveBounds, 500));
+
+  // A renderer that dies leaves a blank window and, without this, no record of why. Reload it
+  // (bounded) so a one-off crash self-heals and a crash loop says so in the log instead of
+  // reloading forever.
+  const recovery = new RendererRecovery({
+    log,
+    reload: () => {
+      if (!win.isDestroyed()) win.webContents.reload();
+    }
+  });
+  win.webContents.on('render-process-gone', (_event, details) => recovery.gone(details.reason, details.exitCode));
+  win.webContents.on('unresponsive', () => log('warn', 'renderer unresponsive — the window is not painting or taking input'));
+  win.webContents.on('responsive', () => log('info', 'renderer responsive again'));
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    // -3 is ERR_ABORTED: an in-page navigation (hash, redirect) that is not a failure.
+    if (isMainFrame && errorCode !== -3) log('error', `renderer failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
+  });
+  win.webContents.on('preload-error', (_event, preloadPath, error) => log('error', `preload script failed (${preloadPath}): ${error.stack ?? error.message}`));
 
   // A reload drops every xterm instance; stop streaming to it and let paused shells run until it re-attaches.
   win.webContents.on('did-start-loading', () => terminals?.detachAll());

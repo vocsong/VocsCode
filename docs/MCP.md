@@ -208,8 +208,11 @@ harness with no approval UI, which is a permission decision for the user, not a 
 
 **ACP** — `newSession/resumeSession({ cwd, mcpServers: toAcp(effective) })`; env and
 headers become `[{ name, value }]` arrays; http/sse entries are dropped unless
-`initialize` reported `mcpCapabilities.http`/`.sse`. Claude-agent-acp, codex-acp and
-gemini all honour `session/new.mcpServers`; verify `dsh` and pi-acp in the smoke run.
+`initialize` reported `mcpCapabilities.http`/`.sse`. ACP wants an absolute stdio
+`command` and the agent rejects the whole request otherwise, so the adapter resolves a
+bare one through PATH and skips it with a warning when it cannot (§9). Claude-agent-acp,
+codex-acp and gemini all honour `session/new.mcpServers`; verify `dsh` and pi-acp in the
+smoke run.
 
 **Native loop** (`client`) — new `src/main/mcp/client.ts` wrapping the MCP SDK `Client`
 with `StdioClientTransport` / `StreamableHTTPClientTransport` / `SSEClientTransport`.
@@ -327,6 +330,10 @@ MCP SDK's OAuth provider and a loopback redirect; deferred to P2 (§10).
 
 - Shim resolution (§6) is the one thing that will bite every user on this machine; test
   `npx -y @modelcontextprotocol/server-filesystem` end to end per harness.
+- ACP takes an absolute stdio `command`; dsh fails `session/new` with "mcpServers[0].command
+  must be an absolute path" for anything else. The shim wrapper `normalizeStdio` produces is
+  a bare `cmd`, so the ACP adapter resolves it through PATH and drops a server it cannot
+  resolve rather than losing the session.
 - ConPTY is irrelevant here (MCP stdio is plain pipes), but `killTree()` from
   `harness/spawn.ts` is needed when a session ends so orphaned `node.exe` servers don't
   accumulate — the native client must own the lifetime of what it spawns.

@@ -4,6 +4,7 @@
  *  identity keys live in the secret store, never in settings or logs. */
 import { WebSocket } from 'ws';
 import { generateIdentity, hostAccept, openFrame, publicOf, sealFrame, verify, type Identity, type PublicIdentity } from '../../shared/crypto';
+import type { RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
 import type { Logger } from '../log';
@@ -34,14 +35,6 @@ export const REMOTE_CHANNELS = new Set<string>([
   'fs:search',
   'fs:read'
 ]);
-
-export interface RemoteState {
-  status: 'off' | 'connecting' | 'online' | 'error';
-  detail?: string;
-  pairing?: { code: string; expiresAt: number };
-  pendingRequest?: { code: string; name: string; platform: string };
-  onlineClients: string[];
-}
 
 interface HostCredentials {
   identity: Identity;
@@ -81,15 +74,18 @@ interface WsMessage {
 export class RemoteHost {
   private creds: HostCredentials | null = null;
   private ws: WebSocket | null = null;
-  private status: RemoteStatus = 'off';
+  private status: RemoteState['status'] = 'off';
   private detail: string | undefined;
   private pairing: { code: string; expiresAt: number } | undefined;
   private pendingRequest: { code: string; name: string; platform: string } | undefined;
   private readonly sessions = new Map<string, Session>();
+  /** Bumped on enable/disable so a pending reconnect timer can be invalidated. */
+  private generation = 0;
 
   constructor(
     private readonly deps: {
-      registry: HandlerRegistry;
+      /** Lazy: the registry exists after registerIpc, which itself consumes this host. */
+      registry: () => HandlerRegistry;
       secrets: { get(key: string): Promise<string | undefined>; set(key: string, value: string): Promise<void> };
       pushState: () => void;
       log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
@@ -108,6 +104,7 @@ export class RemoteHost {
   }
 
   async enable(relayUrl: string, enrollToken: string): Promise<void> {
+    this.generation++;
     await this.disable();
     const stored = await this.loadCreds();
     this.creds = stored ?? { identity: await generateIdentity(), relayUrl, enrollToken, clients: {} };
@@ -120,6 +117,7 @@ export class RemoteHost {
   }
 
   async disable(): Promise<void> {
+    this.generation++; // cancels any pending reconnect timer
     if (this.status !== 'off') this.deps.log('info', `remote: disabled (${this.sessions.size} client session(s) dropped)`);
     this.ws?.close();
     this.ws = null;
@@ -159,11 +157,11 @@ export class RemoteHost {
     }
   }
 
-  async listDevices(): Promise<Array<{ deviceId: string; kind: string; name: string; platform: string; lastSeen: number }>> {
+  async listDevices(): Promise<RemoteDeviceInfo[]> {
     if (!this.creds?.deviceId || !this.creds.deviceToken) return [];
     const res = await fetch(`${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices`, { headers: { authorization: `Bearer ${this.creds.deviceToken}` } });
     if (!res.ok) return [];
-    return (await res.json()) as Array<{ deviceId: string; kind: string; name: string; platform: string; lastSeen: number }>;
+    return (await res.json()) as RemoteDeviceInfo[];
   }
 
   async revokeDevice(deviceId: string): Promise<void> {
@@ -226,7 +224,10 @@ export class RemoteHost {
         this.deps.log('info', `remote: relay connection closed (code ${code}${dropped ? `, ${dropped} client session(s) dropped` : ''}); reconnecting in 3s`);
         this.status = 'connecting';
         this.push();
-        setTimeout(() => void this.connect(), 3000);
+        const gen = this.generation;
+        setTimeout(() => {
+          if (gen === this.generation) void this.connect();
+        }, 3000);
       }
     });
     ws.on('error', (e: Error) => {
@@ -325,7 +326,7 @@ export class RemoteHost {
         return;
       }
       try {
-        const value = await this.deps.registry.invoke(inner.channel, inner.request);
+        const value = await this.deps.registry().invoke(inner.channel, inner.request);
         await this.sendTo(from, { type: 'result', id: inner.id, ok: true, value });
       } catch (e) {
         await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: e instanceof Error ? e.message : String(e) });
@@ -346,4 +347,3 @@ export class RemoteHost {
   }
 }
 
-type RemoteStatus = 'off' | 'connecting' | 'online' | 'error';
