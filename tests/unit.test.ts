@@ -662,6 +662,8 @@ describe('SessionManager fork', () => {
       rewriteTranscript: async (id: string, items: TranscriptItem[]) => void transcripts.set(id, items),
       readNativeHistory: async () => null,
       writeNativeHistory: async () => undefined,
+      readBlob: async () => null,
+      writeBlob: async () => 'fork-context.md',
       sessionDir: (id: string) => path.join(os.tmpdir(), `fork-test-${id}`)
     } as unknown as SessionStore;
     const manager = new SessionManager({
@@ -695,8 +697,9 @@ describe('SessionManager fork', () => {
     // Same directory and branch as the source.
     expect(fork!.cwd).toBe(src.cwd);
     expect(fork!.worktreeBranch).toBe('agent/source-session');
-    // The new harness cannot resume the source's provider session.
+    // The new harness cannot resume the source's provider session; the transcript is handed over as text.
     expect(fork!.harnessRef).toEqual({});
+    expect(fork!.pendingForkContext).toBe(true);
     // Harness-specific config does not transfer; the model falls back to the target default.
     expect(fork!.config.acpAgent).toBeUndefined();
     expect(fork!.config.codexModelProvider).toBeUndefined();

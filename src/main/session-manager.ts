@@ -24,6 +24,7 @@ import type {
 import { autoCompactionThresholdLabel, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
+import { renderForkContext } from './fork-context';
 import { resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
@@ -73,6 +74,8 @@ interface ActiveSession {
 
 const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
 const AUTO_COMPACTION_RETRY_MS = 30_000;
+/** Handoff text written into a cross-harness fork's session dir, consumed by its first message. */
+const FORK_CONTEXT_FILE = 'fork-context.md';
 
 export class SessionManager {
   /** How often a session parked on 'pr' re-checks whether its branch was merged. */
@@ -633,7 +636,29 @@ export class SessionManager {
     // mutating its context until that operation has settled.
     if (active.compactionInFlight) await active.compactionInFlight.catch(() => undefined);
     if (this.active.get(id) !== active) throw new Error('Session stopped before the message could be sent.');
-    await active.adapter.send(input);
+    await active.adapter.send(await this.withForkContext(id, input));
+    await this.clearForkContext(id);
+  }
+
+  /** Prefixes the first message after a cross-harness fork with the handed-off transcript. */
+  private async withForkContext(id: string, input: UserInput): Promise<UserInput> {
+    const meta = this.get(id);
+    if (!meta?.pendingForkContext) return input;
+    let context: string | null = null;
+    try {
+      context = await this.deps.store.readBlob(id, FORK_CONTEXT_FILE);
+    } catch {
+      context = null;
+    }
+    return context ? { ...input, text: `${context}\n\n${input.text}` } : input;
+  }
+
+  /** Cleared only after the harness accepted the seeded message, so a failed start retries with it. */
+  private async clearForkContext(id: string): Promise<void> {
+    const meta = this.get(id);
+    if (!meta?.pendingForkContext) return;
+    meta.pendingForkContext = undefined;
+    await this.deps.store.upsert(meta);
   }
 
   /**
@@ -1228,6 +1253,7 @@ export class SessionManager {
       statusDetail: undefined,
       queued: 0,
       harnessRef: {},
+      pendingForkContext: undefined,
       goal: undefined,
       // A fresh fork starts unpinned and active, never in the archive.
       pinned: undefined,
@@ -1262,17 +1288,21 @@ export class SessionManager {
         meta.harnessRef = { nativeHistory: true };
       }
     }
-    await this.deps.store.upsert(meta);
     const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision));
     if (cross) {
+      // The target cannot resume the source's provider session, so hand it the prior conversation
+      // as plain text: the first message in the fork carries it and then the flag is cleared.
+      await this.deps.store.writeBlob(nid, FORK_CONTEXT_FILE, renderForkContext(keep, src.config.harness, target));
+      meta.pendingForkContext = true;
       keep.push({
         id: shortId('i_'),
         kind: 'info',
         ts: Date.now(),
         level: 'info',
-        text: `Forked from ${HARNESS_BY_ID[src.config.harness].name} into ${HARNESS_BY_ID[target].name} in the same directory${meta.worktreeBranch ? ` (branch ${meta.worktreeBranch})` : ''}. The new harness starts with a fresh context — the transcript above is carried over for reference.`
+        text: `Forked from ${HARNESS_BY_ID[src.config.harness].name} into ${HARNESS_BY_ID[target].name} in the same directory${meta.worktreeBranch ? ` (branch ${meta.worktreeBranch})` : ''}. The conversation above is handed to the new harness as context on your next message.`
       });
     }
+    await this.deps.store.upsert(meta);
     await this.deps.store.rewriteTranscript(nid, keep);
     this.deps.log('info', `[${nid}] forked from ${id}${cross ? ` (${src.config.harness} → ${target})` : ''}; ${keep.length} transcript item(s) carried over`);
     this.pushSessions();

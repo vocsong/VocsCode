@@ -150,6 +150,12 @@ export class SessionStore {
     await writeJson(path.join(this.sessionDir(id), 'native-history.json'), history);
   }
 
+  async readBlob(id: string, name: string): Promise<string | null> {
+    const file = path.join(this.sessionDir(id), name);
+    if (!(await exists(file))) return null;
+    return fs.readFile(file, 'utf8');
+  }
+
   async writeBlob(id: string, name: string, content: string): Promise<string> {
     const file = path.join(this.sessionDir(id), name);
     await ensureDir(path.dirname(file));
