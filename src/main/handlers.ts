@@ -25,6 +25,7 @@ import type { SessionManager } from './session-manager';
 import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
 import type { TerminalManager } from './terminal';
+import type { RemoteHost } from './remote/host';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
@@ -68,6 +69,8 @@ export interface HandlerDeps {
   analytics: AnalyticsStore;
   /** Deep session search (FTS5); derived state, safe to rebuild. */
   search: SearchIndex;
+  /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
+  remote?: RemoteHost;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Push an async event to the connected client (the window today, remote clients later). */
   push: (channel: string, payload: unknown) => void;
@@ -418,6 +421,37 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:goal', ({ id, action, objective, autoContinue, maxIterations }) => sessions.goal(id, action, { objective, autoContinue, maxIterations }));
 
   handle('approvals:respond', ({ sessionId, requestId, decision }) => sessions.respondApproval(sessionId, requestId, decision));
+
+  // Remote access (docs/REMOTE-ACCESS.md). The enrollment and device tokens live in the
+  // secret store, never in settings; enable() stores them and opens the relay socket.
+  if (deps.remote) {
+    const remote = deps.remote;
+    handle('remote:get', async () => ({
+      config: settings.get().remote ?? { enabled: false },
+      state: remote.state(),
+      devices: settings.get().remote?.enabled ? await remote.listDevices() : []
+    }));
+    handle('remote:enable', async ({ relayUrl, enrollToken }) => {
+      await secrets.set('remote-enroll', enrollToken);
+      await settings.update({ remote: { enabled: true, relayUrl } });
+      await remote.enable(relayUrl, enrollToken);
+      return remote.state();
+    });
+    handle('remote:disable', async () => {
+      await settings.update({ remote: { enabled: false } });
+      await remote.disable();
+      return remote.state();
+    });
+    handle('remote:pairStart', ({ hostName }) => remote.startPairing(hostName || 'This computer'));
+    handle('remote:pairRespond', ({ decision }) => {
+      remote.respondPairing(decision);
+      return undefined;
+    });
+    handle('remote:revoke', async ({ deviceId }) => {
+      await remote.revokeDevice(deviceId);
+      return undefined;
+    });
+  }
 
   // `days: 0` is all time; only an absent request falls back to the 30-day default.
   handle('analytics:summary', (req) => deps.analytics.summary(req && typeof req === 'object' && typeof req.days === 'number' ? Math.max(0, req.days) : 30));
