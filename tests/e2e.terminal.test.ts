@@ -12,6 +12,7 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
+import { openNewSession, seedSettings } from './e2e-ui';
 
 const enabled = process.env.HARNESS_E2E === '1';
 const root = path.resolve(__dirname, '..');
@@ -43,8 +44,7 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
     await fs.mkdir(userData, { recursive: true });
     await fs.mkdir(project, { recursive: true });
     await fs.writeFile(path.join(project, 'README.md'), '# terminal project\n');
-    // Seed the sidebar's folder list so the project has a new-session button without the native folder picker.
-    await fs.writeFile(path.join(userData, 'settings.json'), JSON.stringify({ folders: [project], recentProjects: [project] }));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
     await fs.mkdir(shots, { recursive: true });
 
     const env: Record<string, string> = {};
@@ -61,11 +61,12 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       timeout: 60_000
     });
     expect(await app.evaluate(({ app: electronApp }) => electronApp.getName())).toBe('Vocs Code');
-    expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle())).toBe('Vocs Code');
     const mainLog: string[] = [];
     app.process().stdout?.on('data', (d: Buffer) => mainLog.push(d.toString()));
     app.process().stderr?.on('data', (d: Buffer) => mainLog.push(d.toString()));
     let win: Page = await app.firstWindow();
+    // Only now is there a window to ask: launch() resolves as soon as the main process is up.
+    expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle())).toBe('Vocs Code');
     const consoleLines: string[] = [];
     const watch = (p: Page) => {
       p.on('console', (msg) => consoleLines.push(`[${msg.type()}] ${msg.text()}`));
@@ -76,8 +77,7 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
 
     try {
       // A session with no prompt: nothing is sent to a harness, so this runs without any API key.
-      await win.click('.project-new-btn');
-      await win.waitForSelector('.modal');
+      await openNewSession(win);
       await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
