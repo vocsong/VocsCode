@@ -1,20 +1,20 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
 import React, { useEffect, useState } from 'react';
 import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
-import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig } from '../../../shared/types';
+import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig, RemoteDeviceInfo, RemoteState } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
 import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
 import { BUILTIN_SHORTCUT_GROUPS, SHORTCUT_COMMANDS, accelFromEvent, formatAccelerator, isReservedAccel, shortcutCommandInfo, type ShortcutCommand } from '../../../shared/shortcuts';
-import { invoke, isMac, platform } from '../api';
+import { invoke, isMac, on, platform } from '../api';
 import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { systemPrefersDark } from '../theme';
 import { Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
 
-type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'about';
+type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'remote' | 'about';
 
 export function SettingsView() {
   const settings = useStore((s) => s.settings)!;
@@ -36,6 +36,7 @@ export function SettingsView() {
             ['providers', 'Providers & keys', 'bolt'],
             ['harnesses', 'Harnesses', 'shield'],
             ['acp', 'ACP agents', 'fork'],
+            ['remote', 'Remote access', 'bolt'],
             ['about', 'About & doctor', 'info']
           ] as [Section, string, string][]
         ).map(([id, label, icon]) => (
@@ -51,6 +52,7 @@ export function SettingsView() {
         {section === 'providers' && <Providers settings={settings} />}
         {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
         {section === 'acp' && <AcpAgents settings={settings} update={update} />}
+        {section === 'remote' && <RemoteSection settings={settings} update={update} />}
         {section === 'about' && <About />}
       </div>
     </div>
@@ -803,6 +805,145 @@ function About() {
             ))}
           </tbody>
         </table>
+      )}
+    </div>
+  );
+}
+
+/** Remote access (docs/REMOTE-ACCESS.md §6): relay connection, browser pairing, devices.
+ *  The enrollment secret is stored in the OS keychain via secrets:set, never in settings. */
+function RemoteSection({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+  const config = settings.remote ?? { enabled: false };
+  const [state, setState] = useState<RemoteState | null>(null);
+  const [devices, setDevices] = useState<RemoteDeviceInfo[]>([]);
+  const [relayUrl, setRelayUrl] = useState(config.relayUrl ?? '');
+  const [enroll, setEnroll] = useState('');
+  const [pairing, setPairing] = useState<{ code: string; expiresAt: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+
+  useEffect(() => {
+    const refresh = () => {
+      void invoke('remote:get', undefined)
+        .then((r) => {
+          setState(r.state);
+          setDevices(r.devices);
+          setPairing(r.state.pairing ?? null);
+        })
+        .catch(() => undefined);
+    };
+    refresh();
+    const un = on('push:remoteState', (s) => setState(s));
+    const tick = setInterval(refresh, 5000);
+    return () => {
+      un();
+      clearInterval(tick);
+    };
+  }, []);
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await fn();
+      void invoke('remote:get', undefined).then((r) => {
+        setState(r.state);
+        setDevices(r.devices);
+        setPairing(r.state.pairing ?? null);
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const secondsLeft = pairing ? Math.max(0, Math.ceil((pairing.expiresAt - Date.now()) / 1000)) : 0;
+  const statusLine = state ? `${state.status}${state.detail ? ` — ${state.detail}` : ''}` : 'unknown';
+
+  return (
+    <div className="settings-body">
+      <h3>Remote access</h3>
+      <p className="muted small">
+        Let a paired browser at code.vocs.io drive sessions on this computer. Sessions, keys and terminals
+        stay on this machine; the traffic is end-to-end encrypted and the relay sees metadata only.
+      </p>
+      <Field label="Relay URL" hint="WebSocket relay that routes paired sessions, e.g. wss://relay.your-domain.dev">
+        <input value={relayUrl} placeholder="https://your-relay.workers.dev" onChange={(e) => setRelayUrl(e.target.value)} />
+      </Field>
+      <Field label="Enrollment secret" hint="Shared secret from the relay deployment (wrangler secret ENROLL_TOKEN). Stored in the OS keychain.">
+        <input type="password" value={enroll} placeholder="••••••••" onChange={(e) => setEnroll(e.target.value)} />
+      </Field>
+      <div className="settings-actions">
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={busy || !relayUrl || !enroll}
+          onClick={() =>
+            void act(async () => {
+              await invoke('remote:enable', { relayUrl: relayUrl.trim(), enrollToken: enroll.trim() });
+              setEnroll('');
+            })
+          }
+        >
+          {busy ? 'Connecting…' : 'Connect'}
+        </Button>
+        {config.enabled && (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(() => invoke('remote:disable', undefined))}>
+            Disconnect
+          </Button>
+        )}
+      </div>
+      <p className="muted small">
+        Status: <strong>{statusLine}</strong>
+        {state?.onlineClients?.length ? ` · ${state.onlineClients.length} browser${state.onlineClients.length === 1 ? '' : 's'} connected` : ''}
+      </p>
+      {error && <p className="small" style={{ color: 'var(--red, #d00)' }}>{error}</p>}
+
+      {config.enabled && state?.status === 'online' && (
+        <>
+          <h3>Pair a browser</h3>
+          {pairing && secondsLeft > 0 ? (
+            <div>
+              <p className="muted small">Enter this code at code.vocs.io → “Add a computer” (expires in {secondsLeft}s):</p>
+              <p style={{ fontSize: 28, letterSpacing: 6, fontWeight: 600 }}>{pairing.code}</p>
+            </div>
+          ) : (
+            <Button size="sm" disabled={busy} onClick={() => void act(() => invoke('remote:pairStart', { hostName: undefined }))}>
+              Show pairing code
+            </Button>
+          )}
+        </>
+      )}
+
+      {state?.pendingRequest && (
+        <div>
+          <h3>Pairing request</h3>
+          <p className="muted small">
+            “{state.pendingRequest.name}” ({state.pendingRequest.platform}) wants to pair with this computer.
+          </p>
+          <div className="settings-actions">
+            <Button size="sm" variant="primary" onClick={() => void act(() => invoke('remote:pairRespond', { decision: 'approve' }))}>
+              Allow
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void act(() => invoke('remote:pairRespond', { decision: 'deny' }))}>
+              Deny
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {devices.length > 0 && (
+        <>
+          <h3>Paired devices</h3>
+          {devices.map((d) => (
+            <Field key={d.deviceId} label={`${d.kind === 'host' ? 'Computer' : 'Browser'}: ${d.name}`} hint={`${d.platform} · last seen ${new Date(d.lastSeen).toLocaleString()}`}>
+              <Button size="sm" variant="ghost" onClick={() => void act(() => invoke('remote:revoke', { deviceId: d.deviceId }))}>
+                Revoke
+              </Button>
+            </Field>
+          ))}
+        </>
       )}
     </div>
   );
