@@ -101,7 +101,8 @@ describe('gitBranchesOverview', () => {
     expect(r.branches[0].merged).toBe(false);
 
     const fix = byName.get('harness/fix')!;
-    expect(fix.merged).toBe(true);
+    // Three commits ahead of base cannot also be its ancestor.
+    expect(fix.merged).toBe(false);
     expect(fix.behind).toBe(12);
     expect(fix.ahead).toBe(3);
     expect(fix.worktreePath).toContain('worktrees' + path.sep + 'fix');
@@ -117,6 +118,72 @@ describe('gitBranchesOverview', () => {
     const old = byName.get('stale-old')!;
     expect(old.merged).toBe(true);
     expect(old.upstream).toBeUndefined();
+  });
+
+  it('bounds branch probes across 100 refs and reuses successful ancestry counts', async () => {
+    const names = Array.from({ length: 100 }, (_, i) => `work-${i}`);
+    const pending: (() => void)[] = [];
+    let active = 0;
+    let peak = 0;
+    let completed = false;
+    runCapture.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === 'rev-parse') return { code: 0, stdout: 'C:/repo', stderr: '' };
+      if (args[0] === 'worktree') return { code: 0, stdout: 'worktree C:/repo\nbranch refs/heads/develop\n', stderr: '' };
+      if (args[0] === 'for-each-ref') return {
+        code: 0, stderr: '', stdout: ['develop\t1\tBase\t\t', ...names.map((name, i) => `${name}\t${i + 2}\tWork\t\t`)].join('\n'),
+      };
+      const index = Number((args[0] === 'rev-list' ? args[3].split('...')[1] : args[2]).slice(5));
+      active++;
+      peak = Math.max(peak, active);
+      return new Promise((resolve) => pending.push(() => {
+        active--;
+        resolve(args[0] === 'rev-list'
+          ? { code: 0, stdout: `${index}\t${index % 2}\n`, stderr: '' }
+          : { code: 1, stdout: '', stderr: '' });
+      }));
+    });
+    const result = gitBranchesOverview('C:/repo').then((value) => { completed = true; return value; });
+    // Drain explicitly deferred child processes, allowing each worker to advance between batches.
+    for (let turn = 0; turn < 1000 && !completed; turn++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      pending.splice(0).forEach((resolve) => resolve());
+    }
+    expect(completed).toBe(true);
+    const overview = await result;
+    expect(peak).toBeLessThanOrEqual(4);
+    expect(active).toBe(0);
+    expect(overview.branches.map((b) => b.name)).toEqual(['develop', ...[...names].reverse()]);
+    expect(overview.branches.filter((b) => b.merged)).toHaveLength(50);
+    for (const [index, name] of names.entries()) {
+      expect(overview.branches.find((b) => b.name === name)).toMatchObject({
+        ahead: index % 2, behind: index, merged: index % 2 === 0, current: false,
+      });
+    }
+    expect(runCapture.mock.calls.filter(([, args]) => args[0] === 'rev-list')).toHaveLength(100);
+    const ancestry = runCapture.mock.calls.filter(([, args]) => args[0] === 'merge-base');
+    expect(ancestry).toHaveLength(0);
+  });
+
+  it.each([
+    { code: 1, stdout: '8\t0\n', stderr: 'failed' },
+    { code: 0, stdout: '8\t0\n', stderr: '', truncated: true },
+    { code: null, stdout: '8\t0\n', stderr: 'timed out after 20000ms', timedOut: true },
+    { code: 0, stdout: 'invalid', stderr: '' },
+  ])('falls back to ancestry without trusting incomplete counts: %j', async (counts) => {
+    runCapture.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === 'rev-parse') return { code: 0, stdout: 'C:/repo', stderr: '' };
+      if (args[0] === 'for-each-ref') return { code: 0, stdout: 'develop\t1\tBase\t\t\nwork\t2\tWork\t\t', stderr: '' };
+      if (args[0] === 'rev-list') return counts;
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    const overview = await gitBranchesOverview('C:/repo');
+    expect(overview.branches).toHaveLength(2);
+    expect(overview.branches[1]).toMatchObject({ name: 'work', merged: true });
+    expect(overview.branches[1].ahead).toBeUndefined();
+    expect(overview.branches[1].behind).toBeUndefined();
+    expect(runCapture.mock.calls.filter(([, args]) => args[0] === 'merge-base').map(([, args]) => args)).toEqual([
+      ['merge-base', '--is-ancestor', 'work', 'develop'],
+    ]);
   });
 
   it('attaches GitHub PR state when gh is available', async () => {

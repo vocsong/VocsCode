@@ -150,8 +150,17 @@ let flushScheduled = false;
 let subscribed = false;
 /** StrictMode can run App's mount effect twice; share one startup request between both calls. */
 let bootInFlight: Promise<void> | null = null;
+/** Share transcript reads; removing an entry also invalidates its delayed response. */
+const transcriptLoads = new Map<string, Promise<void>>();
 /** The deferred boot-time availability probe; a second boot must not stack a second timer. */
 let availabilityTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Background sessions in another worktree do not change the foreground diff. */
+function affectsActiveWorkspace(s: State, sessionId: string): boolean {
+  if (s.activeId === sessionId) return true;
+  const cwd = s.sessions.find((session) => session.id === sessionId)?.cwd;
+  return !!cwd && s.sessions.some((session) => session.id === s.activeId && session.cwd === cwd);
+}
 
 function bootErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
@@ -286,24 +295,36 @@ export const useStore = create<State>((set, get) => ({
     await applyNav(set, get, history[historyIndex + 1], historyIndex + 1);
   },
 
-  async loadTranscript(id) {
-    if (get().loaded[id]) return;
-    // Clear any previous failure so a retry shows the spinner again, not a stale error.
-    set((s) => {
-      if (!(id in s.transcriptErrors)) return {};
-      const transcriptErrors = { ...s.transcriptErrors };
-      delete transcriptErrors[id];
-      return { transcriptErrors };
+  loadTranscript(id) {
+    const pending = transcriptLoads.get(id);
+    if (pending) return pending;
+    if (get().loaded[id]) return Promise.resolve();
+    // Register before invoking IPC or notifying subscribers, which may request the same load.
+    const request = Promise.resolve().then(async () => {
+      if (transcriptLoads.get(id) !== request) return;
+      // Clear any previous failure so a retry shows the spinner again, not a stale error.
+      set((s) => {
+        if (!(id in s.transcriptErrors)) return s;
+        const transcriptErrors = { ...s.transcriptErrors };
+        delete transcriptErrors[id];
+        return { transcriptErrors };
+      });
+      try {
+        const items = await invoke('sessions:transcript', { id });
+        if (transcriptLoads.get(id) !== request) return;
+        // The snapshot already contains any streamed text; queued deltas would duplicate it.
+        dropPendingDeltas(id);
+        set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
+      } catch (e) {
+        if (transcriptLoads.get(id) !== request) return;
+        // Never throw: the transcript pane stays mounted with a retry instead of loading forever.
+        set((s) => ({ transcriptErrors: { ...s.transcriptErrors, [id]: e instanceof Error ? e.message : String(e) } }));
+      }
+    }).finally(() => {
+      if (transcriptLoads.get(id) === request) transcriptLoads.delete(id);
     });
-    try {
-      const items = await invoke('sessions:transcript', { id });
-      // The snapshot already contains any streamed text; deltas still queued for it would duplicate.
-      dropPendingDeltas(id);
-      set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
-    } catch (e) {
-      // Never throw: the transcript pane stays mounted with a retry instead of loading forever.
-      set((s) => ({ transcriptErrors: { ...s.transcriptErrors, [id]: e instanceof Error ? e.message : String(e) } }));
-    }
+    transcriptLoads.set(id, request);
+    return request;
   },
 
   applyEvent(env) {
@@ -315,16 +336,32 @@ export const useStore = create<State>((set, get) => ({
         requestAnimationFrame(() => {
           flushScheduled = false;
           const batch = pendingDeltas.splice(0);
+          if (!batch.length) return;
           set((s) => {
-            const transcripts = { ...s.transcripts };
-            const touched = new Map<string, TranscriptItem[]>();
+            const touched = new Map<string, { list: TranscriptItem[]; indices: Map<string, number>; cloned: Set<number> }>();
             for (const d of batch) {
               const ev = d.event;
               if (ev.type !== 'item.delta') continue;
-              const list = touched.get(d.sessionId) ?? [...(transcripts[d.sessionId] ?? [])];
-              const idx = list.findIndex((i) => i.id === ev.id);
-              if (idx < 0) continue;
-              const item = { ...list[idx] } as TranscriptItem;
+              let session = touched.get(d.sessionId);
+              if (!session) {
+                const list = s.transcripts[d.sessionId] ?? [];
+                const indices = new Map<string, number>();
+                // One history scan per session, preserving the first match for duplicate ids.
+                list.forEach((item, index) => {
+                  const id = item.id;
+                  if (!indices.has(id)) indices.set(id, index);
+                });
+                session = { list, indices, cloned: new Set() };
+                touched.set(d.sessionId, session);
+              }
+              const idx = session.indices.get(ev.id);
+              if (idx === undefined) continue;
+              if (!session.cloned.size) session.list = [...session.list];
+              if (!session.cloned.has(idx)) {
+                session.list[idx] = { ...session.list[idx] };
+                session.cloned.add(idx);
+              }
+              const item = session.list[idx];
               if (item.kind === 'assistant') {
                 if (ev.textDelta) item.text += ev.textDelta;
                 if (ev.thinkingDelta) item.thinking = (item.thinking ?? '') + ev.thinkingDelta;
@@ -336,11 +373,14 @@ export const useStore = create<State>((set, get) => ({
                   item.output = next.length > 30_000 ? `${next.slice(0, 30_000)}\n[output truncated]` : next;
                 }
               }
-              list[idx] = item;
-              touched.set(d.sessionId, list);
             }
-            for (const [sid, list] of touched) transcripts[sid] = list;
-            return { transcripts };
+            let transcripts: State['transcripts'] | undefined;
+            for (const [sid, session] of touched) {
+              if (!session.cloned.size) continue;
+              transcripts ??= { ...s.transcripts };
+              transcripts[sid] = session.list;
+            }
+            return transcripts ? { transcripts } : s;
           });
         });
       }
@@ -369,7 +409,7 @@ export const useStore = create<State>((set, get) => ({
           const idx = list.findIndex((i) => i.id === event.item.id);
           if (idx >= 0) list[idx] = event.item;
           else list.push(event.item);
-          const bump = event.item.kind === 'tool' && event.item.status !== 'running' ? s.changesVersion + 1 : s.changesVersion;
+          const bump = event.item.kind === 'tool' && event.item.status !== 'running' && affectsActiveWorkspace(s, sessionId) ? s.changesVersion + 1 : s.changesVersion;
           return { transcripts: { ...s.transcripts, [sessionId]: list }, changesVersion: bump };
         });
         break;
@@ -381,7 +421,7 @@ export const useStore = create<State>((set, get) => ({
         get().toast(event.message, 'error');
         break;
       case 'status':
-        if (event.status === 'idle') set((s) => ({ changesVersion: s.changesVersion + 1 }));
+        if (event.status === 'idle') set((s) => affectsActiveWorkspace(s, sessionId) ? { changesVersion: s.changesVersion + 1 } : s);
         break;
       default:
         break;
@@ -397,6 +437,12 @@ export const useStore = create<State>((set, get) => ({
   },
   setSessions(sessions) {
     const ids = new Set(sessions.map((x) => x.id));
+    for (const id of transcriptLoads.keys()) {
+      if (!ids.has(id)) {
+        transcriptLoads.delete(id);
+        dropPendingDeltas(id);
+      }
+    }
     let replacement: SessionMeta | undefined;
     let removedTitle: string | undefined;
     set((s) => {

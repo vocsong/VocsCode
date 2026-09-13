@@ -1,7 +1,7 @@
 // Sidebar folder blocks: persistent manual positioning (drag the header to reorder the whole
 // block) and persistent collapse/expand, both saved through `settings:update`.
 /** @vitest-environment jsdom */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // Stub the preload bridge before any renderer module runs; settings:update writes the patch
 // back into the store so post-drop/post-collapse assertions see the new state.
@@ -21,10 +21,12 @@ const invokeMock = vi.fn().mockImplementation((_channel: string, args?: { folder
   on: vi.fn().mockReturnValue(() => undefined),
 };
 
-import { fireEvent, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { Sidebar } from '../src/renderer/src/components/Sidebar';
 import { useStore } from '../src/renderer/src/store';
 import type { AppSettings, SessionMeta } from '../src/shared/types';
+
+afterEach(async () => { await act(async () => { cleanup(); }); });
 
 const baseSettings = {
   folders: [],

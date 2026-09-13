@@ -77,6 +77,7 @@ export class WebServer {
 
   /** Fan-out an async event to every connected browser client. */
   broadcast(channel: string, payload: unknown): void {
+    if (this.sockets.size === 0) return;
     const frame = JSON.stringify({ type: 'push', channel, payload });
     for (const ws of this.sockets) {
       if (ws.readyState === 1) ws.send(frame);

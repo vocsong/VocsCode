@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { FsEntry, GitSummary, SessionMeta, TranscriptItem } from '../../../shared/types';
+import type { FsEntry, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
+import { useGitDiff, useGitSummary } from '../gitReads';
 import { workspaceRelativePath } from '../file-refs';
 import { fmtCost, fmtDuration, fmtRate, fmtTokens, speedOfTurns } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
@@ -58,42 +59,33 @@ export function RightPanel({ session }: { session: SessionMeta }) {
 function ChangesTab({ session }: { session: SessionMeta }) {
   const version = useStore((s) => s.changesVersion);
   const toast = useStore((s) => s.toast);
-  const [summary, setSummary] = useState<GitSummary | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [diff, setDiff] = useState('');
-  const [diffError, setDiffError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [selection, setSelection] = useState<{ sessionId: string; path: string | null }>({ sessionId: session.id, path: null });
+  const selected = selection.sessionId === session.id ? selection.path : null;
+  const setSelected = (path: string | null) => setSelection({ sessionId: session.id, path });
+  const summaryRead = useGitSummary(session.id, version);
+  const diffRead = useGitDiff(session.id, version, selected);
+  const summary = summaryRead.data;
+  const diff = diffRead.data?.diff ?? '';
+  const diffError = diffRead.data?.error;
+  const loading = summaryRead.loading || diffRead.loading;
   const [commitMsg, setCommitMsg] = useState('');
-  /** The session this component instance currently belongs to; async writes compare against it. */
-  const liveId = useRef(session.id);
+  const visit = useRef(0);
 
-  const refresh = async () => {
-    const sid = session.id;
-    setLoading(true);
-    try {
-      const s = await invoke('git:summary', { sessionId: sid });
-      if (liveId.current !== sid) return;
-      setSummary(s);
-      const d = await invoke('git:diff', { sessionId: sid, path: selected ?? undefined });
-      if (liveId.current !== sid) return;
-      setDiff(d.diff);
-      setDiffError(d.error ?? null);
-    } catch (e) {
-      if (liveId.current === sid) toast(String((e as Error).message ?? e), 'error');
-    } finally {
-      if (liveId.current === sid) setLoading(false);
-    }
+  const refresh = (path?: string | null) => {
+    summaryRead.refresh();
+    diffRead.refresh(path);
   };
   useEffect(() => {
-    liveId.current = session.id;
     setSelected(null);
-    setDiff('');
-    setDiffError(null);
-    setSummary(null);
-  }, [session.id]);
+    setCommitMsg('');
+    return () => { visit.current++; };
+  }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    void refresh();
-  }, [session.id, version, selected]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (summaryRead.error) toast(summaryRead.error.message, 'error');
+  }, [summaryRead.error, toast]);
+  useEffect(() => {
+    if (diffRead.error) toast(diffRead.error.message, 'error');
+  }, [diffRead.error, toast]);
 
   if (summary && !summary.isRepo) return <EmptyState icon="branch" title="Not a git repository">Initialize git in this folder to see diffs and revert changes.</EmptyState>;
   const files = summary?.files ?? [];
@@ -137,18 +129,20 @@ function ChangesTab({ session }: { session: SessionMeta }) {
         </div>
       )}
       <div className="changes-diff">
-        {loading && <Spinner />}
-        {!loading && !summary?.error && files.length === 0 && <div className="muted pad">Working tree clean.</div>}
-        {!loading && files.length > 0 && (
+        {loading && !diffRead.data && <Spinner />}
+        {!loading && summary && !summary.error && !summaryRead.error && files.length === 0 && <div className="muted pad">Working tree clean.</div>}
+        {files.length > 0 && diffRead.data && (
           <DiffView
             diff={diff}
             onRevert={async (p) => {
+              const started = visit.current;
               const r = await invoke('git:revert', { sessionId: session.id, path: p });
+              if (visit.current !== started) return;
               if (!r.ok) toast(r.error ?? 'Revert failed', 'error');
               else {
                 toast(`Reverted ${p}`, 'success');
                 setSelected(null);
-                void refresh();
+                refresh(null);
               }
             }}
           />
@@ -166,8 +160,10 @@ function ChangesTab({ session }: { session: SessionMeta }) {
   );
 
   async function doCommit() {
+    const started = visit.current;
     try {
       const r = await invoke('git:commit', { sessionId: session.id, message: commitMsg.trim() });
+      if (visit.current !== started) return;
       toast(r.ok ? 'Committed' : r.output, r.ok ? 'success' : 'error');
       if (r.ok) {
         setCommitMsg('');
@@ -175,7 +171,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
       }
     } catch (e) {
       // Keep the typed message so the user can retry after the IPC failure.
-      toast(e instanceof Error ? e.message : String(e), 'error');
+      if (visit.current === started) toast(e instanceof Error ? e.message : String(e), 'error');
     }
   }
 }

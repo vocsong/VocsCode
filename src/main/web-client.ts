@@ -59,6 +59,8 @@ export const HARNESS_CLIENT_JS = String.raw`(function () {
       if (ws === socket) ws = null;
       pending.forEach(function (entry) { entry.reject(new Error('harness connection closed')); });
       pending.clear();
+      // These calls already failed; replaying them would execute orphaned mutations.
+      queued = [];
       scheduleReconnect();
     };
   }
@@ -68,11 +70,21 @@ export const HARNESS_CLIENT_JS = String.raw`(function () {
   window.harness = {
     invoke: function (channel, request) {
       return new Promise(function (resolve, reject) {
+        // A disconnected or stalled host must not retain an unlimited request backlog.
+        if (pending.size >= 256) {
+          reject(new Error('Too many pending harness requests; retry when connected'));
+          return;
+        }
         var id = ++nextId;
         pending.set(id, { resolve: resolve, reject: reject });
         var frame = { type: 'invoke', id: id, channel: channel, request: request === undefined ? null : request };
-        if (ws && ws.readyState === 1) ws.send(JSON.stringify(frame));
-        else queued.push(frame);
+        try {
+          if (ws && ws.readyState === 1) ws.send(JSON.stringify(frame));
+          else queued.push(frame);
+        } catch (e) {
+          pending.delete(id);
+          reject(e);
+        }
       });
     },
     on: function (channel, listener) {

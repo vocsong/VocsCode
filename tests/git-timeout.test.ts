@@ -12,6 +12,7 @@ const { which, runCapture } = vi.hoisted(() => ({ which: vi.fn(), runCapture: vi
 vi.mock('../src/main/runtime', () => ({ which, runCapture }));
 
 import { gitBranchesOverview, gitDiff, gitSummary } from '../src/main/git';
+import { makeFileChange } from '../src/main/util/file-changes';
 
 const GIT = '/usr/bin/git';
 
@@ -53,6 +54,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -116,6 +118,90 @@ describe('gitDiff', () => {
     expect(r.diff).toContain('tracked');
     expect(r.diff).toContain('small.txt');
     expect(r.diff).not.toContain('big.bin');
+  });
+
+  it('stops after 200 synthesized files and preserves individual-file access', async () => {
+    const files = Array.from({ length: 250 }, (_, i) => `new-${String(i).padStart(3, '0')}.txt`);
+    await Promise.all(files.map((file) => fs.writeFile(path.join(root, file), 'hello\n')));
+    gitReply(DIFF_HEAD, { code: 0, stdout: 'tracked\n' });
+    gitReply(UNTRACKED, { code: 0, stdout: files.join('\n') });
+    const read = vi.spyOn(fs, 'readFile');
+    const stat = vi.spyOn(fs, 'stat');
+
+    const result = await gitDiff(root);
+    expect(result.error).toMatch(/select an individual file/i);
+    expect(read).toHaveBeenCalledTimes(200);
+    expect(stat).toHaveBeenCalledTimes(200);
+    expect(result.diff).toBe('tracked\n' + files.slice(0, 200).map((file) =>
+      makeFileChange(root, file, null, 'hello\n', { oldFileName: '/dev/null' }).diff).join(''));
+    expect(Buffer.byteLength(result.diff)).toBeLessThanOrEqual(2_000_000);
+
+    const selected = await gitDiff(root, files[249]);
+    expect(selected.error).toBeUndefined();
+    expect(selected.diff).toContain(`+++ ${files[249]}`);
+    expect(selected.diff).toContain('+hello');
+  });
+
+  it.each(['', 'tracked\n' + '+tracked line\n'.repeat(100_000)])(
+    'bounds aggregate UTF-8 bytes including tracked output without cutting a patch', async (tracked) => {
+      const content = 'é\n'.repeat(10_000);
+      const files = Array.from({ length: 100 }, (_, i) => `new-${String(i).padStart(3, '0')}.txt`);
+      await Promise.all(files.map((file) => fs.writeFile(path.join(root, file), content)));
+      gitReply(DIFF_HEAD, { code: 0, stdout: tracked });
+      gitReply(UNTRACKED, { code: 0, stdout: files.join('\n') });
+      const patches = files.map((file) => makeFileChange(root, file, null, content, { oldFileName: '/dev/null' }).diff!);
+      let expected = tracked;
+      let included = 0;
+      for (const patch of patches) {
+        if (Buffer.byteLength(expected) + Buffer.byteLength(patch) > 2_000_000) break;
+        expected += patch;
+        included++;
+      }
+      const read = vi.spyOn(fs, 'readFile');
+      const stat = vi.spyOn(fs, 'stat');
+
+      const result = await gitDiff(root);
+      expect(result.error).toMatch(/select an individual file/i);
+      expect(result.diff).toBe(expected);
+      expect(Buffer.byteLength(result.diff)).toBeLessThanOrEqual(2_000_000);
+      // At most one candidate patch may be read and rejected at the boundary.
+      expect(read).toHaveBeenCalledTimes(included + 1);
+      expect(stat).toHaveBeenCalledTimes(included + 1);
+    },
+  );
+
+  it('rejects oversized tracked output without reading untracked files or slicing a patch', async () => {
+    gitReply(DIFF_HEAD, { code: 0, stdout: 'x'.repeat(2_000_001) });
+    gitReply(UNTRACKED, { code: 0, stdout: 'new.txt' });
+    await fs.writeFile(path.join(root, 'new.txt'), 'hello\n');
+    const read = vi.spyOn(fs, 'readFile');
+    const result = await gitDiff(root);
+    expect(result.diff).toBe('');
+    expect(result.error).toMatch(/select an individual file/i);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('bounds candidate probes even when files disappear before they can be read', async () => {
+    const files = Array.from({ length: 250 }, (_, i) => `missing-${i}.txt`);
+    gitReply(DIFF_HEAD, { code: 0, stdout: 'tracked\n' });
+    gitReply(UNTRACKED, { code: 0, stdout: files.join('\n') });
+    const stat = vi.spyOn(fs, 'stat');
+    const read = vi.spyOn(fs, 'readFile');
+    const result = await gitDiff(root);
+    expect(result.diff).toBe('tracked\n');
+    expect(result.error).toMatch(/select an individual file/i);
+    expect(stat).toHaveBeenCalledTimes(200);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('does not warn when exactly 200 files complete the diff', async () => {
+    const files = Array.from({ length: 200 }, (_, i) => `file-${i}.txt`);
+    await Promise.all(files.map((file) => fs.writeFile(path.join(root, file), 'ok\n')));
+    gitReply(DIFF_HEAD, { code: 0 });
+    gitReply(UNTRACKED, { code: 0, stdout: files.join('\n') });
+    const result = await gitDiff(root);
+    expect(result.error).toBeUndefined();
+    expect(result.diff.match(/^\+\+\+ /gm)).toHaveLength(200);
   });
 
   it('flags a timeout while listing untracked files', async () => {
