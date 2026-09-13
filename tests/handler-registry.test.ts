@@ -211,6 +211,14 @@ describe('handler registry', () => {
     await registry.invoke('sessions:send', { id: 's_test', input: { text: 'hi' } });
     expect(logs.some(([level, msg]) => level === 'warn' && msg.includes('slow ipc sessions:send'))).toBe(true);
   });
+
+  it('records renderer errors in the main log', async () => {
+    const { registry, logs } = stubDeps();
+    await registry.invoke('app:rendererError', { message: 'TypeError: boom', stack: 'Error: boom\n  at render', source: 'App.tsx:12' });
+    const line = logs.find(([level]) => level === 'error');
+    expect(line?.[1]).toContain('renderer error at App.tsx:12: TypeError: boom');
+    expect(line?.[1]).toContain('at render');
+  });
 });
 
 describe('mcp handlers', () => {

@@ -142,6 +142,30 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.keyboard.press('Enter');
       await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(0);
       await win.waitForSelector('.term .empty', { timeout: 10_000 });
+
+      // A killed renderer must not leave a blank window: main logs it and reloads automatically,
+      // and the reloaded page paints the app again — without restarting the main process. The
+      // Playwright page object for a crashed target stays crashed, so prove recovery through main.
+      const electronApp = app;
+      const mainPid = await electronApp.evaluate(() => process.pid);
+      await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.webContents.forcefullyCrashRenderer());
+      await expect
+        .poll(
+          async () =>
+            electronApp.evaluate(async ({ BrowserWindow }) => {
+              const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+              if (!wc || wc.isDestroyed() || wc.isLoading()) return false;
+              try {
+                return (await wc.executeJavaScript("Boolean(document.querySelector('.brand'))")) === true;
+              } catch {
+                return false;
+              }
+            }),
+          { timeout: 60_000 }
+        )
+        .toBe(true);
+      expect(await electronApp.evaluate(() => process.pid)).toBe(mainPid);
+      expect(mainLog.join('')).toMatch(/ERROR renderer process gone: crashed/);
     } catch (e) {
       await win.screenshot({ path: path.join(shots, 'e2e-fail-terminal.png') }).catch(() => undefined);
       const tail = (arr: string[], n: number) => arr.slice(-n).join('\n');

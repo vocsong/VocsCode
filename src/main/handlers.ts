@@ -182,6 +182,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('app:diag', ({ kind, ms, detail }) => {
     deps.log('warn', `renderer ${kind} ${ms}ms${detail ? ` (${detail})` : ''}`);
   });
+  // Exceptions are invisible once the renderer window is blank; they belong in the same log as
+  // everything else, clipped so one runaway stack cannot fill it.
+  handle('app:rendererError', ({ message, stack, source }) => {
+    const where = source ? ` at ${source}` : '';
+    const trace = stack ? `\n${stack.slice(0, 4000)}` : '';
+    deps.log('error', `renderer error${where}: ${message.slice(0, 2000)}${trace}`);
+  });
   handle('app:notify', async ({ title, body }) => {
     if (typeof title !== 'string' || typeof body !== 'string') return;
     const s = settings.get();
