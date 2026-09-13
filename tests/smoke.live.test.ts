@@ -210,7 +210,7 @@ describe('live harness smoke', () => {
   });
 
   it.runIf(want('pi'))('pi rpc answers a prompt and lists models', async () => {
-    const { ctx, items, waitTurn, meta, events } = await makeCtx('pi');
+    const { ctx, events, items, waitTurn, meta } = await makeCtx('pi');
     const adapter = createAdapter('pi', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
@@ -220,6 +220,9 @@ describe('live harness smoke', () => {
     await waitTurn(170_000);
     assertSuccessfulTurn(items, events, 'PONG');
     expect(meta.harnessRef.piSessionFile).toBeTruthy();
+    // The completed turn must also be counted against the session's usage totals.
+    const usage = events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage');
+    expect(usage.at(-1)?.totals.turns).toBe(1);
   });
 
   it.runIf(want('claude'))('claude agent sdk answers a prompt', async () => {

@@ -51,6 +51,22 @@ function feed(adapter: PiAdapter, ev: Record<string, unknown>): void {
 /** finishTurn awaits a get_session_stats round-trip that rejects (no child process). */
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
+/**
+ * Makes send() usable without spawning pi: a child handle satisfies the start guard, and the RPC
+ * round-trips are stubbed so prompt/get_session_stats resolve immediately.
+ */
+function prime(adapter: PiAdapter): void {
+  const priv = adapter as unknown as {
+    child: unknown;
+    extensionCapabilities: Set<string>;
+    request: (type: string) => Promise<unknown>;
+  };
+  priv.child = {};
+  // send() refuses to prompt unless both readiness capabilities were advertised.
+  priv.extensionCapabilities = new Set(['approvals', 'tools']);
+  priv.request = async (type: string) => (type === 'get_session_stats' ? { tokens: { input: 100, output: 40 }, cost: 0.02 } : {});
+}
+
 const turns = (events: SessionEvent[]): TranscriptItem[] =>
   events.filter((e): e is Extract<SessionEvent, { type: 'item.upsert' }> => e.type === 'item.upsert').map((e) => e.item as TranscriptItem).filter((i) => i.kind === 'turn');
 
@@ -141,6 +157,34 @@ describe('Pi adapter turn-state tracking', () => {
     const turn = turns(events).at(-1) as Extract<TranscriptItem, { kind: 'turn' }>;
     expect(turn.status).toBe('interrupted');
     expect(turn.error).toBeUndefined();
+  });
+
+  it('counts a completed turn sent through the normal send() path', async () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    prime(a);
+    // send() sets turnStartedAt before pi emits agent_start; both turns must still be counted.
+    await a.send({ text: 'one' });
+    feed(a, { type: 'agent_start' });
+    feed(a, { type: 'agent_end', messages: [] });
+    await settle();
+    await a.send({ text: 'two' });
+    feed(a, { type: 'agent_start' });
+    feed(a, { type: 'agent_end', messages: [] });
+    await settle();
+    const usages = events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage');
+    expect(usages.at(-1)?.totals.turns).toBe(2);
+  });
+
+  it('does not report an epoch-long wall time when a turn ends with no recorded start', async () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    prime(a);
+    // pi can emit agent_end on its own; without a start, duration must stay unknown, not Date.now().
+    feed(a, { type: 'agent_end', messages: [] });
+    await settle();
+    const turn = turns(events).at(-1) as Extract<TranscriptItem, { kind: 'turn' }>;
+    expect(turn.durationMs).toBeUndefined();
   });
 
   it('reports a failed compaction instead of a bogus compacted message', () => {

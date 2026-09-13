@@ -565,7 +565,9 @@ export class PiAdapter implements HarnessAdapter {
         kind: 'turn',
         ts: Date.now(),
         status: failed ? 'failed' : stopReason === 'aborted' ? 'interrupted' : 'completed',
-        durationMs: Date.now() - this.turnStartedAt,
+        // A turn can end after turnStartedAt was reset (or before a start was seen): measuring from
+        // 0 would report an epoch-long wall time, so that case carries no duration at all.
+        durationMs: this.turnStartedAt > 0 ? Date.now() - this.turnStartedAt : undefined,
         costUsd: turnCost,
         usage: turnUsage,
         error: failed ? errorMsg : undefined
@@ -590,6 +592,9 @@ export class PiAdapter implements HarnessAdapter {
     }
     this._busy = true;
     this.turnStartedAt = Date.now();
+    // Arm the turn here: send() sets turnStartedAt before pi emits agent_start, so the guard in
+    // agent_start never fires for a normal prompt and the turn would never be counted.
+    this.usage.beginTurn();
     this.ctx.emit({ type: 'status', status: 'running' });
     try {
       await this.request('prompt', { message: input.text, images });
