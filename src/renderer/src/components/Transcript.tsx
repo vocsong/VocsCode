@@ -82,11 +82,13 @@ export function Transcript({ session }: { session: SessionMeta }) {
     el.dataset.rowKey = key;
     if (typeof ResizeObserver !== 'undefined' && !rowObserver.current) {
       rowObserver.current = new ResizeObserver((entries) => {
+        // Non-windowed rows use a flex gap; windowed rows carry that gap as padding.
+        const gap = ref.current ? Number.parseFloat(getComputedStyle(ref.current).rowGap) || 0 : 0;
         let changed = false;
         for (const entry of entries) {
           const k = (entry.target as HTMLElement).dataset.rowKey;
           if (!k) continue;
-          const h = entry.borderBoxSize?.[0]?.blockSize ?? entry.target.getBoundingClientRect().height;
+          const h = (entry.borderBoxSize?.[0]?.blockSize ?? entry.target.getBoundingClientRect().height) + gap;
           if (h > 0 && Math.abs((heights.current.get(k) ?? -1) - h) > 0.5) {
             heights.current.set(k, h);
             changed = true;
@@ -96,7 +98,8 @@ export function Transcript({ session }: { session: SessionMeta }) {
       });
     }
     rowObserver.current?.observe(el);
-    const initial = el.getBoundingClientRect().height;
+    const gap = ref.current ? Number.parseFloat(getComputedStyle(ref.current).rowGap) || 0 : 0;
+    const initial = el.getBoundingClientRect().height + gap;
     if (initial > 0 && Math.abs((heights.current.get(key) ?? -1) - initial) > 0.5) {
       heights.current.set(key, initial);
       setMeasureVersion((v) => v + 1);
@@ -147,8 +150,8 @@ export function Transcript({ session }: { session: SessionMeta }) {
 
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
-    if (stick && !findOpen && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [items, stick, findOpen, measureVersion]);
+    if (stick && !findOpen && !jumpHere && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [items, stick, findOpen, jumpHere, measureVersion]);
 
   const onScroll = () => {
     const el = ref.current;
@@ -176,12 +179,24 @@ export function Transcript({ session }: { session: SessionMeta }) {
   useEffect(() => {
     if (!jump || jump.sessionId !== session.id || !loaded || !ref.current) return;
     const el = ref.current.querySelector(`[data-item-id="${CSS.escape(jump.itemId)}"]`);
-    if (!el) return;
+    const consume = () => useStore.setState((s) => s.searchJump === jump ? { searchJump: null } : {});
+    if (!el) {
+      consume();
+      return;
+    }
     setStick(false);
     el.scrollIntoView({ block: 'center' });
     el.classList.add('search-jump-hl');
-    const t = setTimeout(() => el.classList.remove('search-jump-hl'), 2400);
-    return () => clearTimeout(t);
+    const t = setTimeout(() => {
+      el.classList.remove('search-jump-hl');
+      // Keep the reached viewport when rows outside it are unmounted again.
+      setScrollTop(ref.current?.scrollTop ?? 0);
+      consume();
+    }, 2400);
+    return () => {
+      clearTimeout(t);
+      el.classList.remove('search-jump-hl');
+    };
   }, [jump, loaded, session.id]);
 
   const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
@@ -276,7 +291,15 @@ const TranscriptRow = memo(function TranscriptRow({
       )}
     </div>
   );
-});
+}, (a, b) => a.sessionId === b.sessionId && a.canEdit === b.canEdit && a.showThinking === b.showThinking &&
+  a.onImageExpand === b.onImageExpand && a.measureRow === b.measureRow && sameChunk(a.chunk, b.chunk));
+
+/** Grouping recreates wrappers; unchanged constituent items still have stable store identities. */
+function sameChunk(a: RenderChunk, b: RenderChunk): boolean {
+  if (a.kind === 'single' && b.kind === 'single') return a.item === b.item;
+  return a.kind === 'group' && b.kind === 'group' && a.id === b.id &&
+    a.entries.length === b.entries.length && a.entries.every((item, i) => item === b.entries[i]);
+}
 
 function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, showThinking: boolean, onImageExpand: OnImageExpand) {
   switch (item.kind) {
@@ -490,6 +513,8 @@ export function ToolGroup({ entries, sessionId, canEdit = false, showThinking, o
   // A deep-search jump into one of these commands forces the group open so the anchor exists.
   const jump = useStore((s) => s.searchJump);
   const jumpHere = !!jump && jump.sessionId === sessionId && entries.some((e) => e.id === jump.itemId);
+  // Consuming the navigation request must not immediately hide its matched command.
+  useEffect(() => { if (jumpHere) setOpen(true); }, [jumpHere]);
   const commands = entries.filter((e): e is ToolItem => e.kind === 'tool');
   const running = commands.some((i) => i.status === 'running');
   const expanded = jumpHere || (open ?? running);

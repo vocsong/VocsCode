@@ -2,6 +2,7 @@
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import type { FileChange } from '../../../shared/types';
 import { which } from '../../runtime';
 import { truncate } from '../../util/async';
@@ -343,24 +344,92 @@ export async function globTool(cwd: string, args: { pattern: string; path?: stri
 
 export async function grepTool(cwd: string, args: { pattern: string; path?: string; glob?: string; max_results?: number }, signal: AbortSignal): Promise<ToolExecResult> {
   const root = resolveInCwd(cwd, args.path);
-  const max = Math.min(args.max_results ?? 200, 2000);
+  const max = Math.max(1, Math.min(Math.floor(Number.isFinite(args.max_results) ? args.max_results! : 200), 2000));
   const rg = which('rg');
   if (rg) {
-    const rgArgs = ['-n', '--no-heading', '--color', 'never', '-m', '50', '--max-count', '50', '-S'];
+    if (signal.aborted) return { output: '[interrupted by user]', isError: true };
+    const rgArgs = ['-n', '--no-heading', '--color', 'never', '--max-count', String(max), '-S'];
     if (args.glob) rgArgs.push('-g', args.glob);
     for (const d of IGNORED_DIRS) rgArgs.push('-g', `!${d}`);
     rgArgs.push('-e', args.pattern, root);
     const res = await new Promise<ToolExecResult>((resolve) => {
-      let out = '';
-      const child = spawn(rg, rgArgs, { cwd, windowsHide: true });
-      child.stdout.on('data', (d) => (out += d.toString()));
-      child.stderr.on('data', (d) => (out += d.toString()));
-      signal.addEventListener('abort', () => child.kill(), { once: true });
+      const byteLimit = 512 * 1024;
+      const lines: string[] = [];
+      const stdoutDecoder = new StringDecoder('utf8');
+      const stderrDecoder = new StringDecoder('utf8');
+      let pending = '';
+      let stderr = '';
+      let bytes = 0;
+      let limited: 'matches' | 'bytes' | undefined;
+      let interrupted = false;
+      let settled = false;
+      let child;
+      try {
+        child = spawn(rg, rgArgs, { cwd, windowsHide: true });
+      } catch {
+        resolve({ output: 'ripgrep failed', isError: true });
+        return;
+      }
+      const stopAtLimit = (reason: 'matches' | 'bytes') => {
+        if (limited) return;
+        limited = reason;
+        child.kill();
+      };
+      const onAbort = () => {
+        interrupted = true;
+        if (!limited) child.kill();
+      };
+      const finish = (result: ToolExecResult) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        resolve(result);
+      };
+      const addLine = (line: string) => {
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        if (line) lines.push(line.replace(root + path.sep, ''));
+      };
+      const push = (chunk: Buffer, diagnostic: boolean) => {
+        if (settled || limited || interrupted) return;
+        // Slice before decoding: even one enormous match or diagnostic stays bounded.
+        const data = chunk.subarray(0, byteLimit - bytes);
+        bytes += data.length;
+        const text = (diagnostic ? stderrDecoder : stdoutDecoder).write(data);
+        if (diagnostic) stderr += text;
+        else {
+          let start = 0;
+          let end: number;
+          while ((end = text.indexOf('\n', start)) !== -1) {
+            addLine(pending + text.slice(start, end));
+            pending = '';
+            if (lines.length >= max) {
+              stopAtLimit('matches');
+              return;
+            }
+            start = end + 1;
+          }
+          pending += text.slice(start);
+        }
+        if (bytes >= byteLimit) stopAtLimit('bytes');
+      };
+      child.stdout.on('data', (chunk: Buffer) => push(chunk, false));
+      child.stderr.on('data', (chunk: Buffer) => push(chunk, true));
       child.on('close', (code) => {
-        const lines = out.split('\n').filter(Boolean).slice(0, max);
-        resolve({ output: lines.length ? lines.map((l) => l.replace(root + path.sep, '')).join('\n') : code === 1 ? 'No matches.' : out || 'No matches.', isError: code !== 0 && code !== 1 });
+        if (settled) return;
+        // Do not flush an incomplete UTF-8 character cut off by a limit or abort.
+        if (!limited && !interrupted) {
+          pending += stdoutDecoder.end();
+          stderr += stderrDecoder.end();
+        }
+        if (pending && lines.length < max) addLine(pending);
+        let output = [lines.join('\n'), stderr.trimEnd()].filter(Boolean).join('\n');
+        if (limited === 'bytes') output = [output, '[output truncated]'].filter(Boolean).join('\n');
+        if (interrupted) output = [output, '[interrupted by user]'].filter(Boolean).join('\n');
+        finish({ output: output || 'No matches.', isError: interrupted || (!limited && code !== 0 && code !== 1) });
       });
-      child.on('error', () => resolve({ output: 'ripgrep failed', isError: true }));
+      child.on('error', () => finish({ output: 'ripgrep failed', isError: true }));
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
     });
     return res;
   }

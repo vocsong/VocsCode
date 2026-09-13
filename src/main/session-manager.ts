@@ -466,7 +466,8 @@ export class SessionManager {
       // Overlay in-memory streaming state.
       const map = new Map(items.map((i) => [i.id, i]));
       for (const [k, v] of live) map.set(k, v);
-      const order = [...items.map((i) => i.id), ...[...live.keys()].filter((k) => !items.some((i) => i.id === k))];
+      const persistedIds = new Set(items.map((i) => i.id));
+      const order = [...persistedIds, ...[...live.keys()].filter((k) => !persistedIds.has(k))];
       return order.map((k) => map.get(k) as TranscriptItem);
     });
   }

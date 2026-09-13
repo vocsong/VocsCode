@@ -26,6 +26,8 @@ export class SessionStore {
   private readonly indexFile: string;
   private sessions: SessionMeta[] = [];
   private writeQueue: Promise<void> = Promise.resolve();
+  /** One shared generation waiting to start, in addition to any in-flight snapshot. */
+  private pendingIndexWrite: Promise<void> | null = null;
   /** Per-session transcript write chain: reads and rewrites wait for in-flight appends to land first. */
   private transcriptWrites = new Map<string, Promise<void>>();
   /** Optional observers (the search indexer); set after construction to avoid a dependency cycle. */
@@ -93,10 +95,15 @@ export class SessionStore {
   }
 
   private flushIndex(): Promise<void> {
-    // The queued chain keeps swallowing errors so later writes still run, but the caller's own
-    // write rejects: a silently failed index write loses meta on restart while the UI keeps
-    // showing it, so callers must be able to observe the failure.
-    const run = this.writeQueue.then(() => writeJson(this.indexFile, this.sessions));
+    // Synchronous bursts and updates during a write share the next snapshot's promise.
+    if (this.pendingIndexWrite) return this.pendingIndexWrite;
+    const run = this.writeQueue.then(() => {
+      this.pendingIndexWrite = null;
+      // writeJson serializes after asynchronous filesystem work; detach nested mutable meta now.
+      return writeJson(this.indexFile, structuredClone(this.sessions));
+    });
+    this.pendingIndexWrite = run;
+    // Reject this generation's callers visibly, without blocking queued or future generations.
     this.writeQueue = run.catch(() => undefined);
     return run;
   }

@@ -43,9 +43,17 @@ export function windowRange(tops: number[], scrollTop: number, viewport: number,
   if (rows === 0) return { start: 0, end: 0 };
   const from = Math.max(0, scrollTop - overscan);
   const to = scrollTop + Math.max(0, viewport) + overscan;
-  let start = 0;
-  while (start + 1 < rows && tops[start + 1]! < from) start++;
-  let end = start;
-  while (end < rows && tops[end]! < to) end++;
+  // Offsets are monotonic: deep scrolling must not revisit every preceding row.
+  const start = Math.max(0, lowerBound(tops, from, 1, rows) - 1);
+  const end = lowerBound(tops, to, start, rows);
   return { start, end };
+}
+
+function lowerBound(tops: number[], value: number, lo: number, hi: number): number {
+  while (lo < hi) {
+    const mid = lo + Math.floor((hi - lo) / 2);
+    if (tops[mid]! < value) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }

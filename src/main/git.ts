@@ -339,15 +339,27 @@ export async function gitDiff(cwd: string, file?: string, staged = false): Promi
   const r = await git(cwd, ['diff', ...(staged ? ['--cached'] : ['HEAD'])], DIFF_TIMEOUT_MS);
   if (timedOut(r)) return { diff: '', error: diffTimeoutMessage() };
   if (r.truncated) return { diff: '', error: 'Diff output was truncated; select a file or narrow the change.' };
+  const maxDiffBytes = 2_000_000;
+  const maxUntrackedFiles = 200;
+  const budgetError = 'Combined diff limit reached — select an individual file to view the remaining changes.';
   let out = r.stdout;
-  // Append untracked files, capped before reading so a stray artifact cannot spike memory.
+  let outputBytes = Buffer.byteLength(out, 'utf8');
+  // Never slice a tracked patch to make it fit the aggregate preview.
+  if (outputBytes > maxDiffBytes) return { diff: '', error: budgetError };
+  let candidates = 0;
+  // Bound both total patch bytes and file reads, not just each untracked file's size.
   const untracked = await git(cwd, ['ls-files', '--others', '--exclude-standard']);
   if (timedOut(untracked)) return { diff: out, error: 'The untracked-file list timed out — new files may be missing from this diff.' };
   if (untracked.truncated) return { diff: out, error: 'The untracked-file list was truncated — new files may be missing from this diff.' };
   for (const f of untracked.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
+    if (candidates++ >= maxUntrackedFiles || outputBytes >= maxDiffBytes) return { diff: out, error: budgetError };
     const content = await readCapped(path.join(root, f), MAX_UNTRACKED_DIFF_BYTES);
     if (content === undefined) continue;
-    out += makeFileChange(root, f, null, content, { oldFileName: '/dev/null' }).diff ?? '';
+    const patch = makeFileChange(root, f, null, content, { oldFileName: '/dev/null' }).diff ?? '';
+    const patchBytes = Buffer.byteLength(patch, 'utf8');
+    if (outputBytes + patchBytes > maxDiffBytes) return { diff: out, error: budgetError };
+    out += patch;
+    outputBytes += patchBytes;
   }
   return { diff: out };
 }
@@ -667,41 +679,44 @@ export async function gitBranchesOverview(cwd: string): Promise<GitBranchOvervie
   const names = refs.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean);
   const base = pickBase(names);
   const wtByBranch = new Map(wt.worktrees.filter((w) => w.branch).map((w) => [w.branch!, w.path]));
-  const branches = await Promise.all(
-    refs.stdout
-      .split('\n')
-      .filter(Boolean)
-      .map(async (line) => {
-        const [name, date, subject, upstream, track] = line.split('\t');
-        const counts =
-          name === base
-            ? undefined
-            : await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
-                const m = r.stdout.trim().match(/^(\d+)\s+(\d+)$/);
-                return m ? { behind: Number(m[1]), ahead: Number(m[2]) } : undefined;
-              });
-        const merged =
-          name === base
-            ? false
-            : (await git(root, ['merge-base', '--is-ancestor', name, base])).code === 0;
-        const up = parseUpstreamTrack(track ?? '');
-        const item: GitBranchOverviewItem = {
-          name,
-          current: Boolean(wt.worktrees.find((w) => w.branch === name && path.resolve(w.path) === wt.current)),
-          isBase: name === base,
-          lastCommitAt: date ? Number(date) * 1000 : undefined,
-          lastCommitSubject: subject || undefined,
-          merged,
-          upstream: upstream?.trim() || undefined,
-          ...counts,
-          ...(up.ahead !== undefined ? { upstreamAhead: up.ahead } : {}),
-          ...(up.behind !== undefined ? { upstreamBehind: up.behind } : {}),
-          ...(wtByBranch.has(name) ? { worktreePath: wtByBranch.get(name) } : {}),
-          ...(pr.prs?.[name] ? { pr: pr.prs[name] } : {})
-        };
-        return item;
-      })
-  );
+  const lines = refs.stdout.split('\n').filter(Boolean);
+  const branches: GitBranchOverviewItem[] = new Array(lines.length);
+  let next = 0;
+  // A repo can have hundreds of local refs; keep their child processes bounded.
+  await Promise.all(Array.from({ length: Math.min(4, lines.length) }, async () => {
+    while (next < lines.length) {
+      const index = next++;
+      const [name, date, subject, upstream, track] = lines[index].split('\t');
+      const counts =
+        name === base
+          ? undefined
+          : await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
+              if (r.code !== 0 || r.truncated || timedOut(r)) return undefined;
+              const m = r.stdout.trim().match(/^(\d+)\s+(\d+)$/);
+              return m ? { behind: Number(m[1]), ahead: Number(m[2]) } : undefined;
+            });
+      const merged =
+        name === base
+          ? false
+          : counts ? counts.ahead === 0 : (await git(root, ['merge-base', '--is-ancestor', name, base])).code === 0;
+      const up = parseUpstreamTrack(track ?? '');
+      const item: GitBranchOverviewItem = {
+        name,
+        current: Boolean(wt.worktrees.find((w) => w.branch === name && path.resolve(w.path) === wt.current)),
+        isBase: name === base,
+        lastCommitAt: date ? Number(date) * 1000 : undefined,
+        lastCommitSubject: subject || undefined,
+        merged,
+        upstream: upstream?.trim() || undefined,
+        ...counts,
+        ...(up.ahead !== undefined ? { upstreamAhead: up.ahead } : {}),
+        ...(up.behind !== undefined ? { upstreamBehind: up.behind } : {}),
+        ...(wtByBranch.has(name) ? { worktreePath: wtByBranch.get(name) } : {}),
+        ...(pr.prs?.[name] ? { pr: pr.prs[name] } : {})
+      };
+      branches[index] = item;
+    }
+  }));
   // Newest work first, base branch pinned to top like GitHub's default-branch row.
   branches.sort((a, b) => Number(b.isBase) - Number(a.isBase) || (b.lastCommitAt ?? 0) - (a.lastCommitAt ?? 0));
   return { isRepo: true, base, branches, worktrees: wt.worktrees, ...(pr.ghMissing ? { ghMissing: true } : {}) };

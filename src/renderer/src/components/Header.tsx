@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import type { ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { basename, fmtCost, fmtTokens, harnessShort } from '../format';
 import { archiveSession, setSessionEffort } from '../sessionActions';
 import { useSessionModels } from '../models';
+import { useGitSummary } from '../gitReads';
 import { useStore } from '../store';
 import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
 import { ForkIntoDropdown } from './ForkInto';
@@ -20,15 +21,10 @@ export function Header({ session }: { session: SessionMeta }) {
   const toast = useStore((s) => s.toast);
   const showThinking = useStore((s) => s.showThinking);
   const toggleThinking = useStore((s) => s.toggleThinking);
-  const [branch, setBranch] = useState<string | undefined>();
   const changesVersion = useStore((s) => s.changesVersion);
+  const { data: summary } = useGitSummary(session.id, changesVersion);
+  const branch = summary?.branch;
   const h = HARNESS_BY_ID[session.config.harness];
-
-  useEffect(() => {
-    invoke('git:summary', { sessionId: session.id })
-      .then((g) => setBranch(g.branch))
-      .catch(() => setBranch(undefined));
-  }, [session.id, changesVersion]);
 
   const current = session.activeModel ?? session.config.model;
   const currentInfo = models.find((m) => current && m.id === current.model && m.provider === current.provider);

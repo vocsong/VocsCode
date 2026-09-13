@@ -31,6 +31,23 @@ describe('windowRange', () => {
     expect(range.end).toBe(10);
   });
 
+  it('locates a deep viewport without scanning the preceding history', () => {
+    let reads = 0;
+    const tops = new Proxy(Array.from({ length: 100_001 }, (_, i) => i * 100), {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) reads++;
+        return Reflect.get(target, key, receiver);
+      }
+    });
+    expect(windowRange(tops, 9_000_000, 600, 400)).toEqual({ start: 89_995, end: 90_010 });
+    expect(reads).toBeLessThan(50);
+  });
+
+  it('preserves boundary rows with repeated offsets and an out-of-range scroll', () => {
+    expect(windowRange([0, 0, 100, 100, 200], 100, 0, 0)).toEqual({ start: 1, end: 2 });
+    expect(windowRange([0, 0, 100, 100, 200], 1000, 600, 0)).toEqual({ start: 3, end: 4 });
+  });
+
   it('never returns an inverted range for zero-height viewports', () => {
     const tops = Array.from({ length: 5 }, (_, i) => i * 50);
     const range = windowRange(tops, 0, 0, 0);

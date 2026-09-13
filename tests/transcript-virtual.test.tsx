@@ -4,7 +4,7 @@
  * short sessions still render every row.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { Transcript, UserMessage } from '../src/renderer/src/components/Transcript';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
@@ -13,7 +13,8 @@ const scrollPos = new WeakMap<Element, number>();
 const originals = {
   clientHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight'),
   scrollHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight'),
-  scrollTop: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTop')
+  scrollTop: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTop'),
+  scrollIntoView: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
 };
 
 beforeEach(() => {
@@ -32,7 +33,10 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  useStore.setState({ transcripts: {}, loaded: {} });
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  useStore.setState({ transcripts: {}, loaded: {}, searchJump: null });
   for (const [name, descriptor] of Object.entries(originals)) {
     if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
     else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
@@ -69,6 +73,73 @@ describe('windowed transcript', () => {
     expect(screen.getByText('message 0')).toBeTruthy();
     expect(screen.queryByText('message 399')).toBeNull();
     expect(container.querySelector('.transcript')?.classList.contains('virtual')).toBe(true);
+  });
+
+  it('consumes a deep-search jump and restores windowing without collapsing its command group', () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('CSS', { escape: (id: string) => id });
+    const scroll = vi.fn(function (this: HTMLElement) {
+      this.closest('.transcript')!.scrollTop = 20_000;
+    });
+    HTMLElement.prototype.scrollIntoView = scroll;
+    const items = messages(400);
+    items.splice(200, 0,
+      { id: 'cmd1', kind: 'tool', ts: 1, name: 'bash', hint: 'execute', status: 'done' },
+      { id: 'cmd2', kind: 'tool', ts: 2, name: 'bash', hint: 'execute', status: 'done' },
+      { id: 'turn', kind: 'turn', ts: 3, status: 'completed' });
+    useStore.setState({ transcripts: { s1: items }, loaded: { s1: true }, showThinking: false, searchJump: { sessionId: 's1', itemId: 'cmd2', n: 1 } });
+    const { container } = render(<Transcript session={session} />);
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-item-id="cmd2"]')).toBeTruthy();
+    act(() => { vi.advanceTimersByTime(2400); });
+    expect(useStore.getState().searchJump).toBeNull();
+    expect(container.querySelector('.transcript.virtual')).toBeTruthy();
+    expect(container.querySelectorAll('.transcript-row').length).toBeLessThan(40);
+    expect(container.querySelector('[data-item-id="cmd2"]')).toBeTruthy();
+    expect(container.querySelector('.search-jump-hl')).toBeNull();
+    act(() => useStore.setState({ transcripts: { s1: [...items, { id: 'new', kind: 'assistant', ts: 500, text: 'new reply', streaming: true }] } }));
+    expect(container.querySelectorAll('.transcript-row').length).toBeLessThan(40);
+    expect(container.querySelector('[data-item-id="cmd2"]')).toBeTruthy();
+  });
+
+  it('does not let an older highlight consume a replacement jump', () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('CSS', { escape: (id: string) => id });
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    useStore.setState({ transcripts: { s1: messages(20) }, loaded: { s1: true }, searchJump: { sessionId: 's1', itemId: 'a2', n: 1 } });
+    const { container } = render(<Transcript session={session} />);
+    act(() => vi.advanceTimersByTime(2000));
+    const newer = { sessionId: 's1', itemId: 'a5', n: 2 };
+    act(() => useStore.setState({ searchJump: newer }));
+    expect(container.querySelector('[data-item-id="a2"].search-jump-hl')).toBeNull();
+    act(() => vi.advanceTimersByTime(400));
+    expect(useStore.getState().searchJump).toBe(newer);
+    expect(container.querySelector('[data-item-id="a5"].search-jump-hl')).toBeTruthy();
+    act(() => vi.advanceTimersByTime(2000));
+    expect(useStore.getState().searchJump).toBeNull();
+    expect(container.querySelector('.search-jump-hl')).toBeNull();
+  });
+
+  it('consumes a missing target once loaded rather than disabling windowing indefinitely', () => {
+    vi.stubGlobal('CSS', { escape: (id: string) => id });
+    useStore.setState({ transcripts: { s1: messages(400) }, loaded: { s1: true }, searchJump: { sessionId: 's1', itemId: 'deleted', n: 1 } });
+    const { container } = render(<Transcript session={session} />);
+    expect(useStore.getState().searchJump).toBeNull();
+    expect(container.querySelectorAll('.transcript-row').length).toBeLessThan(40);
+  });
+
+  it('does not rerender an unchanged command group when only the answer streams', () => {
+    let durationReads = 0;
+    const command = (id: string): TranscriptItem => ({ id, kind: 'tool', ts: 1, name: 'bash', hint: 'execute', status: 'running', get durationMs() { durationReads++; return 10; } });
+    const items: TranscriptItem[] = [command('cmd1'), command('cmd2'), { id: 'answer', kind: 'assistant', ts: 3, text: 'first', streaming: true }];
+    useStore.setState({ transcripts: { s1: items }, loaded: { s1: true }, showThinking: false, searchJump: null });
+    const { container } = render(<Transcript session={session} />);
+    expect(container.querySelectorAll('.tool-card')).toHaveLength(2);
+    durationReads = 0;
+    act(() => useStore.setState({ transcripts: { s1: [...items.slice(0, 2), { id: 'answer', kind: 'assistant', ts: 3, text: 'finished answer', streaming: false }] } }));
+    expect(screen.getByText('finished answer')).toBeTruthy();
+    expect(container.querySelectorAll('.tool-card')).toHaveLength(2);
+    expect(durationReads).toBe(0);
   });
 
   it('renders every row for a short transcript', () => {

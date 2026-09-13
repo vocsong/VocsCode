@@ -86,6 +86,13 @@ describe('web server', () => {
     await ((globalThis as { __webServer?: WebServer }).__webServer ?? null)?.stop();
   });
 
+  it('does not serialize pushes when there are no browser clients', () => {
+    const idle = new WebServer({ registry: stubRegistry(), staticDir: tmpDir(), port: 0, log: () => undefined });
+    let serializations = 0;
+    idle.broadcast('push:sessionEvent', { toJSON: () => { serializations++; return {}; } });
+    expect(serializations).toBe(0);
+  });
+
   it('serves the client script injected into index.html', async () => {
     const res = await httpGet(port, '/');
     expect(res.status).toBe(200);

@@ -46,7 +46,12 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
       queued: 0
     } as SessionMeta;
+    const history: TranscriptItem[] = Array.from({ length: 400 }, (_, i) => ({
+      id: `history${i}`, kind: 'assistant', ts: Date.now() - 1000 + i,
+      text: i === 200 ? 'PerformanceNeedle: inspect `src/hello.ts:300`.' : `Historical reply ${i}`
+    }));
     const items: TranscriptItem[] = [
+      ...history,
       { id: 'u1', kind: 'user', ts: Date.now(), text: 'Where is the greeting?' },
       { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'It lives in `src/hello.ts:300`, right at the top.' }
     ];
@@ -64,7 +69,8 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     }
     env.VOCS_CODE_USER_DATA = userData;
 
-    app = await electron.launch({ executablePath: require('electron') as string, args: [path.join(root, 'out', 'main', 'index.js')], env, timeout: 60_000 });
+    const packaged = process.env.HARNESS_E2E_EXE;
+    app = await electron.launch({ executablePath: packaged || (require('electron') as string), args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js')], env, timeout: 60_000 });
     const win: Page = await app.firstWindow();
     await win.waitForSelector('.brand', { timeout: 60_000 });
 
@@ -83,5 +89,16 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
 
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'files-01-preview.png') });
+
+    // Deep search temporarily reveals history, then returns to a bounded list at the match.
+    await win.getByRole('button', { name: 'Search sessions', exact: true }).click();
+    await win.getByPlaceholder('Search titles, goals and full transcripts…').fill('PerformanceNeedle');
+    await win.getByRole('button', { name: /PerformanceNeedle/ }).click();
+    const match = win.locator('[data-item-id="history200"]');
+    await match.waitFor({ state: 'visible', timeout: 10_000 });
+    await expect.poll(() => win.locator('.transcript.virtual').count(), { timeout: 10_000 }).toBe(1);
+    expect(await win.locator('.transcript-row').count()).toBeLessThan(80);
+    await match.getByRole('link', { name: 'src/hello.ts:300' }).click();
+    expect(await win.locator('.file-preview pre').innerText()).toBe(body);
   }, 180_000);
 });

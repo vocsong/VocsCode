@@ -12,6 +12,8 @@ export interface MarkdownOptions {
    * plain renderer (skills, issue bodies) leaves them as ordinary text.
    */
   fileLinks?: boolean;
+  /** Reuse and retain rendered HTML (default true). Set false for intermediate streaming renders. */
+  cache?: boolean;
 }
 
 /** Extra attributes on a file reference: the line number, when the mention carried one. */
@@ -49,14 +51,25 @@ plain.use({ renderer: buildRenderer(false) });
 const linked = new Marked({ gfm: true, breaks: false });
 linked.use({ renderer: buildRenderer(true) });
 
-const cache = new Map<string, string>();
+// Budget retained source keys + sanitized HTML as UTF-16 (2 bytes/code unit). The entry cap
+// also bounds Map/object overhead; oversized replies render normally without displacing hits.
+const CACHE_MAX_BYTES = 4 * 1024 * 1024;
+const CACHE_MAX_ENTRIES = 500;
+const cache = new Map<string, { html: string; bytes: number }>();
+let cacheBytes = 0;
 
 export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
   if (!md) return '';
   const fileLinks = !!opts.fileLinks;
-  const key = `${fileLinks ? 'L' : 'P'}:${md}`;
-  const hit = cache.get(key);
-  if (hit) return hit;
+  const key = opts.cache === false ? undefined : `${fileLinks ? 'L' : 'P'}:${md}`;
+  if (key !== undefined) {
+    const hit = cache.get(key);
+    if (hit !== undefined) {
+      cache.delete(key);
+      cache.set(key, hit);
+      return hit.html;
+    }
+  }
   let html: string;
   try {
     html = (fileLinks ? linked : plain).parse(md, { async: false });
@@ -73,8 +86,19 @@ export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
     FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'input'],
     ALLOWED_URI_REGEXP: /^https?:\/\//i
   });
-  if (cache.size > 500) cache.clear();
-  cache.set(key, clean);
+  if (key !== undefined) {
+    const bytes = (key.length + clean.length) * 2;
+    if (bytes <= CACHE_MAX_BYTES) {
+      while (cache.size >= CACHE_MAX_ENTRIES || cacheBytes + bytes > CACHE_MAX_BYTES) {
+        const oldest = cache.entries().next().value;
+        if (!oldest) break;
+        cache.delete(oldest[0]);
+        cacheBytes -= oldest[1].bytes;
+      }
+      cache.set(key, { html: clean, bytes });
+      cacheBytes += bytes;
+    }
+  }
   return clean;
 }
 
