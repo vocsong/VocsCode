@@ -37,6 +37,8 @@ That installs everything (including dev dependencies, even if your environment s
 
 **Nothing gets lost.** Threads grouped by project, isolated git worktrees per session, diff review with per-file revert and commit, steer a running turn or queue your next message, `/goal` with an iteration guard.
 
+**Git without the ceremony.** A brand-new folder gets a guided setup — initialize, first commit, and publish to GitHub, one click through the GitHub CLI or step by step on github.com.
+
 **Built for long days.** Live model and effort switching, cost and context tracking, a real terminal in the side panel, slash commands and `@file` mentions, and notifications when a turn needs you.
 
 **MCP where you want it.** Add a server once — globally, or in a repo's `.mcp.json` — and Claude, both Codex adapters and any ACP agent pick it up. Test a server before you rely on it; secrets stay in your keychain, never in the repo.
