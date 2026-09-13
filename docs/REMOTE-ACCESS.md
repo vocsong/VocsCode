@@ -112,14 +112,27 @@ New pieces:
 2. **Relay service** — stateful router: accounts, devices, presence, message routing.
    **Cloudflare Workers + Durable Objects** on the existing vocs.io Cloudflare account;
    one DO per desktop connection, hibernation-friendly, no servers to patch.
-3. **Web client** — `code.vocs.io`: a distinct web shell around the reused renderer
-   core — different `window.harness` transport, browser-native chrome (desktop
-   titlebar/menu hidden in web builds), slim account/device header, code.vocs.io
-   branding, fully responsive layout (drawer sidebar, touch targets),
-   account/pairing screens, and a few shims.
+   **Multi-host:** an account may pair several desktops (work PC, home PC, laptop);
+   routing is keyed by `(account, host)` and every frame carries the target host id, so
+   the web client can browse and drive any of its paired instances.
+3. **Web client** — `code.vocs.io`: a **standalone cloud deployment** of the web shell
+   (Cloudflare Pages/Workers on the vocs.io account) — it is never pointed at a local
+   machine's server; it reaches desktops only through the relay. A distinct web shell
+   around the reused renderer core — different `window.harness` transport,
+   browser-native chrome (desktop titlebar/menu hidden in web builds), slim
+   account/device header, code.vocs.io branding, fully responsive layout (drawer
+   sidebar, touch targets), account/pairing screens, and a few shims. The sidebar
+   lists sessions across all paired hosts, grouped by host; interactive ops target the
+   host that owns the selected session.
 
 Key idea: **the web client is the existing renderer with a different transport.** The
 less the renderer knows about how `window.harness` is backed, the more is reused.
+
+The P1 localhost web server (`VOCS_CODE_WEB=1`) is the dev dogfood of exactly this
+architecture — same Transport protocol, same registry, but served from the app and
+bound to loopback. At P2 the *same web bundle* is deployed to code.vocs.io and the
+same frames flow through the relay instead; the local server never participates in
+the production path.
 
 ## 5. Protocol & transport
 
@@ -134,6 +147,10 @@ interface Transport {
 - `LocalTransport` = today's `ipcRenderer.invoke/on` (unchanged desktop behavior).
 - `RemoteTransport` = WebSocket, JSON frames `{ id, channel, payload }` with response
   correlation; push channels arrive as server-initiated frames.
+- **Addressing:** relay frames carry a target host id — an account may pair several
+  desktops, and the web client names the host it wants per connection/session. Hosts
+  connect outbound and stay addressable by their device id; one host offline does not
+  affect the others.
 - On the desktop, extract the handler map from `src/main/ipc.ts` into a
   transport-agnostic registry keyed by channel; `ipcMain` binding and the WS server both
   bind the same registry. Handler logic stays identical.
@@ -270,6 +287,7 @@ Web (browser)                Relay                      Desktop (host)
 | Code expires / wrong code | Nothing is recorded; start over with a fresh code |
 | Deny or ignore at desktop | Pairing never completes; web sees "request denied/expired" |
 | Two browsers | Two devices, two pairings, both receive pushes; approvals resolve first-wins (§8.1) |
+| Multiple paired desktops | Each desktop pairs separately; the web client targets one host per connection and every frame names its target; revocation is per desktop |
 | New browser on same machine | New pairing: fresh code + desktop confirm — no codeless/auto path in v1 (codeless-with-confirm is a v2 convenience) |
 | Desktop reinstall / wiped userData | New desktop identity; revoke the old device from the web account page |
 | Desktop offline during claim | Relay queues the pairing request for the code TTL; expires after |
@@ -358,7 +376,7 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 | --- | --- | --- |
 | **P0 — Transport extraction** | `src/shared/transport.ts`; extract handler registry from `src/main/ipc.ts`; renderer `window.harness` rides on Transport; zero user-visible change; handler registry unit-tested in plain Node | ~1 wk |
 | **P1 — Web client shell** | Build renderer as a plain SPA inside a distinct web shell: browser-native chrome (desktop titlebar/menu hidden), slim account/device header, code.vocs.io branding, responsive layout (drawer sidebar, touch targets); shims for paste/notify/openExternal/pickFolder; serve it from a localhost Node server wrapping the handler registry. Dogfood: run Vocs Code in a browser tab on the same machine | 3 wk |
-| **P2 — Pairing + relay, read-only** | Relay service (accounts, devices, routing — accounts-lite: single provisioned v1 account, account-keyed registry from day one); desktop remote host (opt-in, e2e encrypted); web login + pairing (§6); browse folders, sessions, transcripts live | 2–3 wk |
+| **P2 — Pairing + relay, read-only** | Relay service (accounts, devices, multi-host routing keyed by `(account, host)` — accounts-lite: single provisioned v1 account, account-keyed registry from day one); desktop remote host (opt-in, e2e encrypted); web login + pairing (§6); web bundle deployed to code.vocs.io; browse folders, sessions, transcripts across paired hosts | 2–3 wk |
 | **P3 — Interactive** | Send prompts, remote approvals (presence, timeouts, audit), session lifecycle (create/stop/rename). No terminal in v1 (§11) | 2–4 wk |
 | **P3.5 — Terminal over WAN** (post-launch) | Read-only first, then read/write; PTY streaming + flow-control tuning (coalescing, ack windows, reconnect mid-PTY) | 1–2 wk |
 | **P4 — Hardening** | Multi-device management + revocation UI, offline encrypted transcript mirror (read-only), audit log surface, view-only mode | 2–4 wk |
@@ -367,10 +385,11 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 Cloud workspaces: separate track afterward.
 
 **Status:** P0 implemented — transport extraction (`src/shared/transport.ts`,
-`src/main/handlers.ts`, registry tests). P1 in progress — the localhost web server +
-WebSocket transport landed (`VOCS_CODE_WEB=1`, serves the built renderer in a browser
-tab with a per-boot token); the distinct web shell branding and the responsive layer
-are the remaining P1 work.
+`src/main/handlers.ts`, registry tests). P1 implemented — localhost web server +
+WebSocket transport (`VOCS_CODE_WEB=1`, per-boot token), browser shims (openExternal,
+notify, pickFolder, clipboard paste), web badge, and the responsive layer (drawer
+sidebar with backdrop, touch targets under 900px). Remaining before P2: packaged-app
+static-path check; the relay-side account/pairing header is P2 scope.
 
 ## 11. Decisions and open questions
 

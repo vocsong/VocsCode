@@ -15,6 +15,7 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
+import { openNewSession, seedSettings } from './e2e-ui';
 import { GROUP_ORDER, THEMES } from '../src/shared/themes';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -49,6 +50,7 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
     const esc = String.fromCharCode(27);
     const colored = ['31mRED', '32mGREEN', '34mBLUE', '33mYELLOW'].map((c) => esc + '[' + c).join(' ');
     await fs.writeFile(path.join(project, 'colors.txt'), colored + esc + '[0m' + String.fromCharCode(10));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
@@ -74,14 +76,30 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
     const labels = (await cards.allInnerTexts()).map((t) => t.trim());
     expect(labels).toEqual(grouped.map((t) => t.name));
 
+    /**
+     * Two identical consecutive frames. A theme switch lands in stages — the card's own 0.12s
+     * transition, then the native caption overlay a frame or two later — and the sidebar itself
+     * settles after mount (the folder row resolves its git branch when the main process answers),
+     * so a fixed delay fingerprints a half-applied theme. Nebula never settles; it comes back with
+     * the last frame after the cap, which is all its animation check needs.
+     */
+    const settle = async (): Promise<string> => {
+      let prev = digest(await win.screenshot({ clip: SIDEBAR }));
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        const next = digest(await win.screenshot({ clip: SIDEBAR }));
+        if (next === prev) return next;
+        prev = next;
+      }
+      return prev;
+    };
+
     const pick = async (name: string, id: string): Promise<void> => {
       await win.locator('.theme-card', { hasText: new RegExp(`^${name}$`) }).click();
       await win.waitForSelector(`html[data-theme='${id}']`, { timeout: 10_000 });
       await win.locator(`.theme-card.active:has-text("${name}")`).waitFor({ timeout: 10_000 });
-      // A switch repaints once more after the card's own 0.12s transition and the native caption
-      // catches up; fingerprints are only meaningful from a settled frame.
       await win.mouse.move(0, 0);
-      await new Promise((r) => setTimeout(r, 400));
+      await settle();
     };
 
     const fingerprints = new Map<string, string>();
@@ -118,9 +136,7 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
     // The terminal is themed too: its screen is repainted from the active palette. (The 16 ANSI
     // slots themselves are checked for every theme in tests/themes.test.ts.)
     await win.locator('.settings-title button[title="Back"]').click();
-    await win.click('.sidebar-top button:has-text("New")');
-    await win.waitForSelector('.modal');
-    await win.fill('.ns-grid input[placeholder*="repo"]', project);
+    await openNewSession(win);
     await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
     // No prompt, so nothing is ever sent to a harness and no API key is needed.
     await win.click('button:has-text("Start session")');
@@ -137,9 +153,15 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
     const screens = new Map<string, string>();
     for (const id of ['midnight', 'blueprint', 'ember', 'nebula'] as const) {
       const name = THEMES.find((t) => t.id === id)?.name as string;
-      await win.locator('.menubar-btn:has-text("View")').click();
-      await win.locator('.menubar-panel .menu-item', { hasText: new RegExp(`^${name}$`) }).click();
+      // The View menu offers one "Theme" item that opens Settings; the catalogue itself lives there.
+      await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
+      await win.waitForSelector('.theme-picker', { timeout: 20_000 });
+      await win.locator('.theme-card', { hasText: new RegExp(`^${name}$`) }).click();
       await win.waitForSelector(`html[data-theme='${id}']`, { timeout: 10_000 });
+      await win.locator('.settings-title button[title="Back"]').click();
+      // Back to the session: the shell is still running, so the terminal repaints its retained
+      // screen in the new palette rather than starting empty.
+      await win.waitForSelector('.term-view .xterm', { timeout: 20_000 });
       await win.waitForTimeout(500);
       await win.screenshot({ path: path.join(shots, `theme-terminal-${id}.png`) });
       screens.set(id, digest(await term.screenshot()));
