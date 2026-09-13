@@ -8,6 +8,7 @@
  */
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -51,6 +52,9 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== 'ELECTRON_RUN_AS_NODE' && k !== 'ANTHROPIC_BASE_URL' && k !== 'CLAUDECODE' && !k.startsWith('CLAUDE_CODE_')) env[k] = v;
     env.VOCS_CODE_USER_DATA = userData;
     env.VOCS_CODE_DEBUG = '1';
+    // The guided setup's first commit must work on a machine with no global git identity, like CI.
+    env.GIT_AUTHOR_NAME = env.GIT_COMMITTER_NAME = 'Vocs Code E2E';
+    env.GIT_AUTHOR_EMAIL = env.GIT_COMMITTER_EMAIL = 'e2e@example.com';
 
     const packaged = process.env.HARNESS_E2E_EXE;
     app = await electron.launch({
@@ -81,6 +85,31 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
+
+      // The project is a brand-new folder, so the Git tab guides setup. Initializing turns the
+      // guide into the branches view with the GitHub continuation; the first commit runs through
+      // real git, proving the panel's actions reach the repository rather than only its own state.
+      await win.click('.panel-tab:has-text("Git")');
+      await win.waitForSelector('.git-setup', { timeout: 20_000 });
+      expect(await win.locator('.git-setup-title').innerText()).toBe('Set up git in this folder');
+      await win.click('.git-setup button:has-text("Initialize repository")');
+      await win.waitForSelector('.git-setup-banner', { timeout: 20_000 });
+      expect(await win.locator('.git-setup-banner .git-setup-title').innerText()).toBe('Publish this repository to GitHub');
+      await fs.stat(path.join(project, '.git')); // the repository exists on disk, not just in the UI
+      await win.click('.git-setup-banner button:has-text("Commit")');
+      await expect
+        .poll(
+          () => {
+            try {
+              return execFileSync('git', ['-C', project, 'rev-parse', '--verify', 'HEAD'], { stdio: 'pipe' }).toString().trim().length > 0;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 20_000 }
+        )
+        .toBe(true);
+      expect(await win.locator('.git-setup-banner').innerText()).toContain('Connect a GitHub repository');
 
       // A `!` draft with no terminal yet opens one and runs the command there; the agent is not involved.
       await win.fill('.composer textarea', '!echo first-bang > first-bang.txt');

@@ -116,26 +116,7 @@ export function Composer({ session }: { session: SessionMeta }) {
 
   /** Runs `!` draft in the session's shell: switch to the Terminal tab and type it in. Nothing reaches the harness. */
   const runShell = async (command: string) => {
-    const store = useStore.getState();
-    const mine = store.terminals.filter((t) => t.sessionId === session.id);
-    const active = store.activeTerminal[session.id];
-    let terminalId = mine.some((t) => t.id === active) ? active : mine[mine.length - 1]?.id;
-    if (terminalId) {
-      store.setActiveTerminal(session.id, terminalId);
-      store.setPanelTab('terminal');
-      store.focusTerminal();
-    } else {
-      const info = await host.createTerminal(session.id); // opens the tab and toasts on failure
-      if (!info) return;
-      terminalId = info.id;
-    }
-    // Every line runs, as if the draft had been pasted into the shell.
-    const data = command.replace(/\r?\n/g, '\r') + '\r';
-    try {
-      await invoke('terminal:input', { terminalId, data });
-    } catch (e) {
-      toast(`Could not run the command: ${String((e as Error).message ?? e)}`, 'error');
-    }
+    await host.runInTerminal(session.id, command);
   };
 
   const send = async (mode: 'now' | 'steer' | 'queue' = 'now') => {

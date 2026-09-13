@@ -11,6 +11,7 @@ import type {
   GitBranchOverview,
   GitIssueList,
   GitPullRequestList,
+  GitSetupStatus,
   GitSummary,
   GitWorktreeInfo,
   HarnessAvailability,
@@ -162,6 +163,17 @@ export interface IpcContract {
   'git:checkout': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
   /** Branches-panel housekeeping: per-branch age, ahead/behind, merged state and worktree binding. */
   'git:branchesOverview': [{ sessionId: string }, GitBranchOverview];
+  /** Guided git setup: whether the folder is a repository and how far the GitHub connection has come. */
+  'git:setupStatus': [{ sessionId: string }, GitSetupStatus];
+  'git:init': [{ sessionId: string }, { ok: boolean; error?: string }];
+  /** Stages everything and commits; an empty folder gets an empty initial commit so it can be pushed. */
+  'git:initialCommit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];
+  /** Points `origin` at a pasted repository URL, replacing an existing origin. */
+  'git:setRemote': [{ sessionId: string; url: string }, { ok: boolean; error?: string }];
+  /** Pushes the current branch to origin with `-u`; never prompts for credentials. */
+  'git:push': [{ sessionId: string }, { ok: boolean; output: string }];
+  /** Creates a GitHub repository with gh, sets origin and pushes (needs an authenticated gh). */
+  'git:createGitHubRepo': [{ sessionId: string; name: string; private: boolean }, { ok: boolean; url?: string; output?: string }];
   'git:deleteBranch': [{ sessionId: string; branch: string; force?: boolean }, { ok: boolean; error?: string }];
   /** Fast-forwards a local branch to its upstream, whether or not it is checked out. */
   'git:updateBranch': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];

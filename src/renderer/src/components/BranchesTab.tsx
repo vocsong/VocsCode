@@ -1,11 +1,12 @@
 /** Git panel tab: GitHub-style branch overview, worktree housekeeping and the repo's pull requests and issues (pulled via gh). */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { GitBranchOverview, GitBranchOverviewItem, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, GitWorktreeInfo, SessionMeta } from '../../../shared/types';
+import type { GitBranchOverview, GitBranchOverviewItem, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, GitSetupStatus, GitWorktreeInfo, SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { basename, relTime } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
-import { askConfirm, Badge, Button, Dropdown, EmptyState, Icon, MenuItem, Modal, Spinner } from './ui';
+import { GitSetup } from './GitSetup';
+import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, Modal, Spinner } from './ui';
 
 /** Branches untouched for this long land in the Stale filter. */
 const STALE_DAYS = 14;
@@ -57,6 +58,8 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   const sessions = useStore((s) => s.sessions);
   const setActive = useStore((s) => s.setActive);
   const [data, setData] = useState<GitBranchOverview | null>(null);
+  /** Guided-setup state reported by GitSetup, for the housekeeping menu's "Set up GitHub" entry. */
+  const [setup, setSetup] = useState<GitSetupStatus | null>(null);
   const [view, setView] = useState<View>('branches');
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
@@ -316,9 +319,9 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
 
   if (data && !data.isRepo) {
     return (
-      <EmptyState icon="branch" title="Not a git repository">
-        Initialize git in this folder to manage branches and worktrees.
-      </EmptyState>
+      <div className="branches">
+        <GitSetup variant="page" session={session} onChanged={() => void refresh()} onStatus={setSetup} />
+      </div>
     );
   }
   if (!data) {
@@ -337,6 +340,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
 
   return (
     <div className="branches">
+      <GitSetup variant="banner" session={session} onChanged={() => void refresh()} onStatus={setSetup} />
       {data.error && (
         <div className="callout warn" role="status">
           {data.error}
@@ -363,28 +367,43 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           width={230}
           trigger={() => <Button variant="ghost" size="sm" icon="more" title="Housekeeping" aria-label="Housekeeping actions" />}
         >
-          {(close) => (
-            <>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  void act(invoke('git:pruneWorktrees', { sessionId: session.id }), 'Worktrees pruned');
-                }}
-                hint="Clean up deleted worktree folders"
-              >
-                Prune worktrees
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  void act(invoke('git:fetchPrune', { sessionId: session.id }), 'Fetched; stale remote branches pruned');
-                }}
-                hint="git fetch --prune"
-              >
-                Fetch & prune remotes
-              </MenuItem>
-            </>
-          )}
+          {(close) => {
+            const root = setup?.root ?? session.cwd;
+            const skipped = useStore.getState().settings?.gitSetupSkipped ?? [];
+            return (
+              <>
+                {setup?.isRepo && !setup.pushed && skipped.includes(root) && (
+                  <MenuItem
+                    onClick={() => {
+                      close();
+                      void invoke('settings:update', { gitSetupSkipped: skipped.filter((p) => p !== root) });
+                    }}
+                    hint="Finish connecting a repository"
+                  >
+                    Set up GitHub
+                  </MenuItem>
+                )}
+                <MenuItem
+                  onClick={() => {
+                    close();
+                    void act(invoke('git:pruneWorktrees', { sessionId: session.id }), 'Worktrees pruned');
+                  }}
+                  hint="Clean up deleted worktree folders"
+                >
+                  Prune worktrees
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    close();
+                    void act(invoke('git:fetchPrune', { sessionId: session.id }), 'Fetched; stale remote branches pruned');
+                  }}
+                  hint="git fetch --prune"
+                >
+                  Fetch & prune remotes
+                </MenuItem>
+              </>
+            );
+          }}
         </Dropdown>
         <Button
           variant="ghost"

@@ -185,6 +185,31 @@ export async function createTerminal(sessionId: string, shell?: ShellKind): Prom
   }
 }
 
+/**
+ * Runs a command in the session's shell: switches to the Terminal tab, reuses the active tab or
+ * opens one, and types the command in. Used by `!cmd` drafts and the guided Git setup.
+ */
+export async function runInTerminal(sessionId: string, command: string): Promise<void> {
+  const st = useStore.getState();
+  const mine = st.terminals.filter((t) => t.sessionId === sessionId);
+  const active = st.activeTerminal[sessionId];
+  let terminalId = mine.some((t) => t.id === active) ? active : mine[mine.length - 1]?.id;
+  if (terminalId) {
+    st.setActiveTerminal(sessionId, terminalId);
+    st.setPanelTab('terminal');
+    st.focusTerminal();
+  } else {
+    const info = await createTerminal(sessionId); // opens the tab and toasts on failure
+    if (!info) return;
+    terminalId = info.id;
+  }
+  try {
+    await invoke('terminal:input', { terminalId, data: command.replace(/\r?\n/g, '\r') + '\r' });
+  } catch (e) {
+    st.toast(`Could not run the command: ${String((e as Error).message ?? e)}`, 'error');
+  }
+}
+
 function create(id: string, host: HTMLElement): Instance {
   const ts = settings();
   const term = new Terminal({

@@ -182,6 +182,19 @@ describe('handler registry', () => {
     expect(created.id).toBe('s_test');
     expect(await registry.invoke('sessions:get', { id: 's_nope' })).toBeNull();
     await expect(registry.invoke('git:summary', { sessionId: 's_nope' })).rejects.toThrow('Session not found');
+    // Guided-setup mutations resolve the session's cwd first, so an unknown id can never reach git
+    // with a path of the caller's choosing.
+    const guided: [string, Record<string, unknown>][] = [
+      ['git:setupStatus', {}],
+      ['git:init', {}],
+      ['git:initialCommit', { message: 'Initial commit' }],
+      ['git:setRemote', { url: 'https://github.com/you/project.git' }],
+      ['git:push', {}],
+      ['git:createGitHubRepo', { name: 'project', private: true }]
+    ];
+    for (const [channel, extra] of guided) {
+      await expect(registry.invoke(channel, { sessionId: 's_nope', ...extra })).rejects.toThrow('Session not found');
+    }
   });
 
   it('routes deep search through the search index', async () => {

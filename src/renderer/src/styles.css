@@ -2556,6 +2556,164 @@ body.resizing {
   border-top: 1px solid var(--border);
 }
 
+/* Guided git setup (Changes/Git tabs): init, first commit, GitHub remote, push. */
+.git-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 14px 20px;
+  max-width: 520px;
+}
+.git-setup-banner {
+  max-width: none;
+  margin: 8px 10px 4px;
+  padding: 10px 12px;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+.git-setup-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.git-setup-head > .icon {
+  color: var(--accent);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.git-setup-title {
+  font-weight: 600;
+}
+.setup-step {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.setup-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.setup-step-n {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+.setup-step.active .setup-step-n {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.setup-step.done .setup-step-n {
+  border-color: var(--green);
+  color: var(--green);
+  background: var(--green-soft);
+}
+.setup-step.pending .setup-step-head {
+  color: var(--fg-muted);
+}
+.setup-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 28px;
+}
+.setup-note {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.setup-note code,
+.setup-cmd code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.setup-cmd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.setup-cmd code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 5px 8px;
+}
+.setup-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.setup-row > input {
+  flex: 1;
+  min-width: 150px;
+  width: auto;
+}
+.setup-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.setup-vis {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.setup-vis button {
+  border: none;
+  background: none;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--fg-muted);
+}
+.setup-vis button:hover {
+  background: var(--bg-hover);
+}
+.setup-vis button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.setup-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+.setup-how {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 /* Branches tab */
 .branches {
   display: flex;

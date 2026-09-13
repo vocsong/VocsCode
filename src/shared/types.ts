@@ -775,6 +775,8 @@ export interface AppSettings {
   utilityModel?: ModelRef;
   /** Set once the first-run setup guide has been completed. */
   onboardingDone?: boolean;
+  /** Project roots where the user dismissed the "publish to GitHub" guide on the Git tab. */
+  gitSetupSkipped?: string[];
 }
 
 export interface GitFileStatus {
@@ -795,6 +797,26 @@ export interface GitSummary {
   behind?: number;
   /** Set when git could not produce a trustworthy summary (timeout/corrupt repo); the file list may be empty or incomplete. */
   error?: string;
+}
+
+/**
+ * Guided-setup state for a folder: how far a repository has come (init, first commit, GitHub
+ * remote, push) and whether the GitHub CLI can automate the remote side.
+ */
+export interface GitSetupStatus {
+  isRepo: boolean;
+  /** Repository root, once initialized. */
+  root?: string;
+  /** Current branch; absent on a detached HEAD. */
+  branch?: string;
+  /** False for a repository with no commits yet (an unborn branch). */
+  hasCommits: boolean;
+  /** The `origin` remote URL, when one is configured. */
+  remote?: string;
+  /** True once the current branch exists on origin (a remote-tracking ref). */
+  pushed: boolean;
+  /** GitHub CLI availability, which powers one-click repository creation and credential setup. */
+  gh: { installed: boolean; authenticated: boolean; account?: string };
 }
 
 export interface GitBranchInfo {

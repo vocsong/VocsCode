@@ -6,10 +6,11 @@ import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore, type PanelTab } from '../store';
 import { BranchesTab } from './BranchesTab';
 import { DiffView } from './DiffView';
+import { GitSetup } from './GitSetup';
 import { McpTab } from './McpTab';
 import { Resizer } from './Resizer';
 import { TerminalPanel } from './TerminalPanel';
-import { Badge, Button, EmptyState, Field, Icon, Spinner, Toggle } from './ui';
+import { Badge, Button, Field, Icon, Spinner, Toggle } from './ui';
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
 const EMPTY: never[] = [];
@@ -94,7 +95,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
     void refresh();
   }, [session.id, version, selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (summary && !summary.isRepo) return <EmptyState icon="branch" title="Not a git repository">Initialize git in this folder to see diffs and revert changes.</EmptyState>;
+  if (summary && !summary.isRepo) return <GitSetup variant="page" session={session} onChanged={() => void refresh()} />;
   const files = summary?.files ?? [];
   return (
     <div className="changes">
