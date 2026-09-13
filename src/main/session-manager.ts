@@ -35,7 +35,7 @@ import type { SettingsStore } from './settings';
 import type { SessionStore } from './store';
 import type { AnalyticsStore } from './analytics';
 import { deferred, errorMessage, shortId, type Deferred } from './util/async';
-import { readJson, writeJson } from './util/fs';
+import { exists, readJson, writeJson } from './util/fs';
 import { generateSessionTitle, titleFromPrompt } from './session-title';
 
 export { titleFromPrompt };
@@ -91,10 +91,13 @@ export class SessionManager {
     // Sessions restored while parked on a PR resume polling for their merge. A harness that
     // died while the app was closed ('stopped') gets its git-derived status re-checked once,
     // so a quit that killed the harness does not erase a parked pr/merged badge for good.
+    // Stagger the checks: they each probe git and gh, and dozens at the same instant freeze
+    // startup (the probe storm that used to stall the event loop for seconds).
+    let stagger = 0;
     for (const s of list) {
       if ((s.status === 'pr' || s.status === 'stopped') && !this.gitStateChecked.has(s.id)) {
         this.gitStateChecked.add(s.id);
-        this.scheduleGitStateCheck(s.id);
+        this.scheduleGitStateCheck(s.id, 4_000 + Math.min(stagger++, 50) * 400);
       }
     }
     return list;
@@ -201,9 +204,22 @@ export class SessionManager {
    * worktree branch, and may even work in a different repo than the session's cwd.
    */
   async sessionPrRefs(id: string): Promise<PrRef[]> {
+    // The transcript can be tens of MB and every parked-pr/stopped session is scanned once at
+    // boot; stat first and reuse the result until the file actually changes.
+    let file: string;
+    try {
+      file = path.join(this.deps.store.sessionDir(id), 'transcript.jsonl');
+    } catch {
+      return [];
+    }
+    const st = await fs.stat(file).catch(() => undefined);
+    if (!st) return [];
+    const stamp = `${st.mtimeMs}:${st.size}`;
+    const cached = this.prRefsCache.get(id);
+    if (cached && cached.stamp === stamp) return cached.refs;
     let raw = '';
     try {
-      raw = await fs.readFile(path.join(this.deps.store.sessionDir(id), 'transcript.jsonl'), 'utf8');
+      raw = await fs.readFile(file, 'utf8');
     } catch {
       return [];
     }
@@ -212,25 +228,53 @@ export class SessionManager {
       const ref: PrRef = { repo: `${m[1]}/${m[2]}`, number: Number(m[3]) };
       if (!out.some((p) => p.repo === ref.repo && p.number === ref.number)) out.push(ref);
     }
+    this.prRefsCache.set(id, { stamp, refs: out });
     return out;
   }
 
-  /** Git roots of other sessions' repos (cached per cwd), for resolving transcript PRs from a foreign repo. */
+  /** transcript stamp → PR refs, so repeated git-state checks do not re-read every transcript. */
+  private prRefsCache = new Map<string, { stamp: string; refs: PrRef[] }>();
+
+  /** Git roots of other sessions' repos (cached per cwd), for resolving transcript PRs from a foreign repo.
+   *
+   * Every parked-pr/stopped session runs one of these at boot, all at the same moment. Without
+   * sharing, each caller walks the same uncached list and spawns one `git rev-parse` per session
+   * cwd per caller — hundreds of concurrent git processes right as the window opens. Two guards:
+   * in-flight promises are shared per cwd, and a cwd that no longer exists is answered by one
+   * stat instead of a doomed git spawn. */
   async knownRepoRoots(excludeId: string): Promise<string[]> {
     const roots = new Set<string>();
-    for (const s of this.deps.store.list()) {
-      if (s.id === excludeId || s.archived) continue;
-      let root = this.repoRootCache.get(s.cwd);
-      if (root === undefined) {
-        root = (await gitRoot(s.cwd).catch(() => null)) ?? '';
-        this.repoRootCache.set(s.cwd, root);
-      }
-      if (root) roots.add(root);
-    }
+    await Promise.all(
+      this.deps.store.list().map(async (s) => {
+        if (s.id === excludeId || s.archived) return;
+        const root = await this.repoRoot(s.cwd);
+        if (root) roots.add(root);
+      })
+    );
     return [...roots];
   }
 
   private repoRootCache = new Map<string, string>();
+  private repoRootPending = new Map<string, Promise<string>>();
+
+  /** One resolution per cwd at a time; the first resolution is cached for the manager's lifetime. */
+  private repoRoot(cwd: string): Promise<string> {
+    const cached = this.repoRootCache.get(cwd);
+    if (cached !== undefined) return Promise.resolve(cached);
+    let pending = this.repoRootPending.get(cwd);
+    if (!pending) {
+      pending = (async () => {
+        if (!(await exists(cwd))) return '';
+        return (await gitRoot(cwd).catch(() => null)) ?? '';
+      })().then((root) => {
+        this.repoRootCache.set(cwd, root);
+        this.repoRootPending.delete(cwd);
+        return root;
+      });
+      this.repoRootPending.set(cwd, pending);
+    }
+    return pending;
+  }
 
   /** Persists every debounced meta update immediately (used on quit so trailing edits are not lost). */
   async flushPendingPersists(): Promise<void> {
