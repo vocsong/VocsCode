@@ -37,6 +37,8 @@ The Pi gate includes optional PowerShell, follows existing file ancestors to det
 
 ## Verification tiers
 
+The offline native regression suite requires `rg` (ripgrep) on PATH to exercise the real engine as well as the fallback; Ubuntu CI installs it explicitly. Windows shell tests also require a working shell and Node on PATH.
+
 ```bash
 npm run typecheck
 npm test

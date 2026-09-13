@@ -29,6 +29,8 @@ jobs:
       - run: npm ci --include=dev
         env:
           NODE_ENV: development
+      # The native search regressions exercise both real ripgrep and the JS fallback.
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
