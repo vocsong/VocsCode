@@ -216,7 +216,8 @@ export function defaultSettings(): AppSettings {
     collapsedFolders: [],
     customShortcuts: {},
     goalDefaults: { autoContinue: true, maxIterations: 25 },
-    terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] }
+    terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] },
+    gitSetupSkipped: []
   };
 }
 
@@ -326,6 +327,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderOrder: Array.isArray(stored.folderOrder) ? stored.folderOrder.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     collapsedFolders: Array.isArray(stored.collapsedFolders) ? stored.collapsedFolders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    gitSetupSkipped: Array.isArray(stored.gitSetupSkipped) ? stored.gitSetupSkipped.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderStyles: normalizeFolderStyles(stored.folderStyles),
     customLabels: normalizeCustomLabels(stored.customLabels),
     customShortcuts: normalizeCustomShortcuts(stored.customShortcuts),

@@ -10,7 +10,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRevertFile, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
 import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
@@ -529,6 +529,21 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:worktrees', ({ sessionId }) => gitWorktrees(cwdOf(sessionId)));
   handle('git:checkout', ({ sessionId, branch }) => gitCheckout(cwdOf(sessionId), branch));
   handle('git:branchesOverview', ({ sessionId }) => gitBranchesOverview(cwdOf(sessionId)));
+  // Guided setup for a folder that is not a repository yet (or has no GitHub remote).
+  handle('git:setupStatus', ({ sessionId }) => gitSetupStatus(cwdOf(sessionId)));
+  handle('git:init', ({ sessionId }) => gitInit(cwdOf(sessionId)));
+  handle('git:initialCommit', ({ sessionId, message }) => gitInitialCommit(cwdOf(sessionId), message));
+  handle('git:setRemote', ({ sessionId, url }) => gitSetRemote(cwdOf(sessionId), url));
+  handle('git:push', async ({ sessionId }) => {
+    const r = await gitPush(cwdOf(sessionId));
+    if (r.ok) sessions.refreshGitState(sessionId);
+    return r;
+  });
+  handle('git:createGitHubRepo', async ({ sessionId, name, private: isPrivate }) => {
+    const r = await gitCreateGitHubRepo(cwdOf(sessionId), name, !!isPrivate);
+    if (r.ok) sessions.refreshGitState(sessionId);
+    return r;
+  });
   handle('git:deleteBranch', ({ sessionId, branch, force }) => gitDeleteBranch(cwdOf(sessionId), branch, !!force));
   handle('git:updateBranch', ({ sessionId, branch }) => gitUpdateBranch(cwdOf(sessionId), branch));
   // Only registered worktrees may be removed; `path` must match one git reports so the
