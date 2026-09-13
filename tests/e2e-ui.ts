@@ -16,6 +16,23 @@ export function seedSettings(project: string, extra: Record<string, unknown> = {
 }
 
 /**
+ * Environment for a launched Electron: the user's environment minus provider keys and Claude Code
+ * markers, pointed at a throwaway userData directory. `extra` overrides individual variables (for
+ * example PI_CODING_AGENT_DIR, so a suite never touches the real ~/.pi/agent).
+ */
+export function isolatedEnv(userData: string, extra: Record<string, string> = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (k === 'ELECTRON_RUN_AS_NODE' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
+    if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
+    env[k] = v;
+  }
+  env.VOCS_CODE_USER_DATA = userData;
+  return { ...env, ...extra };
+}
+
+/**
  * Opens the new-session dialog from the seeded folder's row in the sidebar. Addressed by test id
  * rather than by class: a restyle must not be able to take the suites' entry point away.
  */

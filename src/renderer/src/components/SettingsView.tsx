@@ -13,8 +13,9 @@ import { useStore } from '../store';
 import { systemPrefersDark } from '../theme';
 import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
+import { PiSection } from './PiSettings';
 
-type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'remote' | 'about';
+type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
 
 export function SettingsView() {
   const settings = useStore((s) => s.settings)!;
@@ -35,6 +36,7 @@ export function SettingsView() {
             ['terminal', 'Terminal', 'terminal'],
             ['providers', 'Providers & keys', 'bolt'],
             ['harnesses', 'Harnesses', 'shield'],
+            ['pi', 'Pi', 'sparkles'],
             ['acp', 'ACP agents', 'fork'],
             ['remote', 'Remote access', 'bolt'],
             ['about', 'About & doctor', 'info']
@@ -51,6 +53,7 @@ export function SettingsView() {
         {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
         {section === 'providers' && <Providers settings={settings} />}
         {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
+        {section === 'pi' && <PiSection />}
         {section === 'acp' && <AcpAgents settings={settings} update={update} />}
         {section === 'remote' && <RemoteSection settings={settings} update={update} />}
         {section === 'about' && <About />}

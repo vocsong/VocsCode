@@ -267,6 +267,69 @@ export interface SkillRootInfo {
   skills: SkillInfo[];
 }
 
+/** Base-pi resources the Settings → Pi page can list and toggle (see main/pi-config.ts). */
+export type PiResourceType = 'extensions' | 'skills' | 'prompts' | 'themes';
+
+/** One resource pi would load from its global agent dir. */
+export interface PiResourceItem {
+  type: PiResourceType;
+  /** Frontmatter name, or the filename / folder name when there is none. */
+  name: string;
+  /** Skill or prompt description from frontmatter, when present. */
+  description?: string;
+  /** Absolute path of the file pi loads (a skill's SKILL.md, an extension's index.ts, …). */
+  path: string;
+  /** False when a `-`/`!` pattern in settings.json currently excludes it. */
+  enabled: boolean;
+  /** True when a `+`/`-` pattern in settings.json pins this path either way. */
+  forced: boolean;
+}
+
+/** Curated slice of pi's global settings.json that affects sessions Vocs Code starts. */
+export interface PiPreferences {
+  defaultThinkingLevel?: string;
+  transport?: string;
+  showCacheMissNotices?: boolean;
+  /** Global-only in pi: what an untrusted project's .pi resources do in non-interactive runs. */
+  defaultProjectTrust?: string;
+  httpProxy?: string;
+  enableSkillCommands?: boolean;
+  compactionEnabled?: boolean;
+  compactionReserveTokens?: number;
+  compactionKeepRecentTokens?: number;
+  retryEnabled?: boolean;
+  retryMaxRetries?: number;
+  retryBaseDelayMs?: number;
+}
+
+/** A preference patch; `null` deletes the key so pi's own default applies again. */
+export type PiPreferencesPatch = { [K in keyof PiPreferences]?: PiPreferences[K] | null };
+
+/** Global pi prompt files, editable from Settings. */
+export type PiPromptName = 'AGENTS.md' | 'APPEND_SYSTEM.md' | 'SYSTEM.md';
+
+export interface PiPromptFile {
+  name: PiPromptName;
+  path: string;
+  exists: boolean;
+  /** File contents; empty when absent. Capped at 512 KB by the backend. */
+  content: string;
+  /** True when the file exceeds the cap, so the UI must not offer to save the truncated read. */
+  truncated?: boolean;
+}
+
+/** Everything the Settings → Pi page needs in one read. */
+export interface PiSetup {
+  /** pi's global agent dir (honors PI_CODING_AGENT_DIR). */
+  agentDir: string;
+  settingsPath: string;
+  /** Set when settings.json exists but is not usable JSON; the page must not write until fixed. */
+  settingsError?: string;
+  preferences: PiPreferences;
+  resources: PiResourceItem[];
+  promptFiles: PiPromptFile[];
+}
+
 export interface UsageTotals {
   inputTokens: number;
   outputTokens: number;

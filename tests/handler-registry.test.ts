@@ -15,6 +15,7 @@ import type { SecretStore } from '../src/main/secrets';
 import type { SessionManager } from '../src/main/session-manager';
 import type { SessionMeta } from '../src/shared/types';
 import { SettingsStore } from '../src/main/settings';
+import { PiConfigStore } from '../src/main/pi-config';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
 
@@ -299,5 +300,45 @@ describe('mcp handlers', () => {
     const { registry } = stubDeps();
     const r = (await registry.invoke('mcp:inspect', { def: { id: 'x', transport: 'stdio' } as never })) as { ok: boolean; error?: string };
     expect(r).toEqual({ ok: false, error: 'Incomplete server definition', tools: [], durationMs: 0 });
+  });
+});
+
+describe('pi config handlers', () => {
+  /** A store scoped to a temp agent dir so no handler can reach the real ~/.pi/agent. */
+  function piDeps(): { agentDir: string } & ReturnType<typeof stubDeps> {
+    const agentDir = tmpDir('pi-agent');
+    fsSync.mkdirSync(path.join(agentDir, 'skills', 'demo'), { recursive: true });
+    fsSync.writeFileSync(path.join(agentDir, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\n---\n', 'utf8');
+    fsSync.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({ theme: 'dark' }), 'utf8');
+    const stub = stubDeps({ piConfig: new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir }, home: agentDir }) });
+    return { agentDir, ...stub };
+  }
+
+  it('serves the setup for the configured agent dir', async () => {
+    const { agentDir, registry } = piDeps();
+    const setup = (await registry.invoke('pi:setup', undefined)) as { agentDir: string; resources: { name: string }[] };
+    expect(setup.agentDir).toBe(path.resolve(agentDir));
+    expect(setup.resources.map((r) => r.name)).toContain('demo');
+  });
+
+  it('refuses a resource path outside the agent dir without writing settings.json', async () => {
+    const { agentDir, registry } = piDeps();
+    await expect(registry.invoke('pi:resource', { type: 'skills', path: path.join(agentDir, '..', 'evil'), enabled: false })).rejects.toThrow('Not a resource');
+    expect(JSON.parse(fsSync.readFileSync(path.join(agentDir, 'settings.json'), 'utf8'))).toEqual({ theme: 'dark' });
+  });
+
+  it('never reveals a path outside the agent dir', async () => {
+    const { agentDir, registry, calls } = piDeps();
+    await registry.invoke('pi:reveal', { path: path.join(agentDir, '..', 'evil') });
+    expect(calls).not.toContain(`openPath:${path.join(agentDir, '..', 'evil')}`);
+    await registry.invoke('pi:reveal', {});
+    expect(calls).toContain(`openPath:${path.resolve(agentDir)}`);
+  });
+
+  it('rejects an editor target outside the agent dir and unknown prompt names', async () => {
+    const { agentDir, registry } = piDeps();
+    const r = (await registry.invoke('pi:openInEditor', { path: path.join(agentDir, '..', 'secret.txt') })) as { ok: boolean; error?: string };
+    expect(r).toEqual({ ok: false, error: 'Path is outside the pi agent dir' });
+    await expect(registry.invoke('pi:prompt:write', { name: 'NOTES.md' as never, content: 'x' })).rejects.toThrow('Unknown prompt file');
   });
 });

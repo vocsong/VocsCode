@@ -25,6 +25,7 @@ import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
+import { PiConfigStore } from './pi-config';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
@@ -72,6 +73,8 @@ export interface HandlerDeps {
   search: SearchIndex;
   /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
   remote?: RemoteHost;
+  /** Base-pi global config (Settings → Pi); a default store is created when absent. */
+  piConfig?: PiConfigStore;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Push an async event to the connected client (the window today, remote clients later). */
   push: (channel: string, payload: unknown) => void;
@@ -89,6 +92,7 @@ const SLOW_HANDLER_MS = 1000;
 
 export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const { settings, secrets, sessions, terminals, runtime } = deps;
+  const piConfig = deps.piConfig ?? new PiConfigStore({ log: deps.log });
   const handlers = new Map<IpcChannel, (req: never) => unknown>();
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
 
@@ -359,6 +363,22 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('skills:create', (req) => createSkill(req));
   handle('skills:copy', (req) => copySkill(req));
   handle('skills:delete', ({ path: p }) => deleteSkill(p));
+
+  // Base-pi global config. Resource toggles and prompt writes are validated inside PiConfigStore
+  // (path containment, type/name allowlists), so a tampered renderer cannot touch other files.
+  handle('pi:setup', () => piConfig.read());
+  handle('pi:preferences', (patch) => piConfig.updatePreferences(patch));
+  handle('pi:resource', ({ type, path: p, enabled }) => piConfig.setResourceEnabled(type, p, enabled));
+  handle('pi:prompt:write', ({ name, content }) => piConfig.writePrompt(name, content));
+  handle('pi:openInEditor', async ({ path: p, line }) => {
+    const target = piConfig.resolveAgentPath(p);
+    if (!target) return { ok: false, error: 'Path is outside the pi agent dir' };
+    return launchEditor(target, line);
+  });
+  handle('pi:reveal', async ({ path: p }) => {
+    const target = p ? piConfig.resolveAgentPath(p) : piConfig.paths().agentDir;
+    if (target) await deps.desktop.openPath(target);
+  });
 
   // MCP. Every definition coming back from the renderer goes through normalizeMcpServers first,
   // so a malformed (or hostile) entry can never reach a harness or a file on disk.

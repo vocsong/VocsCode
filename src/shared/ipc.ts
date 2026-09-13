@@ -25,6 +25,10 @@ import type {
   ModelOverride,
   ModelRef,
   PermissionMode,
+  PiPreferencesPatch,
+  PiPromptName,
+  PiResourceType,
+  PiSetup,
   ProviderConfig,
   RemoteConfig,
   RemoteDeviceInfo,
@@ -103,6 +107,16 @@ export interface IpcContract {
   /** Copies a skill folder into another harness's skills directory. */
   'skills:copy': [{ path: string; toHarness: SkillHarness }, { ok: boolean; path?: string; error?: string }];
   'skills:delete': [{ path: string }, { ok: boolean; error?: string }];
+
+  /** Base-pi global config for Settings → Pi: agent dir resources, prompt files, curated settings.json keys. */
+  'pi:setup': [void, PiSetup];
+  'pi:preferences': [PiPreferencesPatch, PiSetup];
+  'pi:resource': [{ type: PiResourceType; path: string; enabled: boolean }, PiSetup];
+  'pi:prompt:write': [{ name: PiPromptName; content: string }, PiSetup];
+  /** Opens a pi config file in the configured editor; `path` must resolve inside the agent dir. */
+  'pi:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
+  /** Opens the agent dir (or a file inside it) in the OS file manager. */
+  'pi:reveal': [{ path?: string }, void];
 
   /** Every harness's own global MCP store, for the MCP page's read-only tabs. */
   'mcp:stores': [void, McpStoreInfo[]];

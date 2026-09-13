@@ -5653,3 +5653,97 @@ body.resizing {
 .agatho-compose .icon-btn.danger {
   color: var(--red);
 }
+
+/* Settings → Pi */
+.pi-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+.pi-head code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pi-resource-group {
+  margin: 14px 0;
+}
+.pi-resource-group h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 2px;
+}
+.pi-resource {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  padding: 8px 12px;
+  margin: 6px 0;
+}
+.pi-resource.disabled {
+  opacity: 0.65;
+}
+.pi-resource .toggle {
+  margin-top: 2px;
+}
+.pi-resource-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pi-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0;
+}
+.pi-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.pi-tab.active,
+.pi-tab:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.pi-prompt-editor {
+  min-height: 220px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.pi-prompt-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+.pi-prompt-actions code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pi-inline {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.pi-inline .field {
+  flex: 1;
+  min-width: 180px;
+}
+.toggle.disabled {
+  opacity: 0.6;
+  cursor: default;
+}
