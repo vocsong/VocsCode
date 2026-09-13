@@ -309,6 +309,11 @@ describe('settings normalization', () => {
     expect(s.providers.find((p) => p.id === 'custom')?.builtin).toBe(false);
     expect(s.acpAgents.length).toBe(d.acpAgents.length);
   });
+  it('defaults the welcome guide and new sessions to Pi, keeping an explicit choice', () => {
+    expect(defaultSettings().defaultHarness).toBe('pi');
+    expect(normalizeSettings({ theme: 'dark' }).defaultHarness).toBe('pi');
+    expect(normalizeSettings({ defaultHarness: 'claude' }).defaultHarness).toBe('claude');
+  });
   it('remembers the worktree isolation decision and defaults it to off', () => {
     expect(defaultSettings().defaultUseWorktree).toBe(false);
     expect(normalizeSettings({ defaultUseWorktree: true }).defaultUseWorktree).toBe(true);
@@ -319,6 +324,10 @@ describe('settings normalization', () => {
     expect(normalizeSettings({ utilityModel: { provider: 'deepseek', model: 'deepseek-chat' } }).utilityModel).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
     expect(normalizeSettings({}).utilityModel).toBeUndefined();
     expect(normalizeSettings({ utilityModel: { provider: 3, model: 'x' } as never }).utilityModel).toBeUndefined();
+  });
+  it('drops an effort level the app no longer models', () => {
+    expect(normalizeSettings({ defaultEffort: 'high' }).defaultEffort).toBe('high');
+    expect(normalizeSettings({ defaultEffort: 'ultra' as never }).defaultEffort).toBeUndefined();
   });
 });
 
@@ -356,6 +365,14 @@ describe('model mapping', () => {
     expect(m.id).toBe('gpt-5.5');
     expect(m.supportsImages).toBe(true);
     expect(m.pricing?.input).toBe(5);
+    expect(m.supportedEfforts).toEqual(['high']);
+    expect(m.defaultEffort).toBe('high');
+  });
+  it('drops codex effort levels the app cannot express', () => {
+    // Codex 0.153 advertises `ultra` on the 5.6/6 family; the shared effort state only knows minimal..max.
+    const m = codexModelToInfo({ id: 'x', model: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }, { reasoningEffort: 'high', description: '' }, { reasoningEffort: 'ultra', description: '' }], defaultReasoningEffort: 'ultra', inputModalities: ['text'], isDefault: false });
+    expect(m.supportedEfforts).toEqual(['low', 'high']);
+    expect(m.defaultEffort).toBeUndefined();
   });
 });
 
@@ -400,6 +417,10 @@ describe('model capability overrides', () => {
     expect(s.modelOverrides).toEqual({ 'deepseek/x': { supportsImages: true } });
     // Settings written before this feature existed have no such key.
     expect(normalizeSettings({ theme: 'dark' }).modelOverrides).toEqual({});
+  });
+
+  it('lists Pi first in the harness pickers', () => {
+    expect(HARNESSES.map((h) => h.id)).toEqual(['pi', 'claude', 'codex', 'codex-exec', 'cursor', 'acp', 'native']);
   });
 
   it('marks pi as the only harness that strips images itself', () => {
@@ -495,6 +516,8 @@ describe('SecretStore', () => {
       expect(raw.openai.startsWith('b64:')).toBe(true);
       expect(raw.openai).not.toContain('sk-fallback');
       expect(await store.get('openai')).toBe('sk-fallback');
+      expect(store.status).toEqual({ encryptionAvailable: false, hasFallback: true, fallbackProviderIds: ['openai'] });
+      if (process.platform !== 'win32') expect((await fs.stat(path.join(dir, 'secrets.json'))).mode & 0o777).toBe(0o600);
     } finally {
       safeStorageMock.encryptionAvailable = true;
     }
@@ -544,6 +567,62 @@ describe('SessionManager folder tracking', () => {
     // Creating another session in the same folder must not duplicate the entry.
     await manager.create({ config: { ...cfg } });
     expect(stored.folders).toEqual(['G:/proj/a']);
+  });
+
+  it('refreshes the analytics snapshot when a harness discovers or switches its active model', async () => {
+    const session: SessionMeta = {
+      id: 'model-discovery',
+      title: 'model discovery',
+      createdAt: 1,
+      updatedAt: 1,
+      config: { harness: 'pi', projectRoot: 'G:/proj/a', permissionMode: 'ask' },
+      cwd: 'G:/proj/a',
+      status: 'idle',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    const analytics = { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() };
+    const store = {
+      list: () => [session],
+      get: (id: string) => (id === session.id ? session : undefined),
+      upsert: vi.fn(),
+      appendTranscript: vi.fn(async () => undefined),
+      sessionDir: () => os.tmpdir()
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: analytics as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    const ctx = (manager as unknown as { buildContext: (meta: SessionMeta, id: string) => { updateMeta: (patch: Partial<SessionMeta>) => void } }).buildContext(session, session.id);
+    ctx.updateMeta({ activeModel: { provider: 'openai', model: 'gpt-6-terra' } });
+    expect(analytics.touchSession).toHaveBeenCalledWith(expect.objectContaining({ activeModel: { provider: 'openai', model: 'gpt-6-terra' } }));
+    analytics.touchSession.mockClear();
+    await manager.setModel(session.id, { provider: 'anthropic', model: 'claude-opus-5' });
+    expect(analytics.touchSession).toHaveBeenCalledWith(expect.objectContaining({ activeModel: { provider: 'anthropic', model: 'claude-opus-5' } }));
+
+    const adapterSetModel = vi.fn(async () => undefined);
+    const active = { adapter: { setModel: adapterSetModel }, liveItems: new Map(), toolModels: new Map(), dirty: new Set() };
+    (manager as unknown as { active: Map<string, typeof active> }).active.set(session.id, active);
+    analytics.touchSession.mockClear();
+    adapterSetModel.mockRejectedValueOnce(new Error('switch rejected'));
+    await expect(manager.setModel(session.id, { provider: 'openai', model: 'gpt-6-terra' })).rejects.toThrow('switch rejected');
+    expect(session.activeModel).toEqual({ provider: 'anthropic', model: 'claude-opus-5' });
+    expect(analytics.touchSession).not.toHaveBeenCalled();
+
+    const emit = (manager as unknown as { emit: (id: string, event: SessionEvent) => void }).emit.bind(manager);
+    const running = { id: 'tool-1', kind: 'tool', ts: 2, name: 'Bash', status: 'running' } as const;
+    emit(session.id, { type: 'item.upsert', item: running });
+    ctx.updateMeta({ activeModel: { provider: 'openai', model: 'gpt-6-terra' } });
+    const done = { ...running, status: 'done' as const };
+    emit(session.id, { type: 'item.upsert', item: done });
+    expect(analytics.recordToolCall).toHaveBeenCalledWith(session.id, done, undefined, { provider: 'anthropic', model: 'claude-opus-5' });
   });
 });
 

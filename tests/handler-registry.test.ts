@@ -212,3 +212,47 @@ describe('handler registry', () => {
     expect(logs.some(([level, msg]) => level === 'warn' && msg.includes('slow ipc sessions:send'))).toBe(true);
   });
 });
+
+describe('mcp handlers', () => {
+  it('refuses an unknown session rather than reading an arbitrary path', async () => {
+    const { registry } = stubDeps();
+    for (const channel of ['mcp:project', 'mcp:project:save', 'mcp:project:state', 'mcp:export'] as const) {
+      await expect(registry.invoke(channel, { sessionId: 's_nope', servers: [], patch: {}, to: 'cursor' })).rejects.toThrow('Session not found');
+    }
+  });
+
+  it('normalizes what the renderer sends before it reaches .mcp.json', async () => {
+    const { registry, deps } = stubDeps();
+    await deps.settings.load();
+    await registry.invoke('mcp:project:save', {
+      sessionId: 's_test',
+      servers: [
+        { id: 'good', transport: 'stdio', command: 'srv', args: ['--x'] },
+        { id: 'no-command', transport: 'stdio' },
+        { id: 'a/b', transport: 'stdio', command: 'srv' },
+        { id: 'bad-url', transport: 'http', url: 'file:///etc/passwd' }
+      ] as never
+    });
+    const raw = JSON.parse(fsSync.readFileSync(path.join(ws, '.mcp.json'), 'utf8'));
+    expect(Object.keys(raw.mcpServers)).toEqual(['good']);
+    const info = (await registry.invoke('mcp:project', { sessionId: 's_test' })) as { repo: { id: string }[]; effective: { enabled: boolean; reason?: string }[] };
+    expect(info.repo.map((s) => s.id)).toEqual(['good']);
+    // Written, but inert: nothing is active until the user enables it for this repo.
+    expect(info.effective).toEqual([{ def: expect.objectContaining({ id: 'good' }), scope: 'repo', enabled: false, reason: 'not-enabled' }]);
+  });
+
+  it('keeps the per-repo trust switch in settings, keyed by project root', async () => {
+    const { registry, deps } = stubDeps();
+    await deps.settings.load();
+    await registry.invoke('mcp:project:save', { sessionId: 's_test', servers: [{ id: 'db', transport: 'stdio', command: 'srv' }] });
+    const after = (await registry.invoke('mcp:project:state', { sessionId: 's_test', patch: { enabledRepo: ['db'] } })) as { effective: { enabled: boolean }[] };
+    expect(after.effective.some((e) => e.enabled)).toBe(true);
+    expect(deps.settings.get().mcpProjectState?.[ws]).toEqual({ enabledRepo: ['db'] });
+  });
+
+  it('rejects an incomplete definition on inspect instead of spawning anything', async () => {
+    const { registry } = stubDeps();
+    const r = (await registry.invoke('mcp:inspect', { def: { id: 'x', transport: 'stdio' } as never })) as { ok: boolean; error?: string };
+    expect(r).toEqual({ ok: false, error: 'Incomplete server definition', tools: [], durationMs: 0 });
+  });
+});

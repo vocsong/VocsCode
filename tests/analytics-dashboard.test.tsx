@@ -137,9 +137,15 @@ describe('analytics dashboard', () => {
   it("shows each model's per-tool error rates on the tools tab", async () => {
     reset();
     summary.modelTools = [
-      { key: 'p/opus', label: 'opus', name: 'Bash', calls: 10, errors: 2, declined: 0, durationMs: 0 },
-      { key: 'p/glm', label: 'glm', name: 'Bash', calls: 4, errors: 1, declined: 0, durationMs: 0 },
-      { key: 'p/glm', label: 'glm', name: 'Read', calls: 2, errors: 0, declined: 0, durationMs: 0 }
+      { key: 'p/sol', label: 'sol', name: 'bash', calls: 10, errors: 2, declined: 0, durationMs: 0 },
+      { key: 'p/glm', label: 'glm', name: 'bash', calls: 9, errors: 1, declined: 0, durationMs: 0 },
+      { key: 'p/luna', label: 'luna', name: 'bash', calls: 8, errors: 0, declined: 0, durationMs: 0 },
+      { key: 'p/deepseek', label: 'deepseek', name: 'bash', calls: 7, errors: 0, declined: 0, durationMs: 0 },
+      { key: 'p/fable', label: 'fable-5-1', name: 'Bash', calls: 6, errors: 1, declined: 0, durationMs: 0 },
+      { key: 'p/astra', label: 'astra', name: 'bash', calls: 5, errors: 0, declined: 0, durationMs: 0 },
+      { key: 'p/terra', label: 'terra', name: 'bash', calls: 2, errors: 0, declined: 0, durationMs: 0 },
+      { key: 'anthropic/opus', label: 'opus', name: 'Bash', calls: 1, errors: 0, declined: 0, durationMs: 0 },
+      { key: 'p/fable', label: 'fable-5-1', name: 'Read', calls: 2, errors: 0, declined: 0, durationMs: 0 }
     ];
     const { container } = render(<AnalyticsDashboard />);
     await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
@@ -150,10 +156,15 @@ describe('analytics dashboard', () => {
     await waitFor(() => expect(container.textContent).toContain('Error rate by model'));
     const table = Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === 'Tool') as HTMLTableElement;
     expect(table).toBeTruthy();
-    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Tool', 'opus', 'glm']);
-    const bashRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('Bash')) as HTMLTableRowElement;
-    expect(bashRow.textContent).toContain('20%'); // 2 errors in 10 calls
-    expect(bashRow.textContent).toContain('25%'); // 1 error in 4 calls
+    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Tool', 'sol', 'glm', 'fable-5-1', 'luna', 'deepseek', 'astra', 'terra', 'opus']);
+    expect(table.textContent).not.toContain('Other');
+    // Built-in names from Claude use title case, while Pi/native use lower case. They share rows.
+    const bashRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('bash')) as HTMLTableRowElement;
+    expect(bashRow).toBeTruthy();
+    expect(Array.from(bashRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['bash', '(2/10) 20%', '(1/9) 11%', '(1/6) 17%', '(0/8) 0%', '(0/7) 0%', '(0/5) 0%', '(0/2) 0%', '(0/1) 0%']);
+    expect(Array.from(table.querySelectorAll('tr')).filter((tr) => tr.textContent?.toLowerCase().startsWith('bash'))).toHaveLength(1);
+    const readRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('Read')) as HTMLTableRowElement;
+    expect(Array.from(readRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['Read', '—', '—', '(0/2) 0%', '—', '—', '—', '—', '—']);
   });
 
   it('lets the legend hide a series and every chart card swap to its table', async () => {

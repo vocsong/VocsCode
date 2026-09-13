@@ -24,6 +24,7 @@ import type {
 import { autoCompactionThresholdLabel, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
+import { resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
@@ -55,6 +56,8 @@ interface ActiveSession {
   adapter: HarnessAdapter;
   approvals: Map<string, Deferred<ApprovalDecision>>;
   liveItems: Map<string, TranscriptItem>;
+  /** Model active when each running tool call began, retained until its terminal upsert. */
+  toolModels: Map<string, ModelRef>;
   dirty: Set<string>;
   lastAssistantText: string;
   starting: Promise<void> | null;
@@ -430,6 +433,13 @@ export class SessionManager {
       permissionMode: () => (this.get(id) ?? meta).config.permissionMode,
       effort: () => (this.get(id) ?? meta).activeEffort ?? (this.get(id) ?? meta).config.effort ?? this.settings().defaultEffort,
       getApiKey: (providerId) => this.deps.getSecret(providerId),
+      mcpServers: () => {
+        const m = this.get(id) ?? meta;
+        return resolveForSession(
+          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness },
+          { getSecret: this.deps.getSecret, log: (level, message) => this.deps.log(level, `[${id}] ${message}`) }
+        );
+      },
       emit: (event) => this.emit(id, event),
       requestApproval: (draft) => this.requestApproval(id, draft),
       updateRef: (patch: Partial<HarnessRef>) => {
@@ -442,6 +452,9 @@ export class SessionManager {
         const m = this.get(id);
         if (!m) return;
         Object.assign(m, patch);
+        // A harness may discover its actual model only after startup. Refresh the analytics
+        // snapshot immediately so tool calls before the first usage update are not unattributed.
+        if ('activeModel' in patch) this.deps.analytics.touchSession(m);
         this.schedulePersist(m);
         this.pushSessions();
       },
@@ -465,6 +478,7 @@ export class SessionManager {
       adapter,
       approvals: new Map(),
       liveItems: new Map(),
+      toolModels: new Map(),
       dirty: new Set(),
       lastAssistantText: '',
       starting: null,
@@ -523,6 +537,41 @@ export class SessionManager {
       this.pushSessions();
       this.scheduleLlmTitle(id, placeholder, input.text);
     }
+    await this.dispatchInput(id, { ...input, transcriptItemId: userItem.id });
+  }
+
+  /** Replaces a sent prompt only when its adapter can restore a durable pre-message checkpoint. */
+  async editAndResend(id: string, userItemId: string, input: UserInput): Promise<TranscriptItem[]> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (!input.text.trim() && !input.images?.length) throw new Error('Message cannot be empty');
+    if (meta.status === 'running' || meta.status === 'starting' || meta.status === 'awaiting') throw new Error('Wait for the current turn to finish before editing a message');
+
+    const items = await this.deps.store.readTranscript(id);
+    const index = items.findIndex((item) => item.id === userItemId && item.kind === 'user');
+    if (index < 0) throw new Error('Message no longer exists in this transcript');
+    const previous = items[index] as Extract<TranscriptItem, { kind: 'user' }>;
+    const active = await this.ensureActive(id);
+    if (active.compactionInFlight || active.approvals.size || active.adapter.busy) throw new Error('Wait for the current session activity to finish before editing a message');
+    if (!active.adapter.rewindToUserMessage) throw new Error('This harness does not support editing past messages yet');
+    if (!(await active.adapter.rewindToUserMessage(userItemId))) throw new Error('This message can no longer be rewound');
+
+    const revised: TranscriptItem = {
+      ...previous,
+      text: input.text,
+      images: input.images ?? previous.images,
+      queuedAs: 'now'
+    };
+    // Context is now safely at the same boundary, so the persistence rewrite cannot diverge.
+    active.liveItems.clear();
+    active.dirty.clear();
+    active.lastAssistantText = '';
+    await this.deps.store.rewriteTranscript(id, [...items.slice(0, index), revised]);
+    await this.dispatchInput(id, { text: revised.text, images: revised.images, mode: 'now', transcriptItemId: userItemId });
+    return this.transcript(id);
+  }
+
+  private async dispatchInput(id: string, input: UserInput): Promise<void> {
     const active = await this.ensureActive(id);
     // Compaction can run without marking an adapter busy. Keep a new turn from reading or
     // mutating its context until that operation has settled.
@@ -615,10 +664,12 @@ export class SessionManager {
   async setModel(id: string, model: ModelRef): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    const active = this.active.get(id);
+    // Do not publish or persist the requested model until the harness accepts the switch.
+    if (active) await active.adapter.setModel(model);
     meta.config.model = model;
     meta.activeModel = model;
-    const active = this.active.get(id);
-    if (active) await active.adapter.setModel(model);
+    this.deps.analytics.touchSession(meta);
     await this.deps.store.upsert(meta);
     this.pushSessions();
     return meta;
@@ -821,8 +872,17 @@ export class SessionManager {
         const streaming = item.kind === 'assistant' && item.streaming;
         if (!streaming || !active) this.appendTranscript(sessionId, item);
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
-        // Tool calls are recorded once, when they leave the running state.
-        if (item.kind === 'tool' && item.status !== 'running') this.deps.analytics.recordToolCall(sessionId, item);
+        if (item.kind === 'tool') {
+          // Keep the model from the start of the call: a model switch before its terminal upsert
+          // must not move the call to the newly selected model.
+          const toolModels = active ? (active.toolModels ??= new Map()) : undefined;
+          if (item.status === 'running' && meta?.activeModel && toolModels && !toolModels.has(item.id)) toolModels.set(item.id, meta.activeModel);
+          if (item.status !== 'running') {
+            const model = toolModels?.get(item.id);
+            toolModels?.delete(item.id);
+            this.deps.analytics.recordToolCall(sessionId, item, undefined, model);
+          }
+        }
         break;
       }
       case 'item.delta': {

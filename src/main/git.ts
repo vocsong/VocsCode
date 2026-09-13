@@ -1,18 +1,18 @@
 /** Git plumbing behind the Changes panel: status and diff summaries, per-file revert, staging, commits, and isolated worktrees plus the /pr and /merge GitHub flow. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { createTwoFilesPatch } from 'diff';
 import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
-import { runCapture, which } from './runtime';
+import { runCapture, which, type CaptureResult } from './runtime';
 import { exists } from './util/fs';
+import { makeFileChange } from './util/file-changes';
 
 const gitBin = () => which('git') ?? 'git';
 const ghBin = () => which('gh');
 
 const PR_URL = /https:\/\/[^\s/"]+\/[^\s]+\/pull\/\d+/;
 
-type GitRun = { code: number | null; stdout: string; stderr: string; timedOut?: boolean };
+type GitRun = { code: number | null; stdout: string; stderr: string; timedOut?: boolean; truncated?: boolean };
 
 /** runCapture marks a killed process with timedOut; legacy fakes only carry the stderr marker. */
 const timedOut = (r: GitRun): boolean => r.timedOut === true || (r.code === null && /timed out after \d+ms/.test(r.stderr));
@@ -43,7 +43,7 @@ async function git(cwd: string, args: string[], timeoutMs = 20_000): Promise<Git
 
 export async function gitRoot(cwd: string): Promise<string | null> {
   const r = await git(cwd, ['rev-parse', '--show-toplevel']);
-  if (r.code !== 0) return null;
+  if (r.code !== 0 || r.truncated) return null;
   return r.stdout.trim().replace(/\//g, path.sep);
 }
 
@@ -158,7 +158,7 @@ async function listPrs(opts: { cwd: string; repo?: string }): Promise<PrInfo[]> 
     timeoutMs: 15_000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
   });
-  if (r.code !== 0) return [];
+  if (r.code !== 0 || r.truncated) return [];
   try {
     return JSON.parse(r.stdout) as PrInfo[];
   } catch {
@@ -304,26 +304,30 @@ export async function gitDiff(cwd: string, file?: string, staged = false): Promi
     const abs = path.join(root, file);
     const tracked = await git(cwd, ['ls-files', '--error-unmatch', '--', file]);
     if (timedOut(tracked)) return { diff: '', error: `git timed out while checking ${file}.` };
+    if (tracked.truncated) return { diff: '', error: `git output was truncated while checking ${file}.` };
     if (tracked.code !== 0) {
       // Untracked: synthesize an add diff, size-checked before reading.
       const content = await readCapped(abs, MAX_SINGLE_FILE_DIFF_BYTES);
       if (content === undefined) return { diff: '', error: `Binary or very large file: ${file}` };
-      return { diff: createTwoFilesPatch('/dev/null', file, '', content, '', '', { context: 3 }) };
+      return { diff: makeFileChange(root, file, null, content, { oldFileName: '/dev/null' }).diff ?? '' };
     }
     const r = await git(cwd, ['diff', ...(staged ? ['--cached'] : ['HEAD']), '--', file], DIFF_TIMEOUT_MS);
     if (timedOut(r)) return { diff: '', error: diffTimeoutMessage() };
+    if (r.truncated) return { diff: '', error: `Diff output was truncated; narrow the change or select a smaller file: ${file}` };
     return { diff: r.stdout };
   }
   const r = await git(cwd, ['diff', ...(staged ? ['--cached'] : ['HEAD'])], DIFF_TIMEOUT_MS);
   if (timedOut(r)) return { diff: '', error: diffTimeoutMessage() };
+  if (r.truncated) return { diff: '', error: 'Diff output was truncated; select a file or narrow the change.' };
   let out = r.stdout;
   // Append untracked files, capped before reading so a stray artifact cannot spike memory.
   const untracked = await git(cwd, ['ls-files', '--others', '--exclude-standard']);
   if (timedOut(untracked)) return { diff: out, error: 'The untracked-file list timed out — new files may be missing from this diff.' };
+  if (untracked.truncated) return { diff: out, error: 'The untracked-file list was truncated — new files may be missing from this diff.' };
   for (const f of untracked.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
     const content = await readCapped(path.join(root, f), MAX_UNTRACKED_DIFF_BYTES);
     if (content === undefined) continue;
-    out += createTwoFilesPatch('/dev/null', f, '', content, '', '', { context: 3 });
+    out += makeFileChange(root, f, null, content, { oldFileName: '/dev/null' }).diff ?? '';
   }
   return { diff: out };
 }
@@ -362,7 +366,7 @@ type PrResult = { ok: boolean; url?: string; output?: string };
 
 const noGh = (): PrResult => ({ ok: false, output: 'GitHub CLI (gh) is required — install it and run `gh auth login`.' });
 
-async function gh(cwd: string, args: string[], timeoutMs = 120_000): Promise<{ code: number | null; stdout: string; stderr: string }> {
+async function gh(cwd: string, args: string[], timeoutMs = 120_000): Promise<CaptureResult> {
   return runCapture(ghBin() ?? 'gh', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
 }
 
@@ -390,6 +394,7 @@ export async function gitCreatePr(cwd: string, base: string, head?: string): Pro
   if (push.code !== 0) return { ok: false, output: (push.stderr || push.stdout).trim() || 'git push failed' };
   const r = await gh(cwd, ['pr', 'create', '--base', base, '--head', branch, '--fill']);
   const out = (r.stdout + r.stderr).trim();
+  if (r.truncated) return { ok: false, output: 'gh pr create response was truncated' };
   if (r.code !== 0) return { ok: false, output: out || 'gh pr create failed' };
   return { ok: true, url: prUrlIn(out), output: out };
 }
@@ -397,7 +402,7 @@ export async function gitCreatePr(cwd: string, base: string, head?: string): Pro
 /** Merges the open PR whose head is `branch` (explicit, e.g. from the Branches panel); `base`, when given, is checked against the PR's target. */
 async function gitMergeBranchPr(cwd: string, branch: string, base?: string): Promise<PrResult> {
   const view = await gh(cwd, ['pr', 'view', branch, '--json', 'state,url,baseRefName'], 30_000);
-  if (view.code !== 0) return { ok: false, output: (view.stdout + view.stderr).trim() || `No open PR for ${branch}` };
+  if (view.code !== 0 || view.truncated) return { ok: false, output: view.truncated ? 'Could not read PR details: response was truncated.' : (view.stdout + view.stderr).trim() || `No open PR for ${branch}` };
   let pr: { state?: string; url?: string; baseRefName?: string };
   try {
     pr = JSON.parse(view.stdout.trim());
@@ -410,6 +415,7 @@ async function gitMergeBranchPr(cwd: string, branch: string, base?: string): Pro
     return { ok: false, output: `That PR targets ${pr.baseRefName}, not ${base}: ${pr.url ?? ''}`.trim() };
   }
   const merge = await gh(cwd, ['pr', 'merge', branch, '--merge']);
+  if (merge.truncated) return { ok: false, output: 'gh pr merge response was truncated' };
   if (merge.code !== 0) return { ok: false, output: (merge.stderr || merge.stdout).trim() || 'gh pr merge failed' };
   return { ok: true, url: pr.url, output: (merge.stdout + merge.stderr).trim() || `Merged into ${pr.baseRefName ?? base ?? 'base'}` };
 }
@@ -439,6 +445,7 @@ export async function gitMergePr(cwd: string, base?: string, head?: string, q: S
     }
     // Foreign PRs merge by URL, so the repo does not need to be the session's.
     const merge = await gh(cwd, ['pr', 'merge', pr.url ?? String(pr.number), '--merge']);
+    if (merge.truncated) return { ok: false, output: 'gh pr merge response was truncated' };
     if (merge.code !== 0) return { ok: false, output: (merge.stderr || merge.stdout).trim() || 'gh pr merge failed' };
     const headNote = pr.headRefName ? ` (head ${pr.headRefName})` : '';
     return { ok: true, url: pr.url, output: (merge.stdout + merge.stderr).trim() || `Merged PR #${pr.number}${headNote} into ${pr.baseRefName ?? base ?? 'base'}` };
@@ -459,7 +466,7 @@ export async function gitPrMap(cwd: string): Promise<{ prs?: Record<string, GitP
   const root = await gitRoot(cwd);
   if (!root) return {};
   const r = await gh(root, ['pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,headRefName,state,url,title'], 20_000);
-  if (r.code !== 0) return {};
+  if (r.code !== 0 || r.truncated) return {};
   try {
     const list = JSON.parse(r.stdout.trim()) as { number: number; headRefName?: string; state?: string; url?: string; title?: string }[];
     const prs: Record<string, GitPrInfo> = {};
@@ -490,7 +497,7 @@ export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> 
   const root = await gitRoot(cwd);
   if (!root) return { prs: [], fetchedAt, error: 'Not a git repository' };
   const r = await gh(root, ['pr', 'list', '--state', 'all', '--limit', '100', '--json', PR_LIST_FIELDS], 30_000);
-  if (r.code !== 0) return { prs: [], fetchedAt, error: (r.stderr || r.stdout).trim() || 'gh pr list failed' };
+  if (r.code !== 0 || r.truncated) return { prs: [], fetchedAt, error: r.truncated ? 'gh pr list response was truncated' : (r.stderr || r.stdout).trim() || 'gh pr list failed' };
   try {
     const list = JSON.parse(r.stdout.trim()) as Record<string, unknown>[];
     const prs: GitPullRequest[] = [];
@@ -519,7 +526,7 @@ export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> 
   }
 }
 
-const ISSUE_LIST_FIELDS = 'number,title,state,url,author,labels,comments,createdAt,updatedAt,closedAt';
+const ISSUE_LIST_FIELDS = 'number,title,state,url,author,body,labels,comments,createdAt,updatedAt,closedAt';
 
 /** Pulls the repo's issues from GitHub (`gh issue list`, every state, newest first) for the Git panel's Issues view. */
 export async function gitIssues(cwd: string): Promise<GitIssueList> {
@@ -528,7 +535,7 @@ export async function gitIssues(cwd: string): Promise<GitIssueList> {
   const root = await gitRoot(cwd);
   if (!root) return { issues: [], fetchedAt, error: 'Not a git repository' };
   const r = await gh(root, ['issue', 'list', '--state', 'all', '--limit', '100', '--json', ISSUE_LIST_FIELDS], 30_000);
-  if (r.code !== 0) return { issues: [], fetchedAt, error: (r.stderr || r.stdout).trim() || 'gh issue list failed' };
+  if (r.code !== 0 || r.truncated) return { issues: [], fetchedAt, error: r.truncated ? 'gh issue list response was truncated' : (r.stderr || r.stdout).trim() || 'gh issue list failed' };
   try {
     const list = JSON.parse(r.stdout.trim()) as Record<string, unknown>[];
     const issues: GitIssue[] = [];
@@ -538,6 +545,7 @@ export async function gitIssues(cwd: string): Promise<GitIssueList> {
       const author = p.author && typeof p.author === 'object' ? (p.author as { login?: string; name?: string }) : undefined;
       const issue: GitIssue = { number: p.number, title: typeof p.title === 'string' ? p.title : '', state, url: p.url };
       if (author?.login || author?.name) issue.author = author.login || author.name;
+      if (typeof p.body === 'string') issue.body = p.body;
       if (Array.isArray(p.labels)) {
         const labels = p.labels
           .filter((l): l is { name?: string; color?: string } => !!l && typeof l === 'object')

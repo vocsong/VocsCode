@@ -16,6 +16,7 @@ export function Composer({ session }: { session: SessionMeta }) {
   const [text, setText] = useState(() => useStore.getState().drafts[session.id] ?? '');
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [mention, setMention] = useState<{ query: string; start: number; results: string[]; index: number } | null>(null);
+  const [mentionError, setMentionError] = useState<string | null>(null);
   const [slash, setSlash] = useState<{ query: string; index: number } | null>(null);
   const [history, setHistory] = useState<string[]>([]);
   const [histIdx, setHistIdx] = useState(-1);
@@ -93,6 +94,7 @@ export function Composer({ session }: { session: SessionMeta }) {
     // Debounced so typing does not fire an uncancellable full-tree walk per keystroke; results are
     // cleared while a search is in flight instead of seeding the popover with the previous query's.
     setMention((m) => (m ? { ...m, results: [], index: 0 } : m));
+    setMentionError(null);
     const query = mention.query;
     let cancelled = false;
     const timer = setTimeout(() => {
@@ -100,7 +102,9 @@ export function Composer({ session }: { session: SessionMeta }) {
         .then((results) => {
           if (!cancelled) setMention((m) => (m && m.query === query ? { ...m, results, index: 0 } : m));
         })
-        .catch(() => undefined);
+        .catch(() => {
+          if (!cancelled) setMentionError('Search unavailable');
+        });
     }, 150);
     return () => {
       cancelled = true;
@@ -143,6 +147,7 @@ export function Composer({ session }: { session: SessionMeta }) {
     const clearDraft = () => {
       setText('');
       setMention(null);
+      setMentionError(null);
       setSlash(null);
       setHistIdx(-1);
     };
@@ -230,6 +235,9 @@ export function Composer({ session }: { session: SessionMeta }) {
       case 'diff':
         store.setPanelTab('changes');
         return true;
+      case 'mcp':
+        store.setPanelTab('mcp');
+        return true;
       case 'cost':
         toast(`${fmtCost(session.usage.costUsd)} · ${fmtTokens(session.usage.inputTokens)} in / ${fmtTokens(session.usage.outputTokens)} out · ${session.usage.turns} turns`, 'info');
         store.setPanelTab('usage');
@@ -254,7 +262,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         return true;
       }
       case 'open':
-        if (arg === 'editor') await invoke('app:openInEditor', { path: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
+        if (arg === 'editor') await invoke('app:openInEditor', { path: session.cwd, sessionId: session.id }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
         else if (arg === 'terminal') await invoke('app:openTerminal', { cwd: session.cwd }).then((r) => !r.ok && toast(r.error ?? 'Failed', 'error'));
         else await invoke('app:openPath', { path: session.cwd, sessionId: session.id });
         return true;
@@ -402,9 +410,11 @@ export function Composer({ session }: { session: SessionMeta }) {
 
   return (
     <div className="composer">
-      {mention && mention.results.length > 0 && (
+      {mention && (mention.results.length > 0 || mentionError) && (
         <div className="popover">
-          {mention.results.map((r, i) => (
+          {mentionError ? (
+            <div className="popover-item muted"><Icon name="alert" size={12} /> {mentionError}</div>
+          ) : mention.results.map((r, i) => (
             <button key={r} type="button" className={`popover-item mono ${i === mention.index ? 'active' : ''}`} onMouseDown={(e) => { e.preventDefault(); pickMention(r); }}>
               <Icon name="file" size={12} /> {r}
             </button>

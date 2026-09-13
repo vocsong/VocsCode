@@ -14,6 +14,7 @@ import type {
   UserInput
 } from '../../shared/types';
 import type { RuntimeResolver } from '../runtime';
+import type { ResolvedServer } from '../mcp/effective';
 
 export type ApprovalDraft = Omit<ApprovalRequest, 'id' | 'sessionId' | 'harness' | 'createdAt'>;
 
@@ -29,6 +30,12 @@ export interface HarnessContext {
   permissionMode(): PermissionMode;
   effort(): EffortLevel | undefined;
   getApiKey(providerId: string): Promise<string | undefined>;
+  /**
+   * The MCP servers this session should be started with: the global list merged with the repo's
+   * `.mcp.json` under the user's per-repo switches, `${VAR}` references resolved and stdio
+   * commands normalized for the platform. Empty for a harness that cannot take them.
+   */
+  mcpServers(): Promise<ResolvedServer[]>;
   emit(event: SessionEvent): void;
   requestApproval(draft: ApprovalDraft): Promise<ApprovalDecision>;
   updateRef(patch: Partial<HarnessRef>): void;
@@ -51,6 +58,8 @@ export interface HarnessAdapter {
   setPermissionMode(mode: PermissionMode): Promise<void>;
   /** False means the adapter accepted the request but had too little context to reduce. */
   compact?(): Promise<boolean | void>;
+  /** Restores context to immediately before a persisted user message. Only supported by adapters with durable checkpoints. */
+  rewindToUserMessage?(itemId: string): Promise<boolean>;
   listModels?(): Promise<ModelInfo[]>;
   dispose(): Promise<void>;
 }

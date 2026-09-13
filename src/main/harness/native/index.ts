@@ -1,7 +1,8 @@
 /** Built-in agent loop adapter: drives a provider directly and runs the local tool set, with approvals gated in-process. */
 import path from 'node:path';
-import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../../shared/types';
+import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UserInput } from '../../../shared/types';
 import { errorMessage, shortId, truncate } from '../../util/async';
+import { TurnUsageTracker } from '../../util/turn-usage';
 import { estimateCostUsd, findContextWindow, findPricing, STATIC_MODELS_BY_PROVIDER } from '../../models/static-models';
 import { resolveProviderApiKey } from '../../models/providers';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from '../permissions';
@@ -27,13 +28,16 @@ const HISTORY_FILE = 'native-history.json';
 const MAX_STEPS = 120;
 
 interface PersistedHistory {
-  version: 1;
+  version: 1 | 2;
   messages: NativeMessage[];
+  /** A history snapshot immediately before each app user message, keyed by transcript item id. */
+  boundaries?: Record<string, NativeMessage[]>;
 }
 
 export class NativeAdapter implements HarnessAdapter {
   readonly id = 'native' as const;
   private history: NativeMessage[] = [];
+  private boundaries: Record<string, NativeMessage[]> = {};
   private _busy = false;
   private abort: AbortController | null = null;
   private queue: UserInput[] = [];
@@ -41,11 +45,11 @@ export class NativeAdapter implements HarnessAdapter {
   private model: ModelRef | null = null;
   private effort: EffortLevel | undefined;
   private sessionAllowed = new Set<string>();
-  private totals: UsageTotals;
+  private readonly usage: TurnUsageTracker;
   private started = false;
 
   constructor(private readonly ctx: HarnessContext) {
-    this.totals = { ...ctx.session().usage };
+    this.usage = new TurnUsageTracker(ctx.session().usage);
   }
 
   get busy(): boolean {
@@ -59,6 +63,7 @@ export class NativeAdapter implements HarnessAdapter {
     const saved = await this.ctx.readJson<PersistedHistory>(HISTORY_FILE);
     if (saved?.messages) {
       this.history = saved.messages;
+      this.boundaries = saved.boundaries ?? {};
       // A crash or kill mid-tool-run can leave tool calls without results, which every provider rejects.
       if (this.repairDanglingToolCalls('The app was closed before this tool finished.')) await this.persist();
     }
@@ -107,8 +112,23 @@ export class NativeAdapter implements HarnessAdapter {
       return;
     }
     if (!this.model) throw new Error('No model selected. Add a provider API key in Settings and pick a model.');
+    if (input.transcriptItemId) this.boundaries[input.transcriptItemId] = structuredClone(this.history);
     this.history.push({ role: 'user', text: input.text, images: input.images });
     void this.runTurn();
+  }
+
+  async rewindToUserMessage(itemId: string): Promise<boolean> {
+    if (this._busy) return false;
+    const boundary = this.boundaries[itemId];
+    if (!boundary) return false;
+    this.history = structuredClone(boundary);
+    // Boundaries from the discarded branch might otherwise restore context that no longer exists.
+    this.boundaries = {};
+    this.queue = [];
+    this.steer = [];
+    this.ctx.updateMeta({ queued: 0 });
+    await this.persist();
+    return true;
   }
 
   private async runTurn(): Promise<void> {
@@ -116,6 +136,7 @@ export class NativeAdapter implements HarnessAdapter {
     this.abort = new AbortController();
     const signal = this.abort.signal;
     const startedAt = Date.now();
+    this.usage.beginTurn();
     const turnUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
     let turnCost = 0;
     let status: 'completed' | 'interrupted' | 'failed' = 'completed';
@@ -133,6 +154,7 @@ export class NativeAdapter implements HarnessAdapter {
         // Steering messages are injected between steps.
         while (this.steer.length) {
           const s = this.steer.shift()!;
+          if (s.transcriptItemId) this.boundaries[s.transcriptItemId] = structuredClone(this.history);
           this.history.push({ role: 'user', text: `[steer] ${s.text}`, images: s.images });
           this.ctx.updateMeta({ queued: this.queue.length + this.steer.length });
         }
@@ -180,17 +202,12 @@ export class NativeAdapter implements HarnessAdapter {
         turnUsage.reasoningTokens += result.usage.reasoningTokens;
         const stepCost = estimateCostUsd(pricing, { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, cacheWriteTokens: result.usage.cacheWriteTokens });
         turnCost += stepCost;
-        this.totals.inputTokens += result.usage.inputTokens;
-        this.totals.outputTokens += result.usage.outputTokens;
-        this.totals.cacheReadTokens += result.usage.cacheReadTokens;
-        this.totals.cacheWriteTokens += result.usage.cacheWriteTokens;
-        this.totals.reasoningTokens += result.usage.reasoningTokens;
-        this.totals.costUsd += stepCost;
-        this.totals.contextTokens = result.usage.inputTokens + result.usage.cacheReadTokens + result.usage.cacheWriteTokens + result.usage.outputTokens;
+        this.usage.addUsage({ ...result.usage, costUsd: stepCost });
+        this.usage.setCumulative({ contextTokens: result.usage.inputTokens + result.usage.cacheReadTokens + result.usage.cacheWriteTokens + result.usage.outputTokens });
         const info = provider.models.find((m) => m.id === model.model) ?? (STATIC_MODELS_BY_PROVIDER[provider.id] ?? []).find((m) => m.id === model.model);
         const contextWindow = info?.contextWindow ?? findContextWindow(provider.id, model.model, provider.models);
-        if (contextWindow) this.totals.contextWindow = contextWindow;
-        this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
+        if (contextWindow) this.usage.setCumulative({ contextWindow });
+        this.ctx.emit({ type: 'usage', totals: this.usage.snapshot() });
 
         this.history.push({
           role: 'assistant',
@@ -221,9 +238,10 @@ export class NativeAdapter implements HarnessAdapter {
     } finally {
       // Every tool_use must be answered before the next request, even after an interrupt or error.
       this.repairDanglingToolCalls(status === 'interrupted' ? 'Interrupted by the user before this tool ran.' : 'The tool did not run because the turn failed.');
-      this.totals.turns += 1;
-      this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
-      this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - startedAt, costUsd: turnCost, usage: turnUsage, error } });
+      const completed = this.usage.finishTurn();
+      const completedUsage = completed.usage;
+      this.ctx.emit({ type: 'usage', totals: completed.totals });
+      this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: Date.now() - startedAt, costUsd: completedUsage?.costUsd ?? turnCost, usage: completedUsage ? { inputTokens: completedUsage.inputTokens, outputTokens: completedUsage.outputTokens, cacheReadTokens: completedUsage.cacheReadTokens, cacheWriteTokens: completedUsage.cacheWriteTokens, reasoningTokens: completedUsage.reasoningTokens } : turnUsage, error } });
       this._busy = false;
       this.abort = null;
       try {
@@ -350,7 +368,7 @@ export class NativeAdapter implements HarnessAdapter {
   }
 
   private async persist(): Promise<void> {
-    await this.ctx.writeJson(HISTORY_FILE, { version: 1, messages: this.history } satisfies PersistedHistory);
+    await this.ctx.writeJson(HISTORY_FILE, { version: 2, messages: this.history, boundaries: this.boundaries } satisfies PersistedHistory);
   }
 
   /** Appends synthetic error results for tool calls that never received one. Returns true if anything changed. */

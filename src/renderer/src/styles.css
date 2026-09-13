@@ -919,6 +919,12 @@ h4 {
   min-width: 0;
   min-height: 0;
 }
+/* The drawer's dismiss layer only exists below the breakpoint; the element is always in the DOM
+   while the sidebar is open, so it has to stay out of the .app grid at every other width — as a
+   visible child it takes the first column and pushes the sidebar and main into the wrong cells. */
+.sidebar-backdrop {
+  display: none;
+}
 .sidebar-top {
   display: flex;
   align-items: center;
@@ -1555,6 +1561,17 @@ h4 {
      transcript overflows, leaving stray hairlines instead of cards. */
   flex-shrink: 0;
 }
+/* Virtual mode turns the flex gap into per-row padding so measured row heights match the offsets. */
+.transcript.virtual {
+  gap: 0;
+}
+.transcript.virtual > .transcript-row {
+  padding-bottom: 10px;
+}
+.transcript-spacer {
+  pointer-events: none;
+  flex-shrink: 0;
+}
 .transcript-loading,
 .transcript-empty {
   color: var(--fg-muted);
@@ -1650,7 +1667,8 @@ h4 {
 }
 .msg-user {
   display: flex;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: flex-end;
 }
 .msg-user .msg-bubble {
   background: var(--user-bubble);
@@ -1659,6 +1677,51 @@ h4 {
   max-width: 78%;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.msg-user-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 22px;
+  padding: 2px 3px 0;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.msg-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.msg-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.msg-action:disabled {
+  cursor: wait;
+  opacity: .55;
+}
+.msg-edit textarea {
+  display: block;
+  box-sizing: border-box;
+  width: min(560px, 100%);
+  min-width: 260px;
+  resize: vertical;
+  color: inherit;
+  background: color-mix(in srgb, var(--bg) 25%, transparent);
+}
+.msg-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 7px;
 }
 .msg-images {
   display: flex;
@@ -2618,6 +2681,39 @@ body.resizing {
 }
 .issue-title {
   font-size: 12px;
+}
+.issue-row {
+  cursor: pointer;
+}
+.issue-open {
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.issue-open:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.issue-dialog-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--fg-muted);
+  font-size: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.issue-dialog-body {
+  padding-top: 8px;
+}
+.issue-dialog-empty {
+  margin: 20px 0 4px;
 }
 /* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
 .branch-row > :nth-child(2) {
@@ -4890,6 +4986,240 @@ body.resizing {
   padding: 4px;
 }
 
+/* MCP: the global page and the per-repo panel tab */
+.pad-t {
+  padding-top: 8px;
+}
+.mcp-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mcp-intro {
+  margin: 0 0 2px;
+  max-width: 78ch;
+  line-height: 1.5;
+}
+.mcp-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mcp-card.editing {
+  border-color: var(--accent);
+}
+.mcp-card.compact {
+  padding: 6px 9px;
+}
+.mcp-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mcp-name {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-cmd {
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-desc {
+  line-height: 1.4;
+}
+.mcp-store-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mcp-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.mcp-error {
+  color: var(--red);
+}
+
+/* Editor */
+.mcp-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mcp-form .row > * {
+  flex: 1;
+  min-width: 0;
+}
+.mcp-form textarea {
+  resize: vertical;
+}
+.mcp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.mcp-chip {
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--fg-muted);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.mcp-chip:hover {
+  background: var(--bg-hover);
+}
+.mcp-chip.active {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.mcp-secrets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mcp-secret-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mcp-secret-row code {
+  min-width: 140px;
+  font-size: 11px;
+}
+.mcp-secret-row input {
+  flex: 1;
+  min-width: 0;
+}
+.mcp-probe {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mcp-probe.bad {
+  color: var(--red);
+  align-items: flex-start;
+  flex-direction: row;
+  gap: 6px;
+}
+.mcp-probe-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.mcp-probe-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 220px;
+  overflow: auto;
+}
+.mcp-probe-tool {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+.mcp-probe-tool span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Panel tab */
+.mcp-tab {
+  padding: 10px 12px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+}
+.mcp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mcp-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mcp-section-head h3 {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+.mcp-path {
+  font-size: 11px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-trust {
+  border: 1px solid var(--amber, #b45309);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mcp-trust-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--amber, #b45309);
+}
+.mcp-trust-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mcp-trust-main {
+  flex: 1;
+  min-width: 0;
+}
+.mcp-note {
+  font-size: 12px;
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+.mcp-skipped {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
 /* ---- Web shell + small screens (docs/REMOTE-ACCESS.md P1) ---- */
 
 /* Web build: a subtle product badge at the bar's right end (the browser owns the chrome). */
@@ -4909,6 +5239,14 @@ body.resizing {
 }
 
 @media (max-width: 900px) {
+  /* The drawer floats above the content, so the sidebar no longer owns a grid column; leaving one
+     behind would strand the transcript in a 280px-wide cell. */
+  .app {
+    grid-template-columns: minmax(0, 1fr) var(--panel);
+  }
+  .app.no-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
   /* The sidebar becomes an overlay drawer instead of squeezing the transcript. */
   .sidebar {
     position: fixed;
@@ -4921,6 +5259,7 @@ body.resizing {
     box-shadow: 0 0 40px rgb(0 0 0 / 0.45);
   }
   .sidebar-backdrop {
+    display: block;
     position: fixed;
     top: var(--titlebar);
     right: 0;

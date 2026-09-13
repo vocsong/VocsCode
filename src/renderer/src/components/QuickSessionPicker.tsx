@@ -57,38 +57,68 @@ export function QuickSessionPicker() {
 
   const [idx, setIdx] = useState(0);
   const total = roots.length + 1;
+  // The capture listener is intentionally installed once. These refs keep it current without
+  // interrupting keyboard handling while the prompt or attachments change.
+  const pickedRef = useRef<string | null>(null);
+  const idxRef = useRef(0);
+  const rootsRef = useRef<string[]>([]);
+  const promptValueRef = useRef('');
+  const imagesRef = useRef<ImageAttachment[]>([]);
+  pickedRef.current = picked;
+  idxRef.current = idx;
+  rootsRef.current = roots;
+  promptValueRef.current = prompt;
+  imagesRef.current = images;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       e.stopPropagation();
-      if (picked) {
+      const currentPicked = pickedRef.current;
+      if (currentPicked) {
         // Prompt stage: Enter sends, Escape backs out while the prompt is still empty.
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
-          send();
+          const currentImages = imagesRef.current;
+          useStore.getState().openQuickSession(false);
+          void useStore.getState().createQuickSession(currentPicked, { prompt: promptValueRef.current, images: currentImages });
         } else if (e.key === 'Escape') {
           e.preventDefault();
-          if (!prompt.trim() && !images.length) setPicked(null);
-          else close();
+          if (!promptValueRef.current.trim() && !imagesRef.current.length) {
+            pickedRef.current = null;
+            setPicked(null);
+          } else {
+            useStore.getState().openQuickSession(false);
+          }
         }
         return;
       }
-      if (e.key === 'Escape') close();
+      const currentRoots = rootsRef.current;
+      const currentTotal = currentRoots.length + 1;
+      if (e.key === 'Escape') useStore.getState().openQuickSession(false);
       else if (e.key === 'ArrowDown') {
         e.preventDefault();
-        setIdx((i) => (i + 1) % total);
+        const next = (idxRef.current + 1) % currentTotal;
+        idxRef.current = next;
+        setIdx(next);
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
-        setIdx((i) => (i - 1 + total) % total);
+        const next = (idxRef.current - 1 + currentTotal) % currentTotal;
+        idxRef.current = next;
+        setIdx(next);
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        if (idx < roots.length) setPicked(roots[idx]);
-        else browse();
+        if (idxRef.current < currentRoots.length) {
+          pickedRef.current = currentRoots[idxRef.current];
+          setPicked(currentRoots[idxRef.current]);
+        } else {
+          useStore.getState().openQuickSession(false);
+          void useStore.getState().startNewSession();
+        }
       }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [picked, idx, roots, total, prompt, images]);
+  }, []);
 
   // Same image handling as the chat composer: pasted or picked screenshots ride along with the first prompt.
   const onPaste = async (e: React.ClipboardEvent) => {

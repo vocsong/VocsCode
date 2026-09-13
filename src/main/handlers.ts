@@ -13,6 +13,7 @@ import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides
 import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
+import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import { enrichModelContextWindows } from './models/static-models';
@@ -21,7 +22,7 @@ import type { SearchIndex } from './search';
 import { which } from './runtime';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
-import type { SettingsStore } from './settings';
+import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
@@ -114,10 +115,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   // Only open paths scoped to the session: a compromised client must not launch arbitrary files.
   handle('app:openPath', async ({ sessionId, path: p }) => {
     const m = sessions.get(sessionId);
-    if (!m || isOutsideWorkspace(m.cwd, p, path)) return;
-    await deps.desktop.openPath(p);
+    if (!m) return;
+    const target = path.isAbsolute(p) ? p : path.resolve(m.cwd, p);
+    if (isOutsideWorkspace(m.cwd, target, path)) return;
+    await deps.desktop.openPath(target);
   });
-  handle('app:openInEditor', async ({ path: p, line }) => {
+  const launchEditor = async (p: string, line?: number): Promise<{ ok: boolean; error?: string }> => {
     const s = settings.get();
     const editor = s.binaries.editor?.trim() || 'code';
     const bin = which(editor);
@@ -130,15 +133,33 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     } catch (e) {
       return { ok: false, error: errorMessage(e) };
     }
+  };
+  // Editor launches are scoped to the session's project root: a compromised renderer cannot use
+  // this channel as an arbitrary process launcher. Global skills use their own exact-file channel.
+  handle('app:openInEditor', async ({ path: p, line, sessionId }) => {
+    const session = sessions.get(sessionId);
+    if (!session) return { ok: false, error: 'Session not found' };
+    const target = path.isAbsolute(p) ? p : path.resolve(session.cwd, p);
+    if (isOutsideWorkspace(session.config.projectRoot || session.cwd, target, path)) return { ok: false, error: 'Path is outside the session workspace' };
+    return launchEditor(target, line);
+  });
+  handle('skills:openInEditor', async ({ path: p, line }) => {
+    const target = path.resolve(p);
+    const loc = locateSkillPath(path.dirname(target));
+    if (!loc || loc.kind !== 'skill' || path.basename(target) !== 'SKILL.md') return { ok: false, error: 'Path is not a known skill document' };
+    return launchEditor(target, line);
   });
   handle('app:openTerminal', async ({ cwd }) => {
     try {
       if (process.platform === 'win32') {
+        // cmd.exe parses the `start` command itself; keep cwd as one process argument rather
+        // than interpolating it into a command string. Quotes/newlines cannot be represented
+        // safely by that built-in command, so reject them at the boundary.
+        if (/["%\r\n]/.test(cwd)) return { ok: false, error: 'Terminal path contains an unsupported quote, percent sign, or newline' };
         const wt = which('wt');
-        // `start "" /D <dir> cmd.exe` opens a console already in the project directory.
         const child = wt
           ? spawnTool(wt, ['-d', cwd], { detached: true, stdio: 'ignore' })
-          : spawn(process.env.ComSpec || 'cmd.exe', ['/c', `start "" /D "${cwd}" cmd.exe`], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true, windowsHide: false });
+          : spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'start', '', '/D', cwd, 'cmd.exe'], { detached: true, stdio: 'ignore', windowsHide: false });
         child.unref();
       } else if (process.platform === 'darwin') {
         const child = spawnTool('open', ['-a', 'Terminal', cwd], { detached: true, stdio: 'ignore' });
@@ -161,7 +182,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('app:diag', ({ kind, ms, detail }) => {
     deps.log('warn', `renderer ${kind} ${ms}ms${detail ? ` (${detail})` : ''}`);
   });
-  handle('app:notify', ({ title, body }) => deps.desktop.notify(title, body));
+  handle('app:notify', async ({ title, body }) => {
+    if (typeof title !== 'string' || typeof body !== 'string') return;
+    const s = settings.get();
+    if (!s.notifications) return;
+    await deps.desktop.notify(title.slice(0, 200), body.slice(0, 200));
+  });
 
   handle('window:toggleFullScreen', () => deps.desktop.toggleFullScreen());
   handle('window:reload', () => deps.desktop.reload());
@@ -188,6 +214,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     await syncProviderKeyFlags();
   });
   handle('secrets:has', ({ providerId }) => secrets.has(providerId));
+  handle('secrets:status', () => secrets.status);
 
   async function syncProviderKeyFlags(): Promise<AppSettings> {
     const s = settings.get();
@@ -295,6 +322,62 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('skills:copy', (req) => copySkill(req));
   handle('skills:delete', ({ path: p }) => deleteSkill(p));
 
+  // MCP. Every definition coming back from the renderer goes through normalizeMcpServers first,
+  // so a malformed (or hostile) entry can never reach a harness or a file on disk.
+  const mcpScope = (sessionId: string) => {
+    const m = sessions.get(sessionId);
+    if (!m) throw new Error('Session not found');
+    return { settings: settings.get(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness };
+  };
+  handle('mcp:stores', () => globalStoreInfo());
+  handle('mcp:project', ({ sessionId }) => projectInfo(mcpScope(sessionId)));
+  handle('mcp:project:save', async ({ sessionId, servers }) => {
+    const scope = mcpScope(sessionId);
+    const r = await writeProjectMcp(scope.cwd, normalizeMcpServers(servers));
+    return { ok: r.ok, error: r.error };
+  });
+  handle('mcp:project:state', async ({ sessionId, patch }) => {
+    const scope = mcpScope(sessionId);
+    const next = normalizeMcpProjectState({ ...(settings.get().mcpProjectState ?? {}), [scope.projectRoot]: patch });
+    await settings.update({ mcpProjectState: next });
+    return projectInfo({ ...scope, settings: settings.get() });
+  });
+  handle('mcp:inspect', async ({ def, sessionId }) => {
+    const [checked] = normalizeMcpServers([def]);
+    if (!checked) return { ok: false, error: 'Incomplete server definition', tools: [], durationMs: 0 };
+    const resolved = await resolveVars(checked, { env: process.env, secret: (name) => secrets.get(secretKeyFor(name)) });
+    const cwd = sessionId ? sessions.get(sessionId)?.cwd : undefined;
+    return inspectServer(normalizeStdio(resolved.def, { which: (cmd) => which(cmd) }), { cwd });
+  });
+  handle('mcp:import', async ({ servers, to, sessionId }) => {
+    const incoming = normalizeMcpServers(servers);
+    if (!incoming.length) return { ok: false, error: 'Nothing to import' };
+    if (to === 'global') {
+      await settings.update({ mcpServers: mergeById(settings.get().mcpServers ?? [], incoming) });
+      return { ok: true };
+    }
+    if (!sessionId) return { ok: false, error: 'No session' };
+    const scope = mcpScope(sessionId);
+    const current = await readProjectMcp(scope.cwd);
+    if (current.error) return { ok: false, error: current.error };
+    const r = await writeProjectMcp(scope.cwd, mergeById(current.servers, incoming));
+    return { ok: r.ok, error: r.error };
+  });
+  handle('mcp:export', async ({ sessionId }) => {
+    const scope = mcpScope(sessionId);
+    const current = await readProjectMcp(scope.cwd);
+    if (current.error) return { ok: false, error: current.error };
+    const target = path.join(scope.cwd, '.cursor', 'mcp.json');
+    const existing = await readStore({ id: 'cursor', label: 'Cursor', path: target, format: 'json' });
+    try {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, JSON.stringify({ mcpServers: toMcpJsonTable(mergeById(existing.servers, current.servers)) }, null, 2) + '\n', 'utf8');
+      return { ok: true, path: target };
+    } catch (e) {
+      return { ok: false, error: errorMessage(e) };
+    }
+  });
+
   handle('sessions:list', () => sessions.list());
   handle('sessions:create', (req) => sessions.create(req));
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
@@ -314,6 +397,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:pin', ({ id, pinned }) => sessions.setPinned(id, pinned));
   handle('sessions:pinOrder', ({ ids }) => sessions.setPinOrder(ids));
   handle('sessions:send', ({ id, input }) => sessions.send(id, input));
+  handle('sessions:editAndResend', ({ id, userItemId, input }) => sessions.editAndResend(id, userItemId, input));
   handle('sessions:interrupt', ({ id }) => sessions.interrupt(id));
   handle('sessions:stop', ({ id }) => sessions.stop(id));
   handle('sessions:setModel', ({ id, model }) => sessions.setModel(id, model));
