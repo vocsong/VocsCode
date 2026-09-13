@@ -51,6 +51,8 @@ export interface HarnessAdapter {
   setPermissionMode(mode: PermissionMode): Promise<void>;
   /** False means the adapter accepted the request but had too little context to reduce. */
   compact?(): Promise<boolean | void>;
+  /** Restores context to immediately before a persisted user message. Only supported by adapters with durable checkpoints. */
+  rewindToUserMessage?(itemId: string): Promise<boolean>;
   listModels?(): Promise<ModelInfo[]>;
   dispose(): Promise<void>;
 }

@@ -106,6 +106,8 @@ export interface IpcContract {
   /** Persists a pinned-section drag reorder: ids in their new display order. */
   'sessions:pinOrder': [{ ids: string[] }, void];
   'sessions:send': [{ id: string; input: UserInput }, void];
+  /** Replaces a sent message, discards its later transcript items, and runs it again. */
+  'sessions:editAndResend': [{ id: string; userItemId: string; input: UserInput }, TranscriptItem[]];
   'sessions:interrupt': [{ id: string }, void];
   'sessions:stop': [{ id: string }, void];
   'sessions:setModel': [{ id: string; model: ModelRef }, SessionMeta];

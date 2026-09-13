@@ -337,6 +337,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:pin', ({ id, pinned }) => sessions.setPinned(id, pinned));
   handle('sessions:pinOrder', ({ ids }) => sessions.setPinOrder(ids));
   handle('sessions:send', ({ id, input }) => sessions.send(id, input));
+  handle('sessions:editAndResend', ({ id, userItemId, input }) => sessions.editAndResend(id, userItemId, input));
   handle('sessions:interrupt', ({ id }) => sessions.interrupt(id));
   handle('sessions:stop', ({ id }) => sessions.stop(id));
   handle('sessions:setModel', ({ id, model }) => sessions.setModel(id, model));

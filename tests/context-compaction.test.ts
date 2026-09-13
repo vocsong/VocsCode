@@ -103,7 +103,7 @@ describe('automatic compaction thresholds', () => {
     expect(fixture.send).not.toHaveBeenCalled();
     finish();
     await sending;
-    expect(fixture.send).toHaveBeenCalledWith({ text: 'next turn' });
+    expect(fixture.send).toHaveBeenCalledWith(expect.objectContaining({ text: 'next turn' }));
   });
 
   it('retries a no-op compaction after more history is available', async () => {
