@@ -3,10 +3,11 @@ import path from 'node:path';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
 import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
+import { TurnUsageTracker } from '../util/turn-usage';
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
 import { toCodex } from '../mcp/effective';
 import { JsonRpcStdioClient } from './jsonrpc';
-import { gateAction, OPTIONS_ALLOW_DENY } from './permissions';
+import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY } from './permissions';
 import { spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 
@@ -100,15 +101,13 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   /** Exact command lines the user approved "for session"; Codex keeps its own per-command memory too. */
   private sessionAllowedCommands = new Set<string>();
   private queue: UserInput[] = [];
-  private totals: UsageTotals;
   private turnStartedAt = 0;
-  /** Totals when the current turn started; the turn item reports the delta. */
-  private turnBase: UsageTotals | null = null;
+  private readonly usage: TurnUsageTracker;
   private models: ModelInfo[] = [];
   private compactionWaiter: Deferred<void> | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
-    this.totals = { ...ctx.session().usage };
+    this.usage = new TurnUsageTracker(ctx.session().usage);
   }
 
   get busy(): boolean {
@@ -206,8 +205,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const n = p as { turn: { id: string } };
       this.turnId = n.turn.id;
       this._busy = true;
+      if (!this.turnStartedAt) this.usage.beginTurn();
       this.turnStartedAt = this.turnStartedAt || Date.now();
-      this.turnBase ??= { ...this.totals };
       this.ctx.emit({ type: 'status', status: 'running' });
     });
     rpc.onNotification('item/started', (p) => this.upsertItem((p as { item: ThreadItem }).item, false));
@@ -273,25 +272,15 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.turnId = null;
       for (const item of this.items.values()) if (item.kind === 'assistant' && item.streaming) this.ctx.emit({ type: 'item.upsert', item: { ...item, streaming: false } });
       const status = n.turn.status === 'failed' ? 'failed' : n.turn.status === 'interrupted' ? 'interrupted' : 'completed';
-      this.totals.turns += 1;
-      this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
-      const base = this.turnBase;
-      const usage: Partial<UsageTotals> | undefined = base
-        ? {
-            inputTokens: Math.max(0, this.totals.inputTokens - base.inputTokens),
-            outputTokens: Math.max(0, this.totals.outputTokens - base.outputTokens),
-            cacheReadTokens: Math.max(0, this.totals.cacheReadTokens - base.cacheReadTokens),
-            cacheWriteTokens: Math.max(0, this.totals.cacheWriteTokens - base.cacheWriteTokens),
-            reasoningTokens: Math.max(0, this.totals.reasoningTokens - base.reasoningTokens)
-          }
-        : undefined;
-      const turnCost = base ? Math.max(0, this.totals.costUsd - base.costUsd) : undefined;
+      const completed = this.usage.finishTurn();
+      this.ctx.emit({ type: 'usage', totals: completed.totals });
+      const usage = completed.usage;
+      const turnCost = usage?.costUsd;
       this.ctx.emit({
         type: 'item.upsert',
         item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status, durationMs: n.turn.durationMs ?? Date.now() - this.turnStartedAt, usage, costUsd: turnCost, error: n.turn.error?.message }
       });
       this.turnStartedAt = 0;
-      this.turnBase = null;
       this.ctx.emit({ type: 'status', status: 'idle' });
       const next = this.queue.shift();
       this.ctx.updateMeta({ queued: this.queue.length });
@@ -300,21 +289,19 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     rpc.onNotification('thread/tokenUsage/updated', (p) => {
       const n = p as { tokenUsage: { total: { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number; reasoningOutputTokens: number; totalTokens: number }; last: { totalTokens: number }; modelContextWindow: number | null } };
       const t = n.tokenUsage.total;
-      const base = this.ctx.session().usage;
-      // total is per thread (cumulative); use it directly.
-      this.totals = {
-        ...this.totals,
+      const current = this.usage.snapshot();
+      const cumulative = {
         inputTokens: t.inputTokens,
         outputTokens: t.outputTokens,
         cacheReadTokens: t.cachedInputTokens,
         cacheWriteTokens: t.cacheWriteInputTokens,
         reasoningTokens: t.reasoningOutputTokens,
-        contextWindow: n.tokenUsage.modelContextWindow ?? base.contextWindow,
-        contextTokens: n.tokenUsage.last?.totalTokens ?? base.contextTokens
+        contextWindow: n.tokenUsage.modelContextWindow ?? current.contextWindow,
+        contextTokens: n.tokenUsage.last?.totalTokens ?? current.contextTokens
       };
       const pricing = findPricing(this.modelProvider ?? 'openai', this.model ?? '', this.models);
-      this.totals.costUsd = estimateCostUsd(pricing, this.totals);
-      this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
+      this.usage.setCumulative({ ...cumulative, costUsd: estimateCostUsd(pricing, { ...current, ...cumulative }) });
+      this.ctx.emit({ type: 'usage', totals: this.usage.snapshot() });
     });
     rpc.onNotification('error', (p) => {
       const n = p as { error: { message: string }; willRetry: boolean };
@@ -411,12 +398,28 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       return { decision: { denied: { rejection: d.note || 'User declined' } } };
     });
     rpc.onServerRequest('applyPatchApproval', async (p) => {
-      const n = p as { reason?: string; fileChanges?: Record<string, unknown> };
+      const n = p as { reason?: string; fileChanges?: Record<string, unknown>; grantRoot?: string | null };
       const mode = this.ctx.permissionMode();
       if (mode === 'plan') return { decision: { denied: { rejection: 'Plan mode' } } };
-      if (mode !== 'ask') return { decision: 'approved' };
       const files = Object.keys(n.fileChanges ?? {});
-      const d = await this.ctx.requestApproval({ kind: 'file_change', title: 'Apply file changes?', description: n.reason ?? files.join(', '), changes: files.map((f) => ({ path: f, kind: 'update' as const })), options: OPTIONS_ALLOW_DENY });
+      // This legacy request carries no item id, so resolve the affected paths here: the keys are
+      // the written paths and an update may also move a file to a new path. Like the fileChange
+      // handler, a patch that leaves the workspace always asks below full access.
+      const cwd = this.ctx.session().cwd;
+      const outsideWorkspace =
+        !!n.grantRoot ||
+        Object.entries(n.fileChanges ?? {}).some(([file, change]) => {
+          const move = (change as { move_path?: string | null } | null)?.move_path;
+          return isOutsideWorkspace(cwd, file, path) || (typeof move === 'string' && isOutsideWorkspace(cwd, move, path));
+        });
+      if (gateAction(mode, { mutating: true, isEdit: true, outsideWorkspace }) === 'allow') return { decision: 'approved' };
+      const d = await this.ctx.requestApproval({
+        kind: 'file_change',
+        title: 'Apply file changes?',
+        description: n.reason ?? (n.grantRoot ? `Requests write access under ${n.grantRoot}` : files.join(', ')),
+        changes: files.map((f) => ({ path: f, kind: 'update' as const })),
+        options: OPTIONS_ALLOW_DENY
+      });
       if (d.optionId === 'allow') return { decision: 'approved' };
       if (d.optionId === 'allow_session') return { decision: 'approved_for_session' };
       return { decision: { denied: { rejection: d.note || 'User declined' } } };
@@ -591,11 +594,15 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     };
     this._busy = true;
     this.turnStartedAt = Date.now();
-    this.turnBase = { ...this.totals };
+    this.usage.beginTurn();
     this.ctx.emit({ type: 'status', status: 'running' });
     try {
-      const res = await withTimeout(this.rpc.request<{ turn: { id: string } }>('turn/start', params), 300_000, 'turn/start');
-      this.turnId = res.turn.id;
+      // turn/start resolves when the server accepts the turn; the turn itself runs on and streams
+      // through notifications. No timeout: agentic turns routinely exceed five minutes, and the
+      // transport already rejects pending requests when the process exits.
+      const res = await this.rpc.request<{ turn: { id: string } }>('turn/start', params);
+      // A late response must not resurrect turnId after turn/completed cleared it.
+      if (this._busy) this.turnId = res.turn.id;
     } catch (e) {
       this._busy = false;
       this.ctx.emit({ type: 'status', status: 'idle' });

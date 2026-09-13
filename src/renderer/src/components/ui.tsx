@@ -1,5 +1,5 @@
 /** Shared presentational primitives: icons, buttons, badges, dropdowns, modals and toggles. */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 
 const ICONS: Record<string, string> = {
   logo: 'M6.4 7.2L12 17L17.6 7.2M9.2 19h5.6',
@@ -129,6 +129,13 @@ export function Badge({ children, tone = 'neutral', title }: { children: React.R
   );
 }
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const MENU_ITEM_SELECTOR = '[role="menuitem"]:not([disabled])';
+
+/** True only inside a Dropdown menu, so MenuItem labels itself without touching the title-bar menus. */
+const MenuContext = React.createContext(false);
+
 export function Dropdown({
   trigger,
   children,
@@ -142,13 +149,35 @@ export function Dropdown({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const restoreTrigger = () => {
+    setOpen(false);
+    triggerRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)?.focus();
+  };
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
       if (!ref.current?.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') {
+        restoreTrigger();
+        return;
+      }
+      const menu = menuRef.current;
+      if (!menu) return;
+      const items = Array.from(menu.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR));
+      if (items.length === 0) return;
+      const current = items.indexOf(document.activeElement as HTMLElement);
+      const focusAt = (index: number) => {
+        e.preventDefault();
+        items[(index + items.length) % items.length].focus();
+      };
+      if (e.key === 'ArrowDown') focusAt(current === -1 ? 0 : current + 1);
+      else if (e.key === 'ArrowUp') focusAt(current === -1 ? items.length - 1 : current - 1);
+      else if (e.key === 'Home') focusAt(0);
+      else if (e.key === 'End') focusAt(items.length - 1);
     };
     document.addEventListener('mousedown', onDoc);
     document.addEventListener('keydown', onKey);
@@ -157,21 +186,42 @@ export function Dropdown({
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
+  // Moving focus into the menu keeps arrow keys and screen readers on the open items.
+  useEffect(() => {
+    if (open) menuRef.current?.querySelector<HTMLElement>(MENU_ITEM_SELECTOR)?.focus();
+  }, [open]);
+  const rendered = trigger(open);
+  const triggerNode =
+    React.isValidElement(rendered) && typeof rendered.type !== 'symbol' ? (
+      React.cloneElement(rendered as React.ReactElement<React.HTMLAttributes<HTMLElement>>, {
+        'aria-haspopup': 'menu',
+        'aria-expanded': open
+      })
+    ) : (
+      <span aria-haspopup="menu" aria-expanded={open}>
+        {rendered}
+      </span>
+    );
   return (
     <div className="dropdown" ref={ref}>
-      <div onClick={() => setOpen((o) => !o)}>{trigger(open)}</div>
+      <div ref={triggerRef} onClick={() => (open ? restoreTrigger() : setOpen(true))}>
+        {triggerNode}
+      </div>
       {open && (
-        <div className={`dropdown-menu dropdown-${align}`} style={width ? { width } : undefined}>
-          {children(() => setOpen(false))}
-        </div>
+        <MenuContext.Provider value={true}>
+          <div ref={menuRef} role="menu" className={`dropdown-menu dropdown-${align}`} style={width ? { width } : undefined}>
+            {children(() => setOpen(false))}
+          </div>
+        </MenuContext.Provider>
       )}
     </div>
   );
 }
 
 export function MenuItem({ children, onClick, active, danger, hint, disabled }: { children: React.ReactNode; onClick?: () => void; active?: boolean; danger?: boolean; hint?: string; disabled?: boolean }) {
+  const inMenu = React.useContext(MenuContext);
   return (
-    <button type="button" className={`menu-item ${active ? 'active' : ''} ${danger ? 'danger' : ''}`} onClick={onClick} disabled={disabled}>
+    <button type="button" role={inMenu ? 'menuitem' : undefined} className={`menu-item ${active ? 'active' : ''} ${danger ? 'danger' : ''}`} onClick={onClick} disabled={disabled}>
       <span className="menu-item-label">{children}</span>
       {hint && <span className="menu-item-hint">{hint}</span>}
       {active && <Icon name="check" size={14} />}
@@ -180,18 +230,57 @@ export function MenuItem({ children, onClick, active, danger, hint, disabled }: 
 }
 
 export function Modal({ title, onClose, children, width = 720, footer }: { title: React.ReactNode; onClose: () => void; children: React.ReactNode; width?: number; footer?: React.ReactNode }) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // Captured during the first render, before autoFocus can move focus into the dialog.
+  const restoreRef = useRef<HTMLElement | null | undefined>(undefined);
+  if (restoreRef.current === undefined) {
+    restoreRef.current = typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null);
+  }
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const restore = restoreRef.current;
+    // An autoFocus child (ConfirmHost) already claimed focus; leave it alone.
+    if (dialog && !dialog.contains(document.activeElement)) {
+      const items = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      (items[0] ?? dialog).focus();
+    }
+    return () => {
+      if (restore && restore !== document.body && restore.isConnected) restore.focus();
+    };
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        onClose();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const items = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey) {
+        if (active === first || !dialog.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !dialog.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={{ width, maxWidth: '96vw' }} role="dialog" aria-modal="true">
+      <div ref={dialogRef} className="modal" style={{ width, maxWidth: '96vw' }} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <div className="modal-header">
-          <div className="modal-title">{title}</div>
+          <div className="modal-title" id={titleId}>{title}</div>
           <Button variant="ghost" size="sm" icon="x" onClick={onClose} aria-label="Close" />
         </div>
         <div className="modal-body">{children}</div>
@@ -311,12 +400,12 @@ export const STATUS_LABELS: Record<string, string> = {
   stopped: 'Stopped',
 };
 
-export function StatusLabel({ status, label }: { status: string; label?: string }) {
+export function StatusLabel({ status, label, ...rest }: { status: string; label?: string } & React.HTMLAttributes<HTMLSpanElement>) {
   if (label) {
-    return <span className="session-status status-custom" title={`${label} — click to change`}>{label}</span>;
+    return <span className="session-status status-custom" title={`${label} — click to change`} {...rest}>{label}</span>;
   }
   return (
-    <span className={`session-status status-${status}`} title={status}>
+    <span className={`session-status status-${status}`} title={status} {...rest}>
       {STATUS_LABELS[status] ?? status}
     </span>
   );
