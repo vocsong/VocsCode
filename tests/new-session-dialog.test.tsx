@@ -86,4 +86,25 @@ describe('NewSessionDialog', () => {
     expect(start.textContent).toContain('↵');
     expect(start.textContent).not.toContain('Ctrl');
   });
+
+  it('starts a session on a typed custom model id the catalog does not list', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'harness:models') return { models: [{ id: 'claude-sonnet-5', provider: 'anthropic', displayName: 'Claude Sonnet 5' }] };
+      if (channel === 'sessions:create') return createdSession;
+      return {};
+    });
+    render(<NewSessionDialog />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('harness:models', expect.anything()));
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'glm-4.6' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use “glm-4.6”' }));
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        'sessions:create',
+        expect.objectContaining({ config: expect.objectContaining({ model: { provider: 'anthropic', model: 'glm-4.6' } }) }),
+      ),
+    );
+  });
 });

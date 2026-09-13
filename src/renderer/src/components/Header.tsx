@@ -83,6 +83,11 @@ export function Header({ session }: { session: SessionMeta }) {
                 close();
                 if (m) void setModel(m);
               }}
+              onSelectCustom={(id) => {
+                close();
+                const provider = (current ?? models[0])?.provider ?? 'anthropic';
+                void setModel({ id, provider, displayName: id });
+              }}
             />
           )}
         </Dropdown>

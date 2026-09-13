@@ -252,6 +252,7 @@ export function NewSessionDialog() {
               selected={model}
               clearOption={{ label: harness === 'acp' ? 'Agent default (choose after start)' : 'Harness default' }}
               onSelect={(m) => setModel(m ? { provider: m.provider, model: m.id } : undefined)}
+              onSelectCustom={(id) => setModel({ provider: model?.provider ?? models[0]?.provider ?? 'anthropic', model: id })}
             />
           </Field>
           <div className="row gap12">

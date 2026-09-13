@@ -88,5 +88,13 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(picked).toContain('/');
     await first.click();
     await win.waitForSelector(`.pill[title="Model"]:has-text("${picked.split('/').slice(1).join('/')}")`, { timeout: 10_000 });
+
+    // A gateway id that no catalog lists can still be typed and sticks.
+    await win.click('.header-controls .pill[title="Model"]');
+    const picker2 = win.locator('.model-picker');
+    await picker2.waitFor({ timeout: 10_000 });
+    await picker2.locator('.mp-search input').fill('acme-custom-1');
+    await picker2.getByRole('button', { name: 'Use “acme-custom-1”' }).click();
+    await win.waitForSelector('.pill[title="Model"]:has-text("acme-custom-1")', { timeout: 10_000 });
   }, 180_000);
 });

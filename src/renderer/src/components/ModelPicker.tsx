@@ -17,6 +17,7 @@ export function ModelPicker({
   error,
   selected,
   onSelect,
+  onSelectCustom,
   clearOption,
   emptyText = 'No models available'
 }: {
@@ -25,6 +26,8 @@ export function ModelPicker({
   error?: string;
   selected?: ModelRef;
   onSelect: (m: ModelInfo | null) => void;
+  /** When set, a typed id matching no listed model can be used verbatim (gateways that do not publish a catalog). */
+  onSelectCustom?: (id: string) => void;
   /** Optional "no explicit model" row (e.g. harness default). */
   clearOption?: { label: string };
   emptyText?: string;
@@ -38,6 +41,9 @@ export function ModelPicker({
   }, []);
 
   const q = query.trim().toLowerCase();
+  const typed = query.trim();
+  // Offer the typed id only when it is not already a listed model, so an exact match stays a click.
+  const showCustom = !!onSelectCustom && typed.length > 0 && !models.some((m) => m.id.toLowerCase() === typed.toLowerCase());
   const favSet = useMemo(() => new Set(favorites.map(favKey)), [favorites]);
 
   const toggleFavorite = (m: ModelInfo) => {
@@ -147,7 +153,7 @@ export function ModelPicker({
         </div>
       )}
       {error && <div className="menu-empty">{error}</div>}
-      {!loading && !error && !anyResults && <div className="menu-empty">{q ? `No models match “${query}”.` : emptyText}</div>}
+      {!loading && !error && !anyResults && !showCustom && <div className="menu-empty">{q ? `No models match “${query}”.` : emptyText}</div>}
       <div className="mp-list">
         {pinned && (
           <>
@@ -160,6 +166,14 @@ export function ModelPicker({
                 <Icon name="check" size={14} />
               </button>
             )}
+          </>
+        )}
+        {showCustom && (
+          <>
+            <div className="menu-group">Custom</div>
+            <button type="button" className="menu-item" onClick={() => onSelectCustom!(typed)}>
+              <span className="menu-item-label">Use “{typed}”</span>
+            </button>
           </>
         )}
         {filteredFav.length > 0 && (
