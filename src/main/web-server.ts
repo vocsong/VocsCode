@@ -64,6 +64,7 @@ export class WebServer {
   }
 
   async stop(): Promise<void> {
+    const clients = this.sockets.size;
     for (const ws of this.sockets) ws.close();
     this.sockets.clear();
     this.wss.close();
@@ -71,6 +72,7 @@ export class WebServer {
     this.server = null;
     if (!server) return;
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    this.opts.log('info', `web server stopped (${clients} client(s) disconnected)`);
   }
 
   /** Fan-out an async event to every connected browser client. */
@@ -85,7 +87,9 @@ export class WebServer {
     let html: string;
     try {
       html = await fs.readFile(path.join(this.opts.staticDir, 'index.html'), 'utf8');
-    } catch {
+    } catch (e) {
+      // The server still starts (the WebSocket bridge works), but every page will be blank.
+      this.opts.log('warn', `web client: no renderer bundle at ${this.opts.staticDir} (${e instanceof Error ? e.message : String(e)}); run npm run build first`);
       return '';
     }
     if (html.includes('/harness-client.js')) return html;
@@ -96,6 +100,8 @@ export class WebServer {
     // Only the loopback host: a rebound DNS name must not reach the API.
     const hostname = this.hostnameOf(req.headers.host ?? '');
     if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1') {
+      // Either a misconfigured client or a DNS-rebinding attempt; both are worth a line.
+      this.opts.log('warn', `web client: rejected request for host "${hostname}" (only localhost is served)`);
       res.writeHead(403).end('Forbidden');
       return;
     }
@@ -139,6 +145,8 @@ export class WebServer {
   private upgrade(req: IncomingMessage, socket: import('node:stream').Duplex, head: Buffer): void {
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (url.pathname !== '/harness' || url.searchParams.get('token') !== this.token) {
+      // A stale tab from a previous run has the old token; a wrong path is a client bug.
+      this.opts.log('warn', `web client: rejected websocket upgrade on ${url.pathname} (${url.searchParams.has('token') ? 'wrong token' : 'no token'})`);
       socket.destroy();
       return;
     }
@@ -153,9 +161,13 @@ export class WebServer {
       try {
         frame = JSON.parse(String(data));
       } catch {
+        this.opts.log('debug', 'web client: dropped a non-JSON frame');
         return;
       }
-      if (!frame || frame.type !== 'invoke' || typeof frame.channel !== 'string' || typeof frame.id !== 'number') return;
+      if (!frame || frame.type !== 'invoke' || typeof frame.channel !== 'string' || typeof frame.id !== 'number') {
+        this.opts.log('debug', `web client: dropped a malformed frame (type=${String((frame as { type?: unknown } | null)?.type)})`);
+        return;
+      }
       void this.opts.registry
         .invoke(frame.channel, frame.request)
         .then(
@@ -171,7 +183,10 @@ export class WebServer {
       this.sockets.delete(ws);
       this.opts.log('info', `web client disconnected (${this.sockets.size} connected)`);
     });
-    ws.on('error', () => this.sockets.delete(ws));
+    ws.on('error', (e) => {
+      this.opts.log('warn', `web client socket error: ${e instanceof Error ? e.message : String(e)}`);
+      this.sockets.delete(ws);
+    });
   }
 
   private hostnameOf(host: string): string {

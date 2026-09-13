@@ -357,7 +357,7 @@ export class AnalyticsStore {
    * session's last active day, and per-tool/per-file stats are rebuilt from its transcript.
    */
   async load(existing: SessionMeta[], readTranscript?: (id: string) => Promise<TranscriptItem[]>): Promise<void> {
-    const stored = await readJson<Partial<AnalyticsFile> | undefined>(this.file, undefined);
+    const stored = await readJson<Partial<AnalyticsFile> | undefined>(this.file, undefined, { log: this.deps.log });
     this.data = {
       version: 1,
       days: stored?.days && typeof stored.days === 'object' ? stored.days : {},

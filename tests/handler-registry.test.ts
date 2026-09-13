@@ -110,9 +110,31 @@ describe('handler registry', () => {
     fsSync.writeFileSync(path.join(ws, 'sub', 'b.txt'), 'world', 'utf8');
   });
 
-  it('rejects unknown channels', async () => {
-    const { registry } = stubDeps();
+  it('rejects unknown channels and leaves a log line', async () => {
+    const { registry, logs } = stubDeps();
     await expect(registry.invoke('nope:channel', {})).rejects.toThrow('Unknown channel');
+    expect(logs).toContainEqual(['warn', 'ipc: unknown channel nope:channel']);
+  });
+
+  it('logs a failing handler by channel and error, never by request payload', async () => {
+    const { registry, logs } = stubDeps();
+    await expect(registry.invoke('mcp:project', { sessionId: 's_missing' })).rejects.toThrow('Session not found');
+    expect(logs).toContainEqual(['warn', 'ipc mcp:project failed: Session not found']);
+    expect(logs.some(([, m]) => m.includes('s_missing'))).toBe(false);
+  });
+
+  it('writes renderer-reported failures to the log with a bounded length and a checked level', async () => {
+    const { registry, logs } = stubDeps();
+    await registry.invoke('app:log', { level: 'error', message: 'Uncaught TypeError: x is not a function\n    at App.tsx:1' });
+    expect(logs).toContainEqual(['error', '[renderer] Uncaught TypeError: x is not a function\n    at App.tsx:1']);
+    await registry.invoke('app:log', { level: 'debug' as never, message: 'x'.repeat(10_000) });
+    const last = logs[logs.length - 1];
+    expect(last[0]).toBe('warn');
+    expect(last[1].length).toBe('[renderer] '.length + 4000);
+    const before = logs.length;
+    await registry.invoke('app:log', { level: 'error', message: '   ' });
+    await registry.invoke('app:log', { level: 'error', message: 42 as never });
+    expect(logs.length).toBe(before);
   });
 
   it('serves a representative set of channels', () => {

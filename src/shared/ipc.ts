@@ -53,6 +53,8 @@ export interface IpcContract {
   'app:notify': [{ title: string; body: string }, void];
   /** A renderer stall (long task, delayed input, timer drift) recorded in the main log. */
   'app:diag': [{ kind: 'longtask' | 'input-delay' | 'loop-lag'; ms: number; detail?: string }, void];
+  /** A renderer-side failure (uncaught exception, unhandled rejection, surfaced error) written to the main log, which is the only log a packaged build has. */
+  'app:log': [{ level: 'warn' | 'error'; message: string }, void];
   /** Opens a validated SKILL.md in the configured editor. */
   'skills:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
 

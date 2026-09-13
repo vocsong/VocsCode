@@ -3,12 +3,21 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
+import type { Logger } from './log';
 import { runCapture, which, type CaptureResult } from './runtime';
 import { exists } from './util/fs';
 import { makeFileChange } from './util/file-changes';
 
 const gitBin = () => which('git') ?? 'git';
 const ghBin = () => which('gh');
+
+/** Module-level on purpose: these helpers are plain functions called from many places, and the log is one. */
+let gitLog: Logger = () => undefined;
+
+/** Routes git/gh diagnostics (timeouts, non-zero exits) into the main log. Off until the host calls it. */
+export function setGitLog(log: Logger): void {
+  gitLog = log;
+}
 
 const PR_URL = /https:\/\/[^\s/"]+\/[^\s]+\/pull\/\d+/;
 
@@ -38,7 +47,18 @@ async function readCapped(file: string, maxBytes: number): Promise<string | unde
 }
 
 async function git(cwd: string, args: string[], timeoutMs = 20_000): Promise<GitRun> {
-  return runCapture(gitBin(), args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } });
+  const r = await runCapture(gitBin(), args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } });
+  // Probes fail routinely (no repo, unborn branch, no upstream), so a non-zero exit is debug; a
+  // timeout means the panel showed a partial or empty result and deserves a visible line.
+  if (timedOut(r)) gitLog('warn', `git ${describeArgs(args)} in ${cwd} timed out after ${timeoutMs}ms`);
+  else if (r.code !== 0) gitLog('debug', `git ${describeArgs(args)} in ${cwd} exited ${r.code ?? 'null'}: ${failure(r).split('\n')[0].slice(0, 300)}`);
+  return r;
+}
+
+/** Enough of the argv to identify the command; commit messages and long refspecs are cut. */
+function describeArgs(args: string[]): string {
+  const s = args.join(' ');
+  return s.length > 160 ? `${s.slice(0, 160)}…` : s;
 }
 
 export async function gitRoot(cwd: string): Promise<string | null> {
@@ -367,7 +387,11 @@ type PrResult = { ok: boolean; url?: string; output?: string };
 const noGh = (): PrResult => ({ ok: false, output: 'GitHub CLI (gh) is required — install it and run `gh auth login`.' });
 
 async function gh(cwd: string, args: string[], timeoutMs = 120_000): Promise<CaptureResult> {
-  return runCapture(ghBin() ?? 'gh', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+  const r = await runCapture(ghBin() ?? 'gh', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+  // gh talks to GitHub: a timeout or a non-zero exit here is the reason a PR badge or list is missing.
+  if (timedOut(r)) gitLog('warn', `gh ${describeArgs(args)} in ${cwd} timed out after ${timeoutMs}ms`);
+  else if (r.code !== 0) gitLog('debug', `gh ${describeArgs(args)} in ${cwd} exited ${r.code ?? 'null'}: ${failure(r).split('\n')[0].slice(0, 300)}`);
+  return r;
 }
 
 const prUrlIn = (out: string): string | undefined => out.match(PR_URL)?.[0];

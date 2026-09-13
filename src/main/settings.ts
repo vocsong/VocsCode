@@ -7,6 +7,7 @@ import { pruneModelOverrides } from '../shared/model-overrides';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
+import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
 import { readJson, writeJson } from './util/fs';
 
@@ -360,14 +361,18 @@ export class SettingsStore {
   private settings: AppSettings = defaultSettings();
   private readonly file: string;
   private listeners = new Set<(s: AppSettings) => void>();
+  private readonly log: Logger;
 
-  constructor(userData: string) {
+  constructor(userData: string, log: Logger = () => undefined) {
     this.file = path.join(userData, 'settings.json');
+    this.log = log;
   }
 
   async load(): Promise<AppSettings> {
-    const stored = await readJson<Partial<AppSettings> | undefined>(this.file, undefined);
+    const stored = await readJson<Partial<AppSettings> | undefined>(this.file, undefined, { log: this.log });
     this.settings = normalizeSettings(stored);
+    if (stored === undefined) this.log('info', 'no settings.json yet; using defaults');
+    else this.log('info', `settings loaded: harness=${this.settings.defaultHarness} permissions=${this.settings.defaultPermissionMode} theme=${this.settings.theme}`);
     return this.settings;
   }
 
@@ -378,7 +383,14 @@ export class SettingsStore {
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
     this.settings = normalizeSettings({ ...this.settings, ...patch });
     await writeJson(this.file, this.settings);
-    for (const l of this.listeners) l(this.settings);
+    for (const l of this.listeners) {
+      // One listener throwing must not starve the rest, and the caller already has its new settings.
+      try {
+        l(this.settings);
+      } catch (e) {
+        this.log('warn', `settings listener failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+      }
+    }
     return this.settings;
   }
 

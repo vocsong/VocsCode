@@ -9,8 +9,9 @@ import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
 import { AnalyticsStore } from './analytics';
 import { watchEventLoop } from './diag';
+import { setGitLog } from './git';
 import { registerIpc, pushToRenderer } from './ipc';
-import { createLogger, type Logger } from './log';
+import { createLogger, describeError, type Logger } from './log';
 import { RuntimeResolver } from './runtime';
 import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
@@ -57,13 +58,14 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
+    log('info', 'a second launch was redirected to this instance');
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
   });
   app.whenReady().then(main).catch((e) => {
-    log('error', `startup failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+    log('error', `startup failed: ${describeError(e)}`);
     app.quit();
   });
 }
@@ -74,16 +76,23 @@ async function main(): Promise<void> {
   const userData = app.getPath('userData');
   const logger = createLogger(path.join(userData, 'logs'), isDev || !!process.env.VOCS_CODE_DEBUG);
   log = logger.log;
-  log('info', `Vocs Code ${app.getVersion()} starting (electron ${process.versions.electron}, ${process.platform} ${process.arch})`);
+  // Every subsystem gets a closure, not the function, so nothing keeps the console-only bootstrap logger.
+  const logTo: Logger = (level, message) => log(level, message);
+  log('info', `Vocs Code ${app.getVersion()} starting (electron ${process.versions.electron}, node ${process.versions.node}, ${process.platform} ${process.arch}${app.isPackaged ? ', packaged' : ', development'})`);
+  log('info', `user data: ${userData}`);
+  if (logger.file) log('info', `log file: ${logger.file}`);
+  else log('warn', 'log file could not be opened; this run is logging to the console only');
   // A blocked main process is a window that takes no input; leave a trace when that happens.
-  watchEventLoop((level, message) => log(level, message));
-  const settings = new SettingsStore(userData);
+  watchEventLoop(logTo);
+  setGitLog(logTo);
+  installAppProcessHandlers();
+  const settings = new SettingsStore(userData, logTo);
   await settings.load();
-  const secrets = new SecretStore(userData);
+  const secrets = new SecretStore(userData, logTo);
   await secrets.load();
-  const store = new SessionStore(userData);
+  const store = new SessionStore(userData, logTo);
   await store.load();
-  const analytics = new AnalyticsStore(userData, { log });
+  const analytics = new AnalyticsStore(userData, { log: logTo });
   await analytics.load(store.list(), (id) => store.readTranscript(id));
 
   // Deep search index: derived from transcripts, so it lives beside them and rebuilds itself.
@@ -196,11 +205,14 @@ async function main(): Promise<void> {
 
   createWindow(settings, appRoot);
 
+  log('info', `ready in ${Math.round(process.uptime() * 1000)}ms: ${store.list().length} session(s), ${terminals.list().length} terminal tab(s)`);
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot);
   });
   app.on('window-all-closed', () => {
     // macOS convention: stay resident so the 'activate' dock handler can reopen a window.
+    log('debug', 'all windows closed');
     if (process.platform !== 'darwin') app.quit();
   });
   let quitting = false;
@@ -208,6 +220,8 @@ async function main(): Promise<void> {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
+    const t0 = Date.now();
+    log('info', `quitting: ${sessions?.list().filter((s) => s.status === 'running' || s.status === 'awaiting' || s.status === 'starting').length ?? 0} live session(s), ${terminals?.list().length ?? 0} terminal tab(s)`);
     // Drain debounced session-meta persists after the sessions themselves are stopped. Restored
     // terminal snapshots are written first, and the cap ensures a large terminal set cannot hold
     // Electron open indefinitely.
@@ -216,7 +230,7 @@ async function main(): Promise<void> {
       try {
         await task;
       } catch (error) {
-        log('warn', `${label} during shutdown failed: ${formatProcessError(error)}`);
+        log('warn', `${label} during shutdown failed: ${describeError(error)}`);
       }
     };
     const drainSessions = sessions
@@ -231,25 +245,34 @@ async function main(): Promise<void> {
     const cap = new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 4000));
     void Promise.race([shutdown.then(() => false), cap]).then((timedOut) => {
       if (timedOut) log('warn', 'shutdown exceeded the 4s cap; exiting with any remaining state left for the next launch');
+      else log('info', `shutdown complete in ${Date.now() - t0}ms`);
       app.exit(0);
     });
   });
-}
-
-function formatProcessError(error: unknown): string {
-  if (error instanceof Error) return error.stack ?? error.message;
-  return typeof error === 'string' ? error : String(error);
 }
 
 /** Keep process-level failures visible in packaged builds instead of leaving them in a console. */
 function installProcessErrorHandlers(): void {
   if (processErrorHandlersInstalled) return;
   processErrorHandlersInstalled = true;
-  process.on('unhandledRejection', (reason) => log('warn', `unhandled rejection: ${formatProcessError(reason)}`));
+  process.on('unhandledRejection', (reason) => log('warn', `unhandled rejection: ${describeError(reason)}`));
   process.on('uncaughtException', (error) => {
-    log('error', `uncaught exception: ${formatProcessError(error)}`);
+    log('error', `uncaught exception: ${describeError(error)}`);
     if (app.isReady()) app.quit();
     else process.exitCode = 1;
+  });
+  process.on('warning', (warning) => log('warn', `node warning: ${warning.name}: ${warning.message}`));
+}
+
+/** Chromium helper processes (GPU, utility, renderer) dying is otherwise a silent blank window or dead terminal. */
+function installAppProcessHandlers(): void {
+  app.on('child-process-gone', (_e, details) => {
+    const level = details.reason === 'clean-exit' || details.reason === 'killed' ? 'info' : 'error';
+    log(level, `${details.type} process gone: ${details.reason}${details.exitCode !== undefined ? ` (exit code ${details.exitCode})` : ''}${details.name ? ` [${details.name}]` : ''}${details.serviceName ? ` service=${details.serviceName}` : ''}`);
+  });
+  app.on('render-process-gone', (_e, _contents, details) => {
+    // Also reported per window below; this catches webContents that are not the main window.
+    log('error', `a renderer process is gone: ${details.reason} (exit code ${details.exitCode})`);
   });
 }
 
@@ -377,16 +400,35 @@ function createWindow(settings: SettingsStore, appRoot: string): void {
     win.setAppDetails({ appId: APP_ID, appIconPath: icon });
   }
   mainWindow = win;
-  win.once('ready-to-show', () => win.show());
+  log('debug', `window created ${bounds.width}x${bounds.height}${'x' in bounds && bounds.x !== undefined ? ` at ${bounds.x},${bounds.y}` : ''}`);
+  win.once('ready-to-show', () => {
+    log('info', `window shown ${Math.round(process.uptime() * 1000)}ms after launch`);
+    win.show();
+  });
   win.on('closed', () => {
+    log('debug', 'window closed');
     mainWindow = null;
+  });
+  // The failures a user reports as "the app went blank / froze / never loaded", each with its cause.
+  win.webContents.on('render-process-gone', (_e, details) => {
+    log('error', `renderer process gone: ${details.reason} (exit code ${details.exitCode}); the window is blank until it is reloaded`);
+  });
+  win.on('unresponsive', () => log('warn', 'the window became unresponsive (renderer not answering); see the renderer stall lines above'));
+  win.on('responsive', () => log('info', 'the window is responsive again'));
+  win.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    // -3 is ABORTED: a navigation superseded by another, not a failure.
+    if (errorCode === -3 || !isMainFrame) return;
+    log('error', `renderer failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
+  });
+  win.webContents.on('preload-error', (_e, preloadPath, error) => {
+    log('error', `preload script ${preloadPath} failed; the renderer has no IPC bridge: ${describeError(error)}`);
   });
   const saveBounds = () => {
     if (win.isDestroyed() || win.isMinimized()) return;
     const b = win.getBounds();
     settings
       .update({ windowBounds: { x: b.x, y: b.y, width: b.width, height: b.height } })
-      .catch((e) => log('warn', `could not save window bounds: ${e instanceof Error ? e.message : String(e)}`));
+      .catch((e) => log('warn', `could not save window bounds: ${describeError(e)}`));
   };
   win.on('resize', debounce(saveBounds, 500));
   win.on('move', debounce(saveBounds, 500));
@@ -406,16 +448,21 @@ function createWindow(settings: SettingsStore, appRoot: string): void {
     const allowed = isDev ? url.startsWith(process.env.ELECTRON_RENDERER_URL as string) : target === indexUrl;
     if (allowed) return;
     e.preventDefault();
+    log('debug', `blocked in-app navigation to ${url.slice(0, 200)}${/^https?:\/\//i.test(url) ? ' (opened externally)' : ''}`);
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
   });
 
-  if (isDev || process.env.VOCS_CODE_DEBUG) {
-    win.webContents.on('console-message', (event) => {
-      const { level, message, lineNumber, sourceId } = event as unknown as { level: string | number; message: string; lineNumber: number; sourceId: string };
-      const lvl = level === 'error' || level === 3 ? 'error' : level === 'warning' || level === 2 ? 'warn' : 'debug';
-      log(lvl, `[renderer] ${message} (${sourceId}:${lineNumber})`);
-    });
-  }
+  // Renderer console output. Errors and warnings always reach the main log — a packaged build has no
+  // DevTools open, so a React render error or a failed fetch would otherwise vanish. Info/debug chatter
+  // only with the debug flag. (Uncaught exceptions also arrive structured via app:log; the console
+  // copy carries the source location Chromium attaches.)
+  const forwardDebug = isDev || !!process.env.VOCS_CODE_DEBUG;
+  win.webContents.on('console-message', (event) => {
+    const { level, message, lineNumber, sourceId } = event as unknown as { level: string | number; message: string; lineNumber: number; sourceId: string };
+    const lvl = level === 'error' || level === 3 ? 'error' : level === 'warning' || level === 2 ? 'warn' : 'debug';
+    if (lvl === 'debug' && !forwardDebug) return;
+    log(lvl, `[renderer console] ${message.slice(0, 4000)} (${sourceId}:${lineNumber})`);
+  });
   if (process.env.VOCS_CODE_SCREENSHOT) {
     win.webContents.once('did-finish-load', () => {
       setTimeout(async () => {

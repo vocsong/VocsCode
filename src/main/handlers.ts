@@ -82,6 +82,8 @@ export interface HandlerRegistry {
 
 /** A handler holding the host process this long has already frozen the UI; say so. */
 const SLOW_HANDLER_MS = 1000;
+/** Longest renderer-reported log line kept; a stack trace fits, a runaway string does not. */
+const RENDERER_LOG_MAX_CHARS = 4000;
 
 export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const { settings, secrets, sessions, terminals, runtime } = deps;
@@ -179,6 +181,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('app:diag', ({ kind, ms, detail }) => {
     deps.log('warn', `renderer ${kind} ${ms}ms${detail ? ` (${detail})` : ''}`);
   });
+  // The renderer's own failures. Bounded and level-checked: a compromised or looping client must
+  // not be able to fill the log or forge an arbitrary level.
+  handle('app:log', ({ level, message }) => {
+    if (typeof message !== 'string' || !message.trim()) return;
+    deps.log(level === 'error' ? 'error' : 'warn', `[renderer] ${message.slice(0, RENDERER_LOG_MAX_CHARS)}`);
+  });
   handle('app:notify', async ({ title, body }) => {
     if (typeof title !== 'string' || typeof body !== 'string') return;
     const s = settings.get();
@@ -198,6 +206,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('settings:get', () => settings.get());
   handle('settings:update', async (patch) => {
     const next = await settings.update(patch);
+    // Keys only: provider entries carry custom headers, and window bounds change every drag.
+    const keys = patch && typeof patch === 'object' ? Object.keys(patch).filter((k) => k !== 'windowBounds') : [];
+    if (keys.length) deps.log('debug', `settings updated: ${keys.join(', ')}`);
     deps.push(PUSH_CHANNELS.settingsChanged, next);
     return next;
   });
@@ -257,6 +268,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       deps.push(PUSH_CHANNELS.settingsChanged, next);
       return { models: applyModelOverrides(enrichModelContextWindows(models, next.providers), next.modelOverrides) };
     } catch (e) {
+      deps.log('warn', `model list refresh failed for ${id}: ${errorMessage(e)}`);
       const models = enrichModelContextWindows(fallbackModels(p), s.providers);
       return { models: applyModelOverrides(models, s.modelOverrides), error: errorMessage(e) };
     }
@@ -293,6 +305,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
         }
         const value = await runtime.availability(id);
         availabilityCache.set(id, { at: Date.now(), value });
+        deps.log('debug', `harness ${id}: ${value.available ? 'available' : 'unavailable'}${value.version ? ` ${value.version}` : ''}${value.binaryPath ? ` at ${value.binaryPath}` : ''}${value.detail ? ` — ${value.detail}` : ''}`);
         out[id] = value;
       })
     );
@@ -304,8 +317,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return { ...result, models: enrichModelContextWindows(result.models, current.providers) };
   });
   handle('harness:install', async ({ id }) => {
+    deps.log('info', `installing ${id} into the app runtime directory`);
     const r = await runtime.install(id);
     availabilityCache.clear();
+    // npm's output is the renderer's to show in full; the log keeps the verdict and the tail of a failure.
+    if (r.ok) deps.log('info', `installed ${id}`);
+    else deps.log('warn', `install of ${id} failed: ${r.log.trim().split('\n').slice(-5).join(' | ').slice(0, 600)}`);
     return r;
   });
 
@@ -331,6 +348,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('mcp:project:save', async ({ sessionId, servers }) => {
     const scope = mcpScope(sessionId);
     const r = await writeProjectMcp(scope.cwd, normalizeMcpServers(servers));
+    if (!r.ok) deps.log('warn', `[${sessionId}] could not write ${r.file}: ${r.error ?? 'unknown error'}`);
     return { ok: r.ok, error: r.error };
   });
   handle('mcp:project:state', async ({ sessionId, patch }) => {
@@ -344,7 +362,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!checked) return { ok: false, error: 'Incomplete server definition', tools: [], durationMs: 0 };
     const resolved = await resolveVars(checked, { env: process.env, secret: (name) => secrets.get(secretKeyFor(name)) });
     const cwd = sessionId ? sessions.get(sessionId)?.cwd : undefined;
-    return inspectServer(normalizeStdio(resolved.def, { which: (cmd) => which(cmd) }), { cwd });
+    const result = await inspectServer(normalizeStdio(resolved.def, { which: (cmd) => which(cmd) }), { cwd });
+    if (result.ok) deps.log('debug', `mcp ${checked.id}: inspected in ${result.durationMs}ms, ${result.tools.length} tool(s)`);
+    else deps.log('warn', `mcp ${checked.id}: inspect failed after ${result.durationMs}ms: ${result.error ?? 'unknown error'}`);
+    return result;
   });
   handle('mcp:import', async ({ servers, to, sessionId }) => {
     const incoming = normalizeMcpServers(servers);
@@ -411,6 +432,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     });
     if (res.canceled || !res.filePath) return { path: null };
     await fs.writeFile(res.filePath, md, 'utf8');
+    deps.log('info', `[${id}] transcript exported to ${res.filePath}`);
     return { path: res.filePath };
   });
   handle('sessions:fork', ({ id, harness }) => sessions.fork(id, harness));
@@ -456,6 +478,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:pr', async ({ sessionId, base, head }) => {
     const r = await gitCreatePr(cwdOf(sessionId), base, head);
     sessions.note(sessionId, r.ok ? `PR opened${head ? ` for ${head}` : ''}: ${r.url ?? ''}`.trim() : `PR failed: ${r.output ?? 'unknown error'}`, r.ok ? 'info' : 'error');
+    if (r.ok) deps.log('info', `[${sessionId}] PR opened${head ? ` for ${head}` : ''}: ${r.url ?? ''}`.trim());
+    else deps.log('warn', `[${sessionId}] PR creation failed: ${(r.output ?? 'unknown error').trim().slice(0, 600)}`);
     if (r.ok) sessions.refreshGitState(sessionId);
     return r;
   });
@@ -463,6 +487,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     // An explicit head branch pins the PR (Branches panel); otherwise the session's own is resolved.
     const r = await gitMergePr(cwdOf(sessionId), base, head, head ? {} : await prQueryOf(sessionId));
     sessions.note(sessionId, r.ok ? `Merged${head ? ` ${head}` : ''}: ${r.url ?? 'PR merged'}` : r.output ?? 'Failed to merge the PR', r.ok ? 'info' : 'error');
+    if (r.ok) deps.log('info', `[${sessionId}] PR merged${head ? ` (${head})` : ''}: ${r.url ?? ''}`.trim());
+    else deps.log('warn', `[${sessionId}] PR merge failed: ${(r.output ?? 'unknown error').trim().slice(0, 600)}`);
     if (r.ok) sessions.refreshGitState(sessionId);
     return r;
   });
@@ -536,10 +562,19 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     channels: () => Array.from(handlers.keys()),
     async invoke(channel: string, req: unknown): Promise<unknown> {
       const fn = handlers.get(channel as IpcChannel);
-      if (!fn) throw new Error(`Unknown channel: ${channel}`);
+      if (!fn) {
+        deps.log('warn', `ipc: unknown channel ${channel}`);
+        throw new Error(`Unknown channel: ${channel}`);
+      }
       const t0 = Date.now();
       try {
         return await fn(req as never);
+      } catch (e) {
+        // The renderer shows the message as a toast, but a toast is gone in seconds; the log line
+        // is what a bug report has. Only the channel and the error — never the request, which for
+        // secrets:set is the key itself.
+        deps.log('warn', `ipc ${channel} failed: ${errorMessage(e)}`);
+        throw e;
       } finally {
         const ms = Date.now() - t0;
         if (ms >= SLOW_HANDLER_MS) deps.log('warn', `slow ipc ${channel}: ${ms}ms`);

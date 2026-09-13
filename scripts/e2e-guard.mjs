@@ -10,6 +10,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -28,7 +29,8 @@ const env = { ...process.env, VOCS_CODE_E2E_UI: '1', HARNESS_E2E: '1' };
 
 const run = spawnSync(
   process.execPath,
-  [path.join('node_modules', 'vitest', 'vitest.mjs'), 'run', '--reporter=default', '--reporter=json', `--outputFile=${report}`, ...files],
+  // Resolved through Node so a git worktree that borrows the parent checkout's node_modules works too.
+  [createRequire(import.meta.url).resolve('vitest/vitest.mjs'), 'run', '--reporter=default', '--reporter=json', `--outputFile=${report}`, ...files],
   { env, stdio: 'inherit' }
 );
 

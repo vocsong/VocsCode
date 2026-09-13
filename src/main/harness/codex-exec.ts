@@ -67,6 +67,7 @@ export class CodexExecAdapter implements HarnessAdapter {
     const { config: mcpServers, env: mcpEnv } = toCodex(mcp, 'env-ref');
     Object.assign(env, mcpEnv);
     const config = Object.keys(mcpServers).length ? { mcp_servers: mcpServers } : undefined;
+    this.ctx.log('info', `codex exec SDK: ${override ? `${override} (${bin?.source} runtime)` : bin ? `SDK-bundled binary (${bin.path} is a shim the SDK cannot spawn)` : 'SDK-bundled binary'}${config ? `, ${Object.keys(mcpServers).length} MCP server(s)` : ''}`);
     this.codex = new Codex({ codexPathOverride: override, env, config });
     this.model = meta.config.model?.model;
     this.effort = this.ctx.effort();
