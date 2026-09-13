@@ -1,8 +1,9 @@
 /**
  * Offline tests for the pi-subagents override installer. The regression this guards is the one
  * in the report: a subagent billed to OpenRouter's Claude Haiku because pi-subagents' built-in
- * Explore agent pins `anthropic/claude-haiku-4-5`. Vocs Code installs a drop-in Explore that
- * omits the pin so the child inherits the session model, without overwriting a project's own.
+ * Explore agent pins `anthropic/claude-haiku-4-5`. Vocs Code installs a drop-in Explore in pi's
+ * global agent dir that omits the pin so the child inherits the session model, without
+ * overwriting a user's file — and removes the per-project copy older versions wrote.
  */
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -64,20 +65,37 @@ describe('installAgentOverride', () => {
 });
 
 describe('installPiAgentOverrides', () => {
-  it('installs into the global and project agent dirs, honoring PI_CODING_AGENT_DIR', async () => {
+  it('installs into the global agent dir only, honoring PI_CODING_AGENT_DIR', async () => {
     const home = await tmpDir();
     const agentDir = path.join(home, 'relocated-agent');
     const cwd = await tmpDir();
     const log = vi.fn();
     const res = await installPiAgentOverrides({ cwd, env: { PI_CODING_AGENT_DIR: agentDir }, home, log });
 
-    expect(res.global?.path).toBe(path.join(agentDir, 'agents', PI_EXPLORE_AGENT_FILE));
-    expect(res.project?.path).toBe(path.join(cwd, '.pi', 'agents', PI_EXPLORE_AGENT_FILE));
-    expect(res.global?.written).toBe(true);
-    expect(res.project?.written).toBe(true);
-    expect(await fs.readFile(res.project!.path, 'utf8')).not.toMatch(/^model:/m);
+    expect(res?.path).toBe(path.join(agentDir, 'agents', PI_EXPLORE_AGENT_FILE));
+    expect(res?.written).toBe(true);
+    expect(await fs.readFile(res!.path, 'utf8')).not.toMatch(/^model:/m);
+    // No project copy: a worktree session must not gain an untracked `.pi/` folder.
+    await expect(fs.access(path.join(cwd, '.pi'))).rejects.toThrow();
     // The same pass turns on pi-subagents usage reporting in the global settings.
     expect(JSON.parse(await fs.readFile(path.join(agentDir, 'subagents.json'), 'utf8'))).toEqual({ reportUsage: true });
+  });
+
+  it('removes the project copy older versions installed and keeps the rest of .pi intact', async () => {
+    const home = await tmpDir();
+    const cwd = await tmpDir();
+    const legacy = path.join(cwd, '.pi', 'agents', PI_EXPLORE_AGENT_FILE);
+    await fs.mkdir(path.dirname(legacy), { recursive: true });
+    await fs.writeFile(legacy, exploreOverrideMarkdown(), 'utf8');
+    await fs.writeFile(path.join(cwd, '.pi', 'settings.json'), '{}', 'utf8');
+    const log = vi.fn();
+
+    await installPiAgentOverrides({ cwd, env: { PI_CODING_AGENT_DIR: path.join(home, 'agent') }, home, log });
+
+    await expect(fs.access(legacy)).rejects.toThrow();
+    await expect(fs.access(path.join(cwd, '.pi', 'agents'))).rejects.toThrow();
+    expect(await fs.readFile(path.join(cwd, '.pi', 'settings.json'), 'utf8')).toBe('{}');
+    expect(log).toHaveBeenCalledWith('info', expect.stringContaining('removed legacy project pi subagent override'));
   });
 
   it('leaves a project-authored Explore in place so the project keeps its own model', async () => {
@@ -89,22 +107,29 @@ describe('installPiAgentOverrides', () => {
 
     const res = await installPiAgentOverrides({ cwd, env: { PI_CODING_AGENT_DIR: path.join(home, 'agent') }, home });
 
-    expect(res.project?.written).toBe(false);
-    expect(res.project?.skipped).toBe('exists');
+    expect(res?.written).toBe(true);
     expect(await fs.readFile(projectFile, 'utf8')).toContain('deepseek-v4.1-flash');
   });
 
-  it('logs and continues when a target directory cannot be written', async () => {
+  it('keeps the project copy when the global override could not be installed', async () => {
     const home = await tmpDir();
     const cwd = await tmpDir();
-    // A file where the project `.pi` directory should be makes mkdir fail.
-    await fs.writeFile(path.join(cwd, '.pi'), 'not a directory', 'utf8');
+    const agentDir = path.join(home, 'agent');
+    // A file where the global agents dir belongs makes the install fail.
+    await fs.mkdir(agentDir, { recursive: true });
+    await fs.writeFile(path.join(agentDir, 'agents'), 'not a directory', 'utf8');
+    const legacy = path.join(cwd, '.pi', 'agents', PI_EXPLORE_AGENT_FILE);
+    await fs.mkdir(path.dirname(legacy), { recursive: true });
+    await fs.writeFile(legacy, exploreOverrideMarkdown(), 'utf8');
     const log = vi.fn();
-    const res = await installPiAgentOverrides({ cwd, env: { PI_CODING_AGENT_DIR: path.join(home, 'agent') }, home, log });
 
-    expect(res.global?.written).toBe(true);
-    expect(res.project).toBeNull();
-    expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('could not install'));
+    const res = await installPiAgentOverrides({ cwd, env: { PI_CODING_AGENT_DIR: agentDir }, home, log });
+
+    expect(res).toBeNull();
+    expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('could not install pi subagent override'));
+    expect(await fs.readFile(legacy, 'utf8')).toContain(PI_MANAGED_MARKER);
+    // A failed install must not stop usage reporting.
+    expect(JSON.parse(await fs.readFile(path.join(agentDir, 'subagents.json'), 'utf8'))).toEqual({ reportUsage: true });
   });
 });
 

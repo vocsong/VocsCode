@@ -161,9 +161,10 @@ export class PiAdapter implements HarnessAdapter {
     const sessionDir = path.join(this.ctx.sessionDir, 'pi');
     await fs.mkdir(sessionDir, { recursive: true });
 
-    // Subagents inherit the session model: override pi-subagents' pinned Explore agent globally
-    // and per project, without clobbering a file the user or the project already provides. The
-    // same pass turns on usage reporting so their spend reaches the session totals and analytics.
+    // Subagents inherit the session model: override pi-subagents' pinned Explore agent in pi's
+    // global agent dir, without clobbering a user's file there. The same pass drops a legacy
+    // project copy and turns on usage reporting so subagent spend reaches the session totals and
+    // analytics.
     await installPiAgentOverrides({
       cwd: meta.cwd,
       log: (level, message) => this.ctx.log(level, `[pi] ${message}`)

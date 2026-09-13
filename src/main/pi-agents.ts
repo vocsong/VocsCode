@@ -8,9 +8,12 @@
  * keeps Explore's read-only tools and prompt but omits `model:`, letting the child inherit the
  * model selected in the session.
  *
- * Installed only where it would not clobber a user's own file: once in pi's global agent dir and
- * once in the project's `.pi/agents`. A project file outranks the global one, so a project can
- * still pin its own model by replacing the file.
+ * Installed once in pi's global agent dir, which every project and worktree shares — and never
+ * where a user's own file already exists. Earlier versions also wrote a project copy into
+ * `<cwd>/.pi/agents`; because a worktree session's cwd is the worktree, that left an untracked
+ * `.pi/` folder in every worktree for no benefit, so the project copy is gone. The exact copy
+ * Vocs wrote before is removed on the next pi session; a project-authored file is left alone and
+ * still outranks the global override through pi-subagents' own precedence.
  */
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -102,10 +105,32 @@ export interface AgentOverrideInstall {
 }
 
 export interface InstallOverridesOptions {
+  /** Session cwd — only used to drop the project copy earlier versions installed here. */
   cwd: string;
   env?: NodeJS.ProcessEnv;
   home?: string;
   log?: (level: 'info' | 'warn', message: string) => void;
+}
+
+/**
+ * Removes the project-scoped Explore file Vocs installed before installs became global-only. Only
+ * a byte-for-byte match to what we generate is deleted; an edited or project-authored file stays.
+ * Empty `.pi/agents` and `.pi` directories are cleaned up, anything else in them is left intact.
+ */
+export async function removeInstalledProjectOverride(cwd: string): Promise<boolean> {
+  const file = path.join(cwd, '.pi', 'agents', PI_EXPLORE_AGENT_FILE);
+  let current: string;
+  try {
+    current = await fs.readFile(file, 'utf8');
+  } catch {
+    return false;
+  }
+  const normalize = (s: string) => s.replace(/\r\n/g, '\n');
+  if (normalize(current) !== normalize(exploreOverrideMarkdown())) return false;
+  await fs.rm(file, { force: true });
+  await fs.rmdir(path.dirname(file)).catch(() => undefined);
+  await fs.rmdir(path.join(cwd, '.pi')).catch(() => undefined);
+  return true;
 }
 
 /**
@@ -142,31 +167,35 @@ export async function installPiSubagentsReportUsage(agentDir: string): Promise<b
 }
 
 /**
- * Install the Explore override globally and into the project's `.pi/agents`. Failures are logged,
- * never thrown: a read-only project or a locked config dir must not stop the harness from starting.
+ * Install the Explore override in pi's global agent dir. Failures are logged, never thrown: a
+ * read-only or locked config dir must not stop the harness from starting. Returns the global
+ * install, or null when it could not be written.
  */
-export async function installPiAgentOverrides(opts: InstallOverridesOptions): Promise<{ global: AgentOverrideInstall | null; project: AgentOverrideInstall | null }> {
+export async function installPiAgentOverrides(opts: InstallOverridesOptions): Promise<AgentOverrideInstall | null> {
   const log = opts.log ?? (() => {});
   const env = opts.env ?? process.env;
-  const content = exploreOverrideMarkdown();
-  const targets: { key: 'global' | 'project'; dir: string }[] = [
-    { key: 'global', dir: path.join(piAgentDir(env, opts.home), 'agents') },
-    { key: 'project', dir: path.join(opts.cwd, '.pi', 'agents') }
-  ];
-  const result: { global: AgentOverrideInstall | null; project: AgentOverrideInstall | null } = { global: null, project: null };
-  for (const target of targets) {
+  const agentDir = piAgentDir(env, opts.home);
+  const agentsDir = path.join(agentDir, 'agents');
+  let installed: AgentOverrideInstall | null = null;
+  try {
+    installed = await installAgentOverride(agentsDir, PI_EXPLORE_AGENT_FILE, exploreOverrideMarkdown());
+    if (installed.written) log('info', `installed pi subagent override: ${installed.path}`);
+  } catch (e) {
+    log('warn', `could not install pi subagent override in ${agentsDir}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  // Only once the global override is confirmed on disk: dropping the project copy without it would
+  // fall back to pi-subagents' pinned model, the exact regression this override exists to fix.
+  if (installed) {
     try {
-      const installed = await installAgentOverride(target.dir, PI_EXPLORE_AGENT_FILE, content);
-      result[target.key] = installed;
-      if (installed.written) log('info', `installed pi subagent override: ${installed.path}`);
+      if (await removeInstalledProjectOverride(opts.cwd)) log('info', `removed legacy project pi subagent override: ${path.join(opts.cwd, '.pi', 'agents', PI_EXPLORE_AGENT_FILE)}`);
     } catch (e) {
-      log('warn', `could not install pi subagent override in ${target.dir}: ${e instanceof Error ? e.message : String(e)}`);
+      log('warn', `could not remove legacy project pi subagent override: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
   try {
-    if (await installPiSubagentsReportUsage(piAgentDir(env, opts.home))) log('info', 'enabled pi subagent usage reporting');
+    if (await installPiSubagentsReportUsage(agentDir)) log('info', 'enabled pi subagent usage reporting');
   } catch (e) {
     log('warn', `could not enable pi subagent usage reporting: ${e instanceof Error ? e.message : String(e)}`);
   }
-  return result;
+  return installed;
 }
