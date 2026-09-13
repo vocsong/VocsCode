@@ -309,6 +309,11 @@ describe('settings normalization', () => {
     expect(s.providers.find((p) => p.id === 'custom')?.builtin).toBe(false);
     expect(s.acpAgents.length).toBe(d.acpAgents.length);
   });
+  it('defaults the welcome guide and new sessions to Pi, keeping an explicit choice', () => {
+    expect(defaultSettings().defaultHarness).toBe('pi');
+    expect(normalizeSettings({ theme: 'dark' }).defaultHarness).toBe('pi');
+    expect(normalizeSettings({ defaultHarness: 'claude' }).defaultHarness).toBe('claude');
+  });
   it('remembers the worktree isolation decision and defaults it to off', () => {
     expect(defaultSettings().defaultUseWorktree).toBe(false);
     expect(normalizeSettings({ defaultUseWorktree: true }).defaultUseWorktree).toBe(true);
@@ -412,6 +417,10 @@ describe('model capability overrides', () => {
     expect(s.modelOverrides).toEqual({ 'deepseek/x': { supportsImages: true } });
     // Settings written before this feature existed have no such key.
     expect(normalizeSettings({ theme: 'dark' }).modelOverrides).toEqual({});
+  });
+
+  it('lists Pi first in the harness pickers', () => {
+    expect(HARNESSES.map((h) => h.id)).toEqual(['pi', 'claude', 'codex', 'codex-exec', 'cursor', 'acp', 'native']);
   });
 
   it('marks pi as the only harness that strips images itself', () => {
