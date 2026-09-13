@@ -124,6 +124,7 @@ export function Sidebar() {
   const setView = useStore((s) => s.setView);
   const view = useStore((s) => s.view);
   const toast = useStore((s) => s.toast);
+  const archiving = useStore((s) => s.archiving);
   const [showArchived, setShowArchived] = useState(false);
   // Drag-to-reorder state: which folder block is being dragged, and where it currently hovers.
   const [drag, setDrag] = useState<{ root: string; over: string | null; after: boolean } | null>(null);
@@ -345,6 +346,7 @@ export function Sidebar() {
                   session={s}
                   active={s.id === activeId && view === 'chat'}
                   customLabels={settings?.customLabels ?? []}
+                  archiving={!!archiving[s.id]}
                   onSelect={() => void setActive(s.id).catch(toastError)}
                   toast={toast}
                   dnd={dnd}
@@ -382,10 +384,12 @@ type DndHandlers = {
   drop: (id: string) => void;
 };
 
-function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dndHandlers }: {
+function SessionRow({ session: s, active, customLabels, archiving, onSelect, toast, dnd, dndHandlers }: {
   session: SessionMeta;
   active: boolean;
   customLabels: string[];
+  /** An archive request is in flight; the status pill shows a blinking Archiving state meanwhile. */
+  archiving: boolean;
   onSelect: () => void;
   toast: (t: string, k?: 'info' | 'success' | 'error') => void;
   dnd: DndState;
@@ -505,7 +509,9 @@ function SessionRow({ session: s, active, customLabels, onSelect, toast, dnd, dn
       {/* Time clicks must bubble to the row so they select the session; only the status pill swallows them. */}
       <div className="session-side">
         <div onClick={(e) => e.stopPropagation()}>
-          <Dropdown align="right" width={200} trigger={() => <StatusLabel status={s.status} label={s.statusLabel} />}>
+          <Dropdown align="right" width={200} trigger={() => archiving
+            ? <span className="session-status status-running" title="Archiving…">Archiving</span>
+            : <StatusLabel status={s.status} label={s.statusLabel} />}>
             {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
           </Dropdown>
         </div>

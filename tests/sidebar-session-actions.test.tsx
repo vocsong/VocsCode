@@ -10,7 +10,7 @@ const invokeMock = vi.fn().mockResolvedValue({});
   on: vi.fn().mockReturnValue(() => undefined),
 };
 
-import { fireEvent, render } from '@testing-library/react';
+import { fireEvent, render, waitFor } from '@testing-library/react';
 import { Sidebar, sortSessionRows } from '../src/renderer/src/components/Sidebar';
 import { useStore } from '../src/renderer/src/store';
 import type { AppSettings, SessionMeta } from '../src/shared/types';
@@ -85,6 +85,21 @@ describe('sidebar session actions', () => {
     invokeMock.mockResolvedValueOnce(session('s_f', { config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] }));
     fireEvent.click(claude);
     expect(invokeMock).toHaveBeenCalledWith('sessions:fork', { id: 's_a', harness: 'claude' });
+  });
+
+  it('shows a blinking Archiving pill while the archive request is in flight', async () => {
+    let resolveArchive: (v: unknown) => void = () => undefined;
+    invokeMock.mockImplementationOnce(() => new Promise((res) => { resolveArchive = res; }));
+    useStore.setState({ sessions: [session('s_a', { title: 'A' })], settings, activeId: null, view: 'chat' });
+    const { container } = render(<Sidebar />);
+    const archiveBtn = [...container.querySelectorAll('.row-act-btn')].find((b) => b.getAttribute('aria-label') === 'Archive session') as HTMLElement;
+    fireEvent.click(archiveBtn);
+    const pill = container.querySelector('.session-status') as HTMLElement;
+    expect(pill.textContent).toBe('Archiving');
+    // Same class the Working pill uses, so it picks up the blinking animation.
+    expect(pill.className).toContain('status-running');
+    resolveArchive({});
+    await waitFor(() => expect((container.querySelector('.session-status') as HTMLElement).className).toContain('status-idle'));
   });
 
   it('archived rows show only restore and delete', () => {
