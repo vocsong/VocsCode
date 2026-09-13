@@ -70,6 +70,7 @@ Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping c
 
 - API keys are encrypted with Electron `safeStorage` and never leave the machine except to the provider you configured.
 - The renderer runs sandboxed with context isolation; all privileged work happens in the main process behind a typed IPC contract.
+- ACP read requests intentionally allow the agent's `readTextFile` callback to open absolute paths, matching the read policy of the other harnesses; approvals gate writes and commands, not reads. Use ACP with an agent you trust if the machine contains sensitive files outside the project.
 - "Full access" disables every prompt and sandbox. Use it only in disposable environments.
 
 ## Usage analytics

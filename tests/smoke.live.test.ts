@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
-import type { ApprovalDecision, HarnessId, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { ApprovalDecision, HarnessId, HarnessRef, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import type { ResolvedServer } from '../src/main/mcp/effective';
 import { createAdapter } from '../src/main/harness/registry';
 import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
@@ -21,6 +21,8 @@ import { emptyUsage } from '../src/main/models/static-models';
 const enabled = process.env.HARNESS_SMOKE === '1';
 const only = (process.env.HARNESS_SMOKE_ONLY ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 const want = (id: string) => enabled && (only.length === 0 || only.includes(id));
+// Resume round-trips cost a second turn per harness, so they stay behind their own flag.
+const wantResume = (id: string) => want(id) && process.env.HARNESS_SMOKE_RESUME === '1';
 
 const appRoot = path.resolve(__dirname, '..');
 const tmpRoot = path.join(os.tmpdir(), `vocs-code-smoke-${Date.now()}`);
@@ -118,6 +120,40 @@ function assistantText(items: Map<string, TranscriptItem>): string {
 }
 
 const PROMPT = 'Reply with exactly the single word PONG and nothing else. Do not use any tools.';
+const CONTINUE_PROMPT = 'Reply with exactly the single word PONG again and nothing else. Do not use any tools.';
+
+/**
+ * Live resume round-trip: run one prompt, tear the adapter down, then rebuild from the same
+ * session meta (which still carries the harness ref) and run a continuation prompt.
+ */
+async function resumeRoundTrip(harness: HarnessId, refKey: keyof HarnessRef, extra: Partial<SessionMeta['config']> = {}): Promise<void> {
+  const { ctx, meta, events, items, waitTurn } = await makeCtx(harness, extra);
+  const first = createAdapter(harness, ctx);
+  cleanups.push(() => first.dispose());
+  await first.start();
+  await first.send({ text: PROMPT });
+  await waitTurn(170_000);
+  expect(assistantText(items)).toMatch(/PONG/i);
+  expect(meta.harnessRef[refKey]).toBeTruthy();
+  await first.dispose();
+
+  const second = createAdapter(harness, ctx);
+  cleanups.push(() => second.dispose());
+  await second.start();
+  // A rejected resume falls back to a fresh session with a warning; that must not happen here.
+  const resumeWarnings = events.filter(
+    (e) => e.type === 'item.upsert' && e.item.kind === 'info' && e.item.level === 'warn' && /resum/i.test(e.item.text)
+  );
+  expect(resumeWarnings).toEqual([]);
+  const turnsBefore = [...items.values()].filter((i) => i.kind === 'turn').length;
+  await second.send({ text: CONTINUE_PROMPT });
+  await waitTurn(170_000);
+  const turnsAfter = [...items.values()].filter((i) => i.kind === 'turn').length;
+  expect(turnsAfter).toBeGreaterThan(turnsBefore);
+  // The continuation must have produced its own PONG, so the concatenated text has at least two.
+  expect((assistantText(items).match(/PONG/gi) ?? []).length).toBeGreaterThanOrEqual(2);
+  expect(meta.harnessRef[refKey]).toBeTruthy();
+}
 
 describe('live harness smoke', () => {
   it.runIf(want('codex'))('codex app-server answers a prompt', async () => {
@@ -258,5 +294,47 @@ describe('live harness smoke', () => {
     const content = await fs.readFile(path.join(meta.cwd, 'hello.txt'), 'utf8');
     expect(content).toMatch(/hello from vocs code/);
     expect([...items.values()].some((i) => i.kind === 'approval' || (i.kind === 'tool' && i.name === 'write_file'))).toBe(true);
+  });
+
+  // Resume round-trips after a dispose (HARNESS_SMOKE_RESUME=1): a second adapter is built from
+  // the same session meta, so its start() must resume the persisted harness ref rather than
+  // silently starting fresh. A fresh start would still answer PONG, so the tests also assert the
+  // ref is unchanged after the continuation turn.
+  it.runIf(wantResume('codex'))('codex app-server resumes after dispose', async () => {
+    await resumeRoundTrip('codex', 'codexThreadId');
+  });
+
+  it.runIf(wantResume('codex-exec'))('codex exec resumes after dispose', async () => {
+    await resumeRoundTrip('codex-exec', 'codexThreadId');
+  });
+
+  it.runIf(wantResume('cursor'))('cursor resumes after dispose', async (t) => {
+    if (!process.env.CURSOR_API_KEY) {
+      console.warn('cursor resume smoke skipped: no CURSOR_API_KEY in env');
+      return t.skip();
+    }
+    await resumeRoundTrip('cursor', 'cursorAgentId');
+  });
+
+  it.runIf(wantResume('pi'))('pi resumes after dispose', async () => {
+    await resumeRoundTrip('pi', 'piSessionFile');
+  });
+
+  it.runIf(wantResume('claude'))('claude resumes after dispose', async () => {
+    await resumeRoundTrip('claude', 'claudeSessionId');
+  });
+
+  it.runIf(wantResume('acp'))('acp resumes after dispose', async () => {
+    await resumeRoundTrip('acp', 'acpSessionId', { acpAgent: process.env.HARNESS_SMOKE_ACP_AGENT ?? 'dsh' });
+  });
+
+  it.runIf(wantResume('native'))('native resumes after dispose', async (t) => {
+    const provider = process.env.DEEPSEEK_API_KEY ? 'deepseek' : process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : null;
+    if (!provider) {
+      console.warn('native resume smoke skipped: no provider API key in env');
+      return t.skip();
+    }
+    const model = provider === 'deepseek' ? 'deepseek-v4-flash' : provider === 'openai' ? 'gpt-5.4-mini' : 'claude-sonnet-5';
+    await resumeRoundTrip('native', 'nativeHistory', { model: { provider, model } });
   });
 });

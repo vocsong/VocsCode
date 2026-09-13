@@ -7,7 +7,7 @@ import { ANTHROPIC_STATIC_MODELS, CODEX_STATIC_MODELS, CURSOR_STATIC_MODELS, STA
 import { AcpAdapter } from './acp';
 import { ClaudeAdapter } from './claude';
 import { CodexAppServerAdapter, listCodexModels } from './codex-app-server';
-import { CursorAdapter, cursorModelToInfo, listCursorModels } from './cursor';
+import { CursorAdapter, listCursorModels } from './cursor';
 import { CodexExecAdapter } from './codex-exec';
 import { NativeAdapter } from './native';
 import { PiAdapter, listPiModels } from './pi';

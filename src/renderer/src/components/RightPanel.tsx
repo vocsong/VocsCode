@@ -107,7 +107,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
         </span>
         <span className="spacer" />
         <Button variant="ghost" size="sm" icon="refresh" onClick={() => void refresh()} title="Refresh" />
-        <Button variant="ghost" size="sm" icon="external" onClick={() => void invoke('app:openInEditor', { path: session.cwd })} title="Open in editor" />
+        <Button variant="ghost" size="sm" icon="external" onClick={() => void invoke('app:openInEditor', { path: session.cwd, sessionId: session.id })} title="Open in editor" />
       </div>
       {summary?.error && (
         <div className="callout warn" role="status">
@@ -165,11 +165,16 @@ function ChangesTab({ session }: { session: SessionMeta }) {
   );
 
   async function doCommit() {
-    const r = await invoke('git:commit', { sessionId: session.id, message: commitMsg.trim() });
-    toast(r.ok ? 'Committed' : r.output, r.ok ? 'success' : 'error');
-    if (r.ok) {
-      setCommitMsg('');
-      void refresh();
+    try {
+      const r = await invoke('git:commit', { sessionId: session.id, message: commitMsg.trim() });
+      toast(r.ok ? 'Committed' : r.output, r.ok ? 'success' : 'error');
+      if (r.ok) {
+        setCommitMsg('');
+        void refresh();
+      }
+    } catch (e) {
+      // Keep the typed message so the user can retry after the IPC failure.
+      toast(e instanceof Error ? e.message : String(e), 'error');
     }
   }
 }
@@ -237,7 +242,7 @@ function FilesTab({ session }: { session: SessionMeta }) {
                 title={mdView ? 'Show source' : 'Show markdown preview'}
               />
             )}
-            <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}` })} title="Open in editor" />
+            <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}`, sessionId: session.id })} title="Open in editor" />
             <Button size="sm" variant="ghost" icon="x" onClick={() => setPreview(null)} />
           </div>
           {isMd && mdView ? (
@@ -256,10 +261,16 @@ function FilesTab({ session }: { session: SessionMeta }) {
               onClick={async () => {
                 if (e.isDir) setPath(e.path.replace(/\\/g, '/'));
                 else {
-                  const r = await invoke('fs:read', { sessionId: session.id, path: e.path, maxBytes: 200_000 });
-                  const p = e.path.replace(/\\/g, '/');
-                  setPreview({ path: p, ...r });
-                  setMdView(/\.(?:md|markdown)$/i.test(p));
+                  const sid = session.id;
+                  try {
+                    const r = await invoke('fs:read', { sessionId: sid, path: e.path, maxBytes: 200_000 });
+                    if (liveId.current !== sid) return;
+                    const p = e.path.replace(/\\/g, '/');
+                    setPreview({ path: p, ...r });
+                    setMdView(/\.(?:md|markdown)$/i.test(p));
+                  } catch (err) {
+                    if (liveId.current === sid) toast(err instanceof Error ? err.message : String(err), 'error');
+                  }
                 }
               }}
             >

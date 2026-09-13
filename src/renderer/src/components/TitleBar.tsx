@@ -127,18 +127,18 @@ function FileMenu({ close }: { close: () => void }) {
       <MenuItem hint={`${modKey}+N`} onClick={run(() => void st.startNewSession())}>
         New session
       </MenuItem>
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)))}>
+      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)).catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error')))}>
         Fork session
       </MenuItem>
       {session && <ForkIntoItems session={session} onForked={(f) => st.setActive(f.id)} />}
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:export', { id: session.id }).then((r) => r.path && st.toast(`Exported to ${r.path}`, 'success')))}>
+      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:export', { id: session.id }).then((r) => r.path && st.toast(`Exported to ${r.path}`, 'success')).catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error')))}>
         Export transcript…
       </MenuItem>
       <Sep />
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openPath', { path: session.cwd, sessionId: session.id }))}>
         Reveal project folder
       </MenuItem>
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openInEditor', { path: session.cwd }).then(fail))}>
+      <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openInEditor', { path: session.cwd, sessionId: session.id }).then(fail))}>
         Open in editor
       </MenuItem>
       <MenuItem disabled={!session} onClick={run(() => session && void invoke('app:openTerminal', { cwd: session.cwd }).then(fail))}>

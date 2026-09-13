@@ -112,10 +112,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   // Only open paths scoped to the session: a compromised client must not launch arbitrary files.
   handle('app:openPath', async ({ sessionId, path: p }) => {
     const m = sessions.get(sessionId);
-    if (!m || isOutsideWorkspace(m.cwd, p, path)) return;
-    await deps.desktop.openPath(p);
+    if (!m) return;
+    const target = path.isAbsolute(p) ? p : path.resolve(m.cwd, p);
+    if (isOutsideWorkspace(m.cwd, target, path)) return;
+    await deps.desktop.openPath(target);
   });
-  handle('app:openInEditor', async ({ path: p, line }) => {
+  const launchEditor = async (p: string, line?: number): Promise<{ ok: boolean; error?: string }> => {
     const s = settings.get();
     const editor = s.binaries.editor?.trim() || 'code';
     const bin = which(editor);
@@ -128,15 +130,33 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     } catch (e) {
       return { ok: false, error: errorMessage(e) };
     }
+  };
+  // Editor launches are scoped to the session's project root: a compromised renderer cannot use
+  // this channel as an arbitrary process launcher. Global skills use their own exact-file channel.
+  handle('app:openInEditor', async ({ path: p, line, sessionId }) => {
+    const session = sessions.get(sessionId);
+    if (!session) return { ok: false, error: 'Session not found' };
+    const target = path.isAbsolute(p) ? p : path.resolve(session.cwd, p);
+    if (isOutsideWorkspace(session.config.projectRoot || session.cwd, target, path)) return { ok: false, error: 'Path is outside the session workspace' };
+    return launchEditor(target, line);
+  });
+  handle('skills:openInEditor', async ({ path: p, line }) => {
+    const target = path.resolve(p);
+    const loc = locateSkillPath(path.dirname(target));
+    if (!loc || loc.kind !== 'skill' || path.basename(target) !== 'SKILL.md') return { ok: false, error: 'Path is not a known skill document' };
+    return launchEditor(target, line);
   });
   handle('app:openTerminal', async ({ cwd }) => {
     try {
       if (process.platform === 'win32') {
+        // cmd.exe parses the `start` command itself; keep cwd as one process argument rather
+        // than interpolating it into a command string. Quotes/newlines cannot be represented
+        // safely by that built-in command, so reject them at the boundary.
+        if (/["%\r\n]/.test(cwd)) return { ok: false, error: 'Terminal path contains an unsupported quote, percent sign, or newline' };
         const wt = which('wt');
-        // `start "" /D <dir> cmd.exe` opens a console already in the project directory.
         const child = wt
           ? spawnTool(wt, ['-d', cwd], { detached: true, stdio: 'ignore' })
-          : spawn(process.env.ComSpec || 'cmd.exe', ['/c', `start "" /D "${cwd}" cmd.exe`], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true, windowsHide: false });
+          : spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'start', '', '/D', cwd, 'cmd.exe'], { detached: true, stdio: 'ignore', windowsHide: false });
         child.unref();
       } else if (process.platform === 'darwin') {
         const child = spawnTool('open', ['-a', 'Terminal', cwd], { detached: true, stdio: 'ignore' });
@@ -159,7 +179,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('app:diag', ({ kind, ms, detail }) => {
     deps.log('warn', `renderer ${kind} ${ms}ms${detail ? ` (${detail})` : ''}`);
   });
-  handle('app:notify', ({ title, body }) => deps.desktop.notify(title, body));
+  handle('app:notify', async ({ title, body }) => {
+    if (typeof title !== 'string' || typeof body !== 'string') return;
+    const s = settings.get();
+    if (!s.notifications) return;
+    await deps.desktop.notify(title.slice(0, 200), body.slice(0, 200));
+  });
 
   handle('window:toggleFullScreen', () => deps.desktop.toggleFullScreen());
   handle('window:reload', () => deps.desktop.reload());
@@ -186,6 +211,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     await syncProviderKeyFlags();
   });
   handle('secrets:has', ({ providerId }) => secrets.has(providerId));
+  handle('secrets:status', () => secrets.status);
 
   async function syncProviderKeyFlags(): Promise<AppSettings> {
     const s = settings.get();

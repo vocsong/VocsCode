@@ -1,6 +1,5 @@
 import { Readable, Writable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
-import { createTwoFilesPatch } from 'diff';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
@@ -12,6 +11,8 @@ import { toAcp } from '../mcp/effective';
 import { isDangerousCommand, type HarnessAdapter, type HarnessContext } from './types';
 import { isOutsideWorkspace } from './permissions';
 import { shutdownChild, spawnTool } from './spawn';
+import { makeFileChange } from '../util/file-changes';
+import { TurnUsageTracker } from '../util/turn-usage';
 
 interface ConfigOptionLike {
   id: string;
@@ -54,14 +55,14 @@ export class AcpAdapter implements HarnessAdapter {
   private toolItems = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
   private configOptions: ConfigOptionLike[] = [];
   private caps: Record<string, unknown> = {};
-  private totals: UsageTotals;
+  private readonly usage: TurnUsageTracker;
   private turnStartedAt = 0;
   private sessionAllowedKinds = new Set<string>();
   private preset: AcpAgentPreset | null = null;
   private inflightPrompt: Promise<unknown> | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
-    this.totals = { ...ctx.session().usage };
+    this.usage = new TurnUsageTracker(ctx.session().usage);
   }
 
   get busy(): boolean {
@@ -212,6 +213,9 @@ export class AcpAdapter implements HarnessAdapter {
     return {
       requestPermission: async (params: acp.RequestPermissionRequest) => this.onRequestPermission(params),
       sessionUpdate: async (params: acp.SessionNotification) => this.onSessionUpdate(params),
+      // ACP reads intentionally retain the adapter-wide read policy: an absolute path is allowed
+      // even when it is outside the session workspace. Writes and commands still go through the
+      // permission gate; callers should only use ACP with an agent they trust.
       readTextFile: async (params: acp.ReadTextFileRequest) => {
         const p = params as { path: string; line?: number | null; limit?: number | null };
         const abs = path.isAbsolute(p.path) ? p.path : path.join(cwd(), p.path);
@@ -240,7 +244,7 @@ export class AcpAdapter implements HarnessAdapter {
           const d = await this.ctx.requestApproval({
             kind: 'file_change',
             title: `Write ${rel}?`,
-            changes: [{ path: rel, kind: before ? 'update' : 'add', diff: createTwoFilesPatch(rel, rel, before, p.content, '', '', { context: 3 }) }],
+            changes: [makeFileChange(cwd(), rel, before || null, p.content, { addWhenEmpty: true })],
             options: [
               { id: 'allow', label: 'Allow', kind: 'allow' },
               { id: 'deny', label: 'Deny', kind: 'deny' }
@@ -326,8 +330,7 @@ export class AcpAdapter implements HarnessAdapter {
     const out: FileChange[] = [];
     for (const c of content as { type: string; path?: string; oldText?: string | null; newText?: string }[]) {
       if (c.type === 'diff' && c.path) {
-        const rel = path.isAbsolute(c.path) ? path.relative(this.ctx.session().cwd, c.path) || c.path : c.path;
-        out.push({ path: rel, kind: c.oldText ? 'update' : 'add', diff: createTwoFilesPatch(rel, rel, c.oldText ?? '', c.newText ?? '', '', '', { context: 3 }) });
+        out.push(makeFileChange(this.ctx.session().cwd, c.path, c.oldText || null, c.newText ?? '', { addWhenEmpty: true }));
       }
     }
     return out.length ? out : undefined;
@@ -398,11 +401,9 @@ export class AcpAdapter implements HarnessAdapter {
       }
       case 'usage_update': {
         const p = u as unknown as { used: number; size: number; cost?: { amount?: number; total?: number; value?: number } | null };
-        this.totals.contextTokens = p.used;
-        this.totals.contextWindow = p.size;
         const cost = p.cost?.amount ?? p.cost?.total ?? p.cost?.value;
-        if (typeof cost === 'number') this.totals.costUsd = cost;
-        this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
+        this.usage.setCumulative({ contextTokens: p.used, contextWindow: p.size, costUsd: typeof cost === 'number' ? cost : undefined });
+        this.ctx.emit({ type: 'usage', totals: this.usage.snapshot() });
         return;
       }
       case 'config_option_update': {
@@ -464,6 +465,7 @@ export class AcpAdapter implements HarnessAdapter {
       else this.info('This ACP agent does not accept images; the attachment was dropped.', 'warn');
     }
     this._busy = true;
+    this.usage.beginTurn();
     this.turnStartedAt = Date.now();
     this.ctx.emit({ type: 'status', status: 'running' });
     const p = this.conn.prompt({ sessionId: this.sessionId, prompt: blocks } as acp.PromptRequest);
@@ -472,11 +474,12 @@ export class AcpAdapter implements HarnessAdapter {
       .then((res) => {
         this.closeAssistant();
         const stop = res.stopReason;
-        this.totals.turns += 1;
-        this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
+        const completed = this.usage.finishTurn();
+        this.ctx.emit({ type: 'usage', totals: completed.totals });
         this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: stop === 'cancelled' ? 'interrupted' : stop === 'refusal' ? 'failed' : 'completed', durationMs: Date.now() - this.turnStartedAt, error: stop === 'refusal' ? 'The agent refused the request.' : stop === 'max_tokens' || stop === 'max_turn_requests' ? `Stopped: ${stop}` : undefined } });
       })
       .catch((e) => {
+        this.usage.finishTurn(false);
         this.closeAssistant();
         this.ctx.emit({ type: 'item.upsert', item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'failed', durationMs: Date.now() - this.turnStartedAt, error: errorMessage(e) } });
       })

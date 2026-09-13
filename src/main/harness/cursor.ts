@@ -20,12 +20,12 @@ import type {
   PermissionMode,
   ToolKindHint,
   TranscriptItem,
-  UsageTotals,
   UserInput
 } from '../../shared/types';
 import { errorMessage, shortId, truncate } from '../util/async';
+import { TurnUsageTracker, type TurnUsage } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
-import { CURSOR_STATIC_MODELS } from '../models/static-models';
+import { CURSOR_STATIC_MODELS, cursorModelToInfo } from '../models/static-models';
 
 const TEXT_LIMIT = 40_000;
 
@@ -125,18 +125,6 @@ function toSdkMessage(input: UserInput): { text: string; images?: { data: string
   };
 }
 
-/** Map a Cursor catalog entry to the app's ModelInfo. Context windows and pricing are not part of the catalog (usage is billed to the Cursor plan). */
-export function cursorModelToInfo(m: { id: string; displayName?: string; description?: string }): ModelInfo {
-  return {
-    id: m.id,
-    provider: 'cursor',
-    displayName: m.displayName ?? m.id,
-    description: m.description,
-    supportsImages: true,
-    supportsReasoning: true
-  };
-}
-
 /** Live model catalog from Cursor's backend. Throws on auth/network failure so callers can fall back. */
 export async function listCursorModels(apiKey?: string): Promise<ModelInfo[]> {
   const models = await Cursor.models.list({ apiKey });
@@ -157,9 +145,9 @@ export class CursorAdapter implements HarnessAdapter {
   private apiKey: string | undefined;
   private model: ModelSelection | undefined;
   private permissionMode: PermissionMode;
-  private totals: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
-  /** Per-turn usage from the latest `usage` message, attached to that turn's item. */
-  private turnUsage: Partial<UsageTotals> | undefined;
+  private usage: TurnUsageTracker;
+  /** Per-turn usage from Cursor's token-only `usage` messages, attached to that turn's item. */
+  private turnUsage: TurnUsage | undefined;
   /** Follow-up runs drained sequentially after the current turn (queue mode, or steers the SDK bounced back). */
   private followUps: QueuedInput[] = [];
   /** Streaming state for the current turn's assistant bubble. */
@@ -170,6 +158,7 @@ export class CursorAdapter implements HarnessAdapter {
 
   constructor(private readonly ctx: HarnessContext) {
     this.permissionMode = ctx.permissionMode();
+    this.usage = new TurnUsageTracker({ ...ctx.session().usage, costUsd: 0 });
   }
 
   get busy(): boolean {
@@ -179,7 +168,7 @@ export class CursorAdapter implements HarnessAdapter {
   async start(): Promise<void> {
     const meta = this.ctx.session();
     this.model = toModelSelection(meta.config.model);
-    this.totals = { ...meta.usage };
+    this.usage = new TurnUsageTracker({ ...meta.usage, costUsd: 0 });
     this.apiKey = await this.ctx.getApiKey('cursor');
     this.ctx.emit({ type: 'status', status: 'idle' });
     // Best-effort live catalog for the header picker; the New Session dialog uses the registry path.
@@ -249,6 +238,7 @@ export class CursorAdapter implements HarnessAdapter {
     this.bubble = null;
     this.toolItems.clear();
     this.turnUsage = undefined;
+    this.usage.beginTurn();
     this.turnStartedAt = Date.now();
     this.ctx.emit({ type: 'status', status: 'running' });
     void (async () => {
@@ -335,23 +325,23 @@ export class CursorAdapter implements HarnessAdapter {
         return;
       case 'usage': {
         const u = msg.usage;
-        const turn: Partial<UsageTotals> = {
+        const turn: TurnUsage = {
           inputTokens: u.inputTokens ?? 0,
           outputTokens: u.outputTokens ?? 0,
           cacheReadTokens: u.cacheReadTokens ?? 0,
           cacheWriteTokens: u.cacheWriteTokens ?? 0,
           reasoningTokens: u.reasoningTokens ?? 0
         };
-        this.totals.inputTokens += turn.inputTokens ?? 0;
-        this.totals.outputTokens += turn.outputTokens ?? 0;
-        this.totals.cacheReadTokens += turn.cacheReadTokens ?? 0;
-        this.totals.cacheWriteTokens += turn.cacheWriteTokens ?? 0;
-        this.totals.reasoningTokens += turn.reasoningTokens ?? 0;
-        // No dollar cost: usage is billed to the Cursor plan, not a per-token meter we can price.
-        this.totals.costUsd = 0;
-        this.totals.turns += 1;
-        this.turnUsage = turn;
-        this.ctx.emit({ type: 'usage', totals: { ...this.totals } });
+        this.usage.addUsage(turn);
+        this.turnUsage = {
+          inputTokens: (this.turnUsage?.inputTokens ?? 0) + (turn.inputTokens ?? 0),
+          outputTokens: (this.turnUsage?.outputTokens ?? 0) + (turn.outputTokens ?? 0),
+          cacheReadTokens: (this.turnUsage?.cacheReadTokens ?? 0) + (turn.cacheReadTokens ?? 0),
+          cacheWriteTokens: (this.turnUsage?.cacheWriteTokens ?? 0) + (turn.cacheWriteTokens ?? 0),
+          reasoningTokens: (this.turnUsage?.reasoningTokens ?? 0) + (turn.reasoningTokens ?? 0)
+        };
+        // No dollar cost: Cursor usage is billed to the Cursor plan, not a per-token meter.
+        // Publish the cumulative totals when the turn completes so only completion increments turns.
         return;
       }
       default:
@@ -440,6 +430,8 @@ export class CursorAdapter implements HarnessAdapter {
 
   private finishTurn(status: 'completed' | 'interrupted'): void {
     this.closeBubble();
+    const completed = this.usage.finishTurn();
+    this.ctx.emit({ type: 'usage', totals: completed.totals });
     this.ctx.emit({
       type: 'item.upsert',
       item: {
@@ -448,16 +440,18 @@ export class CursorAdapter implements HarnessAdapter {
         ts: Date.now(),
         status,
         durationMs: Date.now() - this.turnStartedAt,
-        usage: this.turnUsage
+        usage: completed.usage ?? this.turnUsage
       }
     });
     this.turnUsage = undefined;
   }
 
   private finishFailed(e: unknown): void {
+    const completed = this.usage.finishTurn();
+    this.ctx.emit({ type: 'usage', totals: completed.totals });
     this.ctx.emit({
       type: 'item.upsert',
-      item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'failed', durationMs: Date.now() - this.turnStartedAt, error: errorMessage(e) }
+      item: { id: shortId('turn_'), kind: 'turn', ts: Date.now(), status: 'failed', durationMs: Date.now() - this.turnStartedAt, usage: completed.usage ?? this.turnUsage, error: errorMessage(e) }
     });
     this.turnUsage = undefined;
   }

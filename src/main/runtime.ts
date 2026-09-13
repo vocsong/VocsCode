@@ -55,44 +55,84 @@ export function which(cmd: string, extraDirs: string[] = []): string | null {
   return null;
 }
 
+export const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
+
+export interface CaptureResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  /** True when stdout or stderr reached MAX_CAPTURE_BYTES. */
+  truncated?: boolean;
+  /** True when the child was killed by the capture timeout. */
+  timedOut?: boolean;
+}
+
 export function runCapture(
   cmd: string,
   args: string[],
   opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; input?: string } = {}
-): Promise<{ code: number | null; stdout: string; stderr: string; timedOut?: boolean }> {
+): Promise<CaptureResult> {
   return new Promise((resolve) => {
-    let stdout = '';
-    let stderr = '';
+    const stdout = { chunks: [] as Buffer[], bytes: 0, truncated: false };
+    const stderr = { chunks: [] as Buffer[], bytes: 0, truncated: false };
     let settled = false;
     let timeout: NodeJS.Timeout | undefined;
-    const settle = (r: { code: number | null; stdout: string; stderr: string; timedOut?: boolean }) => {
+    const append = (target: typeof stdout, data: unknown): void => {
+      if (target.bytes >= MAX_CAPTURE_BYTES) {
+        target.truncated = true;
+        return;
+      }
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+      const remaining = MAX_CAPTURE_BYTES - target.bytes;
+      if (chunk.byteLength > remaining) {
+        target.chunks.push(chunk.subarray(0, remaining));
+        target.bytes = MAX_CAPTURE_BYTES;
+        target.truncated = true;
+      } else {
+        target.chunks.push(chunk);
+        target.bytes += chunk.byteLength;
+      }
+    };
+    const text = (target: typeof stdout): string => Buffer.concat(target.chunks, target.bytes).toString('utf8');
+    const result = (code: number | null, extraStderr?: string, timedOut = false): CaptureResult => {
+      if (extraStderr) append(stderr, extraStderr);
+      const out: CaptureResult = { code, stdout: text(stdout), stderr: text(stderr) };
+      if (stdout.truncated || stderr.truncated) out.truncated = true;
+      if (timedOut) out.timedOut = true;
+      return out;
+    };
+    const settle = (code: number | null, extraStderr?: string, timedOut = false): void => {
       if (settled) return;
       settled = true;
       if (timeout) clearTimeout(timeout);
-      resolve(r);
+      resolve(result(code, extraStderr, timedOut));
     };
     let child;
     try {
       child = spawnTool(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env });
     } catch (e) {
-      settle({ code: null, stdout: '', stderr: String(e) });
+      settle(null, String(e));
       return;
     }
     if (!child.stdout || !child.stderr || !child.stdin) {
-      settle({ code: null, stdout: '', stderr: 'no stdio' });
+      settle(null, 'no stdio');
       return;
     }
     timeout = setTimeout(() => {
-      void killTree(child);
+      try {
+        killTree(child);
+      } catch {
+        /* ignore */
+      }
       // Grandchildren can inherit the pipes and keep stdio open (cmd.exe-wrapped shims on
-      // Windows); settle anyway so callers never hang on a killed child. timedOut marks the
-      // partial output as untrustworthy rather than a completed run.
-      settle({ code: null, stdout, stderr: `${stderr}\ntimed out after ${opts.timeoutMs ?? 15_000}ms`, timedOut: true });
+      // Windows); settle anyway so callers never hang on a killed child.
+      // Mark partial output as untrustworthy rather than a completed run.
+      settle(null, `\ntimed out after ${opts.timeoutMs ?? 15_000}ms`, true);
     }, opts.timeoutMs ?? 15_000);
-    child.stdout.on('data', (d) => (stdout += d.toString()));
-    child.stderr.on('data', (d) => (stderr += d.toString()));
-    child.on('error', (e) => settle({ code: null, stdout, stderr: stderr + String(e) }));
-    child.on('close', (code) => settle({ code, stdout, stderr }));
+    child.stdout.on('data', (d) => append(stdout, d));
+    child.stderr.on('data', (d) => append(stderr, d));
+    child.on('error', (e) => settle(null, String(e)));
+    child.on('close', (code) => settle(code));
     // A dead pipe must not surface as an uncaught exception.
     child.stdin.on('error', () => undefined);
     if (opts.input !== undefined) child.stdin.end(opts.input);
@@ -190,10 +230,10 @@ export class RuntimeResolver {
     if (preferBundled && bundled) return { path: bundled, source: 'bundled' };
 
     const sys = which(tool, this.appRuntimeBin());
-    // An npm .cmd shim needs a cmd.exe parent on Windows, which outlives a plain child.kill()
-    // and makes tree termination unreliable; prefer the bundled native binary when PATH only
-    // offers the shim. Both read the same credentials (~/.claude, ~/.codex).
-    if ((tool === 'claude' || tool === 'codex') && sys && /\.(cmd|bat)$/i.test(sys) && bundled && !systemOnly) return { path: bundled, source: 'bundled' };
+    // The Claude Agent SDK spawns the executable directly; an npm .cmd shim cannot be spawned
+    // without a shell on Windows, so prefer the bundled native binary in that case. Both read
+    // the same ~/.claude credentials.
+    if (tool === 'claude' && sys && /\.(cmd|bat)$/i.test(sys) && bundled && !systemOnly) return { path: bundled, source: 'bundled' };
     if (sys) return { path: sys, source: sys.startsWith(this.paths.appRuntimeDir) ? 'app-runtime' : 'system' };
     if (!systemOnly && bundled) return { path: bundled, source: 'bundled' };
     return null;
