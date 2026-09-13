@@ -559,6 +559,62 @@ describe('SessionManager folder tracking', () => {
     await manager.create({ config: { ...cfg } });
     expect(stored.folders).toEqual(['G:/proj/a']);
   });
+
+  it('refreshes the analytics snapshot when a harness discovers or switches its active model', async () => {
+    const session: SessionMeta = {
+      id: 'model-discovery',
+      title: 'model discovery',
+      createdAt: 1,
+      updatedAt: 1,
+      config: { harness: 'pi', projectRoot: 'G:/proj/a', permissionMode: 'ask' },
+      cwd: 'G:/proj/a',
+      status: 'idle',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    const analytics = { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() };
+    const store = {
+      list: () => [session],
+      get: (id: string) => (id === session.id ? session : undefined),
+      upsert: vi.fn(),
+      appendTranscript: vi.fn(async () => undefined),
+      sessionDir: () => os.tmpdir()
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: analytics as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: vi.fn(),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    const ctx = (manager as unknown as { buildContext: (meta: SessionMeta, id: string) => { updateMeta: (patch: Partial<SessionMeta>) => void } }).buildContext(session, session.id);
+    ctx.updateMeta({ activeModel: { provider: 'openai', model: 'gpt-6-terra' } });
+    expect(analytics.touchSession).toHaveBeenCalledWith(expect.objectContaining({ activeModel: { provider: 'openai', model: 'gpt-6-terra' } }));
+    analytics.touchSession.mockClear();
+    await manager.setModel(session.id, { provider: 'anthropic', model: 'claude-opus-5' });
+    expect(analytics.touchSession).toHaveBeenCalledWith(expect.objectContaining({ activeModel: { provider: 'anthropic', model: 'claude-opus-5' } }));
+
+    const adapterSetModel = vi.fn(async () => undefined);
+    const active = { adapter: { setModel: adapterSetModel }, liveItems: new Map(), toolModels: new Map(), dirty: new Set() };
+    (manager as unknown as { active: Map<string, typeof active> }).active.set(session.id, active);
+    analytics.touchSession.mockClear();
+    adapterSetModel.mockRejectedValueOnce(new Error('switch rejected'));
+    await expect(manager.setModel(session.id, { provider: 'openai', model: 'gpt-6-terra' })).rejects.toThrow('switch rejected');
+    expect(session.activeModel).toEqual({ provider: 'anthropic', model: 'claude-opus-5' });
+    expect(analytics.touchSession).not.toHaveBeenCalled();
+
+    const emit = (manager as unknown as { emit: (id: string, event: SessionEvent) => void }).emit.bind(manager);
+    const running = { id: 'tool-1', kind: 'tool', ts: 2, name: 'Bash', status: 'running' } as const;
+    emit(session.id, { type: 'item.upsert', item: running });
+    ctx.updateMeta({ activeModel: { provider: 'openai', model: 'gpt-6-terra' } });
+    const done = { ...running, status: 'done' as const };
+    emit(session.id, { type: 'item.upsert', item: done });
+    expect(analytics.recordToolCall).toHaveBeenCalledWith(session.id, done, undefined, { provider: 'anthropic', model: 'claude-opus-5' });
+  });
 });
 
 describe('SessionManager fork', () => {
