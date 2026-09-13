@@ -919,6 +919,12 @@ h4 {
   min-width: 0;
   min-height: 0;
 }
+/* The drawer's dismiss layer only exists below the breakpoint; the element is always in the DOM
+   while the sidebar is open, so it has to stay out of the .app grid at every other width — as a
+   visible child it takes the first column and pushes the sidebar and main into the wrong cells. */
+.sidebar-backdrop {
+  display: none;
+}
 .sidebar-top {
   display: flex;
   align-items: center;
@@ -4920,6 +4926,14 @@ body.resizing {
 }
 
 @media (max-width: 900px) {
+  /* The drawer floats above the content, so the sidebar no longer owns a grid column; leaving one
+     behind would strand the transcript in a 280px-wide cell. */
+  .app {
+    grid-template-columns: minmax(0, 1fr) var(--panel);
+  }
+  .app.no-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
   /* The sidebar becomes an overlay drawer instead of squeezing the transcript. */
   .sidebar {
     position: fixed;
@@ -4932,6 +4946,7 @@ body.resizing {
     box-shadow: 0 0 40px rgb(0 0 0 / 0.45);
   }
   .sidebar-backdrop {
+    display: block;
     position: fixed;
     top: var(--titlebar);
     right: 0;
