@@ -2,7 +2,8 @@
 /**
  * PR rows in the Git panel are readable at a glance but carry no description. Clicking one opens a
  * detail dialog with GitHub's markdown body, labels and review state — the same affordance issues
- * already have — while the row's own action buttons keep acting without opening it.
+ * already have — while the row's own action buttons keep acting without opening it. The row's New
+ * session button starts a review session on the repo, with the review template as its first message.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -63,6 +64,8 @@ beforeEach(() => {
     if (channel === 'git:pullRequests') return Promise.resolve({ prs: [...prs], fetchedAt: Date.now() } satisfies GitPullRequestList);
     if (channel === 'git:issues') return Promise.resolve({ issues: [], fetchedAt: Date.now() });
     if (channel === 'git:merge') return Promise.resolve({ ok: true, url: 'https://github.com/o/r/pull/7' });
+    if (channel === 'sessions:create') return Promise.resolve({ id: 's_new', title: 'Review PR #7' });
+    if (channel === 'sessions:transcript') return Promise.resolve([]);
     return Promise.resolve({});
   });
 });
@@ -149,5 +152,36 @@ describe('Git panel PR detail dialog', () => {
 
     expect(invokeMock).toHaveBeenCalledWith('git:merge', { sessionId: 's1', head: 'feature/thing' });
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+/**
+ * The row's New session action replaces the ⋯ menu: one click starts a review session on the repo
+ * itself, with the review template as its first message.
+ */
+describe('Git panel PR review session', () => {
+  it('starts a review session on the repo from the row, review template included', async () => {
+    await openPrList();
+
+    // The ⋯ menu and its list actions are gone, so the row's second action starts the session.
+    expect(screen.queryByTitle('PR actions')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'New session to review PR #7' }));
+    });
+
+    const created = invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create');
+    expect(created).toHaveLength(1);
+    // The session lands on the repo itself (no worktree) and opens with the review template.
+    expect(created[0]![1]).toEqual({
+      config: { harness: 'native', projectRoot: 'G:/proj/a', permissionMode: 'auto', useWorktree: false },
+      title: 'Review PR #7',
+      initialPrompt:
+        'Review pull request #7 "Add the thing" (https://github.com/o/r/pull/7), branch `feature/thing` into `develop`. Run `gh pr diff 7` for the patch: summarize what it changes, flag risks, and say whether it is ready to merge.'
+    });
+    // The button acts like the row's other actions: no dialog, the new session becomes active.
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(useStore.getState().activeId).toBe('s_new');
+    expect(useStore.getState().toasts.some((t) => t.kind === 'success' && t.text === 'Session started to review PR #7')).toBe(true);
   });
 });

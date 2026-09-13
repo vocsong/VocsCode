@@ -264,11 +264,23 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
     return true;
   };
 
-  /** Prefills the composer with the PR so the agent can review it without leaving the desk. */
-  const askAgentAboutPr = (pr: GitPullRequest) => {
-    useStore.getState().insertIntoComposer(
-      `Review pull request #${pr.number} "${pr.title}" (${pr.url})${pr.headRefName ? `, branch \`${pr.headRefName}\`` : ''}${pr.baseRefName ? ` into \`${pr.baseRefName}\`` : ''}: summarize what it changes, flag risks, and say whether it is ready to merge.`
-    );
+  /** First message of a review session: the PR table's New session action sends this as the prompt. */
+  const prReviewPrompt = (pr: GitPullRequest) =>
+    `Review pull request #${pr.number} "${pr.title}" (${pr.url})${pr.headRefName ? `, branch \`${pr.headRefName}\`` : ''}${pr.baseRefName ? ` into \`${pr.baseRefName}\`` : ''}. Run \`gh pr diff ${pr.number}\` for the patch: summarize what it changes, flag risks, and say whether it is ready to merge.`;
+
+  /** Starts a review session on this repo: the PR table's New session action, no folder picker. */
+  const reviewPrInNewSession = async (pr: GitPullRequest) => {
+    try {
+      const meta = await invoke('sessions:create', {
+        config: { ...session.config, useWorktree: false },
+        title: `Review PR #${pr.number}`,
+        initialPrompt: prReviewPrompt(pr)
+      });
+      await setActive(meta.id);
+      toast(`Session started to review PR #${pr.number}`, 'success');
+    } catch (e) {
+      toast(String((e as Error).message ?? e), 'error');
+    }
   };
 
   /** Seeds the Ctrl+N quick picker with the issue so a session on it is two keystrokes away. */
@@ -339,7 +351,6 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   const mergedCount = data.branches.filter((b) => b.merged && !b.isBase).length;
   const openPrCount = prData?.prs.filter((p) => p.state === 'OPEN').length;
   const openIssueCount = issueData?.issues.filter((i) => i.state === 'OPEN').length;
-  const localBranches = new Set(data.branches.map((b) => b.name));
 
   return (
     <div className="branches">
@@ -444,14 +455,10 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           setFilter={setPrFilter}
           query={prQuery}
           setQuery={setPrQuery}
-          isLocal={(name) => localBranches.has(name)}
           onRefresh={() => void refreshPrs()}
           onOpen={(pr) => setSelectedPr(pr)}
           onView={(pr) => void invoke('app:openExternal', { url: pr.url })}
-          onMerge={(pr) => void mergeListedPr(pr)}
-          onCopyUrl={(pr) => void navigator.clipboard.writeText(pr.url).then(() => toast(`Copied ${pr.url}`, 'success'))}
-          onAskAgent={askAgentAboutPr}
-          onNewSession={(pr) => pr.headRefName && void newSessionOnBranch({ name: pr.headRefName } as GitBranchOverviewItem)}
+          onNewSession={reviewPrInNewSession}
         />
       ) : view === 'branches' ? (
         <>
@@ -758,13 +765,9 @@ function PrList({
   setFilter,
   query,
   setQuery,
-  isLocal,
   onRefresh,
   onOpen,
   onView,
-  onMerge,
-  onCopyUrl,
-  onAskAgent,
   onNewSession
 }: {
   data: GitPullRequestList | null;
@@ -773,13 +776,9 @@ function PrList({
   setFilter: (f: PrFilter) => void;
   query: string;
   setQuery: (q: string) => void;
-  isLocal: (branch: string) => boolean;
   onRefresh: () => void;
   onOpen: (pr: GitPullRequest) => void;
   onView: (pr: GitPullRequest) => void;
-  onMerge: (pr: GitPullRequest) => void;
-  onCopyUrl: (pr: GitPullRequest) => void;
-  onAskAgent: (pr: GitPullRequest) => void;
   onNewSession: (pr: GitPullRequest) => void;
 }) {
   const prs = data?.prs ?? [];
@@ -847,12 +846,8 @@ function PrList({
             <PrRow
               key={pr.number}
               pr={pr}
-              local={!!pr.headRefName && isLocal(pr.headRefName)}
               onOpen={() => onOpen(pr)}
               onView={() => onView(pr)}
-              onMerge={() => onMerge(pr)}
-              onCopyUrl={() => onCopyUrl(pr)}
-              onAskAgent={() => onAskAgent(pr)}
               onNewSession={() => onNewSession(pr)}
             />
           ))}
@@ -865,21 +860,13 @@ function PrList({
 
 function PrRow({
   pr,
-  local,
   onOpen,
   onView,
-  onMerge,
-  onCopyUrl,
-  onAskAgent,
   onNewSession
 }: {
   pr: GitPullRequest;
-  local: boolean;
   onOpen: () => void;
   onView: () => void;
-  onMerge: () => void;
-  onCopyUrl: () => void;
-  onAskAgent: () => void;
   onNewSession: () => void;
 }) {
   const open = pr.state === 'OPEN';
@@ -930,64 +917,15 @@ function PrRow({
         )}
       </span>
       <div className="branch-actions">
-        <span className="branch-inline">
-          <Button variant="ghost" size="sm" icon="external" title={`Open PR #${pr.number} on GitHub`} onClick={onView} />
-        </span>
-        <Dropdown
-          align="right"
-          width={260}
-          trigger={() => <Button variant="ghost" size="sm" icon="more" title="PR actions" aria-label={`Actions for PR #${pr.number}`} />}
-        >
-          {(close) => (
-            <>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  onView();
-                }}
-              >
-                View PR on GitHub
-              </MenuItem>
-              <MenuItem
-                disabled={!open || pr.isDraft || !pr.headRefName}
-                onClick={() => {
-                  close();
-                  onMerge();
-                }}
-                hint={pr.isDraft ? 'draft' : open ? `into ${pr.baseRefName ?? 'base'}` : undefined}
-              >
-                Merge PR
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  onAskAgent();
-                }}
-                hint="Prefill the composer"
-              >
-                Ask the agent about this PR
-              </MenuItem>
-              <MenuItem
-                disabled={!local}
-                onClick={() => {
-                  close();
-                  onNewSession();
-                }}
-                hint={local ? 'isolated worktree' : 'branch not local'}
-              >
-                New session on its branch
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  close();
-                  onCopyUrl();
-                }}
-              >
-                Copy PR link
-              </MenuItem>
-            </>
-          )}
-        </Dropdown>
+        <Button variant="ghost" size="sm" icon="external" title={`Open PR #${pr.number} on GitHub`} onClick={onView} />
+        <Button
+          variant="ghost"
+          size="sm"
+          icon="sessionPlus"
+          title={`Start a new session on this repo to review PR #${pr.number}`}
+          aria-label={`New session to review PR #${pr.number}`}
+          onClick={onNewSession}
+        />
       </div>
     </div>
   );
