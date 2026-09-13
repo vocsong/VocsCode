@@ -61,6 +61,7 @@ const summary: AnalyticsSummary = {
   toolTotals: { calls: 8, errors: 0, declined: 0, durationMs: 0 },
   tools: [{ name: 'Bash', calls: 8, errors: 0, declined: 0, durationMs: 0 }],
   modelTools: [],
+  harnessModelTools: [],
   files: [],
   sessions: [rec('s1', 'claude', 'opus', 5, 6), rec('s2', 'pi', 'glm', 1, 2), rec('s3', 'pi', 'glm', 0.5, 1)],
   sessionCount: 3,
@@ -94,6 +95,8 @@ const liveSession = (id: string): SessionMeta =>
 
 function reset() {
   invokeMock.mockClear();
+  summary.modelTools = [];
+  summary.harnessModelTools = [];
   useStore.setState({ sessions: [liveSession('s1'), liveSession('s2')], activeId: null, view: 'analytics', analyticsTab: 'overview', analyticsRange: 30 });
 }
 
@@ -154,17 +157,47 @@ describe('analytics dashboard', () => {
     // until the stub days carry them; all time reads the summary directly.
     fireEvent.click(Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'All time') as HTMLButtonElement);
     await waitFor(() => expect(container.textContent).toContain('Error rate by model'));
-    const table = Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === 'Tool') as HTMLTableElement;
+    const table = Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === 'Model') as HTMLTableElement;
     expect(table).toBeTruthy();
-    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Tool', 'sol', 'glm', 'fable-5-1', 'luna', 'deepseek', 'astra', 'terra', 'opus']);
-    expect(table.textContent).not.toContain('Other');
-    // Built-in names from Claude use title case, while Pi/native use lower case. They share rows.
-    const bashRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('bash')) as HTMLTableRowElement;
-    expect(bashRow).toBeTruthy();
-    expect(Array.from(bashRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['bash', '(2/10) 20%', '(1/9) 11%', '(1/6) 17%', '(0/8) 0%', '(0/7) 0%', '(0/5) 0%', '(0/2) 0%', '(0/1) 0%']);
-    expect(Array.from(table.querySelectorAll('tr')).filter((tr) => tr.textContent?.toLowerCase().startsWith('bash'))).toHaveLength(1);
-    const readRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('Read')) as HTMLTableRowElement;
-    expect(Array.from(readRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['Read', '—', '—', '(0/2) 0%', '—', '—', '—', '—', '—']);
+    // Models are the rows and tools the columns, so adding a model makes the table taller, not wider.
+    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Model', 'bash', 'Read']);
+    expect(table.querySelectorAll('tbody tr')).toHaveLength(8);
+    // Built-in names from Claude use title case, while Pi/native use lower case. They share columns.
+    const solRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('sol')) as HTMLTableRowElement;
+    expect(Array.from(solRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['sol', '(2/10) 20%', '—']);
+    const fableRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('fable-5-1')) as HTMLTableRowElement;
+    expect(Array.from(fableRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['fable-5-1', '(1/6) 17%', '(0/2) 0%']);
+    expect(Array.from(table.querySelectorAll('tr')).filter((tr) => tr.textContent?.toLowerCase().startsWith('bash'))).toHaveLength(0);
+    // No harness+model data in this stub: the sibling card says so instead of rendering an empty table.
+    expect(container.textContent).toContain('No per-harness tool calls recorded yet');
+  });
+
+  it('shows the error rate of each harness and model pair, worst first', async () => {
+    reset();
+    summary.harnessModelTools = [
+      { harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Bash', calls: 8, errors: 1, declined: 0, durationMs: 0 },
+      { harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Read', calls: 4, errors: 0, declined: 0, durationMs: 0 },
+      { harness: 'pi', key: 'openrouter/glm', label: 'glm', name: 'bash', calls: 5, errors: 2, declined: 0, durationMs: 0 },
+      { harness: 'codex', key: 'openai/gpt', label: 'gpt', name: 'Read', calls: 3, errors: 0, declined: 0, durationMs: 0 },
+      // The same model in another harness is its own row, not merged into the first.
+      { harness: 'pi', key: 'anthropic/opus', label: 'opus', name: 'Bash', calls: 2, errors: 0, declined: 0, durationMs: 0 }
+    ];
+    const { container } = render(<AnalyticsDashboard />);
+    await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
+    fireEvent.click(container.querySelector("[data-tab='tools']") as HTMLButtonElement);
+    fireEvent.click(Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'All time') as HTMLButtonElement);
+    await waitFor(() => expect(container.textContent).toContain('Error rate by harness + model'));
+    const table = Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === 'Harness · model') as HTMLTableElement;
+    expect(table).toBeTruthy();
+    expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Harness · model', 'Calls', 'Errors', 'Error rate']);
+    const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr) => Array.from(tr.querySelectorAll('td')).map((cell) => cell.textContent));
+    // Worst rate first: Pi/glm 40%, Claude/opus 8.3% (Bash and Read combined), Pi/opus and Codex/gpt at 0%.
+    expect(rows).toEqual([
+      ['Pi · glm', '5', '2', '40%'],
+      ['Claude · opus', '12', '1', '8.3%'],
+      ['Codex · gpt', '3', '0', '0%'],
+      ['Pi · opus', '2', '0', '0%']
+    ]);
   });
 
   it('lets the legend hide a series and every chart card swap to its table', async () => {

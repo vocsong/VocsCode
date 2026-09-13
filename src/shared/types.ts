@@ -293,6 +293,8 @@ export interface UsageDayDimensions {
   tool: Record<string, ToolUsage>;
   /** Per-tool call counts keyed by model (`provider/model`), attributed to the model active when the call ran. */
   modelTool: Record<string, Record<string, ToolUsage>>;
+  /** Per-tool call counts keyed `harness|provider/model`, attributed to both when the call ran. */
+  harnessModelTool: Record<string, Record<string, ToolUsage>>;
   file: Record<string, FileUsage>;
 }
 
@@ -328,6 +330,12 @@ export interface ModelToolRow extends ToolUsage {
   label: string;
   /** Tool name. */
   name: string;
+}
+
+/** Tool-call rollup for one tool under one harness and model. */
+export interface HarnessModelToolRow extends ModelToolRow {
+  /** The harness the call ran in. */
+  harness: string;
 }
 
 /** File-change counts by change kind, aggregated across tool calls. */
@@ -414,6 +422,8 @@ export interface AnalyticsSummary {
   tools: ToolUsageRow[];
   /** Per-tool call counts per model, sorted by volume. */
   modelTools: ModelToolRow[];
+  /** Per-tool call counts per harness and model, sorted by volume. */
+  harnessModelTools: HarnessModelToolRow[];
   files: FileUsageRow[];
   /** Sessions sorted by spend, highest first. */
   sessions: UsageSessionRecord[];

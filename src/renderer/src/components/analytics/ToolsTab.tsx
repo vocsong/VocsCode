@@ -1,8 +1,9 @@
 /** Tools & files: call volume and reliability per tool, and the files the agents touched most. */
 import React, { useState } from 'react';
-import type { AnalyticsSummary, ModelToolRow } from '../../../../shared/types';
+import type { AnalyticsSummary, HarnessModelToolRow, ModelToolRow } from '../../../../shared/types';
+import { harnessShort } from '../../format';
 import { Button } from '../ui';
-import { BarList, ChartCard, ColumnChart, DataTable, Legend, Meter, Segmented, seriesTable, StackedBar } from './charts';
+import { BarList, ChartCard, ColumnChart, DataTable, Legend, Meter, Segmented, seriesTable, StackedBar, type TableSpec } from './charts';
 import { delta, FILE_KINDS, fmtCompact, fmtMs, fmtPct, plural, SPLITS, splitSeries, type Scope, type Split } from './model';
 import { Footnotes, KpiGrid, StatTile } from './tiles';
 
@@ -18,64 +19,91 @@ interface RateCell {
   errors: number;
 }
 
-interface ToolTotal extends RateCell {
-  label: string;
+function rateCell(cell: RateCell | undefined): { text: string; tone?: string; title: string } {
+  if (!cell || !(cell.calls > 0)) return { text: '—', tone: undefined, title: 'No calls' };
+  const rate = cell.errors / cell.calls;
+  return { text: `(${cell.errors}/${cell.calls}) ${fmtPct(rate)}`, tone: rateTone(rate), title: `${plural(cell.errors, 'error')} in ${plural(cell.calls, 'call')}` };
 }
 
-/** Groups the per-model tool rows into a matrix: one row per tool, one column per model. */
-function errorRateTable(modelTools: ModelToolRow[]): { columns: { label: string; numeric?: boolean }[]; rows: React.ReactNode[][] } | null {
-  const models = new Map<string, RateCell & { label: string }>();
+/**
+ * Groups the per-model tool rows into a matrix: one row per model, one column per tool. Models grow
+ * with every provider added, so they take the rows and the table gets taller instead of wider.
+ */
+function errorRateTable(modelTools: ModelToolRow[]): TableSpec | null {
+  const models = new Map<string, { label: string; calls: number; errors: number; tools: Map<string, RateCell> }>();
+  const tools = new Map<string, { label: string; calls: number }>();
   for (const r of modelTools) {
-    const m = models.get(r.key) ?? { label: r.label || r.key, calls: 0, errors: 0 };
+    const nameKey = r.name.toLocaleLowerCase();
+    const m = models.get(r.key) ?? { label: r.label || r.key, calls: 0, errors: 0, tools: new Map() };
+    const cell = m.tools.get(nameKey) ?? { calls: 0, errors: 0 };
+    cell.calls += r.calls;
+    cell.errors += r.errors;
+    m.tools.set(nameKey, cell);
     m.calls += r.calls;
     m.errors += r.errors;
     models.set(r.key, m);
-  }
-  if (models.size === 0) return null;
-  // Keep every model visible. The table scrolls horizontally when it outgrows the card.
-  const cols = [...models.entries()]
-    .sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label))
-    .map(([key, m]) => ({ key, label: m.label }));
-  // Defensively compare names case-insensitively too, so older/stubbed summaries cannot split
-  // Bash/bash into separate rows.
-  const perModel = new Map<string, Map<string, RateCell>>();
-  const totals = new Map<string, ToolTotal>();
-  for (const r of modelTools) {
-    const nameKey = r.name.toLocaleLowerCase();
-    const m = perModel.get(r.key) ?? new Map<string, RateCell>();
-    const cell = m.get(nameKey) ?? { calls: 0, errors: 0 };
-    cell.calls += r.calls;
-    cell.errors += r.errors;
-    m.set(nameKey, cell);
-    perModel.set(r.key, m);
-    const t = totals.get(nameKey) ?? { label: r.name, calls: 0, errors: 0 };
+    const t = tools.get(nameKey) ?? { label: r.name, calls: 0 };
     // Prefer an all-lowercase spelling when one harness supplies it.
     if (r.name === nameKey) t.label = r.name;
     t.calls += r.calls;
-    t.errors += r.errors;
-    totals.set(nameKey, t);
+    tools.set(nameKey, t);
   }
-  const tools = [...totals.entries()].sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
-  const cell = (r: RateCell | undefined) => {
-    if (!r || !(r.calls > 0)) return { text: '—', tone: undefined, title: 'No calls' };
-    const rate = r.errors / r.calls;
-    return { text: `(${r.errors}/${r.calls}) ${fmtPct(rate)}`, tone: rateTone(rate), title: `${plural(r.errors, 'error')} in ${plural(r.calls, 'call')}` };
-  };
+  if (models.size === 0) return null;
+  const rows = [...models.entries()].sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
+  const cols = [...tools.entries()].sort((a, b) => b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
   return {
-    columns: [{ label: 'Tool' }, ...cols.map((c) => ({ label: c.label, numeric: true }))],
-    rows: tools.map(([nameKey, tool]) => [
-      <span key={nameKey} className="mono" title={tool.label}>
-        {tool.label || '(unnamed)'}
+    columns: [{ label: 'Model' }, ...cols.map(([, t]) => ({ label: t.label, numeric: true }))],
+    rows: rows.map(([key, m]) => [
+      <span key={key} className="mono" title={m.label}>
+        {m.label || key}
       </span>,
-      ...cols.map((c) => {
-        const { text, tone, title } = cell(perModel.get(c.key)?.get(nameKey));
+      ...cols.map(([nameKey]) => {
+        const { text, tone, title } = rateCell(m.tools.get(nameKey));
         return (
-          <span key={c.key} title={title} style={tone ? { color: tone } : undefined}>
+          <span key={nameKey} title={title} style={tone ? { color: tone } : undefined}>
             {text}
           </span>
         );
       })
     ])
+  };
+}
+
+/** One row per harness and model pair, worst error rate first; the tooltip breaks it down by tool. */
+function harnessModelRateTable(rows: HarnessModelToolRow[]): TableSpec | null {
+  interface Combo extends RateCell {
+    harness: string;
+    label: string;
+    tools: string[];
+  }
+  const combos = new Map<string, Combo>();
+  for (const r of rows) {
+    const comboKey = `${r.harness}|${r.key}`;
+    const c = combos.get(comboKey) ?? { harness: r.harness, label: r.label || r.key, calls: 0, errors: 0, tools: [] };
+    c.calls += r.calls;
+    c.errors += r.errors;
+    if (r.calls > 0) c.tools.push(`${r.name} ${r.errors}/${r.calls}`);
+    combos.set(comboKey, c);
+  }
+  if (combos.size === 0) return null;
+  const rate = (c: RateCell) => (c.calls > 0 ? c.errors / c.calls : -1);
+  const sorted = [...combos.entries()].sort((a, b) => rate(b[1]) - rate(a[1]) || b[1].calls - a[1].calls || a[1].label.localeCompare(b[1].label));
+  return {
+    columns: [{ label: 'Harness · model' }, { label: 'Calls', numeric: true }, { label: 'Errors', numeric: true }, { label: 'Error rate', numeric: true }],
+    rows: sorted.map(([comboKey, c]) => {
+      const ratio = c.calls > 0 ? c.errors / c.calls : null;
+      const tone = ratio === null ? undefined : rateTone(ratio);
+      return [
+        <span key={comboKey} className="mono" title={`${harnessShort(c.harness)} · ${c.label}`}>
+          {harnessShort(c.harness)} · {c.label}
+        </span>,
+        fmtCompact(c.calls),
+        fmtCompact(c.errors),
+        <span key="rate" title={c.tools.join(' · ') || 'No calls'} style={tone ? { color: tone } : undefined}>
+          {fmtPct(ratio)}
+        </span>
+      ];
+    })
   };
 }
 
@@ -153,6 +181,13 @@ export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsS
           <div className="chart-empty">No per-model tool calls recorded yet — filled by new tool calls.</div>
         ) : (
           <DataTable table={errorRateTable(scope.modelTools)!} compact />
+        )}
+      </ChartCard>
+      <ChartCard title="Error rate by harness + model" subtitle={`Errors ÷ calls across every tool, worst rate first · ${scope.label}`}>
+        {scope.harnessModelTools.length === 0 ? (
+          <div className="chart-empty">No per-harness tool calls recorded yet — filled by new tool calls.</div>
+        ) : (
+          <DataTable table={harnessModelRateTable(scope.harnessModelTools)!} compact />
         )}
       </ChartCard>
       <Footnotes scope={scope} summary={summary} />
