@@ -263,7 +263,11 @@ export type AcpMcpServer =
   | { name: string; command: string; args: string[]; env: { name: string; value: string }[] }
   | { type: 'http' | 'sse'; name: string; url: string; headers: { name: string; value: string }[] };
 
-/** `session/new.mcpServers`. HTTP and SSE entries are dropped unless the agent advertised them. */
+/**
+ * `session/new.mcpServers`. HTTP and SSE entries are dropped unless the agent advertised them.
+ * Callers must pass stdio servers with an absolute `command`: ACP rejects a relative one and
+ * fails the whole request, so the adapter resolves or drops them before converting.
+ */
 export function toAcp(defs: McpServerDef[], caps: { http?: boolean; sse?: boolean } = {}): AcpMcpServer[] {
   const out: AcpMcpServer[] = [];
   for (const d of defs) {
