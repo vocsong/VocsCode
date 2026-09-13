@@ -1,12 +1,14 @@
 /** System prompt assembly for the native loop, including any project instruction file it finds. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import type { ModelRef } from '../../../shared/types';
+import { modelName } from '../../../shared/model-names';
 import { detectShell } from './tools';
 
-export async function buildSystemPrompt(cwd: string, opts: { planMode: boolean; append?: string; model: string }): Promise<string> {
+export async function buildSystemPrompt(cwd: string, opts: { planMode: boolean; append?: string; model: ModelRef }): Promise<string> {
   const shell = detectShell();
   const parts: string[] = [];
-  parts.push(`You are an expert software engineering agent running inside Vocs Code, a desktop coding assistant. You work autonomously in the user's project by calling tools. Model: ${opts.model}.`);
+  parts.push(`You are an expert software engineering agent running inside Vocs Code, a desktop coding assistant. You work autonomously in the user's project by calling tools. Model: ${modelName(opts.model.provider, opts.model.model)}.`);
   parts.push(`Working directory: ${cwd}\nOperating system: ${process.platform} (${process.arch})\nShell used by the bash tool: ${shell.name}\nDate: ${new Date().toISOString().slice(0, 10)}`);
   parts.push(
     [
