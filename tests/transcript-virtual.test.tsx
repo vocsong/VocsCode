@@ -3,9 +3,9 @@
  * Component tests for the windowed transcript: long sessions mount only the visible rows,
  * short sessions still render every row.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { Transcript } from '../src/renderer/src/components/Transcript';
+import { Transcript, UserMessage } from '../src/renderer/src/components/Transcript';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 
@@ -44,6 +44,20 @@ const session = { id: 's1', title: 't', cwd: '/w', status: 'idle', config: { har
 function messages(count: number): TranscriptItem[] {
   return Array.from({ length: count }, (_, i) => ({ id: `a${i}`, kind: 'assistant', ts: i, text: `message ${i}` }) as TranscriptItem);
 }
+
+describe('user message actions', () => {
+  it('shows its timestamp, copies its text, and opens an edit control', async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    render(<UserMessage sessionId="s1" item={{ id: 'u1', kind: 'user', ts: new Date('2026-03-14T15:15:00').getTime(), text: 'Message to copy' }} />);
+
+    expect(screen.getByText(/Saturday 3:15 (AM|PM|am|pm)/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Copy message' }));
+    expect(writeText).toHaveBeenCalledWith('Message to copy');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit and rerun message' }));
+    expect((screen.getByRole('textbox', { name: 'Edit message' }) as HTMLTextAreaElement).value).toBe('Message to copy');
+  });
+});
 
 describe('windowed transcript', () => {
   it('mounts only the visible slice of a long transcript', () => {
