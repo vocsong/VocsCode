@@ -28,6 +28,7 @@ export function App() {
   const settings = useStore((s) => s.settings);
   const view = useStore((s) => s.view);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
+  const toggleSidebar = useStore((s) => s.toggleSidebar);
   const panelOpen = useStore((s) => s.panelOpen);
   const newSessionOpen = useStore((s) => s.newSessionOpen);
   const quickSessionOpen = useStore((s) => s.quickSessionOpen);
@@ -160,6 +161,7 @@ export function App() {
     <div className="shell">
       <TitleBar />
       <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px` }}>
+        {sidebarOpen && <div className="sidebar-backdrop" onClick={toggleSidebar} />}
         {sidebarOpen && <Sidebar />}
         <main className="main">
           {view === 'settings' ? (

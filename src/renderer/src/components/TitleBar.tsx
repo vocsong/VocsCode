@@ -43,7 +43,7 @@ export function TitleBar() {
       <div className="titlebar-title" title={title}>
         {title}
       </div>
-      <div className="titlebar-tail" />
+      <div className="titlebar-tail">{isWeb && <span className="web-badge">web</span>}</div>
     </div>
   );
 }
