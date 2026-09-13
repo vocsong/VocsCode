@@ -18,6 +18,7 @@ Working agreements for agents in this repo: how to verify, what to touch, what t
   - **Task** — one-line recap of the original task as it was asked, so the report stands alone.
   - **Files** — files touched, grouped by what changed and why.
   - **Verification** — the exact commands run and their results (pass/fail); name anything that could not be run and why.
+  - **PR** — merge status: merged into `develop` with the PR link, or left open for review with the reason it was not merged.
   - **Notes** — anything spotted but deliberately not fixed, out of scope, or left for follow-up. Omit if empty.
 - **Deliver a PR — and merge it.** After the local commit, push the agent branch and open a PR into `develop`. By default, merge the PR yourself once verification passes (`develop` is the integration branch; releases ship from `develop` → `master`, see [docs/RELEASING.md](docs/RELEASING.md)). Skip merging only when the user explicitly says to hold the PR for review, or when the change needs further consideration before it lands (touching permission gating or secrets handling, skipping a required verification run, an ambiguous requirement the user hasn't confirmed, or a destructive action). When you don't merge, say so in the report and why, and leave the PR open for review.
 
