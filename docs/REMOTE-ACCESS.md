@@ -385,10 +385,11 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 Cloud workspaces: separate track afterward.
 
 **Status:** P0 implemented — transport extraction (`src/shared/transport.ts`,
-`src/main/handlers.ts`, registry tests). P1 in progress — the localhost web server +
-WebSocket transport landed (`VOCS_CODE_WEB=1`, serves the built renderer in a browser
-tab with a per-boot token); the distinct web shell branding and the responsive layer
-are the remaining P1 work.
+`src/main/handlers.ts`, registry tests). P1 implemented — localhost web server +
+WebSocket transport (`VOCS_CODE_WEB=1`, per-boot token), browser shims (openExternal,
+notify, pickFolder, clipboard paste), web badge, and the responsive layer (drawer
+sidebar with backdrop, touch targets under 900px). Remaining before P2: packaged-app
+static-path check; the relay-side account/pairing header is P2 scope.
 
 ## 11. Decisions and open questions
 
