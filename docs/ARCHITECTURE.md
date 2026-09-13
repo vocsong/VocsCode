@@ -39,7 +39,7 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 
 | Harness | Engine | Approvals | Models | MCP |
 | --- | --- | --- | --- | --- |
-| **Claude Agent SDK** | `@anthropic-ai/claude-agent-sdk` (Claude Code loop, hooks, MCP, checkpoints) | interactive (`canUseTool`) | Anthropic catalog, plus Bedrock/Vertex/Foundry/gateway via env | injected (`options.mcpServers`) |
+| **Claude Agent SDK** | `@anthropic-ai/claude-agent-sdk` (Claude Code loop, hooks, MCP, checkpoints) | interactive (`canUseTool`) | Anthropic catalog; any Anthropic-compatible endpoint via the Anthropic provider's base URL, plus Bedrock/Vertex/Foundry via env | injected (`options.mcpServers`) |
 | **Codex (app-server)** | `codex app-server` JSON-RPC — the same engine as the Codex desktop app | interactive (command + file-change requests), steer, interrupt | `model/list` from Codex, any `model_providers` entry | injected (`config.mcp_servers`) |
 | **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | Codex catalog | injected (`config.mcp_servers`; secrets via the environment) — Codex declines MCP tool calls under this adapter's `approvalPolicy: never` |
 | **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan | inherited — Cursor reads its own `mcp.json`; import/export only |

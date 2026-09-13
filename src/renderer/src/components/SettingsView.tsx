@@ -655,7 +655,8 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
           <option value="bundled">Bundled runtime only</option>
         </select>
       </Field>
-      <Toggle checked={settings.claude.useProviderKey} onChange={(v) => update({ claude: { ...settings.claude, useProviderKey: v } })} label="Pass the stored Anthropic API key to Claude Code instead of inheriting its login" />
+      <Toggle checked={settings.claude.useProviderKey} onChange={(v) => update({ claude: { ...settings.claude, useProviderKey: v } })} label="Use the Anthropic provider's endpoint and key instead of the Claude Code login" />
+      <p className="muted small">Claude Code runs against any Anthropic-compatible endpoint. Point the Anthropic provider at that gateway (Settings → Providers → Base URL, plus its key), then turn this on to send the base URL and key to Claude Code. With the default Anthropic URL it just passes the stored API key.</p>
       {bin('claude', 'claude path override')}
       <h3>Codex</h3>
       <Field label="Runtime">
