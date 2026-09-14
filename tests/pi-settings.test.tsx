@@ -86,6 +86,13 @@ afterEach(() => {
 });
 
 describe('PiSection', () => {
+  it('warns that the page edits the global pi configuration', async () => {
+    mockBackend();
+    render(<PiSection />);
+    expect(await screen.findByText(/global pi settings/i)).toBeTruthy();
+    expect(screen.getAllByText('C:/pi/agent').length).toBeGreaterThan(1);
+  });
+
   it('renders discovered resources with their type groups', async () => {
     mockBackend();
     render(<PiSection />);

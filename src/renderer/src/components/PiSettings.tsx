@@ -7,7 +7,7 @@ import React, { useEffect, useState } from 'react';
 import type { PiPackageItem, PiPreferences, PiPreferencesPatch, PiPromptName, PiResourceItem, PiResourceType, PiSetup, PiSubagentsPatch, PiSubagentsSettings } from '../../../shared/types';
 import { invoke } from '../api';
 import { useStore } from '../store';
-import { askConfirm, Badge, Button, Field, Spinner, Toggle } from './ui';
+import { askConfirm, Badge, Button, Field, Icon, Spinner, Toggle } from './ui';
 
 const TYPE_ORDER: PiResourceType[] = ['extensions', 'skills', 'prompts', 'themes'];
 const TYPE_LABELS: Record<PiResourceType, string> = {
@@ -155,9 +155,20 @@ export function PiSection() {
   return (
     <div className="settings-section">
       <h2>Pi</h2>
-      <p className="muted">
-        Pi&rsquo;s global configuration, shared with the pi CLI. Every Vocs Code pi session reads it at startup; changes apply to the next session.
-      </p>
+      <div className="info-line info-warn">
+        <Icon name="alert" size={13} />
+        <span>
+          These are your machine&rsquo;s <strong>global pi settings</strong>
+          {setup ? (
+            <>
+              {' '}
+              in <code>{setup.agentDir}</code>
+            </>
+          ) : null}
+          , shared with the pi CLI and every other tool using that install. Anything you change here affects <strong>all</strong> pi sessions, not only Vocs Code, and applies the next time pi starts.
+        </span>
+      </div>
+      <p className="muted">Pi&rsquo;s configuration files, packages and resources.</p>
 
       {loadError && (
         <div className="info-line info-error">

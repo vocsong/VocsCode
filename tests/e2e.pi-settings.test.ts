@@ -55,6 +55,8 @@ describe.runIf(enabled)('pi settings UI', () => {
     await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
     await win.locator('.settings-link:has-text("Pi")').click({ timeout: 20_000 });
     await win.waitForSelector('.pi-head', { timeout: 20_000 });
+    // The page must be explicit that it edits the real global pi config.
+    await win.locator('.info-line.info-warn', { hasText: 'global pi settings' }).first().waitFor();
 
     // Discovery: the extension, the skill (by its frontmatter name), the theme, the local package
     // with its manifest resource, and the on-disk pi-subagents agent are all listed.
