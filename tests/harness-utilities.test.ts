@@ -1,8 +1,10 @@
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { makeFileChange } from '../src/main/util/file-changes';
 import { TurnUsageTracker } from '../src/main/util/turn-usage';
+import { UsageReporter } from '../src/main/util/usage-reporter';
 import { emptyUsage } from '../src/main/models/static-models';
+import type { SessionEvent } from '../src/shared/types';
 
 describe('makeFileChange', () => {
   it('normalizes absolute paths and preserves add/update diff semantics', () => {
@@ -59,5 +61,43 @@ describe('TurnUsageTracker', () => {
     tracker.addUsage({ inputTokens: 2, outputTokens: 1 });
     tracker.addUsage({ inputTokens: 3, outputTokens: 4 });
     expect(tracker.finishTurn().usage).toMatchObject({ inputTokens: 5, outputTokens: 5 });
+  });
+
+  it('reconciles streamed per-request samples with the final cumulative counter', () => {
+    const tracker = new TurnUsageTracker(emptyUsage());
+    tracker.beginTurn();
+    tracker.addUsage({ inputTokens: 10, outputTokens: 2, costUsd: 0.1 });
+    tracker.setCumulative({ inputTokens: 10, outputTokens: 2, costUsd: 0.1 });
+    expect(tracker.finishTurn().usage).toMatchObject({ inputTokens: 10, outputTokens: 2, costUsd: 0.1 });
+
+    tracker.beginTurn();
+    tracker.addUsage({ inputTokens: 20, outputTokens: 3, costUsd: 0.2 });
+    tracker.setCumulative({ inputTokens: 30, outputTokens: 5, costUsd: 0.3 });
+    const second = tracker.finishTurn();
+    expect(second.usage).toMatchObject({ inputTokens: 20, outputTokens: 3 });
+    expect(second.usage?.costUsd).toBeCloseTo(0.2);
+    expect(second.totals).toMatchObject({ inputTokens: 30, outputTokens: 5, turns: 2 });
+    expect(second.totals.costUsd).toBeCloseTo(0.3);
+  });
+});
+
+describe('UsageReporter', () => {
+  it('emits the first live snapshot immediately and coalesces later updates', () => {
+    vi.useFakeTimers();
+    try {
+      const events: SessionEvent[] = [];
+      const reporter = new UsageReporter((event) => events.push(event), 1_000);
+      reporter.report({ ...emptyUsage(), inputTokens: 10 });
+      reporter.report({ ...emptyUsage(), inputTokens: 20 });
+      expect(events).toHaveLength(1);
+      vi.advanceTimersByTime(999);
+      expect(events).toHaveLength(1);
+      vi.advanceTimersByTime(1);
+      expect(events).toHaveLength(2);
+      expect(events[1].type === 'usage' && events[1].totals.inputTokens).toBe(20);
+      reporter.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

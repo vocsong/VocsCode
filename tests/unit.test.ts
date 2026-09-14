@@ -1100,6 +1100,35 @@ describe('SessionStore round-trip', () => {
     expect(published[0][0]).toMatchObject({ id: session.id, status: 'running', statusDetail: 'Working' });
   });
 
+  it('applies an intermediate usage event to the live session and analytics listeners', () => {
+    const session = meta('usage_session');
+    const published: SessionMeta[][] = [];
+    const analytics = { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn(), recordUserMessage: vi.fn() };
+    const store = {
+      list: () => [session],
+      get: (id: string) => (id === session.id ? session : undefined),
+      upsert: vi.fn(async () => undefined)
+    } as unknown as SessionStore;
+    const manager = new SessionManager({
+      store,
+      settings: { get: () => defaultSettings() } as unknown as SettingsStore,
+      runtime: undefined as unknown as RuntimeResolver,
+      analytics: analytics as unknown as AnalyticsStore,
+      getSecret: async () => undefined,
+      pushEvent: vi.fn(),
+      pushSessions: (list) => published.push(list),
+      notify: vi.fn(),
+      log: vi.fn()
+    });
+    const totals = { ...session.usage, inputTokens: 120, outputTokens: 24, costUsd: 0.12 };
+
+    (manager as unknown as { emit: (id: string, event: SessionEvent) => void }).emit(session.id, { type: 'usage', totals });
+
+    expect(session.usage).toEqual(totals);
+    expect(analytics.recordUsage).toHaveBeenCalledWith(session, totals, undefined, undefined);
+    expect(published.at(-1)?.[0]).toMatchObject({ id: session.id, usage: totals });
+  });
+
   it('persists session meta and transcripts that a fresh store over the same directory reads back', async () => {
     const first = new SessionStore(tmpRoot);
     await first.load();

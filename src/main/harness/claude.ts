@@ -19,6 +19,7 @@ import { anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvide
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
+import { UsageReporter } from '../util/usage-reporter';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
 import type { HarnessAdapter, HarnessContext } from './types';
 
@@ -97,6 +98,14 @@ interface ContentBlockLike {
   is_error?: boolean;
 }
 
+function finiteCounter(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : undefined;
+}
+
+function counterDelta(previous: number, current: number): number {
+  return current >= previous ? current - previous : current;
+}
+
 export class ClaudeAdapter implements HarnessAdapter {
   readonly id = 'claude' as const;
   private q: Query | null = null;
@@ -116,12 +125,18 @@ export class ClaudeAdapter implements HarnessAdapter {
   private fileSnapshots = new Map<string, string | null>();
   private turnStartedAt = 0;
   private readonly usage: TurnUsageTracker;
+  private readonly usageReporter: UsageReporter;
+  /** Output usage is cumulative within the current Anthropic streaming response. */
+  private streamOutputTokens = 0;
+  private streamReasoningTokens = 0;
+  private streamInputReported = false;
   private started = false;
   private modelsEmitted = false;
   private compactionWaiter: Deferred<void> | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
+    this.usageReporter = new UsageReporter((event) => this.ctx.emit(event));
   }
 
   get busy(): boolean {
@@ -351,6 +366,69 @@ export class ClaudeAdapter implements HarnessAdapter {
     return { continue: true };
   };
 
+  private reportStreamUsage(ev: {
+    type: string;
+    message?: { model?: string; usage?: Record<string, unknown> };
+    usage?: Record<string, unknown>;
+  }): void {
+    if (ev.type === 'message_start') {
+      this.streamOutputTokens = 0;
+      this.streamReasoningTokens = 0;
+      this.streamInputReported = false;
+      const usage = ev.message?.usage;
+      if (!usage) return;
+      const input = finiteCounter(usage.input_tokens);
+      const cacheRead = finiteCounter(usage.cache_read_input_tokens);
+      const cacheWrite = finiteCounter(usage.cache_creation_input_tokens);
+      const output = finiteCounter(usage.output_tokens);
+      const sample: Partial<UsageTotals> = {
+        ...(input !== undefined ? { inputTokens: input } : {}),
+        ...(cacheRead !== undefined ? { cacheReadTokens: cacheRead } : {}),
+        ...(cacheWrite !== undefined ? { cacheWriteTokens: cacheWrite } : {}),
+        ...(output !== undefined ? { outputTokens: output } : {})
+      };
+      this.streamInputReported = input !== undefined || cacheRead !== undefined || cacheWrite !== undefined;
+      this.streamOutputTokens = output ?? 0;
+      if (Object.keys(sample).length === 0) return;
+      this.usage.addUsage(sample);
+      const contextTokens = (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
+      const model = ev.message?.model ?? this.ctx.session().activeModel?.model;
+      const contextWindow = model ? findContextWindow(this.providerId ?? 'anthropic', model) : undefined;
+      if (contextTokens > 0 || contextWindow) this.usage.setCumulative({ contextTokens: contextTokens > 0 ? contextTokens : undefined, contextWindow });
+      this.usageReporter.report(this.usage.snapshot());
+      return;
+    }
+    if (ev.type !== 'message_delta' || !ev.usage) return;
+    const usage = ev.usage;
+    const output = finiteCounter(usage.output_tokens);
+    const details = usage.output_tokens_details;
+    const reasoning = details && typeof details === 'object' && !Array.isArray(details) ? finiteCounter((details as Record<string, unknown>).thinking_tokens) : undefined;
+    const sample: Partial<UsageTotals> = {};
+    if (output !== undefined) {
+      sample.outputTokens = counterDelta(this.streamOutputTokens, output);
+      this.streamOutputTokens = output;
+    }
+    if (reasoning !== undefined) {
+      sample.reasoningTokens = counterDelta(this.streamReasoningTokens, reasoning);
+      this.streamReasoningTokens = reasoning;
+    }
+    // Newer Anthropic-compatible endpoints may send input counters only on message_delta.
+    // Prefer message_start when both are present so one request is never counted twice.
+    if (!this.streamInputReported) {
+      const input = finiteCounter(usage.input_tokens);
+      const cacheRead = finiteCounter(usage.cache_read_input_tokens);
+      const cacheWrite = finiteCounter(usage.cache_creation_input_tokens);
+      if (input !== undefined) sample.inputTokens = input;
+      if (cacheRead !== undefined) sample.cacheReadTokens = cacheRead;
+      if (cacheWrite !== undefined) sample.cacheWriteTokens = cacheWrite;
+      this.streamInputReported = input !== undefined || cacheRead !== undefined || cacheWrite !== undefined;
+    }
+    if (Object.values(sample).some((value) => typeof value === 'number' && value > 0)) {
+      this.usage.addUsage(sample);
+      this.usageReporter.report(this.usage.snapshot());
+    }
+  }
+
   private async consume(q: Query): Promise<void> {
     for await (const msg of q) this.handle(msg, q);
     this.compactionWaiter?.reject(new Error('Claude Code stopped during context compaction.'));
@@ -393,7 +471,8 @@ export class ClaudeAdapter implements HarnessAdapter {
       case 'stream_event': {
         this.markTurnStarted();
         if (msg.parent_tool_use_id) return; // nested subagent streams are summarized via tool items
-        const ev = msg.event as { type: string; index?: number; content_block?: ContentBlockLike; delta?: { type: string; text?: string; thinking?: string } };
+        const ev = msg.event as { type: string; index?: number; content_block?: ContentBlockLike; delta?: { type: string; text?: string; thinking?: string }; message?: { model?: string; usage?: Record<string, unknown> }; usage?: Record<string, unknown>; output_tokens?: number };
+        if (!msg.parent_tool_use_id) this.reportStreamUsage(ev);
         if (ev.type === 'message_start') this.ensureAssistant();
         if (ev.type === 'content_block_delta' && ev.delta) {
           const a = this.ensureAssistant();
@@ -489,7 +568,8 @@ export class ClaudeAdapter implements HarnessAdapter {
         trackerTurn = this.usage.finishTurn();
         const turnUsage = trackerTurn.usage;
         if (mu) usage = turnUsage ? { inputTokens: turnUsage.inputTokens, outputTokens: turnUsage.outputTokens, cacheReadTokens: turnUsage.cacheReadTokens, cacheWriteTokens: turnUsage.cacheWriteTokens } : undefined;
-        if (mu || typeof msg.total_cost_usd === 'number') this.ctx.emit({ type: 'usage', totals: trackerTurn.totals });
+        this.usageReporter.report(trackerTurn.totals);
+        this.usageReporter.flush();
         const turnCost = turnUsage?.costUsd ?? 0;
         const turnMsg = msg as { is_error?: boolean; terminal_reason?: string };
         const isError = turnMsg.is_error || msg.subtype !== 'success';
@@ -625,6 +705,7 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   async dispose(): Promise<void> {
+    this.usageReporter.close();
     this.compactionWaiter?.reject(new Error('Claude context compaction was cancelled.'));
     this.input.close();
     this.abort.abort();

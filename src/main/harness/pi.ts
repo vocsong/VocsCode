@@ -10,6 +10,7 @@ import { shutdownChild, spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 import { TurnUsageTracker } from '../util/turn-usage';
+import { UsageReporter } from '../util/usage-reporter';
 import { installPiAgentOverrides } from '../pi-agents';
 
 export const PI_APPROVAL_MARKER = 'VCODE_APPROVAL::';
@@ -107,6 +108,49 @@ function piThinkingLevel(effort: EffortLevel | undefined): string | undefined {
   return effort;
 }
 
+interface PiStreamUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+  cost: number;
+}
+
+function finiteCounter(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function piStreamUsage(value: unknown): PiStreamUsage | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const cost = raw.cost && typeof raw.cost === 'object' && !Array.isArray(raw.cost) ? (raw.cost as Record<string, unknown>) : undefined;
+  return {
+    input: finiteCounter(raw.input),
+    output: finiteCounter(raw.output),
+    cacheRead: finiteCounter(raw.cacheRead),
+    cacheWrite: finiteCounter(raw.cacheWrite),
+    reasoning: finiteCounter(raw.reasoning),
+    cost: finiteCounter(cost?.total)
+  };
+}
+
+function piUsageDelta(previous: PiStreamUsage | null, current: PiStreamUsage): PiStreamUsage {
+  const delta = (before: number | null, after: number) => before === null || after < before ? after : after - before;
+  return {
+    input: delta(previous?.input ?? null, current.input),
+    output: delta(previous?.output ?? null, current.output),
+    cacheRead: delta(previous?.cacheRead ?? null, current.cacheRead),
+    cacheWrite: delta(previous?.cacheWrite ?? null, current.cacheWrite),
+    reasoning: delta(previous?.reasoning ?? null, current.reasoning),
+    cost: delta(previous?.cost ?? null, current.cost)
+  };
+}
+
+function hasPiUsage(usage: PiStreamUsage): boolean {
+  return usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0 || usage.reasoning > 0 || usage.cost > 0;
+}
+
 export class PiAdapter implements HarnessAdapter {
   readonly id = 'pi' as const;
   private child: ChildProcess | null = null;
@@ -117,6 +161,9 @@ export class PiAdapter implements HarnessAdapter {
   private declinedTools = new Set<string>();
   private turnStartedAt = 0;
   private readonly usage: TurnUsageTracker;
+  private readonly usageReporter: UsageReporter;
+  /** Latest cumulative usage in the current assistant stream, used to derive per-update deltas. */
+  private streamUsage: PiStreamUsage | null = null;
   /** stopReason/errorMessage of the last assistant message — pi reports turn failures here, not as events. */
   private lastStopReason: string | null = null;
   private lastErrorMessage: string | null = null;
@@ -137,6 +184,7 @@ export class PiAdapter implements HarnessAdapter {
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
+    this.usageReporter = new UsageReporter((event) => this.ctx.emit(event));
   }
 
   get busy(): boolean {
@@ -305,12 +353,17 @@ export class PiAdapter implements HarnessAdapter {
       case 'message_start': {
         const msg = ev.message as { role?: string; provider?: string; model?: string };
         if (msg?.role === 'assistant') {
+          // Pi's streaming usage is cumulative for one assistant message, not the whole session.
+          this.streamUsage = null;
           this.currentAssistant = { id: shortId('a_'), kind: 'assistant', ts: Date.now(), text: '', thinking: '', streaming: true, model: msg.model };
           this.ctx.emit({ type: 'item.upsert', item: { ...this.currentAssistant } });
         }
         return;
       }
       case 'message_update': {
+        // The RPC stream carries the provider's latest usage alongside each content delta. Turn it
+        // into a per-message delta so the session totals can move while the model is still working.
+        this.reportPiUsage(ev.usage);
         const ame = ev.assistantMessageEvent as { type: string; delta?: string; toolCall?: { id: string; name: string; arguments: Record<string, unknown> } } | undefined;
         if (!ame) return;
         const a = this.ensureAssistant();
@@ -334,6 +387,8 @@ export class PiAdapter implements HarnessAdapter {
           return;
         }
         if (msg?.role === 'assistant') {
+          this.reportPiUsage(msg.usage);
+          this.streamUsage = null;
           this.lastStopReason = msg.stopReason ?? null;
           this.lastErrorMessage = msg.errorMessage ?? null;
         }
@@ -521,6 +576,17 @@ export class PiAdapter implements HarnessAdapter {
     return null;
   }
 
+  /** Applies the latest per-assistant usage snapshot and publishes a throttled live session update. */
+  private reportPiUsage(raw: unknown): void {
+    const current = piStreamUsage(raw);
+    if (!current) return;
+    const delta = piUsageDelta(this.streamUsage, current);
+    this.streamUsage = current;
+    if (!hasPiUsage(delta)) return;
+    this.usage.addUsage({ inputTokens: delta.input, outputTokens: delta.output, cacheReadTokens: delta.cacheRead, cacheWriteTokens: delta.cacheWrite, reasoningTokens: delta.reasoning, costUsd: delta.cost });
+    this.usageReporter.report(this.usage.snapshot());
+  }
+
   private async handleUiRequest(req: { id: string; method: string; title?: string; message?: string; options?: string[]; notifyType?: string }): Promise<void> {
     const respond = (payload: Record<string, unknown>) => {
       try {
@@ -688,9 +754,12 @@ export class PiAdapter implements HarnessAdapter {
       // Subagent spend accrued since the last report, so analytics can put it on the model that ran it.
       const subagentCostByModel = this.pendingSubagentCost.size ? [...this.pendingSubagentCost.values()] : undefined;
       this.pendingSubagentCost.clear();
-      this.ctx.emit({ type: 'usage', totals: completed.totals, ...(subagentCostByModel ? { subagentCostByModel } : {}) });
+      this.usageReporter.report(completed.totals, subagentCostByModel);
+      this.usageReporter.flush();
     } catch (e) {
       this.ctx.log('debug', `get_session_stats failed: ${errorMessage(e)}`);
+      // Do not leave a throttled live snapshot waiting after a failed stats request.
+      this.usageReporter.flush();
     }
     // pi ends a failed turn with an assistant message (stopReason 'error'), not an error event.
     const stopReason = this.lastStopReason;
@@ -811,6 +880,7 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   async dispose(): Promise<void> {
+    this.usageReporter.close();
     this.extensionCapabilities.clear();
     this.declinedTools.clear();
     const child = this.child;

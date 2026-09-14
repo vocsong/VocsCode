@@ -86,6 +86,31 @@ describe('Claude adapter turn-state tracking', () => {
     expect(events.filter((e) => e.type === 'status').at(-1)).toEqual({ type: 'status', status: 'idle' });
   });
 
+  it('publishes streamed token usage before the result without double-counting it', () => {
+    const { ctx, events } = stubCtx();
+    const a = new ClaudeAdapter(ctx);
+    feed(a, {
+      type: 'stream_event',
+      event: { type: 'message_start', message: { model: 'claude-sonnet-4-6', usage: { input_tokens: 100, cache_read_input_tokens: 10, cache_creation_input_tokens: 0, output_tokens: 0 } } }
+    });
+    const live = events.filter((e) => e.type === 'usage').at(-1);
+    expect(live?.type === 'usage' && live.totals).toMatchObject({ inputTokens: 100, cacheReadTokens: 10, turns: 0 });
+
+    feed(a, { type: 'stream_event', event: { type: 'message_delta', usage: { output_tokens: 5, output_tokens_details: { thinking_tokens: 2 } }, delta: { stop_reason: 'end_turn' } } });
+    feed(a, {
+      type: 'result',
+      subtype: 'success',
+      duration_ms: 500,
+      total_cost_usd: 0.2,
+      usage: { input_tokens: 100, cache_read_input_tokens: 10, cache_creation_input_tokens: 0 },
+      modelUsage: {
+        'claude-sonnet-4-6': { inputTokens: 100, outputTokens: 5, cacheReadInputTokens: 10, cacheCreationInputTokens: 0, costUSD: 0.2, contextWindow: 200_000 }
+      }
+    });
+    const final = events.filter((e) => e.type === 'usage').at(-1);
+    expect(final?.type === 'usage' && final.totals).toMatchObject({ inputTokens: 100, outputTokens: 5, cacheReadTokens: 10, costUsd: 0.2, turns: 1 });
+  });
+
   it('a tool result user message does not flip idle to running', () => {
     const { ctx } = stubCtx();
     const a = new ClaudeAdapter(ctx);

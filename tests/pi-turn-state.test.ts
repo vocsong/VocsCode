@@ -176,6 +176,36 @@ describe('Pi adapter turn-state tracking', () => {
     expect(usages.at(-1)?.totals.turns).toBe(2);
   });
 
+  it('publishes streamed usage before turn completion and reconciles the final session total', async () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    prime(a);
+    await a.send({ text: 'stream' });
+    feed(a, { type: 'agent_start' });
+    feed(a, { type: 'message_start', message: { role: 'assistant', content: [] } });
+    feed(a, {
+      type: 'message_update',
+      usage: { input: 100, output: 4, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 104, cost: { input: 0, output: 0.01, cacheRead: 0, cacheWrite: 0, total: 0.01 } },
+      assistantMessageEvent: { type: 'text_delta', delta: 'partial' }
+    });
+    const live = events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage').at(-1);
+    expect(live?.totals).toMatchObject({ inputTokens: 100, outputTokens: 4, costUsd: 0.01, turns: 0 });
+
+    // The provider's final stats include the rest of the response. The provisional streamed
+    // sample must not be added a second time when that cumulative snapshot arrives.
+    feed(a, {
+      type: 'message_update',
+      usage: { input: 100, output: 8, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 108, cost: { input: 0, output: 0.015, cacheRead: 0, cacheWrite: 0, total: 0.015 } },
+      assistantMessageEvent: { type: 'text_delta', delta: ' more' }
+    });
+    feed(a, { type: 'message_end', message: { role: 'assistant', content: [], usage: { input: 100, output: 8, cacheRead: 0, cacheWrite: 0, cost: { total: 0.015 } } } });
+    feed(a, { type: 'agent_end', messages: [] });
+    await settle();
+    const final = events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage').at(-1);
+    expect(final?.totals).toMatchObject({ inputTokens: 100, outputTokens: 40, costUsd: 0.02, turns: 1 });
+    await a.dispose();
+  });
+
   it('does not report an epoch-long wall time when a turn ends with no recorded start', async () => {
     const { ctx, events } = stubCtx();
     const a = new PiAdapter(ctx);
