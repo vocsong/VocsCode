@@ -131,12 +131,19 @@ describe.runIf(enabled)('project knowledge panel', () => {
     const proposalFile = path.join(wiki, '_proposals', 'pty-guard.md');
     expect(await fs.readFile(proposalFile, 'utf8')).toContain('status: proposed');
 
-    await win.getByTestId('knowledge-accept-pty-guard').click();
-    await win.getByTestId('knowledge-page-gotchas/pty-guard').waitFor({ timeout: 10_000 });
+    // A draft is accepted straight from its row, without opening it.
+    const draftFile = path.join(wiki, 'architecture', 'process-split.md');
+    expect(await fs.readFile(draftFile, 'utf8')).toContain('status: draft');
+    await win.getByTestId('knowledge-row-accept-architecture/process-split').click();
+    await win.getByTestId('knowledge-row-accept-architecture/process-split').waitFor({ state: 'detached', timeout: 10_000 });
+    const acceptedDraft = await fs.readFile(draftFile, 'utf8');
+    expect(acceptedDraft).toContain('status: current');
+    expect(acceptedDraft).toContain('review_state: reviewed');
+
+    // Accept all takes what is left: the proposal becomes a reviewed page under its target id.
+    await win.getByTestId('knowledge-accept-all').click();
     await proposal.waitFor({ state: 'detached', timeout: 10_000 });
     expect(await fs.readFile(proposalFile, 'utf8').catch(() => '')).toBe('');
-
-    // The page landed in markdown with human-review provenance, under the target id.
     const stored = await fs.readFile(path.join(wiki, 'gotchas', 'pty-guard.md'), 'utf8');
     expect(stored).toContain('status: current');
     expect(stored).toContain('review_state: reviewed');
@@ -148,16 +155,6 @@ describe.runIf(enabled)('project knowledge panel', () => {
     const builtin = win.getByTestId('builtin-vocs-memory');
     await builtin.waitFor({ timeout: 10_000 });
     expect(await builtin.innerText()).toContain('on');
-    await win.getByTestId('panel-bottom-knowledge').click();
-
-    // A generated draft is accepted in place: the file becomes current and human-reviewed.
-    await win.getByTestId('knowledge-page-architecture/process-split').click();
-    await win.getByTestId('knowledge-detail').waitFor({ timeout: 10_000 });
-    await win.getByTestId('knowledge-page-accept').click();
-    await win.getByTestId('knowledge-page-architecture/process-split').waitFor({ timeout: 10_000 });
-    const draftFile = await fs.readFile(path.join(wiki, 'architecture', 'process-split.md'), 'utf8');
-    expect(draftFile).toContain('status: current');
-    expect(draftFile).toContain('review_state: reviewed');
 
     await app.close();
     app = null;

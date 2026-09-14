@@ -794,6 +794,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const scope = knowledgeScopeOf(sessionId);
     return k.review(scope, id, action, { by: 'human', ...(typeof note === 'string' && note.trim() ? { note: note.trim() } : {}) }).then(() => k.view(scope));
   });
+  handle('knowledge:reviewAll', async ({ sessionId }) => {
+    const k = knowledgeOf();
+    if (!k) throw new Error('Project knowledge is unavailable in this run');
+    const scope = knowledgeScopeOf(sessionId);
+    const result = await k.acceptAll(scope, { by: 'human' });
+    return { accepted: result.accepted, view: await k.view(scope) };
+  });
   handle('knowledge:generate', ({ sessionId, mode }) => {
     const k = knowledgeOf();
     if (!k) throw new Error('Project knowledge is unavailable in this run');

@@ -166,9 +166,11 @@ The wiki is easy to generate; keeping it true is the product. The rules:
   so agents cannot refile it every session.
 - **Bootstrap drafts for review.** `Generate from docs` reads README, `docs/*.md`, AGENTS.md and the
   top-level layout, and asks the utility model for at most 12 `status: draft` pages grounded in
-  those files. Nothing in the draft state is ever served to an agent: opening one offers **Accept as
-  current** or **Discard** (which deletes the file and tombstones the claim, so the same draft is not
-  regenerated every run). A page promoted by repeated evidence is reviewed the same way.
+  those files. Nothing in the draft state is ever served to an agent: every row carries an
+  **Accept** button, opening one offers **Accept as current** / **Discard**, and **Accept all**
+  beside Publish takes every pending draft and proposal in one action (deprecated and superseded
+  pages are left alone — accepting everything must not resurrect history). Discarding deletes the
+  file and tombstones the claim, so the same draft is not regenerated every run.
 - **Distillation runs at git boundaries.** Commits, PR opens and merges append an episode; with
   `autoDistill` on (default) the newest episode plus its transcript slice is distilled into up to
   three proposals, which go through the same rules above.

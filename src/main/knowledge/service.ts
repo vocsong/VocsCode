@@ -108,7 +108,8 @@ export class KnowledgeService {
     return {
       hasWiki: await this.store.hasWiki(scope),
       pages: pages.length,
-      needsReview: pages.filter((p) => !p.meta.review || p.meta.review.state !== 'reviewed').length,
+      // A deprecated or superseded page is history, not a pending decision.
+      needsReview: pages.filter((p) => p.meta.status !== 'deprecated' && p.meta.status !== 'superseded' && (!p.meta.review || p.meta.review.state !== 'reviewed')).length,
       proposals: proposals.length,
       stale,
       indexed: false,
@@ -325,6 +326,24 @@ export class KnowledgeService {
     const written = await this.store.write(scope, meta, opts.body && opts.body.trim() ? opts.body : page.body);
     this.deps.log('info', `knowledge: page accepted (${id})`);
     return this.summarize(written);
+  }
+
+  /**
+   * Accepts every candidate at once: proposals through the normal review path (supersession and
+   * evidence handling still apply), then every non-current page in place. Historical pages are left
+   * alone — accepting everything must not resurrect a deprecated or superseded one.
+   */
+  async acceptAll(scope: KnowledgeScope, opts: { by?: string } = {}): Promise<{ accepted: number }> {
+    let accepted = 0;
+    for (const proposal of await this.store.proposals(scope)) {
+      if (await this.reviewProposal(scope, proposal, 'accept', { by: opts.by })) accepted++;
+    }
+    for (const page of await this.store.load(scope)) {
+      if (page.meta.status === 'current' || page.meta.status === 'deprecated' || page.meta.status === 'superseded') continue;
+      if (await this.reviewPage(scope, page.meta.id, 'accept', { by: opts.by })) accepted++;
+    }
+    this.deps.log('info', `knowledge: accepted ${accepted} item(s)`);
+    return { accepted };
   }
 
   /** Copies reviewed pages into the tracked `docs/wiki/` path; committing them stays the user's act. */

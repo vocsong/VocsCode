@@ -283,6 +283,8 @@ export interface IpcContract {
   'knowledge:search': [{ sessionId: string; q: string; limit?: number; includeHistorical?: boolean }, KnowledgeSearchResult[]];
   /** Accept or reject one proposal; rejecting remembers the claim. */
   'knowledge:review': [{ sessionId: string; id: string; action: 'accept' | 'reject'; note?: string }, KnowledgeView];
+  /** Accept every proposal and draft at once; deprecated and superseded pages are left alone. */
+  'knowledge:reviewAll': [{ sessionId: string }, { accepted: number; view: KnowledgeView }];
   /** Run the bootstrap synthesis or the episode distillation with the utility model. */
   'knowledge:generate': [{ sessionId: string; mode: 'bootstrap' | 'distill' }, { ok: boolean; detail?: string; error?: string }];
   /** Copy reviewed pages into the tracked docs/wiki/ path; committing them stays the user's act. */

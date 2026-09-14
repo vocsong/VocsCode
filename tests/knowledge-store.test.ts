@@ -258,6 +258,26 @@ describe('knowledge search and digest', () => {
     expect(await svc.store.rejectedClaims(scope)).toContain('A throwaway claim.');
   });
 
+  it('accepts every pending item at once and leaves history alone', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    await svc.store.write(scope, pageMeta({ id: 'conventions/settled', status: 'current', review: { state: 'reviewed' } }), 'body');
+    await svc.store.write(scope, pageMeta({ id: 'conventions/draft', title: 'Draft', status: 'draft', claim: 'A draft claim.' }), 'body');
+    await svc.store.write(scope, pageMeta({ id: 'conventions/old', title: 'Old', status: 'deprecated', claim: 'An old claim.' }), 'body');
+    const filed = await svc.propose(scope, { title: 'Pending proposal', claim: 'A proposed claim.', body: 'Body.' }, 'agent:pi', 's1');
+    expect(filed.promoted).toBe(false);
+
+    const result = await svc.acceptAll(scope, { by: 'human' });
+    expect(result.accepted).toBe(2);
+    const after = await svc.view(scope);
+    expect(after.proposals).toHaveLength(0);
+    expect(after.pages.find((p) => p.id === 'conventions/draft')?.status).toBe('current');
+    expect(after.pages.find((p) => p.id === 'conventions/settled')?.status).toBe('current');
+    expect(after.pages.find((p) => p.id === 'conventions/old')?.status).toBe('deprecated');
+    expect(after.status.needsReview).toBe(0);
+  });
+
   it('distils episodes through the service pipeline (propose must be wired)', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };

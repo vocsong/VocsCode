@@ -115,6 +115,72 @@ describe('Project knowledge panel', () => {
     expect(invoke).toHaveBeenCalledWith('settings:update', { knowledge: { prime: false, autoDistill: true } });
   });
 
+  it('accepts a pending page straight from its row without opening it', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view();
+      if (channel === 'knowledge:review') return view({ proposals: [], pages: [summary(), summary({ id: 'gotchas/pty', title: 'Duplicate PTYs', status: 'current' })] });
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    // A current page offers no accept button; a proposed one does.
+    expect(screen.queryByTestId('knowledge-row-accept-conventions/harness-lifecycle')).toBeNull();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-row-accept-gotchas/pty'));
+    });
+    expect(invoke).toHaveBeenCalledWith('knowledge:review', { sessionId: 's1', id: 'gotchas/pty', action: 'accept' });
+    // The row click must not have been triggered by the accept button.
+    expect(invoke).not.toHaveBeenCalledWith('knowledge:read', expect.anything());
+  });
+
+  it('accepts everything pending with one click and clears the queue', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view();
+      if (channel === 'knowledge:reviewAll')
+        return { accepted: 2, view: view({ proposals: [], pages: [summary(), summary({ id: 'gotchas/pty', title: 'Duplicate PTYs', status: 'current' })] }) };
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    expect(screen.getByTestId('knowledge-accept-all').textContent).toContain('(2)');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-accept-all'));
+    });
+    expect(invoke).toHaveBeenCalledWith('knowledge:reviewAll', { sessionId: 's1' });
+    expect(screen.queryByTestId('knowledge-proposals')).toBeNull();
+  });
+
+  it('offers accept and discard in the detail view of a draft', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view();
+      if (channel === 'knowledge:read')
+        return {
+          page: {
+            meta: { id: 'gotchas/pty', title: 'Duplicate PTYs', kind: 'gotcha', status: 'proposed', scope: 'repo', keywords: [], sources: [], anchors: [], related: [], supersedes: [], contradicts: [] },
+            body: 'Body.',
+            path: 'gotchas/pty.md'
+          },
+          related: [],
+          stale: false,
+          staleReasons: []
+        };
+      if (channel === 'knowledge:review') return view();
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-page-gotchas/pty'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-page-accept'));
+    });
+    expect(invoke).toHaveBeenCalledWith('knowledge:review', { sessionId: 's1', id: 'gotchas/pty', action: 'accept' });
+  });
+
   it('offers generation when the project has no wiki yet', async () => {
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'knowledge:view') return view({ pages: [], proposals: [], status: { hasWiki: false, pages: 0, needsReview: 0, proposals: 0, stale: 0, indexed: false } });

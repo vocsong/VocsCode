@@ -142,6 +142,21 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
     }
   };
 
+  /** Accepts every draft and proposal in one call; the panel re-renders from the returned view. */
+  const acceptAll = async () => {
+    setBusy(true);
+    try {
+      const r = await invoke('knowledge:reviewAll', { sessionId: session.id });
+      setView(r.view);
+      setDetail(null);
+      toast(r.accepted ? `Accepted ${r.accepted} item${r.accepted === 1 ? '' : 's'}` : 'Nothing to accept', r.accepted ? 'success' : 'error');
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const publish = async () => {
     if (!view) return;
     const ids = view.pages.filter((p) => p.status === 'current').map((p) => p.id);
@@ -161,6 +176,8 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
   };
 
   const shown = useMemo(() => (results ?? view?.pages ?? []).slice(0, 200), [results, view?.pages]);
+  // Anything still awaiting a decision: proposals plus non-current, non-historical pages.
+  const pendingCount = (view?.proposals.length ?? 0) + (view?.pages ?? []).filter((p) => p.status !== 'current' && p.status !== 'deprecated' && p.status !== 'superseded').length;
 
   if (!view) {
     return (
@@ -193,6 +210,9 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
           Distil recent work
         </Button>
         <span className="spacer" />
+        <Button size="sm" icon="check" disabled={busy || pendingCount === 0} data-testid="knowledge-accept-all" title="Accept every draft and proposal as current" onClick={() => void acceptAll()}>
+          Accept all{pendingCount ? ` (${pendingCount})` : ''}
+        </Button>
         <Button size="sm" variant="ghost" icon="upload" disabled={busy} onClick={() => void publish()} title="Copy accepted pages into the tracked docs/wiki/ path">
           Publish
         </Button>
@@ -309,18 +329,49 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
       ) : (
         <section className="knowledge-pages">
           {shown.length === 0 && status.hasWiki && <div className="muted small">No pages match.</div>}
-          {shown.map((page) => (
-            <button key={page.id} type="button" className="knowledge-row" data-testid={`knowledge-page-${page.id}`} onClick={() => void open(page.id)}>
-              <Icon name="file" size={12} />
-              <span className="knowledge-row-main">
-                <span className="knowledge-title">{page.title}</span>
-                {page.claim && <span className="muted small knowledge-claim">{page.claim}</span>}
-                {page.snippet && <span className="muted small knowledge-snippet" dangerouslySetInnerHTML={{ __html: page.snippet.replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>') }} />}
-              </span>
-              <Badge tone={statusTone(page.status)}>{authorityLabel(page)}</Badge>
-              <span className="muted small">{page.kind}</span>
-            </button>
-          ))}
+          {shown.map((page) => {
+            const pending = page.status !== 'current' && page.status !== 'deprecated' && page.status !== 'superseded';
+            return (
+              <div
+                key={page.id}
+                role="button"
+                tabIndex={0}
+                className="knowledge-row"
+                data-testid={`knowledge-page-${page.id}`}
+                onClick={() => void open(page.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    void open(page.id);
+                  }
+                }}
+              >
+                <Icon name="file" size={12} />
+                <span className="knowledge-row-main">
+                  <span className="knowledge-title">{page.title}</span>
+                  {page.claim && <span className="muted small knowledge-claim">{page.claim}</span>}
+                  {page.snippet && <span className="muted small knowledge-snippet" dangerouslySetInnerHTML={{ __html: page.snippet.replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>') }} />}
+                </span>
+                <span className="muted small">{page.kind}</span>
+                <Badge tone={statusTone(page.status)}>{authorityLabel(page)}</Badge>
+                {pending && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    icon="check"
+                    title="Accept as current"
+                    aria-label={`Accept ${page.title}`}
+                    data-testid={`knowledge-row-accept-${page.id}`}
+                    disabled={busy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void decide(page.id, 'accept');
+                    }}
+                  />
+                )}
+              </div>
+            );
+          })}
         </section>
       )}
 
