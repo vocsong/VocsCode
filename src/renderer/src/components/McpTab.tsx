@@ -1,31 +1,21 @@
 /**
- * Right-panel MCP tab: the servers this repo defines in `.mcp.json`, the global ones, and what
- * the running session will actually get. A repo-defined server stays inert until it is enabled
- * here, so cloning a repo never starts someone else's program (docs/MCP.md §8).
+ * Right-panel MCP configuration for the current repository.
+ * Repo-defined servers stay inert until explicitly enabled here.
  */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { McpProjectInfo, McpServerDef, McpSkipReason, SessionMeta } from '../../../shared/types';
-import { HARNESS_BY_ID } from '../../../shared/harness-meta';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { McpProjectInfo, McpServerDef, SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { useStore } from '../store';
 import { McpServerForm, emptyServer, serverSummary } from './McpServerForm';
 import { askConfirm, Badge, Button, EmptyState, Icon, Spinner, Toggle } from './ui';
 
-const SKIP_LABEL: Record<McpSkipReason, string> = {
-  disabled: 'off for this repo',
-  'not-enabled': 'not enabled here',
-  shadowed: 'replaced by the repo server of the same name',
-  'harness-filtered': 'restricted to other harnesses',
-  'not-injected': 'this harness reads its own store'
-};
-
 export function McpTab({ session }: { session: SessionMeta }) {
   const toast = useStore((s) => s.toast);
-  const setView = useStore((s) => s.setView);
   const settings = useStore((s) => s.settings);
   const [info, setInfo] = useState<McpProjectInfo | null>(null);
   const [editing, setEditing] = useState<McpServerDef | null>(null);
   const [busy, setBusy] = useState(false);
+  const [indexing, setIndexing] = useState(false);
   const liveId = useRef(session.id);
 
   const load = useCallback(async () => {
@@ -43,15 +33,12 @@ export function McpTab({ session }: { session: SessionMeta }) {
     void load();
   }, [load, settings?.mcpServers, settings?.mcpProjectState]);
 
-  const support = info?.support ?? HARNESS_BY_ID[session.config.harness].capabilities.mcp;
-  const harnessName = HARNESS_BY_ID[session.config.harness].name;
-  const active = useMemo(() => (info?.effective ?? []).filter((e) => e.enabled), [info]);
-  const pending = useMemo(() => (info?.repo ?? []).filter((d) => !(info?.state.enabledRepo ?? []).includes(d.id)), [info]);
-
   const patchState = async (patch: Parameters<typeof invoke<'mcp:project:state'>>[1]['patch']) => {
     setBusy(true);
     try {
       setInfo(await invoke('mcp:project:state', { sessionId: session.id, patch }));
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
     } finally {
       setBusy(false);
     }
@@ -62,17 +49,30 @@ export function McpTab({ session }: { session: SessionMeta }) {
     return patchState({ ...info?.state, enabledRepo: on ? [...new Set([...cur, id])] : cur.filter((x) => x !== id) });
   };
 
-  const setGlobalEnabled = (id: string, on: boolean) => {
-    const cur = info?.state.disabledGlobal ?? [];
-    return patchState({ ...info?.state, disabledGlobal: on ? cur.filter((x) => x !== id) : [...new Set([...cur, id])] });
-  };
-
   const setBuiltinEnabled = (id: string, on: boolean) => {
     const cur = info?.state.disabledBuiltin ?? [];
     return patchState({ ...info?.state, disabledBuiltin: on ? cur.filter((x) => x !== id) : [...new Set([...cur, id])] });
   };
 
   const setGitnexusShared = (on: boolean) => patchState({ ...info?.state, gitnexusGlobal: on });
+
+  const indexGitnexus = async () => {
+    if (indexing) return;
+    setIndexing(true);
+    try {
+      const result = await invoke('mcp:project:index', { sessionId: session.id });
+      if (!result.ok) {
+        toast(result.error ?? 'GitNexus indexing failed', 'error');
+        return;
+      }
+      toast('GitNexus index updated', 'success');
+      await load();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setIndexing(false);
+    }
+  };
 
   const saveRepo = async (servers: McpServerDef[]) => {
     const r = await invoke('mcp:project:save', { sessionId: session.id, servers });
@@ -88,7 +88,6 @@ export function McpTab({ session }: { session: SessionMeta }) {
     const list = info?.repo ?? [];
     const exists = list.some((s) => s.id === def.id);
     if (!(await saveRepo(exists ? list.map((s) => (s.id === def.id ? def : s)) : [...list, def]))) return;
-    // A server you just typed here is one you trust; anything a teammate added still waits.
     if (!exists) await setRepoEnabled(def.id, true);
     setEditing(null);
     toast(exists ? 'Server updated' : 'Server added to .mcp.json', 'success');
@@ -100,18 +99,6 @@ export function McpTab({ session }: { session: SessionMeta }) {
     await saveRepo((info?.repo ?? []).filter((s) => s.id !== def.id));
   };
 
-  const importDetected = async (servers: McpServerDef[], label: string) => {
-    const r = await invoke('mcp:import', { servers, to: 'repo', sessionId: session.id });
-    if (!r.ok) return toast(r.error ?? 'Import failed', 'error');
-    await load();
-    toast(`Imported ${servers.length} server${servers.length === 1 ? '' : 's'} from ${label}`, 'success');
-  };
-
-  const exportToCursor = async () => {
-    const r = await invoke('mcp:export', { sessionId: session.id, to: 'cursor' });
-    toast(r.ok ? 'Written to .cursor/mcp.json' : r.error ?? 'Export failed', r.ok ? 'success' : 'error');
-  };
-
   if (!info) {
     return (
       <div className="mcp-loading">
@@ -120,209 +107,85 @@ export function McpTab({ session }: { session: SessionMeta }) {
     );
   }
 
+  const builtin = info.builtin.find((entry) => entry.def.id === 'gitnexus');
+  const pending = info.repo.filter((d) => !(info.state.enabledRepo ?? []).includes(d.id));
+
   return (
     <div className="mcp-tab">
-      {pending.length > 0 && (
-        <div className="mcp-trust">
-          <div className="mcp-trust-head">
-            <Icon name="alert" size={13} /> This repo defines {pending.length} MCP server{pending.length === 1 ? '' : 's'} that {pending.length === 1 ? 'is' : 'are'} not enabled here.
-          </div>
-          <div className="muted small">Each one is a program this app would start for you. Enable only the ones you trust.</div>
-          {pending.map((d) => (
-            <div key={d.id} className="mcp-trust-row">
-              <div className="mcp-trust-main">
-                <span className="mcp-name">{d.id}</span>
-                <code className="mcp-cmd mono">{serverSummary(d)}</code>
-              </div>
-              <Button size="sm" disabled={busy} onClick={() => void setRepoEnabled(d.id, true)}>
-                Enable
-              </Button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {info.builtin.length > 0 && (
-        <section className="mcp-section">
-          <div className="mcp-section-head">
-            <h3>Built-in</h3>
-            <span className="spacer" />
-            <Badge tone="neutral">shared server</Badge>
-          </div>
-          {info.builtin.map((b) => (
-            <div key={b.def.id} className="mcp-card compact">
-              <div className="mcp-row-head">
-                <Toggle checked={b.enabled} onChange={(v) => void setBuiltinEnabled(b.def.id, v)} />
-                <span className="mcp-name">{b.def.id}</span>
-                <Badge tone="blue">built-in</Badge>
-                <span className="spacer" />
-                {b.disabledGlobally && <Badge tone="amber">off everywhere</Badge>}
-                {b.enabled && !b.indexed && <Badge tone="amber">not indexed</Badge>}
-              </div>
-              <div className="muted small">
-                Served by the one shared GitNexus server. This session sees only this repo's graph, plus any repo you share.
-              </div>
-              {b.claimed && (
-                <div className="muted small">
-                  Any same-named entry in the {harnessName} config is switched off here, so the shared server is the only GitNexus that runs.
-                </div>
-              )}
-              <div className="mcp-row-head pad-t">
-                <Toggle checked={b.shared} onChange={(v) => void setGitnexusShared(v)} />
-                <span className="muted small">Share this repo's code graph with other repos</span>
-              </div>
-              {!b.indexed && (
-                <div className="muted small">
-                  No index for this repo yet. Run <span className="mono">gitnexus analyze</span> in the repo root, then a session here can query it.
-                </div>
-              )}
-            </div>
-          ))}
-        </section>
-      )}
-
-      <section className="mcp-section">
-        <div className="mcp-section-head">
-          <h3>This repo</h3>
-          <span className="spacer" />
-          <Button size="sm" variant="ghost" icon="plus" onClick={() => setEditing(emptyServer())}>
-            Add
-          </Button>
-        </div>
-        <div className="mcp-path mono" title={info.file}>
-          {info.exists ? info.display : `${info.display} (not created yet)`}
-        </div>
-        {info.error && <div className="skills-error">{info.error}</div>}
-        {info.repo.length === 0 && !editing && !info.error && (
-          <EmptyState icon="server" title="No servers in this repo">
-            <p>
-              A server added here is written to <span className="mono">.mcp.json</span> at the repo root, so everyone working on the project gets the definition — but each of you enables it separately.
-            </p>
-          </EmptyState>
-        )}
-        {info.repo.map((d) =>
-          editing?.id === d.id ? (
-            <div key={d.id} className="mcp-card editing">
-              <McpServerForm value={editing} portableOnly takenIds={info.repo.map((s) => s.id)} sessionId={session.id} onSave={(x) => void upsertRepo(x)} onCancel={() => setEditing(null)} />
-            </div>
-          ) : (
-            <div key={d.id} className="mcp-card">
-              <div className="mcp-row-head">
-                <Toggle checked={(info.state.enabledRepo ?? []).includes(d.id)} onChange={(v) => void setRepoEnabled(d.id, v)} />
-                <span className="mcp-name">{d.id}</span>
-                <Badge tone={d.transport === 'stdio' ? 'neutral' : 'blue'}>{d.transport}</Badge>
-                <span className="spacer" />
-                <Button size="sm" variant="ghost" icon="edit" title="Edit" onClick={() => setEditing({ ...d })} />
-                <Button size="sm" variant="ghost" icon="trash" title="Remove" onClick={() => void removeRepo(d)} />
-              </div>
-              <code className="mcp-cmd mono">{serverSummary(d)}</code>
-              {d.description && <div className="mcp-desc muted small">{d.description}</div>}
-            </div>
-          )
-        )}
-        {editing && !info.repo.some((s) => s.id === editing.id) && (
-          <div className="mcp-card editing">
-            <McpServerForm value={editing} portableOnly takenIds={info.repo.map((s) => s.id)} sessionId={session.id} onSave={(x) => void upsertRepo(x)} onCancel={() => setEditing(null)} />
-          </div>
-        )}
-      </section>
-
-      <section className="mcp-section">
+      <section className="mcp-section" data-testid="mcp-global-section">
         <div className="mcp-section-head">
           <h3>Global</h3>
           <span className="spacer" />
-          <Button size="sm" variant="ghost" onClick={() => setView('mcp')}>
-            Manage
-          </Button>
+          <Badge tone="neutral">shared server</Badge>
         </div>
-        {info.global.length === 0 && <div className="skill-none">No global servers. Add them on the MCP page.</div>}
-        {info.global.map((d) => (
-          <div key={d.id} className="mcp-card compact">
+        {builtin && (
+          <div className="mcp-card" data-testid="gitnexus-card">
             <div className="mcp-row-head">
-              <Toggle checked={!d.disabled && !(info.state.disabledGlobal ?? []).includes(d.id)} onChange={(v) => void setGlobalEnabled(d.id, v)} />
-              <span className="mcp-name">{d.id}</span>
-              <Badge tone={d.transport === 'stdio' ? 'neutral' : 'blue'}>{d.transport}</Badge>
-              {d.disabled && <Badge tone="amber">off everywhere</Badge>}
+              <Icon name="server" size={12} />
+              <span className="mcp-name">gitnexus</span>
+              <Badge tone="blue">built-in</Badge>
+              <span className="spacer" />
+              {builtin.disabledGlobally && <Badge tone="amber">off everywhere</Badge>}
+              {builtin.enabled && builtin.indexed && <Badge tone="green">indexed</Badge>}
             </div>
-            <code className="mcp-cmd mono">{serverSummary(d)}</code>
-          </div>
-        ))}
-      </section>
-
-      {info.detected.length > 0 && (
-        <section className="mcp-section">
-          <div className="mcp-section-head">
-            <h3>Detected in this repo</h3>
-          </div>
-          {info.detected.map((s) => (
-            <div key={s.path} className="mcp-card compact">
-              <div className="mcp-row-head">
-                <span className="mcp-name">{s.label}</span>
-                <Badge tone="neutral">{s.servers.length}</Badge>
-                <span className="spacer" />
-                {s.servers.length > 0 && (
-                  <Button size="sm" variant="ghost" icon="download" onClick={() => void importDetected(s.servers, s.label)}>
-                    Import
-                  </Button>
-                )}
-              </div>
-              <code className="mcp-cmd mono">{s.display}</code>
-              {s.error && <div className="skills-error">{s.error}</div>}
+            <div className="muted small">One shared GitNexus server gives this session access to this repo's code graph.</div>
+            <div className="mcp-control-list">
+              <Toggle checked={builtin.enabled} disabled={busy || builtin.disabledGlobally} onChange={(v) => void setBuiltinEnabled(builtin.def.id, v)} label="Enable GitNexus for this repo" />
+              <Toggle checked={builtin.shared} disabled={busy} onChange={(v) => void setGitnexusShared(v)} label="Share this repo's graph with other repos" />
             </div>
-          ))}
-        </section>
-      )}
-
-      <section className="mcp-section">
-        <div className="mcp-section-head">
-          <h3>In this session</h3>
-        </div>
-        {support === 'inherit' && (
-          <div className="mcp-note">
-            {harnessName} reads its own MCP configuration and takes nothing from this app. Write this repo's servers out to <span className="mono">.cursor/mcp.json</span> instead.
-            <div className="row gap8 pad-t">
-              <Button size="sm" icon="upload" onClick={() => void exportToCursor()}>
-                Export to .cursor/mcp.json
+            <div className="mcp-index-row">
+              <span className="muted small">{builtin.indexed ? 'Index is ready.' : 'Index this repo to enable GitNexus queries.'}</span>
+              <Button size="sm" variant={builtin.indexed ? 'ghost' : 'primary'} icon="refresh" disabled={indexing} data-testid="gitnexus-index" onClick={() => void indexGitnexus()}>
+                {indexing ? 'Indexing…' : builtin.indexed ? 'Re-index' : 'Index repo'}
               </Button>
             </div>
           </div>
         )}
-        {support === 'none' && <div className="mcp-note">{harnessName} has no MCP support in the installed version, so nothing is passed to it.</div>}
-        {(support === 'inject' || support === 'client') && (
-          <>
-            {active.length === 0 ? (
-              <div className="skill-none">No servers active for this session.</div>
-            ) : (
-              active.map((e) => (
-                <div key={`${e.scope}:${e.def.id}`} className="mcp-card compact">
-                  <div className="mcp-row-head">
-                    <Icon name="server" size={12} />
-                    <span className="mcp-name">{e.def.id}</span>
-                    <Badge tone={e.scope === 'repo' ? 'green' : 'neutral'}>{e.scope}</Badge>
-                  </div>
-                </div>
-              ))
-            )}
-            {session.config.harness === 'codex-exec' && (
-              <div className="mcp-note pad-t">
-                <Icon name="alert" size={12} /> Codex loads these servers, but the exec SDK runs with approvals turned off and Codex declines every MCP tool call in that mode. Use the Codex (app-server) harness for a session that needs MCP tools.
+      </section>
+
+      <section className="mcp-section" data-testid="mcp-repo-section">
+        <div className="mcp-section-head">
+          <h3>This repo</h3>
+          <span className="spacer" />
+          <Button size="sm" variant="primary" icon="plus" data-testid="mcp-add-server" onClick={() => setEditing(emptyServer())}>
+            Add MCP server
+          </Button>
+        </div>
+        <div className="mcp-path mono" title={info.file}>{info.exists ? info.display : `${info.display} (not created yet)`}</div>
+        {info.error && <div className="skills-error">{info.error}</div>}
+        {pending.length > 0 && (
+          <div className="mcp-trust">
+            <div className="mcp-trust-head"><Icon name="alert" size={13} /> Review servers before enabling them</div>
+            <div className="muted small">These programs came from the shared repo configuration.</div>
+            {pending.map((d) => (
+              <div key={d.id} className="mcp-trust-row">
+                <div className="mcp-trust-main"><span className="mcp-name">{d.id}</span><code className="mcp-cmd mono">{serverSummary(d)}</code></div>
+                <Button size="sm" disabled={busy} onClick={() => void setRepoEnabled(d.id, true)}>Enable</Button>
               </div>
-            )}
-            <div className="muted small pad-t">
-              Configured, not probed — {harnessName} connects when the session starts. Changes apply to the next session on this repo.
-            </div>
-          </>
-        )}
-        {info.effective.filter((e) => !e.enabled && e.reason !== 'not-enabled').length > 0 && (
-          <div className="mcp-skipped">
-            {info.effective
-              .filter((e) => !e.enabled && e.reason !== 'not-enabled')
-              .map((e) => (
-                <div key={`${e.scope}:${e.def.id}`} className="muted small">
-                  <span className="mono">{e.def.id}</span> — {SKIP_LABEL[e.reason ?? 'disabled']}
-                </div>
-              ))}
+            ))}
           </div>
+        )}
+        {info.repo.length === 0 && !editing && !info.error && (
+          <EmptyState icon="server" title="No servers in this repo"><p>Add an MCP server when this project needs extra tools.</p></EmptyState>
+        )}
+        {info.repo.map((d) => editing?.id === d.id ? (
+          <div key={d.id} className="mcp-card editing"><McpServerForm value={editing} portableOnly takenIds={info.repo.map((s) => s.id)} sessionId={session.id} onSave={(x) => void upsertRepo(x)} onCancel={() => setEditing(null)} /></div>
+        ) : (
+          <div key={d.id} className="mcp-card">
+            <div className="mcp-row-head">
+              <Toggle checked={(info.state.enabledRepo ?? []).includes(d.id)} disabled={busy} onChange={(v) => void setRepoEnabled(d.id, v)} label={<span className="sr-only">Enable {d.id}</span>} />
+              <span className="mcp-name">{d.id}</span>
+              <Badge tone={d.transport === 'stdio' ? 'neutral' : 'blue'}>{d.transport}</Badge>
+              <span className="spacer" />
+              <Button size="sm" variant="ghost" icon="edit" title={`Edit ${d.id}`} onClick={() => setEditing({ ...d })} />
+              <Button size="sm" variant="ghost" icon="trash" title={`Remove ${d.id}`} onClick={() => void removeRepo(d)} />
+            </div>
+            <code className="mcp-cmd mono">{serverSummary(d)}</code>
+            {d.description && <div className="mcp-desc muted small">{d.description}</div>}
+          </div>
+        ))}
+        {editing && !info.repo.some((s) => s.id === editing.id) && (
+          <div className="mcp-card editing"><McpServerForm value={editing} portableOnly takenIds={info.repo.map((s) => s.id)} sessionId={session.id} onSave={(x) => void upsertRepo(x)} onCancel={() => setEditing(null)} /></div>
         )}
       </section>
     </div>

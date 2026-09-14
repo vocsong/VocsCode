@@ -101,18 +101,17 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
 
-      // The MCP tab ships GitNexus built in: served by the one shared server, on by default, and
-      // scoped to this repo until the repo shares its graph. Both switches stay reachable.
+      // The MCP tab keeps the global GitNexus controls first, followed by this repo's servers.
       await win.click('.panel-tab:has-text("MCP")');
-      const builtin = win.locator('.mcp-section', { has: win.locator('h3', { hasText: 'Built-in' }) });
-      await builtin.waitFor({ timeout: 20_000 });
-      expect(await builtin.innerText()).toContain('gitnexus');
-      expect(await builtin.innerText()).toContain('shared server');
-      // This harness's own MCP config is not one the app writes, so nothing is claimed from it.
-      expect(await builtin.innerText()).not.toContain('is switched off here');
-      const builtinToggles = builtin.locator('input[type="checkbox"]');
-      expect(await builtinToggles.nth(0).isChecked()).toBe(true); // enabled by default
-      expect(await builtinToggles.nth(1).isChecked()).toBe(false); // not shared globally
+      const global = win.getByTestId('mcp-global-section');
+      await global.waitFor({ timeout: 20_000 });
+      expect(await global.innerText()).toContain('gitnexus');
+      expect(await global.innerText()).toContain('shared server');
+      expect(await win.getByTestId('mcp-repo-section').innerText()).toMatch(/This repo/i);
+      expect(await win.getByTestId('mcp-add-server').innerText()).toContain('Add MCP server');
+      expect(await win.getByLabel('Enable GitNexus for this repo').isChecked()).toBe(true);
+      expect(await win.getByLabel("Share this repo's graph with other repos").isChecked()).toBe(false);
+      await win.getByTestId('gitnexus-index').waitFor();
 
       // The serving mode is no longer a choice: the MCP page describes the one shared server
       // instead of offering per-repo servers.

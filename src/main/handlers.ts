@@ -23,7 +23,7 @@ import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvide
 import { enrichModelsFromProviders } from './models/static-models';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
-import { which } from './runtime';
+import { runCapture, which } from './runtime';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
@@ -432,6 +432,19 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const next = normalizeMcpProjectState({ ...(settings.get().mcpProjectState ?? {}), [scope.projectRoot]: patch });
     await settings.update({ mcpProjectState: next });
     return projectInfo({ ...scope, settings: settings.get() });
+  });
+  handle('mcp:project:index', async ({ sessionId }) => {
+    const session = sessions.get(sessionId);
+    if (!session) return { ok: false, error: 'Session not found' };
+    const binary = which('gitnexus') ?? which('npx');
+    if (!binary) return { ok: false, error: 'GitNexus is not available. Install gitnexus or npx, then try again.' };
+    const args = binary.toLowerCase().endsWith('npx') || binary.toLowerCase().endsWith('npx.cmd')
+      ? ['-y', 'gitnexus@latest', 'analyze']
+      : ['analyze'];
+    const result = await runCapture(binary, args, { cwd: session.config.projectRoot || session.cwd, timeoutMs: 120_000 });
+    const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
+    if (result.code !== 0) return { ok: false, error: output || `GitNexus indexing failed${result.timedOut ? ' (timed out)' : ''}.` };
+    return { ok: true, output };
   });
   handle('mcp:inspect', async ({ def, sessionId }) => {
     const [checked] = normalizeMcpServers([def]);

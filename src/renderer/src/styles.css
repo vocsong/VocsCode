@@ -5469,6 +5469,22 @@ body.resizing {
 .mcp-desc {
   line-height: 1.4;
 }
+.mcp-control-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+}
+.mcp-index-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+.mcp-index-row .muted {
+  flex: 1;
+  min-width: 0;
+}
 .mcp-store-head {
   display: flex;
   align-items: center;

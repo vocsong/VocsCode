@@ -147,6 +147,8 @@ export interface IpcContract {
   'mcp:project:save': [{ sessionId: string; servers: McpServerDef[] }, { ok: boolean; error?: string }];
   /** Patches this repo's switches (`disabledGlobal` / `enabledRepo`) and returns the fresh view. */
   'mcp:project:state': [{ sessionId: string; patch: McpProjectState }, McpProjectInfo];
+  /** Runs GitNexus indexing in the current session repository. */
+  'mcp:project:index': [{ sessionId: string }, { ok: boolean; output?: string; error?: string }];
   /** Connects to one server, lists its tools and disconnects ("Test connection"). */
   'mcp:inspect': [{ def: McpServerDef; sessionId?: string }, McpInspectResult];
   /** Copies servers out of a harness-native store into the global list or the repo file. */
