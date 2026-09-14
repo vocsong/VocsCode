@@ -172,7 +172,8 @@ async function listMarkdown(fs, path, dir, depth = 0) {
   }
   const out = [];
   for (const entry of entries) {
-    if (entry.name.startsWith('_') || entry.name.startsWith('.')) continue;
+    // `branches` holds other branches' pages; the app points VOCS_MEMORY_BRANCH_ROOT at the one slice.
+    if (entry.name.startsWith('_') || entry.name.startsWith('.') || entry.name === 'branches') continue;
     const abs = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...(await listMarkdown(fs, path, abs, depth + 1)));
     else if (entry.isFile() && entry.name.endsWith('.md')) out.push(abs);

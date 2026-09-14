@@ -5693,6 +5693,19 @@ body.resizing {
   gap: 6px;
   flex-wrap: wrap;
 }
+.knowledge-job {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.knowledge-job-failed {
+  color: var(--red, #b91c1c);
+}
+.knowledge-job-done {
+  color: var(--fg-muted);
+}
 .knowledge-search {
   display: flex;
   align-items: center;

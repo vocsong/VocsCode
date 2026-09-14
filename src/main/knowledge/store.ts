@@ -16,9 +16,11 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
+  KNOWLEDGE_BRANCHES_DIR,
   KNOWLEDGE_DIR,
   KNOWLEDGE_OBSERVATIONS_DIR,
   KNOWLEDGE_PROPOSALS_DIR,
+  branchSlug,
   claimKey,
   isKnowledgeId,
   isSameClaim,
@@ -79,16 +81,19 @@ export class KnowledgeStore {
   private evidenceFile: string | null = null;
   private rejectedFile: string | null = null;
 
-  /** The main checkout's wiki; shared by every worktree of the project. */
+  /** The project's shared wiki; every session of the project writes and reads here. */
   repoDir(scope: KnowledgeScope): string {
     return path.join(scope.projectRoot, KNOWLEDGE_DIR);
   }
 
-  /** The worktree's own wiki, when the session runs somewhere other than the project root. */
+  /**
+   * Branch-scope pages live *inside* the project wiki, never in a worktree: a worktree is deleted
+   * with its session, and knowledge must outlive it. They are keyed by branch name and only surface
+   * for a session working on that branch.
+   */
   branchDir(scope: KnowledgeScope): string | null {
     if (!scope.branch) return null;
-    if (path.resolve(scope.cwd) === path.resolve(scope.projectRoot)) return null;
-    return path.join(scope.cwd, KNOWLEDGE_DIR);
+    return path.join(this.repoDir(scope), KNOWLEDGE_BRANCHES_DIR, branchSlug(scope.branch));
   }
 
   proposalsDir(scope: KnowledgeScope): string {
@@ -122,7 +127,7 @@ export class KnowledgeStore {
   async write(scope: KnowledgeScope, meta: KnowledgePageMeta, body: string): Promise<StoredPage> {
     if (!isKnowledgeId(meta.id)) throw new Error('Invalid knowledge page id');
     const dir = meta.scope === 'branch' ? this.branchDir(scope) : this.repoDir(scope);
-    if (!dir) throw new Error('Branch-scope pages need a session running outside the project root');
+    if (!dir) throw new Error('Branch-scope pages need a branch name (only worktree sessions carry one)');
     await this.ensureIgnored(scope);
     const file = path.join(dir, `${meta.id}.md`);
     if (!isInside(dir, file)) throw new Error('Knowledge page path escapes the wiki');
@@ -342,7 +347,8 @@ export class KnowledgeStore {
         return;
       }
       for (const entry of entries) {
-        if (entry.name.startsWith('_') || entry.name.startsWith('.')) continue;
+        // `branches` holds other branches' pages; the caller loads its own via branchDir().
+        if (entry.name.startsWith('_') || entry.name.startsWith('.') || entry.name === KNOWLEDGE_BRANCHES_DIR) continue;
         const abs = path.join(current, entry.name);
         if (entry.isDirectory()) await walk(abs, depth + 1);
         else if (entry.isFile() && entry.name.endsWith('.md')) out.push(abs);

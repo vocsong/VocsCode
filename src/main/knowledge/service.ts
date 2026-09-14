@@ -22,6 +22,7 @@ import {
   renderKnowledgeDigest,
   serializeKnowledgeDocument,
   type KnowledgeEpisode,
+  type KnowledgeJobState,
   type KnowledgePage,
   type KnowledgePageDetail,
   type KnowledgePageMeta,
@@ -65,6 +66,8 @@ export class KnowledgeService {
   readonly store: KnowledgeStore;
   private readonly deps: KnowledgeServiceDeps;
   private readonly jobs = new Map<string, Promise<KnowledgeJobResult>>();
+  /** Last job outcome per project; the panel shows it so a failure cannot vanish into a toast. */
+  private readonly lastJobs = new Map<string, KnowledgeJobState>();
 
   constructor(deps: KnowledgeServiceDeps) {
     this.deps = deps;
@@ -100,6 +103,8 @@ export class KnowledgeService {
       }
     }
     const updated = pages.map((p) => p.meta.updatedAt).filter((v): v is string => !!v).sort().pop();
+    const job = this.lastJobs.get(scope.projectRoot);
+    const running = this.jobs.has(scope.projectRoot);
     return {
       hasWiki: await this.store.hasWiki(scope),
       pages: pages.length,
@@ -108,7 +113,8 @@ export class KnowledgeService {
       stale,
       indexed: false,
       ...(updated ? { lastUpdated: updated } : {}),
-      ...(this.jobs.has(scope.projectRoot) ? { generating: true } : {})
+      ...(running ? { generating: true } : {}),
+      ...(job ? { job } : {})
     };
   }
 
@@ -209,7 +215,7 @@ export class KnowledgeService {
     const evidenceCount = await this.store.recordEvidence(scope, claim, sessionId);
     const targetId = input.pageId ?? pathForProposal(input.kind ?? 'concept', title).replace(/\.md$/, '');
     const existingPage = await this.store.read(scope, targetId);
-    const pageScope = input.scope ?? this.defaultScope(scope, existingPage);
+    const pageScope = input.scope ?? this.defaultScope(existingPage);
     const meta = proposalMeta({
       id: targetId,
       title,
@@ -326,13 +332,30 @@ export class KnowledgeService {
     const running = this.jobs.get(scope.projectRoot);
     if (running) return running;
     const deps: KnowledgeSynthDeps = { store: this.store, log: this.deps.log, transcript: this.deps.transcript, settings: this.settings(), ...this.deps.synth };
+    const model = this.deps.synth.completer.label() ?? undefined;
+    this.setJob(scope, { mode, state: 'running', at: new Date().toISOString(), ...(model ? { model } : {}) });
     const job = (mode === 'bootstrap' ? bootstrapKnowledge(scope, deps) : distillKnowledge(scope, deps))
       .catch((e): KnowledgeJobResult => ({ ok: false, error: errorMessage(e) }))
+      .then((result): KnowledgeJobResult => {
+        this.setJob(scope, {
+          mode,
+          state: result.ok ? 'done' : 'failed',
+          at: new Date().toISOString(),
+          ...(model ? { model } : {}),
+          ...(result.detail ? { detail: result.detail } : {}),
+          ...(result.error ? { error: result.error } : {})
+        });
+        return result;
+      })
       .finally(() => this.jobs.delete(scope.projectRoot));
     this.jobs.set(scope.projectRoot, job);
     const result = await job;
     this.deps.log(result.ok ? 'info' : 'warn', `knowledge: ${mode} finished: ${result.ok ? (result.detail ?? 'ok') : result.error}`);
     return result;
+  }
+
+  private setJob(scope: KnowledgeScope, job: KnowledgeJobState): void {
+    this.lastJobs.set(scope.projectRoot, job);
   }
 
   generating(projectRoot: string): boolean {
@@ -343,11 +366,11 @@ export class KnowledgeService {
   /* Internals                                                          */
   /* ------------------------------------------------------------------ */
 
-  private defaultScope(scope: KnowledgeScope, existing: KnowledgePage | null): 'repo' | 'branch' {
-    if (existing) return existing.meta.scope;
-    // A page discovered while working on a branch stays with that branch until it is published;
-    // edits to an existing repo page always land in the repo scope.
-    return this.store.branchDir(scope) ? 'branch' : 'repo';
+  private defaultScope(existing: KnowledgePage | null): 'repo' | 'branch' {
+    // Knowledge belongs to the project, not to the checkout it was discovered in: a worktree is
+    // deleted with its session, so a page written there would be lost. Branch scope is opt-in
+    // (an explicit `scope: branch` on the proposal) for knowledge that is only true on that branch.
+    return existing?.meta.scope ?? 'repo';
   }
 
   private proposalFileId(title: string, claim: string): string {

@@ -10,7 +10,7 @@
  * No Electron imports.
  */
 import path from 'node:path';
-import { KNOWLEDGE_DIR, type KnowledgeScope } from '../../shared/knowledge';
+import { KNOWLEDGE_BRANCHES_DIR, KNOWLEDGE_DIR, branchSlug, type KnowledgeScope } from '../../shared/knowledge';
 import type { McpServerDef } from '../../shared/types';
 import { which } from '../runtime';
 import { exists } from '../util/fs';
@@ -22,16 +22,14 @@ export function memoryRoot(scope: Pick<KnowledgeScope, 'projectRoot'>): string {
   return path.join(scope.projectRoot, KNOWLEDGE_DIR);
 }
 
-/** The worktree's own wiki, or null when the session runs in the project root. */
-export function memoryBranchRoot(scope: Pick<KnowledgeScope, 'cwd' | 'projectRoot'>): string | null {
-  if (path.resolve(scope.cwd) === path.resolve(scope.projectRoot)) return null;
-  return path.join(scope.cwd, KNOWLEDGE_DIR);
+/** The branch's slice of the project wiki, or null for a session that is not on a branch. */
+export function memoryBranchRoot(scope: Pick<KnowledgeScope, 'projectRoot' | 'branch'>): string | null {
+  if (!scope.branch) return null;
+  return path.join(memoryRoot(scope), KNOWLEDGE_BRANCHES_DIR, branchSlug(scope.branch));
 }
 
-export async function hasMemoryWiki(scope: Pick<KnowledgeScope, 'projectRoot' | 'cwd'>): Promise<boolean> {
-  if (await exists(memoryRoot(scope))) return true;
-  const branch = memoryBranchRoot(scope);
-  return branch ? exists(branch) : false;
+export async function hasMemoryWiki(scope: Pick<KnowledgeScope, 'projectRoot'>): Promise<boolean> {
+  return exists(memoryRoot(scope));
 }
 
 /** The built-in definition, before the per-session env is attached. */
@@ -59,8 +57,7 @@ interface MemoryHostDeps {
 export function memoryServerDef(scope: { projectRoot: string; cwd: string; branch?: string }, def: McpServerDef, deps: MemoryHostDeps): McpServerDef | null {
   if (!deps.memoryServerPath) return null;
   const node = which('node');
-  const branchRoot = memoryBranchRoot(scope);
-  return {
+  const branchRoot = memoryBranchRoot(scope);  return {
     ...def,
     transport: 'stdio',
     command: node ?? process.execPath,

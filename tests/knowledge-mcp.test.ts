@@ -10,6 +10,7 @@ import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
 import { KnowledgeStore } from '../src/main/knowledge/store';
+import { serializeKnowledgeDocument } from '../src/shared/knowledge';
 import type { KnowledgePageMeta, KnowledgeScope } from '../src/shared/knowledge';
 
 const script = path.join(process.cwd(), 'resources', 'mcp', 'vocs-memory.mjs');
@@ -100,6 +101,13 @@ describe('vocs-memory MCP server', () => {
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
     await store.write(scope, pageMeta(), '# Harness lifecycle\n\nOne harness per session; the main process owns it.');
     await store.write(scope, pageMeta({ id: 'gotchas/pty', title: 'Duplicate PTYs', kind: 'gotcha', claim: 'Reconnects can duplicate a PTY.', keywords: ['pty'], status: 'draft' }), 'A draft page.');
+    // Another branch's slice must stay invisible to a session that is not on that branch.
+    await fs.mkdir(path.join(projectRoot, '.vocs-code', 'wiki', 'branches', 'other'), { recursive: true });
+    await fs.writeFile(
+      path.join(projectRoot, '.vocs-code', 'wiki', 'branches', 'other', 'zebra.md'),
+      serializeKnowledgeDocument(pageMeta({ id: 'zebra', title: 'Zebra branch note', claim: 'A zebra-only claim.', keywords: ['zebra'] }), 'zebra body'),
+      'utf8'
+    );
 
     const { request } = start(path.join(projectRoot, '.vocs-code', 'wiki'));
     const init = await request({ method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } } });
@@ -128,6 +136,9 @@ describe('vocs-memory MCP server', () => {
 
     const status = await request({ method: 'tools/call', params: { name: 'knowledge_status', arguments: {} } });
     expect(JSON.parse(toolText(status)).pages).toBe(2);
+    // Another branch's page is not in this session's view.
+    const zebra = await request({ method: 'tools/call', params: { name: 'knowledge_search', arguments: { query: 'zebra' } } });
+    expect(JSON.parse(toolText(zebra)).count).toBe(0);
   });
 
   it('writes proposals the app can read back', async () => {

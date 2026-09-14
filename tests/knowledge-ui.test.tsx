@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { KnowledgeTab } from '../src/renderer/src/components/KnowledgeTab';
+import { useStore } from '../src/renderer/src/store';
 import type { KnowledgePageSummary, KnowledgeView } from '../src/shared/knowledge';
 import type { SessionMeta } from '../src/shared/types';
 
@@ -53,6 +54,8 @@ function view(over: Partial<KnowledgeView> = {}): KnowledgeView {
 
 beforeEach(() => {
   invoke.mockReset();
+  // Generation is gated on a configured utility model; tests that exercise the gate override this.
+  useStore.setState({ settings: { utilityModel: { provider: 'deepseek', model: 'deepseek-flash' } } as never });
 });
 afterEach(cleanup);
 
@@ -122,5 +125,40 @@ describe('Project knowledge panel', () => {
     });
     expect(screen.getByText('No project wiki yet')).toBeTruthy();
     expect(screen.getByTestId('knowledge-generate')).toBeTruthy();
+  });
+
+  it('shows the last job outcome instead of leaving a silent no-op', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view')
+        return view({
+          status: {
+            hasWiki: true,
+            pages: 1,
+            needsReview: 0,
+            proposals: 0,
+            stale: 0,
+            indexed: false,
+            job: { mode: 'bootstrap', state: 'failed', at: new Date().toISOString(), model: 'deepseek/deepseek-flash', error: 'The background model (deepseek/deepseek-flash) did not answer.' }
+          }
+        });
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    const job = screen.getByTestId('knowledge-job');
+    expect(job.textContent).toContain('did not answer');
+  });
+
+  it('explains that generation needs a utility model and disables it', async () => {
+    useStore.setState({ settings: {} as never });    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view();
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    expect(screen.getByTestId('knowledge-needs-model')).toBeTruthy();
+    expect((screen.getByTestId('knowledge-generate') as HTMLButtonElement).disabled).toBe(true);
   });
 });

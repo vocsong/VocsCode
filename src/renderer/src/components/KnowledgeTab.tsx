@@ -4,7 +4,7 @@
  * rejecting a proposal and copying reviewed pages into docs/wiki/.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { KnowledgePageDetail, KnowledgePageSummary, KnowledgeView } from '../../../shared/knowledge';
+import type { KnowledgeJobState, KnowledgePageDetail, KnowledgePageSummary, KnowledgeView } from '../../../shared/knowledge';
 import type { SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { renderMarkdown } from '../markdown';
@@ -25,8 +25,25 @@ function authorityLabel(page: KnowledgePageSummary): string {
   return page.status;
 }
 
+function jobText(job: KnowledgeJobState): string {
+  const on = job.model ? ` on ${job.model}` : '';
+  if (job.state === 'running') return `${job.mode === 'bootstrap' ? 'Generating pages' : 'Distilling recent work'}${on}…`;
+  if (job.state === 'failed') return job.error ?? 'The job failed.';
+  return job.detail ?? 'Done.';
+}
+
+function JobLine({ job }: { job: KnowledgeJobState }) {
+  return (
+    <div className={`knowledge-job knowledge-job-${job.state}`} data-testid="knowledge-job">
+      {job.state === 'running' ? <Spinner size={12} /> : <Icon name={job.state === 'done' ? 'check' : 'alert'} size={12} />}
+      <span>{jobText(job)}</span>
+    </div>
+  );
+}
+
 export function KnowledgeTab({ session }: { session: SessionMeta }) {
   const toast = useStore((s) => s.toast);
+  const settings = useStore((s) => s.settings);
   const [view, setView] = useState<KnowledgeView | null>(null);
   const [detail, setDetail] = useState<KnowledgePageDetail | null>(null);
   const [query, setQuery] = useState('');
@@ -52,6 +69,13 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
     setQuery('');
     void load();
   }, [load]);
+
+  // A synthesis job can run for a minute or two; keep the panel's status line moving while it does.
+  useEffect(() => {
+    if (!generating) return undefined;
+    const timer = setInterval(() => void load(), 4_000);
+    return () => clearInterval(timer);
+  }, [generating, load]);
 
   // The digest priming and auto-distill switches are app-wide, but the project's wiki is where a
   // user notices them, so they live here rather than only in Settings.
@@ -147,6 +171,8 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
   }
 
   const status = view.status;
+  // Background generation runs on the utility model; without one the button can only fail, so say so.
+  const modelReady = !!settings?.utilityModel;
 
   return (
     <div className="knowledge-tab" data-testid="knowledge-tab">
@@ -160,10 +186,10 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
       <div className="muted small mono knowledge-path" title={view.wikiDir}>{view.wikiDir}{view.branch ? ` · branch ${view.branch}` : ''}</div>
 
       <div className="knowledge-actions">
-        <Button size="sm" variant="primary" icon="sparkles" disabled={generating} data-testid="knowledge-generate" onClick={() => void generate('bootstrap')}>
+        <Button size="sm" variant="primary" icon="sparkles" disabled={generating || !modelReady} data-testid="knowledge-generate" onClick={() => void generate('bootstrap')}>
           {generating ? 'Working…' : 'Generate from docs'}
         </Button>
-        <Button size="sm" icon="refresh" disabled={generating} onClick={() => void generate('distill')}>
+        <Button size="sm" icon="refresh" disabled={generating || !modelReady} onClick={() => void generate('distill')}>
           Distil recent work
         </Button>
         <span className="spacer" />
@@ -171,6 +197,12 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
           Publish
         </Button>
       </div>
+      {!modelReady && (
+        <div className="muted small" data-testid="knowledge-needs-model">
+          Generation needs a utility model — choose one in Settings → General → Background model.
+        </div>
+      )}
+      {status.job && <JobLine job={status.job} />}
 
       <div className="knowledge-search">
         <input

@@ -17,6 +17,13 @@ export const KNOWLEDGE_PUBLISH_DIR = 'docs/wiki';
 /** Reserved subdirectories of a wiki. Pages never live under a leading underscore. */
 export const KNOWLEDGE_PROPOSALS_DIR = '_proposals';
 export const KNOWLEDGE_OBSERVATIONS_DIR = '_observations';
+/** Branch-scope pages live under this directory of a project's wiki, keyed by branch. */
+export const KNOWLEDGE_BRANCHES_DIR = 'branches';
+
+/** `vocscode/fix-pty` → `vocscode-fix-pty`; the directory name for one branch's pages. */
+export function branchSlug(branch: string): string {
+  return branch.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'branch';
+}
 
 /** Identity of a knowledge scope: the project root plus the checkout a session reads from. */
 export interface KnowledgeScope {
@@ -149,6 +156,19 @@ export interface KnowledgeStatusSummary {
   indexed: boolean;
   lastUpdated?: string;
   generating?: boolean;
+  /** The last synthesis job for this project, so a failure cannot vanish into a toast. */
+  job?: KnowledgeJobState;
+}
+
+/** In-memory state of the most recent bootstrap/distill job for one project. */
+export interface KnowledgeJobState {
+  mode: 'bootstrap' | 'distill';
+  state: 'running' | 'done' | 'failed';
+  at: string;
+  /** provider/model the job ran on, for the status line. */
+  model?: string;
+  detail?: string;
+  error?: string;
 }
 
 /** The payload the Knowledge panel renders for one session's project. */

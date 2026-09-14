@@ -75,25 +75,29 @@ Local-first, under the project, git-excluded by the existing `.vocs-code/` conve
 
 ```
 <projectRoot>/.vocs-code/wiki/
-  <kind>/<slug>.md         pages (path = id); repo scope, shared by every worktree
-  _proposals/*.md          candidates waiting for a human decision
-  _observations/*.jsonl    commit / PR / merge outcomes waiting for distillation
-  _evidence.json           claim key → distinct sessions that have seen it
-  _rejected.json           claim tombstones, so agents stop refiling a rejection
-<worktree>/.vocs-code/wiki/   branch-scope pages, overlaid on the repo wiki for that checkout
-docs/wiki/                 written only by the explicit Publish action (tracked, committed by the user)
+  <kind>/<slug>.md            pages (path = id); repo scope, written by every session
+  branches/<branch>/<kind>/…  branch-scope pages, overlaid for a session on that branch
+  _proposals/*.md             candidates waiting for a human decision
+  _observations/*.jsonl       commit / PR / merge outcomes waiting for distillation
+  _evidence.json              claim key → distinct sessions that have seen it
+  _rejected.json              claim tombstones, so agents stop refiling a rejection
+docs/wiki/                    written only by the explicit Publish action (tracked, committed by the user)
 ```
 
 Decisions behind this layout:
 
+- **One wiki per project, always in the project root checkout.** Knowledge must never live in a
+  session's worktree: a worktree is deleted with its session, and a page written there would be
+  lost. Every session — worktree or not — reads and writes `<projectRoot>/.vocs-code/wiki`.
+- **Repo scope is the default, branch scope is opt-in.** A discovery made on a feature branch is
+  filed against the project (scope `repo`) so every session and every branch sees it; a proposal
+  that explicitly says `scope: branch` lands under `branches/<branch>/` and only overlays for
+  sessions working that branch. A migration under development can say so without rewriting the
+  project's shared understanding — and without its knowledge dying with the worktree.
 - **Nothing agent-derived lands in tracked files by default.** The repo's own `AGENTS.md` currently
   carries an *uncommitted* `<!-- gitnexus:start -->` block from `gitnexus analyze`; generated
   knowledge must not add more of that. `Publish` copies reviewed pages to `docs/wiki/`, and the
   commit stays a human act through the normal git flow.
-- **Repo scope is the project root, not the worktree.** Knowledge discovered on a branch defaults
-  to branch scope; edits to an existing repo page stay in the repo scope. Retrieval merges
-  branch-over-repo, so a migration being developed on a branch can say so without rewriting the
-  project's shared understanding.
 - **Markdown is the only source of truth.** Retrieval is a scored scan over the loaded pages — a
   wiki is tens to low hundreds of files. `KnowledgeService.search()` is the seam where a
   rebuildable FTS index (the `search.db` pattern) or embeddings can go later, once a measured
@@ -165,6 +169,13 @@ The wiki is easy to generate; keeping it true is the product. The rules:
 - **Distillation runs at git boundaries.** Commits, PR opens and merges append an episode; with
   `autoDistill` on (default) the newest episode plus its transcript slice is distilled into up to
   three proposals, which go through the same rules above.
+- **Failures are visible, never silent.** Every job records its outcome on the project's status
+  (`KnowledgeJobState`): the panel shows running / done / failed with the model name and the error
+  instead of a toast that fades. A model that returns no text — a thinking mode that spends the
+  whole budget before writing anything — is retried once with double the budget and an explicit
+  "JSON only" instruction, and the complete entries of a truncated reply are salvaged rather than
+  discarded. Generation needs a configured utility model; the panel says so and disables the
+  buttons when there is none.
 
 ### "Every PR" in a local app
 
@@ -237,8 +248,8 @@ paths. The wiki itself costs nothing until an agent asks a question.
 - **Consolidation.** Repetition detection is in (`_evidence.json`); the next steps are a periodic
   lint (unresolved anchors, changed sources, contradictions) and a merge flow that folds a
   confirmed proposal into an existing page instead of creating a near-duplicate.
-- **Branch overlay.** Implemented in the store and retrieval; the remaining work is UI affordance
-  for promoting a branch page to repo scope.
+- **Branch overlay.** Branch-scope pages are stored, retrieved and overlaid; the remaining work is a
+  UI affordance for promoting a branch page into repo scope (and the review step for it).
 - **L4.** Scope is already `projectRoot`-keyed and GitNexus has repo groups (currently hidden by
   the scope proxy), so organisational knowledge is another scope with a higher authority rung, not
   a rewrite. Portable export/import (e.g. OKF bundles) is the interop story.

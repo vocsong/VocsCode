@@ -43,7 +43,7 @@ function pageMeta(over: Partial<KnowledgePageMeta> = {}): KnowledgePageMeta {
 }
 
 describe('knowledge store scoping', () => {
-  it('merges repo pages with branch pages, branch winning by id', async () => {
+  it('keeps branch pages inside the project wiki and merges them by id', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const cwd = path.join(projectRoot, '.vocs-code', 'worktrees', 'feature');
     await fs.mkdir(cwd, { recursive: true });
@@ -55,15 +55,41 @@ describe('knowledge store scoping', () => {
     await store.write(repoScope, pageMeta({ title: 'Harness lifecycle' }), 'repo body');
     await store.write(branchScope, pageMeta({ title: 'Harness lifecycle (branch)', scope: 'branch', branch: 'vocscode/feature' }), 'branch body');
 
+    // The branch page lives in the project wiki, never in the worktree that will be deleted.
+    const branchFile = path.join(projectRoot, '.vocs-code', 'wiki', 'branches', 'vocscode-feature', 'conventions', 'harness-lifecycle.md');
+    expect(await fs.readFile(branchFile, 'utf8')).toContain('branch: vocscode/feature');
+    await expect(fs.stat(path.join(cwd, '.vocs-code'))).rejects.toThrow();
+
     const merged = await store.load(branchScope);
     expect(merged.map((p) => p.meta.id).sort()).toEqual(['architecture/standalone', 'conventions/harness-lifecycle']);
     const overridden = merged.find((p) => p.meta.id === 'conventions/harness-lifecycle');
     expect(overridden?.body).toBe('branch body');
     expect(overridden?.meta.scope).toBe('branch');
 
-    // A session in the project root sees only the repo page.
+    // A session in the project root sees only the repo page; other branches never leak in.
     const plain = await store.load(repoScope);
     expect(plain.find((p) => p.meta.id === 'conventions/harness-lifecycle')?.body).toBe('repo body');
+    expect(plain.map((p) => p.meta.id)).not.toContain('branches');
+    const otherBranch = await store.load({ projectRoot, cwd, branch: 'vocscode/other' });
+    expect(otherBranch.find((p) => p.meta.id === 'conventions/harness-lifecycle')?.body).toBe('repo body');
+  });
+
+  it('files a worktree discovery into the project wiki, not the worktree', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const cwd = path.join(projectRoot, '.vocs-code', 'worktrees', 'feature');
+    await fs.mkdir(cwd, { recursive: true });
+    const repoScope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const branchScope: KnowledgeScope = { projectRoot, cwd, branch: 'vocscode/feature' };
+    const svc = service();
+
+    const filed = await svc.propose(branchScope, { title: 'PTY ownership', claim: 'Only the main process owns a PTY.', body: 'Body text long enough to be a real page.', kind: 'gotcha' }, 'agent:pi', 's1');
+    await svc.review(branchScope, filed.id, 'accept', { by: 'human' });
+
+    // The page belongs to the project: a session in the main checkout can read it.
+    const fromRoot = await svc.detail(repoScope, 'gotcha/pty-ownership');
+    expect(fromRoot?.page.meta.scope).toBe('repo');
+    expect(await fs.readFile(path.join(projectRoot, '.vocs-code', 'wiki', 'gotcha', 'pty-ownership.md'), 'utf8')).toContain('Only the main process owns a PTY.');
+    await expect(fs.stat(path.join(cwd, '.vocs-code'))).rejects.toThrow();
   });
 
   it('reports a page stale when a cited file disappears or changes', async () => {
@@ -194,5 +220,23 @@ describe('knowledge search and digest', () => {
     const episodes = await svc.store.readEpisodes(scope);
     expect(episodes).toHaveLength(1);
     expect(episodes[0].summary).toBe('Add PTY guard');
+  });
+
+  it('keeps the last job outcome on the view so a failure is not just a toast', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    await fs.writeFile(path.join(projectRoot, 'README.md'), `# Demo\n\n${'The main process owns state; the renderer keeps none. '.repeat(15)}\n`, 'utf8');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const svc = new KnowledgeService({
+      log: () => undefined,
+      settings: () => ({ knowledge: { prime: true, autoDistill: false } }) as AppSettings,
+      synth: { completer: { label: () => 'test/model', complete: async () => 'no json at all' } }
+    });
+    const result = await svc.generate(scope, 'bootstrap');
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('no usable pages');
+    const view = await svc.view(scope);
+    expect(view.status.job?.state).toBe('failed');
+    expect(view.status.job?.model).toBe('test/model');
+    expect(view.status.job?.error).toContain('no usable pages');
   });
 });

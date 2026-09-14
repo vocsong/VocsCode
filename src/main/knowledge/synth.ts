@@ -23,7 +23,7 @@ import {
 } from '../../shared/knowledge';
 import { errorMessage } from '../util/async';
 import type { KnowledgeCompleter } from './llm';
-import { parseJsonReply } from './llm';
+import { parseJsonReply, salvageArrayEntries } from './llm';
 import type { KnowledgeStore } from './store';
 
 export interface KnowledgeJobResult {
@@ -46,7 +46,7 @@ export interface KnowledgeSynthDeps {
 const MAX_EVIDENCE_CHARS = 40_000;
 const MAX_FILE_CHARS = 5_000;
 const MAX_FILES = 14;
-const MAX_BOOTSTRAP_PAGES = 25;
+const MAX_BOOTSTRAP_PAGES = 12;
 const MIN_BODY_CHARS = 80;
 const MAX_DISTILLED_PROPOSALS = 3;
 const MAX_TRANSCRIPT_CHARS = 6_000;
@@ -188,14 +188,17 @@ export async function bootstrapKnowledge(scope: KnowledgeScope, deps: KnowledgeS
   const prompt = [
     `Project: ${path.basename(scope.projectRoot)}`,
     '',
-    `Evidence (${files.length} file(s)). Propose at most ${MAX_BOOTSTRAP_PAGES} pages.`,
+    `Evidence (${files.length} file(s)). Propose at most ${MAX_BOOTSTRAP_PAGES} pages, most important first.`,
     '',
     text
   ].join('\n');
-  const reply = await deps.completer.complete({ system: BOOTSTRAP_SYSTEM, prompt, maxTokens: 8000 });
+  const reply = await deps.completer.complete({ system: BOOTSTRAP_SYSTEM, prompt, maxTokens: 16_000 });
   const parsed = parseJsonReply<{ pages?: RawPage[] }>(reply);
-  const raw = Array.isArray(parsed?.pages) ? parsed.pages : [];
-  if (!raw.length) return { ok: false, error: reply ? 'The model did not return usable pages.' : 'The background model did not answer.' };
+  const salvagedPages = Array.isArray(parsed?.pages) && parsed.pages.length ? parsed.pages : salvageArrayEntries<RawPage>(reply, 'pages');
+  const raw = salvagedPages.slice(0, MAX_BOOTSTRAP_PAGES);
+  if (!raw.length) {
+    return { ok: false, error: reply ? 'The model returned no usable pages. Check the app log for the raw reply.' : `The background model (${deps.completer.label() ?? 'unknown'}) did not answer. Check the app log.` };
+  }
   let written = 0;
   for (const entry of raw.slice(0, MAX_BOOTSTRAP_PAGES)) {
     const title = typeof entry.title === 'string' ? entry.title.trim() : '';
@@ -269,9 +272,9 @@ export async function distillKnowledge(scope: KnowledgeScope, deps: KnowledgeSyn
     transcriptText ? '\nTranscript slice from the most recent episode:\n' : '',
     transcriptText
   ].join('\n');
-  const reply = await deps.completer.complete({ system: DISTILL_SYSTEM, prompt, maxTokens: 4000 });
+  const reply = await deps.completer.complete({ system: DISTILL_SYSTEM, prompt, maxTokens: 8000 });
   const parsed = parseJsonReply<{ proposals?: RawPage[] }>(reply);
-  const raw = Array.isArray(parsed?.proposals) ? parsed.proposals : [];
+  const raw = (Array.isArray(parsed?.proposals) && parsed.proposals.length ? parsed.proposals : salvageArrayEntries<RawPage>(reply, 'proposals')).slice(0, MAX_DISTILLED_PROPOSALS);
   if (!raw.length) return { ok: true, detail: reply ? 'no durable knowledge proposed' : 'the background model did not answer' };
   let proposed = 0;
   let promoted = 0;

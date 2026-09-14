@@ -5,7 +5,7 @@ import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
 import { KnowledgeStore } from '../src/main/knowledge/store';
-import { parseJsonReply } from '../src/main/knowledge/llm';
+import { parseJsonReply, salvageArrayEntries } from '../src/main/knowledge/llm';
 import { bootstrapKnowledge, distillKnowledge, type KnowledgeSynthDeps } from '../src/main/knowledge/synth';
 import type { KnowledgeProposalInput, KnowledgeScope } from '../src/shared/knowledge';
 
@@ -35,6 +35,23 @@ describe('parseJsonReply', () => {
     expect(parseJsonReply('Sure! {"pages":[]} done')).toEqual({ pages: [] });
     expect(parseJsonReply('no json here')).toBeNull();
     expect(parseJsonReply(null)).toBeNull();
+  });
+});
+
+describe('salvageArrayEntries', () => {
+  it('recovers complete entries from a reply truncated mid-array', () => {
+    const text = '{"pages":[{"title":"A","body":"one"},{"title":"B","body":"two"},{"title":"C","body":"thr';
+    expect(salvageArrayEntries<{ title: string }>(text, 'pages').map((p) => p.title)).toEqual(['A', 'B']);
+  });
+
+  it('ignores braces inside strings and stops at the closing bracket', () => {
+    const text = '{"pages":[{"title":"a { b }","body":"x"}],"other":[{"title":"nope"}]}';
+    expect(salvageArrayEntries<{ title: string }>(text, 'pages')).toEqual([{ title: 'a { b }', body: 'x' }]);
+  });
+
+  it('is empty when the key never appears', () => {
+    expect(salvageArrayEntries('{}', 'pages')).toEqual([]);
+    expect(salvageArrayEntries(null, 'pages')).toEqual([]);
   });
 });
 
@@ -82,6 +99,22 @@ describe('bootstrapKnowledge', () => {
     const result = await bootstrapKnowledge(scope, deps({ store, completer: { label: () => 'x', complete: async () => '{}' } }));
     expect(result.ok).toBe(false);
     expect(result.error).toContain('Not enough project documentation');
+  });
+
+  it('keeps the pages a truncated reply did write', async () => {
+    const projectRoot = tmpDir('vocs-synth-');
+    await fs.writeFile(path.join(projectRoot, 'README.md'), `# Demo\n\n${'The main process owns state and the renderer keeps none of it. '.repeat(12)}\n`, 'utf8');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const store = new KnowledgeStore();
+    const longBody = 'Explain the boundary in enough words to be a real page body. '.repeat(3);
+    const truncated =
+      `{"pages":[` +
+      `{"title":"First","kind":"architecture","claim":"one","body":"${longBody}"},` +
+      `{"title":"Second","kind":"concept","claim":"two","body":"${longBody}"},` +
+      `{"title":"Third","kind":"concept","claim":"thr`;
+    const result = await bootstrapKnowledge(scope, deps({ store, completer: { label: () => 'x', complete: async () => truncated } }));
+    expect(result.ok).toBe(true);
+    expect((await store.load(scope)).map((p) => p.meta.title).sort()).toEqual(['First', 'Second']);
   });
 });
 
