@@ -27,6 +27,7 @@ import {
   trimInput,
   type ApprovalChoice
 } from './subagent-gate';
+import { mcpReadOnlyToolNames } from './vocs-code-mcp';
 
 // The dangerous-command list is shared with the child gate; re-exported because the offline test
 // asserts it stays verbatim-identical to src/main/harness/types.ts.
@@ -111,7 +112,7 @@ export default function vocsCodeApprovals(pi: PiLike): void {
       }
       return { block: true, reason };
     };
-    const decision = await decideToolCall({ tool, input: event.input, cwd: ctx.cwd, mode, sessionAllowed });
+    const decision = await decideToolCall({ tool, input: event.input, cwd: ctx.cwd, mode, sessionAllowed, readOnlyMcp: await mcpReadOnlyToolNames() });
     if (decision.action === 'allow') return undefined;
     if (decision.action === 'block') return decline(decision.reason);
     // No approval UI means we cannot ask: fail closed instead of letting a gated action run.

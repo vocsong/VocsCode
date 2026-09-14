@@ -35,6 +35,11 @@ interface PiLike {
   on(event: string, handler: (event: any, ctx: any) => unknown): void;
 }
 
+export interface McpBridgeTool extends PiToolDefinition {
+  /** The app's own memory server may mark a tool read-only; only that server is trusted for it. */
+  readOnly: boolean;
+}
+
 /** A pi/OpenAI-safe name segment: lowercase, `[a-z0-9_]` only, no leading digit. */
 export function sanitizeToolName(name: string): string {
   const mapped = String(name ?? '')
@@ -129,18 +134,35 @@ export function promptSnippetFor(description: string | undefined, toolName: stri
 }
 
 export default async function vocsCodeMcp(pi: PiLike): Promise<void> {
+  const registered = await registerMcpTools(pi);
+  // Without servers there is nothing to close, and registering the handler would imply otherwise.
+  if (registered) pi.on('session_shutdown', () => closeMcpBridge());
+}
+
+/** The app's own memory server, mirroring VOCS_MEMORY_SERVER_ID in src/main/mcp/memory.ts. */
+const MEMORY_SERVER = 'vocs_memory';
+
+/**
+ * State shared by every session in this pi process — the parent and each subagent child. A child is
+ * an in-process agent session, so it registers the same tools over the same connections instead of
+ * spawning its own copy of every server.
+ */
+let bridge: Promise<McpBridgeTool[]> | null = null;
+let connections: PiMcpConnection[] = [];
+
+async function connectBridge(): Promise<McpBridgeTool[]> {
   const configPath = process.env.VOCS_CODE_MCP_CONFIG;
-  if (!configPath) return;
+  if (!configPath) return [];
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(configPath, 'utf8'));
   } catch (error) {
     console.error(`[vocs-code-mcp] cannot read MCP config at ${configPath}: ${errorText(error)}`);
-    return;
+    return [];
   }
 
-  const connections: PiMcpConnection[] = [];
+  const tools: McpBridgeTool[] = [];
   for (const cfg of parseMcpConfig(parsed)) {
     let connection: PiMcpConnection;
     try {
@@ -151,25 +173,27 @@ export default async function vocsCodeMcp(pi: PiLike): Promise<void> {
     }
     connections.push(connection);
 
-    let tools: PiMcpTool[];
+    let listed: PiMcpTool[];
     try {
-      tools = await connection.listTools();
+      listed = await connection.listTools();
     } catch (error) {
       console.error(`[vocs-code-mcp] listing tools for MCP server "${cfg.id}" failed: ${errorText(error)}`);
       continue;
     }
 
-    const guidelines = sanitizeToolName(cfg.id) === CODE_GRAPH_SERVER ? CODE_GRAPH_GUIDELINES : undefined;
+    const serverId = sanitizeToolName(cfg.id);
+    const guidelines = serverId === CODE_GRAPH_SERVER ? CODE_GRAPH_GUIDELINES : undefined;
 
-    for (const tool of tools) {
+    for (const tool of listed) {
       const description = tool.description ?? 'MCP tool ' + tool.name + ' from ' + cfg.id;
-      pi.registerTool({
+      tools.push({
         name: toolNameFor(cfg.id, tool.name),
         label: cfg.id + ': ' + tool.name,
         description,
         promptSnippet: promptSnippetFor(tool.description, tool.name),
         ...(guidelines ? { promptGuidelines: [...guidelines] } : {}),
         parameters: tool.inputSchema && typeof tool.inputSchema === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
+        readOnly: serverId === MEMORY_SERVER && tool.readOnly === true,
         async execute(_id, params) {
           const result = await connection.callTool(tool.name, params ?? {});
           if (result.isError) {
@@ -181,14 +205,41 @@ export default async function vocsCodeMcp(pi: PiLike): Promise<void> {
       });
     }
   }
+  return tools;
+}
 
-  pi.on('session_shutdown', () => {
-    for (const connection of connections) {
-      try {
-        connection.close();
-      } catch {
-        /* a connection that already exited is fine */
-      }
+/** Connects once per pi process; later callers (children included) get the same tools. */
+export function loadMcpBridge(): Promise<McpBridgeTool[]> {
+  if (!bridge) bridge = connectBridge();
+  return bridge;
+}
+
+/** Tool names for a child session's active-tool list. */
+export async function mcpToolNames(): Promise<string[]> {
+  return (await loadMcpBridge()).map((tool) => tool.name);
+}
+
+/** Names the gate may treat as reads even below full access (the app's own read-only tools). */
+export async function mcpReadOnlyToolNames(): Promise<ReadonlySet<string>> {
+  return new Set((await loadMcpBridge()).filter((tool) => tool.readOnly).map((tool) => tool.name));
+}
+
+/** Registers every MCP tool into one pi session (the parent, or a subagent child). */
+export async function registerMcpTools(pi: PiLike): Promise<number> {
+  const tools = await loadMcpBridge();
+  for (const tool of tools) pi.registerTool(tool);
+  return tools.length;
+}
+
+/** Closes the process-wide connections; the parent's shutdown handler is the one caller in practice. */
+export function closeMcpBridge(): void {
+  for (const connection of connections) {
+    try {
+      connection.close();
+    } catch {
+      /* a connection that already exited is fine */
     }
-  });
+  }
+  connections = [];
+  bridge = null;
 }

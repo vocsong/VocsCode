@@ -28,8 +28,8 @@ afterEach(async () => {
 const ALLOW = (decision: { action: string }) => decision.action === 'allow';
 const ASK = (decision: { action: string }) => decision.action === 'ask';
 
-async function decide(mode: Mode, tool: string, input: Record<string, unknown>, extra: { cwd?: string; sessionAllowed?: Set<string> } = {}) {
-  return decideToolCall({ tool, input, cwd: extra.cwd ?? process.cwd(), mode, sessionAllowed: extra.sessionAllowed ?? new Set<string>() });
+async function decide(mode: Mode, tool: string, input: Record<string, unknown>, extra: { cwd?: string; sessionAllowed?: Set<string>; readOnlyMcp?: Set<string> } = {}) {
+  return decideToolCall({ tool, input, cwd: extra.cwd ?? process.cwd(), mode, sessionAllowed: extra.sessionAllowed ?? new Set<string>(), ...(extra.readOnlyMcp ? { readOnlyMcp: extra.readOnlyMcp } : {}) });
 }
 
 describe('gate decision table', () => {
@@ -165,6 +165,26 @@ describe('outside-workspace detection', () => {
       return; // platform refuses to create it: nothing to assert
     }
     expect(await isOutsideCwd(dir, 'dangling/file.txt')).toBe(true);
+  });
+});
+
+describe('read-only MCP tools', () => {
+  const search = 'mcp__vocs_memory__knowledge_search';
+
+  it('runs the app\'s own read-only memory tools unprompted in every mode, plan included', async () => {
+    for (const mode of ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'] as Mode[]) {
+      expect(ALLOW(await decide(mode, search, { query: 'restore' }, { readOnlyMcp: new Set([search]) }))).toBe(true);
+    }
+  });
+
+  it('still asks for a write-capable tool from the same server', async () => {
+    const propose = 'mcp__vocs_memory__knowledge_propose';
+    expect(ASK(await decide('auto', propose, { title: 't' }, { readOnlyMcp: new Set([search]) }))).toBe(true);
+  });
+
+  it('cannot be extended to a server the app does not own', async () => {
+    // The trusted set only ever names the app's memory server, so an unknown tool keeps asking.
+    expect(ASK(await decide('auto', 'mcp__other__wipe', {}, { readOnlyMcp: new Set([search]) }))).toBe(true);
   });
 });
 

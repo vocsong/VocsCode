@@ -7,9 +7,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PiMcpConnection } from '../resources/pi/mcp-client';
-import vocsCodeMcp, { parseMcpConfig, promptSnippetFor, sanitizeToolName, toolNameFor } from '../resources/pi/vocs-code-mcp';
+import vocsCodeMcp, { closeMcpBridge, mcpReadOnlyToolNames, mcpToolNames, parseMcpConfig, promptSnippetFor, registerMcpTools, sanitizeToolName, toolNameFor } from '../resources/pi/vocs-code-mcp';
 
 const FIXTURE = path.resolve('tests/fixtures/mcp-echo-server.mjs');
+const MEMORY_SERVER = path.resolve('resources/mcp/vocs-memory.mjs');
 const STAMP = 'VOCSMCP9137';
 
 type Pi = Parameters<typeof vocsCodeMcp>[0];
@@ -31,6 +32,8 @@ function makePi(): { pi: Pi; tools: ToolDef[]; handlers: Map<string, (event: unk
 
 afterEach(() => {
   delete process.env.VOCS_CODE_MCP_CONFIG;
+  // The bridge is process-wide by design; each test starts from a clean one.
+  closeMcpBridge();
 });
 
 describe('toolNameFor', () => {
@@ -245,4 +248,44 @@ describe('vocsCodeMcp extension', () => {
       await rm(dir, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+describe('shared MCP bridge (a child session reuses the parent connections)', () => {
+  it('registers the same tools into a second session and exposes names plus the read-only set', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'vocs-pi-bridge-'));
+    const configPath = path.join(root, 'mcp.json');
+    await writeFile(
+      configPath,
+      JSON.stringify({ servers: [{ id: 'vocs-memory', transport: 'stdio', command: process.execPath, args: [MEMORY_SERVER], env: { VOCS_MEMORY_ROOT: path.join(root, 'wiki') } }] }),
+      'utf8'
+    );
+    process.env.VOCS_CODE_MCP_CONFIG = configPath;
+    const parent = makePi();
+    const child = makePi();
+    try {
+      await vocsCodeMcp(parent.pi);
+      const registered = await registerMcpTools(child.pi);
+      expect(registered).toBe(parent.tools.length);
+      expect(child.tools.map((tool) => tool.name)).toEqual(parent.tools.map((tool) => tool.name));
+
+      const names = await mcpToolNames();
+      expect(names).toContain('mcp__vocs_memory__knowledge_search');
+      const readOnly = await mcpReadOnlyToolNames();
+      expect(readOnly.has('mcp__vocs_memory__knowledge_search')).toBe(true);
+      expect(readOnly.has('mcp__vocs_memory__session_history_search')).toBe(true);
+      expect(readOnly.has('mcp__vocs_memory__knowledge_propose')).toBe(false);
+
+      // Executing from the second registration goes through the one connection.
+      const search = child.tools.find((tool) => tool.name === 'mcp__vocs_memory__knowledge_search')!;
+      const result = await search.execute('call-1', { query: 'anything' });
+      expect(result.content[0]?.text).toContain('"results"');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('resolves to nothing when no server is configured', async () => {
+    expect(await mcpToolNames()).toEqual([]);
+    expect((await mcpReadOnlyToolNames()).size).toBe(0);
+  });
 });

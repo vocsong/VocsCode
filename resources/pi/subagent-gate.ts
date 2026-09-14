@@ -145,6 +145,11 @@ export interface GateInput {
   mode: Mode;
   /** Tools the user already granted for this session ("Allow for session"). */
   sessionAllowed: ReadonlySet<string>;
+  /**
+   * MCP tools the app itself marked read-only (its memory server). A server the app does not own
+   * can never appear here, so a third-party tool still asks below full access.
+   */
+  readOnlyMcp?: ReadonlySet<string>;
 }
 
 export type GateDecision =
@@ -156,9 +161,11 @@ export type GateDecision =
  * The single decision function. `ask` means the caller must obtain explicit approval and may only
  * execute on `Allow once` / `Allow for session`; it must never be treated as a default allow.
  */
-export async function decideToolCall({ tool, input, cwd, mode, sessionAllowed }: GateInput): Promise<GateDecision> {
+export async function decideToolCall({ tool, input, cwd, mode, sessionAllowed, readOnlyMcp }: GateInput): Promise<GateDecision> {
   const isMcp = tool.startsWith(MCP_PREFIX);
   if (!MUTATING.has(tool) && !isMcp) return { action: 'allow' };
+  // The app's own read-only memory tools are reads: they run unprompted and survive plan mode.
+  if (isMcp && readOnlyMcp?.has(tool)) return { action: 'allow' };
   if (mode === 'full-auto') return { action: 'allow' };
   if (mode === 'plan') return { action: 'block', reason: PLAN_REASON };
   const command = typeof input?.command === 'string' ? (input.command as string) : undefined;

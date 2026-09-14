@@ -232,7 +232,12 @@ asar), lists each server's tools and calls `pi.registerTool()` for every one as
 out of its "Available tools" list entirely without one, which is how an injected server stays
 invisible to the model — and the built-in code graph also carries a `promptGuidelines` line so the
 graph is reached for before grep. The approvals extension gates every `mcp__*` tool, since a server
-tool's blast radius is unknown; only full-auto lets it through unprompted.
+tool's blast radius is unknown; only full-auto lets it through unprompted — with one exception: the
+app's own memory server marks its read-only tools (`annotations.readOnlyHint`) and those run
+unprompted and survive plan mode, in the parent and in every subagent child. Trust is by server
+identity (`vocs_memory`), so a server the app does not own can never inherit it. The bridge is
+process-wide, and a subagent child registers the same tools over the parent's connections instead of
+spawning its own copy of every server.
 
 **Cursor** (`inherit`) — nothing is injected. The tab shows what Cursor will read
 (`.cursor/mcp.json`) and offers "Export repo servers to .cursor/mcp.json"; the MCP page

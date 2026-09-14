@@ -43,6 +43,7 @@ import {
   type AgentType
 } from './subagent-agents';
 import { RunStore, addUsage, emptyCall, emptyTotals, type RunItem, type RunStatus, type RunCall, type RunTotals, type UsageLike } from './subagent-runs';
+import { mcpReadOnlyToolNames, mcpToolNames, registerMcpTools } from './vocs-code-mcp';
 
 /** Tools that must never exist inside a child, whether ours or the third-party extension's. */
 const EXCLUDED_CHILD_TOOLS = ['subagent', 'subagent_result', 'subagent_steer', 'Agent', 'SubagentWorkflow', 'get_subagent_result', 'steer_subagent'];
@@ -111,7 +112,7 @@ interface ToolCallEventLike {
 }
 
 interface PiLike {
-  registerTool(definition: Record<string, unknown>): void;
+  registerTool(definition: object): void;
   registerCommand?(name: string, options: { description?: string; handler: (args: string, ctx: CtxLike) => Promise<void> | void }): void;
   on(event: string, handler: (event: Record<string, unknown>, ctx: CtxLike) => Promise<unknown> | unknown): void;
   sendMessage?(message: Record<string, unknown>, options?: Record<string, unknown>): void;
@@ -289,7 +290,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     childPi.on('tool_call', async (event) => {
       const call = event as unknown as ToolCallEventLike;
       await refreshMode();
-      const decision = await decideToolCall({ tool: call.toolName, input: call.input, cwd: parentCtx?.cwd ?? process.cwd(), mode, sessionAllowed });
+      const decision = await decideToolCall({ tool: call.toolName, input: call.input, cwd: parentCtx?.cwd ?? process.cwd(), mode, sessionAllowed, readOnlyMcp: await mcpReadOnlyToolNames() });
       if (decision.action === 'allow') return undefined;
       const blocked = (reason: string) => {
         parentCtx?.ui?.notify(BLOCK_MARKER + JSON.stringify({ toolCallId: call.toolCallId, toolName: call.toolName, runId: run.id }), 'info');
@@ -305,6 +306,18 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
       }
       return blocked(DECLINED_REASON);
     });
+  };
+
+  /**
+   * Registers the session's MCP tools into a child session over the parent's connections. Children
+   * are in-process agent sessions, so this is a registration, not a second set of servers.
+   */
+  const mcpFactoryFor = () => async (childPi: PiLike): Promise<void> => {
+    try {
+      await registerMcpTools(childPi);
+    } catch (error) {
+      console.error(`[vocs-code-subagents] MCP tools unavailable for a child: ${error instanceof Error ? error.message : String(error)}`);
+    }
   };
 
   const registerProviderForChild = (ctx: CtxLike, session: ChildSession): void => {
@@ -442,6 +455,9 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     });
     notify({ kind: 'start', runId, agent: agent.name, description: params.description, mode: run.mode, provider: (model as ModelLike | undefined)?.provider, model: (model as ModelLike | undefined)?.id, startedAt: run.startedAt, cwd });
 
+    // A child gets the session's MCP tools unless its agent definition opts out (`mcp: false`),
+    // the same opt-out the app's own templates use for its read-only Explore and Plan agents.
+    const childMcpTools = agent.mcp ? await mcpToolNames() : [];
     const loader = new sdk.DefaultResourceLoader({
       cwd,
       agentDir,
@@ -450,7 +466,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: false,
-      extensionFactories: [gateFactoryFor(run)],
+      extensionFactories: [gateFactoryFor(run), ...(childMcpTools.length ? [mcpFactoryFor()] : [])],
       systemPromptOverride: () => buildSystemPrompt(agent, parentPrompt),
       appendSystemPromptOverride: () => [],
     });
@@ -460,7 +476,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
       agentDir,
       resourceLoader: loader,
       sessionManager: sdk.SessionManager.inMemory(cwd),
-      tools: toolNamesFor(agent),
+      tools: [...toolNamesFor(agent), ...childMcpTools],
       excludeTools: [...EXCLUDED_CHILD_TOOLS],
       ...(model ? { model } : {}),
       ...(ctx.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),

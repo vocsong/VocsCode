@@ -33,7 +33,7 @@ export class PiOfflineRunner {
   private waiters = new Set<{ match: (event: PiEvent) => boolean; resolve: (event: PiEvent) => void; reject: (error: Error) => void }>();
   private ended = false;
 
-  constructor(options: { cwd: string; agentDir: string; mode?: string; extraArgs?: string[]; modeFile?: string; competing?: boolean; projectRoot?: string; choice?: (payload: PiEvent) => string }) {
+  constructor(options: { cwd: string; agentDir: string; mode?: string; extraArgs?: string[]; modeFile?: string; competing?: boolean; projectRoot?: string; choice?: (payload: PiEvent) => string; mcpConfig?: string }) {
     const { cli, resources } = piIntegrationPaths();
     const fixture = path.resolve('tests/fixtures/pi-scripted-provider.mjs');
     const args = [cli, '--mode', 'rpc', '--offline', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-themes', '--no-approve',
@@ -41,6 +41,8 @@ export class PiOfflineRunner {
       ...(options.competing ? ['-e', fixture] : []),
       '-e', path.join(resources, 'vocs-code-tools.ts'),
       '-e', path.join(resources, 'vocs-code-subagents.ts'),
+      // The app loads the MCP bridge only when the session has servers.
+      ...(options.mcpConfig ? ['-e', path.join(resources, 'vocs-code-mcp.ts')] : []),
       ...(!options.competing ? ['-e', fixture] : []),
       '--provider', 'vocs-offline', '--model', 'scripted', '--thinking', 'off', ...(options.extraArgs ?? ['--no-session'])];
     this.child = spawn(process.execPath, args, {
@@ -51,7 +53,8 @@ export class PiOfflineRunner {
         // The workspace is the project unless a test says otherwise: that is where .pi/agents is read from.
         VOCS_CODE_PROJECT_ROOT: options.projectRoot ?? options.cwd,
         VOCS_CODE_SUBAGENT_COMPLETION_MS: '10',
-        VOCS_CODE_PI_COMPETING_TOOL: options.competing ? '1' : '0' },
+        VOCS_CODE_PI_COMPETING_TOOL: options.competing ? '1' : '0',
+        ...(options.mcpConfig ? { VOCS_CODE_MCP_CONFIG: options.mcpConfig } : {}) },
     });
     this.child.stderr?.on('data', (data: Buffer) => { this.stderr += data.toString(); });
     this.child.stdout?.on('data', (data: Buffer) => splitter.push(data));

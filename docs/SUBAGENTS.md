@@ -292,8 +292,13 @@ New files under `resources/pi/`, copied by the existing `resources/pi → pi` en
   discovery never leaks into children. The permission gate is an inline extension factory
   (`extensionFactories: [...]`) held in the same process, which is what lets a child ask through the
   parent's UI.
-- Children inherit the session model, the cwd, and (by default) the session's MCP servers. Nested
-  subagents stay at depth 1: our own tool names are excluded from child tool sets.
+- Children inherit the session model, the cwd, and (by default) the session's MCP tools. The MCP
+  bridge is process-wide: a child registers the same tools over the parent's existing connections
+  rather than spawning its own copy of every server, and an agent that sets `mcp: false` in its
+  definition gets none (the shipped Explore and Plan templates do). The app's own read-only memory
+  tools skip the approval prompt in children and in the parent alike; any other `mcp__*` tool still
+  asks below full access. Nested subagents stay at depth 1: our own tool names are excluded from
+  child tool sets.
 
 ## Coexistence and cleanup
 
