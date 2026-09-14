@@ -153,6 +153,11 @@ interface State {
 }
 
 let toastCounter = 0;
+const USAGE_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns', 'contextWindow', 'contextTokens'] as const;
+
+function sameUsageTotals(a: SessionMeta['usage'], b: SessionMeta['usage']): boolean {
+  return USAGE_FIELDS.every((field) => a[field] === b[field]);
+}
 
 /** Batches streaming deltas so the UI re-renders at most a few dozen times per second. */
 const pendingDeltas: SessionEventEnvelope[] = [];
@@ -432,6 +437,16 @@ export const useStore = create<State>((set, get) => ({
         });
         break;
       }
+      case 'usage':
+        // Usage is also sent as a session event so the active panel can update without waiting for
+        // a full sessionsChanged snapshot. The main process still publishes that snapshot for the
+        // sidebar and non-renderer clients; ignore an identical value to avoid a duplicate render.
+        set((s) => {
+          const current = s.sessions.find((session) => session.id === sessionId);
+          if (!current || sameUsageTotals(current.usage, event.totals)) return {};
+          return { sessions: s.sessions.map((session) => session.id === sessionId ? { ...session, usage: event.totals } : session) };
+        });
+        break;
       case 'models':
         set((s) => ({ models: { ...s.models, [sessionId]: event.models } }));
         break;

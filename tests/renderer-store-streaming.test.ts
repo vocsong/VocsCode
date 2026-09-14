@@ -78,6 +78,22 @@ describe('renderer streaming batches', () => {
     unsubscribe();
   });
 
+  it('applies live usage events to session metadata without waiting for a session-list snapshot', () => {
+    const a = meta('a');
+    const b = meta('b');
+    useStore.setState({ sessions: [a, b], activeId: a.id });
+    const notify = vi.fn();
+    const unsubscribe = useStore.subscribe(notify);
+    const totals = { ...a.usage, inputTokens: 120, outputTokens: 24, costUsd: 0.12, contextTokens: 144, contextWindow: 200_000 };
+
+    emit(a.id, { type: 'usage', totals });
+
+    expect(useStore.getState().sessions.find((session) => session.id === a.id)?.usage).toEqual(totals);
+    expect(useStore.getState().sessions.find((session) => session.id === b.id)).toBe(b);
+    expect(notify).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
   it('invalidates Git only for activity in the foreground workspace', () => {
     useStore.setState({ activeId: 'a', sessions: [meta('a'), { ...meta('b'), cwd: '/other' }, meta('shared')], changesVersion: 0 });
     emit('b', { type: 'item.upsert', item: { ...tool('t'), status: 'done' } as TranscriptItem });
