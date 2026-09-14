@@ -221,15 +221,7 @@ bare one through PATH and skips it with a warning when it cannot (§9). Claude-a
 codex-acp and gemini all honour `session/new.mcpServers`; verify `dsh` and pi-acp in the
 smoke run.
 
-**Native loop** (`client`) — new `src/main/mcp/client.ts` wrapping the MCP SDK `Client`
-with `StdioClientTransport` / `StreamableHTTPClientTransport` / `SSEClientTransport`.
-On `start()` the adapter connects each server, lists tools, and builds a per-session
-`tools: NativeToolDef[] = [...NATIVE_TOOLS, ...mcpTools]` where each MCP tool is
-`{ name: 'mcp__<server>__<tool>', parameters: inputSchema, mutating: !annotations?.readOnlyHint,
-isEdit: false, execute }`. `executeTool` dispatches by `def.execute` when present, goes
-through the existing `gateAction` permission gate, and reports `hint: 'mcp'`. Elicitation
-and sampling requests from servers route to `ctx.requestApproval`. The same client
-powers "Test connection" on both UI surfaces, so it is worth building first (§10).
+**Native loop** (`client`) — **shipped.** The adapter is the MCP client: `src/main/harness/native/mcp-tools.ts` connects every resolved server at `start()` (in parallel, 15 s per server, a failure is reported in the transcript and skipped), maps each tool to `mcp__<server>__<tool>` with the server's `inputSchema` as its `parameters`, and closes the connections in `dispose()`. `executeTool` dispatches to the connection and the existing `gateAction` gate; the tool card reports `hint: 'mcp'`. Only the app's own memory server is trusted to declare a tool read-only (`annotations.readOnlyHint`) — a server the app does not own is never treated as safe, so such a tool asks below Full access even in Auto mode and is hidden in plan mode. Elicitation and sampling from servers are not routed to approvals yet (P2). The same client powers "Test connection" on both UI surfaces.
 
 **Pi** (`inject`) — `resources/pi/vocs-code-mcp.ts`, a second bundled extension alongside the
 approvals one. The adapter writes the session's resolved servers to `<sessionDir>/pi/mcp.json`,
@@ -326,10 +318,12 @@ and ACP. Log lines redact resolved values.
 
 **Tool calls stay behind the existing gates.** Claude's `canUseTool` already treats
 `mcp__*` as mutating (it is not in `READ_ONLY_TOOLS`), so MCP tools prompt below Full
-access — keep that. The native loop gates MCP tools as mutating unless the server marks
-the tool `readOnlyHint`. Codex runs MCP tool calls inside its own sandbox/approval model;
+access — keep that. The native loop does the same, with one exception: the app's own
+memory server may mark its read-only tools (`readOnlyHint`), and only that server is
+trusted to do so — a tool from a server the app does not own always asks below Full
+access, even in Auto mode, and is hidden in plan mode. Codex runs MCP tool calls inside its own sandbox/approval model;
 note in the UI that Vocs Code does not add a prompt there. Elicitation requests (Codex
-app-server today, native client in P1) become `'elicitation'` approvals instead of
+app-server today, native client in P2) become `'elicitation'` approvals instead of
 silent declines. `tests/review-fixes.test.ts` gets the new gate cases.
 
 **Remote servers with OAuth** (Sentry, Linear, GitHub's hosted MCP) are handled by the
@@ -359,8 +353,8 @@ MCP SDK's OAuth provider and a loopback redirect; deferred to P2 (§10).
 | Phase | Scope | Size |
 | --- | --- | --- |
 | **P0** | types + settings + `normalizeSettings`; `.mcp.json` read/write; `effective.ts` with `${VAR}` + shim normalisation; `mcp:*` IPC; injection for Claude, Codex app-server, Codex exec, ACP; MCP page (Vocs Code tab + read-only Claude/Codex/Cursor tabs); right-panel tab (banner, repo, global, detected-read-only); `Test connection` via `src/main/mcp/client.ts`; unit tests | 2 PRs: main + shared + tests, then renderer |
-| **P1** | native loop `client` mode (tools merged, gate, hint, killTree); Claude live status + `setMcpServers` hot-apply; Codex elicitation → approval; import/export to harness-native files (write side); `/mcp`, shortcut, palette; smoke coverage per harness | 2–3 PRs |
-| **P2** | OAuth for the native client; per-server tool allow/deny (Claude `tools` policy, Codex `enabled_tools`); Codex status if the app-server exposes it | opportunistic |
+| **P1** | Claude live status + `setMcpServers` hot-apply; Codex elicitation → approval; import/export to harness-native files (write side); `/mcp`, shortcut, palette; smoke coverage per harness — native loop `client` mode is shipped (`src/main/harness/native/mcp-tools.ts`) | 2–3 PRs |
+| **P2** | OAuth for the native client; elicitation/sampling from MCP servers into approvals; per-server tool allow/deny (Claude `tools` policy, Codex `enabled_tools`); Codex status if the app-server exposes it | opportunistic |
 
 P0 deliberately ships the MCP client for "Test connection" only. It is the same code the
 native loop needs, so P1's native work is mostly the tool-list merge and the gate.
@@ -379,7 +373,9 @@ native loop needs, so P1's native work is mostly the tool-list merge and the gat
   it is shareable with plain Claude Code users and importable everywhere.
 - Repo servers stay off until enabled per repo (§8).
 - Harness-native stores are read-only tabs on the MCP page in P0; write-back is P1.
-- The native loop's MCP client is P1. P0 ships the client for "Test connection" only.
+- The native loop's MCP client is shipped (`src/main/harness/native/mcp-tools.ts`); servers it
+  spawns are killed by the SDK's transport on close, but a server that spawns its own grandchildren
+  is not tree-killed yet (P2).
 - Pi: extension bridge deferred to P2, `pi.extraArgs` remains the escape hatch.
 - Cursor: inherit-only with import/export, no injection (the SDK has no seam).
 

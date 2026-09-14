@@ -48,7 +48,7 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 | **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan | inherited — Cursor reads its own `mcp.json`; import/export only |
 | **Pi** | `pi --mode rpc` + bundled approvals and MCP-bridge extensions | interactive | pi's registry: Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, Ollama, custom | injected — the bridge extension registers each MCP tool with pi |
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
-| **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself (P1) |
+| **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
 
 Key invariants (enforced by convention and tsconfig project boundaries):
 

@@ -469,6 +469,10 @@ const TOOLS = [
   }
 ];
 
+/** Tools that only read: the app's native harness may run these without a prompt, and plan mode keeps them. */
+const READ_ONLY_TOOLS = new Set(['knowledge_search', 'knowledge_read', 'knowledge_related', 'knowledge_status', 'session_history_search']);
+for (const tool of TOOLS) tool.annotations = { readOnlyHint: READ_ONLY_TOOLS.has(tool.name), title: tool.name };
+
 function textResult(payload) {
   return { content: [{ type: 'text', text: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2) }] };
 }

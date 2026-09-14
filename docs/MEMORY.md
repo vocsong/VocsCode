@@ -59,8 +59,7 @@ Four seams:
 
 1. **Pull.** `vocs-memory` is an app-shipped built-in MCP server, materialized per session exactly
    like the GitNexus scope proxy (`src/main/mcp/memory.ts`). It is injected into every harness whose
-   MCP capability is `inject` or `client`; Cursor (inherit-only) and the native loop (client not yet
-   implemented) do not get it yet. A project with no wiki gets no server at all.
+   MCP capability is `inject` or `client`; only Cursor (inherit-only, file export) does not get it. A project with no wiki gets no server at all.
 2. **Push.** When a wiki exists and `knowledge.prime` is on (default), a new session's
    `appendSystemPrompt` gains a bounded `<digest>` naming the most useful pages. It never contains
    page bodies, never outranks AGENTS.md, and reaches pi subagent children for free (they inherit

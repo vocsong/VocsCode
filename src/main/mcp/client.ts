@@ -20,6 +20,27 @@ interface McpTransportLike {
   close(): Promise<void>;
 }
 
+/** One tool as the SDK reports it, narrowed to what a harness needs. */
+export interface ConnectedMcpTool {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+  readOnly?: boolean;
+}
+
+export interface McpCallResult {
+  output: string;
+  isError: boolean;
+}
+
+/** A live connection: list once at connect, call many times, close when the session ends. */
+export interface ConnectedMcpServer {
+  serverId: string;
+  tools: ConnectedMcpTool[];
+  call(name: string, args: Record<string, unknown>, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<McpCallResult>;
+  close(): Promise<void>;
+}
+
 async function buildTransport(def: McpServerDef, opts: InspectOptions): Promise<McpTransportLike> {
   if (def.transport === 'stdio') {
     if (!def.command) throw new Error('No command configured');
@@ -41,6 +62,53 @@ async function buildTransport(def: McpServerDef, opts: InspectOptions): Promise<
 }
 
 /**
+ * Connects to a server and keeps the connection: the native loop is the app's MCP client, so it
+ * needs the live session rather than a one-shot probe. The definition must already have its
+ * `${VAR}` references resolved and its command normalized.
+ */
+export async function connectServer(def: McpServerDef, opts: InspectOptions = {}): Promise<ConnectedMcpServer> {
+  const timeoutMs = opts.timeoutMs ?? def.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const client = new Client(CLIENT_INFO, { capabilities: {} });
+  const transport = await buildTransport(def, opts);
+  try {
+    await client.connect(transport as never, { timeout: timeoutMs });
+    const listed = await client.listTools(undefined, { timeout: timeoutMs });
+    const tools: ConnectedMcpTool[] = (listed.tools ?? []).map((t) => ({
+      name: t.name,
+      ...(typeof t.description === 'string' ? { description: t.description } : {}),
+      ...(t.inputSchema ? { inputSchema: t.inputSchema as unknown } : {}),
+      // Only the app's own servers are trusted to declare a tool read-only (see native/mcp-tools.ts).
+      ...(t.annotations?.readOnlyHint === true ? { readOnly: true } : {})
+    }));
+    return {
+      serverId: def.id,
+      tools,
+      async call(name, args, callOpts = {}) {
+        const raw = (await client.callTool(
+          { name, arguments: args },
+          undefined,
+          { timeout: callOpts.timeoutMs ?? timeoutMs, ...(callOpts.signal ? { signal: callOpts.signal } : {}) }
+        )) as { content?: unknown; isError?: unknown };
+        const content = Array.isArray(raw.content) ? raw.content : [];
+        const text = content
+          .filter((part): part is { type: 'text'; text: string } => !!part && typeof part === 'object' && (part as { type?: unknown }).type === 'text')
+          .map((part) => part.text)
+          .join('\n');
+        return { output: text || JSON.stringify(raw.content ?? raw), isError: raw.isError === true };
+      },
+      async close() {
+        await client.close().catch(() => undefined);
+        await transport.close().catch(() => undefined);
+      }
+    };
+  } catch (e) {
+    await transport.close().catch(() => undefined);
+    throw e;
+  }
+}
+
+/**
  * Connects to a server, lists its tools and disconnects. Harness-independent, so it validates a
  * server that only Codex would ever run. The definition must already have its `${VAR}`
  * references resolved and its command normalized.
@@ -48,22 +116,22 @@ async function buildTransport(def: McpServerDef, opts: InspectOptions): Promise<
 export async function inspectServer(def: McpServerDef, opts: InspectOptions = {}): Promise<McpInspectResult> {
   const started = Date.now();
   const timeoutMs = opts.timeoutMs ?? def.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  let transport: McpTransportLike | null = null;
   try {
     const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
-    const client = new Client(CLIENT_INFO, { capabilities: {} });
-    transport = await buildTransport(def, opts);
-    await client.connect(transport as never, { timeout: timeoutMs });
-    const info = client.getServerVersion();
-    const listed = await client.listTools(undefined, { timeout: timeoutMs });
-    const tools = (listed.tools ?? []).map((t) => ({ name: t.name, description: typeof t.description === 'string' ? t.description : undefined }));
-    await client.close();
-    transport = null;
-    return { ok: true, serverInfo: info ? { name: String(info.name), version: info.version ? String(info.version) : undefined } : undefined, tools, durationMs: Date.now() - started };
+    const probe = new Client(CLIENT_INFO, { capabilities: {} });
+    const transport = await buildTransport(def, opts);
+    try {
+      await probe.connect(transport as never, { timeout: timeoutMs });
+      const info = probe.getServerVersion();
+      const listed = await probe.listTools(undefined, { timeout: timeoutMs });
+      const tools = (listed.tools ?? []).map((t) => ({ name: t.name, description: typeof t.description === 'string' ? t.description : undefined }));
+      return { ok: true, serverInfo: info ? { name: String(info.name), version: info.version ? String(info.version) : undefined } : undefined, tools, durationMs: Date.now() - started };
+    } finally {
+      // A stdio server that failed mid-handshake still has a live child process.
+      await probe.close().catch(() => undefined);
+      await transport.close().catch(() => undefined);
+    }
   } catch (e) {
     return { ok: false, error: errorMessage(e), tools: [], durationMs: Date.now() - started };
-  } finally {
-    // A stdio server that failed mid-handshake still has a live child process.
-    await transport?.close().catch(() => undefined);
   }
 }

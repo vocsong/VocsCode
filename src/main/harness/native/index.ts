@@ -8,6 +8,7 @@ import { resolveProviderApiKey } from '../../models/providers';
 import { gateAction, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from '../permissions';
 import type { HarnessAdapter, HarnessContext } from '../types';
 import { anthropicStep, isAnthropicProvider, openaiStep, type NativeMessage, type StepResult } from './drivers';
+import { NativeMcpSession } from './mcp-tools';
 import { buildSystemPrompt } from './prompt';
 import {
   NATIVE_TOOLS,
@@ -51,6 +52,8 @@ export class NativeAdapter implements HarnessAdapter {
   private readVersions = new Map<string, { fingerprint: string; total: number; ranges: [number, number][] }>();
   private readonly usage: TurnUsageTracker;
   private started = false;
+  /** MCP servers this session is the client for; connected at start, closed at dispose. */
+  private mcp: NativeMcpSession | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
@@ -77,8 +80,38 @@ export class NativeAdapter implements HarnessAdapter {
     if (!this.model) this.ctx.log('warn', 'native loop has no usable model: no enabled provider with a key; the first message will fail');
     if (this.model) this.ctx.updateMeta({ activeModel: this.model });
     this.ctx.updateRef({ nativeHistory: true });
+    await this.connectMcp();
     this.ctx.emit({ type: 'status', status: 'idle' });
     this.ctx.emit({ type: 'models', models: await this.listModels() });
+  }
+
+  /** The built-in tools plus whatever the configured MCP servers expose. */
+  private allTools() {
+    return this.mcp?.tools.length ? [...NATIVE_TOOLS, ...this.mcp.tools] : NATIVE_TOOLS;
+  }
+
+  /**
+   * Connects to the session's MCP servers. A server that does not answer is reported in the
+   * transcript and left out; the session must still start.
+   */
+  private async connectMcp(): Promise<void> {
+    let servers;
+    try {
+      servers = await this.ctx.mcpServers();
+    } catch (e) {
+      this.ctx.log('warn', `native mcp: could not resolve servers: ${errorMessage(e)}`);
+      return;
+    }
+    if (!servers.length) return;
+    const session = await NativeMcpSession.connect(servers, { cwd: this.ctx.session().cwd, log: (level, message) => this.ctx.log(level, message) });
+    this.mcp = session;
+    for (const failure of session.failures) {
+      this.ctx.emit({
+        type: 'item.upsert',
+        item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'warn', text: `MCP server "${failure.serverId}" is unavailable for this session: ${failure.error}` }
+      });
+    }
+    if (session.tools.length) this.ctx.log('info', `native mcp: ${session.tools.length} tool(s) from ${session.servers.join(', ')}`);
   }
 
   private defaultModel(): ModelRef | null {
@@ -180,7 +213,7 @@ export class NativeAdapter implements HarnessAdapter {
           model: model.model,
           system,
           history: this.history,
-          tools: this.ctx.permissionMode() === 'plan' ? NATIVE_TOOLS.filter((t) => !t.mutating) : NATIVE_TOOLS,
+          tools: this.ctx.permissionMode() === 'plan' ? this.allTools().filter((t) => !t.mutating) : this.allTools(),
           effort: this.effort,
           signal,
           onText: (d: string) => {
@@ -264,7 +297,8 @@ export class NativeAdapter implements HarnessAdapter {
   }
 
   private async executeTool(call: { id: string; name: string; args: Record<string, unknown> }, signal: AbortSignal): Promise<ToolExecResult> {
-    const def = NATIVE_TOOLS.find((t) => t.name === call.name);
+    const mcpTool = this.mcp?.tools.find((t) => t.name === call.name) ?? null;
+    const def = this.allTools().find((t) => t.name === call.name);
     const cwd = this.ctx.session().cwd;
     const args = call.args ?? {};
     const summary =
@@ -320,6 +354,10 @@ export class NativeAdapter implements HarnessAdapter {
       const outsideCwd = def.isEdit && typeof args.path === 'string' && await requiresPathApproval(cwd, args.path);
       let verdict = gateAction(mode, { mutating: true, isEdit: def.isEdit, command, sessionAllowed: this.sessionAllowed.has(call.name) });
       if (outsideCwd && mode !== 'full-auto' && verdict === 'allow') verdict = 'ask';
+      // An MCP tool from a server the app does not own is never "safe": below Full access it asks
+      // even in Auto mode, the same rule pi's gate applies to `mcp__*` tools. "Allow for session"
+      // still silences it.
+      if (mcpTool && mode !== 'full-auto' && !this.sessionAllowed.has(call.name) && verdict === 'allow') verdict = 'ask';
       if (verdict === 'deny') {
         item.status = 'declined';
         item.output = PLAN_MODE_DENIAL;
@@ -342,7 +380,11 @@ export class NativeAdapter implements HarnessAdapter {
           cwd,
           input: args,
           changes,
-          description: outsideCwd ? 'This path is outside the project directory or its physical containment could not be verified.' : undefined,
+          description: outsideCwd
+            ? 'This path is outside the project directory or its physical containment could not be verified.'
+            : mcpTool
+              ? `Tool "${mcpTool.toolName}" from MCP server "${mcpTool.serverId}". The app cannot inspect what this server does.`
+              : undefined,
           toolItemId: item.id,
           options: OPTIONS_ALLOW_DENY
         });
@@ -359,6 +401,10 @@ export class NativeAdapter implements HarnessAdapter {
 
     try {
       if (signal.aborted) return finish({ output: 'Interrupted before execution.', isError: true });
+      if (mcpTool) {
+        const res = await mcpTool.call(args, signal);
+        return finish({ output: res.output, isError: res.isError });
+      }
       const version = typeof args.path === 'string' ? this.readVersions.get(fileVersionKey(cwd, args.path)) : undefined;
       const expected = version && version.ranges.length === 1 && version.ranges[0][0] === 0 && version.ranges[0][1] === version.total ? version.fingerprint : undefined;
       switch (call.name) {
@@ -458,5 +504,8 @@ export class NativeAdapter implements HarnessAdapter {
   async dispose(): Promise<void> {
     this.readVersions.clear();
     this.abort?.abort();
+    const mcp = this.mcp;
+    this.mcp = null;
+    await mcp?.close();
   }
 }
