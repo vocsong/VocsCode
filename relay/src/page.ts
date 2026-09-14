@@ -7,6 +7,8 @@ const client = new RelayClient({ storage: localStorageApi() });
 let sessions: Array<{ id: string; title: string; status: string }> = [];
 let active: string | null = null;
 let activeStatus = 'idle';
+/** Desktop view-only policy (P4): read-only, so every write control is hidden. */
+let viewOnly = false;
 
 function localStorageApi() {
   return {
@@ -53,6 +55,8 @@ function boot(): void {
   el('new-session').addEventListener('click', () => void toggleNewSession(true));
   el('ns-cancel').addEventListener('click', () => void toggleNewSession(false));
   el('ns-create').addEventListener('click', () => void createSession());
+  el('devices').addEventListener('click', () => void toggleDevices());
+  el('devices-close').addEventListener('click', () => el('devices-panel').setAttribute('hidden', ''));
   el('send').addEventListener('click', () => void sendComposer());
   el('act-interrupt').addEventListener('click', () => void actOnActive('sessions:interrupt', null));
   el('act-stop').addEventListener('click', () => void actOnActive('sessions:stop', null));
@@ -70,7 +74,7 @@ function boot(): void {
 async function sendComposer(): Promise<void> {
   const box = el('composer') as HTMLTextAreaElement;
   const text = box.value.trim();
-  if (!text || !active) return;
+  if (!text || !active || viewOnly) return;
   box.value = '';
   try {
     await client.invoke('sessions:send', { id: active, input: { text } });
@@ -162,6 +166,13 @@ async function enter(): Promise<void> {
   }
   setConnection('connected');
   client.onPush((channel, payload) => void onPush(channel, payload));
+  // The desktop's view-only policy hides write controls before the first render of a transcript.
+  try {
+    const settings = (await client.invoke('settings:get', null)) as { remote?: { viewOnly?: boolean } };
+    applyPolicy(settings.remote?.viewOnly === true);
+  } catch {
+    // An older host has no remote policy; stay interactive, matching P3 behavior.
+  }
   await refreshSessions();
 }
 
@@ -189,10 +200,30 @@ async function openSession(id: string): Promise<void> {
   const meta = sessions.find((s) => s.id === id);
   activeStatus = meta?.status ?? 'idle';
   (el('active-title') as HTMLElement).textContent = meta ? `${meta.title} · ${activeStatus}` : '';
-  const running = activeStatus === 'running' || activeStatus === 'starting' || activeStatus === 'awaiting';
+  syncControls();
+  for (const row of Array.from(document.querySelectorAll('.session-row'))) row.classList.toggle('active', (row as HTMLElement).dataset.id === id);
+}
+
+function isRunning(status: string): boolean {
+  return status === 'running' || status === 'starting' || status === 'awaiting';
+}
+
+/** Interrupt/stop show only when the active session is live — and never in view-only mode. */
+function syncControls(): void {
+  const running = !viewOnly && isRunning(activeStatus);
   (el('act-interrupt') as HTMLElement).hidden = !running;
   (el('act-stop') as HTMLElement).hidden = !running;
-  for (const row of Array.from(document.querySelectorAll('.session-row'))) row.classList.toggle('active', (row as HTMLElement).dataset.id === id);
+}
+
+/** Apply the desktop's view-only policy: hide every control that would write. */
+function applyPolicy(next: boolean): void {
+  viewOnly = next;
+  const badge = el('policy');
+  badge.toggleAttribute('hidden', !viewOnly);
+  badge.textContent = viewOnly ? 'view-only' : '';
+  for (const id of ['composer', 'send', 'new-session']) (el(id) as HTMLButtonElement | HTMLTextAreaElement).toggleAttribute('disabled', viewOnly);
+  syncControls();
+  if (viewOnly) el('new-session-panel').setAttribute('hidden', '');
 }
 
 function renderTranscript(items: TranscriptItem[]): void {
@@ -221,10 +252,40 @@ function renderTranscript(items: TranscriptItem[]): void {
 function renderApproval(item: Extract<TranscriptItem, { kind: 'approval' }>): string {
   const requestId = item.request.id;
   if (item.decision) return `<div class="msg approval decided"><b>Approval</b> <small>decided: ${esc(item.decision.optionId)}</small></div>`;
+  if (viewOnly) return `<div class="msg approval"><b>Approval needed</b><small> — decide on the desktop (view-only)</small></div>`;
   return `<div class="msg approval"><b>Approval needed</b><div class="approval-actions" data-request="${esc(requestId)}"><button data-decision="allow">Allow</button><button data-decision="deny" class="danger">Deny</button></div></div>`;
 }
 
+/** Device management (P4): list the account's paired devices, revoke any of them. */
+async function toggleDevices(): Promise<void> {
+  const panel = el('devices-panel');
+  const opening = panel.hasAttribute('hidden');
+  panel.toggleAttribute('hidden', !opening);
+  if (opening) await refreshDevices();
+}
+
+async function refreshDevices(): Promise<void> {
+  const list = el('device-list');
+  el('devices-error').textContent = '';
+  list.innerHTML = '<p class="muted small">Loading…</p>';
+  try {
+    const devices = await client.listDevices();
+    list.innerHTML = devices
+      .map(
+        (d) =>
+          `<div class="device-row"><span>${esc(d.kind === 'host' ? 'Computer' : 'Browser')}: ${esc(d.name)}<br><small class="muted">${esc(d.platform)} · last seen ${esc(new Date(d.lastSeen).toLocaleString())}</small></span><button class="danger" data-revoke="${esc(d.deviceId)}">Revoke</button></div>`
+      )
+      .join('');
+  } catch (e) {
+    el('devices-error').textContent = e instanceof Error ? e.message : String(e);
+  }
+}
+
 async function onPush(channel: string, payload: unknown): Promise<void> {
+  if (channel === 'push:remotePolicy') {
+    applyPolicy((payload as { viewOnly?: boolean } | null)?.viewOnly === true);
+    return;
+  }
   if (channel === 'push:sessionEvent' && payload) {
     const env = payload as { sessionId?: string; event?: { type?: string; status?: string } };
     if (active && env.sessionId === active) {
@@ -232,9 +293,7 @@ async function onPush(channel: string, payload: unknown): Promise<void> {
         activeStatus = env.event.status;
         const meta = sessions.find((s) => s.id === active);
         (el('active-title') as HTMLElement).textContent = meta ? `${meta.title} · ${activeStatus}` : '';
-        const running = activeStatus === 'running' || activeStatus === 'starting' || activeStatus === 'awaiting';
-        (el('act-interrupt') as HTMLElement).hidden = !running;
-        (el('act-stop') as HTMLElement).hidden = !running;
+        syncControls();
       }
       await openSession(active);
     }
@@ -258,7 +317,18 @@ function renderSessionList(): void {
 }
 
 document.addEventListener('click', (ev) => {
-  const btn = (ev.target as HTMLElement).closest('button[data-decision]') as HTMLElement | null;
+  const target = ev.target as HTMLElement;
+  const revoke = target.closest('button[data-revoke]') as HTMLElement | null;
+  if (revoke?.dataset.revoke) {
+    void client
+      .revokeDevice(revoke.dataset.revoke)
+      .then(() => refreshDevices())
+      .catch((e) => {
+        el('devices-error').textContent = e instanceof Error ? e.message : String(e);
+      });
+    return;
+  }
+  const btn = target.closest('button[data-decision]') as HTMLElement | null;
   const wrap = btn?.closest('.approval-actions') as HTMLElement | null;
   if (!btn || !wrap) return;
   const requestId = wrap.dataset.request;

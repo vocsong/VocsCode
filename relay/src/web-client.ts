@@ -2,6 +2,7 @@
  *  e2e Transport a browser uses to drive a paired desktop through the relay. Framework-
  *  free and DOM-free — the page (relay/public) mounts it; tests run it in Node. */
 import { clientFinish, createHello, generateIdentity, openFrame, publicOf, sealFrame, sign, type Identity, type PublicIdentity } from '../../src/shared/crypto';
+import type { RemoteDeviceInfo } from '../../src/shared/types';
 
 /** A paired browser's stored identity: relay URL, tokens, host trust anchor, own keys. */
 export interface WebCredentials {
@@ -200,6 +201,26 @@ export class RelayClient {
 
   credentials(): WebCredentials | null {
     return this.creds;
+  }
+
+  /** Lists every device paired with the account (P4 device management), via the relay REST surface. */
+  async listDevices(): Promise<RemoteDeviceInfo[]> {
+    if (!this.creds) return [];
+    const doFetch = this.deps.fetchImpl ?? fetch;
+    const base = this.creds.relayBase.replace(/\/$/, '');
+    const res = await doFetch(`${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}`);
+    if (!res.ok) throw new Error(`devices failed: ${res.status}`);
+    return (await res.json()) as RemoteDeviceInfo[];
+  }
+
+  /** Revokes any paired device — another browser, the desktop, or this browser itself. */
+  async revokeDevice(deviceId: string): Promise<void> {
+    if (!this.creds) return;
+    const doFetch = this.deps.fetchImpl ?? fetch;
+    const base = this.creds.relayBase.replace(/\/$/, '');
+    const url = `${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}&target=${encodeURIComponent(deviceId)}`;
+    const res = await doFetch(url, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
   }
 }
 

@@ -1,7 +1,7 @@
 /** Unit tests for the relay core (relay/src/core.ts): pairing lifecycle, tokens, revocation.
  *  Runs in plain Node against an in-memory store — the DO is a thin binding over this. */
 import { describe, expect, it } from 'vitest';
-import { claimPairing, hashToken, listDevices, PAIRING_TTL_MS, pollPairing, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, PairError, type RelayStore } from '../relay/src/core';
+import { claimPairing, deviceInfos, hashToken, listDevices, PAIRING_TTL_MS, pollPairing, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, PairError, type RelayStore } from '../relay/src/core';
 import type { PublicIdentity } from '../src/shared/crypto';
 
 function memStore(): RelayStore {
@@ -96,5 +96,20 @@ describe('relay pairing', () => {
     const entries = await store.list('device:a:');
     expect(JSON.stringify([...entries])).not.toContain(hostToken);
     expect(await hashToken(hostToken)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('exposes only public device metadata, never token hashes or keys', async () => {
+    const store = memStore();
+    const { hostToken } = await registerHostDevice(store, { accountId: 'a', name: 'Work PC', platform: 'win32', pub: HOST_PUB }, T0);
+    await registerWebDevice(store, { accountId: 'a', name: 'Chrome', platform: 'web', pub: WEB_PUB }, T0);
+    const infos = await deviceInfos(store, 'a');
+    expect(infos.map((d) => d.kind).sort()).toEqual(['host', 'web']);
+    expect(infos.find((d) => d.kind === 'host')).toMatchObject({ name: 'Work PC', platform: 'win32' });
+    // The serialized response must not carry the token hash, the public key or the raw token.
+    const shape = JSON.stringify(infos);
+    expect(shape).not.toContain('tokenHash');
+    expect(shape).not.toContain(hostToken);
+    // And each record is exactly the public shape, so a new private field cannot sneak out.
+    for (const info of infos) expect(Object.keys(info).sort()).toEqual(['deviceId', 'kind', 'lastSeen', 'name', 'platform']);
   });
 });

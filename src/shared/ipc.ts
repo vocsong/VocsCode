@@ -33,6 +33,7 @@ import type {
   PiSetup,
   PiSubagentsPatch,
   ProviderConfig,
+  RemoteAuditEntry,
   RemoteConfig,
   RemoteDeviceInfo,
   RemoteState,
@@ -223,12 +224,15 @@ export interface IpcContract {
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 
   /** Remote access (docs/REMOTE-ACCESS.md). Enrollment + device tokens live in the secret store. */
-  'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[] }];
+  'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[] }];
   'remote:enable': [{ relayUrl: string; enrollToken: string }, RemoteState];
   'remote:disable': [void, RemoteState];
   'remote:pairStart': [{ hostName?: string }, { code: string; expiresAt: number }];
   'remote:pairRespond': [{ decision: 'approve' | 'deny' }, void];
   'remote:revoke': [{ deviceId: string }, void];
+  /** P4: view-only mode is a desktop policy, persisted in settings and pushed to paired browsers. */
+  'remote:setViewOnly': [{ viewOnly: boolean }, RemoteState];
+  'remote:clearAudit': [void, void];
 
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   'git:summary': [{ sessionId: string }, GitSummary];

@@ -1234,6 +1234,8 @@ export interface FsEntry {
 export interface RemoteConfig {
   enabled: boolean;
   relayUrl?: string;
+  /** P4 view-only mode: paired browsers may browse but not send, approve or change anything. */
+  viewOnly?: boolean;
 }
 
 export interface RemoteState {
@@ -1242,6 +1244,32 @@ export interface RemoteState {
   pairing?: { code: string; expiresAt: number };
   pendingRequest?: { code: string; name: string; platform: string };
   onlineClients: string[];
+  /** Mirrors the view-only policy so both shells can hide write controls without a round trip. */
+  viewOnly: boolean;
+}
+
+/** What a remote audit record can describe (docs/REMOTE-ACCESS.md §6.5): who paired, connected
+ *  or was revoked, and which remote actions were refused. */
+export type RemoteAuditAction =
+  | 'enable'
+  | 'disable'
+  | 'pair-start'
+  | 'pair-request'
+  | 'pair-approve'
+  | 'pair-deny'
+  | 'device-revoke'
+  | 'client-connect'
+  | 'client-disconnect'
+  | 'handshake-failed'
+  | 'channel-refused'
+  | 'view-only-blocked';
+
+/** One audit-trail line; `device` is the id the event concerns, when there is one. */
+export interface RemoteAuditEntry {
+  at: number;
+  action: RemoteAuditAction;
+  device?: string;
+  detail?: string;
 }
 
 export interface RemoteDeviceInfo {

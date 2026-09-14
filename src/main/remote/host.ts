@@ -4,10 +4,11 @@
  *  identity keys live in the secret store, never in settings or logs. */
 import { WebSocket } from 'ws';
 import { generateIdentity, hostAccept, openFrame, publicOf, sealFrame, verify, type Identity, type PublicIdentity } from '../../shared/crypto';
-import type { RemoteDeviceInfo, RemoteState } from '../../shared/types';
+import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
 import type { Logger } from '../log';
+import type { RemoteAudit } from './audit';
 
 /** Channels a paired web client may invoke (docs/REMOTE-ACCESS.md §5). Interactive P3:
  *  chat send/interrupt/stop, session lifecycle and per-session model controls are in;
@@ -45,6 +46,47 @@ export const REMOTE_CHANNELS = new Set<string>([
   'fs:list',
   'fs:search',
   'fs:read'
+]);
+
+/** View-only mode (P4) admits the read half and refuses the write half. Every channel in
+ *  REMOTE_CHANNELS must be classified here or in REMOTE_WRITE_CHANNELS; a test asserts the two
+ *  partition the set, so a newly added channel cannot silently become writable when view-only. */
+export const REMOTE_READ_CHANNELS = new Set<string>([
+  'app:info',
+  'settings:get',
+  'harness:availability',
+  'harness:models',
+  'sessions:list',
+  'sessions:get',
+  'sessions:transcript',
+  'sessions:search',
+  'analytics:summary',
+  'analytics:executions',
+  'skills:list',
+  'skills:read',
+  'git:folderBranch',
+  'git:summary',
+  'git:diff',
+  'git:branches',
+  'git:branchesOverview',
+  'git:worktrees',
+  'git:pullRequests',
+  'git:issues',
+  'fs:list',
+  'fs:search',
+  'fs:read'
+]);
+
+export const REMOTE_WRITE_CHANNELS = new Set<string>([
+  'sessions:send',
+  'sessions:interrupt',
+  'sessions:stop',
+  'sessions:create',
+  'sessions:rename',
+  'sessions:setModel',
+  'sessions:setEffort',
+  'sessions:setPermissionMode',
+  'approvals:respond'
 ]);
 
 interface HostCredentials {
@@ -101,6 +143,10 @@ export class RemoteHost {
       pushState: () => void;
       log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
       broadcast: (channel: string, payload: unknown) => void;
+      /** P4 audit trail; absent in unit tests, in which case records are dropped. */
+      audit?: RemoteAudit;
+      /** P4 view-only policy, read live so a toggle applies without a reconnect. */
+      viewOnly?: () => boolean;
     }
   ) {}
 
@@ -110,8 +156,23 @@ export class RemoteHost {
       detail: this.detail,
       pairing: this.pairing,
       pendingRequest: this.pendingRequest,
-      onlineClients: [...this.sessions.keys()]
+      onlineClients: [...this.sessions.keys()],
+      viewOnly: this.deps.viewOnly?.() ?? false
     };
+  }
+
+  /** The audit trail, newest first (P4); empty when no audit sink was supplied. */
+  auditEntries(): RemoteAuditEntry[] {
+    return this.deps.audit?.list() ?? [];
+  }
+
+  clearAudit(): void {
+    this.deps.audit?.clear();
+  }
+
+  /** Tell paired browsers the view-only policy changed so they hide write controls. */
+  async broadcastPolicy(): Promise<void> {
+    await this.broadcastPush('push:remotePolicy', { viewOnly: this.state().viewOnly });
   }
 
   async enable(relayUrl: string, enrollToken: string): Promise<void> {
@@ -124,12 +185,16 @@ export class RemoteHost {
     await this.saveCreds();
     // The relay URL is configuration; tokens and keys stay out of the log.
     this.deps.log('info', `remote: enabled for ${relayUrl} (${stored ? `${Object.keys(stored.clients).length} paired device(s)` : 'new identity'}${this.creds.deviceId ? ', enrolled' : ', not yet enrolled'})`);
+    this.deps.audit?.record('enable', { detail: relayUrl });
     await this.connect();
   }
 
   async disable(): Promise<void> {
     this.generation++; // cancels any pending reconnect timer
-    if (this.status !== 'off') this.deps.log('info', `remote: disabled (${this.sessions.size} client session(s) dropped)`);
+    if (this.status !== 'off') {
+      this.deps.log('info', `remote: disabled (${this.sessions.size} client session(s) dropped)`);
+      this.deps.audit?.record('disable');
+    }
     this.ws?.close();
     this.ws = null;
     this.sessions.clear();
@@ -151,6 +216,7 @@ export class RemoteHost {
     if (!res.ok) throw new Error(`pair/start failed: ${res.status}`);
     const body = (await res.json()) as { code: string; expiresAt: number };
     this.pairing = { code: body.code, expiresAt: body.expiresAt };
+    this.deps.audit?.record('pair-start');
     this.push();
     return body;
   }
@@ -170,14 +236,19 @@ export class RemoteHost {
 
   async listDevices(): Promise<RemoteDeviceInfo[]> {
     if (!this.creds?.deviceId || !this.creds.deviceToken) return [];
-    const res = await fetch(`${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices`, { headers: { authorization: `Bearer ${this.creds.deviceToken}` } });
+    // The relay authenticates the caller by the `device`/`token` pair; a bare bearer header
+    // carries no device id, so the host must name itself here just like the web client does.
+    const url = `${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices?device=${encodeURIComponent(this.creds.deviceId)}&token=${encodeURIComponent(this.creds.deviceToken)}`;
+    const res = await fetch(url, { headers: { authorization: `Bearer ${this.creds.deviceToken}` } });
     if (!res.ok) return [];
     return (await res.json()) as RemoteDeviceInfo[];
   }
 
   async revokeDevice(deviceId: string): Promise<void> {
     if (!this.creds?.deviceId || !this.creds.deviceToken) return;
-    await fetch(`${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices?device=${encodeURIComponent(deviceId)}`, {
+    // `device`/`token` authenticate the caller; `target` names the device to drop.
+    const url = `${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices?device=${encodeURIComponent(this.creds.deviceId)}&token=${encodeURIComponent(this.creds.deviceToken)}&target=${encodeURIComponent(deviceId)}`;
+    await fetch(url, {
       method: 'DELETE',
       headers: { authorization: `Bearer ${this.creds.deviceToken}` }
     });
@@ -186,6 +257,7 @@ export class RemoteHost {
       await this.saveCreds();
     }
     this.sessions.delete(deviceId);
+    this.deps.audit?.record('device-revoke', { device: deviceId });
     this.push();
   }
 
@@ -229,10 +301,11 @@ export class RemoteHost {
       // must not clobber the new connection or wipe live sessions.
       if (this.ws !== ws) return;
       this.ws = null;
-      const dropped = this.sessions.size;
+      const dropped = [...this.sessions.keys()];
       this.sessions.clear();
+      for (const client of dropped) this.deps.audit?.record('client-disconnect', { device: client });
       if (this.status !== 'off') {
-        this.deps.log('info', `remote: relay connection closed (code ${code}${dropped ? `, ${dropped} client session(s) dropped` : ''}); reconnecting in 3s`);
+        this.deps.log('info', `remote: relay connection closed (code ${code}${dropped.length ? `, ${dropped.length} client session(s) dropped` : ''}); reconnecting in 3s`);
         this.status = 'connecting';
         this.push();
         const gen = this.generation;
@@ -261,6 +334,7 @@ export class RemoteHost {
       case 'pair.request': {
         this.pendingRequest = { code: String(msg.code), name: String(msg.name ?? ''), platform: String(msg.platform ?? '') };
         this.deps.log('info', `remote: pairing request from "${this.pendingRequest.name}" (${this.pendingRequest.platform}); awaiting the user's decision`);
+        this.deps.audit?.record('pair-request', { detail: `${this.pendingRequest.name} (${this.pendingRequest.platform})` });
         this.push();
         return;
       }
@@ -268,6 +342,7 @@ export class RemoteHost {
         this.pendingRequest = undefined;
         this.pairing = undefined;
         this.deps.log('info', `remote: pairing ${msg.decision === 'approve' ? 'approved' : 'denied'}${msg.webDeviceId ? ` for device ${msg.webDeviceId}` : ''}`);
+        this.deps.audit?.record(msg.decision === 'approve' ? 'pair-approve' : 'pair-deny', { device: msg.webDeviceId ? String(msg.webDeviceId) : undefined });
         if (msg.decision === 'approve' && msg.hostToken && msg.hostDeviceId && msg.webDeviceId && msg.webPub && this.creds) {
           this.creds.deviceId = msg.hostDeviceId;
           this.creds.deviceToken = msg.hostToken;
@@ -289,7 +364,10 @@ export class RemoteHost {
         return;
       }
       case 'client.gone': {
-        if (msg.client && this.sessions.delete(String(msg.client))) this.deps.log('info', `remote: client ${msg.client} disconnected (${this.sessions.size} online)`);
+        if (msg.client && this.sessions.delete(String(msg.client))) {
+          this.deps.log('info', `remote: client ${msg.client} disconnected (${this.sessions.size} online)`);
+          this.deps.audit?.record('client-disconnect', { device: String(msg.client) });
+        }
         this.push();
         return;
       }
@@ -304,6 +382,7 @@ export class RemoteHost {
     if (!expected) {
       // The relay routed a device this host never paired with (or one that was revoked).
       this.deps.log('warn', `remote: ignored a handshake from unpaired device ${from}`);
+      this.deps.audit?.record('handshake-failed', { device: from, detail: 'unpaired device' });
       return;
     }
     try {
@@ -311,8 +390,10 @@ export class RemoteHost {
       this.sessions.set(from, { key: session.key, salt: session.salt, out: 0, identity: expected });
       this.ws?.send(JSON.stringify({ t: 'hs', to: from, seq: 0, payload: session.reply }));
       this.deps.log('info', `remote: client ${from} connected (${this.sessions.size} online)`);
+      this.deps.audit?.record('client-connect', { device: from });
     } catch (e) {
       this.deps.log('warn', `remote handshake failed for ${from}: ${e instanceof Error ? e.message : String(e)}`);
+      this.deps.audit?.record('handshake-failed', { device: from });
     }
   }
 
@@ -333,7 +414,16 @@ export class RemoteHost {
       if (!allowed || !signedOk) {
         // A paired client asking for a local-only channel is either an outdated web build or a probe.
         this.deps.log('warn', `remote: refused ${inner.channel} from ${from} (${allowed ? 'missing or invalid approval signature' : 'channel not available remotely'})`);
+        this.deps.audit?.record('channel-refused', { device: from, detail: inner.channel });
         await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: 'channel not available remotely' });
+        return;
+      }
+      // View-only mode (P4): the read half is served, the write half is refused before dispatch,
+      // so no send, approval, session change or lifecycle action can reach the registry.
+      if (this.deps.viewOnly?.() && !REMOTE_READ_CHANNELS.has(inner.channel)) {
+        this.deps.log('info', `remote: refused ${inner.channel} from ${from} (view-only mode)`);
+        this.deps.audit?.record('view-only-blocked', { device: from, detail: inner.channel });
+        await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: 'remote access is in view-only mode' });
         return;
       }
       try {

@@ -1,7 +1,7 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
 import React, { useEffect, useRef, useState } from 'react';
 import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
-import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ModelInfo, ProviderConfig, ProviderKind, RemoteDeviceInfo, RemoteState, SecretStatus, UpdateState } from '../../../shared/types';
+import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ModelInfo, ProviderConfig, ProviderKind, RemoteAuditEntry, RemoteDeviceInfo, RemoteState, SecretStatus, UpdateState } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
@@ -1038,20 +1038,24 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   const config = settings.remote ?? { enabled: false };
   const [state, setState] = useState<RemoteState | null>(null);
   const [devices, setDevices] = useState<RemoteDeviceInfo[]>([]);
+  const [audit, setAudit] = useState<RemoteAuditEntry[]>([]);
   const [relayUrl, setRelayUrl] = useState(config.relayUrl ?? '');
   const [enroll, setEnroll] = useState('');
   const [pairing, setPairing] = useState<{ code: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
+  const applyResult = (r: { state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[] }) => {
+    setState(r.state);
+    setDevices(r.devices);
+    setPairing(r.state.pairing ?? null);
+    setAudit(r.audit ?? []);
+  };
+
   useEffect(() => {
     const refresh = () => {
       void invoke('remote:get', undefined)
-        .then((r) => {
-          setState(r.state);
-          setDevices(r.devices);
-          setPairing(r.state.pairing ?? null);
-        })
+        .then((r) => applyResult(r))
         .catch(() => undefined);
     };
     refresh();
@@ -1068,11 +1072,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
     setError(undefined);
     try {
       await fn();
-      void invoke('remote:get', undefined).then((r) => {
-        setState(r.state);
-        setDevices(r.devices);
-        setPairing(r.state.pairing ?? null);
-      });
+      void invoke('remote:get', undefined).then((r) => applyResult(r));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1091,15 +1091,16 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
         stay on this machine; the traffic is end-to-end encrypted and the relay sees metadata only.
       </p>
       <Field label="Relay URL" hint="WebSocket relay that routes paired sessions, e.g. wss://relay.your-domain.dev">
-        <input value={relayUrl} placeholder="https://your-relay.workers.dev" onChange={(e) => setRelayUrl(e.target.value)} />
+        <input data-testid="remote-relay-url" value={relayUrl} placeholder="https://your-relay.workers.dev" onChange={(e) => setRelayUrl(e.target.value)} />
       </Field>
       <Field label="Enrollment secret" hint="Shared secret from the relay deployment (wrangler secret ENROLL_TOKEN). Stored in the OS keychain.">
-        <input type="password" value={enroll} placeholder="••••••••" onChange={(e) => setEnroll(e.target.value)} />
+        <input data-testid="remote-enroll" type="password" value={enroll} placeholder="••••••••" onChange={(e) => setEnroll(e.target.value)} />
       </Field>
       <div className="settings-actions">
         <Button
           size="sm"
           variant="primary"
+          data-testid="remote-connect"
           disabled={busy || !relayUrl || !enroll}
           onClick={() =>
             void act(async () => {
@@ -1116,11 +1117,22 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
           </Button>
         )}
       </div>
-      <p className="muted small">
+      <p className="muted small" data-testid="remote-status">
         Status: <strong>{statusLine}</strong>
         {state?.onlineClients?.length ? ` · ${state.onlineClients.length} browser${state.onlineClients.length === 1 ? '' : 's'} connected` : ''}
       </p>
       {error && <p className="small" style={{ color: 'var(--red, #d00)' }}>{error}</p>}
+
+      {config.enabled && (
+        <Field label="View-only mode" hint="Paired browsers can browse sessions, transcripts, files and git, but cannot send prompts, approve actions or change anything. Refused attempts still appear below.">
+          <Toggle
+            checked={config.viewOnly === true}
+            disabled={busy}
+            onChange={(v) => void act(() => invoke('remote:setViewOnly', { viewOnly: v }))}
+            label="Only allow reading from paired browsers"
+          />
+        </Field>
+      )}
 
       {config.enabled && state?.status === 'online' && (
         <>
@@ -1159,12 +1171,35 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
         <>
           <h3>Paired devices</h3>
           {devices.map((d) => (
-            <Field key={d.deviceId} label={`${d.kind === 'host' ? 'Computer' : 'Browser'}: ${d.name}`} hint={`${d.platform} · last seen ${new Date(d.lastSeen).toLocaleString()}`}>
+            <Field
+              key={d.deviceId}
+              label={`${d.kind === 'host' ? 'Computer' : 'Browser'}: ${d.name}`}
+              hint={`${d.platform} · last seen ${new Date(d.lastSeen).toLocaleString()}${state?.onlineClients.includes(d.deviceId) ? ' · connected now' : ''}`}
+            >
               <Button size="sm" variant="ghost" onClick={() => void act(() => invoke('remote:revoke', { deviceId: d.deviceId }))}>
                 Revoke
               </Button>
             </Field>
           ))}
+        </>
+      )}
+
+      {audit.length > 0 && (
+        <>
+          <h3>Recent activity</h3>
+          <p className="muted small">Pairing, connection, revocation and refused actions for remote access.</p>
+          <div className="remote-audit" data-testid="remote-audit">
+            {audit.map((entry, i) => (
+              <p key={`${entry.at}-${i}`} className="muted small mono">
+                {new Date(entry.at).toLocaleString()} · {entry.action}
+                {entry.detail ? ` · ${entry.detail}` : ''}
+                {entry.device ? ` · ${entry.device}` : ''}
+              </p>
+            ))}
+          </div>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(() => invoke('remote:clearAudit', undefined))}>
+            Clear activity
+          </Button>
         </>
       )}
     </div>

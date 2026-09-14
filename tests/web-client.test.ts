@@ -1,11 +1,15 @@
 /** Integration test for the relay web client (relay/src/web-client.ts): pairing from the
  *  browser side, e2e handshake, filtered invokes and push reception — the same full loop
  *  as remote-e2e.test.ts but driven entirely through RelayClient's public API. */
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import { RelayClient } from '../relay/src/web-client';
 import { ENROLL, FakeRelay } from './fake-relay';
 import { RemoteHost } from '../src/main/remote/host';
+import { RemoteAudit } from '../src/main/remote/audit';
 import type { HandlerRegistry } from '../src/main/handlers';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -119,5 +123,85 @@ describe('relay web client (browser-side protocol)', () => {
     restored.logout();
     expect(storage.has('vocs-web-credentials')).toBe(false);
     await host.disable();
+  });
+
+  it('enforces view-only mode, records the audit trail and revokes devices', async () => {
+    // A dedicated relay so device ids from the first test do not leak into these assertions.
+    const relay = new FakeRelay();
+    const port = await relay.start();
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'vocs-remote-audit-'));
+    const audit = new RemoteAudit({ dir, log: () => undefined });
+    await audit.load();
+    let viewOnly = false;
+    const calls: string[] = [];
+    const registry = {
+      channels: () => ['sessions:list', 'sessions:send'],
+      invoke: async (channel: string) => {
+        calls.push(channel);
+        if (channel === 'sessions:list') return [{ id: 's1', title: 'From the host' }];
+        if (channel === 'sessions:send') return undefined;
+        throw new Error('unknown');
+      }
+    } as unknown as HandlerRegistry;
+    const host = new RemoteHost({
+      registry: () => registry,
+      secrets: { get: async () => undefined, set: async () => undefined },
+      pushState: () => undefined,
+      log: () => undefined,
+      broadcast: () => undefined,
+      audit,
+      viewOnly: () => viewOnly
+    });
+    try {
+      await host.enable(`http://127.0.0.1:${port}`, ENROLL);
+      const { code } = await host.startPairing('Test PC');
+      const storage = new Map<string, string>();
+      const client = new RelayClient({
+        storage: { get: (k) => storage.get(k) ?? null, set: (k, v) => void storage.set(k, v), remove: (k) => void storage.delete(k) },
+        wsFactory
+      });
+      const pairing = client.pair({ relayBase: `http://127.0.0.1:${port}`, code, deviceName: 'Test Browser' });
+      for (let i = 0; i < 40 && !host.state().pendingRequest; i++) await sleep(100);
+      host.respondPairing('approve');
+      const creds = await pairing;
+      // Wait until the host has reconnected under the real device token it was just granted.
+      for (let i = 0; i < 40 && host.state().status !== 'online'; i++) await sleep(100);
+
+      viewOnly = true;
+      await client.connect();
+
+      // Reads pass; writes are refused at the host before the registry ever runs.
+      expect(await client.invoke('sessions:list', null)).toEqual([{ id: 's1', title: 'From the host' }]);
+      await expect(client.invoke('sessions:send', { id: 's1', input: { text: 'nope' } })).rejects.toThrow('view-only');
+      expect(calls).not.toContain('sessions:send');
+
+      // The policy is read live: flipping it off lets writes through without a reconnect.
+      viewOnly = false;
+      await client.invoke('sessions:send', { id: 's1', input: { text: 'hi' } });
+      expect(calls).toContain('sessions:send');
+
+      // Both sides may list the account's devices, and only public metadata crosses the wire.
+      const hostDevices = await host.listDevices();
+      expect(hostDevices.map((d) => d.kind).sort()).toEqual(['host', 'web']);
+      expect(JSON.stringify(hostDevices)).not.toContain('tokenHash');
+      const webDevices = await client.listDevices();
+      expect(webDevices.map((d) => d.deviceId).sort()).toEqual(hostDevices.map((d) => d.deviceId).sort());
+
+      // The audit trail names the approval, the connection and the refused write.
+      expect(audit.list().some((e) => e.action === 'pair-approve' && e.device === creds.webDeviceId)).toBe(true);
+      expect(audit.list().some((e) => e.action === 'client-connect' && e.device === creds.webDeviceId)).toBe(true);
+      expect(audit.list().some((e) => e.action === 'view-only-blocked' && e.detail === 'sessions:send')).toBe(true);
+
+      // Revoking the browser from the desktop drops its route and kills its token.
+      await host.revokeDevice(creds.webDeviceId);
+      await sleep(200);
+      expect(host.state().onlineClients).not.toContain(creds.webDeviceId);
+      await expect(client.listDevices()).rejects.toThrow();
+      expect(audit.list().some((e) => e.action === 'device-revoke' && e.device === creds.webDeviceId)).toBe(true);
+    } finally {
+      await host.disable();
+      await relay.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

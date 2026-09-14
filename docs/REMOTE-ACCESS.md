@@ -213,10 +213,16 @@ responsive shell; P2 relay + desktop host + e2e crypto + Settings UI + relay web
 create/rename/setModel/setEffort/setPermissionMode` opened to paired clients, the web page
 gained a composer, interrupt/stop controls and a native-dialog-free new-session flow
 (folders come from the host's known folders, harnesses from live availability), and the
-canonical-JSON bug that broke void-returning invoke results was fixed.
+canonical-JSON bug that broke void-returning invoke results was fixed. P4 hardening is
+partly landed: a durable **audit trail** (pairing, approval, connection, revocation and
+refused actions, in Settings → Remote access and `remote:get`), **view-only mode** (a
+desktop policy that refuses every write channel at dispatch, shows a web badge and hides
+write controls), and **cross-client device management** (the web client lists and revokes
+any paired device; the relay's `/devices` read is authenticated and returns public metadata
+only). The offline encrypted transcript mirror remains the one P4 item outstanding.
 Remaining: real deployment (`cd relay && npx wrangler deploy`, secrets) — needs the
 Cloudflare account; QR pairing (deferred until the production relay URL exists); P3.5
-terminal over WAN; P4 hardening (audit surface, offline mirror, view-only mode).
+terminal over WAN; the P4 offline transcript mirror.
 
 Implementation notes: crypto primitives are P-256 ECDSA + ECDH, HKDF-SHA-256 and
 AES-256-GCM — all via WebCrypto so the identical module runs in Node and browsers with

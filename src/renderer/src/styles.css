@@ -3763,6 +3763,15 @@ body.resizing {
 .settings-section {
   max-width: 860px;
 }
+/* P4 audit feed: bounded so a long history cannot push the remote controls off screen. */
+.remote-audit {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  margin: 8px 0;
+}
 .provider-card {
   border: 1px solid var(--border);
   border-radius: var(--radius);

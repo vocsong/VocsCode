@@ -29,6 +29,7 @@ import { TerminalManager } from './terminal';
 import { UpdateService } from './updater';
 import { electronUpdaterFacade } from './updater-electron';
 import { RemoteHost } from './remote/host';
+import { RemoteAudit } from './remote/audit';
 import { WebServer } from './web-server';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -264,13 +265,18 @@ async function main(): Promise<void> {
 
   // Remote access (docs/REMOTE-ACCESS.md): the host needs the registry lazily, since
   // registerIpc itself consumes the host to bind the remote:* channels.
+  const remoteAudit = new RemoteAudit({ dir: userData, log });
+  await remoteAudit.load();
   let registryRef: import('./handlers').HandlerRegistry | null = null;
   remoteHost = new RemoteHost({
     registry: () => registryRef!,
     secrets: { get: (key) => secrets.get(key), set: (key, value) => secrets.set(key, value) },
     pushState: () => pushAll(PUSH_CHANNELS.remoteState, remoteHost!.state()),
     log,
-    broadcast: (channel, payload) => void remoteHost?.broadcastPush(channel, payload)
+    broadcast: (channel, payload) => void remoteHost?.broadcastPush(channel, payload),
+    audit: remoteAudit,
+    // Read live: toggling view-only must apply to an already-connected browser without a reconnect.
+    viewOnly: () => settings.get().remote?.viewOnly === true
   });
 
   const registry = registerIpc({

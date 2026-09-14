@@ -227,6 +227,26 @@ export async function listDevices(store: RelayStore, accountId: string): Promise
   return entries.map(([, d]) => d);
 }
 
+/** Public device metadata (P4 device management): the shape a paired client may see. Never
+ *  token hashes or key material — those stay inside the relay. */
+export interface DeviceInfo {
+  deviceId: string;
+  kind: 'host' | 'web';
+  name: string;
+  platform: string;
+  lastSeen: number;
+}
+
+export async function deviceInfos(store: RelayStore, accountId: string): Promise<DeviceInfo[]> {
+  return (await listDevices(store, accountId)).map((d) => ({
+    deviceId: d.deviceId,
+    kind: d.kind,
+    name: d.name,
+    platform: d.platform,
+    lastSeen: d.lastSeen
+  }));
+}
+
 export async function revokeDevice(store: RelayStore, accountId: string, deviceId: string): Promise<void> {
   await store.delete(deviceKey(accountId, deviceId));
 }

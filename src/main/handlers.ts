@@ -600,20 +600,26 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   // secret store, never in settings; enable() stores them and opens the relay socket.
   if (deps.remote) {
     const remote = deps.remote;
+    const remoteConfig = () => settings.get().remote ?? { enabled: false };
     handle('remote:get', async () => ({
-      config: settings.get().remote ?? { enabled: false },
+      config: remoteConfig(),
       state: remote.state(),
-      devices: settings.get().remote?.enabled ? await remote.listDevices() : []
+      devices: settings.get().remote?.enabled ? await remote.listDevices() : [],
+      audit: remote.auditEntries()
     }));
     handle('remote:enable', async ({ relayUrl, enrollToken }) => {
       await secrets.set('remote-enroll', enrollToken);
-      await settings.update({ remote: { enabled: true, relayUrl } });
+      // Keep the view-only policy across a reconnect; enable() only replaces relay fields.
+      await settings.update({ remote: { ...remoteConfig(), enabled: true, relayUrl } });
       await remote.enable(relayUrl, enrollToken);
+      // The renderer's copy of settings drives the toggle/Disconnect UI, so push it like settings:update.
+      deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
       return remote.state();
     });
     handle('remote:disable', async () => {
-      await settings.update({ remote: { enabled: false } });
+      await settings.update({ remote: { ...remoteConfig(), enabled: false } });
       await remote.disable();
+      deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
       return remote.state();
     });
     handle('remote:pairStart', ({ hostName }) => remote.startPairing(hostName || 'This computer'));
@@ -623,6 +629,17 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     });
     handle('remote:revoke', async ({ deviceId }) => {
       await remote.revokeDevice(deviceId);
+      return undefined;
+    });
+    handle('remote:setViewOnly', async ({ viewOnly }) => {
+      await settings.update({ remote: { ...remoteConfig(), viewOnly: viewOnly === true } });
+      deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
+      // Live policy change: refresh the desktop state and tell paired browsers to hide write controls.
+      void remote.broadcastPolicy();
+      return remote.state();
+    });
+    handle('remote:clearAudit', () => {
+      remote.clearAudit();
       return undefined;
     });
   }

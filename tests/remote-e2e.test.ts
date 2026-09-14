@@ -5,7 +5,7 @@
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket, WebSocketServer, type WebSocket as WsLike } from 'ws';
-import { RemoteHost } from '../src/main/remote/host';
+import { REMOTE_CHANNELS, REMOTE_READ_CHANNELS, REMOTE_WRITE_CHANNELS, RemoteHost } from '../src/main/remote/host';
 import { claimPairing, pollPairing, resolvePairing, startPairing, verifyDeviceToken, type RelayStore } from '../relay/src/core';
 import { clientFinish, createHello, generateIdentity, openFrame, publicOf, sealFrame, type PublicIdentity } from '../src/shared/crypto';
 import type { HandlerRegistry } from '../src/main/handlers';
@@ -126,6 +126,25 @@ describe('remote host end-to-end (fake relay, real core)', () => {
 
     ws.close();
     await host.disable();
+  });
+});
+
+/** P4 guard: view-only mode decides by set membership, so every remotely invocable channel must
+ *  be classified. An unclassified channel would either be silently writable in view-only mode or
+ *  silently unreachable — both are bugs, so this fails the build when a channel is added. */
+describe('remote channel classification (view-only partition)', () => {
+  it('partitions REMOTE_CHANNELS into read and write halves', () => {
+    const all = [...REMOTE_CHANNELS].sort();
+    const partition = [...REMOTE_READ_CHANNELS, ...REMOTE_WRITE_CHANNELS].sort();
+    expect(partition).toEqual(all);
+    for (const channel of REMOTE_READ_CHANNELS) expect(REMOTE_WRITE_CHANNELS.has(channel)).toBe(false);
+  });
+
+  it('classifies every write control as write, not read', () => {
+    for (const channel of ['sessions:send', 'sessions:interrupt', 'sessions:stop', 'sessions:create', 'sessions:rename', 'sessions:setModel', 'sessions:setEffort', 'sessions:setPermissionMode', 'approvals:respond']) {
+      expect(REMOTE_WRITE_CHANNELS.has(channel)).toBe(true);
+      expect(REMOTE_READ_CHANNELS.has(channel)).toBe(false);
+    }
   });
 });
 

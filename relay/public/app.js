@@ -240,6 +240,24 @@
     credentials() {
       return this.creds;
     }
+    /** Lists every device paired with the account (P4 device management), via the relay REST surface. */
+    async listDevices() {
+      if (!this.creds) return [];
+      const doFetch = this.deps.fetchImpl ?? fetch;
+      const base = this.creds.relayBase.replace(/\/$/, "");
+      const res = await doFetch(`${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}`);
+      if (!res.ok) throw new Error(`devices failed: ${res.status}`);
+      return await res.json();
+    }
+    /** Revokes any paired device — another browser, the desktop, or this browser itself. */
+    async revokeDevice(deviceId) {
+      if (!this.creds) return;
+      const doFetch = this.deps.fetchImpl ?? fetch;
+      const base = this.creds.relayBase.replace(/\/$/, "");
+      const url = `${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}&target=${encodeURIComponent(deviceId)}`;
+      const res = await doFetch(url, { method: "DELETE" });
+      if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
+    }
   };
   function browserSocket(url, onMessage, onClose) {
     const ws = new WebSocket(url);
@@ -256,6 +274,7 @@
   var sessions = [];
   var active = null;
   var activeStatus = "idle";
+  var viewOnly = false;
   function localStorageApi() {
     return {
       get: (k) => window.localStorage.getItem(k),
@@ -296,6 +315,8 @@
     el("new-session").addEventListener("click", () => void toggleNewSession(true));
     el("ns-cancel").addEventListener("click", () => void toggleNewSession(false));
     el("ns-create").addEventListener("click", () => void createSession());
+    el("devices").addEventListener("click", () => void toggleDevices());
+    el("devices-close").addEventListener("click", () => el("devices-panel").setAttribute("hidden", ""));
     el("send").addEventListener("click", () => void sendComposer());
     el("act-interrupt").addEventListener("click", () => void actOnActive("sessions:interrupt", null));
     el("act-stop").addEventListener("click", () => void actOnActive("sessions:stop", null));
@@ -312,7 +333,7 @@
   async function sendComposer() {
     const box = el("composer");
     const text = box.value.trim();
-    if (!text || !active) return;
+    if (!text || !active || viewOnly) return;
     box.value = "";
     try {
       await client.invoke("sessions:send", { id: active, input: { text } });
@@ -392,6 +413,11 @@
     }
     setConnection("connected");
     client.onPush((channel, payload) => void onPush(channel, payload));
+    try {
+      const settings = await client.invoke("settings:get", null);
+      applyPolicy(settings.remote?.viewOnly === true);
+    } catch {
+    }
     await refreshSessions();
   }
   async function refreshSessions() {
@@ -415,10 +441,25 @@
     const meta = sessions.find((s) => s.id === id);
     activeStatus = meta?.status ?? "idle";
     el("active-title").textContent = meta ? `${meta.title} \xB7 ${activeStatus}` : "";
-    const running = activeStatus === "running" || activeStatus === "starting" || activeStatus === "awaiting";
+    syncControls();
+    for (const row of Array.from(document.querySelectorAll(".session-row"))) row.classList.toggle("active", row.dataset.id === id);
+  }
+  function isRunning(status) {
+    return status === "running" || status === "starting" || status === "awaiting";
+  }
+  function syncControls() {
+    const running = !viewOnly && isRunning(activeStatus);
     el("act-interrupt").hidden = !running;
     el("act-stop").hidden = !running;
-    for (const row of Array.from(document.querySelectorAll(".session-row"))) row.classList.toggle("active", row.dataset.id === id);
+  }
+  function applyPolicy(next) {
+    viewOnly = next;
+    const badge = el("policy");
+    badge.toggleAttribute("hidden", !viewOnly);
+    badge.textContent = viewOnly ? "view-only" : "";
+    for (const id of ["composer", "send", "new-session"]) el(id).toggleAttribute("disabled", viewOnly);
+    syncControls();
+    if (viewOnly) el("new-session-panel").setAttribute("hidden", "");
   }
   function renderTranscript(items) {
     const root = el("transcript");
@@ -443,9 +484,33 @@
   function renderApproval(item) {
     const requestId = item.request.id;
     if (item.decision) return `<div class="msg approval decided"><b>Approval</b> <small>decided: ${esc(item.decision.optionId)}</small></div>`;
+    if (viewOnly) return `<div class="msg approval"><b>Approval needed</b><small> \u2014 decide on the desktop (view-only)</small></div>`;
     return `<div class="msg approval"><b>Approval needed</b><div class="approval-actions" data-request="${esc(requestId)}"><button data-decision="allow">Allow</button><button data-decision="deny" class="danger">Deny</button></div></div>`;
   }
+  async function toggleDevices() {
+    const panel = el("devices-panel");
+    const opening = panel.hasAttribute("hidden");
+    panel.toggleAttribute("hidden", !opening);
+    if (opening) await refreshDevices();
+  }
+  async function refreshDevices() {
+    const list = el("device-list");
+    el("devices-error").textContent = "";
+    list.innerHTML = '<p class="muted small">Loading\u2026</p>';
+    try {
+      const devices = await client.listDevices();
+      list.innerHTML = devices.map(
+        (d) => `<div class="device-row"><span>${esc(d.kind === "host" ? "Computer" : "Browser")}: ${esc(d.name)}<br><small class="muted">${esc(d.platform)} \xB7 last seen ${esc(new Date(d.lastSeen).toLocaleString())}</small></span><button class="danger" data-revoke="${esc(d.deviceId)}">Revoke</button></div>`
+      ).join("");
+    } catch (e) {
+      el("devices-error").textContent = e instanceof Error ? e.message : String(e);
+    }
+  }
   async function onPush(channel, payload) {
+    if (channel === "push:remotePolicy") {
+      applyPolicy(payload?.viewOnly === true);
+      return;
+    }
     if (channel === "push:sessionEvent" && payload) {
       const env = payload;
       if (active && env.sessionId === active) {
@@ -453,9 +518,7 @@
           activeStatus = env.event.status;
           const meta = sessions.find((s) => s.id === active);
           el("active-title").textContent = meta ? `${meta.title} \xB7 ${activeStatus}` : "";
-          const running = activeStatus === "running" || activeStatus === "starting" || activeStatus === "awaiting";
-          el("act-interrupt").hidden = !running;
-          el("act-stop").hidden = !running;
+          syncControls();
         }
         await openSession(active);
       }
@@ -475,7 +538,15 @@
     }
   }
   document.addEventListener("click", (ev) => {
-    const btn = ev.target.closest("button[data-decision]");
+    const target = ev.target;
+    const revoke = target.closest("button[data-revoke]");
+    if (revoke?.dataset.revoke) {
+      void client.revokeDevice(revoke.dataset.revoke).then(() => refreshDevices()).catch((e) => {
+        el("devices-error").textContent = e instanceof Error ? e.message : String(e);
+      });
+      return;
+    }
+    const btn = target.closest("button[data-decision]");
     const wrap = btn?.closest(".approval-actions");
     if (!btn || !wrap) return;
     const requestId = wrap.dataset.request;

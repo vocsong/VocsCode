@@ -35,6 +35,8 @@
       <header class="topbar">
         <span class="brand">Vocs Code</span>
         <span id="conn" class="muted small"></span>
+        <span id="policy" class="badge" hidden></span>
+        <button id="devices" class="ghost">Devices</button>
         <button id="new-session" class="ghost">New session</button>
         <button id="logout" class="ghost">Log out</button>
       </header>
@@ -49,6 +51,14 @@
           <button id="ns-cancel" class="ghost">Cancel</button>
         </div>
         <p id="ns-error" class="error"></p>
+      </div>
+      <div class="devices-panel" id="devices-panel" hidden>
+        <div class="devices-head">
+          <span class="small muted">Devices paired with this account — revoke a lost browser or computer.</span>
+          <button id="devices-close" class="ghost">Close</button>
+        </div>
+        <div id="device-list"></div>
+        <p id="devices-error" class="error"></p>
       </div>
       <div class="layout">
         <nav id="session-list" class="session-list"></nav>

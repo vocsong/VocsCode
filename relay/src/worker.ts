@@ -2,7 +2,7 @@
  *  and web clients for one provisioned account. Routing metadata only — never keys or
  *  plaintext. One Hub Durable Object per account hosts every socket. */
 import type { PublicIdentity } from '../../src/shared/crypto';
-import { claimPairing, listDevices, pollPairing, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, type RelayStore } from './core';
+import { claimPairing, deviceInfos, PairError, pollPairing, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, type RelayStore } from './core';
 
 export interface Env {
   HUB: DurableObjectNamespace;
@@ -47,12 +47,15 @@ export class Hub {
       if (request.method === 'POST' && url.pathname === '/pair/start') return await this.pairStart(request);
       if (request.method === 'POST' && url.pathname === '/pair/claim') return await this.pairClaim(request);
       if (request.method === 'GET' && url.pathname === '/pair/poll') return json(await pollPairing(this.store, url.searchParams.get('code') ?? '', Date.now()));
-      if (request.method === 'GET' && url.pathname === '/devices') return json(listDevices(this.store, this.env.RELAY_ACCOUNT));
+      if (request.method === 'GET' && url.pathname === '/devices') return await this.deviceList(request);
       if (request.method === 'DELETE' && url.pathname === '/devices') return await this.deviceRevoke(url, request);
       if (url.pathname === '/ws/host') return await this.wsConnect(request, 'host');
       if (url.pathname === '/ws/client') return await this.wsConnect(request, 'client');
       return json({ error: 'not found' }, 404);
     } catch (e) {
+      // An unverifiable device token is an auth failure, not a server error — and the code
+      // in the body is the only detail a caller gets.
+      if (e instanceof PairError) return json({ error: e.code }, 401);
       return json({ error: e instanceof Error ? e.message : String(e) }, e instanceof PairingHttpError ? e.status : 500);
     }
   }
@@ -77,9 +80,17 @@ export class Hub {
     return json({ ok: true });
   }
 
-  private async deviceRevoke(url: URL, request: Request): Promise<Response> {
+  private async deviceList(request: Request): Promise<Response> {
+    // Authenticated, and only public metadata leaves the DO: token hashes and key material stay put.
     await this.authDevice(request);
-    const target = url.searchParams.get('device');
+    return json(await deviceInfos(this.store, this.env.RELAY_ACCOUNT));
+  }
+
+  private async deviceRevoke(url: URL, request: Request): Promise<Response> {
+    // `device`/`token` authenticate the caller (either a paired desktop or browser); `target`
+    // names the device to drop, so one side can revoke the other (lost-laptop / lost-desktop).
+    await this.authDevice(request);
+    const target = url.searchParams.get('target');
     if (!target) throw new PairingHttpError('invalid', 400);
     await revokeDevice(this.store, this.env.RELAY_ACCOUNT, target);
     for (const tag of [`client:${target}`, `host:${target}`]) {
