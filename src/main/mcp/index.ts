@@ -9,10 +9,12 @@ import { which } from '../runtime';
 import { builtinEntries, effectiveEntries, effectiveServers, normalizeStdio, resolveVars, type ResolvedServer } from './effective';
 import { globalStores, projectStores, readProjectMcp, readStores } from './file';
 import { GITNEXUS_SERVER_ID, gitnexusBaseDef, gitnexusSharedRoots, isBuiltinServerId, isGitnexusIndexed, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './gitnexus';
+import { VOCS_MEMORY_SERVER_ID, hasMemoryWiki, memoryServerDef, vocsMemoryBaseDef } from './memory';
 
 export * from './effective';
 export * from './file';
 export * from './gitnexus';
+export * from './memory';
 export { inspectServer, type InspectOptions } from './client';
 
 /** Keychain id for a variable referenced as `${NAME}` in an MCP definition. */
@@ -27,6 +29,8 @@ export interface McpHostDeps {
   sharedGitnexus?: () => Promise<string | null>;
   /** Path to the scope proxy the harness spawns in place of the GitNexus binary. */
   gitnexusProxyPath?: string;
+  /** Path to resources/mcp/vocs-memory.mjs, the Layer 2 wiki server. */
+  memoryServerPath?: string;
 }
 
 export interface SessionScope {
@@ -36,6 +40,8 @@ export interface SessionScope {
   /** The key the per-repo switches are stored under, shared with the main checkout. */
   projectRoot: string;
   harness: HarnessId;
+  /** The worktree's branch name, when the session runs in one (branch-scope wiki pages). */
+  branch?: string;
 }
 
 function stateFor(settings: AppSettings, projectRoot: string): McpProjectState {
@@ -44,7 +50,7 @@ function stateFor(settings: AppSettings, projectRoot: string): McpProjectState {
 
 /** The app-shipped built-in servers, with the installed binary preferred over `npx`. */
 function builtinDefs(): McpServerDef[] {
-  return [gitnexusBaseDef(which(GITNEXUS_SERVER_ID))];
+  return [gitnexusBaseDef(which(GITNEXUS_SERVER_ID)), vocsMemoryBaseDef()];
 }
 
 /**
@@ -105,6 +111,10 @@ async function resolveBuiltins(scope: SessionScope, state: McpProjectState, deps
     if (def.id === GITNEXUS_SERVER_ID) {
       materialized = await sharedGitnexusDef(scope, def, deps);
       if (!materialized) continue;
+    } else if (def.id === VOCS_MEMORY_SERVER_ID) {
+      if (!(await hasMemoryWiki(scope))) continue;
+      materialized = memoryServerDef(scope, def, { memoryServerPath: deps.memoryServerPath, log: deps.log });
+      if (!materialized) continue;
     }
     const resolved = await resolveVars(materialized, { env: process.env, secret: (name) => deps.getSecret(secretKeyFor(name)) });
     if (resolved.missing.length) deps.log?.('warn', `mcp ${def.id}: no value for ${resolved.missing.join(', ')}`);
@@ -148,17 +158,32 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
   const injectable = support === 'inject' || support === 'client';
   const registry = await readGitnexusRegistry(realGitnexusHome());
   const indexed = isGitnexusIndexed(registry, { projectRoot: scope.projectRoot, cwd: scope.cwd });
+  const wiki = await hasMemoryWiki(scope);
   const globalDisabled = scope.settings.mcpDisabledBuiltins ?? [];
-  const builtin: McpBuiltinInfo[] = defs.map((def) => ({
-    def,
-    // The one shared server is on by default; the MCP page can switch it off everywhere, and
-    // this switch keeps a single repo out of it.
-    enabled: injectable && !globalDisabled.includes(def.id) && !(state.disabledBuiltin ?? []).includes(def.id),
-    disabledGlobally: globalDisabled.includes(def.id),
-    shared: state.gitnexusGlobal === true,
-    indexed,
-    claimed: canClaimBuiltins(scope.harness)
-  }));
+  const builtin: McpBuiltinInfo[] = defs.map((def) => {
+    const off = globalDisabled.includes(def.id) || (state.disabledBuiltin ?? []).includes(def.id);
+    if (def.id === VOCS_MEMORY_SERVER_ID) {
+      return {
+        def,
+        enabled: injectable && !off && wiki,
+        disabledGlobally: globalDisabled.includes(def.id),
+        shared: false,
+        indexed: wiki,
+        claimed: canClaimBuiltins(scope.harness),
+        note: wiki ? 'Reads .vocs-code/wiki in this project.' : 'No project wiki yet — generate one from the Knowledge panel.'
+      };
+    }
+    return {
+      def,
+      // The one shared server is on by default; the MCP page can switch it off everywhere, and
+      // this switch keeps a single repo out of it.
+      enabled: injectable && !globalDisabled.includes(def.id) && !(state.disabledBuiltin ?? []).includes(def.id),
+      disabledGlobally: globalDisabled.includes(def.id),
+      shared: state.gitnexusGlobal === true,
+      indexed,
+      claimed: canClaimBuiltins(scope.harness)
+    };
+  });
   return {
     projectRoot: scope.projectRoot,
     file: repo.file,

@@ -50,6 +50,7 @@ import type {
 } from './types';
 import type { AgentClientContext, AgentState } from './agent';
 import type { ExecutionRecord } from './analytics/records';
+import type { KnowledgePageDetail, KnowledgeSearchResult, KnowledgeView } from './knowledge';
 import type { SubagentRun, SubagentRunSummary } from './subagents';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 
@@ -262,6 +263,19 @@ export interface IpcContract {
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];
   'fs:read': [{ sessionId: string; path: string; maxBytes?: number }, { content: string; truncated: boolean }];
+
+  /** Layer 2 project knowledge for one session's project: pages, proposals and review state. */
+  'knowledge:view': [{ sessionId: string }, KnowledgeView];
+  /** One page with its provenance, related pages and staleness. */
+  'knowledge:read': [{ sessionId: string; id: string }, KnowledgePageDetail | null];
+  /** Scored search over the project's pages (accepted pages only unless asked otherwise). */
+  'knowledge:search': [{ sessionId: string; q: string; limit?: number; includeHistorical?: boolean }, KnowledgeSearchResult[]];
+  /** Accept or reject one proposal; rejecting remembers the claim. */
+  'knowledge:review': [{ sessionId: string; id: string; action: 'accept' | 'reject'; note?: string }, KnowledgeView];
+  /** Run the bootstrap synthesis or the episode distillation with the utility model. */
+  'knowledge:generate': [{ sessionId: string; mode: 'bootstrap' | 'distill' }, { ok: boolean; detail?: string; error?: string }];
+  /** Copy reviewed pages into the tracked docs/wiki/ path; committing them stays the user's act. */
+  'knowledge:publish': [{ sessionId: string; ids: string[] }, { ok: boolean; dir: string; written: string[]; error?: string }];
 
   'terminal:list': [void, TerminalInfo[]];
   'terminal:shells': [void, ShellOption[]];

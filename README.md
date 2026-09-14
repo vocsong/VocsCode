@@ -73,6 +73,7 @@ PRs are squash-merged, and titles follow [Conventional Commits](https://www.conv
 | [Operations](docs/OPERATIONS.md) | Log locations, environment variables |
 | [Releasing](docs/RELEASING.md) | Branch model, ship checklist, release-please and CI build pipeline |
 | [MCP servers](docs/MCP.md) | Global and per-repo MCP servers: storage, per-harness injection, UI, trust model, phasing |
+| [Project knowledge](docs/MEMORY.md) | Layer 2 memory: the project wiki, its provenance and review rules, the MCP tools, and the L1–L4 boundary |
 | [Vesta](docs/VESTA.md) | The in-app assistant: its capability allowlist, risk tiers and how to add one |
 
 ## Requirements

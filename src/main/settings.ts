@@ -2,6 +2,7 @@
 import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, ProviderConfig } from '../shared/types';
 import { MCP_BUILTIN_IDS } from '../shared/types';
+import type { KnowledgeSettings } from '../shared/knowledge';
 import { isAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESSES, isEffortLevel } from '../shared/harness-meta';
 import { pruneModelOverrides } from '../shared/model-overrides';
@@ -205,6 +206,7 @@ export function defaultSettings(): AppSettings {
     acpAgents: BUILTIN_ACP_AGENTS.map((a) => ({ ...a })),
     mcpServers: [],
     mcpProjectState: {},
+    knowledge: { prime: true, autoDistill: true },
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
     modelOverrides: {},
     sidebarWidth: 280,
@@ -310,6 +312,12 @@ function strMap(v: unknown): Record<string, string> | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
+/** Layer 2 switches; absent means the defaults (prime on, auto-distill on). */
+export function normalizeKnowledgeSettings(stored: unknown): KnowledgeSettings {
+  const s = stored && typeof stored === 'object' && !Array.isArray(stored) ? (stored as Record<string, unknown>) : {};
+  return { prime: s.prime !== false, autoDistill: s.autoDistill !== false };
+}
+
 /** Per-repo MCP switches: string id lists, keyed by absolute project root. */
 export function normalizeMcpProjectState(stored: unknown): Record<string, McpProjectState> {
   if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
@@ -372,6 +380,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
       ? [...new Set(stored.mcpDisabledBuiltins.filter((x): x is string => typeof x === 'string' && !!x))]
       : [],
     mcpProjectState: normalizeMcpProjectState(stored.mcpProjectState),
+    knowledge: normalizeKnowledgeSettings(stored.knowledge),
     providers: [],
     acpAgents: []
   };

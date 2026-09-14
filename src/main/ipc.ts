@@ -2,6 +2,7 @@
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
 import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry } from './handlers';
 import type { AnalyticsStore } from './analytics';
+import type { KnowledgeService } from './knowledge/service';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
 import type { SecretStore } from './secrets';
@@ -19,6 +20,8 @@ export interface IpcDeps {
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
   search: SearchIndex;
+  /** Layer 2 project knowledge; absent in tests that do not exercise it. */
+  knowledge?: KnowledgeService;
   /** Remote access host (docs/REMOTE-ACCESS.md), wired in index.ts. */
   remote?: RemoteHost;
   /** In-app auto-update (issue #198); present only in packaged builds. */
@@ -104,6 +107,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     runtime: deps.runtime,
     analytics: deps.analytics,
     search: deps.search,
+    knowledge: deps.knowledge,
     remote: deps.remote,
     updater: deps.updater,
     log: deps.log,

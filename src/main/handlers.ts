@@ -14,6 +14,7 @@ import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
 import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRevertFile, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
+import type { KnowledgeService } from './knowledge/service';
 import type { UpdateState } from '../shared/types';
 import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
@@ -74,6 +75,8 @@ export interface HandlerDeps {
   analytics: AnalyticsStore;
   /** Deep session search (FTS5); derived state, safe to rebuild. */
   search: SearchIndex;
+  /** Layer 2 project knowledge (wiki store + jobs); present when wired up in index.ts. */
+  knowledge?: KnowledgeService;
   /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
   remote?: RemoteHost;
   /** Base-pi global config (Settings → Pi); a default store is created when absent. */
@@ -616,7 +619,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:diff', async ({ sessionId, path: p, staged }) => gitDiff(cwdOf(sessionId), p, staged));
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
-  handle('git:commit', ({ sessionId, message }) => gitCommit(cwdOf(sessionId), message));
+  handle('git:commit', async ({ sessionId, message }) => {
+    const r = await gitCommit(cwdOf(sessionId), message);
+    if (r.ok) deps.knowledge?.recordEpisode(knowledgeScopeOf(sessionId), { kind: 'commit', sessionId, summary: message.trim().split('\n')[0].slice(0, 200), detail: r.output.slice(-600), at: new Date().toISOString() });
+    return r;
+  });
   // Local /pr and /merge run outside a turn, so nothing else triggers the sidebar's PR state check.
   // The outcome is recorded as a persistent transcript note so it survives a restart (local-only
   // info lines from the renderer do not). PRs opened from another session's agent branch must
@@ -640,6 +647,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (r.ok) deps.log('info', `[${sessionId}] PR opened${head ? ` for ${head}` : ''}: ${r.url ?? ''}`.trim());
     else deps.log('warn', `[${sessionId}] PR creation failed: ${(r.output ?? 'unknown error').trim().slice(0, 600)}`);
     if (r.ok) sessions.refreshGitState(sessionId);
+    if (r.ok) deps.knowledge?.recordEpisode(knowledgeScopeOf(sessionId), { kind: 'pr', sessionId, summary: `PR into ${base}${head ? ` from ${head}` : ''}`, detail: r.url, at: new Date().toISOString() });
     return r;
   });
   handle('git:merge', async ({ sessionId, base, head }) => {
@@ -649,6 +657,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (r.ok) deps.log('info', `[${sessionId}] PR merged${head ? ` (${head})` : ''}: ${r.url ?? ''}`.trim());
     else deps.log('warn', `[${sessionId}] PR merge failed: ${(r.output ?? 'unknown error').trim().slice(0, 600)}`);
     if (r.ok) sessions.refreshGitState(sessionId);
+    if (r.ok) deps.knowledge?.recordEpisode(knowledgeScopeOf(sessionId), { kind: 'merge', sessionId, summary: `Merged${head ? ` ${head}` : ''}${base ? ` into ${base}` : ''}`, detail: r.url, at: new Date().toISOString() });
     return r;
   });
   handle('git:branches', ({ sessionId }) => gitBranches(cwdOf(sessionId)));
@@ -719,6 +728,49 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return out;
   });
   handle('fs:read', ({ sessionId, path: p, maxBytes }) => readWorkspaceFile(cwdOf(sessionId), p, maxBytes));
+
+  // Layer 2 project knowledge. Every channel resolves its scope from the session, never from a
+  // renderer-supplied path, so a client cannot read or write another project's wiki.
+  const knowledgeScopeOf = (sessionId: string) => {
+    const m = sessions.get(sessionId);
+    if (!m) throw new Error('Session not found');
+    return { projectRoot: m.config.projectRoot, cwd: m.cwd, ...(m.worktreeBranch ? { branch: m.worktreeBranch } : {}) };
+  };
+  const knowledgeOf = () => deps.knowledge ?? null;
+  handle('knowledge:view', ({ sessionId }) => {
+    const k = knowledgeOf();
+    if (!k) throw new Error('Project knowledge is unavailable in this run');
+    return k.view(knowledgeScopeOf(sessionId));
+  });
+  handle('knowledge:read', ({ sessionId, id }) => {
+    const k = knowledgeOf();
+    if (!k) throw new Error('Project knowledge is unavailable in this run');
+    return typeof id === 'string' && id ? k.detail(knowledgeScopeOf(sessionId), id) : null;
+  });
+  handle('knowledge:search', ({ sessionId, q, limit, includeHistorical }) => {
+    const k = knowledgeOf();
+    if (!k || typeof q !== 'string' || !q.trim()) return [];
+    return k.search(knowledgeScopeOf(sessionId), q, { limit: typeof limit === 'number' ? limit : undefined, includeHistorical: includeHistorical === true });
+  });
+  handle('knowledge:review', ({ sessionId, id, action, note }) => {
+    const k = knowledgeOf();
+    if (!k) throw new Error('Project knowledge is unavailable in this run');
+    if (action !== 'accept' && action !== 'reject') throw new Error('Unknown review action');
+    const scope = knowledgeScopeOf(sessionId);
+    return k.review(scope, id, action, { by: 'human', ...(typeof note === 'string' && note.trim() ? { note: note.trim() } : {}) }).then(() => k.view(scope));
+  });
+  handle('knowledge:generate', ({ sessionId, mode }) => {
+    const k = knowledgeOf();
+    if (!k) throw new Error('Project knowledge is unavailable in this run');
+    if (mode !== 'bootstrap' && mode !== 'distill') throw new Error('Unknown generation mode');
+    return k.generate(knowledgeScopeOf(sessionId), mode);
+  });
+  handle('knowledge:publish', ({ sessionId, ids }) => {
+    const k = knowledgeOf();
+    if (!k) throw new Error('Project knowledge is unavailable in this run');
+    const list = Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string' && !!x).slice(0, 50) : [];
+    return k.publish(knowledgeScopeOf(sessionId), list);
+  });
 
   handle('terminal:list', () => terminals.list());
   handle('terminal:shells', () => terminals.shells());

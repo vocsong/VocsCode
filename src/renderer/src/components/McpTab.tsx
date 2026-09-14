@@ -141,6 +141,24 @@ export function McpTab({ session }: { session: SessionMeta }) {
             </div>
           </div>
         )}
+        {info.builtin
+          .filter((entry) => entry.def.id !== 'gitnexus')
+          .map((entry) => (
+            <div key={entry.def.id} className="mcp-card" data-testid={`builtin-${entry.def.id}`}>
+              <div className="mcp-row-head">
+                <Icon name="book" size={12} />
+                <span className="mcp-name">{entry.def.id}</span>
+                <Badge tone="blue">built-in</Badge>
+                <span className="spacer" />
+                {entry.disabledGlobally && <Badge tone="amber">off everywhere</Badge>}
+                {entry.enabled && <Badge tone="green">on</Badge>}
+              </div>
+              <div className="muted small">{entry.note ?? entry.def.description}</div>
+              <div className="mcp-control-list">
+                <Toggle checked={entry.enabled} disabled={busy || entry.disabledGlobally || !entry.indexed} onChange={(v) => void setBuiltinEnabled(entry.def.id, v)} label={`Enable ${entry.def.id} for this repo`} />
+              </div>
+            </div>
+          ))}
       </section>
 
       <section className="mcp-section" data-testid="mcp-repo-section">

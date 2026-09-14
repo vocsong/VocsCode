@@ -18,6 +18,9 @@ src/main
   models/         provider clients and model discovery, with offline catalogs and pricing
   util/           fs and async helpers shared by the adapters (no Electron imports)
   session-manager.ts  sessions, transcripts, approvals, goals, worktrees
+  knowledge/      Layer 2 project knowledge: markdown wiki store, scored retrieval, synthesis and
+                  distillation jobs, publish (docs/MEMORY.md); resources/mcp/vocs-memory.mjs is
+                  the stdio MCP server every harness reaches it through
   runtime.ts      binary discovery (PATH, app runtime dir, bundled), doctor, installer
   secrets.ts      API keys encrypted at rest via Electron safeStorage
   terminal.ts     PTY tabs (node-pty) mirrored by headless xterm for snapshots, flow control, restore

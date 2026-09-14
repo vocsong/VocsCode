@@ -5,6 +5,7 @@
 import type { TerminalSettings } from './terminal';
 import type { ThemeId } from './themes';
 import type { ShortcutCommand } from './shortcuts';
+import type { KnowledgeSettings } from './knowledge';
 import type { ReliabilityReport } from './analytics/reliability';
 
 import type { SubagentRunMode, SubagentRunStatus } from './subagents';
@@ -173,7 +174,7 @@ export interface McpServerDef {
 }
 
 /** Ids of the MCP servers this app ships itself. A same-named user entry is not theirs to edit, so it is ignored everywhere. */
-export const MCP_BUILTIN_IDS: readonly string[] = ['gitnexus'];
+export const MCP_BUILTIN_IDS: readonly string[] = ['gitnexus', 'vocs-memory'];
 
 /** Per-user switches for one project root. Repo-defined servers stay off until enabled here. */
 export interface McpProjectState {
@@ -227,13 +228,15 @@ export interface McpBuiltinInfo {
   disabledGlobally?: boolean;
   /** Whether this repo's index is shared with sessions in other repos. */
   shared: boolean;
-  /** Whether this repo has an index GitNexus can see for the session. */
+  /** GitNexus: this repo has an index it can see. Project knowledge: this repo has a wiki. */
   indexed: boolean;
   /**
    * Whether this app also switches the name off in the harness's own MCP config, so only the one
    * shared server can run. False for a harness whose config this app does not write.
    */
   claimed: boolean;
+  /** One line the row shows under the toggle; built-in specific. */
+  note?: string;
 }
 
 /** Everything the right-panel MCP tab needs for one session. */
@@ -1058,6 +1061,8 @@ export interface AppSettings {
   onboardingDone?: boolean;
   /** Project roots where the user dismissed the "publish to GitHub" guide on the Git tab. */
   gitSetupSkipped?: string[];
+  /** Layer 2 project knowledge: always-on digest priming and automatic distillation after git events. */
+  knowledge?: KnowledgeSettings;
 }
 
 export interface GitFileStatus {

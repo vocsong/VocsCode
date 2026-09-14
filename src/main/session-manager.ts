@@ -58,6 +58,10 @@ export interface SessionManagerDeps {
   sharedGitnexus?: () => Promise<string | null>;
   /** Path to the scope proxy the harness spawns in place of the GitNexus binary. */
   gitnexusProxyPath?: string;
+  /** Path to resources/mcp/vocs-memory.mjs, the Layer 2 wiki server. */
+  memoryServerPath?: string;
+  /** Layer 2 digest for priming a new session's system prompt; absent disables priming. */
+  knowledgeDigest?: (scope: { projectRoot: string; cwd: string; branch?: string }) => Promise<string | null>;
 }
 
 interface ActiveSession {
@@ -339,6 +343,16 @@ export class SessionManager {
       activeEffort: cfg.effort,
       queued: 0
     };
+    // Layer 2: prime the session with the project's curated knowledge digest. The digest names
+    // pages rather than pasting them, and never outranks the project's own instruction files.
+    if (this.deps.knowledgeDigest && this.settings().knowledge?.prime !== false) {
+      try {
+        const digest = await this.deps.knowledgeDigest({ projectRoot: cfg.projectRoot, cwd, branch: worktreeBranch });
+        if (digest) meta.config = { ...meta.config, appendSystemPrompt: [cfg.appendSystemPrompt?.trim(), digest].filter(Boolean).join('\n\n') };
+      } catch (e) {
+        this.deps.log('debug', `[${id}] knowledge digest unavailable: ${errorMessage(e)}`);
+      }
+    }
     if (req.goal?.trim()) {
       meta.goal = {
         objective: req.goal.trim(),
@@ -535,8 +549,14 @@ export class SessionManager {
       mcpServers: () => {
         const m = this.get(id) ?? meta;
         return resolveForSession(
-          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness },
-          { getSecret: this.deps.getSecret, sharedGitnexus: this.deps.sharedGitnexus, gitnexusProxyPath: this.deps.gitnexusProxyPath, log: (level, message) => this.deps.log(level, `[${id}] ${message}`) }
+          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, branch: m.worktreeBranch },
+          {
+            getSecret: this.deps.getSecret,
+            sharedGitnexus: this.deps.sharedGitnexus,
+            gitnexusProxyPath: this.deps.gitnexusProxyPath,
+            memoryServerPath: this.deps.memoryServerPath,
+            log: (level, message) => this.deps.log(level, `[${id}] ${message}`)
+          }
         );
       },
       ownedMcpIds: () => builtinServerIds(),

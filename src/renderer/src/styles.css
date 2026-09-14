@@ -5673,6 +5673,143 @@ body.resizing {
   border-top: 1px solid var(--border);
 }
 
+/* Project knowledge (Layer 2) */
+.knowledge-tab {
+  padding: 10px 12px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+}
+.knowledge-path {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.knowledge-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.knowledge-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.knowledge-search input {
+  flex: 1;
+  min-width: 0;
+}
+.knowledge-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.knowledge-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.knowledge-row:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
+}
+.knowledge-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.knowledge-title {
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.knowledge-claim,
+.knowledge-snippet {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.knowledge-snippet mark {
+  background: var(--amber, #b45309);
+  color: var(--bg, #111);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.knowledge-card,
+.knowledge-detail {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.knowledge-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.knowledge-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.knowledge-proposals {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.knowledge-stale {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--amber, #b45309);
+}
+.knowledge-body {
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.knowledge-meta h4 {
+  margin: 0 0 2px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+.knowledge-meta ul {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.knowledge-switches {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
 /* ---- Web shell + small screens (docs/REMOTE-ACCESS.md P1) ---- */
 
 /* Web build: a subtle product badge at the bar's right end (the browser owns the chrome). */

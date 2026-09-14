@@ -11,6 +11,8 @@ import { AnalyticsStore } from './analytics';
 import { watchEventLoop } from './diag';
 import { setGitLog } from './git';
 import { registerIpc, pushToRenderer } from './ipc';
+import { KnowledgeService } from './knowledge/service';
+import { createKnowledgeCompleter } from './knowledge/llm';
 import { createLogger, describeError, type Logger } from './log';
 import { RendererRecovery } from './renderer-recovery';
 import { SharedGitnexusServer } from './mcp/shared-server';
@@ -141,6 +143,27 @@ async function main(): Promise<void> {
     log: (level, message) => log(level, message)
   });
 
+  // Layer 2 project knowledge: the wiki store, its background jobs, and the digest every new
+  // session may be primed with. The MCP server it feeds is a built-in, materialized per session.
+  const knowledge = new KnowledgeService({
+    log,
+    settings: () => settings.get(),
+    transcript: async (sessionId) => {
+      const items = await store.readTranscript(sessionId);
+      const lines: string[] = [];
+      for (const item of items.slice(-60)) {
+        if (item.kind === 'user') lines.push(`user: ${item.text.slice(0, 500)}`);
+        else if (item.kind === 'assistant' && item.text.trim()) lines.push(`assistant: ${item.text.slice(0, 500)}`);
+        else if (item.kind === 'tool') lines.push(`tool ${item.name} [${item.status}] ${(item.summary ?? item.title ?? '').slice(0, 200)}`);
+        else if (item.kind === 'turn' && item.error) lines.push(`turn ${item.status}: ${item.error.slice(0, 200)}`);
+      }
+      return lines;
+    },
+    synth: {
+      completer: createKnowledgeCompleter({ settings: () => settings.get(), getSecret: (id) => secrets.get(id), log })
+    }
+  });
+
   // Fan-out hooks that need to run on every sessions change (the update prompt waits for idle).
   const sessionsChangedHooks: Array<() => void> = [];
   sessions = new SessionManager({
@@ -151,6 +174,8 @@ async function main(): Promise<void> {
     getSecret: (id) => secrets.get(id),
     sharedGitnexus: () => sharedGitnexus.ensure(),
     gitnexusProxyPath: runtime.resource('mcp', 'gitnexus-scope.mjs'),
+    memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
+    knowledgeDigest: (scope) => knowledge.digest(scope),
     pushEvent: (env: SessionEventEnvelope) => pushAll(PUSH_CHANNELS.sessionEvent, env),
     pushSessions: (list: SessionMeta[]) => {
       search.syncMeta(list);
@@ -231,6 +256,7 @@ async function main(): Promise<void> {
     runtime,
     analytics,
     search,
+    knowledge,
     remote: remoteHost,
     updater: updater ?? undefined,
     broadcast: (channel, payload) => {

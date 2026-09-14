@@ -964,8 +964,8 @@ export function slugify(s: string): string {
     .slice(0, 40) || 'session';
 }
 
-/** Keeps the app's worktree folder out of git status. */
-async function excludeWorktreesDir(root: string): Promise<void> {
+/** Keeps the app's `.vocs-code/` folder (worktrees, project wiki) out of git status. */
+export async function excludeVocsCodeDir(root: string): Promise<void> {
   try {
     const exclude = path.join(root, '.git', 'info', 'exclude');
     const cur = (await exists(exclude)) ? await fs.readFile(exclude, 'utf8') : '';
@@ -981,7 +981,7 @@ export async function createWorktree(projectRoot: string, slug: string): Promise
   if (!root) throw new Error('Worktrees require a git repository.');
   const base = path.join(root, '.vocs-code', 'worktrees');
   await fs.mkdir(base, { recursive: true });
-  await excludeWorktreesDir(root);
+  await excludeVocsCodeDir(root);
   // Pick a name whose directory AND branch are both free (a removed worktree leaves its branch behind).
   const branchExists = async (b: string) => (await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${b}`])).code === 0;
   let name = slug;
@@ -1000,7 +1000,7 @@ export async function worktreeAddForBranch(projectRoot: string, branch: string):
   if (!root) throw new Error('Worktrees require a git repository.');
   const base = path.join(root, '.vocs-code', 'worktrees');
   await fs.mkdir(base, { recursive: true });
-  await excludeWorktreesDir(root);
+  await excludeVocsCodeDir(root);
   const name = slugify(branch.replace(/\//g, '-'));
   let wtPath = path.join(base, name);
   let i = 1;
