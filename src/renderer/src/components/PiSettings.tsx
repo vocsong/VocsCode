@@ -142,7 +142,10 @@ export function PiSection() {
   const remove = async (pkg: PiPackageItem): Promise<void> => {
     const ok = await askConfirm({
       title: 'Remove pi package?',
-      body: `"${pkg.source}" will be removed from settings.json and its files deleted from disk.`,
+      body:
+        pkg.kind === 'local'
+          ? `"${pkg.source}" will be removed from settings.json. The folder itself is left on disk.`
+          : `"${pkg.source}" will be removed from settings.json and its fetched files deleted from disk.`,
       confirmLabel: 'Remove',
       danger: true
     });
