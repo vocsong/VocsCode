@@ -187,6 +187,7 @@ async function main(): Promise<void> {
     sharedGitnexus: () => sharedGitnexus.ensure(),
     gitnexusProxyPath: runtime.resource('mcp', 'gitnexus-scope.mjs'),
     memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
+    memoryUserData: userData,
     knowledgeDigest: (scope) => knowledge.digest(scope),
     pushEvent: (env: SessionEventEnvelope) => pushAll(PUSH_CHANNELS.sessionEvent, env),
     pushSessions: (list: SessionMeta[]) => {

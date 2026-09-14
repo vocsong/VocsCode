@@ -46,6 +46,8 @@ export function vocsMemoryBaseDef(): McpServerDef {
 interface MemoryHostDeps {
   /** Path to resources/mcp/vocs-memory.mjs. */
   memoryServerPath?: string;
+  /** The app's userData, where search.db and sessions.json live (session history recall). */
+  memoryUserData?: string;
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }
 
@@ -57,7 +59,8 @@ interface MemoryHostDeps {
 export function memoryServerDef(scope: { projectRoot: string; cwd: string; branch?: string }, def: McpServerDef, deps: MemoryHostDeps): McpServerDef | null {
   if (!deps.memoryServerPath) return null;
   const node = which('node');
-  const branchRoot = memoryBranchRoot(scope);  return {
+  const branchRoot = memoryBranchRoot(scope);
+  return {
     ...def,
     transport: 'stdio',
     command: node ?? process.execPath,
@@ -65,8 +68,10 @@ export function memoryServerDef(scope: { projectRoot: string; cwd: string; branc
     env: {
       ...(node ? {} : { ELECTRON_RUN_AS_NODE: '1' }),
       VOCS_MEMORY_ROOT: memoryRoot(scope),
+      VOCS_MEMORY_PROJECT_ROOT: scope.projectRoot,
       ...(branchRoot ? { VOCS_MEMORY_BRANCH_ROOT: branchRoot } : {}),
-      ...(scope.branch ? { VOCS_MEMORY_BRANCH: scope.branch } : {})
+      ...(scope.branch ? { VOCS_MEMORY_BRANCH: scope.branch } : {}),
+      ...(deps.memoryUserData ? { VOCS_MEMORY_USER_DATA: deps.memoryUserData } : {})
     }
   };
 }

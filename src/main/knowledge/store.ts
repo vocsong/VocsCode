@@ -152,6 +152,24 @@ export class KnowledgeStore {
     return this.write(scope, { ...page.meta, ...patch, id: page.meta.id }, page.body);
   }
 
+  /** Removes one page from whichever scope holds it; used when a draft is discarded. */
+  async deletePage(scope: KnowledgeScope, id: string): Promise<boolean> {
+    if (!isKnowledgeId(id)) return false;
+    for (const dir of [this.branchDir(scope), this.repoDir(scope)]) {
+      if (!dir) continue;
+      const file = path.join(dir, `${id}.md`);
+      if (!isInside(dir, file)) continue;
+      try {
+        await fs.rm(file, { force: true });
+        this.cache.delete(file);
+        return true;
+      } catch {
+        /* try the next scope */
+      }
+    }
+    return false;
+  }
+
   async proposals(scope: KnowledgeScope): Promise<KnowledgePage[]> {
     const dir = this.proposalsDir(scope);
     const out: KnowledgePage[] = [];

@@ -134,7 +134,7 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
       const next = await invoke('knowledge:review', { sessionId: session.id, id, action });
       setView(next);
       setDetail(null);
-      toast(action === 'accept' ? 'Accepted into the wiki' : 'Proposal rejected', 'success');
+      toast(action === 'accept' ? 'Accepted into the wiki' : 'Discarded', 'success');
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), 'error');
     } finally {
@@ -257,6 +257,17 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
             <span className="knowledge-title">{detail.page.meta.title}</span>
             <Badge tone={statusTone(detail.page.meta.status)}>{detail.page.meta.status}</Badge>
           </div>
+          {/* A generated draft is only knowledge once a human accepts it; until then it is not served. */}
+          {detail.page.meta.status !== 'current' && (
+            <div className="knowledge-card-actions">
+              <Button size="sm" variant="primary" disabled={busy} data-testid="knowledge-page-accept" onClick={() => void decide(detail.page.meta.id, 'accept')}>
+                Accept as current
+              </Button>
+              <Button size="sm" disabled={busy} data-testid="knowledge-page-discard" onClick={() => void decide(detail.page.meta.id, 'reject')}>
+                Discard
+              </Button>
+            </div>
+          )}
           {detail.page.meta.claim && <div className="knowledge-claim">{detail.page.meta.claim}</div>}
           {detail.stale && (
             <div className="knowledge-stale" data-testid="knowledge-stale">

@@ -10,8 +10,11 @@ import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
 import { KnowledgeStore } from '../src/main/knowledge/store';
+import { SearchIndex } from '../src/main/search';
+import { SessionStore } from '../src/main/store';
 import { serializeKnowledgeDocument } from '../src/shared/knowledge';
 import type { KnowledgePageMeta, KnowledgeScope } from '../src/shared/knowledge';
+import type { SessionMeta } from '../src/shared/types';
 
 const script = path.join(process.cwd(), 'resources', 'mcp', 'vocs-memory.mjs');
 const dirs: string[] = [];
@@ -19,6 +22,8 @@ const children: ChildProcessWithoutNullStreams[] = [];
 
 afterAll(async () => {
   for (const child of children) child.kill();
+  // The memory server holds search.db open read-only; give the kill a beat before removing temps.
+  await new Promise((resolve) => setTimeout(resolve, 300));
   await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
 });
 
@@ -35,8 +40,8 @@ interface Rpc {
   error?: { code: number; message: string };
 }
 
-function start(root: string): { child: ChildProcessWithoutNullStreams; request: (message: Record<string, unknown>) => Promise<Rpc> } {
-  const child = spawn(process.execPath, [script], { env: { ...process.env, VOCS_MEMORY_ROOT: root }, stdio: ['pipe', 'pipe', 'pipe'] });
+function start(root: string, extraEnv: Record<string, string> = {}): { child: ChildProcessWithoutNullStreams; request: (message: Record<string, unknown>) => Promise<Rpc> } {
+  const child = spawn(process.execPath, [script], { env: { ...process.env, VOCS_MEMORY_ROOT: root, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'] });
   children.push(child);
   const pending = new Map<number, (msg: Rpc) => void>();
   let buffer = '';
@@ -115,7 +120,7 @@ describe('vocs-memory MCP server', () => {
 
     const tools = await request({ method: 'tools/list', params: {} });
     const names = (tools.result as { tools: { name: string }[] }).tools.map((t) => t.name);
-    expect(names).toEqual(['knowledge_search', 'knowledge_read', 'knowledge_related', 'knowledge_propose', 'knowledge_status']);
+    expect(names).toEqual(['knowledge_search', 'knowledge_read', 'knowledge_related', 'knowledge_propose', 'knowledge_status', 'session_history_search']);
 
     const search = await request({ method: 'tools/call', params: { name: 'knowledge_search', arguments: { query: 'harness session' } } });
     const payload = JSON.parse(toolText(search)) as { results: { id: string; claim?: string; authority?: string }[] };
@@ -183,5 +188,71 @@ describe('vocs-memory MCP server', () => {
     const read = await request({ method: 'tools/call', params: { name: 'knowledge_read', arguments: { page: 'missing/page' } } });
     expect((read.result as { isError?: boolean }).isError).toBe(true);
     expect(toolText(read)).toContain('knowledge_search');
+  });
+});
+
+describe('session history recall', () => {
+  function session(id: string, projectRoot: string, over: Partial<SessionMeta> = {}): SessionMeta {
+    return {
+      id,
+      title: `Session ${id}`,
+      createdAt: 1_700_000_000_000,
+      updatedAt: 1_700_000_000_000,
+      config: { harness: 'native', permissionMode: 'ask', projectRoot },
+      cwd: projectRoot,
+      status: 'idle',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
+      ...over
+    } as SessionMeta;
+  }
+
+  /** Builds a real search.db through the app's own index, then closes it for the server to read. */
+  async function seedIndex(): Promise<{ userData: string; wiki: string; projectRoot: string }> {
+    const userData = tmpDir('vocs-mem-ud-');
+    const projectRoot = tmpDir('vocs-mem-proj-');
+    const otherRoot = tmpDir('vocs-mem-other-');
+    const store = new SessionStore(userData);
+    await store.load();
+    await store.upsert(session('s_a', projectRoot));
+    await store.upsert(session('s_b', otherRoot));
+    await store.upsert(session('s_c', projectRoot, { archived: true }));
+    const search = new SearchIndex(userData, { store, log: () => undefined });
+    await search.init();
+    search.syncMeta(store.list());
+    search.indexItem('s_a', { id: 'u1', kind: 'user', ts: 1_700_000_000_001, text: 'the PTY reconnect duplicates tabs; key sk-abcdefghijklmnopqrstuvwx' });
+    search.indexItem('s_b', { id: 'u1', kind: 'assistant', ts: 1_700_000_000_002, text: 'PTY reconnect handled in the other project' });
+    search.indexItem('s_c', { id: 'u1', kind: 'user', ts: 1_700_000_000_003, text: 'PTY reconnect note in an archived session' });
+    search.flushNow();
+    search.close();
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    await fs.mkdir(wiki, { recursive: true });
+    return { userData, wiki, projectRoot };
+  }
+
+  it('returns only this project, redacts secrets, and skips archived sessions', async () => {
+    const { userData, wiki, projectRoot } = await seedIndex();
+    const { request } = start(wiki, { VOCS_MEMORY_USER_DATA: userData, VOCS_MEMORY_PROJECT_ROOT: projectRoot });
+    const call = await request({ method: 'tools/call', params: { name: 'session_history_search', arguments: { query: 'PTY reconnect' } } });
+    const payload = JSON.parse(toolText(call)) as { available: boolean; count: number; results: { sessionId: string; kind: string; snippet: string }[] };
+    expect(payload.available).toBe(true);
+    expect(payload.results.map((r) => r.sessionId)).toEqual(['s_a']);
+    expect(payload.results[0].snippet).toContain('<secret>');
+    expect(payload.results[0].snippet).not.toContain('sk-abcdefghijklmnopqrst');
+
+    const archived = await request({ method: 'tools/call', params: { name: 'session_history_search', arguments: { query: 'PTY reconnect', include_archived: true } } });
+    const withArchived = JSON.parse(toolText(archived)) as { results: { sessionId: string }[] };
+    expect(withArchived.results.map((r) => r.sessionId).sort()).toEqual(['s_a', 's_c']);
+  });
+
+  it('degrades to an explanation when the app has no index yet', async () => {
+    const projectRoot = tmpDir('vocs-mem-proj-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    await fs.mkdir(wiki, { recursive: true });
+    const { request } = start(wiki, { VOCS_MEMORY_USER_DATA: tmpDir('vocs-mem-empty-'), VOCS_MEMORY_PROJECT_ROOT: projectRoot });
+    const call = await request({ method: 'tools/call', params: { name: 'session_history_search', arguments: { query: 'anything' } } });
+    const payload = JSON.parse(toolText(call)) as { available: boolean; reason?: string };
+    expect(payload.available).toBe(false);
+    expect(payload.reason).toContain('unavailable');
   });
 });

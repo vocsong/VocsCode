@@ -239,4 +239,45 @@ describe('knowledge search and digest', () => {
     expect(view.status.job?.model).toBe('test/model');
     expect(view.status.job?.error).toContain('no usable pages');
   });
+
+  it('accepts a generated draft in place and discards one on request', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    await svc.store.write(scope, pageMeta({ id: 'gotcha/draft-one', title: 'Draft one', status: 'draft', claim: 'A draft claim.' }), 'body text');
+    expect((await svc.view(scope)).status.needsReview).toBe(1);
+
+    await svc.review(scope, 'gotcha/draft-one', 'accept', { by: 'human' });
+    const accepted = await svc.view(scope);
+    expect(accepted.pages[0].status).toBe('current');
+    expect(accepted.status.needsReview).toBe(0);
+
+    await svc.store.write(scope, pageMeta({ id: 'gotcha/draft-two', title: 'Draft two', status: 'draft', claim: 'A throwaway claim.' }), 'body');
+    await svc.review(scope, 'gotcha/draft-two', 'reject', { by: 'human' });
+    expect(await svc.store.read(scope, 'gotcha/draft-two')).toBeNull();
+    expect(await svc.store.rejectedClaims(scope)).toContain('A throwaway claim.');
+  });
+
+  it('distils episodes through the service pipeline (propose must be wired)', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const svc = new KnowledgeService({
+      log: () => undefined,
+      settings: () => ({ knowledge: { prime: true, autoDistill: false } }) as AppSettings,
+      transcript: async () => ['user: fix the double PTY'],
+      synth: {
+        completer: {
+          label: () => 'test/model',
+          complete: async () => JSON.stringify({ proposals: [{ title: 'PTY guard', claim: 'Guard reconnects in the main process.', body: 'Explain the guard.', kind: 'gotcha' }] })
+        }
+      }
+    });
+    await svc.store.write(scope, pageMeta(), 'body');
+    await svc.recordEpisode(scope, { kind: 'merge', sessionId: 's9', at: new Date().toISOString(), summary: 'Merged the PTY fix' });
+
+    const result = await svc.generate(scope, 'distill');
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain('proposed 1');
+    expect((await svc.view(scope)).proposals).toHaveLength(1);
+  });
 });

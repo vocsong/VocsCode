@@ -31,6 +31,8 @@ export interface McpHostDeps {
   gitnexusProxyPath?: string;
   /** Path to resources/mcp/vocs-memory.mjs, the Layer 2 wiki server. */
   memoryServerPath?: string;
+  /** userData path, so the memory server can recall session history (search.db). */
+  memoryUserData?: string;
 }
 
 export interface SessionScope {
@@ -113,7 +115,7 @@ async function resolveBuiltins(scope: SessionScope, state: McpProjectState, deps
       if (!materialized) continue;
     } else if (def.id === VOCS_MEMORY_SERVER_ID) {
       if (!(await hasMemoryWiki(scope))) continue;
-      materialized = memoryServerDef(scope, def, { memoryServerPath: deps.memoryServerPath, log: deps.log });
+      materialized = memoryServerDef(scope, def, { memoryServerPath: deps.memoryServerPath, memoryUserData: deps.memoryUserData, log: deps.log });
       if (!materialized) continue;
     }
     const resolved = await resolveVars(materialized, { env: process.env, secret: (name) => deps.getSecret(secretKeyFor(name)) });

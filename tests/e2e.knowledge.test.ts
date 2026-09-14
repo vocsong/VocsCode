@@ -67,6 +67,15 @@ describe.runIf(enabled)('project knowledge panel', () => {
         'Reconnects must stay in the main process.'
       )
     );
+    // A generated draft, which the panel must be able to accept into the served wiki.
+    await fs.mkdir(path.join(wiki, 'architecture'), { recursive: true });
+    await fs.writeFile(
+      path.join(wiki, 'architecture', 'process-split.md'),
+      serializeKnowledgeDocument(
+        pageMeta({ id: 'architecture/process-split', title: 'Process split', kind: 'architecture', status: 'draft', claim: 'The main process owns privileged work.', review: { state: 'unreviewed' } }),
+        'The renderer stays sandboxed.'
+      )
+    );
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
     const sid = 's_knowledge_e2e';
@@ -139,6 +148,16 @@ describe.runIf(enabled)('project knowledge panel', () => {
     const builtin = win.getByTestId('builtin-vocs-memory');
     await builtin.waitFor({ timeout: 10_000 });
     expect(await builtin.innerText()).toContain('on');
+    await win.getByTestId('panel-bottom-knowledge').click();
+
+    // A generated draft is accepted in place: the file becomes current and human-reviewed.
+    await win.getByTestId('knowledge-page-architecture/process-split').click();
+    await win.getByTestId('knowledge-detail').waitFor({ timeout: 10_000 });
+    await win.getByTestId('knowledge-page-accept').click();
+    await win.getByTestId('knowledge-page-architecture/process-split').waitFor({ timeout: 10_000 });
+    const draftFile = await fs.readFile(path.join(wiki, 'architecture', 'process-split.md'), 'utf8');
+    expect(draftFile).toContain('status: current');
+    expect(draftFile).toContain('review_state: reviewed');
 
     await app.close();
     app = null;

@@ -19,6 +19,41 @@ import { pathToFileURL } from 'node:url';
 const MAX_PAGES = 800;
 const MAX_BODY_CHARS = 20000;
 const MAX_SNIPPET = 220;
+const MAX_QUERY_TERMS = 8;
+/** One chatty session must not drown the rest of the project's history. */
+const MAX_SESSION_HITS = 3;
+
+/** Mirrors src/shared/analytics/text.ts: nothing read out of a transcript is served raw. */
+const SECRET_PATTERNS = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '<private-key>'],
+  [/\b(sk|rk|pk)-(?:[a-z]+-)?[A-Za-z0-9_-]{16,}\b/g, '<secret>'],
+  [/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}\b/g, '<secret>'],
+  [/\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, '<secret>'],
+  [/\bAKIA[0-9A-Z]{16}\b/g, '<secret>'],
+  [/\bAIza[0-9A-Za-z_-]{30,}\b/g, '<secret>'],
+  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '<jwt>'],
+  [/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1<credentials>@'],
+  [/\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{12,}/gi, '$1 <secret>'],
+  [/\b([A-Za-z0-9_.-]*(?:api[_-]?key|apikey|secret|token|passw(?:or)?d|credential|auth(?:orization)?|private[_-]?key|access[_-]?key|client[_-]?secret)[A-Za-z0-9_.-]*)\s*([:=]+)\s*(["']?)(?!<)[^\s"',;&|]{4,}\3/gi, '$1$2<redacted>'],
+  [/(--?(?:token|password|passwd|secret|api-?key|key|auth|access-token|client-secret)(?:[=\s]+))(["']?)[^\s"']{4,}\2/gi, '$1<redacted>']
+];
+
+export function redactSecrets(text) {
+  let out = String(text ?? '');
+  for (const [re, repl] of SECRET_PATTERNS) out = out.replace(re, repl);
+  return out;
+}
+
+/** Quotes every term so FTS operators in a user query cannot change its meaning; `*` = prefix. */
+export function ftsQuery(query) {
+  const parts = String(query ?? '')
+    .split(/[^\p{L}\p{N}_*]+/u)
+    .map((t) => t.trim())
+    .filter((t) => t.replace(/\*/g, '').length > 1)
+    .slice(0, MAX_QUERY_TERMS);
+  if (!parts.length) return null;
+  return parts.map((t) => (t.endsWith('*') ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`)).join(' ');
+}
 
 const KINDS = ['architecture', 'component', 'concept', 'decision', 'convention', 'flow', 'gotcha', 'testing', 'migration'];
 const SOURCE_TYPES = ['file', 'doc', 'commit', 'transcript', 'session', 'url', 'human'];
@@ -416,6 +451,21 @@ const TOOLS = [
     name: 'knowledge_status',
     description: 'How much curated knowledge this project has, what is awaiting review, and where the wiki lives.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+  },
+  {
+    name: 'session_history_search',
+    description:
+      'Search what happened in past coding sessions on this project (episodic memory): earlier attempts, failures, debugging discoveries and outcomes. Use it before re-trying an approach. Results are past events, not project truth — use knowledge_search for what must stay true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Words to look for in past transcripts (all terms must match).' },
+        limit: { type: 'number', description: 'Max results (default 6, max 20).' },
+        include_archived: { type: 'boolean', description: 'Also search archived sessions.' }
+      },
+      required: ['query'],
+      additionalProperties: false
+    }
   }
 ];
 
@@ -427,7 +477,38 @@ function errorResult(message) {
   return { content: [{ type: 'text', text: message }], isError: true };
 }
 
-export function createMemoryTools({ root, branchRoot, branch }) {
+export function createMemoryTools({ root, branchRoot, branch, userData = null, projectRoot = null }) {
+  let searchDb = undefined;
+  let searchError = null;
+  /** Opens search.db read-only on first use; the app's index is the only source of session history. */
+  const ensureSearchDb = async () => {
+    if (searchDb !== undefined) return searchDb;
+    if (!userData) {
+      searchError = 'the app did not provide its data directory';
+      searchDb = null;
+      return searchDb;
+    }
+    try {
+      const sqlite = await import('node:sqlite');
+      const nodePath = await import('node:path');
+      searchDb = new sqlite.DatabaseSync(nodePath.join(userData, 'search.db'), { readOnly: true });
+    } catch (e) {
+      searchError = e && e.message ? String(e.message) : String(e);
+      searchDb = null;
+    }
+    return searchDb;
+  };
+  const sessionsIndex = async () => {
+    const fs = await import('node:fs/promises');
+    const nodePath = await import('node:path');
+    try {
+      const parsed = JSON.parse(await fs.readFile(nodePath.join(userData, 'sessions.json'), 'utf8'));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
   return async function call(name, args) {
     const pages = await loadPages({ root, branchRoot });
     if (name === 'knowledge_search') {
@@ -517,16 +598,72 @@ export function createMemoryTools({ root, branchRoot, branch }) {
         toolHint: servableCount ? 'Use knowledge_search before changing an invariant.' : 'No accepted pages yet; proposals are queued for review.'
       });
     }
+    if (name === 'session_history_search') {
+      const query = typeof args.query === 'string' ? args.query : '';
+      const match = ftsQuery(query);
+      if (!match) return errorResult('session_history_search needs a query of at least two letters.');
+      const db = await ensureSearchDb();
+      if (!db) return textResult({ available: false, reason: `Session history is unavailable (${searchError ?? 'no index'}).` });
+      const scope = new Map();
+      for (const session of await sessionsIndex()) {
+        if (!session || typeof session.id !== 'string') continue;
+        const root = session.config && typeof session.config.projectRoot === 'string' ? session.config.projectRoot : null;
+        // The same project boundary every other memory surface uses: no cross-project recall.
+        if (projectRoot && root !== projectRoot) continue;
+        if (session.archived === true && args.include_archived !== true) continue;
+        scope.set(session.id, { title: typeof session.title === 'string' ? session.title : session.id });
+      }
+      if (!scope.size) return textResult({ available: true, projectRoot, count: 0, results: [], note: 'No sessions recorded for this project yet.' });
+      const limit = Math.min(Math.max(Number(args.limit) || 6, 1), 20);
+      let rows = [];
+      try {
+        rows = db
+          .prepare(
+            `SELECT i.sessionId AS sessionId, i.itemId AS itemId, i.kind AS kind, i.ts AS ts, snippet(fts, 0, char(1), char(2), char(8230), 18) AS text
+             FROM fts JOIN items i ON i.id = fts.rowid
+             WHERE fts MATCH ?
+             ORDER BY bm25(fts)
+             LIMIT ?`
+          )
+          .all(match, Math.min(limit * 10, 300));
+      } catch (e) {
+        return errorResult(`Session history query failed: ${e && e.message ? e.message : String(e)}`);
+      }
+      const perSession = new Map();
+      const results = [];
+      for (const row of rows) {
+        const session = scope.get(row.sessionId);
+        if (!session) continue;
+        const used = perSession.get(row.sessionId) ?? 0;
+        if (used >= MAX_SESSION_HITS) continue;
+        perSession.set(row.sessionId, used + 1);
+        results.push({
+          sessionId: row.sessionId,
+          session: session.title,
+          kind: row.kind,
+          at: Number.isFinite(Number(row.ts)) ? new Date(Number(row.ts)).toISOString() : null,
+          snippet: redactSecrets(row.text)
+        });
+        if (results.length >= limit) break;
+      }
+      return textResult({
+        available: true,
+        projectRoot,
+        count: results.length,
+        results,
+        note: 'Episodic memory: what happened in past sessions on this project. Not project truth — use knowledge_search for that.'
+      });
+    }
     return errorResult(`Unknown tool ${name}`);
   };
 }
 
 /* ────────────────────────────── MCP loop ───────────────────────────────── */
 
-export async function runMemoryServer({ input, output, root, branchRoot = null, branch = null, log = () => {} } = {}) {
+export async function runMemoryServer({ input, output, root, branchRoot = null, branch = null, userData = null, projectRoot = null, log = () => {} } = {}) {
   if (!input || !output) throw new Error('runMemoryServer: input and output streams are required');
   if (!root) throw new Error('runMemoryServer: a wiki root is required');
-  const call = createMemoryTools({ root, branchRoot, branch });
+  const call = createMemoryTools({ root, branchRoot, branch, userData, projectRoot });
   let buffer = '';
   const write = (message) => {
     try {
@@ -615,6 +752,8 @@ if (isMain) {
     root,
     branchRoot: process.env.VOCS_MEMORY_BRANCH_ROOT || null,
     branch: process.env.VOCS_MEMORY_BRANCH || null,
+    userData: process.env.VOCS_MEMORY_USER_DATA || null,
+    projectRoot: process.env.VOCS_MEMORY_PROJECT_ROOT || null,
     log: (message) => console.error(`vocs-memory: ${message}`)
   });
 }

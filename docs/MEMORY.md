@@ -25,6 +25,7 @@ Anything that only makes sense with "in session X we found…" is L3, not L2.
 | `vocs-memory` stdio MCP server (5 tools) | `resources/mcp/vocs-memory.mjs` |
 | Built-in server registration + per-repo switches | `src/main/mcp/memory.ts`, `src/main/mcp/index.ts` |
 | Knowledge panel | `src/renderer/src/components/KnowledgeTab.tsx` |
+| Session history recall (L3) | `session_history_search` in `resources/mcp/vocs-memory.mjs`, scoped to the project and redacted |
 | Session priming | `SessionManager.create` → `appendSystemPrompt` |
 | Git boundaries → episodes → distillation | `src/main/handlers.ts` (`git:commit`, `git:pr`, `git:merge`) |
 
@@ -164,8 +165,10 @@ The wiki is easy to generate; keeping it true is the product. The rules:
 - **Rejections are remembered.** A rejected claim is tombstoned; the same claim is refused on sight,
   so agents cannot refile it every session.
 - **Bootstrap drafts for review.** `Generate from docs` reads README, `docs/*.md`, AGENTS.md and the
-  top-level layout, and asks the utility model for at most 25 `status: draft` pages grounded in
-  those files. Nothing in the draft state is ever served to an agent.
+  top-level layout, and asks the utility model for at most 12 `status: draft` pages grounded in
+  those files. Nothing in the draft state is ever served to an agent: opening one offers **Accept as
+  current** or **Discard** (which deletes the file and tombstones the claim, so the same draft is not
+  regenerated every run). A page promoted by repeated evidence is reviewed the same way.
 - **Distillation runs at git boundaries.** Commits, PR opens and merges append an episode; with
   `autoDistill` on (default) the newest episode plus its transcript slice is distilled into up to
   three proposals, which go through the same rules above.
@@ -204,6 +207,7 @@ Five tools, all pull-based and cheap enough to call without thinking:
 | `knowledge_related` | `page` or `path` | related pages by link or shared anchor |
 | `knowledge_propose` | `title`, `claim`, `body`, `kind?`, `page_id?`, `keywords?`, `sources?`, `anchors?` | writes a proposal; explains that a human reviews it |
 | `knowledge_status` | — | page/servable/proposal counts and the wiki path |
+| `session_history_search` | `query`, `limit?`, `include_archived?` | **L3 recall**: earlier attempts, failures and outcomes from this project's past sessions, with redacted snippets. Read-only over the app's `search.db`; degrades to an explanation when the index is absent. |
 
 Every query term must match somewhere (title, keywords, claim, body) — the right default for a
 curated corpus, where a page matching half the words is not evidence. Results are ranked by field
@@ -239,12 +243,11 @@ paths. The wiki itself costs nothing until an agent asks a question.
 
 ## Evolution
 
-- **L3 surface (next).** `sessions:search` already indexes every transcript and filters by
-  `projectRoot`, but only the renderer can reach it. Exposing a scoped `session_history_search`
-  through the same MCP server is the cheapest L3 win: agents could recall "we tried this and it
-  failed" without any new storage.
-- **Promotion loop.** Episodes already land on commits/PRs/merges. A session-end distill pass
-  (opt-in, same guardrails) would widen the evidence without widening the write path.
+- **L3 recall is live; L3 capture is next.** `session_history_search` reads the app's existing
+  transcript index (`search.db`, read-only, project-scoped, redacted) so any harness can recall "we
+  tried this and it failed". What is still missing is *structured* episodes from session end: the
+  distillation trigger covers commits, PRs and merges, and a session-end pass (opt-in, same
+  guardrails) would widen the evidence without widening the write path.
 - **Consolidation.** Repetition detection is in (`_evidence.json`); the next steps are a periodic
   lint (unresolved anchors, changed sources, contradictions) and a merge flow that folds a
   confirmed proposal into an existing page instead of creating a near-duplicate.
@@ -256,6 +259,8 @@ paths. The wiki itself costs nothing until an agent asks a question.
 
 ## Open questions
 
+- Should `vocs-memory` be injected even in projects with no wiki, so `session_history_search` (L3)
+  works everywhere rather than only where a wiki exists?
 - Should the digest prime every new session by default even on a project with a large wiki (cost of
   ~500 tokens/turn), or only when the wiki is small?
 - Should distillation run on session end and archive, or only on git outcomes?

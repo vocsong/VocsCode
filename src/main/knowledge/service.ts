@@ -252,10 +252,21 @@ export class KnowledgeService {
   }
 
   /** Accept (human review) or reject one proposal. Accepting marks the page current and reviewed. */
+  /** Accept (human review) or reject one candidate: a proposal, or an unreviewed page. */
   async review(scope: KnowledgeScope, id: string, action: 'accept' | 'reject', opts: { by?: string; body?: string; title?: string; note?: string } = {}): Promise<KnowledgePageSummary | null> {
     const proposals = await this.store.proposals(scope);
     const proposal = proposals.find((p) => p.meta.id === id);
-    if (!proposal) return null;
+    if (proposal) return this.reviewProposal(scope, proposal, action, opts);
+    return this.reviewPage(scope, id, action, opts);
+  }
+
+  private async reviewProposal(
+    scope: KnowledgeScope,
+    proposal: KnowledgePage,
+    action: 'accept' | 'reject',
+    opts: { by?: string; body?: string; title?: string; note?: string }
+  ): Promise<KnowledgePageSummary | null> {
+    const id = proposal.meta.id;
     const claim = proposal.meta.claim ?? proposal.meta.title;
     if (action === 'reject') {
       await this.store.removeProposal(scope, id);
@@ -283,6 +294,36 @@ export class KnowledgeService {
       await this.store.patch(scope, superseded, { status: 'superseded', supersededBy: targetId });
     }
     this.deps.log('info', `knowledge: proposal accepted (${id} → ${targetId})`);
+    return this.summarize(written);
+  }
+
+  /**
+   * A generated draft (or a page promoted by repeated evidence) is accepted in place. Discarding one
+   * deletes the file and tombstones its claim, so the same candidate is not regenerated every run.
+   */
+  private async reviewPage(
+    scope: KnowledgeScope,
+    id: string,
+    action: 'accept' | 'reject',
+    opts: { by?: string; body?: string; title?: string; note?: string }
+  ): Promise<KnowledgePageSummary | null> {
+    const page = await this.store.read(scope, id);
+    if (!page) return null;
+    const claim = page.meta.claim ?? page.meta.title;
+    if (action === 'reject') {
+      await this.store.deletePage(scope, id);
+      await this.store.reject(scope, claim, opts.by);
+      this.deps.log('info', `knowledge: page discarded (${id})`);
+      return null;
+    }
+    const meta: KnowledgePageMeta = {
+      ...page.meta,
+      title: opts.title?.trim() || page.meta.title,
+      status: 'current',
+      review: { state: 'reviewed', ...(opts.by ? { by: opts.by } : {}), at: new Date().toISOString(), ...(opts.note ? { note: opts.note } : {}) }
+    };
+    const written = await this.store.write(scope, meta, opts.body && opts.body.trim() ? opts.body : page.body);
+    this.deps.log('info', `knowledge: page accepted (${id})`);
     return this.summarize(written);
   }
 
@@ -331,7 +372,16 @@ export class KnowledgeService {
     if (!this.deps.synth?.completer) return { ok: false, error: 'No background model is configured (Settings → General → Utility model).' };
     const running = this.jobs.get(scope.projectRoot);
     if (running) return running;
-    const deps: KnowledgeSynthDeps = { store: this.store, log: this.deps.log, transcript: this.deps.transcript, settings: this.settings(), ...this.deps.synth };
+    const deps: KnowledgeSynthDeps = {
+      store: this.store,
+      log: this.deps.log,
+      transcript: this.deps.transcript,
+      settings: this.settings(),
+      // Distillation writes through the service so its dedupe, evidence and rejection rules apply.
+      // Tests may inject their own `propose` through deps.synth below.
+      propose: (input, origin, sessionId) => this.propose(scope, input, origin, sessionId),
+      ...this.deps.synth
+    };
     const model = this.deps.synth.completer.label() ?? undefined;
     this.setJob(scope, { mode, state: 'running', at: new Date().toISOString(), ...(model ? { model } : {}) });
     const job = (mode === 'bootstrap' ? bootstrapKnowledge(scope, deps) : distillKnowledge(scope, deps))

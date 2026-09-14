@@ -60,6 +60,8 @@ export interface SessionManagerDeps {
   gitnexusProxyPath?: string;
   /** Path to resources/mcp/vocs-memory.mjs, the Layer 2 wiki server. */
   memoryServerPath?: string;
+  /** userData path, so the memory server can recall session history (search.db). */
+  memoryUserData?: string;
   /** Layer 2 digest for priming a new session's system prompt; absent disables priming. */
   knowledgeDigest?: (scope: { projectRoot: string; cwd: string; branch?: string }) => Promise<string | null>;
 }
@@ -555,6 +557,7 @@ export class SessionManager {
             sharedGitnexus: this.deps.sharedGitnexus,
             gitnexusProxyPath: this.deps.gitnexusProxyPath,
             memoryServerPath: this.deps.memoryServerPath,
+            memoryUserData: this.deps.memoryUserData,
             log: (level, message) => this.deps.log(level, `[${id}] ${message}`)
           }
         );
