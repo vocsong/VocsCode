@@ -7,7 +7,7 @@
  *  call reaches this class over the bridge in ./pi-runtime.ts before anything is invoked. */
 import { randomUUID } from 'node:crypto';
 import type { AgentClientContext, AgentItem, AgentProposal, AgentState } from '../../shared/agent';
-import type { AppSettings, ImageAttachment, SessionMeta } from '../../shared/types';
+import type { AppSettings, HarnessId, ImageAttachment, ModelInfo, SessionMeta } from '../../shared/types';
 import { PI_ENV_KEYS } from '../harness/pi';
 import { errorMessage, shortId } from '../util/async';
 import { contextBlock, systemPrompt } from './context';
@@ -326,7 +326,7 @@ export class Vesta {
     }
 
     const settings = batch?.settings ?? this.settings;
-    const outcome = await runCapability(cap, call.args, { settings }, this.deps.invoke);
+    const outcome = await runCapability(cap, call.args, { settings, models: (harness) => this.listModels(harness) }, this.deps.invoke);
     if (proposal && actionIndex !== undefined && proposal.results) {
       proposal.results[actionIndex] = outcome.ok ? 'Done' : outcome.detail;
       if (!outcome.ok) proposal.status = 'failed';
@@ -335,6 +335,16 @@ export class Vesta {
     }
     this.pushNow();
     return outcome;
+  }
+
+  /** The harness's catalog for a capability to check an argument against; the same reply the New Session dialog gets. */
+  private async listModels(harness: HarnessId): Promise<{ models: ModelInfo[]; error?: string }> {
+    try {
+      const raw = (await this.deps.invoke('harness:models', { harness })) as { models?: unknown; error?: string } | undefined;
+      return { models: Array.isArray(raw?.models) ? (raw.models as ModelInfo[]) : [], error: raw?.error };
+    } catch (e) {
+      return { models: [], error: errorMessage(e) };
+    }
   }
 
   private awaitDecision(proposal: AgentProposal): Promise<boolean> {

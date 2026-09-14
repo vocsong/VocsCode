@@ -6,9 +6,9 @@
  *  (pi's extension asks through `run`, the test answers through the proposal), which is exactly
  *  the sequence tests/vesta-pi.integration.test.ts proves against the real pi. */
 import { describe, expect, it } from 'vitest';
-import { AGENT_CAPABILITIES, agentChannels } from '../src/shared/agent-manifest';
+import { AGENT_CAPABILITIES, agentChannels, resolveSessionModel, type CapabilityContext } from '../src/shared/agent-manifest';
 import { defaultSettings, normalizeSettings } from '../src/main/settings';
-import type { AppSettings, ImageAttachment, ProviderConfig, SessionMeta } from '../src/shared/types';
+import type { AppSettings, ImageAttachment, ModelInfo, ProviderConfig, SessionConfig, SessionMeta } from '../src/shared/types';
 import type { VestaRuntime, VestaToolCall, PiAgentOptions } from '../src/main/agents/pi-runtime';
 import { isRemoteBlocked } from '../src/main/web-server';
 
@@ -151,6 +151,164 @@ describe('capability manifest', () => {
     const seen = JSON.stringify(caps.project!(full));
     expect(seen).not.toContain('testprov');
     expect(seen).not.toContain('SECRET_ENV');
+  });
+});
+
+describe('create_session model', () => {
+  const create = AGENT_CAPABILITIES.find((c) => c.name === 'create_session')!;
+  const PI_MODELS: ModelInfo[] = [
+    { id: 'claude-opus-5', provider: 'anthropic', displayName: 'Opus 5' },
+    { id: 'gpt-5', provider: 'openai', displayName: 'GPT-5' },
+    { id: 'gpt-5', provider: 'openrouter', displayName: 'GPT-5 via OpenRouter' },
+    { id: 'z-ai/glm-4.6', provider: 'openrouter', displayName: 'GLM 4.6' }
+  ];
+  /** A context whose catalog is per harness; records which harnesses were looked up. */
+  function ctxWith(catalog: Partial<Record<string, { models: ModelInfo[]; error?: string }>>, settings = settingsWith()) {
+    const lookups: string[] = [];
+    const ctx: CapabilityContext = {
+      settings,
+      models: async (harness) => {
+        lookups.push(harness);
+        return catalog[harness] ?? { models: [] };
+      }
+    };
+    return { ctx, lookups };
+  }
+  const configOf = async (args: Record<string, unknown>, ctx: CapabilityContext) => ((await create.request(args, ctx)) as { config: SessionConfig }).config;
+
+  it('keeps today\'s behaviour when model is omitted: the configured per-harness default, without consulting the catalog', async () => {
+    const settings = settingsWith({ defaultHarness: 'pi', defaultModelByHarness: { pi: { provider: 'openai', model: 'gpt-5' } } });
+    const { ctx, lookups } = ctxWith({ pi: { models: PI_MODELS } }, settings);
+    const cfg = await configOf({ project_root: 'G:/Vocs-Code' }, ctx);
+    expect(cfg).toMatchObject({ harness: 'pi', model: { provider: 'openai', model: 'gpt-5' } });
+    expect(lookups).toEqual([]);
+  });
+
+  it('leaves model unset when it is omitted and no default is configured, so the harness default applies', async () => {
+    const { ctx } = ctxWith({ pi: { models: PI_MODELS } }, settingsWith({ defaultHarness: 'pi', defaultModelByHarness: {} }));
+    const cfg = await configOf({ project_root: 'G:/Vocs-Code', harness: 'claude' }, ctx);
+    expect(cfg.harness).toBe('claude');
+    expect(cfg.model).toBeUndefined();
+  });
+
+  it('resolves a provider/model name against the chosen harness\'s catalog, not the default harness\'s', async () => {
+    const settings = settingsWith({ defaultHarness: 'claude', defaultModelByHarness: { pi: { provider: 'openai', model: 'gpt-5' } } });
+    const { ctx, lookups } = ctxWith({ pi: { models: PI_MODELS } }, settings);
+    const cfg = await configOf({ project_root: 'G:/Vocs-Code', harness: 'pi', model: 'anthropic/claude-opus-5' }, ctx);
+    expect(cfg.model).toEqual({ provider: 'anthropic', model: 'claude-opus-5' });
+    expect(lookups).toEqual(['pi']);
+  });
+
+  it('accepts a bare id when exactly one provider offers it, and keeps an aggregator\'s slashed id whole', async () => {
+    const { ctx } = ctxWith({ pi: { models: PI_MODELS } });
+    await expect(resolveSessionModel('claude-opus-5', 'pi', ctx)).resolves.toEqual({ provider: 'anthropic', model: 'claude-opus-5' });
+    await expect(resolveSessionModel('z-ai/glm-4.6', 'pi', ctx)).resolves.toEqual({ provider: 'openrouter', model: 'z-ai/glm-4.6' });
+    await expect(resolveSessionModel('openrouter/z-ai/glm-4.6', 'pi', ctx)).resolves.toEqual({ provider: 'openrouter', model: 'z-ai/glm-4.6' });
+  });
+
+  it('refuses a bare id several providers offer, naming them', async () => {
+    const { ctx } = ctxWith({ pi: { models: PI_MODELS } });
+    await expect(resolveSessionModel('gpt-5', 'pi', ctx)).rejects.toThrow(/several providers.*openai\/gpt-5, openrouter\/gpt-5/);
+  });
+
+  it('refuses an unknown id and names the nearest catalog entries', async () => {
+    const { ctx } = ctxWith({ pi: { models: PI_MODELS } });
+    await expect(resolveSessionModel('anthropic/claude-opus', 'pi', ctx)).rejects.toThrow(/not a model the pi harness offers\. anthropic offers: anthropic\/claude-opus-5\./);
+    await expect(resolveSessionModel('opus', 'pi', ctx)).rejects.toThrow(/Did you mean: anthropic\/claude-opus-5\./);
+    await expect(resolveSessionModel('nothing-like-it', 'pi', ctx)).rejects.toThrow(/Available: anthropic\/claude-opus-5, openai\/gpt-5/);
+  });
+
+  it('refuses a model the chosen harness does not offer even when another harness does', async () => {
+    const { ctx } = ctxWith({ pi: { models: PI_MODELS }, claude: { models: [PI_MODELS[0]] } });
+    await expect(resolveSessionModel('openai/gpt-5', 'claude', ctx)).rejects.toThrow(/"openai\/gpt-5" is not a model the claude harness offers/);
+  });
+
+  it('refuses rather than guesses when the harness cannot list its models', async () => {
+    const { ctx } = ctxWith({ pi: { models: [], error: 'pi is not installed.' } });
+    await expect(resolveSessionModel('anthropic/claude-opus-5', 'pi', ctx)).rejects.toThrow(/pi harness lists no models.*\(pi is not installed\.\).*Omit model/);
+  });
+
+  it('refuses an unknown harness id before looking anything up', async () => {
+    const { ctx, lookups } = ctxWith({});
+    await expect(create.request({ project_root: 'G:/Vocs-Code', harness: 'gemini-cli', model: 'x' }, ctx)).rejects.toThrow(/Unknown harness "gemini-cli"\. Harness ids: pi, claude, codex/);
+    expect(lookups).toEqual([]);
+  });
+
+  it('shows the requested model on the proposal card', () => {
+    expect(create.summarize({ project_root: 'G:/Vocs-Code', model: 'anthropic/claude-opus-5' })).toBe('Create a session in G:/Vocs-Code on anthropic/claude-opus-5');
+    expect(create.summarize({ project_root: 'G:/Vocs-Code' })).toBe('Create a session in G:/Vocs-Code');
+  });
+
+  it('lists the catalog lookup among the channels Vesta reaches', () => {
+    expect(agentChannels()).toContain('harness:models');
+  });
+
+  /** The app's side: the catalog answers per harness and a create returns the new session. */
+  function appInvoke(created: unknown[]) {
+    return async (channel: string, req: unknown) => {
+      if (channel === 'harness:models') return { models: (req as { harness: string }).harness === 'pi' ? PI_MODELS : [] };
+      if (channel === 'sessions:create') {
+        created.push(req);
+        return { ...SESSION, id: 's2', title: 'New', config: (req as { config: SessionConfig }).config };
+      }
+      throw new Error(`unexpected channel ${channel}`);
+    };
+  }
+
+  it('starts an approved session on the requested model', async () => {
+    const created: unknown[] = [];
+    const { agent, invoked, runtime } = makeAgent({ invoke: appInvoke(created), settings: settingsWith({ defaultHarness: 'claude' }) });
+    await agent.send('start a pi session on opus');
+    const target = call('create_session', { project_root: 'G:/Vocs-Code', harness: 'pi', model: 'anthropic/claude-opus-5', title: 'Opus' });
+    runtime().step('', [target]);
+    const id = await waitForProposal(agent);
+    expect(invoked).toEqual([]);
+    const pending = runtime().run(target);
+    agent.resolveProposal(id, true);
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(invoked.map((i) => i.channel)).toEqual(['harness:models', 'sessions:create']);
+    expect(created).toEqual([
+      expect.objectContaining({ title: 'Opus', config: expect.objectContaining({ harness: 'pi', projectRoot: 'G:/Vocs-Code', model: { provider: 'anthropic', model: 'claude-opus-5' } }) })
+    ]);
+  });
+
+  it('refuses the model when the catalog lookup itself fails, and never reaches sessions:create', async () => {
+    const created: unknown[] = [];
+    const { agent, invoked, runtime } = makeAgent({
+      invoke: async (channel, req) => {
+        if (channel === 'harness:models') throw new Error('codex CLI crashed');
+        return appInvoke(created)(channel, req);
+      }
+    });
+    await agent.send('start a codex session');
+    const target = call('create_session', { project_root: 'G:/Vocs-Code', harness: 'codex', model: 'openai/gpt-5' });
+    runtime().step('', [target]);
+    const id = await waitForProposal(agent);
+    const pending = runtime().run(target);
+    agent.resolveProposal(id, true);
+    const outcome = await pending;
+    expect(outcome.ok).toBe(false);
+    expect(outcome.detail).toMatch(/codex harness lists no models.*\(codex CLI crashed\)/);
+    expect(invoked.map((i) => i.channel)).toEqual(['harness:models']);
+    expect(created).toEqual([]);
+  });
+
+  it('never reaches sessions:create with a model the harness does not offer, and tells the model why', async () => {
+    const created: unknown[] = [];
+    const { agent, invoked, runtime } = makeAgent({ invoke: appInvoke(created) });
+    await agent.send('start a pi session on gpt-6');
+    const target = call('create_session', { project_root: 'G:/Vocs-Code', harness: 'pi', model: 'openai/gpt-6' });
+    runtime().step('', [target]);
+    const id = await waitForProposal(agent);
+    const pending = runtime().run(target);
+    agent.resolveProposal(id, true);
+    const outcome = await pending;
+    expect(outcome.ok).toBe(false);
+    expect(outcome.detail).toMatch(/"openai\/gpt-6" is not a model the pi harness offers\. openai offers: openai\/gpt-5\./);
+    expect(invoked.map((i) => i.channel)).toEqual(['harness:models']);
+    expect(created).toEqual([]);
+    const proposal = agent.state().items.find((i) => i.kind === 'proposal');
+    expect(proposal?.kind === 'proposal' && proposal.proposal.status).toBe('failed');
   });
 });
 

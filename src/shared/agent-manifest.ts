@@ -7,12 +7,16 @@
  *
  *  Adding a capability is deliberately a code change with a test, not configuration. */
 import type { IpcChannel } from './ipc';
-import type { AppSettings, McpServerDef, SessionMeta } from './types';
+import type { AppSettings, HarnessId, McpServerDef, ModelInfo, ModelRef, SessionMeta } from './types';
 import type { RiskTier } from './agent';
+import { HARNESSES } from './harness-meta';
+import { modelName, parseTypedModel } from './model-names';
 
 /** What a capability can consult while building its channel request. */
 export interface CapabilityContext {
   settings: AppSettings;
+  /** The models a harness offers before any process exists: the New Session dialog's list (`harness:models`). */
+  models(harness: HarnessId): Promise<{ models: ModelInfo[]; error?: string }>;
 }
 
 export interface AgentCapability {
@@ -26,8 +30,9 @@ export interface AgentCapability {
   tier(args: Record<string, unknown>): RiskTier;
   /** One line naming exactly what will happen, shown on the proposal card and the tool row. */
   summarize(args: Record<string, unknown>): string;
-  /** Maps tool args onto the channel's request shape. */
-  request(args: Record<string, unknown>, ctx: CapabilityContext): unknown;
+  /** Maps tool args onto the channel's request shape. May consult the context asynchronously; a throw
+   *  is reported to the model as invalid arguments and the channel is never invoked. */
+  request(args: Record<string, unknown>, ctx: CapabilityContext): unknown | Promise<unknown>;
   /** Trims the channel reply before the model sees it; also keeps bulky payloads out of history. */
   project?(result: unknown): unknown;
 }
@@ -68,6 +73,51 @@ function serverOf(args: Record<string, unknown>): Partial<McpServerDef> {
 function describeServer(s: Partial<McpServerDef>): string {
   if (s.transport === 'stdio') return `${str(s.command, '?')} ${(Array.isArray(s.args) ? s.args : []).join(' ')}`.trim();
   return str(s.url, '(no url)');
+}
+
+const HARNESS_IDS = HARNESSES.map((h) => h.id);
+
+function isHarnessId(v: string): v is HarnessId {
+  return (HARNESS_IDS as string[]).includes(v);
+}
+
+/** The harness a new session runs on: the argument when given, else the configured default. */
+export function sessionHarness(args: Record<string, unknown>, settings: AppSettings): HarnessId {
+  const harness = str(args.harness) || settings.defaultHarness;
+  if (!isHarnessId(harness)) throw new Error(`Unknown harness "${harness}". Harness ids: ${HARNESS_IDS.join(', ')}.`);
+  return harness;
+}
+
+/** How many catalog names an error lists before it counts the rest. */
+const MODEL_HINTS = 30;
+
+/**
+ * Reads create_session's `model` argument against the harness's own catalog, the list the New
+ * Session dialog offers, so a session never starts on an id the harness would reject. Accepts the
+ * canonical `provider/model` name or a bare model id when only one provider offers it.
+ */
+export async function resolveSessionModel(typed: string, harness: HarnessId, ctx: CapabilityContext): Promise<ModelRef> {
+  const { models, error } = await ctx.models(harness);
+  if (!models.length) {
+    throw new Error(`The ${harness} harness lists no models to check "${typed}" against${error ? ` (${error})` : ''}. Omit model to start on the harness default.`);
+  }
+  const names = models.map((m) => modelName(m.provider, m.id));
+  const providers = Array.from(new Set(models.map((m) => m.provider)));
+  // No fallback provider: a head that names no known provider is part of the id (`z-ai/glm-4.6`).
+  const ref = parseTypedModel(typed.trim(), providers, '');
+  const matches = ref.provider ? models.filter((m) => m.provider === ref.provider && m.id === ref.model) : models.filter((m) => m.id === ref.model);
+  if (matches.length === 1) return { provider: matches[0].provider, model: matches[0].id };
+  if (matches.length > 1) {
+    throw new Error(`"${typed}" is offered by several providers on ${harness} (${matches.map((m) => modelName(m.provider, m.id)).join(', ')}). Pass the full provider/model name.`);
+  }
+  // A known provider narrows the hint to its own models; otherwise names containing the id come first.
+  const needle = ref.model.toLowerCase();
+  const near = ref.provider ? names.filter((n) => n.startsWith(`${ref.provider}/`)) : needle ? names.filter((n) => n.toLowerCase().includes(needle)) : [];
+  const pool = near.length ? near : names;
+  const shown = pool.slice(0, MODEL_HINTS);
+  const rest = pool.length - shown.length;
+  const label = near.length ? (ref.provider ? `${ref.provider} offers` : 'Did you mean') : 'Available';
+  throw new Error(`"${typed}" is not a model the ${harness} harness offers. ${label}: ${shown.join(', ')}${rest > 0 ? ` and ${rest} more` : ''}.`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -201,33 +251,40 @@ export const AGENT_CAPABILITIES: AgentCapability[] = [
   {
     name: 'create_session',
     channel: 'sessions:create',
-    description: 'Start a new Vocs Code session in a project folder, optionally with its first prompt already sent. The folder must be one the app already knows (see get_app_settings.folders or list_sessions).',
+    description:
+      'Start a new Vocs Code session in a project folder, optionally with its first prompt already sent. The folder must be one the app already knows (see get_app_settings.folders or list_sessions). Without model the session starts on the harness\'s configured default model; with model it must be one that harness offers, and a wrong id fails with the names it does offer.',
     parameters: {
       type: 'object',
       properties: {
         project_root: { type: 'string', description: 'Absolute path of the project folder.' },
         prompt: { type: 'string', description: 'First message to send once the session starts.' },
         title: { type: 'string' },
-        harness: { type: 'string', description: 'Harness id; defaults to the configured default.' },
+        harness: { type: 'string', description: `Harness id (${HARNESS_IDS.join(', ')}); defaults to the configured default.` },
+        model: { type: 'string', description: 'Model to start on as "provider/model" (e.g. "anthropic/claude-opus-5"), from the models the chosen harness offers. Omit for the harness default.' },
         use_worktree: { type: 'boolean', description: 'Run in an isolated git worktree.' }
       },
       required: ['project_root'],
       additionalProperties: false
     },
     tier: () => 'write',
-    summarize: (a) => `Create a session in ${str(a.project_root, '?')}${a.prompt ? ` and send: "${str(a.prompt).slice(0, 80)}"` : ''}`,
-    request: (a, ctx) => ({
-      config: {
-        harness: str(a.harness) || ctx.settings.defaultHarness,
-        projectRoot: str(a.project_root),
-        permissionMode: ctx.settings.defaultPermissionMode,
-        model: ctx.settings.defaultModelByHarness[(str(a.harness) || ctx.settings.defaultHarness) as keyof typeof ctx.settings.defaultModelByHarness],
-        effort: ctx.settings.defaultEffort,
-        useWorktree: typeof a.use_worktree === 'boolean' ? a.use_worktree : ctx.settings.defaultUseWorktree
-      },
-      title: str(a.title) || undefined,
-      initialPrompt: str(a.prompt) || undefined
-    }),
+    summarize: (a) =>
+      `Create a session in ${str(a.project_root, '?')}${a.model ? ` on ${str(a.model)}` : ''}${a.prompt ? ` and send: "${str(a.prompt).slice(0, 80)}"` : ''}`,
+    request: async (a, ctx) => {
+      const harness = sessionHarness(a, ctx.settings);
+      const typed = str(a.model);
+      return {
+        config: {
+          harness,
+          projectRoot: str(a.project_root),
+          permissionMode: ctx.settings.defaultPermissionMode,
+          model: typed ? await resolveSessionModel(typed, harness, ctx) : ctx.settings.defaultModelByHarness[harness],
+          effort: ctx.settings.defaultEffort,
+          useWorktree: typeof a.use_worktree === 'boolean' ? a.use_worktree : ctx.settings.defaultUseWorktree
+        },
+        title: str(a.title) || undefined,
+        initialPrompt: str(a.prompt) || undefined
+      };
+    },
     project: (result) => {
       const s = result as SessionMeta | null;
       return s ? { id: s.id, title: s.title, cwd: s.cwd, status: s.status } : null;
@@ -307,7 +364,10 @@ export const AGENT_CAPABILITIES: AgentCapability[] = [
 
 export const CAPABILITIES_BY_NAME = new Map(AGENT_CAPABILITIES.map((c) => [c.name, c]));
 
+/** Channels the context consults on a capability's behalf (see CapabilityContext), not tools themselves. */
+const CONTEXT_CHANNELS: IpcChannel[] = ['harness:models'];
+
 /** Channels Vesta may reach. Used by tests to prove the surface stays deliberate. */
 export function agentChannels(): IpcChannel[] {
-  return Array.from(new Set(AGENT_CAPABILITIES.map((c) => c.channel)));
+  return Array.from(new Set([...AGENT_CAPABILITIES.map((c) => c.channel), ...CONTEXT_CHANNELS]));
 }

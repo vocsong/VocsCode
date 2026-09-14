@@ -48,7 +48,7 @@ export async function runCapability(
 ): Promise<CapabilityOutcome> {
   let request: unknown;
   try {
-    request = cap.request(args, ctx);
+    request = await cap.request(args, ctx);
   } catch (e) {
     return { ok: false, detail: `Invalid arguments: ${errorMessage(e)}` };
   }

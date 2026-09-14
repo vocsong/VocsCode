@@ -66,6 +66,14 @@ Rules of thumb:
 
 - Prefer a channel that already narrows the blast radius over a general one. Global MCP servers go through `mcp:import` (merge by id) rather than `settings:update`, which would expose all of settings.
 - `description` is the model's only documentation. Say what the tool is for and what to read first.
+- `request` may be async and may consult the `CapabilityContext` — settings, plus a per-harness model
+  catalog (`ctx.models`, the same `harness:models` reply the New Session dialog gets). Throw to refuse:
+  the model sees the message as invalid arguments and the channel is never invoked. `create_session`
+  uses this to resolve its optional `model` (`provider/model`, the app's canonical model name) against
+  the chosen harness's catalog, so an unknown id, an id another harness offers, or a harness that
+  cannot list its models all fail before a session exists; omitting `model` keeps the harness's
+  configured default. A channel the context reaches on a capability's behalf is listed in
+  `CONTEXT_CHANNELS`, so `agentChannels()` still names the whole surface.
 - Give bulky replies a `project`, or the model's context fills with session metadata.
 - Anything that deletes, pushes, merges or spends money is `destructive`.
 
