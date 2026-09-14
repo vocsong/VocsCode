@@ -243,8 +243,13 @@ export class PiAdapter implements HarnessAdapter {
     }
     const level = piThinkingLevel(intendedEffort);
     if (level) args.push('--thinking', level);
-    // Pi accumulates this flag; separate arguments avoid introducing newlines into Windows cmd shims.
-    if (meta.config.appendSystemPrompt) args.push('--append-system-prompt', meta.config.appendSystemPrompt);
+    // Pi accepts a file path here. Keep dynamic prompt text out of Windows .cmd arguments: project
+    // knowledge is multiline and cmd.exe cannot carry newlines or percent signs without changing it.
+    if (meta.config.appendSystemPrompt) {
+      const appendSystemPromptFile = path.join(sessionDir, 'append-system-prompt.md');
+      await fs.writeFile(appendSystemPromptFile, meta.config.appendSystemPrompt, 'utf8');
+      args.push('--append-system-prompt', appendSystemPromptFile);
+    }
     args.push('--append-system-prompt', PI_TOOL_PROMPT);
     args.push(...(s.pi.extraArgs ?? []));
 

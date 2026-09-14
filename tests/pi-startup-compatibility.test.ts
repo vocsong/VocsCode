@@ -19,7 +19,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
-async function setup(capabilities: string[], extensionError = false) {
+async function setup(capabilities: string[], extensionError = false, appendSystemPrompt = 'Keep my custom instructions.') {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'vocs-pi-startup-'));
   roots.push(root);
   const events: SessionEvent[] = [];
@@ -53,7 +53,7 @@ async function setup(capabilities: string[], extensionError = false) {
   });
   spawn.shutdownChild.mockImplementation(async (child) => { child.emit('close', 0); });
   const ctx = {
-    session: () => ({ cwd: root, usage: {}, harnessRef: {}, config: { appendSystemPrompt: 'Keep my custom instructions.' } }),
+    session: () => ({ cwd: root, usage: {}, harnessRef: {}, config: { appendSystemPrompt } }),
     settings: () => ({ pi: { extraArgs: ['--no-skills'] } }),
     runtime: { resolve: () => ({ path: '/fake/pi' }), resource: (...segments: string[]) => path.join(root, 'resources', ...segments) },
     sessionDir: root, permissionMode: () => 'ask', effort: () => undefined, getApiKey: async () => undefined, mcpServers: async () => [], ownedMcpIds: () => [],
@@ -70,8 +70,9 @@ describe('Pi adapter startup capability boundary', () => {
     expect(events.filter((event) => event.type === 'status' && event.status === 'idle')).toHaveLength(0);
     expect(spawn.shutdownChild).toHaveBeenCalledTimes(1);
   });
-  it('loads all resources and preserves user append instructions before sending one prompt', async () => {
-    const { adapter, events, commands } = await setup(['approvals', 'tools', 'subagents']);
+  it('loads all resources and preserves unsafe Windows prompt text through a file before sending one prompt', async () => {
+    const customPrompt = 'Keep 100% of my custom instructions.\nPrime this project too.';
+    const { adapter, events, commands } = await setup(['approvals', 'tools', 'subagents'], false, customPrompt);
     await adapter.send({ text: 'accepted' });
     expect(commands.filter((command) => command.type === 'prompt')).toEqual([{ id: expect.any(String), type: 'prompt', message: 'accepted', images: [] }]);
     expect(events.filter((event) => event.type === 'status' && event.status === 'idle')).toHaveLength(1);
@@ -82,8 +83,10 @@ describe('Pi adapter startup capability boundary', () => {
     expect(spawn.spawnTool.mock.calls[0][2].env.VOCS_CODE_SUBAGENT_DIR).toContain(path.join('pi', 'subagents'));
     const appends = args.flatMap((arg, index) => arg === '--append-system-prompt' ? [args[index + 1]] : []);
     expect(appends).toHaveLength(2);
-    expect(appends[0]).toBe('Keep my custom instructions.');
+    expect(appends[0]).toMatch(/append-system-prompt\.md$/);
+    expect(await fs.readFile(appends[0]!, 'utf8')).toBe(customPrompt);
     expect(appends[1]).toContain('timeout_ms explicitly means milliseconds');
+    expect(args.every((arg) => !/[%\r\n]/.test(arg))).toBe(true);
     await adapter.dispose();
   });
   it('fails closed for required extension errors even after every readiness notification', async () => {

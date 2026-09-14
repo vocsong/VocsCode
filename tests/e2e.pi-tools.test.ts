@@ -114,7 +114,11 @@ describe.runIf(enabled)('electron e2e: Pi tool compatibility', () => {
         expect(await fs.readFile(path.join(resourceDir, 'pi', name), 'utf8')).toBe(await fs.readFile(path.join(root, 'resources', 'pi', name), 'utf8'));
       }
       const session = await invoke(win, 'sessions:create', {
-        config: { harness: 'pi', projectRoot: project, useWorktree: false, permissionMode: 'ask' }, title: 'Pi packaged compatibility',
+        config: {
+          harness: 'pi', projectRoot: project, useWorktree: false, permissionMode: 'ask',
+          appendSystemPrompt: 'Keep 100% of this project context.\nRetain the second line too.',
+        },
+        title: 'Pi packaged compatibility',
       });
       const id = session.id;
       const send = (calls: ScriptedCall[]) => invoke(win, 'sessions:send', { id, input: { text: JSON.stringify({ calls }) } });
@@ -172,6 +176,10 @@ describe.runIf(enabled)('electron e2e: Pi tool compatibility', () => {
         const extensions = args.flatMap((arg, index) => arg === '-e' ? [args[index + 1]] : []);
         expect(extensions).toContain(path.join(resourceDir, 'pi', 'vocs-code-tools.ts'));
         expect(extensions).toContain(path.join(resourceDir, 'pi', 'vocs-code-approvals.ts'));
+        const appendPrompts = args.flatMap((arg, index) => arg === '--append-system-prompt' ? [args[index + 1]] : []);
+        expect(appendPrompts[0]).toMatch(/append-system-prompt\.md$/);
+        expect(await fs.readFile(appendPrompts[0]!, 'utf8')).toBe('Keep 100% of this project context.\nRetain the second line too.');
+        expect(args.every((arg) => !/[%\r\n]/.test(arg))).toBe(true);
       }
       expect(rpc[1]![rpc[1]!.indexOf('--session') + 1]).toBe(ref);
     } finally {
