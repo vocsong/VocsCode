@@ -71,6 +71,7 @@ PRs are squash-merged, and titles follow [Conventional Commits](https://www.conv
 | [Testing & verification](docs/TESTING.md) | Dev commands, offline and live test suites |
 | [Tool reliability](docs/TOOL-RELIABILITY.md) | Harness/tool analytics, Pi compatibility, native file safeguards and verification |
 | [Operations](docs/OPERATIONS.md) | Log locations, environment variables |
+| [Conventions](docs/CONVENTIONS.md) | Language, formatting, file layout, commit messages, what never gets committed |
 | [Releasing](docs/RELEASING.md) | Branch model, ship checklist, release-please and CI build pipeline |
 | [MCP servers](docs/MCP.md) | Global and per-repo MCP servers: storage, per-harness injection, UI, trust model, phasing |
 | [Project knowledge](docs/MEMORY.md) | Layer 2 memory: the project wiki, its provenance and review rules, the MCP tools, and the L1–L4 boundary |

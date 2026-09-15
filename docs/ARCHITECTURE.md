@@ -50,12 +50,29 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
 
-Key invariants (enforced by convention and tsconfig project boundaries):
+## Layering rules
+
+Layering is enforced by convention and by `tsconfig` project boundaries:
+
+- `src/shared` — types, IPC contract, harness metadata, diff parser. **No runtime deps, no Electron imports**; importable from every process.
+- `src/main` — all privileged work. `harness/` holds one adapter per harness; `models/` provider clients; `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
+- `src/preload` — the only bridge. Renderer calls go through `window.harness`; channels and payloads are defined once in `src/shared/ipc.ts`.
+- `src/renderer` — React 19 + zustand. **Never touches Node or Electron directly.** `terminal/host.ts` keeps xterm.js instances alive outside React.
+
+## Key invariants
 
 - Adapters implement `HarnessAdapter` (`src/main/harness/types.ts`) and receive a `HarnessContext`. Adapters must not import Electron.
 - The terminal lives in the main process; the renderer re-attaches to snapshots and never owns PTY lifetime.
 - API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo.
-- Sessions must resume after restart for every harness.
+- Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.
+- Sessions must resume after restart for every harness; keep that path working when touching persistence.
+
+## Adding a harness
+
+Touch all of these: add an adapter in `src/main/harness/<id>.ts`, register the case in
+`src/main/harness/registry.ts`, add the id to `HarnessId` in `src/shared/types.ts`, add its
+descriptor/capabilities in `src/shared/harness-meta.ts`, and wire detection/install/doctor in
+`src/main/runtime.ts`. Permission modes must map through the shared model (see the table below).
 
 ## Permission mode mapping
 

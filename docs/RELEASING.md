@@ -20,6 +20,11 @@ One-way flow: `develop` → `master` → tag → CI build → GitHub Release. `m
 | `feat!:` or a `BREAKING CHANGE:` footer | major bump |
 | `chore:`, `docs:`, `ci:`, `test:`, `refactor:` | no entry, no bump on its own |
 
+This repo's squash settings are `COMMIT_OR_PR_TITLE` + `COMMIT_MESSAGES`, so the squash subject comes
+from the **head commit** when the PR has one commit, and from the **PR title** when it has several.
+Give a one-commit PR the Conventional Commits title on the commit itself, or merge with
+`gh pr merge --squash --subject "<conventional title>"`; a multi-commit PR only needs it on the PR.
+
 The bot reads master's **first-parent history**: it represents each merge commit by its PR title and parses direct commits as-is. That drives two merge rules:
 
 - **Ship PR (`develop` → `master`): "Rebase and merge."** The individual conventional commits from develop land directly on master where the bot can parse them. A merge commit collapses them under one non-conventional PR title and the bot skips the entire ship.
