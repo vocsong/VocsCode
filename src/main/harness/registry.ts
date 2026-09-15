@@ -6,6 +6,7 @@ import type { RuntimeResolver } from '../runtime';
 import { CODEX_STATIC_MODELS, CURSOR_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
 import { claudeNativeModels, mergeClaudeCatalog } from '../models/claude-catalog';
 import { mergeCodexCatalog } from '../models/codex-catalog';
+import { mergePiCatalog } from '../models/pi-catalog';
 import { AcpAdapter } from './acp';
 import { ClaudeAdapter } from './claude';
 import { CodexAppServerAdapter, listCodexModels } from './codex-app-server';
@@ -84,7 +85,7 @@ async function listHarnessModelsRaw(opts: {
             if (k) env[envKey] = k;
           }
         }
-        return { models: await listPiModels(bin.path, env) };
+        return { models: mergePiCatalog(await listPiModels(bin.path, env), settings) };
       }
       case 'acp':
         return { models: [], error: 'ACP agents advertise their models once the session starts; pick one from the header afterwards.' };

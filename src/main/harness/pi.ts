@@ -12,6 +12,7 @@ import { OPTIONS_ALLOW_DENY } from './permissions';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { installPiAgentOverrides } from '../pi-agents';
+import { mergePiCatalog } from '../models/pi-catalog';
 
 export const PI_APPROVAL_MARKER = 'VCODE_APPROVAL::';
 const PI_BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
@@ -1005,7 +1006,7 @@ export class PiAdapter implements HarnessAdapter {
     if (!this.child) return [];
     try {
       const res = await withTimeout(this.request<{ models: PiModel[] }>('get_available_models'), 20_000, 'get_available_models');
-      this.models = res.models.map(piModelToInfo);
+      this.models = mergePiCatalog(res.models.map(piModelToInfo), this.ctx.settings());
       return this.models;
     } catch (e) {
       this.ctx.log('warn', `get_available_models failed: ${errorMessage(e)}`);

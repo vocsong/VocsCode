@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { defaultSettings } from '../src/main/settings';
 import { listHarnessModels } from '../src/main/harness/registry';
 import { findContextWindow, findPricing, OPENCODE_GO_STATIC_MODELS } from '../src/main/models/static-models';
+import { mergePiCatalog } from '../src/main/models/pi-catalog';
 import { isClaudeGatewayProvider, isOpenAiWireProvider, anthropicBaseUrlFor } from '../src/shared/providers';
 import { PI_ENV_KEYS } from '../src/main/harness/pi';
 import type { AppSettings, ProviderConfig } from '../src/shared/types';
@@ -84,5 +85,39 @@ describe('OpenCode Go harness catalogs', () => {
     const settings = defaultSettings();
     const { models } = await listHarnessModels({ harness: 'native', settings, runtime: { resolve: () => null } as never, getApiKey: async () => undefined });
     expect(models.some((m) => m.provider === 'opencode-go')).toBe(false);
+  });
+});
+
+/**
+ * pi's registry is a snapshot and can lag the plan; the app's bundled catalog is the fallback so a
+ * model pi has not listed yet is still selectable on the pi harness. pi only accepts a model under
+ * a provider it already resolves, and only models the app ships, so those are the two guards.
+ */
+describe('OpenCode Go on the pi harness', () => {
+  it('fills in a plan model pi\u2019s registry has not caught up with', () => {
+    // pi's snapshot in use stops at DeepSeek V4 Pro; the app already ships V4.1 Flash.
+    const native = [{ id: 'deepseek-v4-pro', provider: 'opencode-go', displayName: 'DeepSeek V4 Pro (New)' }];
+    const merged = mergePiCatalog(native, enabledSettings());
+    expect(merged.some((m) => m.provider === 'opencode-go' && m.id === 'deepseek-v4.1-flash')).toBe(true);
+    // The union is exactly the bundled catalog: every plan model is listed once.
+    expect(merged.filter((m) => m.provider === 'opencode-go')).toHaveLength(OPENCODE_GO_STATIC_MODELS.length);
+    expect(merged.some((m) => m.id === 'deepseek-v4-pro' && m.displayName === 'DeepSeek V4 Pro (New)')).toBe(true);
+  });
+
+  it('keeps pi\u2019s own entry when both sides list the same model', () => {
+    const own = OPENCODE_GO_STATIC_MODELS.find((m) => m.id === 'deepseek-v4.1-flash')!;
+    const merged = mergePiCatalog([{ ...own, displayName: 'pi\u2019s label' }], enabledSettings());
+    expect(merged.filter((m) => m.id === 'deepseek-v4.1-flash')).toHaveLength(1);
+    expect(merged.find((m) => m.id === 'deepseek-v4.1-flash')?.displayName).toBe('pi\u2019s label');
+  });
+
+  it('does not offer a provider pi cannot resolve', () => {
+    const merged = mergePiCatalog([{ id: 'llama3.1:8b', provider: 'ollama', displayName: 'Llama 3.1 8B' }], enabledSettings());
+    expect(merged.some((m) => m.provider === 'opencode-go')).toBe(false);
+  });
+
+  it('does not offer a provider the app has turned off', () => {
+    const native = [{ id: 'deepseek-v4-pro', provider: 'opencode-go', displayName: 'DeepSeek V4 Pro (New)' }];
+    expect(mergePiCatalog(native, defaultSettings())).toHaveLength(1);
   });
 });
