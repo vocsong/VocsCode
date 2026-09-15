@@ -10,7 +10,7 @@ import { defaultSettings } from '../src/main/settings';
 import { listHarnessModels } from '../src/main/harness/registry';
 import { findContextWindow, findPricing, OPENCODE_GO_STATIC_MODELS } from '../src/main/models/static-models';
 import { mergePiCatalog } from '../src/main/models/pi-catalog';
-import { isClaudeGatewayProvider, isOpenAiWireProvider, anthropicBaseUrlFor } from '../src/shared/providers';
+import { isClaudeGatewayProvider, isOpenAiWireProvider, anthropicAuthFor, anthropicBaseUrlFor } from '../src/shared/providers';
 import { PI_ENV_KEYS } from '../src/main/harness/pi';
 import type { AppSettings, ProviderConfig } from '../src/shared/types';
 
@@ -44,6 +44,14 @@ describe('OpenCode Go provider row', () => {
     expect(isOpenAiWireProvider({ kind: 'opencode-go' })).toBe(true);
     expect(anthropicBaseUrlFor({ kind: 'opencode-go', baseUrl: 'https://opencode.ai/zen/go/v1' })).toBe('https://opencode.ai/zen/go');
     expect(isClaudeGatewayProvider({ kind: 'opencode-go', baseUrl: 'https://opencode.ai/zen/go/v1' })).toBe(true);
+  });
+
+  it('takes the key as x-api-key on its Anthropic route, not as a bearer token', () => {
+    // Zen answers a bearer token with `401 Missing API key`; the other mapped vendors read the bearer.
+    expect(anthropicAuthFor({ kind: 'opencode-go' })).toBe('api-key');
+    expect(anthropicAuthFor({ kind: 'openrouter' })).toBe('bearer');
+    expect(anthropicAuthFor({ kind: 'deepseek' })).toBe('bearer');
+    expect(anthropicAuthFor({ kind: 'anthropic' })).toBe('bearer');
   });
 
   it('hands pi the key under the env var pi expects for this provider', () => {

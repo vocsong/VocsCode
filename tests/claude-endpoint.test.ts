@@ -123,11 +123,19 @@ describe('Claude endpoint env', () => {
       ANTHROPIC_AUTH_TOKEN: 'sk-or'
     });
     expect(claudeProviderEnv(settings(), DEEPSEEK, 'sk-ds').ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic');
-    expect(claudeProviderEnv(settings(), OPENCODE_GO, 'sk-go')).toEqual({
-      ANTHROPIC_API_KEY: undefined,
-      ANTHROPIC_BASE_URL: 'https://opencode.ai/zen/go',
-      ANTHROPIC_AUTH_TOKEN: 'sk-go'
-    });
+    expect(claudeProviderEnv(settings(), DEEPSEEK, 'sk-ds').ANTHROPIC_AUTH_TOKEN).toBe('sk-ds');
+  });
+
+  it('sends an OpenCode Go key as x-api-key, the header Zen\u2019s Anthropic route reads', () => {
+    // A bearer token there is answered with `401 Missing API key`, so the key must not go in
+    // ANTHROPIC_AUTH_TOKEN, and an inherited one must not survive either.
+    const env = claudeProviderEnv(settings(), OPENCODE_GO, 'sk-go');
+    expect(env).toEqual({ ANTHROPIC_API_KEY: 'sk-go', ANTHROPIC_BASE_URL: 'https://opencode.ai/zen/go' });
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    const withoutKey = claudeProviderEnv(settings(), OPENCODE_GO, undefined);
+    expect(withoutKey.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(withoutKey.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(withoutKey.ANTHROPIC_BASE_URL).toBe('https://opencode.ai/zen/go');
   });
 
   it('leaves a provider with no Anthropic route alone', () => {
@@ -147,6 +155,15 @@ describe('Claude endpoint env', () => {
     expect(env.ANTHROPIC_BASE_URL).toBe('https://api.z.ai/api/anthropic');
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-gateway');
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  it('hands an OpenCode Go session the key as x-api-key and no bearer token', async () => {
+    process.env.ANTHROPIC_API_KEY = 'inherited-real-key';
+    process.env.ANTHROPIC_AUTH_TOKEN = 'inherited-bearer';
+    const env = await envFor(settings({ providers: [ANTHROPIC, OPENCODE_GO] }), { provider: 'opencode-go', model: 'deepseek-v4.1-flash' }, 'sk-go');
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://opencode.ai/zen/go');
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-go');
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
   });
 
   it('keeps the inherited login for a model on the default endpoint with the opt-in off', async () => {

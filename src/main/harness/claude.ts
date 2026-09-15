@@ -15,7 +15,7 @@ import {
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { toClaude } from '../mcp/effective';
 import { findContextWindow } from '../models/static-models';
-import { anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvider, isClaudeGatewayProvider } from '../../shared/providers';
+import { anthropicAuthFor, anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvider, isClaudeGatewayProvider } from '../../shared/providers';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -209,7 +209,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     this.gateway = isClaudeGatewayProvider(provider);
     const stored = provider ? await this.ctx.getApiKey(provider.id) : undefined;
     // A provider whose key lives in its env var has to be handed over explicitly: the child inherits
-    // the process env, but ANTHROPIC_AUTH_TOKEN is what the gateway reads.
+    // the process env, but the gateway reads a header this app has to set (see claudeProviderEnv).
     const key = stored ?? (provider?.envKey ? process.env[provider.envKey] : undefined);
     const overlay = claudeProviderEnv(s, provider, key);
     let auth = 'login';
@@ -727,14 +727,19 @@ export function claudeProviderFor(settings: AppSettings, model: ModelRef | undef
 
 /**
  * Env overlay that points Claude Code at a provider's Anthropic-format endpoint. Every non-Anthropic
- * route is wired from that base URL automatically (a stored key becomes a bearer token, and an
- * inherited Anthropic x-api-key is cleared so it is not sent to the gateway). Anthropic's own
- * endpoint passes the stored key only when the user opted in, and otherwise keeps the login.
+ * route is wired from that base URL automatically, with the stored key sent in the header that route
+ * reads (a bearer token for most gateways, `x-api-key` for OpenCode Zen) and an inherited Anthropic
+ * x-api-key cleared so it is never sent to the gateway. Anthropic's own endpoint passes the stored
+ * key only when the user opted in, and otherwise keeps the login.
  */
 export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, apiKey: string | undefined): Record<string, string | undefined> {
   if (!provider) return {};
   const baseUrl = anthropicBaseUrlFor(provider);
   if (baseUrl && baseUrl !== ANTHROPIC_DEFAULT_BASE_URL) {
+    // Zen's Anthropic route reads x-api-key and answers a bearer token with "Missing API key".
+    if (anthropicAuthFor(provider) === 'api-key') {
+      return { ANTHROPIC_API_KEY: apiKey, ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_BASE_URL: baseUrl };
+    }
     const overlay: Record<string, string | undefined> = { ANTHROPIC_API_KEY: undefined, ANTHROPIC_BASE_URL: baseUrl };
     if (apiKey) overlay.ANTHROPIC_AUTH_TOKEN = apiKey;
     return overlay;
