@@ -1,13 +1,15 @@
 /**
- * The Subagents tab: what each pi subagent run did, and what it cost.
+ * The Subagents tab: what each subagent run did, and what it cost.
  *
  * Runs belong to the session but deliberately stay out of its transcript, so this reads the run files
- * through IPC and refreshes on the live `subagent.run` events the extension reports. Only pi sessions
- * have runs; every other harness shows an explanation rather than an empty pane.
+ * through IPC and refreshes on the live `subagent.run` events the harness reports. What a harness
+ * supports varies — `subagentSupport` is the one answer, shared with the main process — so Stop/Steer
+ * and the Agents view appear only where they would really work; a harness with no runs at all shows
+ * an explanation rather than an empty pane.
  */
 import React, { useEffect, useRef, useState } from 'react';
 import type { SessionMeta } from '../../../shared/types';
-import type { SubagentCall, SubagentRun, SubagentRunSummary } from '../../../shared/subagents';
+import { subagentSupport, type SubagentCall, type SubagentRun, type SubagentRunSummary } from '../../../shared/subagents';
 import { invoke, on } from '../api';
 import { fmtCost, fmtDuration, fmtTokens } from '../format';
 import { useStore } from '../store';
@@ -56,10 +58,10 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
   const [view, setView] = useState<'runs' | 'agents'>('runs');
   const reveal = useStore((s) => s.subagentReveal);
   const consumeReveal = useStore((s) => s.consumeSubagentReveal);
-  const isPi = session.config.harness === 'pi';
+  const support = subagentSupport(session.config.harness);
 
   const loadList = React.useCallback(() => {
-    if (!isPi) return;
+    if (!support.runs) return;
     void invoke('subagents:list', { id: session.id })
       .then((result) => {
         const list = Array.isArray(result) ? result : [];
@@ -68,16 +70,16 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
         setSelected((current) => (current && list.some((run) => run.runId === current) ? current : (list[0]?.runId ?? null)));
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
-  }, [session.id, isPi]);
+  }, [session.id, support.runs]);
 
   useEffect(() => {
-    if (!isPi) {
+    if (!support.runs) {
       setRuns([]);
       return;
     }
     setRuns(null);
     loadList();
-  }, [isPi, loadList]);
+  }, [support.runs, loadList]);
   useLiveRuns(session.id, loadList);
 
   // A transcript tool card can ask for one run by id.
@@ -120,13 +122,13 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
     });
   };
 
-  if (!isPi) {
+  if (!support.runs) {
     return (
       <div className="subagents">
         <div className="panel-empty">
           <Icon name="fork" size={20} />
-          <p>Subagents run in pi sessions.</p>
-          <p className="muted small">This session uses the {session.config.harness} harness, which has its own way of delegating work.</p>
+          <p>This harness does not record subagent runs.</p>
+          <p className="muted small">The {session.config.harness} harness has its own way of delegating work, which this panel cannot read.</p>
         </div>
       </div>
     );
@@ -144,15 +146,17 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
 
   return (
     <div className="subagents">
-      <div className="subagent-views">
-        <button type="button" className={`panel-tab ${view === 'runs' ? 'active' : ''}`} onClick={() => setView('runs')} data-testid="subagent-view-runs">
-          Runs
-        </button>
-        <button type="button" className={`panel-tab ${view === 'agents' ? 'active' : ''}`} onClick={() => setView('agents')} data-testid="subagent-view-agents">
-          Agents
-        </button>
-      </div>
-      {view === 'agents' ? (
+      {support.agents && (
+        <div className="subagent-views">
+          <button type="button" className={`panel-tab ${view === 'runs' ? 'active' : ''}`} onClick={() => setView('runs')} data-testid="subagent-view-runs">
+            Runs
+          </button>
+          <button type="button" className={`panel-tab ${view === 'agents' ? 'active' : ''}`} onClick={() => setView('agents')} data-testid="subagent-view-agents">
+            Agents
+          </button>
+        </div>
+      )}
+      {support.agents && view === 'agents' ? (
         <SubagentAgents session={session} />
       ) : (
         <>
@@ -192,7 +196,7 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
                 <span className="subagent-agent">{detail.meta.agent}</span>
                 <Badge tone={STATUS_TONE[detail.status] ?? 'neutral'}>{statusLabel(detail.status)}</Badge>
                 <span className="spacer" />
-                {detail.status === 'running' && <Button size="sm" variant="ghost" icon="stop" onClick={() => stopRun(detail.meta.runId)}>Stop</Button>}
+                {support.control && detail.status === 'running' && <Button size="sm" variant="ghost" icon="stop" onClick={() => stopRun(detail.meta.runId)}>Stop</Button>}
               </div>
               <div className="subagent-detail-stats muted small">
                 {detail.meta.provider ? `${detail.meta.provider}/${detail.meta.model ?? ''}` : detail.meta.model ?? 'session model'} · {detail.totals.turns} turn{detail.totals.turns === 1 ? '' : 's'} ·{' '}
@@ -200,7 +204,7 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
                 {detail.totals.costUsd ? ` · ${fmtCost(detail.totals.costUsd)}` : ''}
               </div>
               {detail.error && <div className="callout warn small">{detail.error}</div>}
-              {detail.status === 'running' && (
+              {support.control && detail.status === 'running' && (
                 <div className="subagent-steer">
                   <input
                     value={steerText}

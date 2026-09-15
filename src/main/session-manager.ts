@@ -31,7 +31,7 @@ import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/ty
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
 import { isValidRunId, listSubagentRuns, readSubagentRun } from './subagents';
-import type { SubagentRun, SubagentRunSummary } from '../shared/subagents';
+import { subagentSupport, type SubagentRun, type SubagentRunSummary } from '../shared/subagents';
 import { emptyUsage, enrichModelsFromProviders } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
@@ -495,25 +495,26 @@ export class SessionManager {
     if (!meta) return [];
     // The panel is often opened after a restart, when nothing is running: runs whose process is gone
     // are reported as interrupted instead of spinning forever.
-    return listSubagentRuns(this.deps.store.sessionDir(id), { live: this.active.has(id) });
+    return listSubagentRuns(this.deps.store.sessionDir(id), meta.config.harness, { live: this.active.has(id) });
   }
 
   /** One subagent run with its transcript and per-call rows, or null when it is gone. */
   async subagentRun(id: string, runId: string): Promise<SubagentRun | null> {
     const meta = this.get(id);
     if (!meta) return null;
-    return readSubagentRun(this.deps.store.sessionDir(id), runId, { live: this.active.has(id) });
+    return readSubagentRun(this.deps.store.sessionDir(id), meta.config.harness, runId, { live: this.active.has(id) });
   }
 
   /**
    * Stops or steers one subagent run by sending the extension command straight to the harness.
    * The command is not a user message: it must not appear in the transcript or start a turn, so it
-   * bypasses `send` and talks to the live adapter. Only pi sessions have subagents at all.
+   * bypasses `send` and talks to the live adapter. Only harnesses with per-run control accept it —
+   * the Claude SDK can interrupt a turn but not one child, so it must refuse rather than no-op.
    */
   async subagentCommand(id: string, runId: string, kind: 'stop' | 'steer', message?: string): Promise<{ ok: boolean; error?: string }> {
     const meta = this.get(id);
     if (!meta) return { ok: false, error: 'Session not found' };
-    if (meta.config.harness !== 'pi') return { ok: false, error: 'Subagents run in pi sessions only' };
+    if (!subagentSupport(meta.config.harness).control) return { ok: false, error: `Subagent stop/steer is not available for the ${meta.config.harness} harness` };
     if (!isValidRunId(runId)) return { ok: false, error: 'Invalid run id' };
     if (kind === 'steer' && !message?.trim()) return { ok: false, error: 'Message cannot be empty' };
     const active = this.active.get(id);

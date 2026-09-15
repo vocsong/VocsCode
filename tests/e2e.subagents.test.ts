@@ -67,14 +67,18 @@ async function launch(userData: string, extraEnv: Record<string, string> = {}): 
 
 const SEED_SESSION_ID = 'sub_e2e_panel';
 
-/** A session whose transcript already contains a finished subagent card, plus its run record. */
-async function seedSession(userData: string, project: string): Promise<void> {
+/**
+ * A session whose transcript already contains a finished subagent card, plus its run record. Each
+ * harness keeps its runs in its own folder under the session, so the record is seeded where that
+ * harness's reader looks for it.
+ */
+async function seedSession(userData: string, project: string, harness: 'pi' | 'claude' = 'pi'): Promise<void> {
   const session: SessionMeta = {
     id: SEED_SESSION_ID,
     title: 'Subagents panel',
     createdAt: Date.now(),
     updatedAt: Date.now(),
-    config: { harness: 'pi', projectRoot: project, permissionMode: 'ask' },
+    config: { harness, projectRoot: project, permissionMode: 'ask' },
     cwd: project,
     status: 'idle',
     harnessRef: {},
@@ -82,17 +86,20 @@ async function seedSession(userData: string, project: string): Promise<void> {
   };
   await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
   const dir = path.join(userData, 'sessions', SEED_SESSION_ID);
-  await fs.mkdir(path.join(dir, 'pi', 'subagents'), { recursive: true });
-  // A project definition, so the Agents view has something that belongs to the repo.
-  await fs.mkdir(path.join(project, '.pi', 'agents'), { recursive: true });
-  await fs.writeFile(
-    path.join(project, '.pi', 'agents', 'reviewer.md'),
-    ['---', 'name: reviewer', 'description: Reviews a diff against the repo rules', 'tools: read, grep', 'prompt_mode: replace', '---', 'You review diffs.'].join('\n'),
-    'utf8'
-  );
+  await fs.mkdir(path.join(dir, harness, 'subagents'), { recursive: true });
+  // A project definition, so the Agents view has something that belongs to the repo. Only pi reads
+  // this folder, so a Claude session has none to show.
+  if (harness === 'pi') {
+    await fs.mkdir(path.join(project, '.pi', 'agents'), { recursive: true });
+    await fs.writeFile(
+      path.join(project, '.pi', 'agents', 'reviewer.md'),
+      ['---', 'name: reviewer', 'description: Reviews a diff against the repo rules', 'tools: read, grep', 'prompt_mode: replace', '---', 'You review diffs.'].join('\n'),
+      'utf8'
+    );
+  }
   const items = [
     { id: 'u1', kind: 'user', ts: Date.now(), text: 'Find where the harness registry lives.' },
-    { id: 't1', kind: 'tool', ts: Date.now(), name: 'subagent', hint: 'agent', summary: 'Find the registry', status: 'done', runId: 'agent_seed1', output: 'The registry is at src/main/harness/registry.ts' }
+    { id: 't1', kind: 'tool', ts: Date.now(), name: harness === 'pi' ? 'subagent' : 'Agent', hint: 'agent', summary: 'Find the registry', status: 'done', runId: 'agent_seed1', output: 'The registry is at src/main/harness/registry.ts' }
   ];
   await fs.writeFile(path.join(dir, 'transcript.jsonl'), items.map((i) => JSON.stringify(i)).join('\n') + '\n');
   const run = [
@@ -103,7 +110,7 @@ async function seedSession(userData: string, project: string): Promise<void> {
     { t: 'call', call: { index: 1, provider: 'anthropic', model: 'claude-sonnet-4-5', inputTokens: 200, outputTokens: 60, cacheReadTokens: 50, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0.15, durationMs: 2500, stopReason: 'stop', toolsInvoked: [] } },
     { t: 'end', status: 'completed', totals: { turns: 2, toolUses: 1, inputTokens: 1000, outputTokens: 100, cacheReadTokens: 50, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0.25, durationMs: 4000 }, endedAt: 2000 }
   ];
-  await fs.writeFile(path.join(dir, 'pi', 'subagents', 'agent_seed1.jsonl'), run.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  await fs.writeFile(path.join(dir, harness, 'subagents', 'agent_seed1.jsonl'), run.map((r) => JSON.stringify(r)).join('\n') + '\n');
 }
 
 describe.runIf(enabled)('electron e2e: subagents panel', () => {
@@ -162,6 +169,56 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       await win.waitForSelector('.panel-section.panel-bottom', { timeout: 30_000 });
       await win.getByTestId('panel-bottom-subagents').click();
       await win.locator('.subagent-row:has-text("Explore")').first().waitFor({ timeout: 20_000 });
+    } finally {
+      await app?.close().catch(() => undefined);
+      app = null;
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  }, 180_000);
+
+  it("shows a Claude session's runs, and refuses only what its SDK cannot do", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-subagents-claude-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    await seedSession(userData, project, 'claude');
+    try {
+      const win = await launch(userData);
+      await win.waitForSelector('.panel', { timeout: 30_000 });
+
+      // The panel is reachable the same way: the card in the transcript links into it.
+      const chip = win.locator('.tool-card .chip', { hasText: 'open run' });
+      await chip.waitFor({ timeout: 20_000 });
+      await chip.click();
+      await win.locator('.panel-tab.active:has-text("Subagents")').waitFor({ timeout: 20_000 });
+
+      // The Claude session's run is listed with its stats, not an explanation of why it cannot be.
+      const row = win.locator('.subagent-row').first();
+      await row.waitFor({ timeout: 20_000 });
+      const rowText = await row.innerText();
+      for (const expected of ['Explore', 'Find the registry', 'claude-sonnet-4-5', '$0.25']) expect(rowText).toContain(expected);
+      expect(await win.locator('.subagents').innerText()).not.toContain('does not record subagent runs');
+
+      // Its transcript and per-call table come through the same reader.
+      const detailText = await win.locator('.subagent-detail').innerText();
+      expect(detailText).toContain('The registry is at src/main/harness/registry.ts');
+      await win.locator('.subagent-calls tbody tr').first().waitFor({ timeout: 20_000 });
+      expect(await win.locator('.subagent-calls tbody tr').count()).toBe(2);
+
+      // The Agents view edits `.pi/agents`, which a Claude session does not run with, so it is
+      // absent rather than empty. Stop/Steer have no per-child equivalent in the SDK either.
+      expect(await win.locator('[data-testid="subagent-view-agents"]').count()).toBe(0);
+      expect(await win.locator('[data-testid="subagent-view-runs"]').count()).toBe(0);
+
+      await fs.mkdir(shots, { recursive: true });
+      await win.screenshot({ path: path.join(shots, 'subagents-panel-claude.png') });
+
+      // And the refusal is real, over IPC — not merely a hidden button.
+      const stopped = await invoke(win, 'subagents:stop', { id: SEED_SESSION_ID, runId: 'agent_seed1' });
+      expect(stopped).toMatchObject({ ok: false });
+      expect(stopped.ok === false && stopped.error).toMatch(/not available for the claude harness/);
     } finally {
       await app?.close().catch(() => undefined);
       app = null;

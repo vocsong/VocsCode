@@ -9,6 +9,30 @@
 export type SubagentRunStatus = 'running' | 'completed' | 'error' | 'stopped' | 'interrupted';
 export type SubagentRunMode = 'foreground' | 'background';
 
+/**
+ * What a harness's subagents support, so the panel and the main process agree on one answer.
+ *
+ * `runs` is "this harness records runs the panel can list". `control` is per-run stop/steer, which
+ * only pi has: the Claude SDK can interrupt a whole turn but not one child. `agents` is editing the
+ * project's own agent definitions, which is pi's `.pi/agents` layout.
+ */
+export interface SubagentSupport {
+  runs: boolean;
+  control: boolean;
+  agents: boolean;
+}
+
+const SUPPORT: Record<string, SubagentSupport> = {
+  pi: { runs: true, control: true, agents: true },
+  claude: { runs: true, control: false, agents: false }
+};
+
+const NO_SUPPORT: SubagentSupport = { runs: false, control: false, agents: false };
+
+export function subagentSupport(harness: string): SubagentSupport {
+  return SUPPORT[harness] ?? NO_SUPPORT;
+}
+
 export interface SubagentRunMeta {
   runId: string;
   agent: string;
@@ -131,22 +155,21 @@ export function parseRunFile(text: string): SubagentRun | null {
       continue;
     }
     if (record.t === 'run' && typeof record.runId === 'string') {
-      run = {
-        meta: {
-          runId: record.runId,
-          agent: typeof record.agent === 'string' ? record.agent : 'general-purpose',
-          description: typeof record.description === 'string' ? record.description : '',
-          mode: record.mode === 'background' ? 'background' : 'foreground',
-          ...(typeof record.provider === 'string' ? { provider: record.provider } : {}),
-          ...(typeof record.model === 'string' ? { model: record.model } : {}),
-          cwd: typeof record.cwd === 'string' ? record.cwd : '',
-          startedAt: numberOr(record.startedAt),
-        },
-        items: [],
-        calls: [],
-        status: 'running',
-        totals: emptyRunTotals(),
+      const meta: SubagentRunMeta = {
+        runId: record.runId,
+        agent: typeof record.agent === 'string' ? record.agent : 'general-purpose',
+        description: typeof record.description === 'string' ? record.description : '',
+        mode: record.mode === 'background' ? 'background' : 'foreground',
+        ...(typeof record.provider === 'string' ? { provider: record.provider } : {}),
+        ...(typeof record.model === 'string' ? { model: record.model } : {}),
+        cwd: typeof record.cwd === 'string' ? record.cwd : '',
+        startedAt: numberOr(record.startedAt)
       };
+      // A writer may restate the header to correct a fact it only learned later (the Claude adapter
+      // learns a subagent's own model from the child's first message). Only the meta is replaced:
+      // the transcript and calls recorded in between still belong to this run.
+      if (run) run.meta = meta;
+      else run = { meta, items: [], calls: [], status: 'running', totals: emptyRunTotals() };
       continue;
     }
     if (!run) continue;

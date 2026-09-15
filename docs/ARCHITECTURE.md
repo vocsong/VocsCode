@@ -107,3 +107,4 @@ The dashboard (`src/renderer/src/components/analytics/`) asks for one range at a
 - Custom Codex model providers are passed as thread config overrides and were not verified against a live OpenAI-compatible endpoint.
 - ACP agents expose models only after the session starts; pick the model from the header once the agent is up.
 - The terminal tab's directory tracking relies on the shell announcing its cwd (OSC 7, or OSC 9;9 as Windows Terminal profiles do); shells without such a prompt hook show the directory they started in.
+- The Subagents panel covers pi and Claude runs; `subagentSupport` in `src/shared/subagents.ts` is the one answer for what each harness offers. Claude's per-call dollars are estimated from the shared pricing table (its SDK reports tokens, not cost), and its SDK can interrupt a turn but not one child, so the panel offers it no per-run stop/steer and no Agents view — that view edits `.pi/agents`, which a Claude session does not run with.

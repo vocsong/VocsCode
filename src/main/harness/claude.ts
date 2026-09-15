@@ -16,11 +16,14 @@ import {
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { toClaude } from '../mcp/effective';
 import { estimateCostUsd, findContextWindow, findPricing } from '../models/static-models';
+import { subagentDir } from '../subagents';
+import { subagentSupport } from '../../shared/subagents';
 import { anthropicAuthFor, anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvider, isClaudeGatewayProvider } from '../../shared/providers';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
+import { SUBAGENT_TOOLS, ClaudeSubagentRuns, type NestedAssistantLike, type TaskNotificationLike, type TaskProgressLike, type TaskStartedLike, type TaskUpdatedLike } from './claude-subagents';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
 import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext } from './types';
@@ -135,10 +138,21 @@ export class ClaudeAdapter implements HarnessAdapter {
   private started = false;
   private modelsEmitted = false;
   private compactionWaiter: Deferred<void> | null = null;
+  /** Records the delegated runs Claude Code spawns, so the Subagents panel can show them. */
+  private readonly subagents: ClaudeSubagentRuns;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
     this.usageReporter = new UsageReporter((event) => this.ctx.emit(event));
+    this.subagents = new ClaudeSubagentRuns({
+      // Recording is a side feature: a context without a session directory turns it off rather
+      // than making the adapter unconstructible.
+      dir: ctx.sessionDir && subagentSupport('claude').runs ? subagentDir(ctx.sessionDir, 'claude') : null,
+      cwd: ctx.session().cwd,
+      providerId: () => this.providerId,
+      emit: (event) => this.ctx.emit(event),
+      log: (level, message) => this.ctx.log(level, message)
+    });
   }
 
   get busy(): boolean {
@@ -164,6 +178,9 @@ export class ClaudeAdapter implements HarnessAdapter {
       allowDangerouslySkipPermissions: mode === 'full-auto',
       canUseTool: this.canUseTool,
       includePartialMessages: true,
+      // Without this the SDK forwards only a subagent's tool_use/tool_result blocks, so a delegated
+      // run reaches the Subagents panel with no transcript of its own.
+      forwardSubagentText: true,
       persistSession: true,
       env,
       abortController: this.abort,
@@ -475,6 +492,7 @@ export class ClaudeAdapter implements HarnessAdapter {
   private handle(msg: SDKMessage, q: Query): void {
     switch (msg.type) {
       case 'system': {
+        const subtype = (msg as { subtype?: string }).subtype;
         if (msg.subtype === 'init') {
           this.sessionId = msg.session_id;
           this.ctx.updateRef({ claudeSessionId: msg.session_id });
@@ -491,16 +509,24 @@ export class ClaudeAdapter implements HarnessAdapter {
           }
         } else if (msg.subtype === 'compact_boundary') {
           if (msg.compact_metadata.trigger === 'manual') this.compactionWaiter?.resolve();
-        } else if ((msg as { subtype?: string }).subtype === 'status') {
+        } else if (subtype === 'status') {
           const m = msg as { compact_result?: 'success' | 'failed'; compact_error?: string };
           if (m.compact_result) {
             this.info(`Context compaction ${m.compact_result}.`, m.compact_result === 'failed' ? 'warn' : 'info');
             if (m.compact_result === 'failed') this.compactionWaiter?.reject(new Error(m.compact_error || 'Claude context compaction failed.'));
             else this.compactionWaiter?.resolve();
           }
-        } else if ((msg as { subtype?: string }).subtype === 'permission_denied') {
+        } else if (subtype === 'permission_denied') {
           const m = msg as { tool_name: string };
           this.info(`Tool ${m.tool_name} was auto-denied by the harness.`, 'warn');
+        } else if (subtype === 'task_started') {
+          this.subagents.onTaskStarted(msg as unknown as TaskStartedLike);
+        } else if (subtype === 'task_progress') {
+          this.subagents.onTaskProgress(msg as unknown as TaskProgressLike);
+        } else if (subtype === 'task_updated') {
+          this.subagents.onTaskUpdated(msg as unknown as TaskUpdatedLike);
+        } else if (subtype === 'task_notification') {
+          this.subagents.onTaskNotification(msg as unknown as TaskNotificationLike);
         }
         return;
       }
@@ -525,6 +551,9 @@ export class ClaudeAdapter implements HarnessAdapter {
       case 'assistant': {
         this.markTurnStarted();
         const content = (msg.message.content ?? []) as ContentBlockLike[];
+        // The child's own transcript lives in its run, never in the parent's: this message is one
+        // the subagent produced, so every block belongs to the delegation, not to the answer.
+        if (msg.parent_tool_use_id) this.subagents.onNestedAssistant(msg.parent_tool_use_id, msg as unknown as NestedAssistantLike);
         for (const block of content) {
           if (block.type === 'text' && !msg.parent_tool_use_id) {
             const a = this.ensureAssistant();
@@ -548,6 +577,12 @@ export class ClaudeAdapter implements HarnessAdapter {
               // The generating model: inside a subagent it differs from the session's, and analytics charges the call to it.
               model: msg.message.model
             };
+            // A main-thread Agent/Task call *is* a subagent run; recording it here is what lets the
+            // transcript's card link into the Subagents panel.
+            if (!msg.parent_tool_use_id && SUBAGENT_TOOLS.has(block.name)) {
+              const runId = this.subagents.start(block.id, input, msg.message.model);
+              if (runId) item.runId = runId;
+            }
             this.toolItems.set(block.id, item);
             this.ctx.emit({ type: 'item.upsert', item });
             // A tool call closes the current text bubble so the next text starts fresh below the tool card.
@@ -561,9 +596,14 @@ export class ClaudeAdapter implements HarnessAdapter {
         if (!Array.isArray(content)) return;
         for (const block of content as ContentBlockLike[]) {
           if (block.type !== 'tool_result' || !block.tool_use_id) continue;
+          const output = truncate(extractText(block.content), 40_000);
+          if (msg.parent_tool_use_id) this.subagents.onNestedToolResult(msg.parent_tool_use_id, block.tool_use_id, output, !!block.is_error);
+          // A foreground Agent call finishes here; a backgrounded one reports through its task
+          // notification instead. Only spawning calls are tracked, so this is a no-op for the rest.
+          else this.subagents.onCallResult(block.tool_use_id, !!block.is_error);
           const item = this.toolItems.get(block.tool_use_id);
           if (!item) continue;
-          item.output = truncate(extractText(block.content), 40_000);
+          item.output = output;
           item.status = block.is_error ? 'error' : 'done';
           this.ctx.emit({ type: 'item.upsert', item: { ...item } });
         }
@@ -752,6 +792,9 @@ export class ClaudeAdapter implements HarnessAdapter {
       /* ignore */
     }
     this.q = null;
+    // A run still open when the process goes away has no end record and no owner left to write one,
+    // so close it as interrupted rather than leaving it spinning as `running` in an open app.
+    await this.subagents.settle();
   }
 }
 

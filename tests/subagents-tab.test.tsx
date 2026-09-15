@@ -107,9 +107,16 @@ describe('run list', () => {
     expect(invoke).toHaveBeenCalledWith('subagents:list', { id: 's1' });
   });
 
-  it('explains that only pi sessions have subagents', async () => {
+  it('lists a Claude session\'s runs, which the SDK does record', async () => {
+    invoke.mockImplementation((channel: string) => (channel === 'subagents:list' ? Promise.resolve([summary()]) : Promise.resolve(null)));
     await renderTab(session('claude'));
-    expect(document.querySelector('.subagents')!.textContent).toContain('Subagents run in pi sessions');
+    expect(invoke).toHaveBeenCalledWith('subagents:list', { id: 's1' });
+    expect(document.querySelectorAll('.subagent-row')).toHaveLength(1);
+  });
+
+  it('explains itself for a harness that records no runs at all', async () => {
+    await renderTab(session('codex'));
+    expect(document.querySelector('.subagents')!.textContent).toContain('This harness does not record subagent runs');
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -189,6 +196,39 @@ describe('run detail', () => {
     });
     expect(invoke).toHaveBeenCalledWith('subagents:get', { id: 's1', runId: 'agent_9' });
     expect(useStore.getState().subagentReveal).toBeNull();
+  });
+});
+
+describe('what each harness can do', () => {
+  /** Render a session with one running run, so every affordance that needs a live run would show. */
+  async function renderRunning(harness: SessionMeta['config']['harness']): Promise<void> {
+    invoke.mockImplementation((channel: string) => {
+      if (channel === 'subagents:list') return Promise.resolve([summary({ status: 'running' })]);
+      if (channel === 'subagents:get') return Promise.resolve(run({ status: 'running', endedAt: undefined }));
+      return Promise.resolve({ ok: true });
+    });
+    await renderTab(session(harness));
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  it('offers pi the Agents view and run control, which it really has', async () => {
+    await renderRunning('pi');
+    expect(document.querySelector('[data-testid="subagent-view-agents"]')).not.toBeNull();
+    expect(document.querySelector('.subagent-detail button')!.textContent).toBe('Stop');
+    expect(document.querySelector('.subagent-steer input')).not.toBeNull();
+  });
+
+  it('hides both from Claude, whose SDK can stop a turn but not one child', async () => {
+    await renderRunning('claude');
+    // The run itself is still fully visible: list, transcript and the affordances it does have.
+    expect(document.querySelectorAll('.subagent-row')).toHaveLength(1);
+    expect(document.querySelector('.subagent-detail')).not.toBeNull();
+    // …but the controls that would not do what the label says are gone, not disabled.
+    expect(document.querySelector('[data-testid="subagent-view-agents"]')).toBeNull();
+    expect(document.querySelector('.subagent-detail button')).toBeNull();
+    expect(document.querySelector('.subagent-steer')).toBeNull();
   });
 });
 
