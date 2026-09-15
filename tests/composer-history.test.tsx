@@ -28,6 +28,13 @@ const session: SessionMeta = {
 } as unknown as SessionMeta;
 
 const type = (ta: HTMLTextAreaElement, v: string) => fireEvent.change(ta, { target: { value: v } });
+const makeSession = (id: string): SessionMeta => ({ ...session, id });
+
+/** App.tsx mounts the composer as `<Composer key={session.id} …>`, so switching sessions unmounts it. */
+const switchTo = (id: string) => {
+  const view = render(<Composer session={makeSession(id)} />);
+  return { view, ta: view.container.querySelector('textarea') as HTMLTextAreaElement };
+};
 
 describe('composer input history', () => {
   it('recalls the last sent message with ArrowUp', () => {
@@ -83,6 +90,41 @@ describe('composer input history', () => {
 
     fireEvent.keyDown(ta, { key: 'ArrowUp' });
     expect(ta.value).toBe('plain message');
+  });
+
+  it('recalls history after switching to another session and back', () => {
+    const first = switchTo('hist-a');
+    type(first.ta, 'sent in session one');
+    fireEvent.keyDown(first.ta, { key: 'Enter' });
+    first.view.unmount();
+
+    const other = switchTo('hist-b');
+    type(other.ta, 'sent in session two');
+    fireEvent.keyDown(other.ta, { key: 'Enter' });
+    other.view.unmount();
+
+    const back = switchTo('hist-a');
+    fireEvent.keyDown(back.ta, { key: 'ArrowUp' });
+    expect(back.ta.value).toBe('sent in session one');
+  });
+
+  it('keeps each session’s history to itself', () => {
+    const a = switchTo('hist-c');
+    type(a.ta, 'from c');
+    fireEvent.keyDown(a.ta, { key: 'Enter' });
+    a.view.unmount();
+
+    const b = switchTo('hist-d');
+    type(b.ta, 'from d');
+    fireEvent.keyDown(b.ta, { key: 'Enter' });
+    b.view.unmount();
+
+    const back = switchTo('hist-d');
+    fireEvent.keyDown(back.ta, { key: 'ArrowUp' });
+    expect(back.ta.value).toBe('from d');
+    // Walk back one further: session c's prompt must not be reachable from session d.
+    fireEvent.keyDown(back.ta, { key: 'ArrowUp' });
+    expect(back.ta.value).toBe('from d');
   });
 
   it('remembers an effort selected through the slash command', async () => {

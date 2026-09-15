@@ -7,7 +7,7 @@ import { invoke } from '../api';
 import { fmtCost, fmtTokens } from '../format';
 import { useSessionModels } from '../models';
 import { setSessionEffort } from '../sessionActions';
-import { useStore } from '../store';
+import { NO_COMPOSER_HISTORY, useStore } from '../store';
 import * as host from '../terminal/host';
 import { Button, Icon, Kbd } from './ui';
 
@@ -19,7 +19,11 @@ export function Composer({ session }: { session: SessionMeta }) {
   const [mention, setMention] = useState<{ query: string; start: number; results: string[]; index: number } | null>(null);
   const [mentionError, setMentionError] = useState<string | null>(null);
   const [slash, setSlash] = useState<{ query: string; index: number } | null>(null);
-  const [history, setHistory] = useState<string[]>([]);
+  // History lives in the store, not here: App mounts the composer with `key={session.id}`, so a local
+  // copy would be thrown away the moment the user switched sessions and came back.
+  const history = useStore((s) => s.composerHistory[session.id] ?? NO_COMPOSER_HISTORY);
+  const pushHistory = useStore((s) => s.pushComposerHistory);
+  // The browse position stays local — it is a caret-like cursor, not part of the session's record.
   const [histIdx, setHistIdx] = useState(-1);
   const ref = useRef<HTMLTextAreaElement>(null);
   const toast = useStore((s) => s.toast);
@@ -150,13 +154,13 @@ export function Composer({ session }: { session: SessionMeta }) {
     }
     if (t.startsWith('!')) {
       const command = t.slice(1).trim();
-      setHistory((h) => [t, ...h.filter((x) => x !== t)].slice(0, 50));
+      pushHistory(session.id, t);
       clearDraft();
       if (command) await runShell(command);
       else toast('Type a command after ! — for example !git status', 'info');
       return;
     }
-    setHistory((h) => [t, ...h.filter((x) => x !== t)].slice(0, 50));
+    pushHistory(session.id, t);
     clearDraft();
     setImages([]);
     try {

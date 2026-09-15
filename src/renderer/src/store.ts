@@ -68,6 +68,8 @@ interface State {
   activeTerminal: Record<string, string>;
   /** Unsent composer text per session, kept so switching sessions does not lose the draft. */
   drafts: Record<string, string>;
+  /** Prompts already sent per session, newest first, so ArrowUp can recall them after a remount. */
+  composerHistory: Record<string, string[]>;
   /** Bumped to move keyboard focus into the active terminal. */
   terminalFocusNonce: number;
   /** Sessions with an archive request in flight; rows show a blinking Archiving pill meanwhile. */
@@ -169,6 +171,8 @@ interface State {
   /** Upserts a renderer-local info line in a session's transcript; null text removes it. Not persisted by the main process. */
   setLocalInfo(sessionId: string, id: string, text: string | null, opts?: { level?: 'info' | 'warn' | 'error'; pending?: boolean }): void;
   setDraft(sessionId: string, text: string): void;
+  /** Records a sent prompt as the session's most recent history entry; re-sending an old prompt moves it back to the front. */
+  pushComposerHistory(sessionId: string, text: string): void;
   setArchiving(id: string, on: boolean): void;
   setTerminals(list: TerminalInfo[]): void;
   setActiveTerminal(sessionId: string, terminalId: string): void;
@@ -178,6 +182,10 @@ interface State {
 }
 
 let toastCounter = 0;
+/** How many sent prompts a session's ArrowUp history keeps. */
+export const COMPOSER_HISTORY_LIMIT = 50;
+/** Stable stand-in for a session with no history yet — selectors must not build a fresh array per render. */
+export const NO_COMPOSER_HISTORY: readonly string[] = [];
 const USAGE_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns', 'contextWindow', 'contextTokens'] as const;
 
 function sameUsageTotals(a: SessionMeta['usage'], b: SessionMeta['usage']): boolean {
@@ -285,6 +293,7 @@ export const useStore = create<State>((set, get) => ({
   terminalsLoaded: false,
   activeTerminal: {},
   drafts: {},
+  composerHistory: {},
   terminalFocusNonce: 0,
   archiving: {},
   composerInsert: null,
@@ -541,6 +550,7 @@ export const useStore = create<State>((set, get) => ({
       for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.composerHistory)) if (!ids.has(id)) removed.add(id);
       const activeId = s.activeId;
       const before = activeId ? s.sessions.find((x) => x.id === activeId) : undefined;
       const after = activeId ? sessions.find((x) => x.id === activeId) : undefined;
@@ -560,6 +570,7 @@ export const useStore = create<State>((set, get) => ({
       const activeTerminal = { ...s.activeTerminal };
       const models = { ...s.models };
       const drafts = { ...s.drafts };
+      const composerHistory = { ...s.composerHistory };
       for (const id of removed) {
         delete transcripts[id];
         delete loaded[id];
@@ -567,6 +578,7 @@ export const useStore = create<State>((set, get) => ({
         delete activeTerminal[id];
         delete models[id];
         delete drafts[id];
+        delete composerHistory[id];
       }
       return {
         sessions,
@@ -576,6 +588,7 @@ export const useStore = create<State>((set, get) => ({
         activeTerminal,
         models,
         drafts,
+        composerHistory,
         activeId: activeRemoved ? replacement?.id ?? null : s.activeId
       };
     });
@@ -746,6 +759,14 @@ export const useStore = create<State>((set, get) => ({
   },
   setDraft(sessionId, text) {
     set((s) => (s.drafts[sessionId] === text ? {} : { drafts: { ...s.drafts, [sessionId]: text } }));
+  },
+  pushComposerHistory(sessionId, text) {
+    set((s) => {
+      const current = s.composerHistory[sessionId] ?? [];
+      // Newest first, and re-sending an earlier prompt moves it back to the front instead of duplicating it.
+      const next = [text, ...current.filter((entry) => entry !== text)].slice(0, COMPOSER_HISTORY_LIMIT);
+      return { composerHistory: { ...s.composerHistory, [sessionId]: next } };
+    });
   },
   setArchiving(id, on) {
     set((s) => {
