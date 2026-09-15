@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { McpTab } from '../src/renderer/src/components/McpTab';
 import { MEMORY_GUIDE_MARKDOWN, MEMORY_GUIDE_TITLE } from '../src/shared/memory-guide';
+import { authorityLabel } from '../src/shared/knowledge';
 import { useStore } from '../src/renderer/src/store';
 import type { McpProjectInfo, SessionMeta } from '../src/shared/types';
 
@@ -115,5 +116,22 @@ describe('AGENTS.md memory snippet', () => {
     expect(MEMORY_GUIDE_MARKDOWN).not.toContain('L4');
     // The repo is scoped per session; a pasted snippet must never teach agents to pass `repo`.
     expect(MEMORY_GUIDE_MARKDOWN).toContain('Never pass `repo`');
+  });
+
+  it('promises no accept gate for knowledge_propose, and names the rung the write actually lands on', async () => {
+    // `knowledge_propose` serializes `status: current` with `updated_by: agent:mcp` and answers
+    // "writes immediately: nothing is queued for human review" (resources/mcp/vocs-memory.mjs), so
+    // the pasted snippet must not teach an agent to wait for a human to accept or reject the page.
+    invoke.mockResolvedValue(info());
+    await act(async () => { render(<McpTab session={session()} />); });
+    await act(async () => { fireEvent.click(screen.getByTestId('memory-guide-toggle')); });
+    const shown = screen.getByTestId('memory-guide-text').textContent ?? '';
+
+    // The rung comes from the code, not a restatement: the snippet has to name what search returns.
+    const rung = authorityLabel({ status: 'current', updatedBy: 'agent:mcp' });
+    expect(rung).toBe('accepted');
+    expect(shown).toContain('rung `' + rung + '`');
+    expect(shown).toContain('nothing waiting on a human');
+    expect(shown).not.toMatch(/accepts or rejects/i);
   });
 });
