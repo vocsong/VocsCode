@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   accelFromEvent,
+  BUILTIN_SHORTCUT_GROUPS,
   canonicalAccelerator,
   formatAccelerator,
   isReservedAccel,
@@ -89,6 +90,7 @@ describe('isReservedAccel', () => {
   it('flags the fixed shortcuts and editing basics, case-insensitively', () => {
     expect(isReservedAccel('Ctrl+N')).toBe(true);
     expect(isReservedAccel('ctrl+n')).toBe(true);
+    expect(isReservedAccel('Ctrl+Shift+N')).toBe(true);
     expect(isReservedAccel('Ctrl+1')).toBe(true);
     expect(isReservedAccel('Ctrl+C')).toBe(true);
     expect(isReservedAccel('Alt+ArrowLeft')).toBe(true);
@@ -130,6 +132,14 @@ describe('normalizeCustomShortcuts', () => {
     expect(normalizeCustomShortcuts(undefined)).toEqual({});
     expect(normalizeCustomShortcuts('nope')).toEqual({});
     expect(normalizeCustomShortcuts([['Ctrl+Alt+A', 'session.archive']])).toEqual({});
+  });
+});
+
+describe('builtin reference', () => {
+  it('lists the new-session chords the app actually handles', () => {
+    const rows = BUILTIN_SHORTCUT_GROUPS.flatMap((g) => g.rows);
+    expect(rows.find((r) => r.keys.includes('Ctrl+Shift+N'))?.label).toBe('New session in this folder');
+    expect(rows.find((r) => r.keys.includes('Ctrl+Alt+N'))?.label).toBe('New session in folder');
   });
 });
 

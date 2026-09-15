@@ -182,7 +182,7 @@ export function formatAccelerator(text: string, mac: boolean): string {
  * text-editing basics so a custom combo can never swallow copy/paste/undo while typing.
  */
 export const RESERVED_ACCELS: string[] = [
-  'Ctrl+N', 'Ctrl+Alt+N', 'Ctrl+K', 'Ctrl+Shift+F', 'Ctrl+B', 'Ctrl+J', 'Ctrl+,', 'Ctrl+[', 'Ctrl+]',
+  'Ctrl+N', 'Ctrl+Alt+N', 'Ctrl+Shift+N', 'Ctrl+K', 'Ctrl+Shift+F', 'Ctrl+B', 'Ctrl+J', 'Ctrl+,', 'Ctrl+[', 'Ctrl+]',
   'Ctrl+ArrowUp', 'Ctrl+ArrowDown', 'Ctrl+Shift+ArrowUp', 'Ctrl+Shift+ArrowDown',
   'Alt+ArrowLeft', 'Alt+ArrowRight',
   ...['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((d) => `Ctrl+${d}`),
@@ -233,6 +233,7 @@ export const BUILTIN_SHORTCUT_GROUPS: BuiltinShortcutGroup[] = [
     rows: [
       { label: 'New session (quick picker)', keys: ['Ctrl+N'] },
       { label: 'New session in folder', keys: ['Ctrl+Alt+N'] },
+      { label: 'New session in this folder', keys: ['Ctrl+Shift+N'] },
       { label: 'Command palette', keys: ['Ctrl+K'] },
       { label: 'Search sessions (deep, incl. transcripts)', keys: ['Ctrl+Shift+F'] },
       { label: 'Settings', keys: ['Ctrl+,'] },

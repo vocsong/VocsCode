@@ -54,6 +54,12 @@ export function App() {
         // Ctrl+Alt+N: folder-picker flow (native picker, then the full new-session dialog).
         e.preventDefault();
         void st.startNewSession();
+      } else if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
+        // Ctrl+Shift+N: the per-folder New session button for the session you are on, so the folder
+        // is already decided and no native picker opens. With no session there is no folder to seed,
+        // and it falls back to the folder picker.
+        e.preventDefault();
+        void st.startNewSession(st.sessions.find((x) => x.id === st.activeId)?.config.projectRoot);
       } else if (mod && e.key.toLowerCase() === 'n') {
         // Ctrl+N: quick-pick a known folder, start with defaults.
         e.preventDefault();

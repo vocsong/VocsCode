@@ -42,6 +42,7 @@ export function CommandPalette() {
     ];
     if (activeId) {
       base.push(
+        { id: 'new-here', label: 'New session in this folder', hint: 'Ctrl+Shift+N', icon: 'sessionPlus', run: () => void st.startNewSession(st.sessions.find((x) => x.id === st.activeId)?.config.projectRoot) },
         { id: 'new-terminal', label: 'New terminal', hint: 'Ctrl+Shift+`', icon: 'terminal', run: () => void createTerminal(activeId) },
         { id: 'stop', label: 'Interrupt current turn', hint: 'Esc', icon: 'stop', run: () => void invoke('sessions:interrupt', { id: activeId }) },
         { id: 'export', label: 'Export transcript as Markdown', icon: 'download', run: () => void invoke('sessions:export', { id: activeId }) },

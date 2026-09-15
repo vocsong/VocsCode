@@ -101,6 +101,17 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
 
+      // Ctrl+Shift+N is the per-folder New session button from the keyboard: the active session
+      // decides the folder, so the dialog opens on it directly. That the modal appears at all is
+      // the proof no native folder picker was raised — app:pickFolder would block on it and the
+      // dialog would never mount. A picker would hang this suite rather than fail it softly.
+      await win.keyboard.press('Control+Shift+N');
+      await win.waitForSelector('.ns-root', { timeout: 15_000 });
+      const seeded = (await win.locator('.ns-root').innerText()).replace(/\\/g, '/');
+      expect(seeded, 'the dialog is seeded with the folder of the session that is active').toBe(project.replace(/\\/g, '/'));
+      await win.locator('.modal').getByRole('button', { name: 'Cancel' }).click();
+      await win.waitForSelector('.modal', { state: 'detached', timeout: 15_000 });
+
       // The leading pin is a hover affordance, not a selection mark: the new session is the active
       // row, and it must still read as unpinned. Hovering it offers the pin.
       const sessionRow = win.locator('[data-testid="session-row"]').first();
