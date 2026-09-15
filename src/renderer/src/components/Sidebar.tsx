@@ -462,24 +462,21 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
       }}
     >
       {/* The pin lives at the start of the row, so its state reads before the title. It is the
-          pinned state that keeps it on screen: selecting a row never reveals a pin it does not have. */}
+          pinned state that keeps it on screen: selecting a row never reveals a pin it does not have.
+          Archived rows toggle it the same way, so pinning survives archiving in both directions. */}
       <div className="session-pin">
-        {s.archived ? (
-          s.pinned ? <span className="session-pin-indicator" title="Pinned"><Icon name="pin" size={13} /></span> : null
-        ) : (
-          <button
-            type="button"
-            className={`row-act-btn ${s.pinned ? 'is-pinned' : ''}`}
-            data-testid="session-pin"
-            title={s.pinned ? 'Unpin' : 'Pin to top'}
-            aria-label={s.pinned ? 'Unpin session' : 'Pin session'}
-            onClick={(e) => { e.stopPropagation(); void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }); }}
-          >
-            <Icon name="pin" size={13} className="pin-on" />
-            {/* Hovering a pinned row turns its state pin into the unpin action. */}
-            {s.pinned && <Icon name="pinOff" size={13} className="pin-off" />}
-          </button>
-        )}
+        <button
+          type="button"
+          className={`row-act-btn ${s.pinned ? 'is-pinned' : ''}`}
+          data-testid="session-pin"
+          title={s.pinned ? 'Unpin' : 'Pin to top'}
+          aria-label={s.pinned ? 'Unpin session' : 'Pin session'}
+          onClick={(e) => { e.stopPropagation(); void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }); }}
+        >
+          <Icon name="pin" size={13} className="pin-on" />
+          {/* Hovering a pinned row turns its state pin into the unpin action. */}
+          {s.pinned && <Icon name="pinOff" size={13} className="pin-off" />}
+        </button>
       </div>
       <div className="session-main">
         {renaming ? (

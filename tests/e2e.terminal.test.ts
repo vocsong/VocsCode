@@ -231,6 +231,25 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(0);
       await win.waitForSelector('.term .empty', { timeout: 10_000 });
 
+      // Pin/unpin is not a lifecycle action, so an archived session keeps the same leading toggle
+      // instead of degrading to a read-only indicator. Archive the session, open the Archived view,
+      // and prove the pin round-trips there.
+      const activeRow = win.locator('[data-testid="session-row"]').first();
+      await activeRow.hover();
+      await activeRow.locator('[aria-label="Archive session"]').click();
+      await expect.poll(async () => win.locator('[data-testid="session-row"]').count(), { timeout: 20_000 }).toBe(0);
+      await win.click('.sidebar-link:has-text("Archived")');
+      const archivedRow = win.locator('[data-testid="session-row"]').first();
+      await archivedRow.waitFor({ timeout: 20_000 });
+      await archivedRow.hover();
+      const archivedPin = archivedRow.getByTestId('session-pin');
+      expect(await archivedPin.getAttribute('title'), 'an unpinned archived row offers pin').toBe('Pin to top');
+      await archivedPin.click();
+      await expect.poll(async () => archivedPin.getAttribute('class'), { timeout: 10_000 }).toContain('is-pinned');
+      expect(await archivedPin.getAttribute('title'), 'a pinned archived row offers unpin').toBe('Unpin');
+      await archivedPin.click(); // unpin, leaving the app in the state the crash check expects
+      await expect.poll(async () => archivedPin.getAttribute('title'), { timeout: 10_000 }).toBe('Pin to top');
+
       // A killed renderer must not leave a blank window: main logs it and reloads automatically,
       // and the reloaded page paints the app again — without restarting the main process. The
       // Playwright page object for a crashed target stays crashed, so prove recovery through main.

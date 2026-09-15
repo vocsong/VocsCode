@@ -1292,10 +1292,6 @@ h4 {
 .session-pin .row-act-btn.is-pinned:focus-visible .pin-off {
   display: inline-flex;
 }
-.session-pin-indicator {
-  display: inline-flex;
-  color: var(--accent);
-}
 .session-main {
   flex: 1;
   min-width: 0;

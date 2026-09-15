@@ -1,5 +1,5 @@
 // Sidebar session rows: three inline actions (pin / fork / archive), archived rows get restore /
-// delete only, pinned rows sort first-pin-on-top and accept drag reorder.
+// delete plus the same pin toggle, pinned rows sort first-pin-on-top and accept drag reorder.
 /** @vitest-environment jsdom */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -142,30 +142,50 @@ describe('sidebar session actions', () => {
     await waitFor(() => expect((container.querySelector('.session-status') as HTMLElement).className).toContain('status-idle'));
   });
 
-  it('archived rows show only restore and delete', () => {
+  it('archived rows show only restore and delete in the hover actions', () => {
     useStore.setState({ sessions: [session('s_a', { title: 'A', archived: true, worktreeBranch: 'agent/a' })], settings, activeId: null, view: 'chat' });
     const { container } = render(<Sidebar />);
     // Archived sessions only appear once the Archived toggle is on.
     const archived = [...container.querySelectorAll('.sidebar-link')].find((b) => (b.textContent ?? '').includes('Archived')) as HTMLElement;
     fireEvent.click(archived);
     const row = container.querySelector('.session-row') as HTMLElement;
-    const btns = [...row.querySelectorAll('.row-act-btn')] as HTMLElement[];
+    const btns = [...(row.querySelector('.row-actions') as HTMLElement).querySelectorAll('.row-act-btn')] as HTMLElement[];
     expect(btns.map((b) => b.title)).toEqual(['Restore session', 'Delete session']);
     expect(row.getAttribute('draggable')).toBe('false');
     fireEvent.click(btns[0]);
     expect(invokeMock).toHaveBeenCalledWith('sessions:archive', { id: 's_a', archived: false });
   });
 
-  it('keeps a read-only pin on the left of a pinned archived row', () => {
+  it('archived rows offer the pin toggle, on the left, and it pins and unpins them', () => {
     useStore.setState({ sessions: [session('s_a', { title: 'A', archived: true, pinned: true, pinnedAt: 5 })], settings, activeId: null, view: 'chat' });
     const { container } = render(<Sidebar />);
     // Archived sessions only appear once the Archived toggle is on.
     const archived = [...container.querySelectorAll('.sidebar-link')].find((b) => (b.textContent ?? '').includes('Archived')) as HTMLElement;
     fireEvent.click(archived);
     const row = container.querySelector('.session-row') as HTMLElement;
-    // Pinned state still reads on the left, but an archived row offers no pin toggle.
-    expect(row.querySelector('.session-pin .session-pin-indicator')).toBeTruthy();
-    expect(row.querySelector('[data-testid="session-pin"]')).toBeNull();
+    // A pinned archived row shows the pin as state, in the leading gutter, and offers unpin.
+    const pin = row.querySelector('[data-testid="session-pin"]') as HTMLElement;
+    expect(row.querySelector('.session-pin')?.contains(pin)).toBe(true);
+    expect(pin.className).toContain('is-pinned');
+    expect(pin.title).toBe('Unpin');
+    expect(pin.querySelector('.pin-on')).toBeTruthy();
+    expect(pin.querySelector('.pin-off')).toBeTruthy();
+    fireEvent.click(pin);
+    expect(invokeMock).toHaveBeenCalledWith('sessions:pin', { id: 's_a', pinned: false });
+  });
+
+  it('pins an unpinned archived row', () => {
+    useStore.setState({ sessions: [session('s_a', { title: 'A', archived: true })], settings, activeId: null, view: 'chat' });
+    const { container } = render(<Sidebar />);
+    const archived = [...container.querySelectorAll('.sidebar-link')].find((b) => (b.textContent ?? '').includes('Archived')) as HTMLElement;
+    fireEvent.click(archived);
+    const row = container.querySelector('.session-row') as HTMLElement;
+    const pin = row.querySelector('[data-testid="session-pin"]') as HTMLElement;
+    expect(pin.title).toBe('Pin to top');
+    // Hovering an unpinned archived row can only ever offer pinning, so the unpin icon stays hidden.
+    expect(pin.querySelector('.pin-off')).toBeNull();
+    fireEvent.click(pin);
+    expect(invokeMock).toHaveBeenCalledWith('sessions:pin', { id: 's_a', pinned: true });
   });
 
   it('dragging one pinned row over another persists the new pin order', () => {
