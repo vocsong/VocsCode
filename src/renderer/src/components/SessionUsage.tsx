@@ -92,7 +92,7 @@ export function SessionUsage({ session, items }: { session: SessionMeta; items?:
       <div className="usage-kpis">
         <Kpi label="Tokens" value={fmtTokens(totalTokens)} sub={`${fmtTokens(u.inputTokens)} in · ${fmtTokens(u.outputTokens)} out`} title="Every token this session reported, including cache traffic and reasoning." />
         <Kpi label="Cache hit" value={fmtPct(cache)} sub={`${fmtTokens(u.cacheReadTokens)} reused`} title="Cache reads as a share of everything read into the model (cache reads + fresh input)." />
-        <Kpi label="Output speed" value={fmtRate(speed.tokens, speed.ms) || '—'} sub={avgTurnMs > 0 ? `${fmtDuration(avgTurnMs)} / turn` : undefined} title="Output tokens per second of turn wall time, averaged over completed turns (includes tool execution)." />
+        <Kpi label="Output speed" value={fmtRate(speed.tokens, speed.ms) || '—'} sub={avgTurnMs > 0 ? `${fmtDuration(avgTurnMs)} / turn` : undefined} title="Output tokens per second of turn wall time, averaged over completed turns (includes tool execution and any subagents the turn ran)." />
         <Kpi label="Avg turn" value={avgTurnCost > 0 ? fmtCost(avgTurnCost) : '—'} sub={stats.turns.longestMs > 0 ? `longest ${fmtDuration(stats.turns.longestMs)}` : undefined} title="Session cost divided by the number of turns." />
         <Kpi label="Tool calls" value={String(stats.tools.total)} sub={stats.tools.totalMs > 0 ? `${fmtDuration(stats.tools.totalMs)} in tools` : undefined} tone={stats.tools.running > 0 ? 'live' : undefined} title="Tool calls recorded in the loaded transcript." />
         <Kpi

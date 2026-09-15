@@ -5,6 +5,7 @@ import {
   query,
   type CanUseTool,
   type HookCallback,
+  type ModelUsage,
   type Options,
   type PermissionMode as SdkPermissionMode,
   type PermissionResult,
@@ -14,7 +15,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { toClaude } from '../mcp/effective';
-import { findContextWindow } from '../models/static-models';
+import { estimateCostUsd, findContextWindow, findPricing } from '../models/static-models';
 import { anthropicAuthFor, anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvider, isClaudeGatewayProvider } from '../../shared/providers';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
@@ -429,6 +430,39 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
   }
 
+  /**
+   * Sums the cumulative per-model counters the CLI reports, re-deriving the cost of every model it
+   * could not price itself. Claude Code flags them `costBasis: 'unknown'` and charges its default
+   * model's rate — $5/$25/$0.50 per Mtok for a model it has no row for — which overstates a cheap
+   * third-party model by two orders of magnitude (a DeepSeek V4.1 Flash session at $203 instead of
+   * the catalog's $2.38). List and managed rates are the CLI's own and are kept as reported.
+   */
+  private modelUsageTotals(mu: Record<string, ModelUsage>): UsageTotals {
+    const totals: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
+    for (const [model, v] of Object.entries(mu)) {
+      totals.inputTokens += v.inputTokens;
+      totals.outputTokens += v.outputTokens;
+      totals.cacheReadTokens += v.cacheReadInputTokens;
+      totals.cacheWriteTokens += v.cacheCreationInputTokens;
+      totals.costUsd += (v.costBasis === 'unknown' ? this.catalogCostUsd(model, v) : undefined) ?? v.costUSD;
+      if (v.contextWindow) totals.contextWindow = v.contextWindow;
+    }
+    return totals;
+  }
+
+  /** What this app's catalog says a model costs; undefined when it has no row, leaving the CLI's number. */
+  private catalogCostUsd(model: string, v: ModelUsage): number | undefined {
+    const provider = this.providerId ?? 'anthropic';
+    const pricing = findPricing(provider, model) ?? (v.canonicalModel ? findPricing(provider, v.canonicalModel) : undefined);
+    if (!pricing) return undefined;
+    return estimateCostUsd(pricing, {
+      inputTokens: v.inputTokens,
+      outputTokens: v.outputTokens,
+      cacheReadTokens: v.cacheReadInputTokens,
+      cacheWriteTokens: v.cacheCreationInputTokens
+    });
+  }
+
   private async consume(q: Query): Promise<void> {
     for await (const msg of q) this.handle(msg, q);
     this.compactionWaiter?.reject(new Error('Claude Code stopped during context compaction.'));
@@ -539,35 +573,29 @@ export class ClaudeAdapter implements HarnessAdapter {
         this.finishAssistant();
         this._busy = false;
         let usage: Partial<UsageTotals> | undefined;
-        const mu = (msg as { modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number; contextWindow: number }> }).modelUsage;
-        let trackerTurn: ReturnType<TurnUsageTracker['finishTurn']>;
-        if (typeof msg.total_cost_usd === 'number') this.usage.setCumulative({ costUsd: msg.total_cost_usd });
-        if (mu) {
-          const cumulative: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
-          for (const v of Object.values(mu)) {
-            cumulative.inputTokens += v.inputTokens;
-            cumulative.outputTokens += v.outputTokens;
-            cumulative.cacheReadTokens += v.cacheReadInputTokens;
-            cumulative.cacheWriteTokens += v.cacheCreationInputTokens;
-            cumulative.costUsd += v.costUSD;
-            cumulative.contextWindow = v.contextWindow || cumulative.contextWindow;
-          }
+        const mu = (msg as { modelUsage?: Record<string, ModelUsage> }).modelUsage;
+        const cumulative = mu && Object.keys(mu).length > 0 ? this.modelUsageTotals(mu) : undefined;
+        // Cost is settled in one step: the CLI's `total_cost_usd` is the same figure modelUsage breaks
+        // down, and reporting the guess first would seed the tracker with exactly the value the catalog
+        // override replaces — its counters only move up, so the higher number would stick.
+        const costUsd = cumulative ? cumulative.costUsd : typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd : undefined;
+        if (costUsd !== undefined) this.usage.setCumulative({ costUsd });
+        if (cumulative) {
           const u = (msg as { usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }).usage;
           this.usage.setCumulative({
             inputTokens: cumulative.inputTokens,
             outputTokens: cumulative.outputTokens,
             cacheReadTokens: cumulative.cacheReadTokens,
             cacheWriteTokens: cumulative.cacheWriteTokens,
-            costUsd: cumulative.costUsd,
             contextWindow: cumulative.contextWindow,
             contextTokens: u ? (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) : undefined
           });
         }
         // Finish even when the SDK omitted modelUsage: total_cost_usd is still useful, and the
         // tracker must close its baseline so the next streamed turn starts cleanly.
-        trackerTurn = this.usage.finishTurn();
+        const trackerTurn = this.usage.finishTurn();
         const turnUsage = trackerTurn.usage;
-        if (mu) usage = turnUsage ? { inputTokens: turnUsage.inputTokens, outputTokens: turnUsage.outputTokens, cacheReadTokens: turnUsage.cacheReadTokens, cacheWriteTokens: turnUsage.cacheWriteTokens } : undefined;
+        if (cumulative) usage = turnUsage ? { inputTokens: turnUsage.inputTokens, outputTokens: turnUsage.outputTokens, cacheReadTokens: turnUsage.cacheReadTokens, cacheWriteTokens: turnUsage.cacheWriteTokens } : undefined;
         this.usageReporter.report(trackerTurn.totals);
         this.usageReporter.flush();
         const turnCost = turnUsage?.costUsd ?? 0;
@@ -575,6 +603,12 @@ export class ClaudeAdapter implements HarnessAdapter {
         const isError = turnMsg.is_error || msg.subtype !== 'success';
         const interrupted = turnMsg.terminal_reason === 'aborted_streaming' || turnMsg.terminal_reason === 'aborted_tools';
         const status = interrupted ? 'interrupted' : isError ? 'failed' : 'completed';
+        // The turn is as long as the app watched it, the way every other harness reports it and the
+        // way the Usage panel reads "turn wall time". The SDK's `duration_ms` measures the CLI's own
+        // agent loop and drops the wall time a subagent fan-out spends working (9.2s reported against
+        // a 343s turn), while the tokens counted for that turn come from the cumulative modelUsage
+        // that *does* include the subagents — the mismatch read as 16k tok/s on a single turn.
+        const wallMs = this.turnStartedAt > 0 ? Math.max(0, Date.now() - this.turnStartedAt) : 0;
         this.ctx.emit({
           type: 'item.upsert',
           item: {
@@ -582,12 +616,13 @@ export class ClaudeAdapter implements HarnessAdapter {
             kind: 'turn',
             ts: Date.now(),
             status,
-            durationMs: msg.duration_ms ?? Date.now() - this.turnStartedAt,
+            durationMs: wallMs || msg.duration_ms,
             costUsd: turnCost,
             usage,
             error: isError ? `${msg.subtype}${'result' in msg && msg.result ? `: ${msg.result}` : ''}` : undefined
           }
         });
+        this.turnStartedAt = 0;
         this.ctx.emit({ type: 'status', status: 'idle' });
         return;
       }
