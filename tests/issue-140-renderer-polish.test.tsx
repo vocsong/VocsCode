@@ -158,3 +158,12 @@ describe('issue 140 renderer error states', () => {
     expect(invoke).toHaveBeenCalledWith('providers:save', expect.objectContaining({ id: 'openai', baseUrl: 'https://two.example/v1' }));
   });
 });
+
+describe('settings navigation icons', () => {
+  it('marks Providers & keys with the key icon instead of the bolt it shared with Remote access', () => {
+    render(<SettingsView />);
+    const icon = (name: string): string | null => screen.getByRole('button', { name }).querySelector('svg')?.getAttribute('data-icon') ?? null;
+    expect(icon('Providers & keys')).toBe('key');
+    expect(icon('Remote access')).toBe('bolt');
+  });
+});

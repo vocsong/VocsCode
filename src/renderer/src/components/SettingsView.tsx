@@ -34,7 +34,7 @@ export function SettingsView() {
             ['general', 'General', 'settings'],
             ['shortcuts', 'Shortcuts', 'keyboard'],
             ['terminal', 'Terminal', 'terminal'],
-            ['providers', 'Providers & keys', 'bolt'],
+            ['providers', 'Providers & keys', 'key'],
             ['harnesses', 'Harnesses', 'shield'],
             ['pi', 'Pi', 'sparkles'],
             ['acp', 'ACP agents', 'fork'],
