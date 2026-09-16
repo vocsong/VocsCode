@@ -1030,6 +1030,29 @@ export interface FolderStyle {
   icon?: string;
 }
 
+/**
+ * The New Session dialog's remembered choices for one project folder, keyed by project root.
+ *
+ * Worktree isolation is decided per project and is the reason this record exists: a folder that
+ * isolates its sessions and a folder that must not are both normal, and one app-wide answer made
+ * each new folder inherit the other one's choice. Harness, model, permission mode and the ACP
+ * agent are remembered here as well, with the app-wide defaults (Settings) filling any field the
+ * folder has no record of — those defaults also read as "what I usually use", while an unasked-for
+ * worktree is visible only after the fact (a branch and a checkout appear), so the two are not the
+ * same kind of preference.
+ */
+export interface FolderSessionDefaults {
+  harness?: HarnessId;
+  /** Model per harness, same shape as `AppSettings.defaultModelByHarness`. */
+  modelByHarness?: Partial<Record<HarnessId, ModelRef>>;
+  /** Absent means the harness's own default, as in the dialog's "Default" option. */
+  effort?: EffortLevel;
+  permissionMode?: PermissionMode;
+  useWorktree?: boolean;
+  /** ACP agent id, for harness `acp`. */
+  acpAgent?: string;
+}
+
 export interface AppSettings {
   version: 1;
   theme: ThemeId;
@@ -1040,9 +1063,12 @@ export interface AppSettings {
   defaultEffort?: EffortLevel;
   /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */
   autoCompactionThreshold?: AutoCompactionThreshold;
-  /** Last chosen worktree isolation decision in the new-session dialog. */
-  defaultUseWorktree?: boolean;
   defaultModelByHarness: Partial<Record<HarnessId, ModelRef>>;
+  /**
+   * New-session choices remembered per project folder; a folder with no record starts on the
+   * app-wide defaults above. See FolderSessionDefaults for why worktree isolation lives only here.
+   */
+  folderSessionDefaults?: Record<string, FolderSessionDefaults>;
   /** Starred models, always listed first in the model pickers. */
   favoriteModels: ModelRef[];
   notifications: boolean;

@@ -21,7 +21,6 @@ function settings(defaultEffort?: EffortLevel) {
     defaultHarness: 'claude',
     defaultPermissionMode: 'ask',
     defaultEffort,
-    defaultUseWorktree: false,
     defaultModelByHarness: {},
     favoriteModels: [],
     acpAgents: []

@@ -35,7 +35,7 @@ That installs everything (including dev dependencies, even if your environment s
 
 **Your agents can work hands-off.** Pick a permission mode per session — Ask, Accept edits, Plan, Auto, or Full access — and every harness respects it the same way. Dangerous commands always ask first.
 
-**Nothing gets lost.** Threads grouped by project, isolated git worktrees per session, diff review with per-file revert and commit, steer a running turn or queue your next message, `/goal` with an iteration guard.
+**Nothing gets lost.** Threads grouped by project, isolated git worktrees per session, diff review with per-file revert and commit, steer a running turn or queue your next message, `/goal` with an iteration guard. Each project remembers how you start it — harness, model, permission mode and whether sessions isolate in a worktree.
 
 **Git without the ceremony.** A brand-new folder gets a guided setup — initialize, first commit, and publish to GitHub, one click through the GitHub CLI or step by step on github.com.
 

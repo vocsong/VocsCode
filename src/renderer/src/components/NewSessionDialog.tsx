@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
+import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
 import { invoke } from '../api';
 import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
@@ -20,19 +21,21 @@ export function NewSessionDialog() {
   const activeSession = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
 
   // The folder is chosen before the dialog opens (sidebar button or per-folder +); the dialog only
-  // configures harness, model and options for that folder.
+  // configures harness, model and options for that folder. What it opens on is the folder's own
+  // remembered choices, falling back field by field to the app-wide defaults (see session-defaults).
   const projectRoot = useStore((s) => s.newSessionRoot) ?? activeSession?.config.projectRoot ?? '';
-  const [harness, setHarness] = useState<HarnessId>(settings.defaultHarness);
+  const initial = resolveNewSessionDefaults(settings, projectRoot);
+  const [harness, setHarness] = useState<HarnessId>(initial.harness);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(!!projectRoot);
   const [modelsError, setModelsError] = useState<string | undefined>();
-  const [model, setModel] = useState<ModelRef | undefined>(settings.defaultModelByHarness[settings.defaultHarness]);
-  const [effort, setEffort] = useState<EffortLevel | ''>(settings.defaultEffort ?? '');
-  const [mode, setMode] = useState<PermissionMode>(settings.defaultPermissionMode);
-  const [useWorktree, setUseWorktree] = useState(settings.defaultUseWorktree ?? false);
+  const [model, setModel] = useState<ModelRef | undefined>(initial.model);
+  const [effort, setEffort] = useState<EffortLevel | ''>(initial.effort);
+  const [mode, setMode] = useState<PermissionMode>(initial.permissionMode);
+  const [useWorktree, setUseWorktree] = useState(initial.useWorktree);
   // Undefined until the folder has been probed; worktree isolation is offered only for a repository.
   const [folderIsRepo, setFolderIsRepo] = useState<boolean | undefined>(undefined);
-  const [acpAgent, setAcpAgent] = useState(settings.acpAgents[0]?.id ?? 'dsh');
+  const [acpAgent, setAcpAgent] = useState(initial.acpAgent ?? settings.acpAgents[0]?.id ?? 'dsh');
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [goal, setGoal] = useState('');
@@ -94,14 +97,14 @@ export function NewSessionDialog() {
     setModels([]);
     setModelsError(undefined);
     setModelsLoading(!!projectRoot);
-    setModel(settings.defaultModelByHarness[harness]);
+    setModel(rememberedModel(settings, projectRoot, harness));
     if (!projectRoot) return;
     invoke('harness:models', { harness, acpAgent, projectRoot })
       .then((r) => {
         if (cancelled) return;
         setModels(r.models);
         setModelsError(r.error);
-        if (!settings.defaultModelByHarness[harness]) {
+        if (!rememberedModel(settings, projectRoot, harness)) {
           const def = r.models.find((m) => m.isDefault) ?? r.models[0];
           if (def) setModel({ provider: def.provider, model: def.id });
         }
@@ -149,12 +152,22 @@ export function NewSessionDialog() {
         maxBudgetUsd: maxBudget ? Number(maxBudget) : undefined
       };
       // Persist before creation so an initial prompt also sees an explicit switch back to the
-      // harness default instead of inheriting the previously remembered effort.
+      // harness default instead of inheriting the previously remembered effort. The folder's own
+      // record is what the next dialog on this project opens on; the app-wide values are kept as
+      // they were (effort is shared with live session switches, model with cross-harness forks).
       await rememberEffort(selectedEffort || undefined, {
         defaultHarness: harness,
         defaultPermissionMode: mode,
-        defaultUseWorktree: useWorktree,
-        defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model }
+        defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model },
+        folderSessionDefaults: withFolderSessionDefaults(settings, projectRoot, {
+          harness,
+          modelByHarness: { ...(settings.folderSessionDefaults?.[projectRoot]?.modelByHarness ?? {}), [harness]: model },
+          effort: selectedEffort || undefined,
+          permissionMode: mode,
+          useWorktree,
+          // Only an ACP session records an agent; another harness must not erase the folder's pick.
+          ...(harness === 'acp' ? { acpAgent } : {})
+        })
       });
       const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, initialImages: images.length ? images : undefined, goal: goal.trim() || undefined });
       close();

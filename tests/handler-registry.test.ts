@@ -177,7 +177,8 @@ describe('handler registry', () => {
       collapsedFolders: ['G:/proj/a'],
       recentProjects: ['G:/proj/a', 'G:/proj/b'],
       gitSetupSkipped: ['G:/proj/a'],
-      folderStyles: { 'G:/proj/a': { color: '#5b9bf8' }, 'G:/proj/b': { icon: 'bolt' } }
+      folderStyles: { 'G:/proj/a': { color: '#5b9bf8' }, 'G:/proj/b': { icon: 'bolt' } },
+      folderSessionDefaults: { 'G:/proj/a': { useWorktree: true }, 'G:/proj/b': { harness: 'pi' } }
     });
     const before = pushes.filter(([c]) => c === PUSH_CHANNELS.settingsChanged).length;
 
@@ -195,6 +196,8 @@ describe('handler registry', () => {
     expect(after.recentProjects).toEqual(['G:/proj/b']);
     expect(after.gitSetupSkipped).toEqual([]);
     expect(after.folderStyles).toEqual({ 'G:/proj/b': { icon: 'bolt' } });
+    // The removed folder's remembered new-session choices go with it; the other folder keeps its own.
+    expect(after.folderSessionDefaults).toEqual({ 'G:/proj/b': { harness: 'pi' } });
     // The other folder keeps its session, and the renderer is told about the new settings.
     expect(live.map((s) => s.id)).toEqual(['s_c']);
     expect(pushes.filter(([c]) => c === PUSH_CHANNELS.settingsChanged).length).toBe(before + 1);

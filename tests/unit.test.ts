@@ -342,11 +342,29 @@ describe('settings normalization', () => {
     expect(normalizeSettings({ theme: 'dark' }).defaultHarness).toBe('pi');
     expect(normalizeSettings({ defaultHarness: 'claude' }).defaultHarness).toBe('claude');
   });
-  it('remembers the worktree isolation decision and defaults it to off', () => {
-    expect(defaultSettings().defaultUseWorktree).toBe(false);
-    expect(normalizeSettings({ defaultUseWorktree: true }).defaultUseWorktree).toBe(true);
-    // Settings written before this key existed fall back to off.
-    expect(normalizeSettings({ theme: 'dark' }).defaultUseWorktree).toBe(false);
+  it('keeps well-formed per-folder new-session defaults and drops malformed ones', () => {
+    expect(defaultSettings().folderSessionDefaults).toEqual({});
+    const stored = {
+      'G:/a': { harness: 'claude', permissionMode: 'plan', effort: 'high', useWorktree: true, acpAgent: 'dsh', modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } },
+      'G:/b': { harness: 'nope', permissionMode: 'yolo', effort: 'ultra', useWorktree: 'yes', acpAgent: '  ' },
+      'G:/c': 'not an object'
+    };
+    const s = normalizeSettings({ folderSessionDefaults: stored as never });
+    expect(s.folderSessionDefaults).toEqual({
+      'G:/a': {
+        harness: 'claude',
+        permissionMode: 'plan',
+        effort: 'high',
+        useWorktree: true,
+        acpAgent: 'dsh',
+        modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } }
+      }
+    });
+  });
+  it('drops the retired app-wide worktree default so it cannot override a folder', () => {
+    const s = normalizeSettings({ defaultUseWorktree: true } as never);
+    expect('defaultUseWorktree' in s).toBe(false);
+    expect(s.folderSessionDefaults).toEqual({});
   });
   it('keeps a well-formed utility model and drops malformed ones', () => {
     expect(normalizeSettings({ utilityModel: { provider: 'deepseek', model: 'deepseek-chat' } }).utilityModel).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });

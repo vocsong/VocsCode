@@ -305,7 +305,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     without('collapsedFolders');
     without('recentProjects');
     without('gitSetupSkipped');
-    for (const key of ['folderStyles', 'mcpProjectState'] as const) {
+    for (const key of ['folderStyles', 'mcpProjectState', 'folderSessionDefaults'] as const) {
       const map = cur[key];
       if (map && root in map) {
         const next = { ...map };

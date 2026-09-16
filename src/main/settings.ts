@@ -1,10 +1,10 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
-import type { AcpAgentPreset, AppSettings, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, ProviderConfig } from '../shared/types';
+import type { AcpAgentPreset, AppSettings, FolderSessionDefaults, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, PermissionMode, ProviderConfig } from '../shared/types';
 import { MCP_BUILTIN_IDS } from '../shared/types';
 import type { KnowledgeSettings } from '../shared/knowledge';
 import { isAutoCompactionThreshold } from '../shared/compaction';
-import { HARNESSES, isEffortLevel } from '../shared/harness-meta';
+import { HARNESSES, PERMISSION_MODE_LABELS, isEffortLevel } from '../shared/harness-meta';
 import { pruneModelOverrides } from '../shared/model-overrides';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
@@ -205,8 +205,8 @@ export function defaultSettings(): AppSettings {
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
     autoCompactionThreshold: undefined,
-    defaultUseWorktree: false,
     defaultModelByHarness: {},
+    folderSessionDefaults: {},
     favoriteModels: [],
     notifications: true,
     soundOnApproval: false,
@@ -241,6 +241,42 @@ export function defaultSettings(): AppSettings {
 function normalizeModelRef(stored: unknown): ModelRef | undefined {
   const m = stored as Partial<ModelRef> | undefined;
   return m && typeof m.provider === 'string' && typeof m.model === 'string' ? { provider: m.provider, model: m.model } : undefined;
+}
+
+/** A `provider/model` map keyed by harness; unknown harness keys and malformed refs are dropped. */
+function normalizeModelRefMap(stored: unknown): Partial<Record<HarnessId, ModelRef>> | undefined {
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return undefined;
+  const out: Partial<Record<HarnessId, ModelRef>> = {};
+  for (const [id, raw] of Object.entries(stored as Record<string, unknown>)) {
+    if (!HARNESSES.some((h) => h.id === id)) continue;
+    const m = normalizeModelRef(raw);
+    if (m) out[id as HarnessId] = m;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Per-folder new-session defaults: only well-formed entries survive, so a hand-edited
+ * settings.json cannot hand a session an unknown harness, permission mode or effort level.
+ * A record left with no fields (every key invalid) is dropped rather than kept as an empty shell.
+ */
+export function normalizeFolderSessionDefaults(stored: unknown): Record<string, FolderSessionDefaults> {
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
+  const out: Record<string, FolderSessionDefaults> = {};
+  for (const [root, raw] of Object.entries(stored as Record<string, unknown>)) {
+    if (!root || !raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const s = raw as Record<string, unknown>;
+    const d: FolderSessionDefaults = {};
+    if (typeof s.harness === 'string' && HARNESSES.some((h) => h.id === s.harness)) d.harness = s.harness as HarnessId;
+    const models = normalizeModelRefMap(s.modelByHarness);
+    if (models) d.modelByHarness = models;
+    if (isEffortLevel(s.effort)) d.effort = s.effort;
+    if (typeof s.permissionMode === 'string' && s.permissionMode in PERMISSION_MODE_LABELS) d.permissionMode = s.permissionMode as PermissionMode;
+    if (typeof s.useWorktree === 'boolean') d.useWorktree = s.useWorktree;
+    if (typeof s.acpAgent === 'string' && s.acpAgent.trim()) d.acpAgent = s.acpAgent.trim().slice(0, 64);
+    if (Object.keys(d).length) out[root] = d;
+  }
+  return out;
 }
 
 /** Vesta's panel placement; a hand-edited or stale position must not push it off screen. */
@@ -373,6 +409,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     goalDefaults: { ...d.goalDefaults, ...(stored.goalDefaults ?? {}) },
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
+    folderSessionDefaults: normalizeFolderSessionDefaults(stored.folderSessionDefaults),
     folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderOrder: Array.isArray(stored.folderOrder) ? stored.folderOrder.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     collapsedFolders: Array.isArray(stored.collapsedFolders) ? stored.collapsedFolders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
@@ -398,6 +435,9 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
   };
   // The GitNexus serving-mode key is retired; drop it so the spread over `stored` cannot keep it.
   delete (merged as AppSettings & { gitnexus?: unknown }).gitnexus;
+  // Worktree isolation is remembered per folder now (FolderSessionDefaults); the app-wide answer
+  // would only make a new folder inherit another project's choice.
+  delete (merged as AppSettings & { defaultUseWorktree?: unknown }).defaultUseWorktree;
   // Wrong-shaped arrays in settings.json must not break boot: coerce to arrays before use.
   const storedProviders = Array.isArray(stored.providers) ? stored.providers : [];
   for (const bp of BUILTIN_PROVIDERS) {

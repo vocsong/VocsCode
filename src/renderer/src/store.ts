@@ -4,6 +4,7 @@ import type { AgentState } from '../../shared/agent';
 import { EMPTY_AGENT_STATE } from '../../shared/agent';
 import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
+import { resolveNewSessionDefaults } from '../../shared/session-defaults';
 import { invoke, on } from './api';
 import { recencyAt, sortSessionRows } from './sessionOrder';
 
@@ -657,15 +658,17 @@ export const useStore = create<State>((set, get) => ({
   async createQuickSession(root, first) {
     const settings = get().settings;
     if (!settings) return;
-    const harness = settings.defaultHarness;
+    // Same memory as the dialog: the folder's remembered choices, app-wide defaults for the rest.
+    const defaults = resolveNewSessionDefaults(settings, root);
+    const harness = defaults.harness;
     const config: SessionConfig = {
       harness,
       projectRoot: root,
-      model: settings.defaultModelByHarness[harness],
-      effort: settings.defaultEffort,
-      permissionMode: settings.defaultPermissionMode,
-      useWorktree: settings.defaultUseWorktree ?? false,
-      acpAgent: harness === 'acp' ? settings.acpAgents[0]?.id : undefined
+      model: defaults.model,
+      effort: defaults.effort || undefined,
+      permissionMode: defaults.permissionMode,
+      useWorktree: defaults.useWorktree,
+      acpAgent: harness === 'acp' ? defaults.acpAgent : undefined
     };
     try {
       const meta = await invoke('sessions:create', {

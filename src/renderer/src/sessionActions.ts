@@ -1,5 +1,6 @@
 /** Shared renderer actions for changing and archiving sessions. */
 import type { AppSettings, EffortLevel, SessionMeta } from '../../shared/types';
+import { withFolderSessionDefaults } from '../../shared/session-defaults';
 import { invoke } from './api';
 import { basename } from './format';
 import { askConfirm } from './components/ui';
@@ -33,8 +34,13 @@ export async function setSessionEffort(id: string, effort: EffortLevel, toast: T
     toast(`Reasoning effort switch failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
     return;
   }
+  // The app-wide effort preference is shared with the dialog, and the session's own project keeps
+  // the choice too: otherwise the next dialog on that folder would offer the effort it was last
+  // *created* with, and the switch just made would look forgotten.
+  const root = useStore.getState().sessions.find((s) => s.id === id)?.config.projectRoot;
+  const patch = root ? { folderSessionDefaults: withFolderSessionDefaults(useStore.getState().settings, root, { effort }) } : {};
   try {
-    await persistEffort(selection, effort);
+    await persistEffort(selection, effort, patch);
   } catch (e) {
     toast(`Reasoning effort changed, but could not be remembered: ${e instanceof Error ? e.message : String(e)}`, 'error');
   }

@@ -112,7 +112,10 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
         <span className="field-label">Theme</span>
         <ThemePicker value={settings.theme} onChange={(theme) => update({ theme })} />
       </div>
-      <Field label="Default harness">
+      <Field
+        label="Default harness"
+        hint="Used by folders that have no remembered choices yet: the New Session dialog keeps each project's own harness, model, permission mode and worktree setting."
+      >
         <select value={settings.defaultHarness} onChange={(e) => update({ defaultHarness: e.target.value as HarnessId })}>
           {HARNESSES.map((h) => (
             <option key={h.id} value={h.id}>

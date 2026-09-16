@@ -18,8 +18,8 @@ const settings = {
   defaultHarness: 'claude',
   defaultPermissionMode: 'ask',
   defaultEffort: undefined,
-  defaultUseWorktree: false,
   defaultModelByHarness: {},
+  folderSessionDefaults: {},
   favoriteModels: [],
   acpAgents: [],
 } as unknown as AppSettings;
@@ -128,7 +128,7 @@ describe('NewSessionDialog', () => {
   // A plain folder cannot host a worktree: `git worktree add` fails there, so creation died with
   // "Worktrees require a git repository." — including when only the remembered default asked for it.
   it('disables worktree isolation for a folder with no git repository and never asks for it', async () => {
-    useStore.setState({ settings: { ...settings, defaultUseWorktree: true } } as never);
+    useStore.setState({ settings: { ...settings, folderSessionDefaults: { 'G:/project': { useWorktree: true } } } } as never);
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'harness:models') return { models: [] };
       if (channel === 'sessions:create') return createdSession;

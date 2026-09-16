@@ -20,7 +20,6 @@ const settings = {
   defaultHarness: 'native',
   defaultPermissionMode: 'ask',
   defaultEffort: undefined,
-  defaultUseWorktree: false,
   defaultModelByHarness: {},
   favoriteModels: [],
   acpAgents: [],

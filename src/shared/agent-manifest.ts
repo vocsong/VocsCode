@@ -11,6 +11,7 @@ import type { AppSettings, HarnessId, McpServerDef, ModelInfo, ModelRef, Session
 import type { RiskTier } from './agent';
 import { HARNESSES } from './harness-meta';
 import { modelName, parseTypedModel } from './model-names';
+import { rememberedModel, resolveNewSessionDefaults } from './session-defaults';
 
 /** What a capability can consult while building its channel request. */
 export interface CapabilityContext {
@@ -82,8 +83,8 @@ function isHarnessId(v: string): v is HarnessId {
 }
 
 /** The harness a new session runs on: the argument when given, else the configured default. */
-export function sessionHarness(args: Record<string, unknown>, settings: AppSettings): HarnessId {
-  const harness = str(args.harness) || settings.defaultHarness;
+export function sessionHarness(args: Record<string, unknown>, settings: AppSettings, fallback: HarnessId = settings.defaultHarness): HarnessId {
+  const harness = str(args.harness) || fallback;
   if (!isHarnessId(harness)) throw new Error(`Unknown harness "${harness}". Harness ids: ${HARNESS_IDS.join(', ')}.`);
   return harness;
 }
@@ -259,7 +260,7 @@ export const AGENT_CAPABILITIES: AgentCapability[] = [
         project_root: { type: 'string', description: 'Absolute path of the project folder.' },
         prompt: { type: 'string', description: 'First message to send once the session starts.' },
         title: { type: 'string' },
-        harness: { type: 'string', description: `Harness id (${HARNESS_IDS.join(', ')}); defaults to the configured default.` },
+        harness: { type: 'string', description: `Harness id (${HARNESS_IDS.join(', ')}); defaults to the one remembered for that folder.` },
         model: { type: 'string', description: 'Model to start on as "provider/model" (e.g. "anthropic/claude-opus-5"), from the models the chosen harness offers. Omit for the harness default.' },
         use_worktree: { type: 'boolean', description: 'Run in an isolated git worktree.' }
       },
@@ -270,16 +271,20 @@ export const AGENT_CAPABILITIES: AgentCapability[] = [
     summarize: (a) =>
       `Create a session in ${str(a.project_root, '?')}${a.model ? ` on ${str(a.model)}` : ''}${a.prompt ? ` and send: "${str(a.prompt).slice(0, 80)}"` : ''}`,
     request: async (a, ctx) => {
-      const harness = sessionHarness(a, ctx.settings);
+      const projectRoot = str(a.project_root);
+      // A session started for a folder follows that folder's remembered choices, the same ones the
+      // New Session dialog opens on; an explicit harness argument still wins over the folder's.
+      const defaults = resolveNewSessionDefaults(ctx.settings, projectRoot);
+      const harness = sessionHarness(a, ctx.settings, defaults.harness);
       const typed = str(a.model);
       return {
         config: {
           harness,
-          projectRoot: str(a.project_root),
-          permissionMode: ctx.settings.defaultPermissionMode,
-          model: typed ? await resolveSessionModel(typed, harness, ctx) : ctx.settings.defaultModelByHarness[harness],
-          effort: ctx.settings.defaultEffort,
-          useWorktree: typeof a.use_worktree === 'boolean' ? a.use_worktree : ctx.settings.defaultUseWorktree
+          projectRoot,
+          permissionMode: defaults.permissionMode,
+          model: typed ? await resolveSessionModel(typed, harness, ctx) : rememberedModel(ctx.settings, projectRoot, harness),
+          effort: defaults.effort || undefined,
+          useWorktree: typeof a.use_worktree === 'boolean' ? a.use_worktree : defaults.useWorktree
         },
         title: str(a.title) || undefined,
         initialPrompt: str(a.prompt) || undefined
