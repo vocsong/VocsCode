@@ -11,6 +11,7 @@ import type { SettingsStore } from './settings';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
 import type { UpdateService } from './updater';
+import type { GitnexusIndexer } from './mcp';
 
 export interface IpcDeps {
   settings: SettingsStore;
@@ -22,6 +23,8 @@ export interface IpcDeps {
   search: SearchIndex;
   /** Layer 2 project knowledge; absent in tests that do not exercise it. */
   knowledge?: KnowledgeService;
+  /** Passive built-in GitNexus freshness queue. */
+  gitnexusIndexer?: GitnexusIndexer;
   /** Remote access host (docs/REMOTE-ACCESS.md), wired in index.ts. */
   remote?: RemoteHost;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
@@ -110,6 +113,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     analytics: deps.analytics,
     search: deps.search,
     knowledge: deps.knowledge,
+    gitnexusIndexer: deps.gitnexusIndexer,
     remote: deps.remote,
     remoteMirror: deps.remoteMirror,
     updater: deps.updater,

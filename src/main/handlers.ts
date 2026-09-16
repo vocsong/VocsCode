@@ -11,7 +11,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import { Vesta } from './agents';
 import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAgent, setProjectAgentTracked } from './agent-files';
 import { createClaudeAgent, isPinnedModel, listClaudeAgents, setClaudeAgentModel } from './claude-agents';
-import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment } from '../shared/types';
+import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment, SessionMeta } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
 import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitRoot, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
@@ -20,13 +20,13 @@ import type { KnowledgeService } from './knowledge/service';
 import type { UpdateState } from '../shared/types';
 import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
-import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
+import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import { enrichModelsFromProviders } from './models/static-models';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
-import { runCapture, which } from './runtime';
+import { which } from './runtime';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
@@ -79,6 +79,8 @@ export interface HandlerDeps {
   search: SearchIndex;
   /** Layer 2 project knowledge (wiki store + jobs); present when wired up in index.ts. */
   knowledge?: KnowledgeService;
+  /** Best-effort GitNexus freshness queue; absent in tests/hosts that do not run the built-in. */
+  gitnexusIndexer?: Pick<GitnexusIndexer, 'schedule' | 'index'>;
   /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
   remote?: RemoteHost;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
@@ -485,15 +487,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('mcp:project:index', async ({ sessionId }) => {
     const session = sessions.get(sessionId);
     if (!session) return { ok: false, error: 'Session not found' };
-    const binary = which('gitnexus') ?? which('npx');
-    if (!binary) return { ok: false, error: 'GitNexus is not available. Install gitnexus or npx, then try again.' };
-    const args = binary.toLowerCase().endsWith('npx') || binary.toLowerCase().endsWith('npx.cmd')
-      ? ['-y', 'gitnexus@latest', 'analyze']
-      : ['analyze'];
-    const result = await runCapture(binary, args, { cwd: session.config.projectRoot || session.cwd, timeoutMs: 120_000 });
-    const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
-    if (result.code !== 0) return { ok: false, error: output || `GitNexus indexing failed${result.timedOut ? ' (timed out)' : ''}.` };
-    return { ok: true, output };
+    if (!deps.gitnexusIndexer) return { ok: false, error: 'GitNexus indexing is unavailable in this run.' };
+    return deps.gitnexusIndexer.index({ cwd: session.config.projectRoot || session.cwd, projectRoot: session.config.projectRoot, reason: 'manual' });
   });
   handle('mcp:inspect', async ({ def, sessionId }) => {
     const [checked] = normalizeMcpServers([def]);
@@ -534,8 +529,16 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     }
   });
 
+  const scheduleGitnexus = (session: SessionMeta, reason: GitnexusIndexReason): void => {
+    deps.gitnexusIndexer?.schedule({ cwd: session.cwd, projectRoot: session.config.projectRoot, reason });
+  };
+
   handle('sessions:list', () => sessions.list());
-  handle('sessions:create', (req) => sessions.create(req));
+  handle('sessions:create', async (req) => {
+    const session = await sessions.create(req);
+    scheduleGitnexus(session, 'session-start');
+    return session;
+  });
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
   handle('subagents:list', ({ id }) => sessions.subagentRuns(id));
@@ -643,7 +646,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     deps.log('info', `[${id}] transcript exported to ${res.filePath}`);
     return { path: res.filePath };
   });
-  handle('sessions:fork', ({ id, harness }) => sessions.fork(id, harness));
+  handle('sessions:fork', async ({ id, harness }) => {
+    const session = await sessions.fork(id, harness);
+    if (session) scheduleGitnexus(session, 'session-start');
+    return session;
+  });
   handle('sessions:moveTo', ({ id, cwd }) => sessions.moveTo(id, cwd));
   handle('sessions:goal', ({ id, action, objective, autoContinue, maxIterations }) => sessions.goal(id, action, { objective, autoContinue, maxIterations }));
 
@@ -763,7 +770,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
   handle('git:commit', async ({ sessionId, message }) => {
     const r = await gitCommit(cwdOf(sessionId), message);
-    if (r.ok) deps.knowledge?.recordEpisode(knowledgeScopeOf(sessionId), { kind: 'commit', sessionId, summary: message.trim().split('\n')[0].slice(0, 200), detail: r.output.slice(-600), at: new Date().toISOString() });
+    if (r.ok) {
+      deps.knowledge?.recordEpisode(knowledgeScopeOf(sessionId), { kind: 'commit', sessionId, summary: message.trim().split('\n')[0].slice(0, 200), detail: r.output.slice(-600), at: new Date().toISOString() });
+      const session = sessions.get(sessionId);
+      if (session) scheduleGitnexus(session, 'commit');
+    }
     return r;
   });
   // Local /pr and /merge run outside a turn, so nothing else triggers the sidebar's PR state check.
@@ -790,6 +801,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     else deps.log('warn', `[${sessionId}] PR creation failed: ${(r.output ?? 'unknown error').trim().slice(0, 600)}`);
     if (r.ok) sessions.refreshGitState(sessionId);
     if (r.ok) {
+      const session = sessions.get(sessionId);
+      if (session) scheduleGitnexus(session, 'pull-request');
       // PR reflection: the commits and a bounded patch are reflected over the whole wiki, then
       // ingested automatically. Gathering evidence is best-effort; the PR itself already succeeded.
       const evidence = await gitRangeEvidence(cwdOf(sessionId), base, head).catch(() => ({ commits: [], diff: '' }));
@@ -807,8 +820,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     sessions.note(sessionId, r.ok ? `Merged${head ? ` ${head}` : ''}: ${r.url ?? 'PR merged'}` : r.output ?? 'Failed to merge the PR', r.ok ? 'info' : 'error');
     if (r.ok) deps.log('info', `[${sessionId}] PR merged${head ? ` (${head})` : ''}: ${r.url ?? ''}`.trim());
     else deps.log('warn', `[${sessionId}] PR merge failed: ${(r.output ?? 'unknown error').trim().slice(0, 600)}`);
-    if (r.ok) sessions.refreshGitState(sessionId);
-    if (r.ok) deps.knowledge?.recordEpisode(knowledgeScopeOf(sessionId), { kind: 'merge', sessionId, summary: `Merged${head ? ` ${head}` : ''}${base ? ` into ${base}` : ''}`, detail: r.url, at: new Date().toISOString() });
+    if (r.ok) {
+      sessions.refreshGitState(sessionId);
+      const session = sessions.get(sessionId);
+      if (session) scheduleGitnexus(session, 'merge');
+      deps.knowledge?.recordEpisode(knowledgeScopeOf(sessionId), { kind: 'merge', sessionId, summary: `Merged${head ? ` ${head}` : ''}${base ? ` into ${base}` : ''}`, detail: r.url, at: new Date().toISOString() });
+    }
     return r;
   });
   handle('git:branches', ({ sessionId }) => gitBranches(cwdOf(sessionId)));
