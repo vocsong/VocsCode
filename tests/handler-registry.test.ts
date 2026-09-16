@@ -270,10 +270,17 @@ describe('handler registry', () => {
     expect(calls).not.toContain('openExternal:file:///etc/passwd');
   });
 
-  it('dispatches session handlers and fails unknown sessions', async () => {
-    const { registry } = stubDeps();
+  it('dispatches session handlers, passively indexes new sessions, and fails unknown sessions', async () => {
+    const indexed: unknown[] = [];
+    const { registry } = stubDeps({
+      gitnexusIndexer: {
+        schedule: (request: unknown) => void indexed.push(request),
+        index: async () => ({ ok: true })
+      }
+    });
     const created = (await registry.invoke('sessions:create', {})) as SessionMeta;
     expect(created.id).toBe('s_test');
+    expect(indexed).toEqual([{ cwd: ws, projectRoot: ws, reason: 'session-start' }]);
     expect(await registry.invoke('sessions:get', { id: 's_nope' })).toBeNull();
     await expect(registry.invoke('git:summary', { sessionId: 's_nope' })).rejects.toThrow('Session not found');
     // Guided-setup mutations resolve the session's cwd first, so an unknown id can never reach git
@@ -398,6 +405,22 @@ describe('mcp handlers', () => {
     const after = (await registry.invoke('mcp:project:state', { sessionId: 's_test', patch: { enabledRepo: ['db'] } })) as { effective: { enabled: boolean }[] };
     expect(after.effective.some((e) => e.enabled)).toBe(true);
     expect(deps.settings.get().mcpProjectState?.[ws]).toEqual({ enabledRepo: ['db'] });
+  });
+
+  it('delegates the explicit GitNexus index action through the serialized indexer', async () => {
+    const requests: unknown[] = [];
+    const { registry } = stubDeps({
+      gitnexusIndexer: {
+        schedule: () => undefined,
+        index: async (request: unknown) => {
+          requests.push(request);
+          return { ok: true, output: 'fresh' };
+        }
+      }
+    });
+
+    await expect(registry.invoke('mcp:project:index', { sessionId: 's_test' })).resolves.toEqual({ ok: true, output: 'fresh' });
+    expect(requests).toEqual([{ cwd: ws, projectRoot: ws, reason: 'manual' }]);
   });
 
   it('rejects an incomplete definition on inspect instead of spawning anything', async () => {

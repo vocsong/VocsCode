@@ -494,8 +494,14 @@ Rules:
   out of the shared server with `disabledBuiltin` — the switch above the share toggle on the
   repo's MCP tab. Either switch alone is enough to keep a session from receiving it, and the
   repo tab marks a built-in stuck off by the page switch with `off everywhere`.
-- Indexing is still the user's action: an unindexed repo is not injected at all, and the tab
-  says to run `gitnexus analyze` rather than failing the session.
+- Index freshness is passive: creating or forking a session, committing from the Changes panel,
+  opening a PR, and merging a PR enqueue `gitnexus analyze --skip-agents-md` for that session's
+  checkout. The queue is best-effort, serialized across repos, and coalesces duplicate hooks; it
+  never blocks the session/commit/PR action and never edits project instruction files. Failures go
+  to the app log and the existing Re-index button remains the explicit retry. Automatic runs respect
+  both the app-wide and per-repo GitNexus switches and refresh existing indexes only. The first index
+  remains an explicit action in the MCP tab, so merely starting a session never creates files in an
+  unindexed project.
 - Codex loads its own `~/.codex/config.toml` underneath whatever a session is handed, so a
   `[mcp_servers.gitnexus]` left there would start a second, unscoped copy beside the shared one.
   Both Codex adapters pass `ownedMcpIds()` to `toCodex`, which writes

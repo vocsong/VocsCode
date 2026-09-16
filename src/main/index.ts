@@ -15,7 +15,8 @@ import { registerIpc, pushToRenderer } from './ipc';
 import { KnowledgeService } from './knowledge/service';
 import { createKnowledgeCompleter } from './knowledge/llm';
 import { createGitnexusAnchorResolver } from './knowledge/anchors';
-import { gitnexusSharedRoots, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './mcp/gitnexus';
+import { GITNEXUS_SERVER_ID, gitnexusSharedRoots, isGitnexusIndexed, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './mcp/gitnexus';
+import { GitnexusIndexer } from './mcp/indexer';
 import { createLogger, describeError, type Logger } from './log';
 import { RendererRecovery } from './renderer-recovery';
 import { SharedGitnexusServer } from './mcp/shared-server';
@@ -176,10 +177,23 @@ async function main(): Promise<void> {
   // Prefer an installed `gitnexus`; otherwise run it through npx. Both are resolved, because a bare
   // `npx` on Windows is a `.cmd` shim only the resolved path lets `spawnTool` find.
   const gitnexusBinary = which('gitnexus');
+  const npxBinary = gitnexusBinary ? null : which('npx');
   const sharedGitnexus = new SharedGitnexusServer({
-    command: gitnexusBinary ?? which('npx') ?? 'npx',
+    command: gitnexusBinary ?? npxBinary ?? 'npx',
     baseArgs: gitnexusBinary ? ['serve'] : ['-y', 'gitnexus@latest', 'serve'],
     log: (level, message) => log(level, message)
+  });
+  const gitnexusIndexer = new GitnexusIndexer({
+    command: gitnexusBinary ?? npxBinary,
+    baseArgs: gitnexusBinary ? [] : ['-y', 'gitnexus@latest'],
+    enabled: (projectRoot) => {
+      const current = settings.get();
+      if ((current.mcpDisabledBuiltins ?? []).includes(GITNEXUS_SERVER_ID)) return false;
+      return !(current.mcpProjectState?.[projectRoot]?.disabledBuiltin ?? []).includes(GITNEXUS_SERVER_ID);
+    },
+    indexed: async ({ cwd, projectRoot }) =>
+      isGitnexusIndexed(await readGitnexusRegistry(realGitnexusHome()), { projectRoot, cwd }),
+    log: logTo
   });
 
   // Layer 2 project knowledge: the wiki store, its background jobs, and the digest every new
@@ -213,6 +227,11 @@ async function main(): Promise<void> {
     })
   });
 
+  // Git state can change outside the app (an agent may run `gh` itself). Remember the last state so
+  // the existing PR/merge poll becomes a passive indexing hook too, without re-indexing old parked
+  // sessions at every app start.
+  const indexedGitStates = new Map(store.list().map((session) => [session.id, session.status]));
+
   // Fan-out hooks that need to run on every sessions change (the update prompt waits for idle).
   const sessionsChangedHooks: Array<() => void> = [];
   // Declared before the manager so the push callbacks can mirror transcripts; assigned once the
@@ -239,6 +258,20 @@ async function main(): Promise<void> {
     },
     pushSessions: (list: SessionMeta[]) => {
       search.syncMeta(list);
+      const liveIds = new Set(list.map((session) => session.id));
+      for (const session of list) {
+        const previous = indexedGitStates.get(session.id);
+        indexedGitStates.set(session.id, session.status);
+        if (previous === session.status) continue;
+        if (session.status === 'pr' || session.status === 'merged') {
+          gitnexusIndexer.schedule({
+            cwd: session.cwd,
+            projectRoot: session.config.projectRoot,
+            reason: session.status === 'pr' ? 'pull-request' : 'merge'
+          });
+        }
+      }
+      for (const id of indexedGitStates.keys()) if (!liveIds.has(id)) indexedGitStates.delete(id);
       for (const hook of sessionsChangedHooks) hook();
       remoteMirror?.notifyIndex();
       pushAll(PUSH_CHANNELS.sessionsChanged, list);
@@ -333,6 +366,7 @@ async function main(): Promise<void> {
     analytics,
     search,
     knowledge,
+    gitnexusIndexer,
     remote: remoteHost,
     remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },
     updater: updater ?? undefined,

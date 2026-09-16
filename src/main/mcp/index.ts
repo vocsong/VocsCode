@@ -14,6 +14,7 @@ import { VOCS_MEMORY_SERVER_ID, hasMemoryWiki, memoryServerDef, vocsMemoryBaseDe
 export * from './effective';
 export * from './file';
 export * from './gitnexus';
+export * from './indexer';
 export * from './memory';
 export { inspectServer, type InspectOptions } from './client';
 
