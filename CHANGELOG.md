@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.4.0](https://github.com/vocsong/VocsCode/compare/v0.3.0...v0.4.0) (2026-09-16)
+
+
+### Features
+
+* Accept knowledge pages from their row, or all at once ([b1291ee](https://github.com/vocsong/VocsCode/commit/b1291ee55c4c48caaebccb6502066924948259bf))
+* Add Ctrl+Shift+N for a new session in the current folder ([#333](https://github.com/vocsong/VocsCode/issues/333)) ([86c805c](https://github.com/vocsong/VocsCode/commit/86c805ce5969416faf7ed02dc4b44bbe226651b0))
+* Add the OpenCode Go provider ([d56266c](https://github.com/vocsong/VocsCode/commit/d56266c2da6d38d819efb54761839b8b64333677))
+* Allow pin/unpin on archived sessions ([dd9641d](https://github.com/vocsong/VocsCode/commit/dd9641d47fd72d2f09623eee3e7d1efc16171857))
+* Automate project knowledge ingestion with labels and a relation graph ([#321](https://github.com/vocsong/VocsCode/issues/321)) ([0f8f092](https://github.com/vocsong/VocsCode/commit/0f8f092984e82f5a6ae115b6b0ad23948cdc5285))
+* Check a wiki page's anchors against GitNexus when it opens ([aafbeda](https://github.com/vocsong/VocsCode/commit/aafbedaecfaa34be82f003424d8d73cb2dbce06a))
+* Create Claude agent definitions from the Subagents panel ([#355](https://github.com/vocsong/VocsCode/issues/355)) ([606d1c6](https://github.com/vocsong/VocsCode/commit/606d1c61b09bade19d7434ddc67ac200f95dfa4a))
+* Give pi subagent children the session's MCP tools ([671f036](https://github.com/vocsong/VocsCode/commit/671f036ff5354c0639fde74ef0197ba7b6ab9cbd))
+* Give projects a reviewed knowledge wiki every harness can read ([a2386ef](https://github.com/vocsong/VocsCode/commit/a2386efcf23866b2783fe1e9351ab2297dcf202f))
+* Give the native loop the app's own MCP client ([7f436ee](https://github.com/vocsong/VocsCode/commit/7f436eef5c77629c23560ba0b82175e1ebb4c422))
+* Hand /goal to the harness's own goal command ([#342](https://github.com/vocsong/VocsCode/issues/342)) ([bc770fc](https://github.com/vocsong/VocsCode/commit/bc770fc6ca6b3779515653c66973db3733724207))
+* Harden remote access with an audit log and view-only mode ([dbf8c43](https://github.com/vocsong/VocsCode/commit/dbf8c439d1ad496c13ed04dbfb088d59919bd9a3))
+* Let agents review drafts and recall past session history ([bedebd6](https://github.com/vocsong/VocsCode/commit/bedebd6cb704bb6306d04b8c7710845a2cd60cd7))
+* Let Claude compact its own context instead of spending a turn on /compact ([#343](https://github.com/vocsong/VocsCode/issues/343)) ([780c365](https://github.com/vocsong/VocsCode/commit/780c365f066c5c9d82bc3f1de55f6203cdad4b7a))
+* Make relay routing deny-by-default and rate-limited ([65a0408](https://github.com/vocsong/VocsCode/commit/65a04085acebc67af8d17a97d7ea6b825e579ce2))
+* Mirror remote transcripts offline under an end-to-end key ([12dd4ef](https://github.com/vocsong/VocsCode/commit/12dd4ef3b4a9ec103c8e7ce416ab457b8d8984fb))
+* Move the sidebar session row's pin to the left side ([ccf19ee](https://github.com/vocsong/VocsCode/commit/ccf19ee0824ee0016fe0f4cd4d71e9734c5ad66d))
+* Offer an AGENTS.md memory snippet from the MCP panel ([#319](https://github.com/vocsong/VocsCode/issues/319)) ([5c467d5](https://github.com/vocsong/VocsCode/commit/5c467d585fc706ea9a422693b719927d64f51abd))
+* Override a Claude built-in from its row in the Models view ([#362](https://github.com/vocsong/VocsCode/issues/362)) ([01c1f48](https://github.com/vocsong/VocsCode/commit/01c1f489f72fa697633a0b9cb7aff15117377090))
+* Rebuild the Usage panel as a session analytics dashboard ([#318](https://github.com/vocsong/VocsCode/issues/318)) ([b7c5df8](https://github.com/vocsong/VocsCode/commit/b7c5df8da2c268b7ea3ba516f625c0f91bf9f41a))
+* Right-click menus for the sidebar and transcript, with folder removal ([#359](https://github.com/vocsong/VocsCode/issues/359)) ([6ab43c0](https://github.com/vocsong/VocsCode/commit/6ab43c0c9d841a5bfcaa4563526255b9d3c8bfc5))
+* Run Claude subagents on the session's model, configurable per agent type ([#354](https://github.com/vocsong/VocsCode/issues/354)) ([5823887](https://github.com/vocsong/VocsCode/commit/58238873e8ab2e214690229bf6b4bac334680ee5))
+* Serve the web app at /app on the landing origin ([87afade](https://github.com/vocsong/VocsCode/commit/87afadee297d3cb5e8da0f6770b1b5f380649468))
+* Show cache hit rate by harness and by harness × model ([#338](https://github.com/vocsong/VocsCode/issues/338)) ([bf38188](https://github.com/vocsong/VocsCode/commit/bf38188dac522d755bb76209fd3ad3ba14e2760b))
+* Show Claude's subagent runs in the Subagents panel ([#344](https://github.com/vocsong/VocsCode/issues/344)) ([c6902c1](https://github.com/vocsong/VocsCode/commit/c6902c10450ddc90e290239383e7ec5ecdc85972))
+* Show the goal a harness-owned /goal is working on ([#352](https://github.com/vocsong/VocsCode/issues/352)) ([257ab6e](https://github.com/vocsong/VocsCode/commit/257ab6ec0afea7aff8335611298bafbff65d41ab))
+* Show the live session count beside the sidebar title ([#325](https://github.com/vocsong/VocsCode/issues/325)) ([6cf882f](https://github.com/vocsong/VocsCode/commit/6cf882f6e80232e950b6cbfebc950c66adda3324))
+* Start issue sessions from the Git panel with a fix template ([#332](https://github.com/vocsong/VocsCode/issues/332)) ([31c50f7](https://github.com/vocsong/VocsCode/commit/31c50f72c4512264e66f130412b7bda6bd78f305))
+
+
+### Bug Fixes
+
+* Charge each session only for the spend it made itself ([#353](https://github.com/vocsong/VocsCode/issues/353)) ([d9abfc6](https://github.com/vocsong/VocsCode/commit/d9abfc6f62c9a5eb71031f453cba43d52525114f))
+* Close the Layer 2 memory defects left open by [#320](https://github.com/vocsong/VocsCode/issues/320) ([#335](https://github.com/vocsong/VocsCode/issues/335)) ([cbfedfb](https://github.com/vocsong/VocsCode/commit/cbfedfb8a5f4de88112ad9c4b4259b68a663eb63))
+* Count pi turns when the session stats request fails ([#345](https://github.com/vocsong/VocsCode/issues/345)) ([6d1727c](https://github.com/vocsong/VocsCode/commit/6d1727cca2d1f724cefb39a2c54d4a4a660f3fe2))
+* Draw the key icon on the Providers & keys settings row ([#360](https://github.com/vocsong/VocsCode/issues/360)) ([cdcf44b](https://github.com/vocsong/VocsCode/commit/cdcf44b303dcb65ed467fef037330009df1a0b6e))
+* Group every sidebar status count beside the wordmark ([4dcacf7](https://github.com/vocsong/VocsCode/commit/4dcacf771df7aba507c00797ac06f3cd05845d40))
+* Keep composer input history when switching sessions ([#356](https://github.com/vocsong/VocsCode/issues/356)) ([acdb327](https://github.com/vocsong/VocsCode/commit/acdb327489924e879164181835e5dfc05407392c))
+* Keep packaged e2e runs off the live update feed ([#309](https://github.com/vocsong/VocsCode/issues/309)) ([4c685f1](https://github.com/vocsong/VocsCode/commit/4c685f168fad39bb03c4526b32f4e96480dda9ad))
+* Keep project knowledge in the project wiki and surface generation failures ([651cca7](https://github.com/vocsong/VocsCode/commit/651cca7a82ecd074c73831f70fb2010a8809bc77))
+* Keep the right panel's bottom tab mounted across view changes ([f819752](https://github.com/vocsong/VocsCode/commit/f81975281e648cc8617cbd34aac20b354b863302))
+* Keep unpackaged runs off the installed app's profile and identity ([#302](https://github.com/vocsong/VocsCode/issues/302)) ([550dd70](https://github.com/vocsong/VocsCode/commit/550dd70c114dc81961cf7397090f7d83d1d9d7fa))
+* Lead the MCP panel with the AGENTS.md snippet card ([#328](https://github.com/vocsong/VocsCode/issues/328)) ([579632a](https://github.com/vocsong/VocsCode/commit/579632a9dc168db1e06506209f8c375b9c02c2c7))
+* Offer the app's bundled catalogs on the Pi harness ([ec74824](https://github.com/vocsong/VocsCode/commit/ec7482465e7443389e16f752dfa3da6f470d482d))
+* Offer worktree isolation only where a git repository exists ([#358](https://github.com/vocsong/VocsCode/issues/358)) ([378e867](https://github.com/vocsong/VocsCode/commit/378e867f643d08f24572c7747ecb1094279d2ee3))
+* Order the sidebar by the user's last message, not agent activity ([#336](https://github.com/vocsong/VocsCode/issues/336)) ([5884cee](https://github.com/vocsong/VocsCode/commit/5884ceea6807338545fd1ca50ab1d70c5032b172))
+* Preserve Pi prompts through Windows command shims ([3af686b](https://github.com/vocsong/VocsCode/commit/3af686b6da0c0a4c7851b6b9388bfdf8ad0d3d18))
+* Price codex app-server samples at the model that produced them ([#347](https://github.com/vocsong/VocsCode/issues/347)) ([2f68976](https://github.com/vocsong/VocsCode/commit/2f689760e5727ef8fa11c734c7c79bf08bd9fe68))
+* Price codex-exec turns so their spend is counted ([#346](https://github.com/vocsong/VocsCode/issues/346)) ([4e4cdb2](https://github.com/vocsong/VocsCode/commit/4e4cdb2d754c6ccb760f5abf0c3425ad485fe9be))
+* Re-sync the Branches panel with the remote and mark branches deleted on the server ([6b4edd8](https://github.com/vocsong/VocsCode/commit/6b4edd826eec520d06dc0f8394d4dd58a3cae6f5))
+* Record why Claude refused a subagent spawn, and raise the concurrent cap ([#357](https://github.com/vocsong/VocsCode/issues/357)) ([1400333](https://github.com/vocsong/VocsCode/commit/14003330e862f504995d1a11570de391cea1cda1))
+* Reprice stored Claude spend the CLI billed at its fallback rates ([#351](https://github.com/vocsong/VocsCode/issues/351)) ([ee2d1ff](https://github.com/vocsong/VocsCode/commit/ee2d1ffee61dfefd0259676c6a0ae24d723e82fd))
+* Select the next session when the active one is archived ([428b1a2](https://github.com/vocsong/VocsCode/commit/428b1a29e4aba43a29fcf62d143742e656b8cad9))
+* Send the OpenCode Go key as x-api-key on Claude's Anthropic route ([#331](https://github.com/vocsong/VocsCode/issues/331)) ([809f043](https://github.com/vocsong/VocsCode/commit/809f043b023e5965085c3478792652925e2f1acb))
+* Ship DeepSeek V4.1 Flash on the DeepSeek provider ([33f6cc2](https://github.com/vocsong/VocsCode/commit/33f6cc28575293a7538fe185e539810e3b645d1d))
+* Show the pin only on pinned rows and offer unpin on hover ([#323](https://github.com/vocsong/VocsCode/issues/323)) ([32f4550](https://github.com/vocsong/VocsCode/commit/32f45506ea6a05e4258e3f3ab750de91424680a4))
+* Stop a session and close its shells when it is archived ([#361](https://github.com/vocsong/VocsCode/issues/361)) ([f9fb708](https://github.com/vocsong/VocsCode/commit/f9fb70867a7da5304193705356dd3ddf6ed66b77))
+* Stop Claude sessions over-reporting spend and output speed ([#341](https://github.com/vocsong/VocsCode/issues/341)) ([c848fbc](https://github.com/vocsong/VocsCode/commit/c848fbc6c5d84e364562ab03efa076e4cdac10bf))
+* Stop the memory snippet promising an accept gate for knowledge_propose ([7069596](https://github.com/vocsong/VocsCode/commit/70695964518eed2e6e16a9e3e165d1db53ea95d5))
+* Stop the Usage panel double-counting reasoning tokens ([#348](https://github.com/vocsong/VocsCode/issues/348)) ([942e1dc](https://github.com/vocsong/VocsCode/commit/942e1dc0f4d51506847824b28a1a9cfec53afaee))
+
 ## [0.3.0](https://github.com/vocsong/VocsCode/compare/v0.2.0...v0.3.0) (2026-09-14)
 
 
