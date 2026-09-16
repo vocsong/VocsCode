@@ -156,7 +156,7 @@ describe('creating a definition from the panel', () => {
     });
     await settle();
 
-    expect(invoke).toHaveBeenCalledWith('claude-agents:create', { id: 's1', name: 'reviewer', description: 'Reviews a diff', prompt: 'You review diffs.' });
+    expect(invoke).toHaveBeenCalledWith('claude-agents:create', { id: 's1', name: 'reviewer', description: 'Reviews a diff', prompt: 'You review diffs.', model: null });
     // The editor closes and the list is read back, so the file on disk is the panel's source of truth.
     expect(document.querySelector('[data-testid="claude-agent-new-name"]')).toBeNull();
     expect(invoke.mock.calls.filter(([channel]) => channel === 'claude-agents:list').length).toBe(2);
@@ -202,6 +202,75 @@ describe('creating a definition from the panel', () => {
     expect(document.querySelector('[data-testid="claude-agent-new-builtin"]')).toBeNull();
     expect(document.querySelector('[data-testid="claude-agent-new-taken"]')).toBeNull();
     expect(saveButton().disabled).toBe(false);
+  });
+});
+
+describe('overriding a built-in from its row', () => {
+  it('opens the editor from a built-in row and writes the file that replaces it, pinning the chosen model', async () => {
+    invoke.mockImplementation((channel: string) =>
+      channel === 'claude-agents:list' ? Promise.resolve(info({ files: [] })) : Promise.resolve({ ok: true, path: 'G:/repo/.claude/agents/Explore.md' })
+    );
+    await act(async () => {
+      render(<ClaudeAgentModels session={session()} />);
+    });
+    await settle();
+
+    // The built-in has no definition behind it, so its row is the control that writes one.
+    const tile = document.querySelector('[data-testid="claude-agent-Explore"]') as HTMLButtonElement;
+    expect(tile.tagName).toBe('BUTTON');
+    expect(tile.textContent).toContain('override it to pin a model');
+
+    await act(async () => {
+      fireEvent.click(tile);
+    });
+    // The name is the built-in's and cannot change; the engine's description seeds the form, and the
+    // warning says what the write costs before the user commits to it.
+    const name = document.querySelector('[data-testid="claude-agent-new-name"]') as HTMLInputElement;
+    expect(name.value).toBe('Explore');
+    expect(name.disabled).toBe(true);
+    expect(document.querySelector('[data-testid="claude-agent-override-warning"]')!.textContent).toContain('replaces it');
+    expect((document.querySelector('[data-testid="claude-agent-new-description"]') as HTMLInputElement).value).toBe('Searches the repo');
+
+    await act(async () => {
+      fireEvent.change(document.querySelector('[data-testid="claude-agent-new-prompt"]')!, { target: { value: 'You search the repo.' } });
+      fireEvent.change(document.querySelector('[data-testid="claude-agent-new-model"]')!, { target: { value: 'deepseek-v4.1-flash' } });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="claude-agent-new-save"]')!);
+    });
+    await settle();
+
+    expect(invoke).toHaveBeenCalledWith('claude-agents:create', {
+      id: 's1',
+      name: 'Explore',
+      description: 'Searches the repo',
+      prompt: 'You search the repo.',
+      model: 'deepseek-v4.1-flash',
+      override: true
+    });
+    // The editor closes and the list is read back, so the file that now replaces the built-in is the
+    // panel's source of truth.
+    expect(document.querySelector('[data-testid="claude-agent-new-name"]')).toBeNull();
+    expect(invoke.mock.calls.filter(([channel]) => channel === 'claude-agents:list').length).toBe(2);
+  });
+
+  it('leaves a built-in the project already defines as an edit of its model, not an override', async () => {
+    invoke.mockResolvedValue(info());
+    await act(async () => {
+      render(<ClaudeAgentModels session={session()} />);
+    });
+    await settle();
+
+    // `Explore` has a file, so its row is the project's definition and carries the model select.
+    const explore = document.querySelector('[data-testid="claude-agent-Explore"]')!;
+    expect(explore.tagName).toBe('DIV');
+    expect(explore.querySelector('[data-testid="claude-agent-model-Explore"]')).not.toBeNull();
+    expect(explore.textContent).toContain('project');
+
+    await act(async () => {
+      fireEvent.click(explore);
+    });
+    expect(document.querySelector('[data-testid="claude-agent-new-name"]')).toBeNull();
   });
 });
 

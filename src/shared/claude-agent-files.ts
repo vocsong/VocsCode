@@ -8,9 +8,10 @@
  * A definition with the same name as a built-in (`Explore`, `Plan`) replaces that built-in, which is
  * the only way to pin the model one of them runs on: the built-ins declare `model: inherit`, and
  * `CLAUDE_CODE_SUBAGENT_MODEL` is read *after* frontmatter, so the environment variable cannot move
- * them. Editing here is deliberately narrow — the app sets a definition's `model` and leaves every
- * other byte of a hand-written file exactly as its author left it; it creates only a definition for
- * a name no built-in and no existing file claims, so it can replace neither.
+ * them. Editing stays narrow — the app sets a definition's `model` and leaves every other byte of a
+ * hand-written file exactly as its author left it. It creates a definition for a name no existing
+ * file claims, and it creates one for a built-in name only when the caller explicitly overrides it,
+ * because that file takes the built-in's instructions with it.
  */
 
 /**
@@ -31,6 +32,8 @@ export interface ClaudeAgentDraft {
   name: string;
   description: string;
   prompt: string;
+  /** A model to pin; absent writes no `model:` line, so the definition inherits the session model. */
+  model?: string;
 }
 
 /** The frontmatter keys this app reads. Anything else in the file is preserved verbatim on write. */

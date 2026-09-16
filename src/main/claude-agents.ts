@@ -4,10 +4,12 @@
  *
  * Claude Code reads `<projectRoot>/.claude/agents/*.md`, and a definition whose `name:` matches a
  * built-in (`Explore`, `Plan`) *replaces* that built-in — the built-in's own instructions are gone,
- * verified against the bundled CLI. So this module creates only a definition for a name no built-in
- * and no existing file claims: a new type is safe, replacing one is a decision only its author makes
- * by hand. Editing stays narrow too — the app rewrites a definition's `model:` line and leaves every
- * other byte of a hand-written file exactly as its author left it.
+ * verified against the bundled CLI. So creating a definition is deliberate about which kind it is:
+ * a name no built-in and no existing file claims *adds* a type, and a built-in name is written only
+ * when the caller passes `override` — the panel's Models view asks for that from a built-in's row,
+ * after saying out loud that the built-in's instructions are replaced. Editing stays narrow either
+ * way — the app rewrites a definition's `model:` line and leaves every other byte of a hand-written
+ * file exactly as its author left it.
  *
  * The `model:` line is also what the adapter reads back: a project that pins a model anywhere cannot
  * be overridden wholesale by `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` (the CLI lets FORCE outrank a
@@ -93,25 +95,23 @@ export function isPinnedModel(model: string | undefined): boolean {
 }
 
 /**
- * Create a new definition. Refuses a name that would replace a built-in or overwrite a definition
- * the project already has — the two ways writing a file would take something away rather than add.
+ * Create a definition. Adding a type is safe; taking one away is not, so the two ways writing a file
+ * would replace something are refused unless they are exactly what was asked for.
  *
  * `reserved` is what the live engine reports as its own types; `CLAUDE_BUILTIN_AGENT_TYPES` covers
- * the built-ins an idle session cannot list, so the rule holds whether or not one is running.
+ * the built-ins an idle session cannot list, so the rule holds whether or not one is running. A
+ * built-in name is written only with `override` — the definition then *replaces* that built-in,
+ * instructions and all, which only the user who asked for the override may do.
  */
 export async function createClaudeAgent(
   projectRoot: string,
   draft: ClaudeAgentDraft,
-  reserved: string[] = []
+  reserved: string[] = [],
+  options: { override?: boolean } = {}
 ): Promise<{ ok: boolean; path?: string; error?: string }> {
   const name = draft.name.trim();
   if (!isValidAgentName(name)) return { ok: false, error: 'A definition needs a name of letters, digits, dot, dash or underscore.' };
   if (!draft.description.trim()) return { ok: false, error: 'A description is required: Claude Code picks a subagent by it.' };
-  const reservedNames = [...CLAUDE_BUILTIN_AGENT_TYPES, ...reserved];
-  const builtin = reservedNames.find((candidate) => candidate.trim().toLowerCase() === name.toLowerCase());
-  if (builtin) {
-    return { ok: false, error: `${builtin} is one of Claude Code's built-in agent types: a definition named after it replaces it. Pick another name, or write that file by hand.` };
-  }
   const file = claudeAgentFile(projectRoot, name);
   if (!file) return { ok: false, error: 'Invalid definition name.' };
   // A file the exact name already holds is the author's, even when it does not parse as a definition.
@@ -120,9 +120,15 @@ export async function createClaudeAgent(
   // in any casing — counts as the project already defining it.
   const existing = (await readAgentFiles(projectRoot)).find((info) => info.name.toLowerCase() === name.toLowerCase());
   if (existing) return { ok: false, error: `This project already defines ${existing.name}; edit it in the list instead.` };
+  const reservedNames = [...CLAUDE_BUILTIN_AGENT_TYPES, ...reserved];
+  const builtin = reservedNames.find((candidate) => candidate.trim().toLowerCase() === name.toLowerCase());
+  if (builtin && !options.override) {
+    return { ok: false, error: `${builtin} is one of Claude Code's built-in agent types: a definition named after it replaces it. Pick another name, or override it from its row.` };
+  }
   try {
     await fs.mkdir(claudeAgentDir(projectRoot), { recursive: true });
-    await fs.writeFile(file, serializeClaudeAgentFile({ name, description: draft.description.trim() }, draft.prompt), 'utf8');
+    const fields = { name, description: draft.description.trim(), ...(draft.model?.trim() ? { model: draft.model.trim() } : {}) };
+    await fs.writeFile(file, serializeClaudeAgentFile(fields, draft.prompt), 'utf8');
     return { ok: true, path: file };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };

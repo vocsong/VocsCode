@@ -261,6 +261,27 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       expect(replaced.ok === false && replaced.error).toContain('Plan');
       expect(await fs.readdir(path.join(project, '.claude', 'agents'))).toEqual(['reviewer.md']);
 
+      // An explicit override is the one way a built-in gets a file. Over the real IPC boundary and
+      // filesystem it writes the definition that replaces the built-in, pinning the model it was given.
+      const overrode = await invoke(win, 'claude-agents:create', {
+        id: SEED_SESSION_ID,
+        name: 'Plan',
+        description: 'Plans a change',
+        prompt: 'You plan changes.',
+        model: 'deepseek-v4.1-flash',
+        override: true
+      });
+      expect(overrode).toMatchObject({ ok: true });
+      const planFile = path.join(project, '.claude', 'agents', 'Plan.md');
+      const planText = await fs.readFile(planFile, 'utf8');
+      expect(planText).toContain('name: Plan');
+      expect(planText).toContain('model: deepseek-v4.1-flash');
+      // The panel's own source sees both definitions, and the pin is what releases Claude Code from
+      // the session model — the consequence the view warns about.
+      const listed = await invoke(win, 'claude-agents:list', { id: SEED_SESSION_ID });
+      expect(listed.files.map((file) => file.name).sort()).toEqual(['Plan', 'reviewer']);
+      expect(listed.forced).toBe(false);
+
       await fs.mkdir(shots, { recursive: true });
       await win.screenshot({ path: path.join(shots, 'subagents-panel-claude-new-agent.png') });
     } finally {

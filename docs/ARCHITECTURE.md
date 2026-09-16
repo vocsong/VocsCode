@@ -56,7 +56,8 @@ adapter sets `CLAUDE_CODE_SUBAGENT_MODEL` to it and, while the project pins no m
 declare `model: inherit`, which on an endpoint that is not Anthropic resolves to an Anthropic id and
 is refused with a `401 ... model sent to the API`. A project definition in `.claude/agents` that
 names a model wins instead, which is why `_FORCE` is withheld the moment one does; the Subagents
-tab's **Models** view lists every type with the model it will run on and edits that one field.
+tab's **Models** view lists every type with the model it will run on, edits that one field, and
+writes the definition that overrides a built-in the user chooses to replace.
 
 Context reduction differs the same way. Most engines take an app-requested `compact()` at an idle
 boundary between turns. Claude's CLI instead reduces context from inside the turn that needs it, so

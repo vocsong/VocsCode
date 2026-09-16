@@ -234,18 +234,21 @@ happens: every type the engine reports is listed with the model it will run on.
 What it can change is a definition the project already supplies at
 `<projectRoot>/.claude/agents/<Name>.md`. Those rows carry a **model** select — *Same as session*
 clears the pin — and saving rewrites that one frontmatter line, leaving the rest of the file
-byte-identical. A type with no definition gets no control, because pinning one would require writing
-it first.
+byte-identical.
 
-The view also creates a definition: **New** asks for a name, a description and the instructions, and
-writes `<Name>.md` with no `model:` line, so it inherits the session model until the new row's select
-pins one. Creation is deliberately narrow — a name a built-in or an existing definition already has
-is refused, in the form and over IPC, because a definition does not *adjust* one of those but
-**replace** it, instructions and all (verified against the bundled CLI: a frontmatter-only
-`Explore.md` left the agent describing itself as a general-purpose agent). Replacing a built-in
-remains a decision whoever writes the file makes by hand, and the app cannot upload one: the engine's
-built-in types are refused even when the session is idle and cannot list them (`Explore`, `Plan`,
-`general-purpose` in `src/shared/claude-agent-files.ts`).
+A **built-in** row (one with no project file) writes one instead. Clicking it opens the editor with
+the name fixed to the built-in's and the engine's own description filled in, and it says plainly that
+the file replaces the built-in's instructions, which the app cannot read back. Saving sends
+`claude-agents:create` with `override: true` and writes `<Name>.md`, with a `model:` line when one
+was chosen, so the override pins the model in the same step.
+
+The view's **New** button writes a genuinely new type: a name, a description, the instructions and
+an optional model. A name a built-in or an existing definition already has is refused, in the form
+and over IPC — a definition does not *adjust* a built-in, it **replaces** it, instructions and all
+(verified against the bundled CLI: a frontmatter-only `Explore.md` left the agent describing itself
+as a general-purpose agent). The override path is the single exception, and the only thing that may
+write a built-in's name. The refusal covers the built-ins even when the session is idle and cannot
+list them (`Explore`, `Plan`, `general-purpose` in `src/shared/claude-agent-files.ts`).
 
 The one thing to know about a pin: while any definition pins a model, the adapter stops forcing the
 session model, so the built-ins without a definition go back to Claude Code's own default — an

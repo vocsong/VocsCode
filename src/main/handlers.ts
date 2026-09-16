@@ -597,11 +597,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!root) return { ok: false, error: 'Session not found' };
     return setClaudeAgentModel(root, name, model ?? undefined);
   });
-  handle('claude-agents:create', async ({ id, name, description, prompt }) => {
+  handle('claude-agents:create', async ({ id, name, description, prompt, model, override }) => {
     const root = projectRootOf(id);
     if (!root) return { ok: false, error: 'Session not found' };
     // The engine names its own types while it is live; the module covers the built-ins it cannot.
-    return createClaudeAgent(root, { name, description, prompt }, (await sessions.subagentTypes(id)).map((type) => type.name));
+    return createClaudeAgent(root, { name, description, prompt, model: model ?? undefined }, (await sessions.subagentTypes(id)).map((type) => type.name), { override });
   });
   handle('sessions:search', (req) => deps.search.search(req));
   handle('sessions:delete', async ({ id, removeWorktree }) => {

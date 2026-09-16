@@ -5,8 +5,8 @@
  * The last part is the point. A definition named after a built-in (`Explore`, `Plan`) does not
  * adjust that built-in, it replaces it — verified against the bundled CLI, where a frontmatter-only
  * `Explore.md` left the agent describing itself as "a general-purpose Claude Code agent". So the app
- * creates only names no built-in and no existing file claims, and once a file exists it edits the
- * `model:` line and nothing else.
+ * creates a built-in's name only when the caller explicitly overrides it, refuses a name an existing
+ * file claims either way, and once a file exists it edits the `model:` line and nothing else.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -182,6 +182,37 @@ describe('creating a new definition', () => {
     expect(engineOwn.ok).toBe(false);
     expect(engineOwn.error).toContain('code-reviewer');
     await expect(fs.readdir(claudeAgentDir(root))).rejects.toThrow();
+  });
+
+  it('writes the definition that replaces a built-in when the caller overrides it, pinning the model it was given', async () => {
+    const root = await tempDir();
+    const result = await createClaudeAgent(
+      root,
+      { name: 'Explore', description: 'Searches the repo', prompt: 'You search.', model: 'deepseek-v4.1-flash' },
+      [],
+      { override: true }
+    );
+    expect(result.ok).toBe(true);
+    expect(result.path).toBe(path.join(root, CLAUDE_AGENT_DIR, 'Explore.md'));
+    expect(await fs.readFile(result.path!, 'utf8')).toBe('---\nname: Explore\ndescription: Searches the repo\nmodel: deepseek-v4.1-flash\n---\n\nYou search.\n');
+    // The pin is the point of the override: the built-in no longer inherits Claude Code's own default.
+    expect(await hasClaudeAgentPins(root)).toBe(true);
+    // Overriding one built-in does not open the door for the ordinary path.
+    expect((await createClaudeAgent(root, { name: 'Plan', description: 'd', prompt: 'p' })).ok).toBe(false);
+  });
+
+  it('an override still refuses a name a project definition already owns, or a file on disk', async () => {
+    const root = await tempDir();
+    await writeAgent(root, 'search-helper.md', '---\nname: Explore\ndescription: Custom search\n---\n\nYou search.\n');
+    const claimed = await createClaudeAgent(root, { name: 'Explore', description: 'Overrides', prompt: 'p' }, [], { override: true });
+    expect(claimed.ok).toBe(false);
+    expect(claimed.error).toContain('already defines Explore');
+    // A file the exact name holds is the author's too, definition or not.
+    await writeAgent(root, 'Plan.md', 'notes with no frontmatter');
+    const file = await createClaudeAgent(root, { name: 'Plan', description: 'Overrides', prompt: 'p' }, [], { override: true });
+    expect(file.ok).toBe(false);
+    expect(file.error).toContain('Plan.md already exists');
+    expect(await fs.readdir(claudeAgentDir(root))).toEqual(['Plan.md', 'search-helper.md']);
   });
 
   it('refuses a name the project already defines, under any file name', async () => {

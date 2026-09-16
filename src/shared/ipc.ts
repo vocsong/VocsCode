@@ -208,8 +208,8 @@ export interface IpcContract {
   'claude-agents:list': [{ id: string }, ClaudeAgentTypesInfo];
   /** Pins (or with `null`, unpins) one project definition's model, rewriting only its `model:` line. */
   'claude-agents:setModel': [{ id: string; name: string; model: string | null }, { ok: boolean; error?: string }];
-  /** Writes a new definition; refuses a name that would replace a built-in or an existing definition. */
-  'claude-agents:create': [{ id: string; name: string; description: string; prompt: string }, { ok: boolean; path?: string; error?: string }];
+  /** Writes a definition; refuses a built-in name unless `override`, and a name an existing definition owns. */
+  'claude-agents:create': [{ id: string; name: string; description: string; prompt: string; model?: string | null; override?: boolean }, { ok: boolean; path?: string; error?: string }];
   /** Deep search: session titles/goals plus full transcript content (FTS5 index in main). */
   'sessions:search': [{ q: string; filters?: SearchFilters; limit?: number }, SearchResponse];
   'sessions:delete': [{ id: string; removeWorktree?: boolean }, void];
