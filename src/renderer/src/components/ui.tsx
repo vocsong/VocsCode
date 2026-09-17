@@ -408,14 +408,26 @@ export function Field({ label, hint, children, inline }: { label: React.ReactNod
   );
 }
 
+/*
+ * The thumb's position alone does not say which side is on, so the state is spelled out three ways
+ * at once: the track colour, a check/cross glyph riding inside the thumb, and an On/Off word next
+ * to it. Position is then only a confirmation, never the sole cue.
+ */
 export function Toggle({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label?: React.ReactNode; disabled?: boolean }) {
   return (
-    <label className={`toggle ${disabled ? 'disabled' : ''}`}>
-      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
-      <span className="toggle-track">
-        <span className="toggle-thumb" />
+    <label className={`toggle ${checked ? 'is-on' : 'is-off'} ${disabled ? 'disabled' : ''}`}>
+      {/* The On/Off word lives inside the label, so without this the accessible name would become
+          "Off Auto-compaction" and shift every time the switch flips. */}
+      <input type="checkbox" aria-label={typeof label === 'string' ? label : undefined} checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span className="toggle-track" aria-hidden="true">
+        <span className="toggle-thumb">
+          <svg className="toggle-glyph" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            {checked ? <path d="M2.6 6.3 5 8.7 9.4 3.8" /> : <path d="M3.5 3.5 8.5 8.5M8.5 3.5 3.5 8.5" />}
+          </svg>
+        </span>
       </span>
-      {label && <span>{label}</span>}
+      <span className="toggle-state" aria-hidden="true">{checked ? 'On' : 'Off'}</span>
+      {label && <span className="toggle-label">{label}</span>}
     </label>
   );
 }

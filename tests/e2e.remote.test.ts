@@ -64,7 +64,11 @@ describe.runIf(enabled)('remote access settings', () => {
     // styled toggle whose checkbox input is visually hidden, so click the label track.
     const toggle = win.locator('.field:has-text("View-only mode") .toggle');
     await toggle.waitFor({ timeout: 10_000 });
+    // Thumb position alone is not readable, so the switch states itself in a word. Assert the word,
+    // not just the persisted value: that is the part a user actually goes by.
+    expect(await toggle.locator('.toggle-state').innerText()).toBe('Off');
     await toggle.click();
+    await expect.poll(async () => toggle.locator('.toggle-state').innerText(), { timeout: 10_000 }).toBe('On');
     await expect.poll(async () => (JSON.parse(await fs.readFile(settingsPath, 'utf8')) as { remote?: { viewOnly?: boolean } }).remote?.viewOnly).toBe(true);
 
     // Turning on the offline mirror is also persisted; the desktop would then sync snapshots.

@@ -913,44 +913,78 @@ h4 {
   color: var(--fg-faint);
 }
 .toggle {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
   margin: 8px 0;
 }
+/* Hidden to the eye but still in the tab order, so the switch stays keyboard-operable. */
 .toggle input {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  margin: 0;
+  pointer-events: none;
 }
 .toggle-track {
-  width: 32px;
-  height: 18px;
-  background: var(--border-strong);
+  width: 38px;
+  height: 22px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-strong);
   border-radius: 999px;
   position: relative;
-  transition: background 0.15s;
+  transition: background 0.15s, border-color 0.15s;
   flex-shrink: 0;
 }
 .toggle-thumb {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: #fff;
-  transition: left 0.15s;
+  background: var(--fg-muted);
+  color: var(--bg-elev);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: left 0.15s, background 0.15s, color 0.15s;
+}
+.toggle-glyph {
+  width: 11px;
+  height: 11px;
+}
+.toggle-state {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  min-width: 20px;
+  color: var(--fg-faint);
+  transition: color 0.15s;
 }
 .toggle input:checked + .toggle-track {
   background: var(--accent);
+  border-color: var(--accent);
 }
 /* On a light accent (Graphite's is near-white) a white thumb vanishes, so it flips to the
-   accent's own foreground once checked. */
+   accent's own foreground once checked — and the glyph inside flips to the accent to stay legible. */
 .toggle input:checked + .toggle-track .toggle-thumb {
+  left: 18px;
   background: var(--accent-fg);
+  color: var(--accent);
 }
-.toggle input:checked + .toggle-track .toggle-thumb {
-  left: 16px;
+.toggle.is-on .toggle-state {
+  color: var(--accent);
+}
+.toggle input:focus-visible + .toggle-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.toggle:hover:not(.disabled) .toggle-track {
+  border-color: var(--accent);
 }
 
 /* Sidebar */
