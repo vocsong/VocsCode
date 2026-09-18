@@ -92,8 +92,13 @@ Names deliberately avoid the third-party extension's (`Agent`, `SubagentWorkflow
 - `promptSnippet` / `promptGuidelines` describe the tools and state plainly that `subagent` is the
   Vocs Code tool to prefer over any other delegation tool that may be present.
 
-Concurrency: background pool default **4** (setting), a hard cap of **8 runs per session**, foreground
-uncapped. Bounds live in the extension so a runaway loop cannot spawn dozens of agents.
+Concurrency follows the user's pi-subagents settings (`<agentDir>/subagents.json`), re-read on every
+spawn so a change in Settings applies without restarting the session. `maxConcurrent` (default **4**)
+is both the background pool and the per-session cap — a user who sets it to 20 gets 20 — and
+`maxConcurrentForeground` (default `0` = no separate cap) limits concurrent foreground runs. With
+nothing configured the shipped defaults stand: background 4, session 8. Bounds live in the extension
+so a runaway loop cannot spawn dozens of agents, and a malformed or out-of-range settings file falls
+back to those defaults instead of failing a spawn.
 
 ## Agent types
 
