@@ -12,7 +12,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type { ModelRef, SubagentCompletion, TranscriptItem } from '../shared/types';
 import { classifyExecution, deriveOutcome, type ExecutionFacts } from '../shared/analytics/classify';
-import { EXECUTION_RETENTION, modelKeyOf, type ExecutionRecord, type IngestKind, type TurnRecord } from '../shared/analytics/records';
+import { addedLinesOf } from '../shared/analytics/lines';
+import { EXECUTION_RETENTION, modelKeyOf, usageTokens, type ExecutionRecord, type IngestKind, type TurnRecord, type TurnUsageFacts } from '../shared/analytics/records';
 import { ANALYTICS_SCHEMA_VERSION, OUTCOME_CLASSIFIER_VERSION } from '../shared/analytics/taxonomy';
 import { appendLine, readJson, readJsonl, writeJson, writeText } from './util/fs';
 
@@ -222,7 +223,8 @@ export class ExecutionLog {
       turn: this.turnIndex.get(sessionId) ?? 0,
       ingest: ctx.ingest,
       facts,
-      derived
+      derived,
+      addedLines: addedLinesOf(item.changes)
     };
     this.push(record);
     return record;
@@ -319,6 +321,8 @@ export class ExecutionLog {
     }
     record.status = item.status;
     record.endTs = endTs;
+    const usage = turnUsageFacts(item);
+    if (usage) record.usage = usage;
     this.openTurns.delete(sessionId);
     this.enqueue({ k: 't', ...record });
     this.version++;
@@ -413,4 +417,26 @@ function attributeModel(item: ToolItem, ctx: ExecutionContext): { model?: string
   if (item.model && parent && item.model !== parent.model) return { model: `${parent.provider}/${item.model}`, parentModel: parentKey };
   if (item.model && !parent) return { model: `/${item.model}` };
   return { model: parentKey };
+}
+
+/**
+ * The token facts of a finished turn, or undefined when the harness reported nothing.
+ *
+ * Cost alone is enough to store them: a harness can report what a turn cost without reporting the
+ * counters behind it (Claude's `total_cost_usd` without `modelUsage`), and that cost belongs in the
+ * ledger. A turn that reported nothing but zeros is unmeasured instead, so it can never be mistaken
+ * for a turn that genuinely cost nothing.
+ */
+function turnUsageFacts(item: TurnItem): TurnUsageFacts | undefined {
+  if (!item.usage && typeof item.costUsd !== 'number') return undefined;
+  const usage = item.usage;
+  const counter = (value: number | undefined): number => (typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0);
+  const facts: TurnUsageFacts = {
+    inputTokens: counter(usage?.inputTokens),
+    outputTokens: counter(usage?.outputTokens),
+    cacheReadTokens: counter(usage?.cacheReadTokens),
+    cacheWriteTokens: counter(usage?.cacheWriteTokens),
+    costUsd: counter(item.costUsd)
+  };
+  return usageTokens(facts) > 0 || facts.costUsd > 0 ? facts : undefined;
 }

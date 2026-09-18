@@ -5,7 +5,7 @@
  */
 
 /** Bumped when the shape of a stored execution record changes. */
-export const ANALYTICS_SCHEMA_VERSION = 2;
+export const ANALYTICS_SCHEMA_VERSION = 3;
 
 /**
  * Bumped whenever a classification rule changes meaning. Stored on every record, so a chart can

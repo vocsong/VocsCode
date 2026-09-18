@@ -14,7 +14,7 @@ export type GitPanelView = 'branches' | 'worktrees' | 'prs' | 'issues';
 /** The panel's lower half: live session services rather than workspace views. */
 export type PanelBottomTab = 'mcp' | 'subagents' | 'knowledge';
 export type View = 'chat' | 'settings' | 'analytics' | 'skills' | 'mcp';
-export type AnalyticsTab = 'overview' | 'spend' | 'tokens' | 'activity' | 'tools' | 'reliability' | 'sessions';
+export type AnalyticsTab = 'overview' | 'spend' | 'tokens' | 'activity' | 'tools' | 'code' | 'reliability' | 'sessions';
 /** Days in the analytics range; 0 is all time. */
 export type AnalyticsRange = 7 | 30 | 90 | 0;
 

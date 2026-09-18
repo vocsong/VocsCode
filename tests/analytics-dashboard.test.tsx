@@ -6,6 +6,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AnalyticsDayPoint, AnalyticsSummary, SessionMeta, UsageSessionRecord } from '../src/shared/types';
 import { emptyReliabilityReport } from '../src/shared/analytics/reliability';
+import { codeOutputReport, emptyCodeOutputReport } from '../src/shared/analytics/code-output';
+import type { ExecutionRecord, TurnRecord } from '../src/shared/analytics/records';
 import { addCounters, addSlice, emptyCounters, emptyDimensions, harnessModelKey } from '../src/shared/usage-rollup';
 
 const DAY = 86_400_000;
@@ -71,8 +73,57 @@ const summary: AnalyticsSummary = {
   sessionCount: 3,
   activeDays: 3,
   firstDay: days[0].date,
-  reliability: emptyReliabilityReport(now)
+  reliability: emptyReliabilityReport(now),
+  codeOutput: emptyCodeOutputReport(now)
 };
+
+/** One finished turn of a session that wrote code: the calls that added `lines`, and the verdict. */
+function codeTurn(
+  sessionId: string,
+  harness: string,
+  model: string,
+  lines: number[],
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number },
+  costUsd: number
+): { records: ExecutionRecord[]; turns: TurnRecord[] } {
+  const startTs = now - DAY;
+  const records = lines.map((addedLines, i) => ({
+    v: 3,
+    id: `${sessionId}:t${i}`,
+    sessionId,
+    ts: startTs + i * 1000,
+    endTs: startTs + i * 1000,
+    harness,
+    model,
+    // The later calls are the same turn's subagent work: delegated lines, counted, not subtracted.
+    role: i === 0 ? 'parent' : 'subagent',
+    projectRoot: 'G:/proj/a',
+    os: 'win32',
+    turn: 1,
+    ingest: 'live',
+    facts: {} as ExecutionRecord['facts'],
+    derived: {} as ExecutionRecord['derived'],
+    addedLines
+  })) as ExecutionRecord[];
+  return { records, turns: [{ v: 3, id: `${sessionId}:turn:1`, sessionId, turn: 1, harness, model, projectRoot: 'G:/proj/a', startTs, status: 'completed', ingest: 'live', usage: { ...usage, cacheWriteTokens: 0, costUsd } }] };
+}
+
+/** A turn that only answered: tokens spent, no line written, so its tokens belong to no rate. */
+function noCodeTurn(sessionId: string): TurnRecord {
+  return {
+    v: 3,
+    id: `${sessionId}:turn:2`,
+    sessionId,
+    turn: 2,
+    harness: 'claude',
+    model: 'anthropic/opus',
+    projectRoot: 'G:/proj/a',
+    startTs: now - DAY,
+    status: 'completed',
+    ingest: 'live',
+    usage: { inputTokens: 500_000, outputTokens: 100_000, cacheReadTokens: 400_000, cacheWriteTokens: 0, costUsd: 0.5 }
+  };
+}
 
 const invokeMock = vi.fn().mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? summary : []));
 (window as unknown as { harness: unknown }).harness = {
@@ -103,6 +154,7 @@ function reset() {
   summary.modelTools = [];
   summary.harnessTools = [];
   summary.harnessModelTools = [];
+  summary.codeOutput = emptyCodeOutputReport(now);
   useStore.setState({ sessions: [liveSession('s1'), liveSession('s2')], activeId: null, view: 'analytics', analyticsTab: 'overview', analyticsRange: 30 });
 }
 
@@ -363,5 +415,40 @@ describe('analytics dashboard', () => {
     expect(Array.from(byModel.querySelectorAll('.hbar-name')).map((n) => n.textContent)).toEqual(['p/opus', 'p/glm']);
     // The rates table names the same model the same way.
     expect(container.querySelector('.atable .mono')?.textContent).toBe('p/opus');
+  });
+
+  it('rates the code output the summary carries and lists the turns it had to leave out', async () => {
+    reset();
+    const claude = codeTurn('s1', 'claude', 'anthropic/opus', [100, 50], { inputTokens: 100_000, outputTokens: 100_000, cacheReadTokens: 800_000 }, 2);
+    const pi = codeTurn('s2', 'pi', 'p/glm', [50], { inputTokens: 100_000, outputTokens: 100_000, cacheReadTokens: 300_000 }, 0.25);
+    summary.codeOutput = codeOutputReport([...claude.records, ...pi.records], [...claude.turns, ...pi.turns, noCodeTurn('s1')], { now, rangeDays: 30, retention: { maxRecords: 50_000, maxDays: 90 } });
+
+    const { container } = render(<AnalyticsDashboard />);
+    await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
+    fireEvent.click(container.querySelector("[data-tab='code']") as HTMLButtonElement);
+    expect(useStore.getState().analyticsTab).toBe('code');
+
+    // 200 lines over the 1.5M tokens the two counted turns spent; the 1M of the no-code turn is out.
+    expect(container.querySelector('.hero-label')?.textContent).toBe('Code written per token spent');
+    expect(container.querySelector('.hero-value')?.textContent).toBe('133 lines / M tokens');
+    const tile = (label: string) => Array.from(container.querySelectorAll('.kpi')).find((k) => k.querySelector('.kpi-label')?.textContent === label) as HTMLElement;
+    expect(tile('Cost per 1k lines').querySelector('.kpi-value')?.textContent).toBe('$11.25 / 1k lines');
+    expect(tile('Written by subagents').querySelector('.kpi-value')?.textContent).toBe('25%');
+    expect(tile('Turns excluded').querySelector('.kpi-value')?.textContent).toBe('1');
+
+    const table = (header: string) => Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === header) as HTMLTableElement;
+    const rowsOf = (t: HTMLTableElement) => Array.from(t.querySelectorAll('tbody tr')).map((tr) => Array.from(tr.querySelectorAll('td')).map((cell) => cell.textContent));
+    // Each harness carries its own rate and its own cost per 1000 lines, with the sample badge.
+    expect(rowsOf(table('Harness'))).toEqual([
+      ['Claude', '1', '150', '1.00M', '150', '$13.33 / 1k lines', '33%', 'n<3'],
+      ['Pi', '1', '50', '500k', '100', '$5.00 / 1k lines', '0%', 'n<3']
+    ]);
+    expect(rowsOf(table('Harness · model'))[0][0]).toBe('Claude · anthropic/opus');
+    // Every turn in range is accounted for, and only the counted one says it is in the rate.
+    expect(rowsOf(table('Bucket')).slice(0, 2)).toEqual([
+      ['Wrote code and reported tokens', '2', '200', '1.50M', 'yes'],
+      ['Wrote no code (question, read, answer)', '1', '0', '1.00M', 'no']
+    ]);
+    expect(container.textContent).toContain('their 1.00M tokens are left out of every rate');
   });
 });

@@ -277,3 +277,84 @@ describe.runIf(enabled)('analytics harness/tool reliability UI', () => {
     }
   }, 180_000);
 });
+
+describe.runIf(enabled)('analytics code output UI', () => {
+  it('rates lines written per token for turns that wrote code, and shows what it could not measure', async () => {
+    await app?.close();
+    app = null;
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-code-output-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    const now = Date.now();
+    const session = (id: string, harness: 'claude' | 'cursor'): SessionMeta => ({
+      id,
+      title: `${harness} code workload`,
+      createdAt: now - 40 * 86_400_000,
+      updatedAt: now,
+      config: { harness, projectRoot: project, permissionMode: 'ask' },
+      cwd: project,
+      status: 'idle',
+      harnessRef: {},
+      activeModel: { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    });
+    const claude = session('code-claude', 'claude');
+    const cursor = session('code-cursor', 'cursor');
+    // Seed through the production store: a turn that writes 150 lines over 900k tokens, one that
+    // writes code without reporting tokens, and a harness that reports no diff at all.
+    const store = new AnalyticsStore(userData, { log: () => undefined });
+    await store.load([claude, cursor]);
+    const ts = now - 60_000;
+    const diff = `--- a.ts\n+++ a.ts\n@@ -0,0 +1,150 @@\n${Array.from({ length: 150 }, (_, i) => `+line ${i}`).join('\n')}\n`;
+    const tool = (id: string, changes: Extract<TranscriptItem, { kind: 'tool' }>['changes']): Extract<TranscriptItem, { kind: 'tool' }> => ({ id, kind: 'tool', ts, name: 'Edit', hint: 'edit', input: {}, status: 'done', changes });
+
+    store.recordUserMessage(claude, { id: 'u1', kind: 'user', ts, text: 'write it' }, ts);
+    store.recordToolCall('code-claude', tool('a', [{ path: 'a.ts', kind: 'update', diff }]), ts);
+    store.recordTurn(claude, { id: 'turn1', kind: 'turn', ts, status: 'completed', durationMs: 20_000, costUsd: 3, usage: { inputTokens: 1000, outputTokens: 5000, cacheReadTokens: 894_000, cacheWriteTokens: 0 } }, ts);
+
+    store.recordUserMessage(claude, { id: 'u2', kind: 'user', ts: ts + 1, text: 'again' }, ts + 1);
+    store.recordToolCall('code-claude', tool('b', [{ path: 'b.ts', kind: 'update', diff }]), ts + 1);
+    // Wrote lines, but the harness reported no counters: nothing to divide them by.
+    store.recordTurn(claude, { id: 'turn2', kind: 'turn', ts: ts + 1, status: 'completed', durationMs: 20_000 }, ts + 1);
+
+    store.recordUserMessage(cursor, { id: 'u3', kind: 'user', ts: ts + 2, text: 'edit it' }, ts + 2);
+    store.recordToolCall('code-cursor', tool('c', [{ path: 'c.ts', kind: 'update' }]), ts + 2);
+    store.recordTurn(cursor, { id: 'turn3', kind: 'turn', ts: ts + 2, status: 'completed', durationMs: 20_000, usage: { inputTokens: 500, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0 } }, ts + 2);
+    await store.flush();
+
+    try {
+      app = await electron.launch({ ...launchOptions, env: isolatedEnv(userData), timeout: 60_000 });
+      const win: Page = await app.firstWindow();
+      await openAnalytics(win);
+      await win.getByRole('tab', { name: 'Code output' }).click();
+
+      // 150 lines over 900k tokens is 167 lines per million; the cost-only and diff-less turns are out.
+      await expect.poll(() => win.locator('.hero-value').innerText()).toBe('167 lines / M tokens');
+      const kpi = (label: string) => win.locator('.kpi').filter({ has: win.locator('.kpi-label', { hasText: new RegExp(`^${label}$`) }) }).locator('.kpi-value');
+      await expect.poll(() => kpi('Lines written').innerText()).toBe('150');
+      await expect.poll(() => kpi('Tokens behind them').innerText()).toBe('900k');
+      await expect.poll(() => kpi('Cost per 1k lines').innerText()).toBe('$20.00 / 1k lines');
+
+      const byHarness = win.getByRole('table', { name: 'Code output by harness', exact: true });
+      await byHarness.waitFor();
+      // Only the harness that wrote code and reported its tokens is rated; Cursor has no rows at all.
+      expect(await byHarness.getByRole('columnheader').allTextContents()).toEqual(['Harness', 'Turns with code', 'Lines written', 'Tokens', 'Lines / M tokens', '$ / 1k lines', 'Written by subagents', 'Sample']);
+      expect(await byHarness.getByRole('row').filter({ hasText: 'Claude' }).getByRole('cell').allTextContents()).toEqual(['Claude', '1', '150', '900k', '166.7', '$20.00 / 1k lines', '0%', 'n<3']);
+      expect(await byHarness.getByRole('row').filter({ hasText: 'Cursor' }).count()).toBe(0);
+
+      // Every turn in range is accounted for, including the two that stayed out of the rate.
+      const coverage = win.getByRole('table', { name: 'Code output coverage', exact: true });
+      const bucket = (label: string) => coverage.getByRole('row').filter({ hasText: label });
+      expect(await bucket('Wrote code and reported tokens').getByRole('cell').allTextContents()).toEqual(['Wrote code and reported tokens', '1', '150', '900k', 'yes']);
+      expect(await bucket('Wrote code, reported no tokens').getByRole('cell').allTextContents()).toEqual(['Wrote code, reported no tokens', '1', '150', '—', 'no']);
+      expect(await bucket('Changed files without a diff (Cursor)').getByRole('cell').allTextContents()).toEqual(['Changed files without a diff (Cursor)', '1', '0', '—', 'no']);
+    } finally {
+      await app?.close();
+      app = null;
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  }, 180_000);
+});

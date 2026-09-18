@@ -22,6 +22,7 @@ export const TABS: { id: AnalyticsTab; label: string; icon: string }[] = [
   { id: 'tokens', label: 'Tokens', icon: 'layers' },
   { id: 'activity', label: 'Activity', icon: 'activity' },
   { id: 'tools', label: 'Tools & files', icon: 'wrench' },
+  { id: 'code', label: 'Code output', icon: 'code' },
   { id: 'reliability', label: 'Reliability', icon: 'shield' },
   { id: 'sessions', label: 'Sessions', icon: 'list' }
 ];

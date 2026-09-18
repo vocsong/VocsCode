@@ -7,6 +7,7 @@ import type { ThemeId } from './themes';
 import type { ShortcutCommand } from './shortcuts';
 import type { KnowledgeSettings } from './knowledge';
 import type { ReliabilityReport } from './analytics/reliability';
+import type { CodeOutputReport } from './analytics/code-output';
 
 import type { SubagentRunMode, SubagentRunStatus } from './subagents';
 
@@ -655,6 +656,8 @@ export interface AnalyticsSummary {
   firstDay?: string;
   /** Semantic outcome analytics over the retained execution log, for the requested range. */
   reliability: ReliabilityReport;
+  /** Lines written per token spent, over the same execution log and range. */
+  codeOutput: CodeOutputReport;
 }
 
 export interface HarnessRef {
