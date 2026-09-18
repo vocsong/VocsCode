@@ -26,6 +26,7 @@ import type {
 } from '../shared/types';
 import { modelKeyLabel } from '../shared/model-names';
 import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, emptySlice, harnessModelKey, harnessModelToolUsageRows, harnessToolUsageRows, modelToolUsageRows, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
+import { codeOutputReport, type CodeOutputReport } from '../shared/analytics/code-output';
 import type { ExecutionRecord } from '../shared/analytics/records';
 import { reliabilityReport, type ReliabilityReport } from '../shared/analytics/reliability';
 import { ExecutionLog, type ExecutionContext, type ExecutionQuery } from './analytics-executions';
@@ -459,8 +460,8 @@ export function reconcileForkInheritedSpend(data: AnalyticsFile, sessions: Sessi
   return { ids, usd };
 }
 
-/** The usage half of a summary; `AnalyticsStore.summary` adds the reliability report from the execution log. */
-export type UsageSummary = Omit<AnalyticsSummary, 'reliability'>;
+/** The usage half of a summary; `AnalyticsStore.summary` adds the reports built from the execution log. */
+export type UsageSummary = Omit<AnalyticsSummary, 'reliability' | 'codeOutput'>;
 
 export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, modelTools: Record<string, Record<string, ToolUsage>>, harnessModelTools: Record<string, Record<string, ToolUsage>>, files: Record<string, FileUsage>, dayLimit: number, now: number, harnessTools: Record<string, Record<string, ToolUsage>> = {}): UsageSummary {
   const seed = (): UsageTotals => ({ ...EMPTY_USAGE });
@@ -621,6 +622,7 @@ export class AnalyticsStore {
    */
   forkSweepPending = false;
   private reliabilityCache?: { key: string; report: ReliabilityReport };
+  private codeOutputCache?: { key: string; report: CodeOutputReport };
 
   constructor(userData: string, private readonly deps: AnalyticsDeps) {
     this.file = path.join(userData, 'analytics.json');
@@ -1113,7 +1115,7 @@ export class AnalyticsStore {
   /** Summary over the last `dayLimit` days (0 = all time), with the preceding window for comparison. */
   summary(dayLimit = 30, now = Date.now()): AnalyticsSummary {
     const sessions = Object.values(this.data.sessions);
-    return { ...summarize(sessions, this.data.days, this.data.tools, this.data.modelTools, this.data.harnessModelTools, this.data.files, dayLimit, now, this.data.harnessTools), reliability: this.reliability(dayLimit, now) };
+    return { ...summarize(sessions, this.data.days, this.data.tools, this.data.modelTools, this.data.harnessModelTools, this.data.files, dayLimit, now, this.data.harnessTools), reliability: this.reliability(dayLimit, now), codeOutput: this.codeOutput(dayLimit, now) };
   }
 
   /** The reliability report for a range, rebuilt only when the log or the day changed. */
@@ -1127,6 +1129,20 @@ export class AnalyticsStore {
       retainedFirstTs: this.executions.retainedFirstTs()
     });
     this.reliabilityCache = { key, report };
+    return report;
+  }
+
+  /** The code-output report for a range, rebuilt only when the log or the day changed. */
+  codeOutput(dayLimit = 30, now = Date.now()): CodeOutputReport {
+    const key = `${this.executions.version}:${dayLimit}:${dayKey(now)}`;
+    if (this.codeOutputCache?.key === key) return this.codeOutputCache.report;
+    const report = codeOutputReport(this.executions.all() as ExecutionRecord[], [...this.executions.allTurns()], {
+      now,
+      rangeDays: dayLimit,
+      retention: this.executions.retention,
+      retainedFirstTs: this.executions.retainedFirstTs()
+    });
+    this.codeOutputCache = { key, report };
     return report;
   }
 }

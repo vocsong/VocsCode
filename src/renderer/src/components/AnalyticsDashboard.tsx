@@ -10,6 +10,7 @@ import { relTime } from '../format';
 import { useStore, type AnalyticsTab } from '../store';
 import { ActivityTab } from './analytics/ActivityTab';
 import { Segmented } from './analytics/charts';
+import { CodeTab } from './analytics/CodeTab';
 import { buildScope, RANGES, TABS } from './analytics/model';
 import { OverviewTab } from './analytics/OverviewTab';
 import { ReliabilityTab } from './analytics/ReliabilityTab';
@@ -119,6 +120,7 @@ export function AnalyticsDashboard() {
             {tab === 'tokens' && <TokensTab scope={scope} summary={summary} />}
             {tab === 'activity' && <ActivityTab scope={scope} summary={summary} />}
             {tab === 'tools' && <ToolsTab scope={scope} summary={summary} />}
+            {tab === 'code' && <CodeTab scope={scope} summary={summary} />}
             {tab === 'reliability' && <ReliabilityTab scope={scope} summary={summary} />}
             {tab === 'sessions' && <SessionsTab scope={scope} summary={summary} />}
           </>

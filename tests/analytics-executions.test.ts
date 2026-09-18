@@ -8,10 +8,10 @@ import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { AnalyticsStore } from '../src/main/analytics';
-import { ExecutionLog, type ExecutionContext } from '../src/main/analytics-executions';
+import { ExecutionLog, type ExecutionContext, type TurnItem } from '../src/main/analytics-executions';
 import type { ExecutionRecord } from '../src/shared/analytics/records';
 import { OUTCOME_CLASSIFIER_VERSION } from '../src/shared/analytics/taxonomy';
-import type { SessionMeta, TranscriptItem, UsageTotals } from '../src/shared/types';
+import type { FileChange, SessionMeta, TranscriptItem, UsageTotals } from '../src/shared/types';
 
 const dirs: string[] = [];
 afterAll(async () => {
@@ -58,6 +58,59 @@ describe('ExecutionLog', () => {
     expect(b.all()[0]).toEqual(r);
     // The reloaded log still refuses the same id.
     expect(b.recordTool('s1', tool('t1', 'rg foo src', 'Command exited with code 1'), ctx())).toBeNull();
+  });
+
+  it('measures added lines from the call diff, never crediting a rename and never guessing a missing one', async () => {
+    const dir = tmpDir();
+    const a = new ExecutionLog(dir, { log, platform: 'win32', release: '10.0' });
+    await a.load();
+    const change = (file: string, diff: string | undefined, kind: FileChange['kind'] = 'update'): FileChange => ({ path: file, kind, ...(diff === undefined ? {} : { diff }) });
+    const record = (id: string, changes: FileChange[]) => a.recordTool('s1', { ...tool(id, 'edit', undefined), name: 'Edit', changes }, ctx())!;
+
+    // A modification is a removed line plus its replacement, so the diff counts both as added output.
+    expect(record('t1', [change('a.ts', '--- a.ts\n+++ a.ts\n@@ -1,2 +1,3 @@\n-gone\n+new\n+extra\n')]).addedLines).toBe(2);
+    // The +++ header is a header, not code.
+    expect(record('t2', [change('b.ts', '--- b.ts\n+++ b.ts\n@@ -0,0 +1,1 @@\n+one\n')]).addedLines).toBe(1);
+    // Removing code adds nothing, however many lines it removes.
+    expect(record('t3', [change('c.ts', '--- c.ts\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-a\n-b\n-c\n', 'delete')]).addedLines).toBe(0);
+    // A move is a delete plus an add of identical content; crediting it would count the code twice.
+    expect(record('t4', [change('d.ts', '--- d.ts\n+++ e.ts\n@@ -1,2 +1,2 @@\n-x\n-y\n+x\n+y\n', 'rename')]).addedLines).toBe(0);
+    // A change the harness could not diff is unmeasured, not zero.
+    expect(record('t5', [change('e.ts', undefined)]).addedLines).toBeUndefined();
+    // One undiffable change leaves the whole call unmeasured rather than silently undercounting it.
+    expect(record('t6', [change('f.ts', '--- f.ts\n+++ f.ts\n@@ -0,0 +1,1 @@\n+one\n'), change('g.ts', undefined)]).addedLines).toBeUndefined();
+    // A call that touched no file wrote nothing.
+    expect(a.recordTool('s1', tool('t7', 'ls', undefined), ctx())!.addedLines).toBe(0);
+
+    await a.flush();
+    const b = new ExecutionLog(dir, { log, platform: 'win32', release: '10.0' });
+    await b.load();
+    expect(b.all().find((r) => r.id === 's1:t1')?.addedLines).toBe(2);
+    expect(b.all().find((r) => r.id === 's1:t5')?.addedLines).toBeUndefined();
+  });
+
+  it('stores the turn token facts the harness reported and leaves an unreported turn unmeasured', async () => {
+    const dir = tmpDir();
+    const a = new ExecutionLog(dir, { log, platform: 'win32', release: '10.0' });
+    await a.load();
+    const turn = (n: number, item: Partial<TurnItem>) => {
+      a.recordUser('s1', { id: `u${n}`, kind: 'user', ts: T0 + n * 1000, text: 'go' }, ctx({ now: T0 + n * 1000 }));
+      return a.recordTurn('s1', { id: `turn${n}`, kind: 'turn', ts: T0 + n * 1000 + 500, status: 'completed', ...item }, ctx({ now: T0 + n * 1000 + 500 }));
+    };
+
+    expect(turn(1, { usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40 }, costUsd: 0.5 }).usage).toEqual({ inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40, costUsd: 0.5 });
+    // A harness that reports no counters (ACP) leaves the turn unmeasured rather than free.
+    expect(turn(2, {}).usage).toBeUndefined();
+    // Reported zeros are not a measurement either: there would be no tokens to divide by.
+    expect(turn(3, { usage: ZERO }).usage).toBeUndefined();
+    // Cost without any tokens still counts as something the turn cost.
+    expect(turn(4, { costUsd: 0.25 }).usage).toEqual({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.25 });
+
+    await a.flush();
+    const b = new ExecutionLog(dir, { log, platform: 'win32', release: '10.0' });
+    await b.load();
+    expect(b.allTurns().find((t) => t.turn === 1)?.usage?.outputTokens).toBe(20);
+    expect(b.allTurns().find((t) => t.turn === 2)?.usage).toBeUndefined();
   });
 
   it('re-derives outcomes from stored facts when the classifier version moves, and rewrites the file', async () => {

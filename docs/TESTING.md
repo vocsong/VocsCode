@@ -67,6 +67,7 @@ suites alive** below):
 | Right-click menus (`components/ContextMenu.tsx`), folder removal | `tests/context-menus.test.tsx`, `tests/folder-remove.test.ts` + `e2e.context-menu` |
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Usage panel, `src/renderer/src/session-usage.ts` | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx` + `e2e.usage` |
+| Analytics dashboard, `src/main/analytics*.ts`, `src/shared/analytics/**` | `tests/analytics*.test.ts(x)` + `e2e.vision` |
 | Themes, `styles.css`, terminal colours | `e2e.themes` |
 | Terminal panel, PTY, `terminal/host.ts` | `e2e.terminal` |
 | Approval cards, `harness/permissions.ts` | `e2e.approval` (live) |

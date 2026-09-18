@@ -37,10 +37,34 @@ export interface ExecutionRecord {
   facts: ExecutionFacts;
   derived: ExecutionDerived;
   /**
+   * Lines the call added to files, from its own diffs; 0 when it wrote nothing. Absent when a file
+   * change arrived without a diff, so the call counts as unmeasured rather than as having written
+   * nothing — see `addedLinesOf`. Not set on delegated-run summaries, which are not executions.
+   */
+  addedLines?: number;
+  /**
    * For a pi subagent completion, the number of internal tool calls it reported. Such records are
    * summaries, not executions: excluded from execution rates and shown as delegated volume.
    */
   weight?: number;
+}
+
+/** What one finished turn cost, as the harness reported it. */
+export interface TurnUsageFacts {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+}
+
+/**
+ * Tokens a turn's facts add up to — the denominator of every per-token rate. Reasoning tokens are
+ * not added: they are billed inside output. A turn that reported only a cost adds up to zero and has
+ * nothing to divide by, so a rate over tokens must skip it rather than count it as a free turn.
+ */
+export function usageTokens(u: TurnUsageFacts): number {
+  return u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens;
 }
 
 export interface TurnRecord {
@@ -57,6 +81,14 @@ export interface TurnRecord {
   /** `open` while no terminal turn item has been seen (including a session that died mid-turn). */
   status: 'completed' | 'failed' | 'interrupted' | 'open';
   ingest: IngestKind;
+  /**
+   * Token facts of the completed turn: what it cost, and the counters behind it when the harness
+   * reported them. Absent when the harness reported neither (ACP agents report no tokens) or on
+   * records written before they were stored, so a turn without them is unmeasured and stays out of
+   * every per-turn rate rather than counting as a free turn. A turn whose cost is known but whose
+   * counters are not is stored too, with zeros — see `usageTokens`.
+   */
+  usage?: TurnUsageFacts;
 }
 
 /** Whether a record is a real tool execution rather than a delegated-run summary. */
