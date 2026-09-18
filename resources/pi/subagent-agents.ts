@@ -258,6 +258,46 @@ export function resolveAgentDir(env: NodeJS.ProcessEnv = process.env, home = env
   return fromEnv ? expandTilde(fromEnv, home) : path.join(home, '.pi', 'agent');
 }
 
+/** Concurrency caps for a session, derived from pi-subagents' global `subagents.json`. */
+export interface SubagentLimits {
+  /** Concurrent background runs allowed (pi-subagents' `maxConcurrent`). */
+  background: number;
+  /** Concurrent runs allowed in total — the same number the user configured. */
+  session: number;
+  /** Concurrent foreground runs allowed; `0` means no separate cap. */
+  foreground: number;
+}
+
+/** Matches the shipped extension's long-standing caps when nothing is configured. */
+export const DEFAULT_BACKGROUND_LIMIT = 4;
+export const DEFAULT_SESSION_LIMIT = 8;
+/** Mirror pi-subagents' own sanitize() bound so a stale value cannot survive here either. */
+const MAX_LIMIT = 1024;
+
+/**
+ * The user's concurrency settings, read from `<agentDir>/subagents.json` on every spawn so a change
+ * made in Settings takes effect without restarting the session. A missing, malformed or
+ * out-of-range value falls back to the shipped defaults; the extension must never fail to spawn a
+ * run because a settings file is unreadable.
+ */
+export async function readSubagentLimits(agentDir: string): Promise<SubagentLimits> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await fs.readFile(path.join(agentDir, 'subagents.json'), 'utf8'));
+  } catch {
+    raw = undefined;
+  }
+  const settings = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const count = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= MAX_LIMIT ? value : undefined;
+  const maxConcurrent = count(settings.maxConcurrent);
+  return {
+    background: maxConcurrent ?? DEFAULT_BACKGROUND_LIMIT,
+    session: maxConcurrent ?? DEFAULT_SESSION_LIMIT,
+    foreground: count(settings.maxConcurrentForeground) ?? 0,
+  };
+}
+
 async function readAgentDir(dir: string, origin: AgentOrigin): Promise<AgentType[]> {
   let entries: string[];
   try {

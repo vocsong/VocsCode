@@ -10,10 +10,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   BUILTIN_AGENTS,
   buildSystemPrompt,
+  DEFAULT_BACKGROUND_LIMIT,
+  DEFAULT_SESSION_LIMIT,
   discoverAgents,
   findAgent,
   parseAgentFile,
   parseFrontmatter,
+  readSubagentLimits,
   resolveAgentDir,
   toolNamesFor
 } from '../resources/pi/subagent-agents';
@@ -249,5 +252,32 @@ describe('project-level definitions', () => {
       expect(template.mcp).toBe(fallback.mcp);
       expect(template.model).toBeUndefined();
     }
+  });
+});
+
+describe('concurrency limits', () => {
+  it('falls back to the shipped caps when there is no settings file', async () => {
+    const dir = await tempDir();
+    await expect(readSubagentLimits(dir)).resolves.toEqual({ background: DEFAULT_BACKGROUND_LIMIT, session: DEFAULT_SESSION_LIMIT, foreground: 0 });
+  });
+
+  it('takes maxConcurrent as both the background pool and the per-session cap', async () => {
+    const dir = await tempDir();
+    await writeFile(path.join(dir, 'subagents.json'), JSON.stringify({ reportUsage: true, maxConcurrent: 20 }));
+    await expect(readSubagentLimits(dir)).resolves.toEqual({ background: 20, session: 20, foreground: 0 });
+  });
+
+  it('takes maxConcurrentForeground as the foreground cap, 0 meaning no separate cap', async () => {
+    const dir = await tempDir();
+    await writeFile(path.join(dir, 'subagents.json'), JSON.stringify({ maxConcurrentForeground: 2 }));
+    await expect(readSubagentLimits(dir)).resolves.toMatchObject({ foreground: 2 });
+  });
+
+  it('ignores a malformed file or an out-of-range value rather than failing a spawn', async () => {
+    const dir = await tempDir();
+    await writeFile(path.join(dir, 'subagents.json'), '{ not json');
+    await expect(readSubagentLimits(dir)).resolves.toEqual({ background: DEFAULT_BACKGROUND_LIMIT, session: DEFAULT_SESSION_LIMIT, foreground: 0 });
+    await writeFile(path.join(dir, 'subagents.json'), JSON.stringify({ maxConcurrent: 0 }));
+    await expect(readSubagentLimits(dir)).resolves.toEqual({ background: DEFAULT_BACKGROUND_LIMIT, session: DEFAULT_SESSION_LIMIT, foreground: 0 });
   });
 });

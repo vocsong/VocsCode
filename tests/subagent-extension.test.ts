@@ -8,6 +8,7 @@
  */
 import os from 'node:os';
 import path from 'node:path';
+import { mkdtempSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createVocsCodeSubagents, type SubagentDeps } from '../resources/pi/vocs-code-subagents';
@@ -80,6 +81,11 @@ function harness(options: HarnessOptions = {}) {
   process.env.VOCS_CODE_PERMISSION_MODE = options.mode ?? 'ask';
   delete process.env.VOCS_CODE_MODE_FILE;
   process.env.VOCS_CODE_SUBAGENT_COMPLETION_MS = '5';
+  // Point at an empty agent dir so the suite never reads the developer's own pi-subagents
+  // settings (a real `maxConcurrent` there would silently change the caps under test).
+  const agentDir = mkdtempSync(path.join(os.tmpdir(), 'vocs-subagent-agent-'));
+  tempDirs.push(agentDir);
+  process.env.PI_CODING_AGENT_DIR = agentDir;
 
   const tools = new Map<string, Record<string, any>>();
   const commands = new Map<string, Record<string, any>>();
@@ -296,6 +302,30 @@ describe('caps', () => {
     await expect(spawn(true)).rejects.toThrow(/4 background subagent runs/);
     for (let i = 0; i < 4; i++) void spawn(false); // foreground is uncapped, up to the session cap
     await expect(spawn(false)).rejects.toThrow(/8 active subagent runs/);
+  });
+
+  it('follows the configured maxConcurrent rather than a fixed cap', async () => {
+    const dir = await tempDir();
+    await fs.writeFile(path.join(dir, 'subagents.json'), JSON.stringify({ maxConcurrent: 3 }), 'utf8');
+    const h = harness({ childDriver: neverFinishes });
+    process.env.PI_CODING_AGENT_DIR = dir;
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const spawn = (background: boolean) => h.tools.get('subagent')!.execute('c', { ...subagentCall, background }, undefined, undefined, h.parentCtx);
+    for (let i = 0; i < 3; i++) await spawn(true);
+    await expect(spawn(true)).rejects.toThrow(/3 active subagent runs per session/);
+  });
+
+  it('caps foreground runs at maxConcurrentForeground when it is set', async () => {
+    const dir = await tempDir();
+    await fs.writeFile(path.join(dir, 'subagents.json'), JSON.stringify({ maxConcurrent: 20, maxConcurrentForeground: 2 }), 'utf8');
+    const h = harness({ childDriver: neverFinishes });
+    process.env.PI_CODING_AGENT_DIR = dir;
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const spawn = (background: boolean) => h.tools.get('subagent')!.execute('c', { ...subagentCall, background }, undefined, undefined, h.parentCtx);
+    void spawn(false);
+    void spawn(false);
+    await vi.waitFor(() => expect(h.children).toHaveLength(2));
+    await expect(spawn(false)).rejects.toThrow(/2 foreground subagent runs/);
   });
 });
 

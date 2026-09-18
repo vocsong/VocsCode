@@ -38,6 +38,7 @@ import {
   buildSystemPrompt,
   discoverAgents,
   findAgent,
+  readSubagentLimits,
   resolveAgentDir,
   toolNamesFor,
   type AgentType
@@ -54,8 +55,6 @@ const NOTIFY_MARKER = 'VCODE_SUBAGENT::';
 /** Custom message that carries a finished background run back into the parent's context. */
 const COMPLETION_TYPE = 'vocs-code-subagent-done';
 const COMPLETION_DEBOUNCE_MS = 2_000;
-const BACKGROUND_LIMIT = 4;
-const SESSION_LIMIT = 8;
 const RESULT_CHARS = 200_000;
 
 /** What the extension needs from the running Pi runtime. Injectable so the gate and run manager
@@ -389,8 +388,12 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
       const names = agents.map((a) => a.name).join(', ');
       throw new Error(`Unknown subagent type "${params.type}". Available: ${names}. Omit type to use general-purpose.`);
     }
-    if (activeCount() >= SESSION_LIMIT) throw new Error(`Vocs Code allows ${SESSION_LIMIT} active subagent runs per session; wait for one to finish or stop one first.`);
-    if (params.background && activeCount('background') >= BACKGROUND_LIMIT) throw new Error(`Vocs Code allows ${BACKGROUND_LIMIT} background subagent runs at once; wait for one to finish or run this one in the foreground.`);
+    // Read the user's pi-subagents concurrency settings on every spawn so a change in Settings
+    // applies to this session without a restart, and a cap always matches what the app shows.
+    const limits = await readSubagentLimits(agentDir);
+    if (activeCount() >= limits.session) throw new Error(`Vocs Code allows ${limits.session} active subagent runs per session; wait for one to finish or stop one first.`);
+    if (params.background && activeCount('background') >= limits.background) throw new Error(`Vocs Code allows ${limits.background} background subagent runs at once; wait for one to finish or run this one in the foreground.`);
+    if (!params.background && limits.foreground > 0 && activeCount('foreground') >= limits.foreground) throw new Error(`Vocs Code allows ${limits.foreground} foreground subagent runs at once; wait for one to finish or run this one in the background.`);
 
     const runId = `agent_${randomUUID().slice(0, 8)}`;
     let settle: () => void = () => undefined;

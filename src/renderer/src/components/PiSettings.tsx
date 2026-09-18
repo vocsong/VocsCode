@@ -478,7 +478,7 @@ export function PiSection() {
                 }}
               />
             </Field>
-            <Field label="Max concurrent agents" hint="Background pool; default 4.">
+            <Field label="Max concurrent agents" hint="Background pool and runs per session; default 4.">
               <input
                 type="number"
                 min={1}
