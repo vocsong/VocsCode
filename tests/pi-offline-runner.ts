@@ -19,7 +19,7 @@ export function piIntegrationPaths(): { cli: string; resources: string } {
   const cli = path.join(packageDir, manifest.bin.pi);
   if (!existsSync(cli)) throw new Error(`Pi CLI is unavailable: ${cli}`);
   const resources = path.resolve(process.env.VOCS_CODE_PI_RESOURCES_DIR ?? 'resources/pi');
-  for (const file of ['vocs-code-tools.ts', 'tool-arguments.ts', 'vocs-code-approvals.ts', 'vocs-code-subagents.ts', 'subagent-gate.ts', 'subagent-agents.ts', 'subagent-runs.ts', 'agents/general-purpose.md', 'agents/Explore.md', 'agents/Plan.md']) {
+  for (const file of ['vocs-code-tools.ts', 'tool-arguments.ts', 'search-tools.ts', 'vocs-code-approvals.ts', 'vocs-code-subagents.ts', 'subagent-gate.ts', 'subagent-agents.ts', 'subagent-runs.ts', 'agents/general-purpose.md', 'agents/Explore.md', 'agents/Plan.md']) {
     if (!existsSync(path.join(resources, file))) throw new Error(`Pi resource is unavailable: ${path.join(resources, file)}`);
   }
   return { cli, resources };

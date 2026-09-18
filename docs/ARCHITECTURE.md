@@ -50,6 +50,14 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
 
+**Pi's tool set is Vocs Code's, on Pi's implementations.** `resources/pi/vocs-code-tools.ts`
+registers Pi's own `grep`, `find` and `ls` definitions under the names `rg`, `glob` and `ls`, so a Pi
+session starts with `read, bash, edit, write, rg, glob, ls` active and never needs a shell to search
+or list. They are extension tools, which is what makes them active by default while still honouring
+`--tools`, `--exclude-tools` and `--no-tools`; a `--tools` allowlist could not express that default
+because it also filters MCP and subagent tools. Pi's built-in `grep`/`find` stay inactive, and
+delegated Pi subagents — separate in-process sessions with per-agent tool lists — keep them.
+
 Delegated agents differ too. A Claude session's subagents run on the **session's own model**: the
 adapter sets `CLAUDE_CODE_SUBAGENT_MODEL` to it and, while the project pins no model of its own,
 `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` alongside it. The pair is required — Claude Code's built-ins

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { prepareToolArguments, type CompatibleTool } from '../resources/pi/tool-arguments';
+import { prepareToolArguments, TOOL_GUIDELINES, type CompatibleTool } from '../resources/pi/tool-arguments';
+import { createSearchToolDefinitions, type PiToolDefinition } from '../resources/pi/search-tools';
 import { PiAdapter } from '../src/main/harness/pi';
 import type { HarnessContext } from '../src/main/harness/types';
 import type { SessionEvent, TranscriptItem } from '../src/shared/types';
@@ -44,6 +45,50 @@ describe('Pi compatibility argument preparation', () => {
   });
   it.each([0, -1, Infinity, NaN, '1000', null, 2_147_483_648])('rejects invalid timeout_ms: %s', (timeout_ms) => {
     expect(() => prepareToolArguments('bash', { command: 'x', timeout_ms })).toThrow('finite positive');
+  });
+});
+
+const sourceExecute = () => 'executed';
+const sourceParameters = { type: 'object', properties: { pattern: { type: 'string' } } };
+
+function fakeSearchSdk() {
+  const make = (name: string, extra: Partial<PiToolDefinition> = {}): PiToolDefinition => ({
+    name,
+    label: name,
+    description: `${name} source description`,
+    parameters: sourceParameters,
+    execute: sourceExecute,
+    ...extra,
+  });
+  return {
+    createGrepToolDefinition: () => make('grep'),
+    createFindToolDefinition: () => make('find', { prepareArguments: (args: unknown) => ({ ...(args as Record<string, unknown>), prepared: true }) }),
+    createLsToolDefinition: () => make('ls'),
+  };
+}
+
+describe('Pi search tool aliases', () => {
+  it("exposes rg, glob and ls backed by Pi's own grep, find and ls definitions", () => {
+    const definitions = createSearchToolDefinitions(fakeSearchSdk(), '/workspace');
+    expect(definitions.map((definition) => definition.name)).toEqual(['rg', 'glob', 'ls']);
+    for (const definition of definitions) {
+      expect(definition.label).toBe(definition.name);
+      // Same objects as the built-in: this is Pi's implementation under a Vocs Code name.
+      expect(definition.execute).toBe(sourceExecute);
+      expect(definition.parameters).toBe(sourceParameters);
+      const guideline = TOOL_GUIDELINES[definition.name as 'rg' | 'glob' | 'ls'];
+      expect(definition.description).toContain(guideline);
+      expect(definition.promptGuidelines).toContain(guideline);
+    }
+  });
+
+  it("prepares alias arguments, then hands off to Pi's own preparation", () => {
+    const definitions = createSearchToolDefinitions(fakeSearchSdk(), '/workspace');
+    const glob = definitions.find((definition) => definition.name === 'glob')!;
+    const input = { file_path: 'src', pattern: '*.ts' };
+    expect(glob.prepareArguments!(input)).toEqual({ path: 'src', pattern: '*.ts', prepared: true });
+    expect(input).toEqual({ file_path: 'src', pattern: '*.ts' });
+    expect(() => glob.prepareArguments!({ path: 'a', file_path: 'b' })).toThrow('Conflicting path');
   });
 });
 
@@ -159,5 +204,12 @@ describe('Pi host compatibility protocol', () => {
     feed({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'write', args: { file_path: 'created.txt', content: '' } });
     feed({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'write', isError: false, result: { content: [] } });
     expect(latestTool().changes).toEqual([{ path: 'created.txt', kind: 'update' }]);
+  });
+  it('carries rg, glob and ls through as search items', () => {
+    const { feed, latestTool } = host();
+    for (const name of ['rg', 'glob', 'ls']) {
+      feed({ type: 'tool_execution_start', toolCallId: name, toolName: name, args: { pattern: 'needle' } });
+      expect(latestTool()).toMatchObject({ name, hint: 'search', summary: 'needle' });
+    }
   });
 });

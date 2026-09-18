@@ -516,7 +516,7 @@ export class PiAdapter implements HarnessAdapter {
 
   private startTool(id: string, name: string, args: Record<string, unknown>): void {
     if (this.toolItems.has(id)) return;
-    const hint = name === 'bash' || name === 'powershell' ? 'execute' : name === 'edit' || name === 'write' ? 'edit' : name === 'read' ? 'read' : name === 'grep' || name === 'find' || name === 'ls' ? 'search' : SUBAGENT_TOOLS.has(name) ? 'agent' : 'other';
+    const hint = name === 'bash' || name === 'powershell' ? 'execute' : name === 'edit' || name === 'write' ? 'edit' : name === 'read' ? 'read' : name === 'grep' || name === 'find' || name === 'rg' || name === 'glob' || name === 'ls' ? 'search' : SUBAGENT_TOOLS.has(name) ? 'agent' : 'other';
     const summary =
       typeof args?.command === 'string' ? (args.command as string) : typeof args?.description === 'string' ? (args.description as string) : toolPath(args) !== undefined ? toolPath(args) : typeof args?.pattern === 'string' ? (args.pattern as string) : truncate(JSON.stringify(args ?? {}), 200, '…');
     const item: Extract<TranscriptItem, { kind: 'tool' }> = { id, kind: 'tool', ts: Date.now(), name, hint, input: args, summary, status: 'running' };

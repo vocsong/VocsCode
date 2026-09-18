@@ -1,5 +1,6 @@
 /** Pi 0.85.1 compatibility shims. The running Pi supplies all execution code. */
-import { prepareToolArguments, TOOL_GUIDELINES, type CompatibleTool } from './tool-arguments';
+import { prepareToolArguments, TOOL_GUIDELINES } from './tool-arguments';
+import { createSearchToolDefinitions } from './search-tools';
 
 // Structural boundaries keep this external resource independent of the desktop's dependencies.
 interface Context {
@@ -35,8 +36,12 @@ interface Sdk {
   createWriteToolDefinition(cwd: string): Definition;
   createEditToolDefinition(cwd: string): Definition;
   createBashToolDefinition(cwd: string, options: { commandPrefix?: string; shellPath?: string }): Definition;
+  createGrepToolDefinition(cwd: string): Definition;
+  createFindToolDefinition(cwd: string): Definition;
+  createLsToolDefinition(cwd: string): Definition;
 }
-const NAMES: CompatibleTool[] = ['read', 'write', 'edit', 'bash'];
+const NAMES = ['read', 'write', 'edit', 'bash'] as const;
+type ShimmedTool = (typeof NAMES)[number];
 const READY = 'VCODE_PI_READY::';
 const ERROR = 'VCODE_PI_ERROR::';
 const INPUT = 'VCODE_PI_TOOL_INPUT::';
@@ -46,10 +51,21 @@ export default async function vocsCodeTools(pi: Pi): Promise<void> {
   const packageName = '@earendil-works/pi-coding-agent';
   const sdk = await import(packageName) as unknown as Sdk;
   const incompatible = (detail: string) => new Error(`Incompatible Pi runtime: Vocs Code tool compatibility requires Pi 0.85.1 APIs. ${detail}`);
-  for (const name of ['createReadToolDefinition', 'createWriteToolDefinition', 'createEditToolDefinition', 'createBashToolDefinition', 'getAgentDir'] as const) {
+  for (const name of ['createReadToolDefinition', 'createWriteToolDefinition', 'createEditToolDefinition', 'createBashToolDefinition', 'createGrepToolDefinition', 'createFindToolDefinition', 'createLsToolDefinition', 'getAgentDir'] as const) {
     if (typeof sdk[name] !== 'function') throw incompatible(`Missing ${name}; update Pi.`);
   }
   if (typeof sdk.SettingsManager?.create !== 'function') throw incompatible('Missing SettingsManager.create; update Pi.');
+  // Register Pi's own search/listing definitions under Vocs Code's names while the extension loads:
+  // Pi activates extension tools by default, so this is what puts rg/glob/ls in a session's default
+  // set. A `--tools` allowlist could not do it, because that would also drop MCP and subagent tools.
+  const search = new Map<string, Definition>();
+  for (const definition of createSearchToolDefinitions(sdk, process.cwd())) {
+    if (typeof definition.name !== 'string' || !definition.name || typeof definition.execute !== 'function' || !definition.parameters || typeof definition.parameters !== 'object') {
+      throw incompatible(`Invalid ${definition.name} definition; update Pi.`);
+    }
+    search.set(definition.name, definition);
+    pi.registerTool(definition);
+  }
   let definitions = new Map<string, Definition>();
   let ready = false;
   const notify = (ctx: Context, marker: string, payload: Record<string, unknown>) => {
@@ -58,8 +74,10 @@ export default async function vocsCodeTools(pi: Pi): Promise<void> {
   const verify = () => {
     if (!ready) throw incompatible('Tool overrides are not ready.');
     const actual = pi.getAllTools();
-    for (const [name, expected] of definitions) {
+    for (const [name, expected] of [...definitions, ...search]) {
       const registered = actual.find((tool) => tool.name === name);
+      // A search tool Pi filtered out for --tools/--exclude-tools/--no-tools is absent on purpose.
+      if (!registered && search.has(name)) continue;
       // Public metadata reflects the winning definition. A competing extension must not win silently.
       if (!registered || registered.parameters !== expected.parameters || registered.description !== expected.description) {
         throw incompatible(`Another extension replaced ${name}. Disable the conflicting tool override.`);
@@ -79,7 +97,7 @@ export default async function vocsCodeTools(pi: Pi): Promise<void> {
       const settings = sdk.SettingsManager.create(ctx.cwd, sdk.getAgentDir(), { projectTrusted: ctx.isProjectTrusted() });
       const available = new Set(pi.getAllTools().map((tool) => tool.name));
       const active = pi.getActiveTools();
-      const builtins: Record<CompatibleTool, Definition> = {
+      const builtins: Record<ShimmedTool, Definition> = {
         read: sdk.createReadToolDefinition(ctx.cwd, { autoResizeImages: settings.getImageAutoResize() }),
         write: sdk.createWriteToolDefinition(ctx.cwd),
         edit: sdk.createEditToolDefinition(ctx.cwd),
@@ -111,7 +129,7 @@ export default async function vocsCodeTools(pi: Pi): Promise<void> {
       pi.setActiveTools(active);
       ready = true;
       verify();
-      notify(ctx, READY, { capability: 'tools', tools: [...definitions.keys()] });
+      notify(ctx, READY, { capability: 'tools', tools: [...definitions.keys(), ...search.keys()] });
     } catch (error) {
       fail(ctx, error);
       throw error;
@@ -122,7 +140,7 @@ export default async function vocsCodeTools(pi: Pi): Promise<void> {
   });
   pi.on('tool_call', (event, ctx) => {
     try { verify(); } catch (error) { return { block: true, reason: fail(ctx, error) }; }
-    if (typeof event.toolName === 'string' && definitions.has(event.toolName)) {
+    if (typeof event.toolName === 'string' && (definitions.has(event.toolName) || search.has(event.toolName))) {
       // This is validated, normalized input, not model prose. Never feed it back into execution.
       notify(ctx, INPUT, { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input });
     }

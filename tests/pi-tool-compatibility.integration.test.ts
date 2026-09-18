@@ -238,6 +238,52 @@ describe.skipIf(!enabled)('real Pi 0.85.1 offline compatibility dispatch', () =>
     else { expect(active).not.toContain('bash'); expect(tools.map((tool: PiEvent) => tool.name)).not.toContain('bash'); }
   });
 
+  it("activates Vocs Code's rg/glob/ls by default and dispatches them through Pi", async () => {
+    const runner = start();
+    await runner.ready();
+    const metadata = runner.events.find((event) => event.message?.startsWith?.('PI_FIXTURE_TOOLS::'));
+    const { active, tools } = JSON.parse(metadata!.message.slice('PI_FIXTURE_TOOLS::'.length));
+    // Extension tools need no --tools flag, so searching never falls back to bash on its own.
+    expect(active).toEqual(expect.arrayContaining(['read', 'bash', 'edit', 'write', 'rg', 'glob', 'ls']));
+    expect(active).not.toContain('grep');
+    expect(active).not.toContain('find');
+    const names = tools.map((tool: PiEvent) => tool.name);
+    expect(names).toEqual(expect.arrayContaining(['rg', 'glob', 'ls']));
+    const rg = tools.find((tool: PiEvent) => tool.name === 'rg');
+    expect(rg.description).toContain('ripgrep');
+    expect(Object.keys(rg.parameters.properties)).toEqual(expect.arrayContaining(['pattern', 'path', 'glob']));
+
+    await fs.writeFile(path.join(cwd, 'search-me.txt'), 'NEEDLE_IN_FILE\n');
+    const events = await runner.prompt([
+      call('ls1', 'ls', { path: '.' }),
+      call('rg1', 'rg', { pattern: 'NEEDLE_IN_FILE' }),
+      call('glob1', 'glob', { pattern: '*.txt' }),
+    ]);
+    settled(events, 3);
+    expect(text(ended(events).find((event) => event.toolCallId === 'ls1')!)).toContain('search-me.txt');
+    expect(text(ended(events).find((event) => event.toolCallId === 'rg1')!)).toContain('search-me.txt');
+    expect(text(ended(events).find((event) => event.toolCallId === 'glob1')!)).toContain('search-me.txt');
+    expect(events.filter((event) => event.type === 'extension_error')).toEqual([]);
+    // What the model is actually told: the renamed tools are listed and the bash fallback is gone.
+    const prompt = JSON.parse(events.find((event) => event.message?.startsWith?.('PI_FIXTURE_PROMPT::'))!.message.slice('PI_FIXTURE_PROMPT::'.length)).systemPrompt;
+    expect(prompt).toContain('- rg:');
+    expect(prompt).toContain('- glob:');
+    expect(prompt).toContain('- ls:');
+    expect(prompt).toContain('rg searches file contents with ripgrep');
+    expect(prompt).not.toContain('Use bash for file operations');
+  });
+
+  it('honours --exclude-tools for the renamed search tools', async () => {
+    const runner = start({ extraArgs: ['--no-session', '--exclude-tools', 'rg,glob'] });
+    await runner.ready();
+    const metadata = runner.events.find((event) => event.message?.startsWith?.('PI_FIXTURE_TOOLS::'));
+    const { active, tools } = JSON.parse(metadata!.message.slice('PI_FIXTURE_TOOLS::'.length));
+    expect(active).not.toContain('rg');
+    expect(active).not.toContain('glob');
+    expect(active).toContain('ls');
+    expect(tools.map((tool: PiEvent) => tool.name)).not.toContain('rg');
+  });
+
   it('fails readiness if another extension wins a built-in registration', async () => {
     const runner = start({ competing: true });
     await expect(runner.ready()).rejects.toThrow(/Missing tools readiness/);

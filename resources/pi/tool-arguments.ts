@@ -1,11 +1,14 @@
 /** Compatibility preparation only: no I/O, permissions, or execution belongs here. */
-export type CompatibleTool = 'read' | 'write' | 'edit' | 'bash';
+export type CompatibleTool = 'read' | 'write' | 'edit' | 'bash' | 'rg' | 'glob' | 'ls';
 
 export const TOOL_GUIDELINES = {
   read: 'read accepts file_path as an alias for path; prefer canonical path.',
   write: 'write accepts file_path as an alias for path; prefer canonical path.',
   edit: 'edit accepts file_path and a single old_string/new_string pair (including an empty new_string). Prefer path and edits[]. replace_all:true is unsupported; use unique, non-overlapping edits instead.',
   bash: 'bash timeout is in seconds (no default). timeout_ms is an explicit milliseconds alias; never infer units from magnitude or send both timeout fields.',
+  rg: 'rg searches file contents with ripgrep and respects .gitignore; use it instead of bash grep, rg or find.',
+  glob: 'glob finds files by glob pattern and respects .gitignore; use it instead of bash find or ls.',
+  ls: 'ls lists one directory; use it instead of bash ls.',
 } satisfies Record<CompatibleTool, string>;
 
 export function prepareToolArguments(tool: CompatibleTool, value: unknown): unknown {
