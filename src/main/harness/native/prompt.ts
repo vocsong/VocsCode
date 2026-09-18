@@ -1,8 +1,7 @@
 /** System prompt assembly for the native loop, including any project instruction file it finds. */
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
 import type { ModelRef } from '../../../shared/types';
 import { modelName } from '../../../shared/model-names';
+import { projectInstructionBlock } from '../project-instructions';
 import { detectShell } from './tools';
 
 export async function buildSystemPrompt(cwd: string, opts: { planMode: boolean; append?: string; model: ModelRef }): Promise<string> {
@@ -28,22 +27,8 @@ export async function buildSystemPrompt(cwd: string, opts: { planMode: boolean; 
   if (opts.planMode) {
     parts.push('PLAN MODE is active: you must not modify files or run commands that change state. Explore with read-only tools and produce a concrete, numbered implementation plan for the user to approve.');
   }
-  const context = await loadContextFiles(cwd);
+  const context = await projectInstructionBlock(cwd);
   if (context) parts.push(context);
   if (opts.append) parts.push(opts.append);
   return parts.join('\n\n');
-}
-
-async function loadContextFiles(cwd: string): Promise<string> {
-  const candidates = ['AGENTS.md', 'CLAUDE.md', '.vocs-code/INSTRUCTIONS.md'];
-  const out: string[] = [];
-  for (const name of candidates) {
-    try {
-      const text = await fs.readFile(path.join(cwd, name), 'utf8');
-      if (text.trim()) out.push(`# Project instructions from ${name}\n\n${text.slice(0, 16_000)}`);
-    } catch {
-      /* not present */
-    }
-  }
-  return out.join('\n\n');
 }

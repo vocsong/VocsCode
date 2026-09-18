@@ -265,7 +265,7 @@ describe('Claude adapter subagent capture', () => {
   it('asks the SDK to forward subagent text, without which there is no child transcript at all', async () => {
     const { ctx } = await stubCtx();
     const a = new ClaudeAdapter(ctx);
-    const options = (a as unknown as { buildOptions: () => Record<string, unknown> }).buildOptions();
+    const options = await (a as unknown as { buildOptions: () => Promise<Record<string, unknown>> }).buildOptions();
     expect(options.forwardSubagentText).toBe(true);
   });
 });

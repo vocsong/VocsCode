@@ -91,6 +91,7 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 ## Key invariants
 
 - Adapters implement `HarnessAdapter` (`src/main/harness/types.ts`) and receive a `HarnessContext`. Adapters must not import Electron.
+- Project instructions are read once per harness. `AGENTS.md`, `CLAUDE.md` and `.vocs-code/INSTRUCTIONS.md` are the app's instruction files (`src/main/harness/project-instructions.ts`); an engine that discovers one itself keeps it, and the adapter adds only what that engine does not read. The Claude adapter, whose CLI reads `CLAUDE.md` alone, appends `AGENTS.md` (only where the directory has no Claude document) and `.vocs-code/INSTRUCTIONS.md` to its system prompt, so no file is ever handed over twice.
 - The terminal lives in the main process; the renderer re-attaches to snapshots and never owns PTY lifetime.
 - API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo.
 - Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.

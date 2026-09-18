@@ -57,7 +57,7 @@ async function envFor(): Promise<Record<string, string | undefined>> {
     log: () => {}
   } as unknown as HarnessContext;
   const adapter = new ClaudeAdapter(ctx);
-  return (adapter as unknown as { buildOptions: () => { env: Record<string, string | undefined> } }).buildOptions().env;
+  return (adapter as unknown as { buildOptions: () => Promise<{ env: Record<string, string | undefined> }> }).buildOptions().then((o) => o.env);
 }
 
 describe('the subagent fan-out a Claude session may run', () => {

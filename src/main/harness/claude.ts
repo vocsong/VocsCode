@@ -23,10 +23,12 @@ import { subagentSupport, type AgentTypeInfo } from '../../shared/subagents';
 import { anthropicAuthFor, anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvider, isClaudeGatewayProvider } from '../../shared/providers';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
+import { exists } from '../util/fs';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { SUBAGENT_TOOLS, ClaudeSubagentRuns, type NestedAssistantLike, type TaskNotificationLike, type TaskProgressLike, type TaskStartedLike, type TaskUpdatedLike } from './claude-subagents';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
+import { projectInstructionBlock } from './project-instructions';
 import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext } from './types';
 
@@ -38,6 +40,34 @@ const APP_ID = 'vocs-code/0.1.0';
  * concurrent run is its own conversation, so cost is the real brake, not this number.
  */
 const MAX_CONCURRENT_SUBAGENTS = 32;
+
+/**
+ * Claude Code's own project-document names. With `'project'` in `settingSources` its engine
+ * discovers these itself (following `@` imports), so the adapter must leave them to it: handing the
+ * same instructions over again costs context and buries the file that was actually missing. The
+ * bundled CLI reads no other instruction file, so a project whose rules live only in `AGENTS.md` —
+ * the convention pi, Codex and the native loop follow — would otherwise run unprimed.
+ */
+const CLAUDE_PROJECT_DOC_FILES = ['CLAUDE.md', '.claude/CLAUDE.md', 'CLAUDE.local.md'];
+
+/**
+ * The project instructions the Claude engine does not read. `AGENTS.md` is added only where the
+ * directory has no Claude document, matching the engine's own fallback rule (never both for one
+ * directory) so a repo that maintains `CLAUDE.md` — e.g. `@AGENTS.md` — is not duplicated.
+ * `.vocs-code/INSTRUCTIONS.md` has no engine equivalent, so it is added whenever it exists.
+ */
+export async function claudeProjectInstructions(cwd: string): Promise<string | undefined> {
+  let agents = true;
+  for (const name of CLAUDE_PROJECT_DOC_FILES) {
+    if (await exists(path.join(cwd, name))) {
+      agents = false;
+      break;
+    }
+  }
+  const names = [...(agents ? ['AGENTS.md'] : []), '.vocs-code/INSTRUCTIONS.md'];
+  return (await projectInstructionBlock(cwd, names)) || undefined;
+}
+
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const READ_ONLY_TOOLS = new Set([
   'Read',
@@ -183,11 +213,14 @@ export class ClaudeAdapter implements HarnessAdapter {
     return this._busy;
   }
 
-  private buildOptions(): Options {
+  private async buildOptions(): Promise<Options> {
     const s = this.ctx.settings();
     const meta = this.ctx.session();
     const cfg = meta.config;
-    const append = sessionAppendPrompt(meta);
+    // The engine reads the project's own CLAUDE.md through `settingSources`; everything it does not
+    // read is appended here, so every harness starts from the same instruction files.
+    const project = s.claude.settingSources.includes('project') ? await claudeProjectInstructions(meta.cwd) : undefined;
+    const append = [project, sessionAppendPrompt(meta)].filter(Boolean).join('\n\n') || undefined;
     const mode = this.ctx.permissionMode();
     const bin = this.ctx.runtime.resolve('claude');
     const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
@@ -239,7 +272,7 @@ export class ClaudeAdapter implements HarnessAdapter {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
-    const options = this.buildOptions();
+    const options = await this.buildOptions();
     // `strictMcpConfig` stays unset on purpose: the user's own ~/.claude.json and plugin servers
     // must keep working alongside the ones this app injects. With 'project' in settingSources
     // Claude also reads <cwd>/.mcp.json itself, so a repo server this app passes is declared
