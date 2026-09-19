@@ -194,7 +194,12 @@ export function isCuaPermissionMode(v: unknown): v is CuaPermissionMode {
 
 /** Vocs Code's computer-use settings; the binary itself is not shipped, only discovered. */
 export interface CuaSettings {
-  /** Opt-in. Off by default: the driver can operate every app on this machine. */
+  /**
+   * On by default. Installing Cua Driver is already the user's explicit act, so the built-in turns
+   * itself on when a binary is found — the same shape as GitNexus being on once a repo is indexed.
+   * The app-wide switch (`mcpDisabledBuiltins`) and this repo's switch (`disabledBuiltin`) turn it
+   * off, and the authorization mode/approvals are the real boundary.
+   */
   enabled: boolean;
   mode: CuaPermissionMode;
   /** Required for `bounded`: a reviewed capability manifest scoping apps, origins and files. */
@@ -212,6 +217,11 @@ export interface CuaStatus {
   ready: boolean;
   /** One line for the UI. */
   note: string;
+  /**
+   * Which process owns the authorization mode: Vocs Code's launch environment, or the host's own
+   * Cua Driver daemon (macOS proxies to `CuaDriver.app`, so the daemon's launch flags decide).
+   */
+  modeSource: 'vocs-code' | 'host';
 }
 
 /** One live screen capture for the Desktop preview tab. */

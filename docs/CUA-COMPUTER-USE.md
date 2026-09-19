@@ -121,9 +121,9 @@ desktop task are two manifests / two runtimes. The UI must not pretend otherwise
 
 ## 5. Integration surface: built-in, not a manual entry
 
-Cua Driver should be an **opt-in built-in server**, `MCP_BUILTIN_IDS = ['gitnexus',
-'vocs-memory', 'cua-driver']`, off by default, because a manual global entry would give up every
-thing the built-in path already provides:
+Cua Driver is a **built-in server**, `MCP_BUILTIN_IDS = ['gitnexus', 'vocs-memory',
+'cua-driver']`, on by default once a binary is found, because a manual global entry would give up
+everything the built-in path already provides:
 
 - Binary discovery (`which('cua-driver')` + the Windows
   `%LOCALAPPDATA%\Programs\Cua\cua-driver\bin` and macOS/Linux `~/.local/bin` locations), a
@@ -202,7 +202,7 @@ and decide option 1 vs 2 in §6. Confirm what `get_config` reports for mode on e
 - `src/main/mcp/cua.ts` — binary discovery, base `McpServerDef`, mode→env/argv, per-session label,
   manifest path resolution, `get_config` read.
 - `src/main/runtime.ts` — a `cua-driver` tool entry: version/doctor probe, install hint.
-- `src/main/mcp/index.ts` — cua in `builtinDefs()`; opt-in default; socket attachment; Codex
+- `src/main/mcp/index.ts` — cua in `builtinDefs()`; on-by-default; socket attachment (follow-up); Codex
   name-claiming.
 - `src/shared/types.ts` — `'cua-driver'` in `MCP_BUILTIN_IDS`; settings for mode, manifest path,
   binary override, and the app-owned-runtime flag; `ToolKindHint` `'computer'`; images on the tool

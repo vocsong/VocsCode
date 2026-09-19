@@ -12,7 +12,7 @@ import type { CuaStatus } from '../src/shared/types';
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl' }));
 
-const status = (over: Partial<CuaStatus> = {}): CuaStatus => ({ installed: true, version: '0.28.2', mode: 'standard', ready: true, note: 'On.', ...over });
+const status = (over: Partial<CuaStatus> = {}): CuaStatus => ({ installed: true, version: '0.28.2', mode: 'standard', ready: true, note: 'On.', modeSource: 'vocs-code', ...over });
 
 function setup(cua: { enabled: boolean; mode: string; manifestPath?: string }, s: CuaStatus) {
   useStore.setState({ settings: { mcpServers: [], cua } as never });
@@ -71,5 +71,16 @@ describe('Cua Driver card', () => {
       fireEvent.keyDown(input, { key: 'Enter' });
     });
     expect(invoke).toHaveBeenCalledWith('settings:update', { cua: { enabled: true, mode: 'bounded', manifestPath: '/etc/cua-capabilities.yaml' } });
+  });
+
+  it('offers a real Test connection handshake once installed', async () => {
+    setup({ enabled: true, mode: 'standard' }, status());
+    await act(async () => {
+      render(<CuaCard />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('cua-test'));
+    });
+    expect(invoke).toHaveBeenCalledWith('cua:test', undefined);
   });
 });

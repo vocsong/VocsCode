@@ -517,7 +517,7 @@ and a `gitnexus mcp` process per session) is gone: `src/main/mcp/gitnexus.ts` no
 global registry and computes each session's allow-list. `AppSettings.gitnexus.mode` no longer
 exists, and a value left on disk by an older build is dropped when settings are normalized.
 
-## 14. Built-in Cua Driver — computer use, opt-in
+## 14. Built-in Cua Driver — computer use
 
 **Status: shipped (Phase 1 core + Desktop preview).** [Cua Driver](https://github.com/trycua/cua) is the third
 app-shipped server: a native computer-use driver that inspects and operates desktop apps and
@@ -530,18 +530,30 @@ inherit-only. The design and the phase plan live in `docs/CUA-COMPUTER-USE.md`.
 
 Rules:
 
-- **Off by default.** The def is `disabled` unless the user switched `settings.cua.enabled` on, a
-  binary was found, and the selected mode can start. `builtinEntries` honors a def's own
-  `disabled`, which is the opt-in path; `disabledBuiltin` (per repo) and `mcpDisabledBuiltins`
-  (everywhere) then narrow it further. The MCP page's `CuaCard` is the one place the opt-in and
-  the mode are chosen, and the repo tab shows the same card in its compact form.
+- **Built in like GitNexus: on once a binary is found.** Installing Cua Driver is already the user's
+explicit act, so the built-in switches itself on when one is discovered — the same shape as
+GitNexus being on once a repo is indexed. `settings.cua.enabled` is true by default; only an
+explicit `false` keeps it off. The def is still `disabled` (never injected) when no binary is
+present or a `bounded` mode has no manifest, and `builtinEntries` honors that. The MCP page can
+switch it off everywhere (`mcpDisabledBuiltins`) and a repo keeps itself out with
+`disabledBuiltin`. The `CuaCard` is the one place the mode is chosen; the repo tab shows it in
+compact form.
+- **Managed, with a real health check.** The card reports the installed binary's version and its
+resolution path, and its **Test connection** runs the app's own MCP client against
+`cua-driver mcp` (the same probe user-defined servers get), so an install that cannot serve its
+tools is visible before a session depends on it.
 - **Two gates.** Vocs Code's per-call approval (permission mode, below Full access) is separate
   from Cua's per-action authorization inside its runtime. `standard` is promptless internally;
   `bounded` requires a capability manifest and denies undeclared scope; `unrestricted` needs the
   dangerous acknowledgement. The mode maps to the launch environment in `cuaEnv`
   (`CUA_DRIVER_PERMISSION_MODE`, plus the manifest pair or the bypass flag) because the runtime
   reads it once and no tool call can widen it.
-- **Fail closed.** Missing binary, no manifest in `bounded`, or the opt-in off all leave the
+- **The mode is fixed at launch, and on macOS the host owns it.** `cua-driver mcp` proxies to
+  `CuaDriver.app` on macOS so the bundle keeps the Accessibility and Screen Recording grants, which
+  means that daemon's launch flags — not this app's environment — fix the mode; the card says so
+  (`CuaStatus.modeSource === 'host'`). On Windows and Linux the environment variables decide. This
+  is why a shared, app-owned runtime is the remaining structural difference from GitNexus.
+- **Fail closed.** Missing binary, no manifest in `bounded`, or an explicit off all leave the
   built-in disabled rather than injected broken. Settings normalization drops an unknown mode back
   to `standard` and an empty manifest path.
 - It is claimed like the other built-ins: `builtinServerIds()` includes `cua-driver`, so both

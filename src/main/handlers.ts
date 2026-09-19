@@ -20,7 +20,7 @@ import type { KnowledgeService } from './knowledge/service';
 import type { UpdateState } from '../shared/types';
 import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
-import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, CuaPreviewSession, cuaStatus, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
+import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, CuaPreviewSession, cuaBaseDef, cuaDefState, cuaStatus, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import { enrichModelsFromProviders } from './models/static-models';
@@ -534,6 +534,18 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const cuaPreview = new CuaPreviewSession();
   handle('cua:status', () => cuaStatus(settings.get()));
   handle('cua:preview', () => cuaPreview.capture(settings.get()));
+  // The built-in's "Test connection": a real MCP handshake against `cua-driver mcp`, the same
+  // thing the user-server rows offer, so an install that lies about its tools is visible.
+  handle('cua:test', async () => {
+    const current = settings.get();
+    const def = cuaBaseDef(current);
+    if (def.disabled) return { ok: false, error: cuaDefState(current).note, tools: [], durationMs: 0 };
+    const resolved = await resolveVars(def, { env: process.env, secret: (name) => secrets.get(secretKeyFor(name)) });
+    const result = await inspectServer(normalizeStdio(resolved.def, { which: (cmd) => which(cmd) }), {});
+    if (result.ok) deps.log('debug', `cua: ${result.tools.length} tool(s) in ${result.durationMs}ms`);
+    else deps.log('warn', `cua: test failed: ${result.error ?? 'unknown error'}`);
+    return result;
+  });
 
   const scheduleGitnexus = (session: SessionMeta, reason: GitnexusIndexReason): void => {
     deps.gitnexusIndexer?.schedule({ cwd: session.cwd, projectRoot: session.config.projectRoot, reason });

@@ -23,7 +23,7 @@ const session = (): SessionMeta =>
     usage: { costUsd: 0 }
   }) as unknown as SessionMeta;
 
-const status = (over: Partial<CuaStatus> = {}): CuaStatus => ({ installed: true, version: '0.28.2', mode: 'standard', ready: true, note: 'On.', ...over });
+const status = (over: Partial<CuaStatus> = {}): CuaStatus => ({ installed: true, version: '0.28.2', mode: 'standard', ready: true, note: 'On.', modeSource: 'vocs-code', ...over });
 
 function mockInvoke(s: CuaStatus, preview: CuaPreviewResult) {
   invoke.mockImplementation((channel: string) => {

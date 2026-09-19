@@ -63,6 +63,21 @@ describe('MCP panel tab', () => {
     expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { disabledBuiltin: ['gitnexus'] } });
   });
 
+  it('keeps the built-in Cua Driver out of one repo with the same switch', async () => {
+    const cua = { id: 'cua-driver', transport: 'stdio' as const, command: 'cua-driver', args: ['mcp'] };
+    invoke.mockResolvedValue(
+      info({
+        builtin: [
+          { def: gitnexus, enabled: true, shared: false, indexed: false, claimed: false },
+          { def: cua, enabled: true, shared: false, indexed: true, claimed: false }
+        ]
+      })
+    );
+    await act(async () => { render(<McpTab session={session()} />); });
+    await act(async () => { fireEvent.click(screen.getByLabelText('Enable computer use for this repo')); });
+    expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { disabledBuiltin: ['cua-driver'] } });
+  });
+
   it('indexes from the current repo and refreshes the project info', async () => {
     invoke.mockResolvedValueOnce(info()).mockResolvedValueOnce({ ok: true, output: 'done' }).mockResolvedValueOnce(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true, claimed: false }] }));
     await act(async () => { render(<McpTab session={session()} />); });

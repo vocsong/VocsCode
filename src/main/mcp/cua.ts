@@ -80,9 +80,11 @@ export function cuaDefState(settings: AppSettings, lookup: typeof which = which)
   const mode = settings.cua?.mode ?? 'standard';
   const command = findCuaDriver(settings, lookup);
   const plan = cuaEnv(mode, settings.cua?.manifestPath);
-  const enabled = settings.cua?.enabled === true;
+  // On by default: installing the driver is the user's act, so the built-in switches itself on
+  // when a binary is there. Only an explicit `false` keeps it off.
+  const enabled = settings.cua?.enabled !== false;
   const note = !command
-    ? 'Cua Driver is not installed on this machine. Install it, then turn it on here.'
+    ? 'Cua Driver is not installed on this machine. Install it and this turns on by itself.'
     : !enabled
       ? 'Off. Turn it on to let agents drive apps and browsers on this machine.'
       : !plan.ready
@@ -129,10 +131,13 @@ export function clearCuaVersionCache(): void {
 /** One status read for the MCP page and the Desktop tab. */
 export async function cuaStatus(settings: AppSettings, lookup: typeof which = which): Promise<CuaStatus> {
   const state = cuaDefState(settings, lookup);
-  if (!state.command) return { installed: false, mode: state.mode, ready: false, note: state.note };
+  // On macOS, `cua-driver mcp` proxies to CuaDriver.app so the app bundle keeps the TCC grants,
+  // which also means that daemon's launch flags — not this app's environment — fix the mode.
+  const modeSource: CuaStatus['modeSource'] = process.platform === 'darwin' ? 'host' : 'vocs-code';
+  if (!state.command) return { installed: false, mode: state.mode, ready: false, note: state.note, modeSource };
   const version = await cuaVersion(state.command);
   if (!version) {
-    return { installed: false, path: state.command, mode: state.mode, ready: false, note: `${state.command} did not answer --version; reinstall Cua Driver or point the binary override at it.` };
+    return { installed: false, path: state.command, mode: state.mode, ready: false, note: `${state.command} did not answer --version; reinstall Cua Driver or point the binary override at it.`, modeSource };
   }
-  return { installed: true, path: state.command, version, mode: state.mode, ready: state.ready, note: state.note };
+  return { installed: true, path: state.command, version, mode: state.mode, ready: state.ready, note: state.note, modeSource };
 }
