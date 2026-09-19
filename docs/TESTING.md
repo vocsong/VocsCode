@@ -76,6 +76,7 @@ suites alive** below):
 | pi harness (`harness/pi.ts`), `resources/pi/**` | `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-tool-compatibility.integration.test.ts tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts` + live `HARNESS_SMOKE_ONLY=pi` |
 | Subagents panel, right-panel split | `VOCS_CODE_E2E_UI=1 vitest run tests/e2e.subagents.test.ts` + `e2e.layout`, `e2e.files` |
 | Project knowledge (wiki store, docs scan, distillation, PR reflection, relation graph), `src/main/knowledge/**`, `resources/mcp/vocs-memory.mjs` | `e2e.knowledge` |
+| MCP layer (`src/main/mcp/**`), built-in servers, computer use (`mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`) | `tests/mcp.test.ts`, `tests/mcp-gitnexus.test.ts`, `tests/mcp-client.test.ts`, `tests/cua.test.ts`, `tests/cua-preview.test.ts`, `tests/cua-card.test.tsx`, `tests/desktop-tab.test.tsx`, `tests/right-panel-bottom.test.tsx` |
 | Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/web-client.test.ts` |
 | Relay routing, auth or rate limiting (`relay/src/routes.ts`, `relay/src/rate.ts`) | `tests/relay-routes.test.ts` + `tests/remote-e2e.test.ts`, `e2e.remote` |
 | Relay web app layout (`relay/public/app/**`, `relay/src/page.ts`) | `tests/relay-page-layout.test.ts` + `tests/web-client.test.ts` |

@@ -4,18 +4,22 @@
  * the same time; adapters only ever see the resolved list through `ctx.mcpServers()`.
  */
 import type { AppSettings, HarnessId, McpBuiltinInfo, McpProjectInfo, McpProjectState, McpServerDef } from '../../shared/types';
+import { MCP_BUILTIN_IDS } from '../../shared/types';
 import { HARNESS_BY_ID } from '../../shared/harness-meta';
 import { which } from '../runtime';
 import { builtinEntries, effectiveEntries, effectiveServers, normalizeStdio, resolveVars, type ResolvedServer } from './effective';
 import { globalStores, projectStores, readProjectMcp, readStores } from './file';
 import { GITNEXUS_SERVER_ID, gitnexusBaseDef, gitnexusSharedRoots, isBuiltinServerId, isGitnexusIndexed, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './gitnexus';
 import { VOCS_MEMORY_SERVER_ID, hasMemoryWiki, memoryServerDef, vocsMemoryBaseDef } from './memory';
+import { CUA_SERVER_ID, cuaBaseDef, cuaDefState } from './cua';
 
 export * from './effective';
 export * from './file';
 export * from './gitnexus';
 export * from './indexer';
 export * from './memory';
+export * from './cua';
+export * from './cua-preview';
 export { inspectServer, type InspectOptions } from './client';
 
 /** Keychain id for a variable referenced as `${NAME}` in an MCP definition. */
@@ -52,16 +56,18 @@ function stateFor(settings: AppSettings, projectRoot: string): McpProjectState {
 }
 
 /** The app-shipped built-in servers, with the installed binary preferred over `npx`. */
-function builtinDefs(): McpServerDef[] {
-  return [gitnexusBaseDef(which(GITNEXUS_SERVER_ID)), vocsMemoryBaseDef()];
+function builtinDefs(settings: AppSettings): McpServerDef[] {
+  return [gitnexusBaseDef(which(GITNEXUS_SERVER_ID)), vocsMemoryBaseDef(), cuaBaseDef(settings)];
 }
 
 /**
  * The ids this app defines itself. A harness that loads its own MCP config alongside what this app
- * injects has to be told to keep them off when the session does not get them.
+ * injects has to be told to keep them off when the session does not get them. Static: an apparatus
+ * name is owned whether or not the current settings enable it, so a same-name entry left in a
+ * harness's own store is switched off rather than started beside ours.
  */
 export function builtinServerIds(): string[] {
-  return builtinDefs().map((def) => def.id);
+  return [...MCP_BUILTIN_IDS];
 }
 
 /**
@@ -106,7 +112,7 @@ async function sharedGitnexusDef(scope: SessionScope, def: McpServerDef, deps: M
 /** Built-ins the session actually gets, materialized against the shared server. */
 async function resolveBuiltins(scope: SessionScope, state: McpProjectState, deps: McpHostDeps): Promise<ResolvedServer[]> {
   const support = HARNESS_BY_ID[scope.harness].capabilities.mcp;
-  const defs = builtinDefs();
+  const defs = builtinDefs(scope.settings);
   const chosen = builtinEntries({ builtin: defs, state, globalDisabled: scope.settings.mcpDisabledBuiltins, harness: scope.harness, support }).filter((e) => e.enabled);
   const out: ResolvedServer[] = [];
   for (const { def } of chosen) {
@@ -137,7 +143,7 @@ export async function resolveForSession(scope: SessionScope, deps: McpHostDeps):
   const globals = (scope.settings.mcpServers ?? []).filter((d) => !isBuiltinServerId(d.id));
   const repo = await readProjectMcp(scope.cwd);
   const repoDefs = repo.servers.filter((d) => !isBuiltinServerId(d.id));
-  const chosen = effectiveServers({ global: globals, repo: repoDefs, state, harness: scope.harness, support, builtin: builtinDefs() });
+  const chosen = effectiveServers({ global: globals, repo: repoDefs, state, harness: scope.harness, support, builtin: builtinDefs(scope.settings) });
   if (repo.error) deps.log?.('warn', `mcp: ${repo.file} could not be used: ${repo.error}`);
   const out: ResolvedServer[] = await resolveBuiltins(scope, state, deps);
   for (const def of chosen) {
@@ -157,12 +163,13 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
   const repoDefs = repo.servers.filter((d) => !isBuiltinServerId(d.id));
   const state = stateFor(scope.settings, scope.projectRoot);
   const detected = (await readStores(projectStores(scope.cwd))).filter((s) => s.exists);
-  const defs = builtinDefs();
+  const defs = builtinDefs(scope.settings);
   const injectable = support === 'inject' || support === 'client';
   const registry = await readGitnexusRegistry(realGitnexusHome());
   const indexed = isGitnexusIndexed(registry, { projectRoot: scope.projectRoot, cwd: scope.cwd });
   const wiki = await hasMemoryWiki(scope);
   const globalDisabled = scope.settings.mcpDisabledBuiltins ?? [];
+  const cua = cuaDefState(scope.settings);
   const builtin: McpBuiltinInfo[] = defs.map((def) => {
     const off = globalDisabled.includes(def.id) || (state.disabledBuiltin ?? []).includes(def.id);
     if (def.id === VOCS_MEMORY_SERVER_ID) {
@@ -174,6 +181,19 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
         indexed: wiki,
         claimed: canClaimBuiltins(scope.harness),
         note: wiki ? 'Reads .vocs-code/wiki in this project.' : 'No project wiki yet — generate one from the Knowledge panel.'
+      };
+    }
+    if (def.id === CUA_SERVER_ID) {
+      return {
+        def,
+        // Opt-in: the app-wide switch is `settings.cua.enabled`, carried on the def as `disabled`.
+        enabled: injectable && !off && !def.disabled,
+        disabledGlobally: globalDisabled.includes(def.id),
+        shared: false,
+        // Reused for Cua as "has what it needs to start"; the repo toggle disables on it.
+        indexed: cua.installed,
+        claimed: canClaimBuiltins(scope.harness),
+        note: cua.note
       };
     }
     return {

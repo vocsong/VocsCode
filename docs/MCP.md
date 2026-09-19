@@ -516,3 +516,43 @@ The earlier per-repo mode (a private `GITNEXUS_HOME` per project holding a one-e
 and a `gitnexus mcp` process per session) is gone: `src/main/mcp/gitnexus.ts` now only reads the
 global registry and computes each session's allow-list. `AppSettings.gitnexus.mode` no longer
 exists, and a value left on disk by an older build is dropped when settings are normalized.
+
+## 14. Built-in Cua Driver — computer use, opt-in
+
+**Status: shipped (Phase 1 core + Desktop preview).** [Cua Driver](https://github.com/trycua/cua) is the third
+app-shipped server: a native computer-use driver that inspects and operates desktop apps and
+browsers on macOS, Windows and Linux, speaking MCP over stdio as `cua-driver mcp`. Vocs Code does
+not ship the binary and never installs it silently; it discovers one the user installed
+(`~/.local/bin`, `%LOCALAPPDATA%\Programs\Cua\cua-driver\bin`, or the `binaries.cua` override),
+asks for an authorization profile, and injects the server through the normal resolver, so every
+harness with `inject`/`client` support gets its tools with no adapter code. Cursor stays
+inherit-only. The design and the phase plan live in `docs/CUA-COMPUTER-USE.md`.
+
+Rules:
+
+- **Off by default.** The def is `disabled` unless the user switched `settings.cua.enabled` on, a
+  binary was found, and the selected mode can start. `builtinEntries` honors a def's own
+  `disabled`, which is the opt-in path; `disabledBuiltin` (per repo) and `mcpDisabledBuiltins`
+  (everywhere) then narrow it further. The MCP page's `CuaCard` is the one place the opt-in and
+  the mode are chosen, and the repo tab shows the same card in its compact form.
+- **Two gates.** Vocs Code's per-call approval (permission mode, below Full access) is separate
+  from Cua's per-action authorization inside its runtime. `standard` is promptless internally;
+  `bounded` requires a capability manifest and denies undeclared scope; `unrestricted` needs the
+  dangerous acknowledgement. The mode maps to the launch environment in `cuaEnv`
+  (`CUA_DRIVER_PERMISSION_MODE`, plus the manifest pair or the bypass flag) because the runtime
+  reads it once and no tool call can widen it.
+- **Fail closed.** Missing binary, no manifest in `bounded`, or the opt-in off all leave the
+  built-in disabled rather than injected broken. Settings normalization drops an unknown mode back
+  to `standard` and an empty manifest path.
+- It is claimed like the other built-ins: `builtinServerIds()` includes `cua-driver`, so both
+  Codex adapters write `mcp_servers.cua-driver = { enabled: false }` for a session that is not
+  receiving it.
+- **Desktop preview.** The panel's lower half has a Desktop tab (`DesktopTab.tsx`) that polls
+  `cua:preview` every 2s and shows the returned screenshot. The main-process `CuaPreviewSession`
+  keeps one MCP connection to `cua-driver mcp` between polls (closed after 30s idle) and calls
+  `get_desktop_state`, which never moves the pointer or takes focus. The tab's Stop button is the
+  session interrupt; when the driver is not ready it falls back to the compact Cua card.
+
+Not yet shipped (see the design doc): one app-owned runtime shared by concurrent sessions,
+in-transcript screenshots of driver actions on tool cards, a window picker in the preview, the
+guidance skill, and the Computer History audit view.

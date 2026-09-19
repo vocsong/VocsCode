@@ -31,6 +31,17 @@ export interface ConnectedMcpTool {
 export interface McpCallResult {
   output: string;
   isError: boolean;
+  /** Image content blocks (base64), as a computer-use server returns screenshots. */
+  images: McpImage[];
+  /** The raw structuredContent, when the server sent one. */
+  structured?: unknown;
+}
+
+/** One image content block from an MCP tool result. */
+export interface McpImage {
+  mimeType: string;
+  /** Base64, without a data-URL prefix. */
+  data: string;
 }
 
 /** A live connection: list once at connect, call many times, close when the session ends. */
@@ -89,13 +100,25 @@ export async function connectServer(def: McpServerDef, opts: InspectOptions = {}
           { name, arguments: args },
           undefined,
           { timeout: callOpts.timeoutMs ?? timeoutMs, ...(callOpts.signal ? { signal: callOpts.signal } : {}) }
-        )) as { content?: unknown; isError?: unknown };
+        )) as { content?: unknown; isError?: unknown; structuredContent?: unknown };
         const content = Array.isArray(raw.content) ? raw.content : [];
         const text = content
           .filter((part): part is { type: 'text'; text: string } => !!part && typeof part === 'object' && (part as { type?: unknown }).type === 'text')
           .map((part) => part.text)
           .join('\n');
-        return { output: text || JSON.stringify(raw.content ?? raw), isError: raw.isError === true };
+        const images: McpImage[] = content
+          .filter((part): part is { type: 'image'; data: string; mimeType: string } => {
+            if (!part || typeof part !== 'object') return false;
+            const p = part as { type?: unknown; data?: unknown; mimeType?: unknown };
+            return p.type === 'image' && typeof p.data === 'string' && typeof p.mimeType === 'string';
+          })
+          .map((part) => ({ mimeType: part.mimeType, data: part.data }));
+        return {
+          output: text || JSON.stringify(raw.content ?? raw),
+          isError: raw.isError === true,
+          images,
+          ...(raw.structuredContent !== undefined ? { structured: raw.structuredContent } : {})
+        };
       },
       async close() {
         await client.close().catch(() => undefined);

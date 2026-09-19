@@ -61,6 +61,9 @@ export function builtinEntries(input: { builtin: McpServerDef[]; state: McpProje
   const disabled = new Set([...(input.state.disabledBuiltin ?? []), ...(input.globalDisabled ?? [])]);
   return input.builtin.map((def) => {
     const off = (reason: McpEffectiveEntry['reason']): McpEffectiveEntry => ({ def, scope: 'builtin', enabled: false, reason });
+    // A built-in can opt out on its own behalf too: Cua Driver is off unless the user turned it
+    // on and a binary was found. The per-repo and app-wide switches then narrow it further.
+    if (def.disabled) return off('disabled');
     if (disabled.has(def.id)) return off('disabled');
     if (def.harnesses?.length && !def.harnesses.includes(input.harness)) return off('harness-filtered');
     if (!injectable) return off('not-injected');

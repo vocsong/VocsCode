@@ -8,6 +8,7 @@ import type { McpProjectInfo, McpServerDef, SessionMeta } from '../../../shared/
 import { invoke } from '../api';
 import { useStore } from '../store';
 import { McpServerForm, emptyServer, serverSummary } from './McpServerForm';
+import { CuaCard } from './CuaCard';
 import { askConfirm, Badge, Button, EmptyState, Icon, Spinner, Toggle } from './ui';
 
 export function McpTab({ session }: { session: SessionMeta }) {
@@ -173,7 +174,7 @@ export function McpTab({ session }: { session: SessionMeta }) {
           </div>
         )}
         {info.builtin
-          .filter((entry) => entry.def.id !== 'gitnexus')
+          .filter((entry) => entry.def.id !== 'gitnexus' && entry.def.id !== 'cua-driver')
           .map((entry) => (
             <div key={entry.def.id} className="mcp-card" data-testid={`builtin-${entry.def.id}`}>
               <div className="mcp-row-head">
@@ -190,6 +191,7 @@ export function McpTab({ session }: { session: SessionMeta }) {
               </div>
             </div>
           ))}
+        {info.builtin.some((entry) => entry.def.id === 'cua-driver') && <CuaCard compact />}
       </section>
 
       <section className="mcp-section" data-testid="mcp-repo-section">

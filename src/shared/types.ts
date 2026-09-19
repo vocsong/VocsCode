@@ -171,12 +171,56 @@ export interface McpServerDef {
   /** Per-call timeout hint, passed through where the harness supports it. */
   timeoutMs?: number;
   description?: string;
-  /** Global list only: a master switch independent of the per-repo ones. */
+  /** A master switch independent of the per-repo ones. Built-ins use it for opt-in (Cua). */
   disabled?: boolean;
 }
 
 /** Ids of the MCP servers this app ships itself. A same-named user entry is not theirs to edit, so it is ignored everywhere. */
-export const MCP_BUILTIN_IDS: readonly string[] = ['gitnexus', 'vocs-memory'];
+export const MCP_BUILTIN_IDS: readonly string[] = ['gitnexus', 'vocs-memory', 'cua-driver'];
+
+/**
+ * Authorization profile Cua Driver runs under. The mode is read once, when the process that owns
+ * the driver runtime starts, and a tool call can never widen it. `standard` is promptless for
+ * routine actions; `bounded` requires a capability manifest and denies undeclared scope;
+ * `unrestricted` requires an explicit dangerous acknowledgement. See docs/CUA-COMPUTER-USE.md.
+ */
+export type CuaPermissionMode = 'standard' | 'bounded' | 'unrestricted';
+
+export const CUA_PERMISSION_MODES: readonly CuaPermissionMode[] = ['standard', 'bounded', 'unrestricted'];
+
+export function isCuaPermissionMode(v: unknown): v is CuaPermissionMode {
+  return typeof v === 'string' && (CUA_PERMISSION_MODES as readonly string[]).includes(v);
+}
+
+/** Vocs Code's computer-use settings; the binary itself is not shipped, only discovered. */
+export interface CuaSettings {
+  /** Opt-in. Off by default: the driver can operate every app on this machine. */
+  enabled: boolean;
+  mode: CuaPermissionMode;
+  /** Required for `bounded`: a reviewed capability manifest scoping apps, origins and files. */
+  manifestPath?: string;
+}
+
+/** What the MCP page and the Desktop tab need to know about the installed driver. */
+export interface CuaStatus {
+  installed: boolean;
+  /** The resolved binary path, when one was found. */
+  path?: string;
+  version?: string;
+  mode: CuaPermissionMode;
+  /** Whether the selected mode has what it needs to start (bounded needs a manifest). */
+  ready: boolean;
+  /** One line for the UI. */
+  note: string;
+}
+
+/** One live screen capture for the Desktop preview tab. */
+export interface CuaPreviewResult {
+  ok: boolean;
+  /** A `data:` URL, ready to hand to an `<img>`. */
+  imageDataUrl?: string;
+  error?: string;
+}
 
 /** Per-user switches for one project root. Repo-defined servers stay off until enabled here. */
 export interface McpProjectState {
@@ -1085,6 +1129,8 @@ export interface AppSettings {
     npx?: string;
     gemini?: string;
     editor?: string;
+    /** Explicit `cua-driver` path (empty = auto-detect on PATH or in Cua's install dirs). */
+    cua?: string;
   };
   claude: {
     /** 'auto' prefers system CLI (uses the user's login), then bundled. */
@@ -1102,6 +1148,8 @@ export interface AppSettings {
   acpAgents: AcpAgentPreset[];
   /** Global MCP servers, offered to every harness that can take them. */
   mcpServers: McpServerDef[];
+  /** Computer use through Cua Driver; off unless the user turns it on. */
+  cua: CuaSettings;
   /** Built-in server ids switched off everywhere, from the MCP page. */
   mcpDisabledBuiltins?: string[];
   /** Per-user MCP switches keyed by project root; see McpProjectState. */

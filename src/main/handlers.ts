@@ -20,7 +20,7 @@ import type { KnowledgeService } from './knowledge/service';
 import type { UpdateState } from '../shared/types';
 import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
-import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
+import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, CuaPreviewSession, cuaStatus, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import { enrichModelsFromProviders } from './models/static-models';
@@ -528,6 +528,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       return { ok: false, error: errorMessage(e) };
     }
   });
+
+  // Computer use. The renderer only ever reads status and screenshots; the mode and opt-in live in
+  // settings, and the driver's own authorization is fixed when its runtime starts.
+  const cuaPreview = new CuaPreviewSession();
+  handle('cua:status', () => cuaStatus(settings.get()));
+  handle('cua:preview', () => cuaPreview.capture(settings.get()));
 
   const scheduleGitnexus = (session: SessionMeta, reason: GitnexusIndexReason): void => {
     deps.gitnexusIndexer?.schedule({ cwd: session.cwd, projectRoot: session.config.projectRoot, reason });
