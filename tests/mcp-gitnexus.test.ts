@@ -149,7 +149,7 @@ describe('GitNexus serving (one shared server)', () => {
     process.env.GITNEXUS_HOME = home;
 
     const proxyPath = path.join(base, 'gitnexus-scope.mjs');
-    const settings = { mcpProjectState: {}, mcpServers: [] } as unknown as AppSettings;
+    const settings = { mcpProjectState: {}, mcpServers: [], cua: { enabled: false } } as unknown as AppSettings;
     const out = await resolveForSession(
       { settings, cwd: project, projectRoot: project, harness: 'claude' },
       {
@@ -172,7 +172,7 @@ describe('GitNexus serving (one shared server)', () => {
     await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('proj', project)]), 'utf8');
     process.env.GITNEXUS_HOME = home;
     const proxyPath = path.join(base, 'gitnexus-scope.mjs');
-    const settings = { mcpProjectState: {}, mcpServers: [], gitnexus: { mode: 'per-repo' } } as unknown as AppSettings;
+    const settings = { mcpProjectState: {}, mcpServers: [], cua: { enabled: false }, gitnexus: { mode: 'per-repo' } } as unknown as AppSettings;
     const out = await resolveForSession(
       { settings, cwd: project, projectRoot: project, harness: 'claude' },
       {
@@ -192,7 +192,7 @@ describe('GitNexus serving (one shared server)', () => {
     dirs.push(project, home);
     await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('proj', project)]), 'utf8');
     process.env.GITNEXUS_HOME = home;
-    const settings = { mcpProjectState: {}, mcpServers: [] } as unknown as AppSettings;
+    const settings = { mcpProjectState: {}, mcpServers: [], cua: { enabled: false } } as unknown as AppSettings;
     const out = await resolveForSession(
       { settings, cwd: project, projectRoot: project, harness: 'claude' },
       { getSecret: async () => undefined, sharedGitnexus: async () => null, gitnexusProxyPath: '/tmp/p.mjs' }
@@ -207,7 +207,7 @@ describe('GitNexus serving (one shared server)', () => {
     dirs.push(project, other, home);
     await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('other', other)]), 'utf8');
     process.env.GITNEXUS_HOME = home;
-    const settings = { mcpProjectState: {}, mcpServers: [] } as unknown as AppSettings;
+    const settings = { mcpProjectState: {}, mcpServers: [], cua: { enabled: false } } as unknown as AppSettings;
     const out = await resolveForSession(
       { settings, cwd: project, projectRoot: project, harness: 'claude' },
       {
@@ -227,7 +227,8 @@ describe('GitNexus serving (one shared server)', () => {
     process.env.GITNEXUS_HOME = home;
     const settings = {
       mcpProjectState: { [project]: { disabledBuiltin: [GITNEXUS_SERVER_ID] } },
-      mcpServers: []
+      mcpServers: [],
+      cua: { enabled: false }
     } as unknown as AppSettings;
     const out = await resolveForSession(
       { settings, cwd: project, projectRoot: project, harness: 'claude' },
@@ -249,7 +250,7 @@ describe('GitNexus serving (one shared server)', () => {
     dirs.push(project, home);
     await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('proj', project)]), 'utf8');
     process.env.GITNEXUS_HOME = home;
-    const settings = { mcpDisabledBuiltins: [GITNEXUS_SERVER_ID], mcpProjectState: {}, mcpServers: [] } as unknown as AppSettings;
+    const settings = { mcpDisabledBuiltins: [GITNEXUS_SERVER_ID], mcpProjectState: {}, mcpServers: [], cua: { enabled: false } } as unknown as AppSettings;
     const out = await resolveForSession(
       { settings, cwd: project, projectRoot: project, harness: 'claude' },
       {
@@ -272,7 +273,8 @@ describe('GitNexus serving (one shared server)', () => {
     process.env.GITNEXUS_HOME = home;
     const settings = {
       mcpProjectState: { [project]: { gitnexusGlobal: true } },
-      mcpServers: []
+      mcpServers: [],
+      cua: { enabled: false }
     } as unknown as AppSettings;
     const info = await projectInfo({ settings, cwd: project, projectRoot: project, harness: 'claude' });
     expect(info.builtin[0]).toMatchObject({ enabled: true, indexed: true, shared: true });

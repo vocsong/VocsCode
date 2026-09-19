@@ -7,6 +7,7 @@ import {
   cuaBaseDef,
   cuaDefState,
   cuaEnv,
+  cuaInstallCommand,
   cuaInstallDirs,
   findCuaDriver
 } from '../src/main/mcp/cua';
@@ -42,6 +43,19 @@ describe('Cua Driver discovery', () => {
   it('falls back to the PATH lookup', () => {
     expect(findCuaDriver(settings(), installed)).toBe('/opt/cua/cua-driver');
     expect(findCuaDriver(settings(), missing)).toBeNull();
+  });
+});
+
+describe('the official installer command', () => {
+  it('uses PowerShell on Windows and the shell installer elsewhere, and shows the one-liner', () => {
+    const win = cuaInstallCommand('win32');
+    expect(win?.file).toBe('powershell.exe');
+    expect(win?.display).toBe('irm https://cua.ai/driver/install.ps1 | iex');
+    const nix = cuaInstallCommand('linux');
+    expect(nix?.file).toBe('/bin/bash');
+    expect(nix?.display).toBe('curl -fsSL https://cua.ai/driver/install.sh | bash');
+    expect(cuaInstallCommand('darwin')?.display).toContain('install.sh');
+    expect(cuaInstallCommand('freebsd')).toBeNull();
   });
 });
 

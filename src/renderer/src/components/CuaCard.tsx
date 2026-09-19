@@ -24,6 +24,7 @@ export function CuaCard({ compact = false, repo }: { compact?: boolean; repo?: {
   const [status, setStatus] = useState<CuaStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [installing, setInstalling] = useState(false);
   const [manifestDraft, setManifestDraft] = useState(cua.manifestPath ?? '');
 
   const refresh = useCallback(async () => {
@@ -101,6 +102,36 @@ export function CuaCard({ compact = false, repo }: { compact?: boolean; repo?: {
   };
 
   const installed = status?.installed === true;
+  // The platform's installer text comes from the main process, which knows the platform.
+  const installCommand = status?.installCommand ?? '';
+
+  // The installer downloads a privileged native driver and registers an autostart daemon, so it
+  // runs only behind an explicit confirmation that shows the exact command.
+  const runInstall = async () => {
+    const ok = await askConfirm({
+      title: 'Install Cua Driver?',
+      body: (
+        <>
+          This runs Cua Driver's official installer:
+          <code className="mono">{installCommand}</code>
+          It downloads a native driver that can operate every app on this computer and registers an autostart daemon. Remove it later with <code className="mono">cua-driver autostart disable</code>.
+        </>
+      ),
+      confirmLabel: 'Install'
+    });
+    if (!ok) return;
+    setInstalling(true);
+    try {
+      const r = await invoke('cua:install', undefined);
+      if (r.ok) toast('Cua Driver installed', 'success');
+      else toast(r.error ?? 'The installer did not finish', 'error');
+      await refresh();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   return (
     <div className="mcp-card" data-testid="cua-card">
@@ -119,14 +150,21 @@ export function CuaCard({ compact = false, repo }: { compact?: boolean; repo?: {
           : 'Let agents drive native apps and browsers on this machine. Off by default, and Vocs Code still prompts for each tool call below Full access.'}
       </div>
       {!installed && (
-        <div className="mcp-index-row">
-          <span className="muted small mono">
-            macOS/Linux: curl -fsSL https://cua.ai/driver/install.sh | bash · Windows: irm https://cua.ai/driver/install.ps1 | iex
-          </span>
-          <Button size="sm" icon="refresh" disabled={busy} onClick={() => void refresh()}>
-            Re-check
-          </Button>
-        </div>
+        <>
+          <div className="mcp-index-row">
+            <span className="muted small">Cua Driver is installed separately, so it is never bundled or updated silently.</span>
+          </div>
+          {installCommand && <code className="mcp-cmd mono" data-testid="cua-install-command">{installCommand}</code>}
+          <div className="mcp-index-row">
+            <span className="muted small" />
+            <Button size="sm" icon="refresh" disabled={busy || installing} onClick={() => void refresh()}>
+              Re-check
+            </Button>
+            <Button size="sm" variant="primary" icon="cpu" disabled={busy || installing || !installCommand} data-testid="cua-install" onClick={() => void runInstall()}>
+              {installing ? 'Installing…' : 'Install Cua Driver'}
+            </Button>
+          </div>
+        </>
       )}
       {installed && !compact && (
         <>

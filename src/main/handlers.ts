@@ -20,13 +20,13 @@ import type { KnowledgeService } from './knowledge/service';
 import type { UpdateState } from '../shared/types';
 import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
-import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, CuaPreviewSession, cuaBaseDef, cuaDefState, cuaStatus, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
+import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, CuaPreviewSession, clearCuaVersionCache, cuaBaseDef, cuaDefState, cuaInstallCommand, cuaStatus, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import { enrichModelsFromProviders } from './models/static-models';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
-import { which } from './runtime';
+import { clearWhichCache, runCapture, which } from './runtime';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
@@ -545,6 +545,21 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (result.ok) deps.log('debug', `cua: ${result.tools.length} tool(s) in ${result.durationMs}ms`);
     else deps.log('warn', `cua: test failed: ${result.error ?? 'unknown error'}`);
     return result;
+  });
+  // Installs the driver on the user's behalf, but only after the renderer has confirmed (the UI
+  // shows the exact command). Nothing here decides on its own to run a remote script.
+  handle('cua:install', async () => {
+    const command = cuaInstallCommand();
+    if (!command) return { ok: false, command: '', error: 'No Cua Driver installer for this platform.' };
+    deps.log('info', `cua: running the official installer: ${command.display}`);
+    const result = await runCapture(command.file, command.args, { timeoutMs: 300_000 });
+    const output = `${result.stdout}\n${result.stderr}`.trim().slice(-4_000);
+    // The PATH/install-dir memo and the version cache must not keep reporting the pre-install state.
+    clearWhichCache();
+    clearCuaVersionCache();
+    const ok = result.code === 0;
+    if (!ok) deps.log('warn', `cua: installer exited ${result.code ?? 'null'}${result.timedOut ? ' (timed out)' : ''}`);
+    return { ok, command: command.display, ...(output ? { output } : {}), ...(ok ? {} : { error: result.timedOut ? 'The installer timed out.' : 'The installer exited with an error; see its output.' }) };
   });
 
   const scheduleGitnexus = (session: SessionMeta, reason: GitnexusIndexReason): void => {

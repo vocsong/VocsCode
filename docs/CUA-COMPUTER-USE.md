@@ -1,6 +1,6 @@
 # Computer use with Cua
 
-Status: **Phase 1 core + Desktop preview shipped** (`src/main/mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`, docs/MCP.md §14); in-transcript screenshots, the guidance skill and a shared app-owned runtime are still to come. This document decides whether Vocs Code should
+Status: **Phase 1 core + Desktop preview + one-click install shipped** (`src/main/mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`, docs/MCP.md §14); in-transcript screenshots, the guidance skill and a shared app-owned runtime are still to come. This document decides whether Vocs Code should
 use [trycua/cua](https://github.com/trycua/cua) for computer use, and how.
 
 ## 1. What Cua actually is
@@ -129,9 +129,9 @@ everything the built-in path already provides:
   `%LOCALAPPDATA%\Programs\Cua\cua-driver\bin` and macOS/Linux `~/.local/bin` locations), a
   `cua-driver --version` / `cua-driver doctor` probe in `runtime.ts`, and a clear "not installed —
   here is the exact installer command" state instead of a broken server.
-- An install action that is **never silent**: show the one-line installer
-  (`install.sh` / `install.ps1`), run it only on explicit click, and never bundle or auto-update
-  the binary.
+- An install action that is **never silent**: the card shows the one-line installer
+  (`install.sh` / `install.ps1`) plus an **Install Cua Driver** button that runs it only after a
+  confirmation repeating the command. The binary is never bundled and never auto-updated.
 - The mode/manifest settings, the kill switch and the per-session label live in one place.
 - Harness filtering comes for free: inject into claude/codex/codex-exec/acp, client for native,
   bridge for pi, and **Cursor is inherit-only** — offer the same import/export the MCP page
