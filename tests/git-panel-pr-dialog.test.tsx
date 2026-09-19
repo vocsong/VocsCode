@@ -79,6 +79,8 @@ beforeEach(() => {
     if (channel === 'git:branchesOverview') return Promise.resolve(OVERVIEW);
     if (channel === 'git:pullRequests') return Promise.resolve({ prs: [...prs], fetchedAt: Date.now() } satisfies GitPullRequestList);
     if (channel === 'git:issues') return Promise.resolve({ issues: [...issues], fetchedAt: Date.now() } satisfies GitIssueList);
+    if (channel === 'git:issueComments') return Promise.resolve({ comments: [{ author: 'octocat', body: 'Me **too**', createdAt: Date.now() - 7_200_000, url: 'https://github.com/o/r/issues/12#issuecomment-1' }] });
+    if (channel === 'git:prComments') return Promise.resolve({ comments: [{ author: 'reviewer', body: 'Looks **good**', createdAt: Date.now() - 3_600_000, url: 'https://github.com/o/r/pull/7#issuecomment-1', authorAssociation: 'MEMBER' }] });
     if (channel === 'git:merge') return Promise.resolve({ ok: true, url: 'https://github.com/o/r/pull/7' });
     if (channel === 'sessions:create') return Promise.resolve({ id: 's_new', title: 'Review PR #7' });
     if (channel === 'sessions:transcript') return Promise.resolve([]);
@@ -149,6 +151,12 @@ describe('Git panel PR detail dialog', () => {
     // GitHub's markdown is rendered, not dumped as source text.
     expect(dialog.textContent).toContain('This fixes the thing.');
     expect(dialog.querySelector('.pr-dialog-body strong')?.textContent).toBe('fixes');
+    // The conversation is fetched with the preview and rendered below the description.
+    const comments = dialog.querySelector('.git-comments')!;
+    expect(comments.textContent).toContain('Comments (1)');
+    expect(comments.textContent).toContain('Looks good');
+    expect(comments.querySelector('.git-comment-body strong')?.textContent).toBe('good');
+    expect(comments.querySelector('.git-comment-head strong')?.textContent).toBe('reviewer');
 
     await act(async () => {
       fireEvent.keyDown(document, { key: 'Escape' });
@@ -185,6 +193,21 @@ describe('Git panel PR detail dialog', () => {
 
     expect(invokeMock).toHaveBeenCalledWith('git:merge', { sessionId: 's1', head: 'feature/thing' });
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+describe('Git panel issue detail dialog', () => {
+  it('shows the issue conversation, markdown rendered', async () => {
+    await openIssueList();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Read issue #12: Widget is wobbly' }));
+    });
+    const dialog = screen.getByRole('dialog');
+    expect(invokeMock).toHaveBeenCalledWith('git:issueComments', { sessionId: 's1', number: 12 });
+    const comments = dialog.querySelector('.git-comments')!;
+    expect(comments.textContent).toContain('Comments (1)');
+    expect(comments.textContent).toContain('Me too');
+    expect(comments.querySelector('.git-comment-body strong')?.textContent).toBe('too');
   });
 });
 

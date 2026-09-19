@@ -1298,6 +1298,26 @@ export interface GitIssueList {
   error?: string;
 }
 
+/** One conversation comment on a GitHub issue or pull request, as `gh … view --json comments` reports it. */
+export interface GitComment {
+  author?: string;
+  /** Markdown body returned by GitHub. */
+  body?: string;
+  /** ms since epoch */
+  createdAt?: number;
+  url?: string;
+  /** GitHub's association of the commenter with the repo: OWNER, MEMBER, CONTRIBUTOR, … */
+  authorAssociation?: string;
+}
+
+/** The conversation comments pulled for one issue or pull request; `error` carries gh's own words when the pull failed. */
+export interface GitCommentList {
+  comments: GitComment[];
+  /** True when the GitHub CLI is unavailable; the preview then shows the comment count only. */
+  ghMissing?: boolean;
+  error?: string;
+}
+
 export interface GitBranchOverview {
   isRepo: boolean;
   base?: string;

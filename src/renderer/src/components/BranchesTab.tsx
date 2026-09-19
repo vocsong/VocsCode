@@ -1,6 +1,6 @@
 /** Git panel tab: GitHub-style branch overview, worktree housekeeping and the repo's pull requests and issues (pulled via gh). */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { GitBranchOverview, GitBranchOverviewItem, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, GitSetupStatus, GitWorktreeInfo, SessionMeta } from '../../../shared/types';
+import type { GitBranchOverview, GitBranchOverviewItem, GitComment, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, GitSetupStatus, GitWorktreeInfo, SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { basename, relTime } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
@@ -600,6 +600,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
       {selectedIssue && (
         <IssueDialog
           issue={selectedIssue}
+          sessionId={session.id}
           onClose={() => setSelectedIssue(null)}
           onViewExternal={() => {
             setSelectedIssue(null);
@@ -614,6 +615,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
       {selectedPr && (
         <PrDialog
           pr={selectedPr}
+          sessionId={session.id}
           onClose={() => setSelectedPr(null)}
           onViewExternal={() => {
             setSelectedPr(null);
@@ -1144,19 +1146,95 @@ function IssueRow({ issue, onOpen, onViewExternal, onNewSession }: { issue: GitI
   );
 }
 
+/**
+ * Pulls one issue's or PR's conversation comments when its preview opens. The list payload only
+ * carries the count, so bodies are fetched on demand; `null` means the fetch is still in flight.
+ */
+function useGitComments(channel: 'git:issueComments' | 'git:prComments', sessionId: string, number: number) {
+  const [comments, setComments] = useState<GitComment[] | null>(null);
+  const [error, setError] = useState<string | undefined>();
+  useEffect(() => {
+    let live = true;
+    setComments(null);
+    setError(undefined);
+    invoke(channel, { sessionId, number })
+      .then((r) => {
+        if (!live) return;
+        setComments(r.comments ?? []);
+        setError(r.error ?? (r.ghMissing ? 'GitHub CLI (gh) is not available, so comments cannot be shown.' : undefined));
+      })
+      .catch((e: unknown) => {
+        if (!live) return;
+        setComments([]);
+        setError(String((e as Error).message ?? e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [channel, sessionId, number]);
+  return { comments, error };
+}
+
+/** One conversation comment with GitHub's markdown rendered; links open in the OS browser. */
+function CommentRow({ comment }: { comment: GitComment }) {
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const bodyHtml = useMemo(() => renderMarkdown(comment.body ?? ''), [comment.body]);
+  useEffect(() => {
+    if (!bodyRef.current || !bodyHtml) return;
+    return installMarkdownHandlers(bodyRef.current, (url) => void invoke('app:openExternal', { url }));
+  }, [bodyHtml]);
+  const association = comment.authorAssociation && comment.authorAssociation !== 'NONE' ? comment.authorAssociation.toLowerCase().replace(/_/g, ' ') : undefined;
+  return (
+    <article className="git-comment">
+      <header className="git-comment-head">
+        <strong>{comment.author ?? 'unknown'}</strong>
+        {association && <Badge tone="neutral">{association}</Badge>}
+        {comment.createdAt !== undefined && (
+          <span className="muted small" title={new Date(comment.createdAt).toLocaleString()}>
+            {relTime(comment.createdAt)}
+          </span>
+        )}
+      </header>
+      {bodyHtml ? (
+        <div ref={bodyRef} className="md git-comment-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} />
+      ) : (
+        <p className="muted small git-comment-body">(no text)</p>
+      )}
+    </article>
+  );
+}
+
+/** The conversation below an issue or PR preview: a loading note until the fetch settles, then the comments (or a note when there are none). */
+function CommentsSection({ comments, error, loading }: { comments: GitComment[] | null; error?: string; loading: boolean }) {
+  return (
+    <section className="git-comments" aria-label="Comments">
+      <h4 className="git-comments-title">Comments{comments && comments.length > 0 ? ` (${comments.length})` : ''}</h4>
+      {error && <p className="muted small git-comments-note">{error}</p>}
+      {!error && loading && <p className="muted small git-comments-note">Loading comments…</p>}
+      {!error && !loading && comments && comments.length === 0 && <p className="muted small git-comments-note">No comments yet.</p>}
+      {comments?.map((c, i) => (
+        <CommentRow key={c.url ?? i} comment={c} />
+      ))}
+    </section>
+  );
+}
+
 function IssueDialog({
   issue,
+  sessionId,
   onClose,
   onViewExternal,
   onNewSession
 }: {
   issue: GitIssue;
+  sessionId: string;
   onClose: () => void;
   onViewExternal: () => void;
   onNewSession: () => void;
 }) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const bodyHtml = useMemo(() => renderMarkdown(issue.body ?? ''), [issue.body]);
+  const { comments, error } = useGitComments('git:issueComments', sessionId, issue.number);
   useEffect(() => {
     if (!bodyRef.current || !bodyHtml) return;
     return installMarkdownHandlers(bodyRef.current, (url) => void invoke('app:openExternal', { url }));
@@ -1193,23 +1271,27 @@ function IssueDialog({
         ))}
       </div>
       {bodyHtml ? <div ref={bodyRef} className="md issue-dialog-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} /> : <p className="muted issue-dialog-empty">No description provided.</p>}
+      <CommentsSection comments={comments} error={error} loading={comments === null} />
     </Modal>
   );
 }
 
 function PrDialog({
   pr,
+  sessionId,
   onClose,
   onViewExternal,
   onMerge
 }: {
   pr: GitPullRequest;
+  sessionId: string;
   onClose: () => void;
   onViewExternal: () => void;
   onMerge: () => void;
 }) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const bodyHtml = useMemo(() => renderMarkdown(pr.body ?? ''), [pr.body]);
+  const { comments, error } = useGitComments('git:prComments', sessionId, pr.number);
   useEffect(() => {
     if (!bodyRef.current || !bodyHtml) return;
     return installMarkdownHandlers(bodyRef.current, (url) => void invoke('app:openExternal', { url }));
@@ -1259,6 +1341,7 @@ function PrDialog({
         ))}
       </div>
       {bodyHtml ? <div ref={bodyRef} className="md pr-dialog-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} /> : <p className="muted pr-dialog-empty">No description provided.</p>}
+      <CommentsSection comments={comments} error={error} loading={comments === null} />
     </Modal>
   );
 }

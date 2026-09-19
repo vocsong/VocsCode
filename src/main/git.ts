@@ -1,7 +1,7 @@
 /** Git plumbing behind the Changes panel: status and diff summaries, per-file revert, staging, commits, and isolated worktrees plus the /pr and /merge GitHub flow. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSetupStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
+import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitComment, GitCommentList, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSetupStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import type { Logger } from './log';
 import { runCapture, which, type CaptureResult } from './runtime';
@@ -765,6 +765,56 @@ export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> 
 }
 
 const ISSUE_LIST_FIELDS = 'number,title,state,url,author,body,labels,comments,createdAt,updatedAt,closedAt';
+
+/** `gh <x> view --json comments` reports each comment's author, markdown body, timestamp and URL; keep the fields the preview shows. */
+function ghComments(v: unknown): GitComment[] {
+  if (!Array.isArray(v)) return [];
+  const out: GitComment[] = [];
+  for (const c of v) {
+    if (!c || typeof c !== 'object') continue;
+    const o = c as { author?: { login?: string; name?: string }; body?: string; createdAt?: string; url?: string; authorAssociation?: string };
+    const author = o.author && typeof o.author === 'object' ? o.author.login || o.author.name : undefined;
+    const comment: GitComment = {};
+    if (author) comment.author = author;
+    if (typeof o.body === 'string') comment.body = o.body;
+    const created = isoMs(o.createdAt);
+    if (created !== undefined) comment.createdAt = created;
+    if (typeof o.url === 'string') comment.url = o.url;
+    if (typeof o.authorAssociation === 'string' && o.authorAssociation) comment.authorAssociation = o.authorAssociation;
+    out.push(comment);
+  }
+  return out;
+}
+
+/**
+ * Pulls the conversation comments of one issue or PR, on demand: the list payload only carries the
+ * count, and fetching every body up front would pay for issues the user never opens.
+ */
+async function gitComments(cwd: string, kind: 'issue' | 'pr', number: number): Promise<GitCommentList> {
+  if (!ghBin()) return { comments: [], ghMissing: true };
+  const root = await gitRoot(cwd);
+  if (!root) return { comments: [], error: 'Not a git repository' };
+  const r = await gh(root, [kind, 'view', String(number), '--json', 'comments'], 30_000);
+  if (r.code !== 0 || r.truncated) {
+    return { comments: [], error: r.truncated ? `gh ${kind} view response was truncated` : (r.stderr || r.stdout).trim() || `gh ${kind} view failed` };
+  }
+  try {
+    const parsed = JSON.parse(r.stdout.trim()) as { comments?: unknown };
+    return { comments: ghComments(parsed.comments) };
+  } catch {
+    return { comments: [], error: `gh ${kind} view returned something that is not JSON` };
+  }
+}
+
+/** Pulls one issue's conversation comments, for the Git panel's issue preview. */
+export async function gitIssueComments(cwd: string, number: number): Promise<GitCommentList> {
+  return gitComments(cwd, 'issue', number);
+}
+
+/** Pulls one pull request's conversation comments, for the Git panel's PR preview. */
+export async function gitPullRequestComments(cwd: string, number: number): Promise<GitCommentList> {
+  return gitComments(cwd, 'pr', number);
+}
 
 /** Pulls the repo's issues from GitHub (`gh issue list`, every state, newest first) for the Git panel's Issues view. */
 export async function gitIssues(cwd: string): Promise<GitIssueList> {

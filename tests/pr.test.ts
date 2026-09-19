@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { gitCreatePr, gitIssues, gitMergePr, gitPrMap, gitPullRequests, gitUpdateBranch, worktreeAddForBranch } from '../src/main/git';
+import { gitCreatePr, gitIssueComments, gitIssues, gitMergePr, gitPrMap, gitPullRequestComments, gitPullRequests, gitUpdateBranch, worktreeAddForBranch } from '../src/main/git';
 
 const isWin = process.platform === 'win32';
 
@@ -18,10 +18,13 @@ const GH_SH = [
   '    echo "[{\\"number\\":7,\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"headRefName\\":\\"${GH_HEAD:-harness/test}\\",\\"baseRefName\\":\\"$GH_BASE\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"title\\":\\"Test PR\\",\\"body\\":\\"Full PR description\\",\\"labels\\":[{\\"name\\":\\"enhancement\\",\\"color\\":\\"00ff00\\"}],\\"comments\\":[{\\"body\\":\\"first comment\\"},{\\"body\\":\\"second comment\\"}]}]" ;;',
   '  \'pr view\')',
   '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
-  '    echo "{\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"baseRefName\\":\\"$GH_BASE\\"}" ;;',
+  '    echo "{\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"baseRefName\\":\\"$GH_BASE\\",\\"comments\\":[{\\"author\\":{\\"login\\":\\"reviewer\\"},\\"body\\":\\"First **comment**\\",\\"createdAt\\":\\"2024-01-02T03:04:05Z\\",\\"url\\":\\"https://example.com/acme/repo/pull/7#issuecomment-1\\",\\"authorAssociation\\":\\"MEMBER\\"}]}" ;;',
   '  \'issue list\')',
   '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
   '    echo "[{\\\"number\\\":42,\\\"state\\\":\\\"${GH_ISSUE_STATE:-OPEN}\\\",\\\"url\\\":\\\"https://example.com/acme/repo/issues/42\\\",\\\"title\\\":\\\"Test issue\\\",\\\"body\\\":\\\"Full issue description\\\",\\\"labels\\\":[{\\\"name\\\":\\\"bug\\\",\\\"color\\\":\\\"ff0000\\\"}],\\\"comments\\\":[{\\\"body\\\":\\\"first comment\\\"},{\\\"body\\\":\\\"second comment\\\"}],\\\"author\\\":{\\\"login\\\":\\\"octocat\\\"}}]" ;;',
+  '  \'issue view\')',
+  '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
+  '    echo "{\\"comments\\":[{\\"author\\":{\\"login\\":\\"octocat\\"},\\"body\\":\\"Me **too**\\",\\"createdAt\\":\\"2024-02-03T04:05:06Z\\",\\"url\\":\\"https://example.com/acme/repo/issues/42#issuecomment-1\\"}]}" ;;',
   'esac',
   'exit 0'
 ].join('\n');
@@ -35,10 +38,12 @@ const GH_CMD = [
   'if "%GH_HEAD%"=="" set "GH_HEAD=harness/test"',
   'if /i "%~1"=="pr" if /i "%~2"=="list" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
   'if /i "%~1"=="pr" if /i "%~2"=="list" echo [{"number":7,"state":"%GH_STATE%","headRefName":"%GH_HEAD%","baseRefName":"%GH_BASE%","url":"https://example.com/acme/repo/pull/7","title":"Test PR","body":"Full PR description","labels":[{"name":"enhancement","color":"00ff00"}],"comments":[{"body":"first comment"},{"body":"second comment"}]}]',
-  'if /i "%~1"=="pr" if /i "%~2"=="view" echo {"state":"%GH_STATE%","url":"https://example.com/acme/repo/pull/7","baseRefName":"%GH_BASE%"}',
+  'if /i "%~1"=="pr" if /i "%~2"=="view" echo {"state":"%GH_STATE%","url":"https://example.com/acme/repo/pull/7","baseRefName":"%GH_BASE%","comments":[{"author":{"login":"reviewer"},"body":"First **comment**","createdAt":"2024-01-02T03:04:05Z","url":"https://example.com/acme/repo/pull/7#issuecomment-1","authorAssociation":"MEMBER"}]}',
   'if "%GH_ISSUE_STATE%"=="" set "GH_ISSUE_STATE=OPEN"',
   'if /i "%~1"=="issue" if /i "%~2"=="list" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
   'if /i "%~1"=="issue" if /i "%~2"=="list" echo [{"number":42,"state":"%GH_ISSUE_STATE%","url":"https://example.com/acme/repo/issues/42","title":"Test issue","body":"Full issue description","labels":[{"name":"bug","color":"ff0000"}],"comments":[{"body":"first comment"},{"body":"second comment"}],"author":{"login":"octocat"}}]',
+  'if /i "%~1"=="issue" if /i "%~2"=="view" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
+  'if /i "%~1"=="issue" if /i "%~2"=="view" echo {"comments":[{"author":{"login":"octocat"},"body":"Me **too**","createdAt":"2024-02-03T04:05:06Z","url":"https://example.com/acme/repo/issues/42#issuecomment-1"}]}',
   'exit /b 0'
 ].join('\r\n');
 
@@ -234,6 +239,53 @@ describe('git PR flow (/pr, /merge)', () => {
     const list = await gitIssues(tmp);
     expect(list.issues).toEqual([]);
     expect(list.error).toBe('Not a git repository');
+  });
+
+  it('pulls one issue\'s conversation comments for the preview', async () => {
+    const r = await gitIssueComments(repo, 42);
+    expect(r.error).toBeUndefined();
+    expect(r.comments).toEqual([
+      {
+        author: 'octocat',
+        body: 'Me **too**',
+        createdAt: Date.UTC(2024, 1, 3, 4, 5, 6),
+        url: 'https://example.com/acme/repo/issues/42#issuecomment-1'
+      }
+    ]);
+  });
+
+  it('pulls one pull request\'s conversation comments for the preview', async () => {
+    const r = await gitPullRequestComments(repo, 7);
+    expect(r.error).toBeUndefined();
+    expect(r.comments).toEqual([
+      {
+        author: 'reviewer',
+        body: 'First **comment**',
+        createdAt: Date.UTC(2024, 0, 2, 3, 4, 5),
+        url: 'https://example.com/acme/repo/pull/7#issuecomment-1',
+        authorAssociation: 'MEMBER'
+      }
+    ]);
+  });
+
+  it('reports gh failing to read comments in its own words', async () => {
+    process.env.GH_VIEW_FAIL = '1';
+    try {
+      const issue = await gitIssueComments(repo, 42);
+      expect(issue.comments).toEqual([]);
+      expect(issue.error).toBeTruthy();
+      const pr = await gitPullRequestComments(repo, 7);
+      expect(pr.comments).toEqual([]);
+      expect(pr.error).toBeTruthy();
+    } finally {
+      delete process.env.GH_VIEW_FAIL;
+    }
+  });
+
+  it('reports a missing repository instead of calling gh for comments', async () => {
+    const r = await gitIssueComments(tmp, 42);
+    expect(r.comments).toEqual([]);
+    expect(r.error).toBe('Not a git repository');
   });
 
   it('merges the open PR for the current branch and checks the requested base', async () => {
