@@ -217,7 +217,7 @@ export function defaultSettings(): AppSettings {
     pi: { extraArgs: [] },
     acpAgents: BUILTIN_ACP_AGENTS.map((a) => ({ ...a })),
     mcpServers: [],
-    cua: { enabled: false, mode: 'standard' },
+    cua: { enabled: true, mode: 'standard' },
     mcpProjectState: {},
     knowledge: { prime: true, autoDistill: true },
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
@@ -392,14 +392,15 @@ export function normalizeMcpProjectState(stored: unknown): Record<string, McpPro
 }
 
 /**
- * Computer use is opt-in and fail-closed: only a known mode survives, and a bounded mode keeps its
- * manifest path (an empty one is dropped so the UI shows the requirement rather than a dead path).
+ * Computer use is fail-closed on the mode but on by default: only a known mode survives, and a
+ * bounded mode keeps its manifest path (an empty one is dropped so the UI shows the requirement
+ * rather than a dead path). Only an explicit `false` turns the built-in off.
  */
 export function normalizeCuaSettings(stored: unknown): CuaSettings {
   const raw = (stored ?? {}) as Partial<CuaSettings>;
   const mode = isCuaPermissionMode(raw.mode) ? raw.mode : 'standard';
   const manifest = typeof raw.manifestPath === 'string' ? raw.manifestPath.trim() : '';
-  return { enabled: raw.enabled === true, mode, ...(manifest ? { manifestPath: manifest } : {}) };
+  return { enabled: raw.enabled !== false, mode, ...(manifest ? { manifestPath: manifest } : {}) };
 }
 
 /** Merge stored settings over defaults, keeping builtin providers/agents present. */

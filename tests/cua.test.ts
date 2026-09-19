@@ -21,7 +21,7 @@ const missing = (): string | null => null;
 
 const settings = (cua: Partial<CuaSettings> = {}, over: Partial<AppSettings> = {}): AppSettings => ({
   ...BASE,
-  cua: { enabled: false, mode: 'standard', ...cua },
+  cua: { enabled: true, mode: 'standard', ...cua },
   ...over
 });
 
@@ -81,15 +81,16 @@ describe('the built-in definition is off unless the user, the binary and the mod
     expect(cuaDefState(settings({ enabled: false }), installed).note).toMatch(/^Off\./);
   });
 
-  it('is enabled once installed, opted in and the mode can start', () => {
-    const def = cuaBaseDef(settings({ enabled: true, mode: 'standard' }), installed);
+  it('is enabled once installed and the mode can start, with no opt-in step', () => {
+    const def = cuaBaseDef(settings({ mode: 'standard' }), installed);
     expect(def.disabled).toBe(false);
     expect(def.command).toBe('/opt/cua/cua-driver');
     expect(def.args).toEqual(['mcp']);
     expect(def.env).toEqual({ CUA_DRIVER_PERMISSION_MODE: 'standard' });
   });
 
-  it('stays disabled in bounded mode until a manifest is set', () => {
+  it('stays disabled in bounded mode until a manifest is set, and when explicitly off', () => {
+    expect(cuaBaseDef(settings({ enabled: false, mode: 'standard' }), installed).disabled).toBe(true);
     expect(cuaBaseDef(settings({ enabled: true, mode: 'bounded' }), installed).disabled).toBe(true);
     expect(cuaDefState(settings({ enabled: true, mode: 'bounded' }), installed).note).toMatch(/manifest/i);
     const withManifest = cuaBaseDef(settings({ enabled: true, mode: 'bounded', manifestPath: '/m.yaml' }), installed);
@@ -127,13 +128,16 @@ describe('the effective set treats a disabled built-in as off', () => {
 
 describe('settings normalization for computer use', () => {
   it('is off and standard by default', () => {
-    expect(defaultSettings().cua).toEqual({ enabled: false, mode: 'standard' });
+    expect(defaultSettings().cua).toEqual({ enabled: true, mode: 'standard' });
   });
 
   it('coerces an unknown mode back to standard and drops an empty manifest path', () => {
     expect(normalizeCuaSettings({ enabled: true, mode: 'yolo' as never, manifestPath: '   ' })).toEqual({ enabled: true, mode: 'standard' });
-    expect(normalizeCuaSettings(undefined)).toEqual({ enabled: false, mode: 'standard' });
-    expect(normalizeCuaSettings({ enabled: 'yes' as never, mode: 'bounded', manifestPath: ' /m.yaml ' })).toEqual({ enabled: false, mode: 'bounded', manifestPath: '/m.yaml' });
+    expect(normalizeCuaSettings(undefined)).toEqual({ enabled: true, mode: 'standard' });
+    expect(normalizeCuaSettings({ mode: 'bounded', manifestPath: ' /m.yaml ' })).toEqual({ enabled: true, mode: 'bounded', manifestPath: '/m.yaml' });
+    // Only an explicit false turns the built-in off.
+    expect(normalizeCuaSettings({ enabled: false, mode: 'standard' })).toEqual({ enabled: false, mode: 'standard' });
+    expect(normalizeCuaSettings({ enabled: 'yes' as never })).toEqual({ enabled: true, mode: 'standard' });
   });
 
   it('makes a hand-edited settings.json safe', () => {

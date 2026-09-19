@@ -118,6 +118,7 @@ export function McpTab({ session }: { session: SessionMeta }) {
   }
 
   const builtin = info.builtin.find((entry) => entry.def.id === 'gitnexus');
+  const cua = info.builtin.find((entry) => entry.def.id === 'cua-driver');
   const pending = info.repo.filter((d) => !(info.state.enabledRepo ?? []).includes(d.id));
 
   return (
@@ -191,7 +192,7 @@ export function McpTab({ session }: { session: SessionMeta }) {
               </div>
             </div>
           ))}
-        {info.builtin.some((entry) => entry.def.id === 'cua-driver') && <CuaCard compact />}
+        {cua && <CuaCard compact repo={{ enabled: cua.enabled, disabled: busy || cua.disabledGlobally === true, onChange: (v) => void setBuiltinEnabled('cua-driver', v) }} />}
       </section>
 
       <section className="mcp-section" data-testid="mcp-repo-section">

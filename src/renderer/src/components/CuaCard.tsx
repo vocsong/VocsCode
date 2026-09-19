@@ -17,12 +17,13 @@ const MODE_LABEL: Record<CuaPermissionMode, string> = {
   unrestricted: 'Unrestricted — bypasses Cua approvals'
 };
 
-export function CuaCard({ compact = false }: { compact?: boolean }) {
+export function CuaCard({ compact = false, repo }: { compact?: boolean; repo?: { enabled: boolean; disabled: boolean; onChange: (on: boolean) => void } }) {
   const settings = useStore((s) => s.settings);
   const toast = useStore((s) => s.toast);
   const cua: CuaSettings = settings?.cua ?? { enabled: false, mode: 'standard' };
   const [status, setStatus] = useState<CuaStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [manifestDraft, setManifestDraft] = useState(cua.manifestPath ?? '');
 
   const refresh = useCallback(async () => {
@@ -82,6 +83,21 @@ export function CuaCard({ compact = false }: { compact?: boolean }) {
     const manifestPath = manifestDraft.trim();
     await patch({ manifestPath: manifestPath || undefined });
     toast(manifestPath ? 'Manifest path saved' : 'Manifest path cleared', 'success');
+  };
+
+  // The built-in's Test connection: a real MCP handshake, so an install that cannot actually
+  // serve its tools is caught here rather than inside the first session that needs it.
+  const runTest = async () => {
+    setTesting(true);
+    try {
+      const r = await invoke('cua:test', undefined);
+      if (r.ok) toast(`Cua Driver answered with ${r.tools.length} tool${r.tools.length === 1 ? '' : 's'}`, 'success');
+      else toast(r.error ?? 'Cua Driver did not answer', 'error');
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setTesting(false);
+    }
   };
 
   const installed = status?.installed === true;
@@ -146,9 +162,23 @@ export function CuaCard({ compact = false }: { compact?: boolean }) {
           <div className="muted small" data-testid="cua-note">
             {status?.note}
           </div>
+          {status?.modeSource === 'host' && (
+            <div className="muted small">The mode is granted by Cua Driver's own app daemon on this platform; change it there.</div>
+          )}
+          <div className="mcp-index-row">
+            <span className="muted small">{status?.path ?? ''}</span>
+            <Button size="sm" icon="cpu" disabled={testing || busy} data-testid="cua-test" onClick={() => void runTest()}>
+              {testing ? 'Testing…' : 'Test connection'}
+            </Button>
+          </div>
         </>
       )}
       {installed && compact && <div className="muted small" data-testid="cua-note">{status?.note}</div>}
+      {compact && repo && (
+        <div className="mcp-control-list">
+          <Toggle checked={repo.enabled} disabled={busy || repo.disabled} onChange={repo.onChange} label="Enable computer use for this repo" />
+        </div>
+      )}
     </div>
   );
 }

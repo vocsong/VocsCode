@@ -189,6 +189,8 @@ export interface IpcContract {
   'cua:status': [void, CuaStatus];
   /** One screen capture from the driver, for the Desktop preview tab. */
   'cua:preview': [void, CuaPreviewResult];
+  /** Connects to the built-in Cua Driver server, lists its tools and disconnects. */
+  'cua:test': [void, McpInspectResult];
 
   'sessions:list': [void, SessionMeta[]];
   'sessions:create': [CreateSessionRequest, SessionMeta];
