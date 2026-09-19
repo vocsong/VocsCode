@@ -10,9 +10,14 @@ import { useStore } from '../src/renderer/src/store';
 import type { CuaStatus } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl' }));
+const { askConfirmMock } = vi.hoisted(() => ({ askConfirmMock: vi.fn() }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', platform: 'win32' }));
+vi.mock('../src/renderer/src/components/ui', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/renderer/src/components/ui')>();
+  return { ...actual, askConfirm: askConfirmMock };
+});
 
-const status = (over: Partial<CuaStatus> = {}): CuaStatus => ({ installed: true, version: '0.28.2', mode: 'standard', ready: true, note: 'On.', modeSource: 'vocs-code', ...over });
+const status = (over: Partial<CuaStatus> = {}): CuaStatus => ({ installed: true, version: '0.28.2', mode: 'standard', ready: true, note: 'On.', modeSource: 'vocs-code', installCommand: 'irm https://cua.ai/driver/install.ps1 | iex', ...over });
 
 function setup(cua: { enabled: boolean; mode: string; manifestPath?: string }, s: CuaStatus) {
   useStore.setState({ settings: { mcpServers: [], cua } as never });
@@ -21,6 +26,7 @@ function setup(cua: { enabled: boolean; mode: string; manifestPath?: string }, s
 
 beforeEach(() => {
   invoke.mockReset();
+  askConfirmMock.mockReset();
   useStore.setState({ settings: { mcpServers: [], cua: { enabled: false, mode: 'standard' } } as never });
 });
 afterEach(cleanup);
@@ -82,5 +88,35 @@ describe('Cua Driver card', () => {
       fireEvent.click(screen.getByTestId('cua-test'));
     });
     expect(invoke).toHaveBeenCalledWith('cua:test', undefined);
+  });
+
+  it('shows the exact installer and never runs it without a confirmation', async () => {
+    setup({ enabled: true, mode: 'standard' }, status({ installed: false, version: undefined, note: 'Cua Driver is not installed on this machine.' }));
+    askConfirmMock.mockResolvedValue(false);
+    await act(async () => {
+      render(<CuaCard />);
+    });
+    expect(screen.getByTestId('cua-install-command').textContent).toContain('cua.ai/driver/install.ps1');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('cua-install'));
+    });
+    expect(invoke).not.toHaveBeenCalledWith('cua:install', undefined);
+  });
+
+  it('runs the official installer once confirmed, then re-checks status', async () => {
+    askConfirmMock.mockResolvedValue(true);
+    invoke.mockImplementation((channel: string) => {
+      if (channel === 'cua:status') return Promise.resolve(status({ installed: false, version: undefined, note: 'Cua Driver is not installed on this machine.' }));
+      if (channel === 'cua:install') return Promise.resolve({ ok: true, command: 'irm https://cua.ai/driver/install.ps1 | iex' });
+      return Promise.resolve({});
+    });
+    await act(async () => {
+      render(<CuaCard />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('cua-install'));
+    });
+    expect(askConfirmMock).toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith('cua:install', undefined);
   });
 });

@@ -222,6 +222,8 @@ export interface CuaStatus {
    * Cua Driver daemon (macOS proxies to `CuaDriver.app`, so the daemon's launch flags decide).
    */
   modeSource: 'vocs-code' | 'host';
+  /** The platform's official one-line installer, shown before it is ever run. */
+  installCommand?: string;
 }
 
 /** One live screen capture for the Desktop preview tab. */
@@ -229,6 +231,16 @@ export interface CuaPreviewResult {
   ok: boolean;
   /** A `data:` URL, ready to hand to an `<img>`. */
   imageDataUrl?: string;
+  error?: string;
+}
+
+/** Result of running Cua Driver's official installer on the user's behalf. */
+export interface CuaInstallResult {
+  ok: boolean;
+  /** The command that was run, so the UI can be exact about what happened. */
+  command: string;
+  /** Tail of the installer's output. */
+  output?: string;
   error?: string;
 }
 

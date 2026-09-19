@@ -128,16 +128,43 @@ export function clearCuaVersionCache(): void {
   versionCache.clear();
 }
 
+/** The official one-line installer for this platform, resolved but never run here. */
+export interface CuaInstallCommand {
+  file: string;
+  args: string[];
+  /** The human-readable command, exactly as the UI shows it before running. */
+  display: string;
+}
+
+export function cuaInstallCommand(platform: NodeJS.Platform = process.platform): CuaInstallCommand | null {
+  if (platform === 'win32') {
+    return {
+      file: 'powershell.exe',
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://cua.ai/driver/install.ps1 | iex'],
+      display: 'irm https://cua.ai/driver/install.ps1 | iex'
+    };
+  }
+  if (platform === 'darwin' || platform === 'linux') {
+    return {
+      file: '/bin/bash',
+      args: ['-c', 'curl -fsSL https://cua.ai/driver/install.sh | bash'],
+      display: 'curl -fsSL https://cua.ai/driver/install.sh | bash'
+    };
+  }
+  return null;
+}
+
 /** One status read for the MCP page and the Desktop tab. */
 export async function cuaStatus(settings: AppSettings, lookup: typeof which = which): Promise<CuaStatus> {
   const state = cuaDefState(settings, lookup);
   // On macOS, `cua-driver mcp` proxies to CuaDriver.app so the app bundle keeps the TCC grants,
   // which also means that daemon's launch flags — not this app's environment — fix the mode.
   const modeSource: CuaStatus['modeSource'] = process.platform === 'darwin' ? 'host' : 'vocs-code';
-  if (!state.command) return { installed: false, mode: state.mode, ready: false, note: state.note, modeSource };
+  const installCommand = cuaInstallCommand()?.display;
+  if (!state.command) return { installed: false, mode: state.mode, ready: false, note: state.note, modeSource, ...(installCommand ? { installCommand } : {}) };
   const version = await cuaVersion(state.command);
   if (!version) {
-    return { installed: false, path: state.command, mode: state.mode, ready: false, note: `${state.command} did not answer --version; reinstall Cua Driver or point the binary override at it.`, modeSource };
+    return { installed: false, path: state.command, mode: state.mode, ready: false, note: `${state.command} did not answer --version; reinstall Cua Driver or point the binary override at it.`, modeSource, ...(installCommand ? { installCommand } : {}) };
   }
-  return { installed: true, path: state.command, version, mode: state.mode, ready: state.ready, note: state.note, modeSource };
+  return { installed: true, path: state.command, version, mode: state.mode, ready: state.ready, note: state.note, modeSource, ...(installCommand ? { installCommand } : {}) };
 }

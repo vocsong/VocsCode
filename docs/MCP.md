@@ -542,6 +542,11 @@ compact form.
 resolution path, and its **Test connection** runs the app's own MCP client against
 `cua-driver mcp` (the same probe user-defined servers get), so an install that cannot serve its
 tools is visible before a session depends on it.
+- **One-click install, never silent.** When no binary is found the card shows the exact one-line
+installer for the platform (`install.sh` on macOS/Linux, `install.ps1` on Windows) and an
+**Install Cua Driver** button. The button runs it only after a confirmation dialog that repeats
+the command and says what it does; `cua:install` re-checks discovery and the version cache
+afterwards. Vocs Code never bundles the driver or updates it on its own.
 - **Two gates.** Vocs Code's per-call approval (permission mode, below Full access) is separate
   from Cua's per-action authorization inside its runtime. `standard` is promptless internally;
   `bounded` requires a capability manifest and denies undeclared scope; `unrestricted` needs the

@@ -4,6 +4,7 @@ import type {
   ApprovalDecision,
   AppSettings,
   CreateSessionRequest,
+  CuaInstallResult,
   CuaPreviewResult,
   CuaStatus,
   DoctorReport,
@@ -191,6 +192,8 @@ export interface IpcContract {
   'cua:preview': [void, CuaPreviewResult];
   /** Connects to the built-in Cua Driver server, lists its tools and disconnects. */
   'cua:test': [void, McpInspectResult];
+  /** Runs Cua Driver's official installer after an explicit confirmation. */
+  'cua:install': [void, CuaInstallResult];
 
   'sessions:list': [void, SessionMeta[]];
   'sessions:create': [CreateSessionRequest, SessionMeta];
