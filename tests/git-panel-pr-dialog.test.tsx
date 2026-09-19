@@ -235,9 +235,13 @@ describe('Git panel PR review session', () => {
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create')).toHaveLength(0);
 
     // The edited first message is what the session opens with, on the repo itself (no worktree).
+    // Shift+Enter remains available for multiline prompts; plain Enter confirms.
     fireEvent.change(prompt, { target: { value: 'Review PR #7, focusing on the migration.' } });
+    fireEvent.keyDown(prompt, { key: 'Enter', shiftKey: true });
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create')).toHaveLength(0);
+    expect(screen.getByRole('dialog')).toBe(dialog);
     await act(async () => {
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Start session' }));
+      fireEvent.keyDown(prompt, { key: 'Enter' });
     });
 
     const created = invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create');
@@ -293,7 +297,7 @@ describe('Git panel issue session', () => {
     // The edited first message is what the session opens with, on the repo itself (no worktree).
     fireEvent.change(prompt, { target: { value: 'Fix issue #12, starting with the regression test.' } });
     await act(async () => {
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Start session' }));
+      fireEvent.keyDown(prompt, { key: 'Enter' });
     });
 
     const created = invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create');

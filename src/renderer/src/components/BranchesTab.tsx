@@ -295,7 +295,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
       title: `Start a session to review PR #${pr.number}?`,
       body: `New session in ${session.config.projectRoot}, on its current checkout.`,
       confirmLabel: 'Start session',
-      input: { label: 'First message', value: prReviewPrompt(pr), rows: 6, testId: 'pr-review-prompt' }
+      input: { label: 'First message', value: prReviewPrompt(pr), rows: 6, testId: 'pr-review-prompt', submitOnEnter: true }
     });
     if (prompt === null) return;
     const firstMessage = prompt.trim();
@@ -322,7 +322,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
       title: `Start a session on issue #${issue.number}?`,
       body: `New session in ${session.config.projectRoot}, on its current checkout.`,
       confirmLabel: 'Start session',
-      input: { label: 'First message', value: issueSessionPrompt(issue), rows: 6, testId: 'issue-prompt' }
+      input: { label: 'First message', value: issueSessionPrompt(issue), rows: 6, testId: 'issue-prompt', submitOnEnter: true }
     });
     if (prompt === null) return;
     const firstMessage = prompt.trim();

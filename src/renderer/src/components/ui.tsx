@@ -303,7 +303,15 @@ export interface ConfirmOptions {
   /** Styles the confirming button as destructive. */
   danger?: boolean;
   /** Adds an editable field to the dialog; askPrompt resolves its text instead of a boolean. */
-  input?: { label?: React.ReactNode; value: string; rows?: number; placeholder?: string; testId?: string };
+  input?: {
+    label?: React.ReactNode;
+    value: string;
+    rows?: number;
+    placeholder?: string;
+    testId?: string;
+    /** Enter confirms the prompt; Shift+Enter remains available for a newline. */
+    submitOnEnter?: boolean;
+  };
 }
 
 type PendingConfirm = ConfirmOptions & { resolve: (value: string | null) => void };
@@ -391,6 +399,12 @@ export function ConfirmHost() {
             placeholder={pending.input.placeholder}
             defaultValue={pending.input.value}
             data-testid={pending.input.testId ?? 'ask-input'}
+            onKeyDown={(e) => {
+              if (pending.input?.submitOnEnter && e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                answer(e.currentTarget.value);
+              }
+            }}
           />
         </Field>
       )}

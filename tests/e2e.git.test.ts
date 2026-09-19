@@ -256,7 +256,7 @@ describe.runIf(enabled)('git panel PR review session', () => {
 
     // Whatever is left in the dialog is the session's first message.
     await promptBox.fill('Custom brief for PR #7.\nRun `gh pr diff 7` and flag risks.');
-    await win.getByRole('button', { name: 'Start session' }).click();
+    await promptBox.press('Enter');
 
     // The app switches to a session titled for the PR, open on the review template. The seeded
     // session's own transcript is already on screen, so wait for the new session's title and
@@ -323,7 +323,7 @@ describe.runIf(enabled)('git panel issue session', () => {
 
     // Whatever is left in the dialog is the session's first message.
     await promptBox.fill('Custom brief for issue #12.\nStart with the wobble regression test.');
-    await win.getByRole('button', { name: 'Start session' }).click();
+    await promptBox.press('Enter');
 
     // The app switches to a session titled for the issue, open on the fix template.
     await win.waitForSelector('[data-testid="session-title"][title="Fix issue #12"]', { timeout: 30_000 });
