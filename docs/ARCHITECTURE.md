@@ -134,6 +134,7 @@ The dashboard (`src/renderer/src/components/analytics/`) asks for one range at a
 
 ## Known limitations
 
+- Computer use ships as an opt-in built-in MCP server (Cua Driver, `src/main/mcp/cua.ts`): Vocs Code discovers a binary the user installed and injects `cua-driver mcp` with the chosen authorization mode. Phase 1 core is detection, opt-in, mode mapping and injection; the live Desktop preview tab, in-transcript screenshots of driver actions, a guidance skill, and one app-owned runtime shared by concurrent sessions are not yet shipped (docs/CUA-COMPUTER-USE.md).
 - Codex exec (SDK) cannot ask for approval; prefer the app-server harness for interactive work.
 - The Cursor harness cannot ask for approval either; safety comes from Cursor's sandbox (Auto) and Plan mode. A `.cursor/hooks.json` approval bridge is a possible follow-up.
 - Cursor usage is billed to the user's Cursor plan, so the analytics show tokens but no dollar cost for that harness.

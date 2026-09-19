@@ -1,7 +1,7 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
-import type { AcpAgentPreset, AppSettings, FolderSessionDefaults, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, PermissionMode, ProviderConfig } from '../shared/types';
-import { MCP_BUILTIN_IDS } from '../shared/types';
+import type { AcpAgentPreset, AppSettings, CuaSettings, FolderSessionDefaults, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, PermissionMode, ProviderConfig } from '../shared/types';
+import { MCP_BUILTIN_IDS, isCuaPermissionMode } from '../shared/types';
 import type { KnowledgeSettings } from '../shared/knowledge';
 import { isAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESSES, PERMISSION_MODE_LABELS, isEffortLevel } from '../shared/harness-meta';
@@ -217,6 +217,7 @@ export function defaultSettings(): AppSettings {
     pi: { extraArgs: [] },
     acpAgents: BUILTIN_ACP_AGENTS.map((a) => ({ ...a })),
     mcpServers: [],
+    cua: { enabled: false, mode: 'standard' },
     mcpProjectState: {},
     knowledge: { prime: true, autoDistill: true },
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
@@ -390,6 +391,17 @@ export function normalizeMcpProjectState(stored: unknown): Record<string, McpPro
   return out;
 }
 
+/**
+ * Computer use is opt-in and fail-closed: only a known mode survives, and a bounded mode keeps its
+ * manifest path (an empty one is dropped so the UI shows the requirement rather than a dead path).
+ */
+export function normalizeCuaSettings(stored: unknown): CuaSettings {
+  const raw = (stored ?? {}) as Partial<CuaSettings>;
+  const mode = isCuaPermissionMode(raw.mode) ? raw.mode : 'standard';
+  const manifest = typeof raw.manifestPath === 'string' ? raw.manifestPath.trim() : '';
+  return { enabled: raw.enabled === true, mode, ...(manifest ? { manifestPath: manifest } : {}) };
+}
+
 /** Merge stored settings over defaults, keeping builtin providers/agents present. */
 export function normalizeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
   const d = defaultSettings();
@@ -425,6 +437,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     agent: normalizeAgentSettings(stored.agent),
     modelOverrides: pruneModelOverrides(stored.modelOverrides),
     mcpServers: normalizeMcpServers(stored.mcpServers),
+    cua: normalizeCuaSettings(stored.cua),
     mcpDisabledBuiltins: Array.isArray(stored.mcpDisabledBuiltins)
       ? [...new Set(stored.mcpDisabledBuiltins.filter((x): x is string => typeof x === 'string' && !!x))]
       : [],

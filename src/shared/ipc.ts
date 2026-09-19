@@ -4,6 +4,7 @@ import type {
   ApprovalDecision,
   AppSettings,
   CreateSessionRequest,
+  CuaStatus,
   DoctorReport,
   EffortLevel,
   FsEntry,
@@ -183,6 +184,8 @@ export interface IpcContract {
   'mcp:import': [{ servers: McpServerDef[]; to: 'global' | 'repo'; sessionId?: string }, { ok: boolean; error?: string }];
   /** Writes the session repo's servers out to `.cursor/mcp.json` for a Cursor session. */
   'mcp:export': [{ sessionId: string; to: 'cursor' }, { ok: boolean; path?: string; error?: string }];
+  /** Installed Cua Driver, its mode and whether that mode can start (computer use). */
+  'cua:status': [void, CuaStatus];
 
   'sessions:list': [void, SessionMeta[]];
   'sessions:create': [CreateSessionRequest, SessionMeta];

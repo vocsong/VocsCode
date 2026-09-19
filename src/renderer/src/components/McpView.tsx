@@ -8,6 +8,7 @@ import { MCP_BUILTIN_IDS } from '../../../shared/types';
 import { invoke } from '../api';
 import { useStore } from '../store';
 import { McpServerForm, emptyServer, serverSummary } from './McpServerForm';
+import { CuaCard } from './CuaCard';
 import { askConfirm, Badge, Button, EmptyState, Icon, Spinner, Toggle } from './ui';
 
 const OWN_TAB = 'vocs-code';
@@ -134,6 +135,7 @@ export function McpView() {
                 that repo's MCP panel tab.
               </div>
             </div>
+            <CuaCard />
             {userServers.length === 0 && !editing && (
               <EmptyState icon="server" title="No MCP servers yet">
                 <p>An MCP server gives your agents extra tools — a code host, a database, a browser. Add one here and every harness that supports MCP picks it up on its next session.</p>
