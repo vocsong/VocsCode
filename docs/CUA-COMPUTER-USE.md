@@ -1,6 +1,6 @@
 # Computer use with Cua
 
-Status: **Phase 1 core shipped** (`src/main/mcp/cua.ts`, `CuaCard.tsx`, docs/MCP.md §14); the Desktop preview tab, in-transcript screenshots, the guidance skill and a shared app-owned runtime are still to come. This document decides whether Vocs Code should
+Status: **Phase 1 core + Desktop preview shipped** (`src/main/mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`, docs/MCP.md §14); in-transcript screenshots, the guidance skill and a shared app-owned runtime are still to come. This document decides whether Vocs Code should
 use [trycua/cua](https://github.com/trycua/cua) for computer use, and how.
 
 ## 1. What Cua actually is
@@ -212,9 +212,10 @@ and decide option 1 vs 2 in §6. Confirm what `get_config` reports for mode on e
   button; image rendering on tool cards; the kill switch.
 - Tests — see §9.
 
-**Phase 2.** Desktop panel tab (live preview), bounded-manifest editor with the browser-origin
-constraint surfaced, skill-install button, Cua Computer History as an opt-in session audit view,
-subagent policy (default: subagents may not use cua tools), analytics category.
+**Phase 2.** Bounded-manifest editor with the browser-origin constraint surfaced, skill-install
+button, Cua Computer History as an opt-in session audit view, subagent policy (default: subagents
+may not use cua tools), analytics category, a window picker in the preview, and one app-owned
+runtime shared by concurrent sessions.
 
 **Phase 3 (optional).** Cua Fleets as a second provider for remote isolated desktops; Lume VMs as a
 sandboxed desktop for Full-access computer use; a Cua Bench task in the opt-in live suite.

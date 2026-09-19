@@ -56,6 +56,7 @@ beforeEach(() => {
   invokeMock.mockReset();
   invokeMock.mockImplementation((channel: string) => {
     if (channel === 'mcp:project') return Promise.resolve(MCP_INFO);
+    if (channel === 'cua:status') return Promise.resolve({ installed: false, mode: 'standard', ready: false, note: 'Cua Driver is not installed on this machine.' });
     return Promise.resolve({});
   });
   useStore.setState({ panelTab: 'goal', panelBottomTab: 'mcp', panelBottomOpened: [], toasts: [] });
@@ -80,5 +81,17 @@ describe('right panel bottom half', () => {
     first.unmount();
     render(<RightPanel session={session()} />);
     expect(await screen.findByTestId('mcp-global-section')).toBeTruthy();
+  });
+
+  it('mounts the Desktop tab lazily and shows the Cua card when the driver is not ready', async () => {
+    render(<RightPanel session={session()} />);
+    // Not opened yet, so the preview has not been asked for.
+    expect(invokeMock.mock.calls.some(([channel]) => channel === 'cua:preview')).toBe(false);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('panel-bottom-desktop'));
+    });
+    expect(await screen.findByTestId('cua-card')).toBeTruthy();
+    expect(screen.queryByTestId('desktop-tab')).toBeNull();
+    expect(invokeMock.mock.calls.some(([channel]) => channel === 'cua:preview')).toBe(false);
   });
 });

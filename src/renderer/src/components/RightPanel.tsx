@@ -12,6 +12,7 @@ import { BranchesTab } from './BranchesTab';
 import { DiffView } from './DiffView';
 import { GitSetup } from './GitSetup';
 import { McpTab } from './McpTab';
+import { DesktopTab } from './DesktopTab';
 import { KnowledgeTab } from './KnowledgeTab';
 import { Resizer, SplitResizer } from './Resizer';
 import { SessionUsage } from './SessionUsage';
@@ -34,6 +35,7 @@ const TABS: { id: PanelTab; label: string; icon: string }[] = [
 /** The lower half holds live session services, which is why it gets its own strip. */
 const BOTTOM_TABS: { id: PanelBottomTab; label: string; icon: string }[] = [
   { id: 'mcp', label: 'MCP', icon: 'server' },
+  { id: 'desktop', label: 'Desktop', icon: 'cpu' },
   { id: 'subagents', label: 'Subagents', icon: 'fork' },
   { id: 'knowledge', label: 'Knowledge', icon: 'book' }
 ];
@@ -83,6 +85,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
         </div>
         <div className="panel-body">
           {bottomTab === 'mcp' && opened.includes('mcp') && <McpTab session={session} />}
+          {bottomTab === 'desktop' && opened.includes('desktop') && <DesktopTab session={session} />}
           {bottomTab === 'subagents' && opened.includes('subagents') && <SubagentsTab session={session} />}
           {bottomTab === 'knowledge' && opened.includes('knowledge') && <KnowledgeTab session={session} />}
         </div>

@@ -19,6 +19,7 @@ export * from './gitnexus';
 export * from './indexer';
 export * from './memory';
 export * from './cua';
+export * from './cua-preview';
 export { inspectServer, type InspectOptions } from './client';
 
 /** Keychain id for a variable referenced as `${NAME}` in an MCP definition. */

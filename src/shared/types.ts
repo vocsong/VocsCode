@@ -214,6 +214,14 @@ export interface CuaStatus {
   note: string;
 }
 
+/** One live screen capture for the Desktop preview tab. */
+export interface CuaPreviewResult {
+  ok: boolean;
+  /** A `data:` URL, ready to hand to an `<img>`. */
+  imageDataUrl?: string;
+  error?: string;
+}
+
 /** Per-user switches for one project root. Repo-defined servers stay off until enabled here. */
 export interface McpProjectState {
   /** Global server ids switched off for this repo. */

@@ -12,7 +12,7 @@ export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'te
 /** The Git panel's inner view: the repo, its worktrees, or the two GitHub lists. */
 export type GitPanelView = 'branches' | 'worktrees' | 'prs' | 'issues';
 /** The panel's lower half: live session services rather than workspace views. */
-export type PanelBottomTab = 'mcp' | 'subagents' | 'knowledge';
+export type PanelBottomTab = 'mcp' | 'subagents' | 'knowledge' | 'desktop';
 export type View = 'chat' | 'settings' | 'analytics' | 'skills' | 'mcp';
 export type AnalyticsTab = 'overview' | 'spend' | 'tokens' | 'activity' | 'tools' | 'code' | 'reliability' | 'sessions';
 /** Days in the analytics range; 0 is all time. */

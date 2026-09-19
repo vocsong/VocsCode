@@ -519,7 +519,7 @@ exists, and a value left on disk by an older build is dropped when settings are 
 
 ## 14. Built-in Cua Driver — computer use, opt-in
 
-**Status: shipped (Phase 1 core).** [Cua Driver](https://github.com/trycua/cua) is the third
+**Status: shipped (Phase 1 core + Desktop preview).** [Cua Driver](https://github.com/trycua/cua) is the third
 app-shipped server: a native computer-use driver that inspects and operates desktop apps and
 browsers on macOS, Windows and Linux, speaking MCP over stdio as `cua-driver mcp`. Vocs Code does
 not ship the binary and never installs it silently; it discovers one the user installed
@@ -547,7 +547,12 @@ Rules:
 - It is claimed like the other built-ins: `builtinServerIds()` includes `cua-driver`, so both
   Codex adapters write `mcp_servers.cua-driver = { enabled: false }` for a session that is not
   receiving it.
+- **Desktop preview.** The panel's lower half has a Desktop tab (`DesktopTab.tsx`) that polls
+  `cua:preview` every 2s and shows the returned screenshot. The main-process `CuaPreviewSession`
+  keeps one MCP connection to `cua-driver mcp` between polls (closed after 30s idle) and calls
+  `get_desktop_state`, which never moves the pointer or takes focus. The tab's Stop button is the
+  session interrupt; when the driver is not ready it falls back to the compact Cua card.
 
-Not yet shipped (see the design doc): one app-owned runtime shared by concurrent sessions, the
-live Desktop preview tab, in-transcript screenshots, the guidance skill, and the Computer History
-audit view.
+Not yet shipped (see the design doc): one app-owned runtime shared by concurrent sessions,
+in-transcript screenshots of driver actions on tool cards, a window picker in the preview, the
+guidance skill, and the Computer History audit view.

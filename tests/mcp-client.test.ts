@@ -4,10 +4,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { inspectServer } from '../src/main/mcp/client';
+import { inspectServer, connectServer } from '../src/main/mcp/client';
 import { normalizeStdio } from '../src/main/mcp/effective';
 
 const FIXTURE = path.resolve('tests/fixtures/mcp-echo-server.mjs');
+const IMAGE_FIXTURE = path.resolve('tests/fixtures/mcp-image-server.mjs');
 
 describe('inspectServer', () => {
   it('connects to a stdio server and lists its tools', async () => {
@@ -56,4 +57,22 @@ describe('inspectServer', () => {
       await rm(dir, { recursive: true, force: true });
     }
   }, 90_000);
+});
+
+// A computer-use server returns screenshots as image content blocks; the client has to keep them
+// rather than lump them into the text output, or the preview has nothing to render.
+const PIXEL_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+describe('connectServer', () => {
+  it('keeps image blocks alongside the text and reports them as base64', async () => {
+    const conn = await connectServer({ id: 'image-fixture', transport: 'stdio', command: process.execPath, args: [IMAGE_FIXTURE] }, { timeoutMs: 30_000 });
+    try {
+      const r = await conn.call('shot', {});
+      expect(r.isError).toBe(false);
+      expect(r.output).toBe('captured');
+      expect(r.images).toEqual([{ mimeType: 'image/png', data: PIXEL_PNG }]);
+    } finally {
+      await conn.close();
+    }
+  }, 60_000);
 });

@@ -5886,6 +5886,24 @@ body.resizing {
   align-items: center;
   gap: 8px;
 }
+/* The Desktop tab: a live, read-only screen preview with the session's stop control. */
+.desktop-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+.desktop-frame {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #000;
+}
+.desktop-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
 /* The AGENTS.md memory snippet: a disclosure that stays quiet until asked for. */
 .mcp-guide-toggle {
   display: flex;

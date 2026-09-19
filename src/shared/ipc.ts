@@ -4,6 +4,7 @@ import type {
   ApprovalDecision,
   AppSettings,
   CreateSessionRequest,
+  CuaPreviewResult,
   CuaStatus,
   DoctorReport,
   EffortLevel,
@@ -186,6 +187,8 @@ export interface IpcContract {
   'mcp:export': [{ sessionId: string; to: 'cursor' }, { ok: boolean; path?: string; error?: string }];
   /** Installed Cua Driver, its mode and whether that mode can start (computer use). */
   'cua:status': [void, CuaStatus];
+  /** One screen capture from the driver, for the Desktop preview tab. */
+  'cua:preview': [void, CuaPreviewResult];
 
   'sessions:list': [void, SessionMeta[]];
   'sessions:create': [CreateSessionRequest, SessionMeta];
