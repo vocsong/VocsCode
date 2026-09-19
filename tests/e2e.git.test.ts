@@ -1,7 +1,8 @@
 /**
  * End-to-end Git panel flow: a real repository whose GitHub data comes from a fake `gh` on PATH.
  * Clicking a PR row opens the same kind of detail dialog issues already have, with GitHub's
- * markdown body and metadata; the issue dialog keeps working, comment counts included. The PR
+ * markdown body and metadata; the issue dialog keeps working, comment counts included. Both previews
+ * pull the conversation's comments on open and render them below the description. The PR
  * table keeps the number in its own column at the default panel width and when the panel is wide.
  * The row's New session action confirms first in a dialog carrying the review template, editable
  * before the session starts on the repo; the issue row does the same with the fix template. That
@@ -39,13 +40,31 @@ const PR_JSON =
 const ISSUE_JSON =
   '[{"number":12,"title":"Widget is wobbly","state":"OPEN","url":"https://example.com/acme/repo/issues/12","author":{"login":"octocat"},' +
   '"body":"It **wobbles** badly.","labels":[{"name":"bug","color":"ff0000"}],"comments":[{"body":"me too"}]}]';
+const PR_VIEW_JSON =
+  '{"comments":[{"author":{"login":"reviewer"},"body":"Looks **good** to me.","createdAt":"2024-01-02T03:04:05Z",' +
+  '"url":"https://example.com/acme/repo/pull/7#issuecomment-1","authorAssociation":"MEMBER"}]}';
+const ISSUE_VIEW_JSON =
+  '{"comments":[{"author":{"login":"octocat"},"body":"Me **too**.","createdAt":"2024-02-03T04:05:06Z",' +
+  '"url":"https://example.com/acme/repo/issues/12#issuecomment-1"}]}';
 
-const GH_SH = ['#!/bin/sh', 'case "$1 $2" in', `  'pr list') echo '${PR_JSON}' ;;`, `  'issue list') echo '${ISSUE_JSON}' ;;`, "  'auth status') echo 'Logged in to github.com account octocat (keyring)' ;;", 'esac', 'exit 0'].join('\n');
+const GH_SH = [
+  '#!/bin/sh',
+  'case "$1 $2" in',
+  `  'pr list') echo '${PR_JSON}' ;;`,
+  `  'pr view') echo '${PR_VIEW_JSON}' ;;`,
+  `  'issue list') echo '${ISSUE_JSON}' ;;`,
+  `  'issue view') echo '${ISSUE_VIEW_JSON}' ;;`,
+  "  'auth status') echo 'Logged in to github.com account octocat (keyring)' ;;",
+  'esac',
+  'exit 0'
+].join('\n');
 
 const GH_CMD = [
   '@echo off',
   `if /i "%~1"=="pr" if /i "%~2"=="list" echo ${PR_JSON}`,
+  `if /i "%~1"=="pr" if /i "%~2"=="view" echo ${PR_VIEW_JSON}`,
   `if /i "%~1"=="issue" if /i "%~2"=="list" echo ${ISSUE_JSON}`,
+  `if /i "%~1"=="issue" if /i "%~2"=="view" echo ${ISSUE_VIEW_JSON}`,
   'if /i "%~1"=="auth" if /i "%~2"=="status" echo Logged in to github.com account octocat (keyring)',
   'exit /b 0'
 ].join('\r\n');
@@ -179,6 +198,11 @@ describe.runIf(enabled)('git panel PR details', () => {
     expect(prMeta).toContain('Approved');
     // GitHub's markdown is rendered, not dumped as source text.
     expect(await win.locator('.pr-dialog-body strong').innerText()).toBe('widget');
+    // The conversation is fetched on open and rendered below the description.
+    await win.waitForSelector('.pr-dialog-body ~ .git-comments .git-comment-body', { timeout: 10_000 });
+    expect(await win.locator('.git-comments').innerText()).toMatch(/comments \(1\)/i);
+    expect(await win.locator('.git-comments').innerText()).toContain('reviewer');
+    expect(await win.locator('.git-comment-body strong').innerText()).toBe('good');
     expect(await win.locator('.modal-footer').innerText()).toContain('Merge PR');
     await win.screenshot({ path: path.join(shots, 'git-panel-01-pr-dialog.png') });
     await win.keyboard.press('Escape');
@@ -192,6 +216,9 @@ describe.runIf(enabled)('git panel PR details', () => {
     await win.waitForSelector('.issue-dialog-body', { timeout: 10_000 });
     expect(await win.locator('.issue-dialog-meta').innerText()).toContain('1 comment');
     expect(await win.locator('.issue-dialog-body').innerText()).toContain('It wobbles badly.');
+    await win.waitForSelector('.issue-dialog-body ~ .git-comments .git-comment-body', { timeout: 10_000 });
+    expect(await win.locator('.git-comments').innerText()).toMatch(/comments \(1\)/i);
+    expect(await win.locator('.git-comments').innerText()).toContain('Me too');
 
     await app.close();
   }, 180_000);

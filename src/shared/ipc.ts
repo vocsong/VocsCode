@@ -9,6 +9,7 @@ import type {
   FsEntry,
   GitBranchInfo,
   GitBranchOverview,
+  GitCommentList,
   GitIssueList,
   GitPullRequestList,
   GitSetupStatus,
@@ -307,6 +308,10 @@ export interface IpcContract {
   'git:pullRequests': [{ sessionId: string }, GitPullRequestList];
   /** Pulls the repo's issues (all states) from GitHub through gh, for the Git panel's Issues view. */
   'git:issues': [{ sessionId: string }, GitIssueList];
+  /** Pulls one issue's conversation comments through gh, for the Git panel's issue preview. */
+  'git:issueComments': [{ sessionId: string; number: number }, GitCommentList];
+  /** Pulls one pull request's conversation comments through gh, for the Git panel's PR preview. */
+  'git:prComments': [{ sessionId: string; number: number }, GitCommentList];
 
   'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];

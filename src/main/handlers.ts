@@ -14,7 +14,7 @@ import { createClaudeAgent, isPinnedModel, listClaudeAgents, setClaudeAgentModel
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment, SessionMeta } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitRoot, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssueComments, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequestComments, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitRoot, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
 import type { UpdateState } from '../shared/types';
@@ -868,6 +868,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:fetchPrune', ({ sessionId }) => gitFetchPrune(cwdOf(sessionId)));
   handle('git:pullRequests', ({ sessionId }) => gitPullRequests(cwdOf(sessionId)));
   handle('git:issues', ({ sessionId }) => gitIssues(cwdOf(sessionId)));
+  handle('git:issueComments', ({ sessionId, number }) => gitIssueComments(cwdOf(sessionId), number));
+  handle('git:prComments', ({ sessionId, number }) => gitPullRequestComments(cwdOf(sessionId), number));
 
   handle('fs:list', ({ sessionId, relPath }) => listWorkspaceFiles(cwdOf(sessionId), relPath));
   handle('fs:search', async ({ sessionId, query, limit }) => {

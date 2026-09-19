@@ -44,6 +44,8 @@ export const REMOTE_CHANNELS = new Set<string>([
   'git:worktrees',
   'git:pullRequests',
   'git:issues',
+  'git:issueComments',
+  'git:prComments',
   'fs:list',
   'fs:search',
   'fs:read'
@@ -74,6 +76,8 @@ export const REMOTE_READ_CHANNELS = new Set<string>([
   'git:worktrees',
   'git:pullRequests',
   'git:issues',
+  'git:issueComments',
+  'git:prComments',
   'fs:list',
   'fs:search',
   'fs:read'

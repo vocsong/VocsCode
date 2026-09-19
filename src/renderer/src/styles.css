@@ -3222,6 +3222,42 @@ body.resizing {
 .pr-dialog-empty {
   margin: 20px 0 4px;
 }
+.git-comments {
+  margin-top: 20px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.git-comments-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+.git-comments-note {
+  margin: 0 0 8px;
+}
+.git-comment {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.git-comment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
+}
+.git-comment-body {
+  padding: 8px 10px;
+  margin: 0;
+}
 /* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
 .branch-row > :nth-child(2) {
   min-width: 0;
