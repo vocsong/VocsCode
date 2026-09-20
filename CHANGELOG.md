@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.0](https://github.com/vocsong/VocsCode/compare/v0.4.0...v0.5.0) (2026-09-20)
+
+
+### Features
+
+* **mcp:** add opt-in Cua Driver computer use with a Desktop preview ([#375](https://github.com/vocsong/VocsCode/issues/375)) ([9c4f963](https://github.com/vocsong/VocsCode/commit/9c4f96321554847ebb110b5b12cd4fe86ad042a8))
+* **mcp:** install Cua Driver from its card with one click ([#378](https://github.com/vocsong/VocsCode/issues/378)) ([03c63a9](https://github.com/vocsong/VocsCode/commit/03c63a947b289ddc8e3842d524e2e782fed80d0d))
+* **mcp:** ship Cua Driver on by default like GitNexus ([#377](https://github.com/vocsong/VocsCode/issues/377)) ([6b0f1db](https://github.com/vocsong/VocsCode/commit/6b0f1db06019deb7e62e9ede828db8f55420d428))
+* **pi:** default Pi sessions to read, bash, edit, write, rg, glob, ls ([#370](https://github.com/vocsong/VocsCode/issues/370)) ([380110e](https://github.com/vocsong/VocsCode/commit/380110ee25a1d07585228f2a7a7f68461392005b))
+* Print the runtime doctor report from a /doctor command ([#380](https://github.com/vocsong/VocsCode/issues/380)) ([94bafda](https://github.com/vocsong/VocsCode/commit/94bafda6893b5490e593d2f92bd9f48b35e7be4f))
+* refresh GitNexus indexes at lifecycle checkpoints ([#367](https://github.com/vocsong/VocsCode/issues/367)) ([0fa69b0](https://github.com/vocsong/VocsCode/commit/0fa69b092bf31ab8216221df0481f3fbdab86373))
+* Remember new-session choices per project folder ([#368](https://github.com/vocsong/VocsCode/issues/368)) ([ba96d71](https://github.com/vocsong/VocsCode/commit/ba96d71f9a056c00857b129c9af998288ae04a11))
+* Show issue and PR comments in the Git panel preview ([#374](https://github.com/vocsong/VocsCode/issues/374)) ([0fd2bef](https://github.com/vocsong/VocsCode/commit/0fd2befdf068414c7e7986fd695165d22904e1d8))
+* Track code written per token on an analytics tab ([#371](https://github.com/vocsong/VocsCode/issues/371)) ([2e880d9](https://github.com/vocsong/VocsCode/commit/2e880d9110ebec39113ee2f96ef2ccaf353d61f0))
+* **transcript:** collapse each turn's work behind a Worked header ([#379](https://github.com/vocsong/VocsCode/issues/379)) ([25caf72](https://github.com/vocsong/VocsCode/commit/25caf72e1417aa96f5ad70c7dbbfa2e98b1003fe))
+
+
+### Bug Fixes
+
+* Honor the configured subagent concurrency cap ([#373](https://github.com/vocsong/VocsCode/issues/373)) ([9466ffb](https://github.com/vocsong/VocsCode/commit/9466ffb21936f0b82d7045db3d5de0113a62c938))
+* make a switch state which side is on ([#369](https://github.com/vocsong/VocsCode/issues/369)) ([bdebdf5](https://github.com/vocsong/VocsCode/commit/bdebdf57efbde15ecf50b2ff6f8ea2f97b0120a3))
+* Read AGENTS.md in the Claude harness when the project has no CLAUDE.md ([#372](https://github.com/vocsong/VocsCode/issues/372)) ([2f7b3ef](https://github.com/vocsong/VocsCode/commit/2f7b3ef56f00b5e020a0de26a034aeff0e39ff20))
+* submit GitHub session prompts on Enter ([1d91a49](https://github.com/vocsong/VocsCode/commit/1d91a496e218254704985f8341aae125a9297fc3))
+
 ## [0.4.0](https://github.com/vocsong/VocsCode/compare/v0.3.0...v0.4.0) (2026-09-16)
 
 
