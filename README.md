@@ -47,7 +47,7 @@ That installs everything (including dev dependencies, even if your environment s
 
 ## Why you'll like it
 
-It takes the best of the Codex and Claude Code desktop apps — threads grouped by project, isolated git worktrees, live multi-session sidebar, diff review with per-file revert and commit, `/goal` with an iteration guard — and makes it all work **across every agent**, not just one. There's even a Doctor page that shows which runtimes you have installed and logged in, so setup is never guesswork.
+It takes the best of the Codex and Claude Code desktop apps — threads grouped by project, isolated git worktrees, live multi-session sidebar, diff review with per-file revert and commit, `/goal` with an iteration guard — and makes it all work **across every agent**, not just one. There's even a Doctor page — and a `/doctor` command that prints the same report into a session — that shows which runtimes you have installed and logged in, so setup is never guesswork.
 
 ## Contributing
 

@@ -1,6 +1,7 @@
 /** Prompt input: slash commands, @file mentions, and steer-vs-queue while a turn is running. */
 import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
+import { formatDoctorReport } from '../../../shared/doctor';
 import { EFFORT_LEVELS, HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
 import { modelName, parseTypedModel } from '../../../shared/model-names';
 import { invoke } from '../api';
@@ -179,6 +180,21 @@ export function Composer({ session }: { session: SessionMeta }) {
       case 'help':
         toast(`Commands: ${SLASH_COMMANDS.map((c) => '/' + c.name).join(' ')} · Enter send · Shift+Enter newline · Esc stop · ! shell · Ctrl+K palette`, 'info');
         return true;
+      case 'doctor': {
+        // Runtimes are probed live (each probe can cost a process spawn), so the note shows up right
+        // away and is replaced by the report. Renderer-local like the other command notes: it is a
+        // reading of this machine at this moment, not part of the conversation.
+        const noteId = `local-doctor-${session.id}`;
+        store.setLocalInfo(session.id, noteId, 'Checking harness runtimes and provider keys…', { pending: true });
+        try {
+          const [info, report] = await Promise.all([invoke('app:info', undefined), invoke('app:doctor', undefined)]);
+          const { text, level } = formatDoctorReport(report, info);
+          store.setLocalInfo(session.id, noteId, text, { level });
+        } catch (e) {
+          store.setLocalInfo(session.id, noteId, `Doctor failed: ${String((e as Error).message ?? e)}`, { level: 'error' });
+        }
+        return true;
+      }
       case 'model': {
         if (!arg) {
           toast('Usage: /model provider/model', 'error');

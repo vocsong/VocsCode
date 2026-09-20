@@ -244,6 +244,7 @@ export function isEffortLevel(value: unknown): value is EffortLevel {
 
 export const SLASH_COMMANDS: { name: string; description: string; args?: string }[] = [
   { name: 'help', description: 'Show available commands and shortcuts' },
+  { name: 'doctor', description: 'Check harness runtimes, sign-in state and provider keys' },
   { name: 'model', description: 'Switch model for this session', args: '<provider/model>' },
   { name: 'mode', description: 'Change permission mode', args: 'ask|accept-edits|plan|auto|full-auto' },
   { name: 'effort', description: 'Change reasoning effort', args: 'low|medium|high|xhigh|max' },
