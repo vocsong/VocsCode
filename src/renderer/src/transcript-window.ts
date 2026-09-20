@@ -5,24 +5,37 @@
  */
 import type { TranscriptItem } from '../../shared/types';
 
-/** A run of shell commands collapses into one group chunk; everything else renders alone. */
+/**
+ * Rows the transcript renders. A run of shell commands collapses into one group chunk, and a
+ * turn's intermediate work collapses into one `work` chunk; everything else renders alone.
+ */
 export type RenderChunk =
   | { kind: 'single'; item: TranscriptItem }
-  | { kind: 'group'; id: string; entries: TranscriptItem[] };
+  | { kind: 'group'; id: string; entries: TranscriptItem[] }
+  | {
+      kind: 'work';
+      id: string;
+      entries: TranscriptItem[];
+      /** The turn this work belongs to, attached when its turn row arrives. */
+      turn?: { status: 'completed' | 'interrupted' | 'failed'; durationMs?: number };
+    };
 
-/** Stable row key: group chunks keep the id of their first command. */
+/** Stable row key: group and work chunks keep the id of their first entry. */
 export function chunkKey(chunk: RenderChunk): string {
-  return chunk.kind === 'group' ? `group:${chunk.id}` : chunk.item.id;
+  if (chunk.kind === 'group') return `group:${chunk.id}`;
+  if (chunk.kind === 'work') return `work:${chunk.id}`;
+  return chunk.item.id;
 }
 
 /** Rough row height for a chunk that has not been measured yet, including the 10px flex gap. */
 export function estimateChunkHeight(chunk: RenderChunk): number {
-  if (chunk.kind === 'group') return 190;
+  if (chunk.kind === 'work') return 32;
+  if (chunk.kind === 'group') return 60;
   switch (chunk.item.kind) {
     case 'assistant':
       return 100;
     case 'tool':
-      return 140;
+      return 46;
     case 'approval':
       return 170;
     case 'plan':

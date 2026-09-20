@@ -2128,23 +2128,56 @@ h4 {
   width: 16px;
 }
 
+/* A turn's work: tool calls, commentary and thinking behind one "Worked for …" header */
+.work-group {
+  display: flex;
+  flex-direction: column;
+}
+.work-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  padding: 3px 0 6px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.work-head:hover {
+  color: var(--fg);
+}
+.work-label {
+  font-weight: 500;
+}
+.work-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 0 2px;
+}
+
 /* Run of consecutive shell commands, collapsed into one header */
 .tool-group {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-  overflow: hidden;
+  border: none;
+  background: none;
+  overflow: visible;
 }
 .tool-group-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   width: 100%;
   border: none;
+  border-radius: var(--radius-sm);
   background: none;
-  padding: 6px 10px;
+  padding: 3px 6px;
   cursor: pointer;
   text-align: left;
+  font-size: 12.5px;
 }
 .tool-group-head:hover {
   background: var(--bg-hover);
@@ -2152,43 +2185,46 @@ h4 {
 .tool-group-running .tool-icon {
   color: var(--blue);
 }
+.tool-group .tool-name {
+  color: var(--fg-muted);
+  font-weight: 500;
+}
 .tool-group-body {
-  border-top: 1px solid var(--border);
-  background: var(--bg-sunken);
-  padding: 6px;
+  padding: 1px 0 2px 14px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 1px;
 }
 
-/* Tool cards */
+/* Tool rows: one compact line each, expanding into the command's shell panel */
 .tool-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-  overflow: hidden;
+  border: none;
+  background: none;
+  overflow: visible;
 }
 .tool-nested {
   margin-left: 24px;
   width: calc(100% - 24px);
-  border-style: dashed;
 }
 .tool-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   width: 100%;
   border: none;
+  border-radius: var(--radius-sm);
   background: none;
-  padding: 6px 10px;
+  padding: 3px 6px;
   cursor: pointer;
   text-align: left;
+  font-size: 12.5px;
 }
 .tool-head:hover {
   background: var(--bg-hover);
 }
 .tool-icon {
   color: var(--fg-muted);
+  flex-shrink: 0;
 }
 .tool-running .tool-icon {
   color: var(--blue);
@@ -2199,6 +2235,10 @@ h4 {
 .tool-name {
   font-weight: 600;
   white-space: nowrap;
+}
+.tool-command .tool-name {
+  color: var(--fg-muted);
+  font-weight: 500;
 }
 .tool-summary {
   color: var(--fg-muted);
@@ -2213,6 +2253,10 @@ h4 {
   color: var(--fg-muted);
 }
 .tool-body {
+  border-top: none;
+  background: none;
+}
+.tool-card:not(.tool-command) .tool-body {
   border-top: 1px solid var(--border);
   background: var(--bg-sunken);
 }
@@ -2228,6 +2272,47 @@ h4 {
 .tool-input {
   color: var(--fg-muted);
   border-bottom: 1px solid var(--border);
+}
+
+/* One shell command expanded: the command line, its output and the exit status. */
+.shell-card {
+  margin: 2px 0 8px 23px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+.shell-bar {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+}
+.shell-cmd {
+  margin: 0;
+  padding: 7px 10px 2px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.shell-prompt {
+  color: var(--fg-faint);
+}
+.shell-card .tool-output {
+  padding: 3px 10px 8px;
+  max-height: 320px;
+}
+.shell-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--green);
+}
+.shell-foot-failed {
+  color: var(--red);
 }
 
 /* Approval */

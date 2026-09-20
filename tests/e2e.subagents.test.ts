@@ -135,7 +135,9 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       expect(await win.locator('.resizer-split').count()).toBe(1);
       await win.getByTestId('panel-bottom-mcp').waitFor({ state: 'visible', timeout: 20_000 });
 
-      // The card in the transcript links into the panel's lower half.
+      // The card in the transcript links into the panel's lower half. The turn's work is collapsed
+      // behind its header, so open that first.
+      await win.locator('.work-head').click();
       const chip = win.locator('.tool-card .chip', { hasText: 'open run' });
       await chip.waitFor({ timeout: 20_000 });
       await chip.click();
@@ -189,6 +191,7 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       await win.waitForSelector('.panel', { timeout: 30_000 });
 
       // The panel is reachable the same way: the card in the transcript links into it.
+      await win.locator('.work-head').click();
       const chip = win.locator('.tool-card .chip', { hasText: 'open run' });
       await chip.waitFor({ timeout: 20_000 });
       await chip.click();

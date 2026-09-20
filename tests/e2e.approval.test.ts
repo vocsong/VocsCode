@@ -79,6 +79,8 @@ describe.runIf(enabled)('electron e2e: approvals', () => {
     expect(await win.locator('.turn-footer').innerText()).not.toMatch(/failed|interrupted/i);
 
     // Both tools completed; the non-repository Changes panel offers Git setup.
+    // The turn's work sits behind its header — one per stretch of work around the approval.
+    for (const head of await win.locator('.work-head').all()) await head.click();
     expect(await win.locator('.tool-card').count()).toBe(2);
     expect(await win.locator('.tool-name').allTextContents()).toEqual(['write_file', 'grep']);
     const grep = win.locator('.tool-card').filter({ has: win.locator('.tool-name', { hasText: /^grep$/ }) });

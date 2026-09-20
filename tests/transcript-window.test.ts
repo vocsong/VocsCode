@@ -57,10 +57,11 @@ describe('windowRange', () => {
 });
 
 describe('chunk helpers', () => {
-  it('keys single chunks by item id and groups by the group id', () => {
+  it('keys single chunks by item id, groups and work by their first entry', () => {
     const single = item('assistant', 'a1');
     expect(chunkKey({ kind: 'single', item: single })).toBe('a1');
     expect(chunkKey({ kind: 'group', id: 'g1', entries: [single] })).toBe('group:g1');
+    expect(chunkKey({ kind: 'work', id: 'w1', entries: [single] })).toBe('work:w1');
   });
 
   it('estimates a positive height for every chunk kind', () => {
@@ -69,5 +70,6 @@ describe('chunk helpers', () => {
       expect(estimateChunkHeight({ kind: 'single', item: item(kind, kind) })).toBeGreaterThan(0);
     }
     expect(estimateChunkHeight({ kind: 'group', id: 'g', entries: [] })).toBeGreaterThan(0);
+    expect(estimateChunkHeight({ kind: 'work', id: 'w', entries: [] })).toBeGreaterThan(0);
   });
 });

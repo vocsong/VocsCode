@@ -59,6 +59,20 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const openFile = useCallback((path: string, line?: number) => useStore.getState().revealFile(session.id, path, line), [session.id]);
 
   const chunks = useMemo(() => groupTranscript(items), [items]);
+  const running = session.status === 'running' || session.status === 'starting';
+  // The in-flight turn's work stays open while it runs; finished work collapses to its header.
+  const liveWorkId = useMemo(() => {
+    if (!running) return null;
+    let lastUser = -1;
+    chunks.forEach((chunk, i) => {
+      if (chunk.kind === 'single' && chunk.item.kind === 'user') lastUser = i;
+    });
+    for (let i = chunks.length - 1; i > lastUser; i--) {
+      const chunk = chunks[i]!;
+      if (chunk.kind === 'work') return chunk.id;
+    }
+    return null;
+  }, [chunks, running]);
 
   // Track the viewport so the window can be sized. jsdom reports 0 and simply disables windowing.
   useEffect(() => {
@@ -263,7 +277,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
         )}
         {virtual && range.start > 0 && <div className="transcript-spacer" style={{ height: tops[range.start] }} aria-hidden />}
         {visible.map((chunk) => (
-          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} canEdit={session.config.harness === 'native' && session.status === 'idle'} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} />
+          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} canEdit={session.config.harness === 'native' && session.status === 'idle'} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} live={chunk.kind === 'work' && chunk.id === liveWorkId} />
         ))}
         {virtual && range.end < chunks.length && <div className="transcript-spacer" style={{ height: tops[chunks.length]! - tops[range.end]! }} aria-hidden />}
         {(session.status === 'running' || session.status === 'starting') && (
@@ -308,7 +322,8 @@ const TranscriptRow = memo(function TranscriptRow({
   canEdit,
   showThinking,
   onImageExpand,
-  measureRow
+  measureRow,
+  live = false
 }: {
   chunk: RenderChunk;
   sessionId: string;
@@ -316,6 +331,7 @@ const TranscriptRow = memo(function TranscriptRow({
   showThinking: boolean;
   onImageExpand: OnImageExpand;
   measureRow: (key: string, el: HTMLElement) => () => void;
+  live?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const key = chunkKey(chunk);
@@ -325,21 +341,28 @@ const TranscriptRow = memo(function TranscriptRow({
   }, [key, measureRow]);
   return (
     <div className="transcript-row" ref={ref}>
-      {chunk.kind === 'group' ? (
+      {chunk.kind === 'work' ? (
+        <WorkGroup chunk={chunk} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} live={live} />
+      ) : chunk.kind === 'group' ? (
         <ToolGroup entries={chunk.entries} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} />
       ) : (
         <Item item={chunk.item} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={chunk.item.id} />
       )}
     </div>
   );
-}, (a, b) => a.sessionId === b.sessionId && a.canEdit === b.canEdit && a.showThinking === b.showThinking &&
+}, (a, b) => a.sessionId === b.sessionId && a.canEdit === b.canEdit && a.showThinking === b.showThinking && a.live === b.live &&
   a.onImageExpand === b.onImageExpand && a.measureRow === b.measureRow && sameChunk(a.chunk, b.chunk));
 
 /** Grouping recreates wrappers; unchanged constituent items still have stable store identities. */
 function sameChunk(a: RenderChunk, b: RenderChunk): boolean {
   if (a.kind === 'single' && b.kind === 'single') return a.item === b.item;
-  return a.kind === 'group' && b.kind === 'group' && a.id === b.id &&
-    a.entries.length === b.entries.length && a.entries.every((item, i) => item === b.entries[i]);
+  if (a.kind === 'group' && b.kind === 'group') return a.id === b.id && sameEntries(a.entries, b.entries);
+  return a.kind === 'work' && b.kind === 'work' && a.id === b.id && sameEntries(a.entries, b.entries) &&
+    a.turn?.status === b.turn?.status && a.turn?.durationMs === b.turn?.durationMs;
+}
+
+function sameEntries(a: TranscriptItem[], b: TranscriptItem[]): boolean {
+  return a.length === b.length && a.every((item, i) => item === b[i]);
 }
 
 function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, showThinking: boolean, onImageExpand: OnImageExpand) {
@@ -500,43 +523,100 @@ const HINT_ICON: Record<string, string> = { execute: 'terminal', edit: 'edit', r
 
 type ToolItem = Extract<TranscriptItem, { kind: 'tool' }>;
 
-/** A run ends at user messages, approvals, turn boundaries, plans and non-command tools. */
-const breaksCommandRun = (item: TranscriptItem): boolean =>
-  (item.kind === 'tool' && item.hint !== 'execute') ||
-  item.kind === 'user' || item.kind === 'approval' || item.kind === 'turn' || item.kind === 'plan';
+export const isRunningEntry = (item: TranscriptItem): boolean =>
+  (item.kind === 'tool' && item.status === 'running') || (item.kind === 'assistant' && !!item.streaming);
 
 /**
- * Group execute tools (per nesting parent) into collapsible chunks. Assistant text, thinking
- * and info lines between two commands are absorbed so commentary does not break the run;
- * anything trailing the last command is popped back out so the turn's answer stays visible.
+ * Whether an item is part of a turn's work (collapsed behind its "Worked for …" header) rather
+ * than something that must stay visible: the answer, warnings, plans and user turns. Approvals
+ * are work too, but the header stays open while one is undecided (see `WorkGroup`).
+ * `laterToolInTurn` says whether a tool call still follows within the same turn, which is what
+ * makes an unlabelled assistant text commentary instead of the answer.
+ */
+export function isWorkItem(item: TranscriptItem, laterToolInTurn: boolean): boolean {
+  if (item.kind === 'tool' || item.kind === 'approval') return true;
+  // Warnings and errors are signals, not work: they stay on screen when the group is collapsed.
+  if (item.kind === 'info') return item.level === 'info';
+  if (item.kind !== 'assistant') return false;
+  if (item.phase === 'final' || item.phase === 'plan') return false;
+  if (item.phase === 'commentary') return true;
+  return item.text.trim() === '' || laterToolInTurn;
+}
+
+/**
+ * Collapses each turn's tool calls, commentary, thinking and approvals into one `work` chunk
+ * (Codex-style), keeping the answer, warnings, plans and turn rows as standalone rows. The duration
+ * shown by the header comes off the turn row that closes the work.
  */
 export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
-  const isCmd = (item: TranscriptItem): item is ToolItem => item.kind === 'tool' && item.hint === 'execute';
+  // A phase-less assistant text narrates the work while a tool call still follows it in the turn.
+  const laterTool = new Array<boolean>(items.length).fill(false);
+  let seenTool = false;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i]!;
+    if (item.kind === 'user' || item.kind === 'turn') {
+      seenTool = false;
+      continue;
+    }
+    laterTool[i] = seenTool;
+    if (item.kind === 'tool') seenTool = true;
+  }
+
   const chunks: RenderChunk[] = [];
-  let run: TranscriptItem[] = [];
-  let runId = '';
+  let work: TranscriptItem[] = [];
+  const flush = () => {
+    if (!work.length) return;
+    chunks.push({ kind: 'work', id: work[0]!.id, entries: work });
+    work = [];
+  };
+  const attachTurn = (turn: Extract<TranscriptItem, { kind: 'turn' }>) => {
+    for (let i = chunks.length - 1; i >= 0; i--) {
+      const chunk = chunks[i]!;
+      if (chunk.kind === 'work') {
+        chunk.turn = { status: turn.status, durationMs: turn.durationMs };
+        return;
+      }
+      // Only the answer (or a warning line) may stand between the work and its turn row.
+      if (chunk.kind === 'single' && (chunk.item.kind === 'assistant' || chunk.item.kind === 'info')) continue;
+      return;
+    }
+  };
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    if (isWorkItem(item, laterTool[i]!)) {
+      work.push(item);
+      continue;
+    }
+    flush();
+    if (item.kind === 'turn') attachTurn(item);
+    chunks.push({ kind: 'single', item });
+  }
+  flush();
+  return chunks;
+}
+
+/** One row of a work body: a collapsed command run, or a single entry of any kind. */
+type CommandChunk = { kind: 'run'; id: string; entries: ToolItem[] } | { kind: 'single'; item: TranscriptItem };
+
+/**
+ * Consecutive shell commands become one "Ran n commands" row (per nesting parent); every other
+ * entry keeps its own row. Commentary breaks a run: it belongs beside the commands, not inside.
+ */
+export function groupCommands(entries: TranscriptItem[]): CommandChunk[] {
+  const isCmd = (item: TranscriptItem): item is ToolItem => item.kind === 'tool' && item.hint === 'execute';
+  const chunks: CommandChunk[] = [];
+  let run: ToolItem[] = [];
   let runParent: string | null = null;
   const flush = () => {
-    if (run.length) {
-      const lastCmd = run.reduce((acc, it, idx) => (isCmd(it) ? idx : acc), -1);
-      const head = run.slice(0, lastCmd + 1);
-      const commands = head.filter(isCmd);
-      if (commands.length > 1) chunks.push({ kind: 'group', id: runId, entries: head });
-      else for (const it of head) chunks.push({ kind: 'single', item: it });
-      for (const it of run.slice(lastCmd + 1)) chunks.push({ kind: 'single', item: it });
-    }
+    if (run.length > 1) chunks.push({ kind: 'run', id: run[0]!.id, entries: run });
+    else if (run.length === 1) chunks.push({ kind: 'single', item: run[0]! });
     run = [];
   };
-  for (const item of items) {
+  for (const item of entries) {
     if (isCmd(item)) {
       const parent = item.parentId ?? null;
       if (run.length && parent !== runParent) flush();
-      if (!run.length) {
-        runId = item.id;
-        runParent = parent;
-      }
-      run.push(item);
-    } else if (run.length && !breaksCommandRun(item)) {
+      if (!run.length) runParent = parent;
       run.push(item);
     } else {
       flush();
@@ -547,7 +627,44 @@ export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
   return chunks;
 }
 
-/** Collapsed "Ran n commands" header for a run of shell commands, with interleaved commentary inside. */
+/** One turn's work behind a "Worked for …" header; the answer itself stays outside. */
+export function WorkGroup({ chunk, sessionId, canEdit = false, showThinking, onImageExpand, live = false }: { chunk: Extract<RenderChunk, { kind: 'work' }>; sessionId: string; canEdit?: boolean; showThinking: boolean; onImageExpand: OnImageExpand; live?: boolean }) {
+  // open === null means the user has not toggled; then follow the turn so live activity stays visible.
+  const [open, setOpen] = useState<boolean | null>(null);
+  // A deep-search jump into one of these entries forces the group open so the anchor exists.
+  const jump = useStore((s) => s.searchJump);
+  const jumpHere = !!jump && jump.sessionId === sessionId && chunk.entries.some((e) => e.id === jump.itemId);
+  useEffect(() => { if (jumpHere) setOpen(true); }, [jumpHere]);
+  const running = live || chunk.entries.some(isRunningEntry);
+  // An undecided approval is a gate the user has to answer: it keeps the work open no matter what.
+  const pendingApproval = chunk.entries.some((e) => e.kind === 'approval' && !e.decision);
+  const expanded = pendingApproval || jumpHere || (open ?? running);
+  const failed = chunk.entries.filter((e) => e.kind === 'tool' && (e.status === 'error' || e.status === 'declined')).length;
+  const durationMs = chunk.turn?.durationMs;
+  return (
+    <div className={`work-group ${running ? 'work-running' : ''}`}>
+      <button type="button" className="work-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
+        <span className="work-label">{running ? 'Working…' : durationMs ? `Worked for ${fmtDuration(durationMs)}` : 'Worked'}</span>
+        {running ? <Spinner size={12} /> : null}
+        {failed ? <Badge tone="red">{failed} failed</Badge> : null}
+        <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
+      </button>
+      {expanded && (
+        <div className="work-body">
+          {groupCommands(chunk.entries).map((c) =>
+            c.kind === 'run' ? (
+              <ToolGroup key={c.id} entries={c.entries} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} />
+            ) : (
+              <Item key={c.item.id} item={c.item} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={c.item.id} />
+            )
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Collapsed "Ran n commands" header for a run of shell commands. */
 export function ToolGroup({ entries, sessionId, canEdit = false, showThinking, onImageExpand }: { entries: TranscriptItem[]; sessionId: string; canEdit?: boolean; showThinking: boolean; onImageExpand: OnImageExpand }) {
   // open === null means the user has not toggled; then follow running state so live output stays visible.
   const [open, setOpen] = useState<boolean | null>(null);
@@ -586,21 +703,33 @@ export function ToolGroup({ entries, sessionId, canEdit = false, showThinking, o
   );
 }
 
+/** Status badge text for a tool row: an exit code says more than "error" when there is one. */
+function toolStatus(item: ToolItem): string {
+  if (item.exitCode !== undefined && item.exitCode !== null && (item.status === 'done' || item.status === 'error')) return `exit ${item.exitCode}`;
+  return item.status === 'done' ? 'done' : item.status;
+}
+
 function ToolCard({ item, sessionId, dataItemId }: { item: Extract<TranscriptItem, { kind: 'tool' }>; sessionId: string; dataItemId?: string }) {
   const [open, setOpen] = useState(false);
   const revealSubagentRun = useStore((s) => s.revealSubagentRun);
+  const command = item.hint === 'execute';
+  const running = item.status === 'running';
+  const failed = item.status === 'error' || item.status === 'declined';
   const hasBody = !!item.output || !!(item.changes && item.changes.length) || item.input !== undefined;
-  const statusTone = item.status === 'running' ? 'blue' : item.status === 'error' ? 'red' : item.status === 'declined' ? 'amber' : 'green';
+  const statusTone = running ? 'blue' : item.status === 'error' ? 'red' : item.status === 'declined' ? 'amber' : 'green';
+  // A running command streams its output into view; every other body waits for a click.
+  const showBody = open || (running && command && !!item.output);
+  const commandText = item.summary ?? (typeof item.input === 'string' ? item.input : '');
   return (
-    <div data-item-id={dataItemId} className={`tool-card tool-${item.status} ${item.parentId ? 'tool-nested' : ''}`}>
+    <div data-item-id={dataItemId} className={`tool-card tool-${item.status} ${command ? 'tool-command' : ''} ${item.parentId ? 'tool-nested' : ''}`}>
       <button type="button" className="tool-head" onClick={() => hasBody && setOpen((o) => !o)}>
         <Icon name={HINT_ICON[item.hint ?? 'other']} size={14} className="tool-icon" />
-        <span className="tool-name">{item.title ?? item.name}</span>
+        <span className="tool-name">{command ? (running ? 'Running' : 'Ran') : item.title ?? item.name}</span>
         {item.summary && <span className="tool-summary mono" title={item.summary}>{item.summary}</span>}
         <span className="spacer" />
         {item.changes?.length ? <span className="tool-changes">{item.changes.length} file{item.changes.length === 1 ? '' : 's'}</span> : null}
-        {item.status === 'running' ? <Spinner size={12} /> : <Badge tone={statusTone}>{item.status === 'done' ? (item.exitCode !== undefined && item.exitCode !== null ? `exit ${item.exitCode}` : 'done') : item.status}</Badge>}
-        {item.durationMs ? <span className="muted small">{fmtDuration(item.durationMs)}</span> : null}
+        {running ? <Spinner size={12} /> : !command || failed ? <Badge tone={statusTone}>{toolStatus(item)}</Badge> : null}
+        {!command && item.durationMs ? <span className="muted small">{fmtDuration(item.durationMs)}</span> : null}
         {item.runId ? (
           <span
             className="chip"
@@ -623,13 +752,28 @@ function ToolCard({ item, sessionId, dataItemId }: { item: Extract<TranscriptIte
         ) : null}
         {hasBody && <Icon name={open ? 'chevron' : 'chevronRight'} size={12} />}
       </button>
-      {(open || (item.status === 'running' && item.hint === 'execute' && item.output)) && (
+      {showBody && (
         <div className="tool-body">
-          {open && item.input !== undefined && item.hint !== 'execute' && (
-            <pre className="tool-input mono">{typeof item.input === 'string' ? item.input : JSON.stringify(item.input, null, 2).slice(0, 4000)}</pre>
+          {command ? (
+            <div className="shell-card">
+              <div className="shell-bar">Shell</div>
+              {commandText ? <pre className="shell-cmd mono"><span className="shell-prompt">$ </span>{commandText}</pre> : null}
+              {item.output && <pre className="tool-output mono">{item.output.length > 12_000 && !open ? item.output.slice(-12_000) : item.output}</pre>}
+              {open && (
+                <div className={`shell-foot ${failed ? 'shell-foot-failed' : ''}`}>
+                  <Icon name={failed ? 'alert' : 'check'} size={12} /> {toolStatus(item)}{item.durationMs ? ` · ${fmtDuration(item.durationMs)}` : ''}
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              {open && item.input !== undefined && (
+                <pre className="tool-input mono">{typeof item.input === 'string' ? item.input : JSON.stringify(item.input, null, 2).slice(0, 4000)}</pre>
+              )}
+              {item.changes?.some((c) => c.diff) && <DiffView diff={item.changes.filter((c) => c.diff).map((c) => c.diff!).join('\n')} compact />}
+              {item.output && <pre className="tool-output mono">{item.output.length > 12_000 && !open ? item.output.slice(-12_000) : item.output}</pre>}
+            </>
           )}
-          {item.changes?.some((c) => c.diff) && <DiffView diff={item.changes.filter((c) => c.diff).map((c) => c.diff!).join('\n')} compact />}
-          {item.output && <pre className="tool-output mono">{item.output.length > 12_000 && !open ? item.output.slice(-12_000) : item.output}</pre>}
         </div>
       )}
     </div>
