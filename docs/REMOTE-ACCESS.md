@@ -229,10 +229,21 @@ transcript while the desktop is unreachable. The relay's HTTP surface is now a
 (`public`/`enroll`/`device`/`host`), the dispatcher authorizes before the handler runs, and the
 whole surface is unit-tested in plain Node (`tests/relay-routes.test.ts`) instead of relying on
 review. The public pairing endpoints also carry in-memory fixed-window rate limits.
-Remaining: real deployment (`cd relay && npx wrangler deploy`, secrets) — needs the
-Cloudflare account and the landing Worker's service binding to the relay (one origin,
-`code.vocs.io`); QR
-pairing (deferred until the production relay URL exists); P3.5 terminal over WAN.
+**Deployed.** The relay runs at `https://vocs-relay.vocs.workers.dev` (Worker + one Hub Durable
+Object + the `ENROLL_TOKEN` secret), and the landing Worker at `code.vocs.io` forwards `/app`,
+`/v1` and `/ws` to it through a service binding — one origin, no CORS, no second DNS record
+(vocs.io PR #18). Verified live: `/app/` serves the web client, `/v1/devices` is 401 without a
+device token, `/v1/pair/start` is 403 without the enrollment secret and mints a code with it, and
+an enrolling-host WebSocket opens while a bad token is refused.
+
+A login still gates the web client. `remote.status` stays `in-development` on the landing so its
+CTAs stay inert until the GitHub OAuth flow and its `/login`, `/auth/*` and `/logout` paths exist.
+
+The relay has **no deploy workflow**: `cd relay && npx wrangler deploy` is a manual step, so a
+merged relay change is not live until someone runs it.
+
+Remaining: the login gate (needs a GitHub OAuth app for `code.vocs.io`); QR pairing (the payload
+is already `https://code.vocs.io/app?code=…`); P3.5 terminal over WAN.
 
 Implementation notes: crypto primitives are P-256 ECDSA + ECDH, HKDF-SHA-256 and
 AES-256-GCM — all via WebCrypto so the identical module runs in Node and browsers with
