@@ -55,18 +55,21 @@ const safeStorageMock = vi.hoisted(() => ({
 vi.mock('electron', () => ({ safeStorage: safeStorageMock }));
 
 describe('auto session titles', () => {
-  it('caps derived titles at 6 words', () => {
-    expect(titleFromPrompt('Fix the bug where the sidebar flickers when switching folders')).toBe('Fix the bug where the sidebar');
+  it('caps derived titles at 6 words and marks the cut', () => {
+    // Unmarked, the row reads as a title someone wrote badly rather than as the stand-in it is.
+    expect(titleFromPrompt('Fix the bug where the sidebar flickers when switching folders')).toBe('Fix the bug where the sidebar…');
   });
 
   it('keeps short prompts whole and only uses the first line', () => {
     expect(titleFromPrompt('Add dark mode')).toBe('Add dark mode');
     expect(titleFromPrompt('First line stays\nsecond line ignored')).toBe('First line stays');
+    expect(titleFromPrompt('Six words exactly stay uncut here')).toBe('Six words exactly stay uncut here');
   });
 
   it('still enforces the 60 char cap on long words', () => {
     const title = titleFromPrompt('Supercalifragilisticexpialidocious antidisestablishmentarianism floccinaucinihilipilification');
     expect(title.length).toBeLessThanOrEqual(60);
+    expect(title.endsWith('…')).toBe(true);
   });
 });
 
@@ -88,11 +91,18 @@ function listenOnce(respond: (req: IncomingMessage, res: ServerResponse, body?: 
 describe('LLM session titles', () => {
   const getSecret = async (id: string) => (id === 'fake' ? 'sk-test' : undefined);
 
-  it('strips quotes and preamble from model replies and keeps the 6-word cap', () => {
-    expect(sanitizeLlmTitle('"Fix the sidebar flicker on folder switch"')).toBe('Fix the sidebar flicker on folder');
+  it('strips quotes and preamble from model replies', () => {
+    // A model asked for 6 words regularly writes 7 or 8; chopping those to 6 was itself a source
+    // of half-sentence titles, so the reply keeps its words up to the sidebar's own limit.
+    expect(sanitizeLlmTitle('"Fix the sidebar flicker on folder switch"')).toBe('Fix the sidebar flicker on folder switch');
     expect(sanitizeLlmTitle('**Fix the sidebar flicker**')).toBe('Fix the sidebar flicker');
     expect(sanitizeLlmTitle('Title: Refactor auth module.')).toBe('Refactor auth module');
     expect(sanitizeLlmTitle('  \n\n  ')).toBeNull();
+  });
+
+  it('marks a reply that runs past the sidebar cap instead of ending it mid-word', () => {
+    const title = sanitizeLlmTitle('Investigate alerts and warnings and errors and everything else reported today');
+    expect(title).toBe('Investigate alerts and warnings and errors and everything…');
   });
 
   it('rejects leaked chat-template control tokens instead of titling with them', () => {
@@ -163,6 +173,58 @@ describe('LLM session titles', () => {
       expect(seen.body?.max_tokens).toBeUndefined();
       expect(seen.body?.max_completion_tokens).toBe(1024);
       expect(seen.body?.reasoning_effort).toBe('low');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('gives a thinking model room to think before it writes the title', async () => {
+    const seen: { body?: Record<string, unknown> } = {};
+    const server = await listenOnce((_req, res, body) => {
+      seen.body = JSON.parse(body ?? '{}') as Record<string, unknown>;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: 'Investigate alert completeness' }, finish_reason: 'stop' }] }));
+    });
+    try {
+      // A 200-token budget shared with a chain of thought is what left `Investigate alerts and`
+      // in the sidebar; the catalog says this model thinks, so it gets the bigger budget.
+      const models = [{ id: 'deepseek-flash', provider: 'fake', displayName: 'Flash', supportsReasoning: true }];
+      const provider = { id: 'fake', kind: 'deepseek' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models };
+      const title = await generateSessionTitle('there are many warnings today', [provider] as never, getSecret, { provider: 'fake', model: 'deepseek-flash' });
+      expect(title).toBe('Investigate alert completeness');
+      expect(seen.body?.max_tokens).toBe(2048);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('keeps the placeholder when the reply was cut off by the token budget', async () => {
+    const server = await listenOnce((_req, res) => {
+      res.setHeader('content-type', 'application/json');
+      // A real reply from a thinking model that spent its budget: a fragment ending on a conjunction.
+      res.end(JSON.stringify({ choices: [{ message: { content: 'Investigate alerts and' }, finish_reason: 'length' }] }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'openai-compatible' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [] };
+      const title = await generateSessionTitle('there are many warnings today', [provider] as never, getSecret, { provider: 'fake', model: 'cheap-flash' });
+      expect(title).toBeNull();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('keeps the placeholder when an Anthropic reply stopped at max_tokens', async () => {
+    const server = await listenOnce((_req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({
+        id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-x', stop_reason: 'max_tokens', stop_sequence: null,
+        content: [{ type: 'text', text: 'Investigate alerts and' }], usage: { input_tokens: 1, output_tokens: 1 }
+      }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'anthropic' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [] };
+      const title = await generateSessionTitle('there are many warnings today', [provider] as never, getSecret, { provider: 'fake', model: 'claude-x' });
+      expect(title).toBeNull();
     } finally {
       await server.close();
     }
