@@ -99,6 +99,17 @@ const GOAL_CONTINUATION_MAX_ATTEMPTS = 60;
 /** Handoff text written into a cross-harness fork's session dir, consumed by its first message. */
 const FORK_CONTEXT_FILE = 'fork-context.md';
 
+/** Title calls per session per run: one on the first message, one more if that one came back empty. */
+const MAX_TITLE_ATTEMPTS = 2;
+
+/**
+ * Whether the session is still waiting to be named. Sessions written before `titleIsPlaceholder`
+ * existed carry no flag, so the old marker — the untouched default title — still counts.
+ */
+function isPlaceholderTitle(meta: SessionMeta): boolean {
+  return meta.titleIsPlaceholder === true || meta.title === 'New session';
+}
+
 export class SessionManager {
   /** How often a session parked on 'pr' re-checks whether its branch was merged. */
   private static readonly GIT_STATE_RECHECK_MS = 120_000;
@@ -108,6 +119,14 @@ export class SessionManager {
   private gitStateTimers = new Map<string, NodeJS.Timeout>();
   /** Sessions whose restored git state was re-checked once after boot. */
   private gitStateChecked = new Set<string>();
+  /**
+   * Title calls made for a session this run. A failed call leaves the placeholder, so the next
+   * message retries with more context — but an unattended goal session sends many messages, and
+   * none of them should pay for a title model that is not answering.
+   */
+  private titleAttempts = new Map<string, number>();
+  /** Sessions with a title call out right now, so two quick messages cannot fire two of them. */
+  private titleInFlight = new Set<string>();
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
@@ -350,11 +369,16 @@ export class SessionManager {
     // A session created with a goal on a harness that owns `/goal` belongs to the harness: the
     // objective is sent to it as a command and the app sets no goal state (see shared/goal-driver.ts).
     const nativeGoal = objective ? await this.harnessGoal(cfg.harness) : null;
-    const titleSeed = req.initialPrompt ?? (nativeGoal ? objective : '');
+    // The objective names the session whoever runs the goal: on a harness without its own /goal the
+    // first message is the app's kickoff prompt, and a title cut from that boilerplate names nothing.
+    const titleSeed = req.initialPrompt ?? objective;
+    // Only a title the caller chose is the session's real name. A title derived here is a stand-in
+    // for one nobody has written yet, so flag it: the first message replaces it with a model's.
     const title = req.title?.trim() || (titleSeed ? titleFromPrompt(titleSeed) : 'New session');
     const meta: SessionMeta = {
       id,
       title,
+      titleIsPlaceholder: req.title?.trim() ? undefined : true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       config: { ...cfg, model: cfg.model ?? s.defaultModelByHarness[cfg.harness] },
@@ -455,6 +479,7 @@ export class SessionManager {
     const t0 = Date.now();
     await this.stop(id);
     this.cancelPersist(id);
+    this.titleAttempts.delete(id);
     const tStop = Date.now();
     if (meta.worktreeBranch && removeWt) {
       try {
@@ -474,7 +499,9 @@ export class SessionManager {
   async patch(id: string, patch: Partial<SessionMeta>): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
-    Object.assign(meta, patch, { updatedAt: Date.now() });
+    // A rename is the user naming the session: no title model may overwrite it afterwards.
+    const named = patch.title !== undefined && patch.titleIsPlaceholder === undefined ? { titleIsPlaceholder: undefined } : {};
+    Object.assign(meta, patch, named, { updatedAt: Date.now() });
     await this.deps.store.upsert(meta);
     this.pushSessions();
     return meta;
@@ -766,10 +793,16 @@ export class SessionManager {
     // The sidebar orders rows by the user's own last message: stamp it before the harness even
     // starts, so the row moves up on the send rather than on whatever the turn does next.
     if (source === 'user') meta.lastUserMessageAt = userItem.ts;
-    if (meta.title === 'New session' && input.text.trim()) {
-      const placeholder = titleFromPrompt(input.text);
+    // A session named from a dialog prompt or a goal is already carrying a placeholder, and that
+    // placeholder is the better one: it was cut from what the user wrote, not from a `/goal …`
+    // command the app composed. Keep it on screen and let the model replace it.
+    if (isPlaceholderTitle(meta) && input.text.trim()) {
+      const placeholder = meta.title === 'New session' ? titleFromPrompt(input.text) : meta.title;
+      // A goal kickoff is the app's own prompt; the objective behind it is what names the session.
+      const seed = (source === 'goal' && meta.goal?.objective?.trim()) || input.text;
       meta.title = placeholder;
-      this.scheduleLlmTitle(id, placeholder, input.text);
+      meta.titleIsPlaceholder = true;
+      this.scheduleLlmTitle(id, placeholder, seed);
     }
     this.schedulePersist(meta);
     this.pushSessions();
@@ -858,6 +891,10 @@ export class SessionManager {
    * user has not renamed (or deleted) the session while the call was in flight.
    */
   private scheduleLlmTitle(id: string, placeholder: string, prompt: string): void {
+    const attempts = this.titleAttempts.get(id) ?? 0;
+    if (attempts >= MAX_TITLE_ATTEMPTS || this.titleInFlight.has(id)) return;
+    this.titleAttempts.set(id, attempts + 1);
+    this.titleInFlight.add(id);
     // The cheap utility model is for background chores like this; the session's own model is
     // the fallback so titling still works before the user picks a utility model.
     const meta = this.get(id);
@@ -868,10 +905,13 @@ export class SessionManager {
         const meta = this.get(id);
         if (!meta || meta.title !== placeholder) return;
         meta.title = title;
+        // The session has a real name now; a later message must not re-title it.
+        meta.titleIsPlaceholder = undefined;
         this.schedulePersist(meta);
         this.pushSessions();
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => this.titleInFlight.delete(id));
   }
 
   /** Denies every pending approval and records the decision on its transcript card. */
@@ -1564,6 +1604,8 @@ export class SessionManager {
       ...structuredClone(src),
       id: nid,
       title: cross ? `${src.title} (fork → ${HARNESS_BY_ID[target].name})` : `${src.title} (fork)`,
+      // The fork suffix names which session this came from; a title model would drop that.
+      titleIsPlaceholder: undefined,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       status: 'idle',
