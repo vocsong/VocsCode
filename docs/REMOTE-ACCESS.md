@@ -1,8 +1,9 @@
 # Remote access: code.vocs.io (plan)
 
-Status: **planning — direction and product decisions locked. Model C (hybrid): build
-Model A (relay) first; cloud workspaces (Model B) is the committed later track. All
-pre-P2 product and pairing questions are resolved (§11); next step is P0 (§12).**
+Design and decisions of record for remote access — the relay, pairing and e2e crypto, the web
+client, and the P0–P4 phases. **Implemented and deployed**: §6.2 carries the live status, and
+[REMOTE-ACCESS-ROADMAP.md](./REMOTE-ACCESS-ROADMAP.md) is the working backlog — what is live,
+what is not, and in what order.
 
 ## 1. The idea
 
