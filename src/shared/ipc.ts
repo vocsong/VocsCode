@@ -354,6 +354,8 @@ export interface IpcContract {
   'knowledge:delete': [{ sessionId: string; id: string }, KnowledgeView];
 
   'terminal:list': [void, TerminalInfo[]];
+  /** Read-only plain-text screen of one terminal (remote P3.5): never attaches, pauses or resizes it. */
+  'terminal:screen': [{ terminalId: string; lines?: number }, { info: TerminalInfo; lines: string[]; seq: number }];
   'terminal:shells': [void, ShellOption[]];
   'terminal:create': [{ sessionId: string; shell?: ShellKind; cols?: number; rows?: number }, TerminalInfo];
   /** Start showing a terminal: the screen as it is now plus the seq of the last chunk it contains. */

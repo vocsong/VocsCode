@@ -3,6 +3,7 @@
  *  computers; the switcher in the top bar picks the one to drive and shows which are online. */
 import { PairingRevokedError, RelayClient, relayBaseFor, type PairingVault, type VaultState } from './web-client';
 import { PAIRING_CODE_PATTERN } from '../../src/shared/pairing';
+import type { TerminalInfo } from '../../src/shared/terminal';
 import type { RemoteDeviceInfo, TranscriptItem } from '../../src/shared/types';
 
 /** Pairings (with their non-extractable keys) live in IndexedDB: structured clone keeps a
@@ -74,6 +75,10 @@ let windowItems: TranscriptItem[] = [];
 /** Streaming turns push many events: coalesce them into at most one refresh in flight. */
 let refreshing: Promise<void> | null = null;
 let refreshAgain = false;
+/** The read-only terminal view (P3.5): polled while open, one request in flight at a time. */
+let terminalOpen = false;
+let terminalTimer: ReturnType<typeof setInterval> | null = null;
+let terminalBusy = false;
 
 function el(id: string): HTMLElement {
   const e = document.getElementById(id);
@@ -139,6 +144,8 @@ async function boot(): Promise<void> {
   el('send').addEventListener('click', () => void sendComposer());
   el('act-interrupt').addEventListener('click', () => void actOnActive('sessions:interrupt', null));
   el('act-stop').addEventListener('click', () => void actOnActive('sessions:stop', null));
+  el('act-terminal').addEventListener('click', () => void toggleTerminal());
+  el('terminal-select').addEventListener('change', () => void pollTerminal());
   const composer = el('composer') as HTMLTextAreaElement;
   composer.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter' && !ev.shiftKey) {
@@ -316,6 +323,7 @@ async function switchHost(hostDeviceId: string): Promise<void> {
 }
 
 function resetView(): void {
+  closeTerminal();
   sessions = [];
   active = null;
   mode = 'live';
@@ -466,7 +474,71 @@ async function openSession(id: string): Promise<void> {
     (el('active-title') as HTMLElement).textContent = meta ? `${meta.title} · ${activeStatus}` : '';
   }
   syncControls();
+  if (terminalOpen) void refreshTerminals();
   for (const row of Array.from(document.querySelectorAll('.session-row'))) row.classList.toggle('active', (row as HTMLElement).dataset.id === id);
+}
+
+/** Read-only terminal view (docs/REMOTE-ACCESS.md P3.5, read-only first): the desktop's terminals
+ *  for the active session as plain text, refreshed once a second while open. The desktop never
+ *  attaches, resizes or pauses a terminal for it, and nothing can be typed from here. */
+async function toggleTerminal(): Promise<void> {
+  if (terminalOpen) {
+    closeTerminal();
+    return;
+  }
+  terminalOpen = true;
+  el('terminal-panel').hidden = false;
+  await refreshTerminals();
+}
+
+function closeTerminal(): void {
+  terminalOpen = false;
+  el('terminal-panel').hidden = true;
+  if (terminalTimer) clearInterval(terminalTimer);
+  terminalTimer = null;
+}
+
+async function refreshTerminals(): Promise<void> {
+  const id = active;
+  if (!terminalOpen || !id || mode !== 'live') return closeTerminal();
+  const screen = el('terminal-screen');
+  let mine: TerminalInfo[];
+  try {
+    mine = ((await client.invoke('terminal:list', null)) as TerminalInfo[]).filter((t) => t.sessionId === id);
+  } catch {
+    // A desktop from before remote terminals refuses the channel.
+    screen.textContent = 'This computer does not share terminals yet. Update Vocs Code on it.';
+    return;
+  }
+  if (active !== id || !terminalOpen) return;
+  const select = el('terminal-select') as HTMLSelectElement;
+  const previous = select.value;
+  select.innerHTML = mine.map((t) => `<option value="${esc(t.id)}">${esc(t.title)}${t.exit ? ' (exited)' : ''}</option>`).join('');
+  if (mine.some((t) => t.id === previous)) select.value = previous;
+  if (!mine.length) {
+    screen.textContent = 'No terminal is open for this session on the desktop.';
+    return;
+  }
+  terminalTimer ??= setInterval(() => void pollTerminal(), 1000);
+  await pollTerminal();
+}
+
+async function pollTerminal(): Promise<void> {
+  const terminalId = (el('terminal-select') as HTMLSelectElement).value;
+  if (!terminalOpen || !terminalId || mode !== 'live' || terminalBusy) return;
+  terminalBusy = true;
+  try {
+    const view = (await client.invoke('terminal:screen', { terminalId, lines: 200 })) as { lines: string[] };
+    if (!terminalOpen || (el('terminal-select') as HTMLSelectElement).value !== terminalId) return;
+    const screen = el('terminal-screen');
+    const atBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 24;
+    screen.textContent = view.lines.join('\n');
+    if (atBottom) screen.scrollTop = screen.scrollHeight;
+  } catch {
+    // The terminal closed or the desktop left; the next list refresh or reconnect decides.
+  } finally {
+    terminalBusy = false;
+  }
 }
 
 /** Re-reads the loaded window (and anything appended after it). One refresh runs at a time; events
@@ -516,6 +588,9 @@ function syncControls(): void {
   const running = mode === 'live' && !viewOnly && isRunning(activeStatus);
   (el('act-interrupt') as HTMLElement).hidden = !running;
   (el('act-stop') as HTMLElement).hidden = !running;
+  // Viewing is read-only, so view-only mode keeps it; a mirror has no live terminal.
+  (el('act-terminal') as HTMLElement).hidden = mode !== 'live' || !active;
+  if (mode !== 'live' && terminalOpen) closeTerminal();
 }
 
 /** Apply the desktop's view-only policy; the mirror is read-only regardless of what it said. */

@@ -637,6 +637,9 @@
   var windowItems = [];
   var refreshing = null;
   var refreshAgain = false;
+  var terminalOpen = false;
+  var terminalTimer = null;
+  var terminalBusy = false;
   function el(id) {
     const e = document.getElementById(id);
     if (!e) throw new Error(`missing #${id}`);
@@ -695,6 +698,8 @@
     el("send").addEventListener("click", () => void sendComposer());
     el("act-interrupt").addEventListener("click", () => void actOnActive("sessions:interrupt", null));
     el("act-stop").addEventListener("click", () => void actOnActive("sessions:stop", null));
+    el("act-terminal").addEventListener("click", () => void toggleTerminal());
+    el("terminal-select").addEventListener("change", () => void pollTerminal());
     const composer = el("composer");
     composer.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" && !ev.shiftKey) {
@@ -843,6 +848,7 @@
     await connectLoop(true);
   }
   function resetView() {
+    closeTerminal();
     sessions = [];
     active = null;
     mode = "live";
@@ -974,7 +980,62 @@
       el("active-title").textContent = meta ? `${meta.title} \xB7 ${activeStatus}` : "";
     }
     syncControls();
+    if (terminalOpen) void refreshTerminals();
     for (const row of Array.from(document.querySelectorAll(".session-row"))) row.classList.toggle("active", row.dataset.id === id);
+  }
+  async function toggleTerminal() {
+    if (terminalOpen) {
+      closeTerminal();
+      return;
+    }
+    terminalOpen = true;
+    el("terminal-panel").hidden = false;
+    await refreshTerminals();
+  }
+  function closeTerminal() {
+    terminalOpen = false;
+    el("terminal-panel").hidden = true;
+    if (terminalTimer) clearInterval(terminalTimer);
+    terminalTimer = null;
+  }
+  async function refreshTerminals() {
+    const id = active;
+    if (!terminalOpen || !id || mode !== "live") return closeTerminal();
+    const screen = el("terminal-screen");
+    let mine;
+    try {
+      mine = (await client.invoke("terminal:list", null)).filter((t) => t.sessionId === id);
+    } catch {
+      screen.textContent = "This computer does not share terminals yet. Update Vocs Code on it.";
+      return;
+    }
+    if (active !== id || !terminalOpen) return;
+    const select = el("terminal-select");
+    const previous = select.value;
+    select.innerHTML = mine.map((t) => `<option value="${esc(t.id)}">${esc(t.title)}${t.exit ? " (exited)" : ""}</option>`).join("");
+    if (mine.some((t) => t.id === previous)) select.value = previous;
+    if (!mine.length) {
+      screen.textContent = "No terminal is open for this session on the desktop.";
+      return;
+    }
+    terminalTimer ??= setInterval(() => void pollTerminal(), 1e3);
+    await pollTerminal();
+  }
+  async function pollTerminal() {
+    const terminalId = el("terminal-select").value;
+    if (!terminalOpen || !terminalId || mode !== "live" || terminalBusy) return;
+    terminalBusy = true;
+    try {
+      const view = await client.invoke("terminal:screen", { terminalId, lines: 200 });
+      if (!terminalOpen || el("terminal-select").value !== terminalId) return;
+      const screen = el("terminal-screen");
+      const atBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 24;
+      screen.textContent = view.lines.join("\n");
+      if (atBottom) screen.scrollTop = screen.scrollHeight;
+    } catch {
+    } finally {
+      terminalBusy = false;
+    }
   }
   function refreshTranscript() {
     if (refreshing) {
@@ -1017,6 +1078,8 @@
     const running = mode === "live" && !viewOnly && isRunning(activeStatus);
     el("act-interrupt").hidden = !running;
     el("act-stop").hidden = !running;
+    el("act-terminal").hidden = mode !== "live" || !active;
+    if (mode !== "live" && terminalOpen) closeTerminal();
   }
   function applyPolicy(next) {
     viewOnly = next;

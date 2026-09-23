@@ -11,8 +11,8 @@ import type { Logger } from '../log';
 import type { RemoteAudit } from './audit';
 
 /** Channels a paired web client may invoke (docs/REMOTE-ACCESS.md §5). Interactive P3:
- *  chat send/interrupt/stop, session lifecycle and per-session model controls are in;
- *  the terminal joins in P3.5 and destructive git stays desktop-only. */
+ *  chat send/interrupt/stop, session lifecycle and per-session model controls are in; the
+ *  terminal is read-only (P3.5 step one) and destructive git stays desktop-only. */
 export const REMOTE_CHANNELS = new Set<string>([
   'app:info',
   'settings:get',
@@ -49,7 +49,10 @@ export const REMOTE_CHANNELS = new Set<string>([
   'git:prComments',
   'fs:list',
   'fs:search',
-  'fs:read'
+  'fs:read',
+  // P3.5, read-only first: list terminals and read a plain-text screen. No input, resize or attach.
+  'terminal:list',
+  'terminal:screen'
 ]);
 
 /** View-only mode (P4) admits the read half and refuses the write half. Every channel in
@@ -82,7 +85,10 @@ export const REMOTE_READ_CHANNELS = new Set<string>([
   'git:prComments',
   'fs:list',
   'fs:search',
-  'fs:read'
+  'fs:read',
+  // P3.5, read-only first: list terminals and read a plain-text screen. No input, resize or attach.
+  'terminal:list',
+  'terminal:screen'
 ]);
 
 export const REMOTE_WRITE_CHANNELS = new Set<string>([

@@ -71,8 +71,16 @@
           <div class="chat-head">
             <span id="active-title" class="muted small"></span>
             <span class="spacer"></span>
+            <button id="act-terminal" class="ghost" title="Read-only view of this session's terminals on the desktop" hidden>Terminal</button>
             <button id="act-interrupt" class="ghost" hidden>Interrupt</button>
             <button id="act-stop" class="ghost" hidden>Stop</button>
+          </div>
+          <div id="terminal-panel" class="terminal-panel" hidden>
+            <div class="terminal-head">
+              <select id="terminal-select" aria-label="Terminal"></select>
+              <span class="muted small">Read-only · refreshes every second</span>
+            </div>
+            <pre id="terminal-screen" class="terminal-screen"></pre>
           </div>
           <div id="transcript-pane" class="transcript-pane">
             <button id="load-earlier" class="ghost load-earlier" hidden>Load earlier messages</button>

@@ -1010,6 +1010,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
 
   handle('terminal:list', () => terminals.list());
+  handle('terminal:screen', ({ terminalId, lines }) => terminals.screenText(String(terminalId ?? ''), typeof lines === 'number' ? lines : undefined));
   handle('terminal:shells', () => terminals.shells());
   handle('terminal:create', ({ sessionId, shell, cols, rows }) => terminals.create(sessionId, { shell, cols, rows }));
   handle('terminal:attach', ({ terminalId, cols, rows }) => terminals.attach(terminalId, cols, rows));

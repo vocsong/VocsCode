@@ -90,6 +90,12 @@ button.ghost { background: transparent; }
 .session-row.active { background: var(--bg-elev); outline: 1px solid var(--border); }
 .session-row small { color: var(--fg-muted); }
 
+/* P3.5, read-only first: a plain-text view of the desktop's terminal for the active session. */
+.terminal-panel { display: flex; flex-direction: column; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: #0b0e11; }
+.terminal-panel[hidden] { display: none; }
+.terminal-head { display: flex; align-items: center; gap: 10px; }
+.terminal-head select { padding: 4px 8px; }
+.terminal-screen { margin: 0; max-height: 34vh; overflow: auto; font: 12px/1.4 ui-monospace, 'Cascadia Mono', Consolas, monospace; white-space: pre; color: #d7dde5; }
 .transcript-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .load-earlier { align-self: center; margin: 10px 0 0; font-size: 13px; }
 .load-earlier[hidden] { display: none; }

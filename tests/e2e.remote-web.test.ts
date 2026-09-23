@@ -68,6 +68,10 @@ async function desk(name: string, origin: string, enrollToken: string): Promise<
         case 'sessions:send':
           sent.push(request);
           return undefined;
+        case 'terminal:list':
+          return [{ id: `${name}-t1`, sessionId: `${name}-s1`, title: 'build', shell: 'bash', shellName: 'bash', cwd: '/repo', createdAt: 1 }];
+        case 'terminal:screen':
+          return { info: { id: `${name}-t1` }, lines: [`$ npm test`, `${name} terminal says hi`], seq: 1 };
         default:
           throw new Error(`unexpected channel ${channel}`);
       }
@@ -123,6 +127,12 @@ describe.runIf(enabled)('remote web client in a real browser', () => {
     await page.locator('#session-list').getByText('Work session').waitFor();
     await page.locator('#transcript').getByText('answer from Work').waitFor();
     await expect.poll(async () => (await page.locator('#host-select option').allTextContents()).join('|'), { timeout: 20_000 }).toBe('Work PC · online');
+
+    // The desktop's terminal, read-only: a snapshot polled while the panel is open.
+    await page.getByRole('button', { name: 'Terminal' }).click();
+    await page.locator('#terminal-screen').getByText('Work terminal says hi').waitFor({ timeout: 20_000 });
+    await page.getByRole('button', { name: 'Terminal' }).click();
+    await expect.poll(() => page.locator('#terminal-panel').isHidden()).toBe(true);
 
     // A reload restores the pairing from IndexedDB: the non-extractable keys still sign.
     await page.reload();

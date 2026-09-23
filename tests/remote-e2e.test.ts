@@ -242,6 +242,18 @@ describe('remote channel classification (view-only partition)', () => {
     for (const channel of REMOTE_READ_CHANNELS) expect(REMOTE_WRITE_CHANNELS.has(channel)).toBe(false);
   });
 
+  it('lets a paired browser view terminals but never type, resize, attach or kill them (P3.5 read-only)', () => {
+    for (const channel of ['terminal:list', 'terminal:screen']) {
+      expect(REMOTE_CHANNELS.has(channel)).toBe(true);
+      expect(REMOTE_READ_CHANNELS.has(channel)).toBe(true);
+    }
+    for (const channel of ['terminal:input', 'terminal:resize', 'terminal:attach', 'terminal:ack', 'terminal:create', 'terminal:kill', 'terminal:close', 'terminal:restart', 'terminal:clear', 'terminal:rename']) {
+      expect(REMOTE_CHANNELS.has(channel)).toBe(false);
+    }
+    // Live PTY output is not pushed to browsers: the viewer polls a snapshot instead.
+    expect(REMOTE_PUSH_CHANNELS.has('push:terminalData')).toBe(false);
+  });
+
   it('classifies every write control as write, not read', () => {
     for (const channel of ['sessions:send', 'sessions:interrupt', 'sessions:stop', 'sessions:create', 'sessions:rename', 'sessions:setModel', 'sessions:setEffort', 'sessions:setPermissionMode', 'approvals:respond']) {
       expect(REMOTE_WRITE_CHANNELS.has(channel)).toBe(true);
