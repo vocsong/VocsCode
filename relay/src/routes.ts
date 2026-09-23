@@ -32,6 +32,11 @@ export interface SocketLike {
   close(code: number, reason: string): void;
 }
 
+/** Broadcast tags carried by every connected socket, for fan-out that is not device-specific.
+ *  Durable Object tag matching is exact, so a `host:` prefix does NOT match `host:<id>` — a socket
+ *  must carry the bare tag as well as its own targeted one. */
+export const BROADCAST_TAG = { host: 'hosts', client: 'clients' } as const;
+
 export interface RouteContext {
   store: RelayStore;
   accountId: string;
@@ -177,8 +182,7 @@ async function pairClaim({ ctx, request }: Call): Promise<Response> {
   if (!body.code || !body.webPub) throw new HttpError('invalid', 400);
   await claimPairing(ctx.store, { code: body.code, webName: body.name ?? 'browser', webPlatform: body.platform ?? '', webPub: body.webPub }, ctx.now);
   // Ask every online desktop of the account to confirm; first responder wins.
-  // ('host:enrolling' — a pre-pairing socket — matches the same prefix.)
-  for (const ws of ctx.sockets('host:')) {
+  for (const ws of ctx.sockets(BROADCAST_TAG.host)) {
     ws.send(JSON.stringify({ t: 'pair.request', code: body.code, name: body.name ?? 'browser', platform: body.platform ?? '' }));
   }
   return json({ ok: true });

@@ -3,9 +3,9 @@
  *  Node against an in-memory store — no Cloudflare runtime involved, which is the point of the
  *  extraction: the layer that makes auth decisions is the layer that gets tested. */
 import { describe, expect, it } from 'vitest';
-import { registerHostDevice, registerWebDevice, verifyDeviceToken } from '../relay/src/core';
+import { registerHostDevice, registerWebDevice, startPairing, verifyDeviceToken } from '../relay/src/core';
 import { FixedWindowLimiter } from '../relay/src/rate';
-import { authorizeSocket, handleHttp, ROUTES, type RouteContext } from '../relay/src/routes';
+import { authorizeSocket, BROADCAST_TAG, handleHttp, ROUTES, type RouteContext, type SocketLike } from '../relay/src/routes';
 import type { PublicIdentity } from '../src/shared/crypto';
 import { memStore } from './fake-relay';
 
@@ -54,6 +54,30 @@ describe('relay route table', () => {
     expect(wrong.status).toBe(405);
     expect(wrong.headers.get('allow')).toContain('GET');
     expect(wrong.headers.get('allow')).toContain('DELETE');
+  });
+
+  it('fans a pairing claim out to the desktops through the broadcast tag', async () => {
+    // Durable Object tag matching is exact, so the fan-out must use the bare broadcast tag a
+    // desktop socket carries — a `host:` prefix matches nothing, which is how a live pairing
+    // request silently never reached the desktop.
+    const sent: string[] = [];
+    const socket: SocketLike = { send: (data) => void sent.push(data), close: () => undefined };
+    const seen: string[] = [];
+    const { ctx, store } = harness();
+    const withSockets = () =>
+      ctx({
+        sockets: (tag: string) => {
+          seen.push(tag);
+          return tag === BROADCAST_TAG.host ? [socket] : [];
+        }
+      });
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'PC', hostPlatform: 'win32', hostPub: HOST_PUB }, Date.now());
+    const body = JSON.stringify({ code, name: 'Chrome', webPub: WEB_PUB });
+    const res = await handleHttp(req('POST', '/pair/claim', { body }), withSockets());
+    expect(res.status).toBe(200);
+    expect(seen).toContain(BROADCAST_TAG.host);
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toMatchObject({ t: 'pair.request', code, name: 'Chrome' });
   });
 
   it('requires the enrollment secret to start pairing', async () => {
