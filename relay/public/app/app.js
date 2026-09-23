@@ -6,12 +6,18 @@
   function publicOf(identity) {
     return { sig: identity.sig.pub, enc: identity.enc.pub };
   }
-  async function generateIdentity() {
-    const sig = await subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
-    const ecdh2 = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  async function generateKeyIdentity() {
+    const sig = await subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
+    const ecdh2 = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
     return {
-      sig: { pub: await subtle.exportKey("jwk", sig.publicKey), priv: await subtle.exportKey("jwk", sig.privateKey) },
-      enc: { pub: await subtle.exportKey("jwk", ecdh2.publicKey), priv: await subtle.exportKey("jwk", ecdh2.privateKey) }
+      sig: { pub: await subtle.exportKey("jwk", sig.publicKey), priv: sig.privateKey },
+      enc: { pub: await subtle.exportKey("jwk", ecdh2.publicKey), priv: ecdh2.privateKey }
+    };
+  }
+  async function lockIdentity(identity) {
+    return {
+      sig: { pub: identity.sig.pub, priv: await subtle.importKey("jwk", identity.sig.priv, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]) },
+      enc: { pub: identity.enc.pub, priv: await subtle.importKey("jwk", identity.enc.priv, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]) }
     };
   }
   function isJwk(key) {
@@ -139,20 +145,23 @@
   }
 
   // relay/src/web-client.ts
-  var CREDS_KEY = "vocs-web-credentials";
+  var LEGACY_CREDENTIALS_KEY = "vocs-web-credentials";
   function relayBaseFor(origin, override) {
     return (override?.trim() || origin).replace(/\/$/, "");
   }
   var ACCESS_REFRESH_MARGIN_MS = 6e4;
   var PairingRevokedError = class extends Error {
-    constructor() {
+    constructor(hostName) {
       super("this browser is no longer paired");
+      this.hostName = hostName;
     }
   };
   var RelayClient = class {
     constructor(deps) {
       this.deps = deps;
     }
+    list = [];
+    /** The active pairing. */
     creds = null;
     socket = null;
     session = null;
@@ -160,48 +169,126 @@
     outCounter = 0;
     pending = /* @__PURE__ */ new Map();
     pushListeners = /* @__PURE__ */ new Set();
+    changeListeners = /* @__PURE__ */ new Set();
     hsWaiter = null;
     mirrorCache = null;
     /** Sealed frames that arrive while the handshake reply is still being finished. */
     earlyFrames = [];
     connectAttempt = 0;
-    /** The short-lived relay access token (§6.2), in memory only. */
-    access = null;
-    refreshing = null;
+    /** Short-lived relay access tokens (§6.2) per web device, in memory only. */
+    access = /* @__PURE__ */ new Map();
+    refreshing = /* @__PURE__ */ new Map();
     hasCredentials() {
-      return !!this.deps.storage.get(CREDS_KEY);
+      return this.list.length > 0;
     }
-    restore() {
-      const raw = this.deps.storage.get(CREDS_KEY);
-      if (!raw) return false;
+    /** Every pairing this browser holds, oldest first. */
+    pairings() {
+      return [...this.list];
+    }
+    /** The active pairing. */
+    credentials() {
+      return this.creds;
+    }
+    /** Called whenever the set of pairings or the active one changes. */
+    onPairingsChanged(listener) {
+      this.changeListeners.add(listener);
+      return () => this.changeListeners.delete(listener);
+    }
+    /** Loads the vault, migrating a pairing left in legacy storage. True when any pairing exists. */
+    async restore() {
+      let state = await this.deps.vault.load();
+      if (!state?.pairings.length) state = await this.migrateLegacy() ?? state;
+      this.list = state?.pairings ?? [];
+      this.creds = this.list.find((p) => p.hostDeviceId === state?.active) ?? this.list[0] ?? null;
+      return !!this.creds;
+    }
+    /** A pairing stored by an older page as extractable JWKs in localStorage: re-import the keys as
+     *  non-extractable, keep them in the vault, and delete the exportable copy. */
+    async migrateLegacy() {
+      const legacy = this.deps.legacy;
+      const raw = legacy?.get(LEGACY_CREDENTIALS_KEY);
+      if (!legacy || !raw) return null;
+      let old;
       try {
-        this.creds = JSON.parse(raw);
-        return true;
+        old = JSON.parse(raw);
+        if (!old.webDeviceId || !old.hostDeviceId || !old.identity?.sig?.priv) throw new Error("incomplete");
       } catch {
-        this.deps.storage.remove(CREDS_KEY);
-        return false;
+        legacy.remove(LEGACY_CREDENTIALS_KEY);
+        return null;
       }
+      const migrated = { ...old, identity: await lockIdentity(old.identity), hostName: old.hostName ?? "Computer" };
+      const state = { pairings: [migrated], active: migrated.hostDeviceId };
+      await this.deps.vault.save(state);
+      legacy.remove(LEGACY_CREDENTIALS_KEY);
+      return state;
     }
-    logout() {
+    async persist() {
+      await this.deps.vault.save({ pairings: this.list, active: this.creds?.hostDeviceId });
+      for (const listener of [...this.changeListeners]) listener();
+    }
+    /** Makes another pairing active. The caller reconnects. */
+    async select(hostDeviceId) {
+      const next = this.list.find((p) => p.hostDeviceId === hostDeviceId);
+      if (!next || next === this.creds) return;
+      this.disconnect();
+      this.creds = next;
+      this.mirrorCache = null;
+      await this.persist();
+    }
+    disconnect() {
       this.connectAttempt++;
       this.socket?.close();
       this.socket = null;
       this.session = null;
-      this.creds = null;
-      this.access = null;
-      this.deps.storage.remove(CREDS_KEY);
+      this.earlyFrames = [];
     }
-    /** Enters a pairing code, claims it with a fresh identity, polls until the desktop approves. */
+    /** Forgets every pairing locally, without telling the relay (tests and a full reset). */
+    async logout() {
+      this.disconnect();
+      this.list = [];
+      this.creds = null;
+      this.access.clear();
+      this.deps.legacy?.remove(LEGACY_CREDENTIALS_KEY);
+      await this.deps.vault.clear();
+      for (const listener of [...this.changeListeners]) listener();
+    }
+    /** Unpairs the active computer: revokes this browser's device at the relay, then forgets the
+     *  pairing locally. A relay that is unreachable or already forgot the device does not keep a
+     *  local copy alive. */
+    async unpair() {
+      const pairing = this.creds;
+      if (!pairing) return;
+      try {
+        await this.revokeDevice(pairing.webDeviceId);
+      } catch {
+      }
+      await this.forget([pairing]);
+    }
+    async forget(pairings) {
+      if (!pairings.length) return;
+      if (this.creds && pairings.includes(this.creds)) {
+        this.disconnect();
+        this.creds = null;
+        this.mirrorCache = null;
+      }
+      for (const p of pairings) this.access.delete(p.webDeviceId);
+      this.list = this.list.filter((p) => !pairings.includes(p));
+      this.creds ??= this.list[0] ?? null;
+      await this.persist();
+    }
+    /** Enters a pairing code, claims it with a fresh identity, polls until the desktop approves.
+     *  The new pairing is added and made active. */
     async pair(input) {
       const doFetch = this.deps.fetchImpl ?? fetch;
       const base = input.relayBase.replace(/\/$/, "");
       const code = input.code.trim().toUpperCase();
-      const identity = await (this.deps.newIdentity ?? generateIdentity)();
+      const identity = await (this.deps.newIdentity ?? generateKeyIdentity)();
       const claim = await doFetch(`${base}/v1/pair/claim`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ code, webPub: publicOf(identity), name: input.deviceName })
       });
+      if (claim.status === 409) throw new Error("this account already has the maximum number of paired browsers; revoke one first");
       if (!claim.ok) throw new Error(`claim failed: ${claim.status}`);
       const { pollToken } = await claim.json();
       if (typeof pollToken !== "string" || !pollToken) throw new Error("claim did not return a poll capability");
@@ -215,26 +302,28 @@
         const poll = await response.json();
         if (poll.status === "approved") {
           const webToken = await openSealedToKey(identity.enc, poll.sealedToken, pairingTokenContext(code, poll.webDeviceId));
-          this.creds = { relayBase: base, webToken, webDeviceId: poll.webDeviceId, hostPub: poll.hostPub, hostDeviceId: poll.hostDeviceId, identity };
-          this.access = null;
-          this.deps.storage.set(CREDS_KEY, JSON.stringify(this.creds));
-          return this.creds;
+          const pairing = { relayBase: base, webToken, webDeviceId: poll.webDeviceId, hostDeviceId: poll.hostDeviceId, hostName: poll.hostName ?? "Computer", hostPub: poll.hostPub, identity, pairedAt: now() };
+          const previous = this.list.filter((p) => p.hostDeviceId === pairing.hostDeviceId && p.relayBase === base);
+          for (const old of previous) await this.revokeWith(old, old.webDeviceId).catch(() => void 0);
+          this.disconnect();
+          this.list = [...this.list.filter((p) => !previous.includes(p)), pairing];
+          this.creds = pairing;
+          this.mirrorCache = null;
+          await this.persist();
+          return pairing;
         }
         if (poll.status === "denied") throw new Error("pairing denied on the desktop");
         if (poll.status === "expired") throw new Error("pairing code expired");
       }
     }
-    /** Opens the relay socket and performs the e2e handshake with the paired host. */
+    /** Opens the relay socket and performs the e2e handshake with the active computer. */
     async connect(onClose) {
       const creds = this.creds;
       if (!creds) throw new Error("not paired");
-      const attempt = ++this.connectAttempt;
-      this.socket?.close();
-      this.socket = null;
-      this.session = null;
-      this.earlyFrames = [];
+      this.disconnect();
+      const attempt = this.connectAttempt;
       const base = creds.relayBase.replace(/\/$/, "");
-      const response = await this.relayFetch("/v1/ws/ticket", { method: "POST" });
+      const response = await this.relayFetch(creds, "/v1/ws/ticket", { method: "POST" });
       if (!response.ok) throw new Error(`socket ticket failed: ${response.status}`);
       const { ticket } = await response.json();
       if (typeof ticket !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) throw new Error("invalid socket ticket");
@@ -312,8 +401,10 @@
         return;
       }
       if (inner.type === "mirror.key" && typeof inner.key === "string" && this.creds) {
-        this.creds.mirrorKey = inner.key;
-        this.deps.storage.set(CREDS_KEY, JSON.stringify(this.creds));
+        if (this.creds.mirrorKey !== inner.key) {
+          this.creds.mirrorKey = inner.key;
+          await this.persist();
+        }
         return;
       }
       if (inner.type === "push" && inner.channel) {
@@ -348,29 +439,30 @@
         }, 3e4);
       });
     }
-    credentials() {
-      return this.creds;
-    }
-    /** A short-lived access token for this pairing, refreshed a minute before expiry (§6.2).
+    /** A short-lived access token for a pairing, refreshed a minute before expiry (§6.2).
      *  Concurrent callers share one refresh. */
-    async accessToken() {
-      const creds = this.creds;
-      if (!creds) throw new Error("not paired");
-      const cached = this.access;
-      if (cached && cached.deviceId === creds.webDeviceId && cached.expiresAt - (this.deps.now ?? Date.now)() > ACCESS_REFRESH_MARGIN_MS) return cached.token;
-      this.refreshing ??= this.refreshAccess(creds).finally(() => {
-        this.refreshing = null;
-      });
-      return this.refreshing;
+    async accessToken(creds) {
+      const cached = this.access.get(creds.webDeviceId);
+      if (cached && cached.expiresAt - (this.deps.now ?? Date.now)() > ACCESS_REFRESH_MARGIN_MS) return cached.token;
+      let running = this.refreshing.get(creds.webDeviceId);
+      if (!running) {
+        running = this.refreshAccess(creds).finally(() => this.refreshing.delete(creds.webDeviceId));
+        this.refreshing.set(creds.webDeviceId, running);
+      }
+      return running;
     }
     /** Proof of possession: the refresh credential buys a one-time challenge, this browser's
-     *  device key signs it, and only that signature buys an access token. */
+     *  device key signs it, and only that signature buys an access token. A pairing the relay no
+     *  longer knows is forgotten. */
     async refreshAccess(creds) {
       const doFetch = this.deps.fetchImpl ?? fetch;
       const base = creds.relayBase.replace(/\/$/, "");
       const query = `?device=${encodeURIComponent(creds.webDeviceId)}`;
       const challengeRes = await doFetch(`${base}/v1/token/challenge${query}`, { method: "POST", headers: { authorization: `Bearer ${creds.webToken}` } });
-      if (challengeRes.status === 401) throw new PairingRevokedError();
+      if (challengeRes.status === 401) {
+        await this.forget(this.list.filter((p) => p === creds));
+        throw new PairingRevokedError(creds.hostName ?? "Computer");
+      }
       if (!challengeRes.ok) throw new Error(`token challenge failed: ${challengeRes.status}`);
       const { challenge } = await challengeRes.json();
       if (typeof challenge !== "string" || !challenge) throw new Error("relay returned no token challenge");
@@ -383,35 +475,40 @@
       if (!tokenRes.ok) throw new Error(`token request failed: ${tokenRes.status}`);
       const body = await tokenRes.json();
       if (typeof body.accessToken !== "string" || typeof body.expiresAt !== "number") throw new Error("relay returned no access token");
-      if (this.creds === creds) this.access = { token: body.accessToken, expiresAt: body.expiresAt, deviceId: creds.webDeviceId };
+      this.access.set(creds.webDeviceId, { token: body.accessToken, expiresAt: body.expiresAt });
       return body.accessToken;
     }
-    /** An authenticated relay REST call as this browser. A 401 means the access token expired or
-     *  was dropped: prove possession once more and retry, then report whatever the relay says. */
-    async relayFetch(path, init = {}) {
-      const creds = this.creds;
-      if (!creds) throw new Error("not paired");
+    /** An authenticated relay REST call as one pairing's device. A 401 means the access token
+     *  expired or was dropped: prove possession once more and retry, then report what the relay says. */
+    async relayFetch(creds, path, init = {}) {
       const doFetch = this.deps.fetchImpl ?? fetch;
       const url = `${creds.relayBase.replace(/\/$/, "")}${path}${path.includes("?") ? "&" : "?"}device=${encodeURIComponent(creds.webDeviceId)}`;
       for (let attempt = 0; ; attempt++) {
-        const token = await this.accessToken();
+        const token = await this.accessToken(creds);
         const res = await doFetch(url, { ...init, headers: { ...init.headers, authorization: `Bearer ${token}` } });
         if (res.status !== 401 || attempt > 0) return res;
-        if (this.access?.token === token) this.access = null;
+        if (this.access.get(creds.webDeviceId)?.token === token) this.access.delete(creds.webDeviceId);
       }
     }
-    /** Lists every device paired with the account (P4 device management), via the relay REST surface. */
+    /** Lists every device paired with the account (P4 device management), with live presence. */
     async listDevices() {
       if (!this.creds) return [];
-      const res = await this.relayFetch("/v1/devices");
+      const res = await this.relayFetch(this.creds, "/v1/devices");
       if (!res.ok) throw new Error(`devices failed: ${res.status}`);
       return await res.json();
     }
-    /** Revokes any paired device — another browser, the desktop, or this browser itself. */
+    /** Revokes any paired device — another browser, a computer, or this browser itself. Local
+     *  pairings the revocation ended (this browser's, or ones through a revoked computer) go too. */
     async revokeDevice(deviceId) {
       if (!this.creds) return;
-      const res = await this.relayFetch(`/v1/devices?target=${encodeURIComponent(deviceId)}`, { method: "DELETE" });
+      const revoked = await this.revokeWith(this.creds, deviceId);
+      await this.forget(this.list.filter((p) => revoked.includes(p.webDeviceId) || revoked.includes(p.hostDeviceId)));
+    }
+    async revokeWith(creds, deviceId) {
+      const res = await this.relayFetch(creds, `/v1/devices?target=${encodeURIComponent(deviceId)}`, { method: "DELETE" });
       if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
+      const body = await res.json().catch(() => ({}));
+      return Array.isArray(body.revoked) ? body.revoked.map(String) : [deviceId];
     }
     /** True once the desktop has handed over the mirror key (it does so on every connect). */
     hasMirror() {
@@ -441,7 +538,7 @@
     /** Reads an opaque mirror blob from the relay; the caller decrypts it. */
     async mirrorFetch(path) {
       if (!this.creds) return null;
-      const res = await this.relayFetch(`${path}?host=${encodeURIComponent(this.creds.hostDeviceId)}`);
+      const res = await this.relayFetch(this.creds, `${path}?host=${encodeURIComponent(this.creds.hostDeviceId)}`);
       if (!res.ok) throw new Error(`mirror fetch failed: ${res.status}`);
       const body = await res.json();
       return body && typeof body.iv === "string" && typeof body.ct === "string" ? { iv: body.iv, ct: body.ct } : null;
@@ -482,14 +579,42 @@
   var PAIRING_CODE_PATTERN = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
 
   // relay/src/page.ts
-  var client = new RelayClient({ storage: localStorageApi() });
-  var sessions = [];
-  var active = null;
-  var activeStatus = "idle";
-  var viewOnly = false;
-  var mode = "live";
-  var reconnectTimer = null;
-  var connecting = false;
+  function indexedDbVault() {
+    const open = () => new Promise((resolve, reject) => {
+      if (typeof indexedDB === "undefined") {
+        reject(new Error("IndexedDB is unavailable"));
+        return;
+      }
+      const request = indexedDB.open("vocs-code-remote", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("vault");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error("IndexedDB open failed"));
+    });
+    const run = async (mode2, work) => {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction("vault", mode2);
+        const request = work(tx.objectStore("vault"));
+        tx.oncomplete = () => {
+          db.close();
+          resolve(request.result);
+        };
+        tx.onerror = tx.onabort = () => {
+          db.close();
+          reject(tx.error ?? new Error("IndexedDB transaction failed"));
+        };
+      });
+    };
+    return {
+      load: async () => await run("readonly", (store) => store.get("state")) ?? null,
+      save: async (state) => {
+        await run("readwrite", (store) => store.put(state, "state"));
+      },
+      clear: async () => {
+        await run("readwrite", (store) => store.delete("state"));
+      }
+    };
+  }
   function localStorageApi() {
     return {
       get: (k) => window.localStorage.getItem(k),
@@ -497,6 +622,21 @@
       remove: (k) => window.localStorage.removeItem(k)
     };
   }
+  var client = new RelayClient({ vault: indexedDbVault(), legacy: localStorageApi() });
+  var sessions = [];
+  var active = null;
+  var activeStatus = "idle";
+  var viewOnly = false;
+  var mode = "live";
+  var reconnectTimer = null;
+  var presenceTimer = null;
+  var connecting = false;
+  var online = /* @__PURE__ */ new Map();
+  var PAGE = 150;
+  var windowStart = 0;
+  var windowItems = [];
+  var refreshing = null;
+  var refreshAgain = false;
   function el(id) {
     const e = document.getElementById(id);
     if (!e) throw new Error(`missing #${id}`);
@@ -515,7 +655,12 @@
   function setConnection(state) {
     el("conn").textContent = state;
   }
-  function boot() {
+  function notice(text) {
+    const box = el("notice");
+    box.textContent = text;
+    box.hidden = !text;
+  }
+  async function boot() {
     const params = new URLSearchParams(window.location.search);
     if (params.has("code")) {
       const codes = params.getAll("code");
@@ -535,15 +680,18 @@
       const name = el("device-name").value.trim() || "Browser";
       void startPairing(code, name);
     });
-    el("logout").addEventListener("click", () => {
-      client.logout();
-      location.reload();
+    el("pair-cancel").addEventListener("click", () => {
+      if (client.hasCredentials()) show("screen-app");
     });
+    el("add-host").addEventListener("click", () => openPairScreen());
+    el("host-select").addEventListener("change", (ev) => void switchHost(ev.target.value));
+    el("logout").addEventListener("click", () => void unpairActive());
     el("new-session").addEventListener("click", () => void toggleNewSession(true));
     el("ns-cancel").addEventListener("click", () => void toggleNewSession(false));
     el("ns-create").addEventListener("click", () => void createSession());
     el("devices").addEventListener("click", () => void toggleDevices());
     el("devices-close").addEventListener("click", () => el("devices-panel").setAttribute("hidden", ""));
+    el("load-earlier").addEventListener("click", () => void loadEarlier());
     el("send").addEventListener("click", () => void sendComposer());
     el("act-interrupt").addEventListener("click", () => void actOnActive("sessions:interrupt", null));
     el("act-stop").addEventListener("click", () => void actOnActive("sessions:stop", null));
@@ -554,9 +702,20 @@
         void sendComposer();
       }
     });
-    if (client.restore()) void enter();
-    else show("screen-pair");
+    client.onPush((channel, payload) => void onPush(channel, payload));
+    client.onPairingsChanged(() => renderHosts());
     void loadAccount();
+    let restored = false;
+    try {
+      restored = await client.restore();
+    } catch {
+      el("pair-error").textContent = "This browser cannot store pairing keys securely (IndexedDB is unavailable, for example in some private windows). Use a regular window to pair.";
+      el("pair-form").querySelector('button[type="submit"]').disabled = true;
+      show("screen-pair");
+      return;
+    }
+    if (restored) void enter();
+    else openPairScreen();
   }
   async function loadAccount() {
     try {
@@ -571,6 +730,11 @@
       }
     } catch {
     }
+  }
+  function openPairScreen() {
+    el("pair-cancel").toggleAttribute("hidden", !client.hasCredentials());
+    el("pair-title").textContent = client.hasCredentials() ? "Add a computer" : "Vocs Code";
+    show("screen-pair");
   }
   async function sendComposer() {
     const box = el("composer");
@@ -629,13 +793,17 @@
     }
   }
   async function startPairing(code, name) {
+    el("pair-error").textContent = "";
     show("screen-pairing");
     try {
       await client.pair({ relayBase: relayBaseFor(window.location.origin, relayOverride()), code, deviceName: name });
+      el("code").value = "";
+      notice("");
+      resetView();
       await enter();
     } catch (e) {
       el("pair-error").textContent = e instanceof Error ? e.message : String(e);
-      show("screen-pair");
+      openPairScreen();
     }
   }
   function relayOverride() {
@@ -643,24 +811,93 @@
   }
   async function enter() {
     show("screen-app");
-    client.onPush((channel, payload) => void onPush(channel, payload));
-    await connectLoop();
+    renderHosts();
+    presenceTimer ??= setInterval(() => void refreshPresence(), 15e3);
+    void refreshPresence();
+    await connectLoop(true);
   }
-  async function connectLoop() {
-    if (connecting || !client.hasCredentials()) return;
+  function renderHosts() {
+    const select = el("host-select");
+    const current = client.credentials();
+    select.innerHTML = client.pairings().map((p) => {
+      const state = online.has(p.hostDeviceId) ? online.get(p.hostDeviceId) ? "online" : "offline" : "\u2026";
+      return `<option value="${esc(p.hostDeviceId)}"${p === current ? " selected" : ""}>${esc(p.hostName ?? "Computer")} \xB7 ${state}</option>`;
+    }).join("");
+    select.disabled = client.pairings().length < 2;
+  }
+  async function refreshPresence() {
+    if (!client.hasCredentials()) return;
+    try {
+      const devices = await client.listDevices();
+      online = new Map(devices.filter((d) => d.kind === "host").map((d) => [d.deviceId, d.online === true]));
+      for (const p of client.pairings()) if (!online.has(p.hostDeviceId)) online.set(p.hostDeviceId, false);
+      renderHosts();
+    } catch (e) {
+      if (e instanceof PairingRevokedError) await pairingEnded(e);
+    }
+  }
+  async function switchHost(hostDeviceId) {
+    if (hostDeviceId === client.credentials()?.hostDeviceId) return;
+    await client.select(hostDeviceId);
+    resetView();
+    await connectLoop(true);
+  }
+  function resetView() {
+    sessions = [];
+    active = null;
+    mode = "live";
+    windowItems = [];
+    windowStart = 0;
+    renderSessionList();
+    renderTranscript();
+    el("active-title").textContent = "";
+  }
+  async function unpairActive() {
+    const current = client.credentials();
+    if (!current) return;
+    await client.unpair();
+    notice(`Unpaired from ${current.hostName ?? "the computer"}.`);
+    await afterPairingRemoved();
+  }
+  async function pairingEnded(e) {
+    notice(`This browser is no longer paired with ${e.hostName}. Pair again from the desktop if you still need it.`);
+    await afterPairingRemoved();
+  }
+  async function afterPairingRemoved() {
+    resetView();
+    if (client.hasCredentials()) {
+      renderHosts();
+      await connectLoop(true);
+      return;
+    }
+    if (reconnectTimer) clearInterval(reconnectTimer);
+    if (presenceTimer) clearInterval(presenceTimer);
+    reconnectTimer = presenceTimer = null;
+    openPairScreen();
+  }
+  async function connectLoop(force = false) {
+    if (connecting && !force || !client.hasCredentials()) return;
     connecting = true;
+    const target = client.credentials();
+    setConnection("connecting\u2026");
     try {
       await client.connect(() => {
         setConnection("reconnecting\u2026");
         scheduleReconnect();
       });
-    } catch {
+    } catch (e) {
       connecting = false;
+      if (e instanceof PairingRevokedError) {
+        await pairingEnded(e);
+        return;
+      }
+      if (client.credentials() !== target) return;
       await showMirror();
       scheduleReconnect();
       return;
     }
     connecting = false;
+    if (client.credentials() !== target) return;
     mode = "live";
     if (reconnectTimer) {
       clearInterval(reconnectTimer);
@@ -700,7 +937,8 @@
       const first = sessions[0]?.id;
       if (first) await openSession(first);
     } catch (e) {
-      setConnection(`desktop offline \u2014 ${e instanceof Error ? e.message : String(e)}`);
+      const message = e instanceof Error && e.name === "OperationError" ? "the mirror was re-keyed; connect once while the desktop is online" : e instanceof Error ? e.message : String(e);
+      setConnection(`desktop offline \u2014 ${message}`);
     }
   }
   async function refreshSessions() {
@@ -721,18 +959,56 @@
     if (mode === "mirror") {
       const snapshot = await client.mirrorSession(id);
       if (!snapshot || active !== id) return;
-      renderTranscript(snapshot.items);
+      windowItems = snapshot.items;
+      windowStart = 0;
+      renderTranscript(true);
       activeStatus = snapshot.status;
       el("active-title").textContent = `${snapshot.title} \xB7 ${snapshot.status}${snapshot.truncated ? " \xB7 earlier history trimmed" : ""}`;
     } else {
-      const items = await client.invoke("sessions:transcript", { id });
+      const page = await client.invoke("sessions:transcriptPage", { id, limit: PAGE });
       if (active !== id) return;
-      renderTranscript(items);
+      windowItems = page.items;
+      windowStart = page.start;
+      renderTranscript(true);
       activeStatus = meta?.status ?? "idle";
       el("active-title").textContent = meta ? `${meta.title} \xB7 ${activeStatus}` : "";
     }
     syncControls();
     for (const row of Array.from(document.querySelectorAll(".session-row"))) row.classList.toggle("active", row.dataset.id === id);
+  }
+  function refreshTranscript() {
+    if (refreshing) {
+      refreshAgain = true;
+      return refreshing;
+    }
+    refreshing = (async () => {
+      do {
+        refreshAgain = false;
+        const id = active;
+        if (!id || mode !== "live") break;
+        try {
+          const page = await client.invoke("sessions:transcriptPage", { id, start: windowStart });
+          if (active !== id || mode !== "live") break;
+          windowItems = page.items;
+          windowStart = page.start;
+          renderTranscript(false);
+        } catch {
+          break;
+        }
+      } while (refreshAgain);
+    })().finally(() => {
+      refreshing = null;
+    });
+    return refreshing;
+  }
+  async function loadEarlier() {
+    const id = active;
+    if (!id || mode !== "live" || windowStart === 0) return;
+    const page = await client.invoke("sessions:transcriptPage", { id, start: Math.max(0, windowStart - PAGE), end: windowStart });
+    if (active !== id) return;
+    windowItems = [...page.items, ...windowItems];
+    windowStart = page.start;
+    renderTranscript(false, true);
   }
   function isRunning(status) {
     return status === "running" || status === "starting" || status === "awaiting";
@@ -755,9 +1031,14 @@
     syncControls();
     if (readOnly) el("new-session-panel").setAttribute("hidden", "");
   }
-  function renderTranscript(items) {
+  function renderTranscript(jumpToEnd = false, keepOffset = false) {
     const root = el("transcript");
-    root.innerHTML = items.map((i) => {
+    const atBottom = root.scrollHeight - root.scrollTop - root.clientHeight < 40;
+    const fromBottom = root.scrollHeight - root.scrollTop;
+    const earlier = el("load-earlier");
+    earlier.hidden = mode !== "live" || windowStart === 0;
+    earlier.textContent = `Load earlier messages (${windowStart})`;
+    root.innerHTML = windowItems.map((i) => {
       switch (i.kind) {
         case "user":
           return `<div class="msg user">${esc(i.text)}</div>`;
@@ -773,7 +1054,8 @@
           return "";
       }
     }).join("");
-    root.scrollTop = root.scrollHeight;
+    if (keepOffset) root.scrollTop = root.scrollHeight - fromBottom;
+    else if (jumpToEnd || atBottom) root.scrollTop = root.scrollHeight;
   }
   function renderApproval(item) {
     const requestId = item.request.id;
@@ -793,12 +1075,20 @@
     list.innerHTML = '<p class="muted small">Loading\u2026</p>';
     try {
       const devices = await client.listDevices();
-      list.innerHTML = devices.map(
-        (d) => `<div class="device-row"><span>${esc(d.kind === "host" ? "Computer" : "Browser")}: ${esc(d.name)}<br><small class="muted">${esc(d.platform)} \xB7 last seen ${esc(new Date(d.lastSeen).toLocaleString())}</small></span><button class="danger" data-revoke="${esc(d.deviceId)}">Revoke</button></div>`
-      ).join("");
+      const own = client.credentials()?.webDeviceId;
+      list.innerHTML = devices.map((d) => deviceRow(d, d.deviceId === own)).join("");
     } catch (e) {
+      if (e instanceof PairingRevokedError) {
+        await pairingEnded(e);
+        return;
+      }
       el("devices-error").textContent = e instanceof Error ? e.message : String(e);
     }
+  }
+  function deviceRow(d, self) {
+    const what = d.kind === "host" ? "Computer" : "Browser";
+    const state = d.online ? "online now" : `last seen ${new Date(d.lastSeen).toLocaleString()}`;
+    return `<div class="device-row"><span>${esc(what)}: ${esc(d.name)}${self ? ' <small class="muted">(this browser)</small>' : ""}<br><small class="muted">${esc(d.platform)} \xB7 ${esc(state)}</small></span><button class="danger" data-revoke="${esc(d.deviceId)}">Revoke</button></div>`;
   }
   async function onPush(channel, payload) {
     if (channel === "push:remotePolicy") {
@@ -815,14 +1105,14 @@
           el("active-title").textContent = meta ? `${meta.title} \xB7 ${activeStatus}` : "";
           syncControls();
         }
-        await openSession(active);
+        await refreshTranscript();
       }
       return;
     }
     if (channel === "push:sessionsChanged") {
       sessions = payload ?? sessions;
       renderSessionList();
-      if (active) await openSession(active);
+      if (active) await refreshTranscript();
     }
   }
   function renderSessionList() {
@@ -836,7 +1126,11 @@
     const target = ev.target;
     const revoke = target.closest("button[data-revoke]");
     if (revoke?.dataset.revoke) {
-      void client.revokeDevice(revoke.dataset.revoke).then(() => refreshDevices()).catch((e) => {
+      const before = client.pairings().length;
+      void client.revokeDevice(revoke.dataset.revoke).then(async () => {
+        if (client.pairings().length < before) await afterPairingRemoved();
+        else await refreshDevices();
+      }).catch((e) => {
         el("devices-error").textContent = e instanceof Error ? e.message : String(e);
       });
       return;
@@ -848,5 +1142,5 @@
     const decision = { optionId: btn.dataset.decision === "allow" ? "allow" : "deny" };
     if (requestId) void client.invoke("approvals:respond", { sessionId: active, requestId, decision });
   });
-  boot();
+  void boot();
 })();

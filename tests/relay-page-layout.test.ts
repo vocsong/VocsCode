@@ -7,6 +7,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { describe, expect, it, vi } from 'vitest';
+import { fakeIndexedDB } from './support/fake-indexeddb';
 
 const { JSDOM } = createRequire(import.meta.url)('jsdom') as {
   JSDOM: new (html: string, options: { url: string; runScripts: 'outside-only' }) => { window: Window & typeof globalThis };
@@ -50,7 +51,7 @@ describe('web app layout (/app on the landing origin)', () => {
       runScripts: 'outside-only'
     });
     try {
-      Object.assign(dom.window, { TextEncoder });
+      Object.assign(dom.window, { TextEncoder, indexedDB: fakeIndexedDB() });
       Object.defineProperty(dom.window.crypto, 'subtle', { value: { generateKey: () => new Promise(() => {}) } });
       const fetchMock = vi.fn();
       dom.window.fetch = fetchMock;
@@ -58,7 +59,8 @@ describe('web app layout (/app on the landing origin)', () => {
 
       const code = dom.window.document.querySelector<HTMLInputElement>('#code')!;
       expect(code.value).toBe('ABCD2345');
-      expect(dom.window.document.querySelector('#screen-pair')?.hasAttribute('hidden')).toBe(false);
+      // The pairing screen appears once the (empty) vault has been read.
+      await vi.waitFor(() => expect(dom.window.document.querySelector('#screen-pair')?.hasAttribute('hidden')).toBe(false));
       expect(dom.window.document.querySelector('#screen-pairing')?.hasAttribute('hidden')).toBe(true);
       expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/v1/me']);
       // Do not leave the short-lived code in the URL/history or disturb the relay override.
@@ -76,7 +78,7 @@ describe('web app layout (/app on the landing origin)', () => {
       url: 'https://code.vocs.io/app/', runScripts: 'outside-only'
     });
     try {
-      Object.assign(dom.window, { TextEncoder });
+      Object.assign(dom.window, { TextEncoder, indexedDB: fakeIndexedDB() });
       dom.window.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ login: 'vocs' }) })) as unknown as typeof fetch;
       dom.window.eval(await read('relay/public/app/app.js'));
       await vi.waitFor(() => expect([...dom.window.document.querySelectorAll<HTMLFormElement>('.account-signout')].every((form) => !form.hidden)).toBe(true));
@@ -86,6 +88,59 @@ describe('web app layout (/app on the landing origin)', () => {
         expect(form.querySelector('.account-name')?.textContent).toBe('@vocs');
       }
       expect(dom.window.document.querySelector('#logout')?.textContent).toBe('Unpair browser');
+      await vi.waitFor(() => expect(dom.window.document.querySelector('#screen-pair')?.hasAttribute('hidden')).toBe(false));
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  it('shows every paired computer in the switcher and offers to add another', async () => {
+    const pairing = (hostDeviceId: string, hostName: string) => ({
+      relayBase: 'https://code.vocs.io', webToken: 'refresh', webDeviceId: `w_${hostDeviceId}`, hostDeviceId, hostName,
+      hostPub: { sig: {}, enc: {} }, identity: { sig: { pub: {}, priv: {} }, enc: { pub: {}, priv: {} } }
+    });
+    const idb = fakeIndexedDB({ 'vocs-code-remote': { vault: { state: { pairings: [pairing('h_work', 'Work PC'), pairing('h_home', 'Home <PC>')], active: 'h_home' } } } });
+    const dom = new JSDOM(await read('relay/public/app/index.html'), { url: 'https://code.vocs.io/app/', runScripts: 'outside-only' });
+    try {
+      Object.assign(dom.window, { TextEncoder, indexedDB: idb });
+      // No relay here: the page falls back to "desktop offline" without claiming anything.
+      const fetchMock = vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) }));
+      dom.window.fetch = fetchMock as unknown as typeof fetch;
+      dom.window.eval(await read('relay/public/app/app.js'));
+      const doc = dom.window.document;
+      await vi.waitFor(() => expect(doc.querySelector('#screen-app')?.hasAttribute('hidden')).toBe(false));
+      const select = doc.querySelector<HTMLSelectElement>('#host-select')!;
+      await vi.waitFor(() => expect([...select.options].map((o) => o.value)).toEqual(['h_work', 'h_home']));
+      expect(select.value).toBe('h_home');
+      expect(select.disabled).toBe(false);
+      // Names are text, never markup.
+      expect(select.options[1].textContent).toMatch(/^Home <PC> · /);
+      expect(select.querySelector('pc')).toBeNull();
+
+      doc.querySelector<HTMLButtonElement>('#add-host')!.click();
+      expect(doc.querySelector('#screen-pair')?.hasAttribute('hidden')).toBe(false);
+      expect(doc.querySelector('#pair-title')?.textContent).toBe('Add a computer');
+      const cancel = doc.querySelector<HTMLButtonElement>('#pair-cancel')!;
+      expect(cancel.hidden).toBe(false);
+      cancel.click();
+      expect(doc.querySelector('#screen-app')?.hasAttribute('hidden')).toBe(false);
+      // Let the connection attempt settle before the window goes away.
+      await vi.waitFor(() => expect(doc.querySelector('#conn')?.textContent).toBe('desktop offline'));
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  it('refuses to pair where it cannot keep keys non-extractable (no IndexedDB)', async () => {
+    const dom = new JSDOM(await read('relay/public/app/index.html'), { url: 'https://code.vocs.io/app/', runScripts: 'outside-only' });
+    try {
+      Object.assign(dom.window, { TextEncoder });
+      dom.window.fetch = vi.fn() as unknown as typeof fetch;
+      dom.window.eval(await read('relay/public/app/app.js'));
+      const doc = dom.window.document;
+      await vi.waitFor(() => expect(doc.querySelector('#pair-error')?.textContent).toMatch(/cannot store pairing keys securely/));
+      expect(doc.querySelector<HTMLButtonElement>('#pair-form button[type="submit"]')?.disabled).toBe(true);
+      expect(dom.window.localStorage.length).toBe(0);
     } finally {
       dom.window.close();
     }
@@ -97,7 +152,7 @@ describe('web app layout (/app on the landing origin)', () => {
       runScripts: 'outside-only'
     });
     try {
-      Object.assign(dom.window, { TextEncoder });
+      Object.assign(dom.window, { TextEncoder, indexedDB: fakeIndexedDB() });
       const fetchMock = vi.fn();
       dom.window.fetch = fetchMock;
       dom.window.eval(await read('relay/public/app/app.js'));
@@ -107,6 +162,9 @@ describe('web app layout (/app on the landing origin)', () => {
       expect(dom.window.document.querySelector('#screen-pair img')).toBeNull();
       expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/v1/me']);
       expect(dom.window.location.href).toBe('https://code.vocs.io/app/');
+      await vi.waitFor(() => expect(dom.window.document.querySelector('#screen-pair')?.hasAttribute('hidden')).toBe(false));
+      // Still the link's complaint, not overwritten once the vault loads.
+      expect(dom.window.document.querySelector('#pair-error')?.textContent).toMatch(/invalid code/i);
     } finally {
       dom.window.close();
     }

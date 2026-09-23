@@ -10,7 +10,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, it } from 'vitest';
 import { WebSocket } from 'ws';
-import { RelayClient, type SimpleSocket, type WebCredentials } from '../relay/src/web-client';
+import { memoryVault, RelayClient, type SimpleSocket, type WebCredentials } from '../relay/src/web-client';
 import { RemoteHost } from '../src/main/remote/host';
 import { generateIdentity, importAesKey, sealBlob, sign, tokenProofPayload, type AnyIdentity, type Identity } from '../src/shared/crypto';
 import type { HandlerRegistry } from '../src/main/handlers';
@@ -143,7 +143,6 @@ it.skipIf(process.env.REMOTE_LIVE !== '1')('mints, claims, approves, handshakes,
   globalThis.fetch = (input, init) => originalFetch(input, { ...init, signal: AbortSignal.timeout(8_000) });
 
   const hostSecrets = new Map<string, string>();
-  const webStorage = new Map<string, string>();
   const calls: string[] = [];
   const registry = {
     channels: () => ['sessions:list' as const],
@@ -167,7 +166,7 @@ it.skipIf(process.env.REMOTE_LIVE !== '1')('mints, claims, approves, handshakes,
   let socketUrlSafe = false;
   let ticketRequestSafe = false;
   const client = new RelayClient({
-    storage: { get: (key) => webStorage.get(key) ?? null, set: (key, value) => { webStorage.set(key, value); }, remove: (key) => { webStorage.delete(key); } },
+    vault: memoryVault(),
     // Keep the claim identity: recovery after a lost approval poll must open the sealed credential.
     newIdentity: async () => (browserIdentity = await generateIdentity()),
     wsFactory: (url, onMessage, onClose) => {
@@ -320,10 +319,9 @@ it.skipIf(process.env.REMOTE_LIVE !== '1')('mints, claims, approves, handshakes,
       }
       if (code && !approvalSent && host.state().pendingRequest?.code === code) await host.respondPairing('deny');
     } catch { cleanupFailures.push('device cleanup failed'); }
-    try { client.logout(); } catch { cleanupFailures.push('browser socket cleanup failed'); }
+    try { await client.logout(); } catch { cleanupFailures.push('browser socket cleanup failed'); }
     try { await host.disable(); } catch { cleanupFailures.push('host socket cleanup failed'); }
     hostSecrets.clear();
-    webStorage.clear();
     globalThis.fetch = originalFetch;
   }
   if (failed || cleanupFailures.length) throw new Error(`remote live smoke failed${failed ? ` during ${failed}` : ''}${cleanupFailures.length ? `; ${cleanupFailures.join('; ')}` : ''} (sensitive details withheld)`);

@@ -7,16 +7,18 @@
     <link rel="stylesheet" href="/app/styles.css" />
   </head>
   <body>
+    <p id="notice" class="notice" role="status" hidden></p>
     <!-- Pairing: enter the code shown by the desktop (Settings → Remote access). -->
     <section id="screen-pair" data-screen hidden>
       <div class="card">
-        <h1>Vocs Code</h1>
-        <p class="muted">Pair this browser with your desktop app. Enter the code shown under Settings → Remote access. A pairing link fills the code; press Pair to request desktop approval.</p>
+        <h1 id="pair-title">Vocs Code</h1>
+        <p class="muted">Pair this browser with your desktop app. Enter the code shown under Settings → Remote access, or scan its QR code. A pairing link fills the code; press Pair to request desktop approval.</p>
         <form method="post" action="/logout" class="account-signout" hidden><span class="account-name"></span><button type="submit" class="ghost">Sign out of GitHub</button></form>
         <form id="pair-form">
           <label>Pairing code<input id="code" maxlength="9" placeholder="ABCD2345" autocomplete="off" required /></label>
           <label>Browser name<input id="device-name" placeholder="My laptop" /></label>
           <button type="submit" class="primary">Pair</button>
+          <button type="button" id="pair-cancel" class="ghost" hidden>Cancel</button>
           <p id="pair-error" class="error"></p>
         </form>
       </div>
@@ -34,12 +36,14 @@
     <section id="screen-app" data-screen hidden>
       <header class="topbar">
         <span class="brand">Vocs Code</span>
+        <select id="host-select" aria-label="Computer" title="The paired computer this browser drives"></select>
         <span id="conn" class="muted small"></span>
         <form method="post" action="/logout" class="account-signout" hidden><span class="account-name"></span><button type="submit" class="ghost">Sign out of GitHub</button></form>
         <span id="policy" class="badge" hidden></span>
         <button id="devices" class="ghost">Devices</button>
         <button id="new-session" class="ghost">New session</button>
-        <button id="logout" class="ghost" title="Forget this browser's pairing; account sign-out is separate">Unpair browser</button>
+        <button id="add-host" class="ghost">Add a computer</button>
+        <button id="logout" class="ghost" title="Revoke and forget this browser's pairing with the selected computer; account sign-out is separate">Unpair browser</button>
       </header>
       <div class="new-session" id="new-session-panel" hidden>
         <label>Folder<input id="ns-folder" list="known-folders" placeholder="/path/on/your/machine" /></label>
@@ -70,7 +74,10 @@
             <button id="act-interrupt" class="ghost" hidden>Interrupt</button>
             <button id="act-stop" class="ghost" hidden>Stop</button>
           </div>
-          <div id="transcript" class="transcript"></div>
+          <div id="transcript-pane" class="transcript-pane">
+            <button id="load-earlier" class="ghost load-earlier" hidden>Load earlier messages</button>
+            <div id="transcript" class="transcript"></div>
+          </div>
           <div class="composer">
             <textarea id="composer" rows="2" placeholder="Message the agent… (Enter to send, Shift+Enter for a new line)"></textarea>
             <button id="send" class="primary">Send</button>

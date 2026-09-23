@@ -4,9 +4,9 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
-import { RelayClient, relayBaseFor } from '../relay/src/web-client';
+import { LEGACY_CREDENTIALS_KEY, memoryVault, PairingRevokedError, RelayClient, relayBaseFor } from '../relay/src/web-client';
 import { ENROLL, FakeRelay } from './fake-relay';
 import { RemoteHost } from '../src/main/remote/host';
 import { RemoteAudit } from '../src/main/remote/audit';
@@ -84,7 +84,7 @@ describe('relay web client (browser-side protocol)', () => {
     const { code } = await host.startPairing('Test PC');
 
     // Browser side: start the pairing (claim + poll loop).
-    const storage = new Map<string, string>();
+    const vault = memoryVault();
     const rest: Array<{ url: string; authorization: string | null }> = [];
     let pollToken: string | undefined;
     const trackingFetch: typeof fetch = async (input, init) => {
@@ -95,15 +95,7 @@ describe('relay web client (browser-side protocol)', () => {
       if (url.endsWith('/v1/pair/claim') && response.ok) pollToken = ((await response.clone().json()) as { pollToken: string }).pollToken;
       return response;
     };
-    const client = new RelayClient({
-      fetchImpl: trackingFetch,
-      storage: {
-        get: (k) => storage.get(k) ?? null,
-        set: (k, v) => void storage.set(k, v),
-        remove: (k) => void storage.delete(k)
-      },
-      wsFactory
-    });
+    const client = new RelayClient({ fetchImpl: trackingFetch, vault, wsFactory });
     const pairing = client.pair({ relayBase: `http://127.0.0.1:${port}`, code, deviceName: 'Test Browser' });
 
     // The desktop sees the request; the human approves while the browser polls.
@@ -113,17 +105,22 @@ describe('relay web client (browser-side protocol)', () => {
     expect(creds.webToken).toBeTruthy();
     expect(client.hasCredentials()).toBe(true);
     expect(pollToken).toBeTruthy();
-    expect(JSON.stringify([...storage])).not.toContain(pollToken);
+    expect(JSON.stringify(vault.peek())).not.toContain(pollToken);
+    // The stored identity is a non-extractable key: page script can sign with it, never read it.
+    const stored = vault.peek()!.pairings[0];
+    expect(stored.identity.sig.priv).toBeInstanceOf(CryptoKey);
+    expect((stored.identity.sig.priv as CryptoKey).extractable).toBe(false);
+    expect((stored.identity.enc.priv as CryptoKey).extractable).toBe(false);
+    expect(stored.hostName).toBe('Test PC');
     expect(rest.filter((entry) => entry.url.includes('/v1/pair/poll')).every((entry) => entry.authorization === `Bearer ${pollToken}`)).toBe(true);
 
-    // A fresh client restores its pairing from storage.
-    const shared = { get: (k: string) => storage.get(k) ?? null, set: (k: string, v: string) => void storage.set(k, v), remove: (k: string) => void storage.delete(k) };
+    // A fresh client restores its pairing from the vault.
     const inbound: string[] = [];
     let deliver: ((raw: string) => void) | undefined;
     let holdNext = false;
     let held: string | undefined;
     let socketUrlSafe = false;
-    const restored = new RelayClient({ storage: shared, fetchImpl: trackingFetch, wsFactory: (url, onMessage, onClose) => {
+    const restored = new RelayClient({ vault, fetchImpl: trackingFetch, wsFactory: (url, onMessage, onClose) => {
       const parsed = new URL(url);
       socketUrlSafe = parsed.pathname === '/v1/ws/client' && parsed.searchParams.has('ticket') &&
         parsed.searchParams.get('ticket') !== creds.webToken && !parsed.searchParams.has('token') && !url.includes(creds.webToken);
@@ -140,7 +137,7 @@ describe('relay web client (browser-side protocol)', () => {
       onMessage(raw);
       }, onClose);
     } });
-    expect(restored.restore()).toBe(true);
+    expect(await restored.restore()).toBe(true);
     await sleep(400); // host reconnects under its new device token
 
     const pushes: Array<[string, unknown]> = [];
@@ -200,8 +197,8 @@ describe('relay web client (browser-side protocol)', () => {
       ['push:settingsChanged', { notifications: false }]
     ]);
 
-    restored.logout();
-    expect(storage.has('vocs-web-credentials')).toBe(false);
+    await restored.logout();
+    expect(vault.peek()).toBeNull();
     // The refresh credential is presented to the token endpoints and nowhere else.
     expect(rest.filter((entry) => entry.authorization === `Bearer ${creds.webToken}`).every((entry) => /\/v1\/token(\/challenge)?\?/.test(entry.url))).toBe(true);
     expect(rest.every((entry) => !entry.url.includes('token='))).toBe(true);
@@ -221,10 +218,7 @@ describe('relay web client (browser-side protocol)', () => {
       log: () => undefined,
       broadcast: () => undefined
     });
-    const browser = () => {
-      const storage = new Map<string, string>();
-      return new RelayClient({ storage: { get: (k) => storage.get(k) ?? null, set: (k, v) => void storage.set(k, v), remove: (k) => void storage.delete(k) }, wsFactory });
-    };
+    const browser = () => new RelayClient({ vault: memoryVault(), wsFactory });
     const pairOne = async (client: RelayClient, name: string) => {
       const { code } = await host.startPairing('Shared PC');
       const pairing = client.pair({ relayBase: base, code, deviceName: name });
@@ -248,12 +242,116 @@ describe('relay web client (browser-side protocol)', () => {
       await second.connect();
       expect(await second.invoke('sessions:list', null)).toEqual([{ id: 's1', title: 'Shared host' }]);
       expect(host.state().onlineClients.sort()).toEqual([firstCreds.webDeviceId, secondCreds.webDeviceId].sort());
-      first.logout();
-      second.logout();
+      await first.logout();
+      await second.logout();
     } finally {
       await host.disable();
       await relay.stop();
     }
+  });
+
+  describe('several computers from one browser', () => {
+    const hosts: RemoteHost[] = [];
+    const relays: FakeRelay[] = [];
+    afterEach(async () => {
+      for (const h of hosts.splice(0)) await h.disable();
+      for (const r of relays.splice(0)) await r.stop();
+    });
+
+    async function setup() {
+      const relay = new FakeRelay();
+      relays.push(relay);
+      const base = `http://127.0.0.1:${await relay.start()}`;
+      const makeHost = async (sessionTitle: string) => {
+        const secrets = new Map<string, string>();
+        const host = new RemoteHost({
+          registry: () => ({ channels: () => ['sessions:list'], invoke: async () => [{ id: 's', title: sessionTitle }] } as unknown as HandlerRegistry),
+          secrets: { get: async (k) => secrets.get(k), set: async (k, v) => void secrets.set(k, v) },
+          pushState: () => undefined,
+          log: () => undefined,
+          broadcast: () => undefined
+        });
+        hosts.push(host);
+        await host.enable(base, ENROLL);
+        return host;
+      };
+      const pairWith = async (client: RelayClient, host: RemoteHost, hostName: string) => {
+        const { code } = await host.startPairing(hostName);
+        const pairing = client.pair({ relayBase: base, code, deviceName: 'Phone' });
+        for (let i = 0; i < 80 && host.state().pendingRequest?.code !== code; i++) await sleep(25);
+        await host.respondPairing('approve');
+        const creds = await pairing;
+        for (let i = 0; i < 80 && host.state().status !== 'online'; i++) await sleep(25);
+        return creds;
+      };
+      return { relay, base, makeHost, pairWith };
+    }
+
+    it('keeps a pairing per computer, switches between them, and unpairs one without the other', async () => {
+      const { makeHost, pairWith } = await setup();
+      const work = await makeHost('Work sessions');
+      const home = await makeHost('Home sessions');
+      const vault = memoryVault();
+      const client = new RelayClient({ vault, wsFactory });
+      const workCreds = await pairWith(client, work, 'Work PC');
+      const homeCreds = await pairWith(client, home, 'Home PC');
+      expect(client.pairings().map((p) => p.hostName)).toEqual(['Work PC', 'Home PC']);
+      expect(workCreds.webDeviceId).not.toBe(homeCreds.webDeviceId);
+      // The newest pairing is active; each computer is reached through its own pairing.
+      expect(client.credentials()?.hostDeviceId).toBe(homeCreds.hostDeviceId);
+      await client.connect();
+      expect(await client.invoke('sessions:list', null)).toEqual([{ id: 's', title: 'Home sessions' }]);
+      await client.select(workCreds.hostDeviceId);
+      await client.connect();
+      expect(await client.invoke('sessions:list', null)).toEqual([{ id: 's', title: 'Work sessions' }]);
+      // The switcher's online state comes from the relay's live sockets.
+      const presence = Object.fromEntries((await client.listDevices()).filter((d) => d.kind === 'host').map((d) => [d.deviceId, d.online]));
+      expect(presence).toEqual({ [workCreds.hostDeviceId]: true, [homeCreds.hostDeviceId]: true });
+
+      // A reloaded page gets both pairings back and the one it last used.
+      const reopened = new RelayClient({ vault, wsFactory });
+      expect(await reopened.restore()).toBe(true);
+      expect(reopened.pairings()).toHaveLength(2);
+      expect(reopened.credentials()?.hostDeviceId).toBe(workCreds.hostDeviceId);
+
+      // Unpair revokes this browser's device for the active computer at the relay, and only it.
+      await client.unpair();
+      expect(client.pairings().map((p) => p.hostName)).toEqual(['Home PC']);
+      const registry = (await home.listDevices()).map((d) => d.deviceId);
+      expect(registry).not.toContain(workCreds.webDeviceId);
+      expect(registry).toContain(homeCreds.webDeviceId);
+      await client.connect();
+      expect(await client.invoke('sessions:list', null)).toEqual([{ id: 's', title: 'Home sessions' }]);
+      await client.logout();
+    });
+
+    it('forgets a pairing the relay revoked and names the computer it was for', async () => {
+      const { makeHost, pairWith } = await setup();
+      const host = await makeHost('Sessions');
+      const vault = memoryVault();
+      const client = new RelayClient({ vault, wsFactory });
+      const creds = await pairWith(client, host, 'Studio PC');
+      await host.revokeDevice(creds.webDeviceId);
+      const failure = await client.connect().then(() => null, (e: unknown) => e);
+      expect(failure).toBeInstanceOf(PairingRevokedError);
+      expect((failure as PairingRevokedError).hostName).toBe('Studio PC');
+      expect(client.pairings()).toEqual([]);
+      expect(vault.peek()?.pairings).toEqual([]);
+    });
+
+    it('re-pairing the same computer replaces the old pairing and revokes its device', async () => {
+      const { makeHost, pairWith } = await setup();
+      const host = await makeHost('Sessions');
+      const client = new RelayClient({ vault: memoryVault(), wsFactory });
+      const first = await pairWith(client, host, 'Desk PC');
+      const second = await pairWith(client, host, 'Desk PC');
+      expect(client.pairings()).toHaveLength(1);
+      expect(client.credentials()?.webDeviceId).toBe(second.webDeviceId);
+      const registry = (await host.listDevices()).map((d) => d.deviceId);
+      expect(registry).not.toContain(first.webDeviceId);
+      expect(registry).toContain(second.webDeviceId);
+      await client.logout();
+    });
   });
 
   it('mints a fresh ticket for each attempt and never puts the device bearer in the socket URL', async () => {
@@ -263,21 +361,27 @@ describe('relay web client (browser-side protocol)', () => {
       const identity = await generateIdentity();
       const web = await registerWebDevice(relay.store, { accountId: 'a', name: 'browser', platform: 'test', pub: publicOf(identity) }, Date.now());
       const base = `http://127.0.0.1:${port}`;
-      const storage = new Map<string, string>([['vocs-web-credentials', JSON.stringify({
+      // Stored by the pre-vault page: exportable JWKs in localStorage, migrated on restore.
+      const storage = new Map<string, string>([[LEGACY_CREDENTIALS_KEY, JSON.stringify({
         relayBase: base, webToken: web.webToken, webDeviceId: web.deviceId,
         hostDeviceId: 'h_test', hostPub: publicOf(identity), identity
       })]]);
+      const vault = memoryVault();
       const urls: string[] = [];
       const requests: Array<{ url: string; header: string | null }> = [];
       const client = new RelayClient({
-        storage: { get: (key) => storage.get(key) ?? null, set: (key, value) => void storage.set(key, value), remove: (key) => void storage.delete(key) },
+        vault,
+        legacy: { get: (key) => storage.get(key) ?? null, set: (key, value) => void storage.set(key, value), remove: (key) => void storage.delete(key) },
         fetchImpl: async (input, init) => {
           requests.push({ url: String(input), header: new Headers(init?.headers).get('authorization') });
           return fetch(input, init);
         },
         wsFactory: (url) => { urls.push(url); throw new Error('socket withheld'); }
       });
-      expect(client.restore()).toBe(true);
+      expect(await client.restore()).toBe(true);
+      // Migrated once: the exportable copy is gone and the keys are non-extractable now.
+      expect(storage.has(LEGACY_CREDENTIALS_KEY)).toBe(false);
+      expect((vault.peek()!.pairings[0].identity.sig.priv as CryptoKey).extractable).toBe(false);
       await expect(client.connect()).rejects.toThrow('socket withheld');
       await expect(client.connect()).rejects.toThrow('socket withheld');
       expect(urls).toHaveLength(2);
@@ -296,13 +400,14 @@ describe('relay web client (browser-side protocol)', () => {
 
   it('never sends a handshake on a socket closed while the hello is being prepared', async () => {
     const identity = await generateIdentity();
-    const storage = new Map<string, string>([['vocs-web-credentials', JSON.stringify({
+    const storage = new Map<string, string>([[LEGACY_CREDENTIALS_KEY, JSON.stringify({
       relayBase: 'https://relay.test', webToken: 'paired-bearer', webDeviceId: 'w_browser',
       hostDeviceId: 'h_host', hostPub: publicOf(identity), identity
     })]]);
     const sent: string[] = [];
     const client = new RelayClient({
-      storage: { get: (key) => storage.get(key) ?? null, set: (key, value) => void storage.set(key, value), remove: (key) => void storage.delete(key) },
+      vault: memoryVault(),
+      legacy: { get: (key) => storage.get(key) ?? null, set: (key, value) => void storage.set(key, value), remove: (key) => void storage.delete(key) },
       fetchImpl: async (input) => {
         const path = new URL(String(input)).pathname;
         if (path === '/v1/token/challenge') return new Response(JSON.stringify({ challenge: 'c'.repeat(43), expiresAt: Date.now() + 60_000 }));
@@ -314,7 +419,7 @@ describe('relay web client (browser-side protocol)', () => {
         close: () => undefined
       })
     });
-    expect(client.restore()).toBe(true);
+    expect(await client.restore()).toBe(true);
     await expect(client.connect()).rejects.toThrow('connection superseded');
     expect(sent).toEqual(['hello']);
   });
@@ -349,10 +454,9 @@ describe('relay web client (browser-side protocol)', () => {
     try {
       await host.enable(`http://127.0.0.1:${port}`, ENROLL);
       const { code } = await host.startPairing('Test PC');
-      const storage = new Map<string, string>();
       const rest: Array<{ url: string; authorization: string | null }> = [];
       const client = new RelayClient({
-        storage: { get: (k) => storage.get(k) ?? null, set: (k, v) => void storage.set(k, v), remove: (k) => void storage.delete(k) },
+        vault: memoryVault(),
         fetchImpl: async (input, init) => {
           rest.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') });
           return fetch(input, init);

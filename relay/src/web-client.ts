@@ -1,24 +1,63 @@
 /** The web client core (code.vocs.io, docs/REMOTE-ACCESS.md §6): the pairing flow and the
  *  e2e Transport a browser uses to drive a paired desktop through the relay. Framework-
- *  free and DOM-free — the page (relay/public) mounts it; tests run it in Node. */
-import { clientFinish, createHello, generateIdentity, importAesKey, openBlob, openFrame, openSealedToKey, pairingTokenContext, publicOf, sealFrame, sign, tokenProofPayload, type Identity, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
+ *  free and DOM-free — the page (relay/public) mounts it; tests run it in Node.
+ *
+ *  A browser may pair with several computers. Each pairing is its own web device with its own
+ *  identity, relay credential and host trust anchor; one is active at a time. Pairings live in a
+ *  PairingVault — IndexedDB in the browser, where the private keys are non-extractable CryptoKeys
+ *  that page script can use but never read out. */
+import { clientFinish, createHello, generateKeyIdentity, importAesKey, lockIdentity, openBlob, openFrame, openSealedToKey, pairingTokenContext, publicOf, sealFrame, sign, tokenProofPayload, type AnyIdentity, type Identity, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
 import type { MirrorIndex, MirrorSnapshot } from '../../src/shared/mirror';
 import type { RemoteDeviceInfo } from '../../src/shared/types';
 
-/** A paired browser's stored identity: relay URL, tokens, host trust anchor, own keys. */
+/** One browser↔computer pairing: relay URL, relay credential, host trust anchor, own keys. */
 export interface WebCredentials {
   relayBase: string;
   /** The relay refresh credential: it buys access tokens only with a signature by `identity`. */
   webToken: string;
   webDeviceId: string;
   hostDeviceId: string;
+  /** The computer's name at pairing time, for the host switcher. */
+  hostName?: string;
   hostPub: PublicIdentity;
-  identity: Identity;
+  /** Non-extractable CryptoKeys in browsers; exportable JWKs only in tests and legacy data. */
+  identity: AnyIdentity;
   /** P4: the desktop's mirror key, delivered sealed over the e2e session. */
   mirrorKey?: string;
+  pairedAt?: number;
 }
 
-/** Minimal storage contract (localStorage in the browser, a Map in tests). */
+/** Everything a browser persists: its pairings and which one is active. */
+export interface VaultState {
+  pairings: WebCredentials[];
+  /** hostDeviceId of the active pairing. */
+  active?: string;
+}
+
+/** Durable storage for pairings. It must keep CryptoKeys intact (structured clone), which is
+ *  why the browser uses IndexedDB and never localStorage. */
+export interface PairingVault {
+  load(): Promise<VaultState | null>;
+  save(state: VaultState): Promise<void>;
+  clear(): Promise<void>;
+}
+
+/** An in-memory vault (tests, and a page that cannot persist). */
+export function memoryVault(initial: VaultState | null = null): PairingVault & { peek(): VaultState | null } {
+  let state = initial;
+  return {
+    load: async () => state,
+    save: async (next) => {
+      state = { pairings: [...next.pairings], active: next.active };
+    },
+    clear: async () => {
+      state = null;
+    },
+    peek: () => state
+  };
+}
+
+/** Minimal string storage contract (localStorage in the browser, a Map in tests). */
 export interface KvStorage {
   get(key: string): string | null;
   set(key: string, value: string): void;
@@ -31,7 +70,8 @@ export interface SimpleSocket {
   close(): void;
 }
 
-const CREDS_KEY = 'vocs-web-credentials';
+/** Where a browser paired before IndexedDB kept its keys: read once, migrated, then removed. */
+export const LEGACY_CREDENTIALS_KEY = 'vocs-web-credentials';
 
 /** The relay base a page should talk to. The web app and the relay share one origin (the landing
  *  Worker forwards `/app`, `/v1` and `/ws` to the relay), so the default is the page's own origin;
@@ -69,14 +109,16 @@ type PollResult =
 /** Refresh the access token this long before it expires. */
 const ACCESS_REFRESH_MARGIN_MS = 60_000;
 
-/** The relay no longer accepts this browser's pairing (revoked, from any device). */
+/** The relay no longer accepts a pairing (revoked, from any device). The pairing is forgotten. */
 export class PairingRevokedError extends Error {
-  constructor() {
+  constructor(readonly hostName: string) {
     super('this browser is no longer paired');
   }
 }
 
 export class RelayClient {
+  private list: WebCredentials[] = [];
+  /** The active pairing. */
   private creds: WebCredentials | null = null;
   private socket: SimpleSocket | null = null;
   private session: WebSession | null = null;
@@ -84,64 +126,154 @@ export class RelayClient {
   private outCounter = 0;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private readonly pushListeners = new Set<(channel: string, payload: unknown) => void>();
+  private readonly changeListeners = new Set<() => void>();
   private hsWaiter: { resolve: (reply: never) => void; reject: (e: Error) => void } | null = null;
   private mirrorCache: { secret: string; value: CryptoKey } | null = null;
   /** Sealed frames that arrive while the handshake reply is still being finished. */
   private earlyFrames: Array<{ salt: string; seq: number; ct: string }> = [];
   private connectAttempt = 0;
-  /** The short-lived relay access token (§6.2), in memory only. */
-  private access: { token: string; expiresAt: number; deviceId: string } | null = null;
-  private refreshing: Promise<string> | null = null;
+  /** Short-lived relay access tokens (§6.2) per web device, in memory only. */
+  private readonly access = new Map<string, { token: string; expiresAt: number }>();
+  private readonly refreshing = new Map<string, Promise<string>>();
 
   constructor(
     private readonly deps: {
-      storage: KvStorage;
+      vault: PairingVault;
+      /** Pre-vault string storage: an old pairing found there is migrated once, then removed. */
+      legacy?: KvStorage;
       fetchImpl?: typeof fetch;
       /** Defaults to the browser WebSocket; tests inject a stub. */
       wsFactory?: (url: string, onMessage: (raw: string) => void, onClose: () => void) => SimpleSocket;
       now?: () => number;
-      /** Creates the identity a new pairing claims with; tests keep a handle on it. */
-      newIdentity?: () => Promise<Identity>;
+      /** Creates the identity a new pairing claims with: non-extractable keys by default. */
+      newIdentity?: () => Promise<AnyIdentity>;
     }
   ) {}
 
   hasCredentials(): boolean {
-    return !!this.deps.storage.get(CREDS_KEY);
+    return this.list.length > 0;
   }
 
-  restore(): boolean {
-    const raw = this.deps.storage.get(CREDS_KEY);
-    if (!raw) return false;
+  /** Every pairing this browser holds, oldest first. */
+  pairings(): WebCredentials[] {
+    return [...this.list];
+  }
+
+  /** The active pairing. */
+  credentials(): WebCredentials | null {
+    return this.creds;
+  }
+
+  /** Called whenever the set of pairings or the active one changes. */
+  onPairingsChanged(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
+  }
+
+  /** Loads the vault, migrating a pairing left in legacy storage. True when any pairing exists. */
+  async restore(): Promise<boolean> {
+    let state = await this.deps.vault.load();
+    if (!state?.pairings.length) state = (await this.migrateLegacy()) ?? state;
+    this.list = state?.pairings ?? [];
+    this.creds = this.list.find((p) => p.hostDeviceId === state?.active) ?? this.list[0] ?? null;
+    return !!this.creds;
+  }
+
+  /** A pairing stored by an older page as extractable JWKs in localStorage: re-import the keys as
+   *  non-extractable, keep them in the vault, and delete the exportable copy. */
+  private async migrateLegacy(): Promise<VaultState | null> {
+    const legacy = this.deps.legacy;
+    const raw = legacy?.get(LEGACY_CREDENTIALS_KEY);
+    if (!legacy || !raw) return null;
+    let old: WebCredentials & { identity: Identity };
     try {
-      this.creds = JSON.parse(raw) as WebCredentials;
-      return true;
+      old = JSON.parse(raw) as WebCredentials & { identity: Identity };
+      if (!old.webDeviceId || !old.hostDeviceId || !old.identity?.sig?.priv) throw new Error('incomplete');
     } catch {
-      this.deps.storage.remove(CREDS_KEY);
-      return false;
+      legacy.remove(LEGACY_CREDENTIALS_KEY);
+      return null;
     }
+    const migrated: WebCredentials = { ...old, identity: await lockIdentity(old.identity), hostName: old.hostName ?? 'Computer' };
+    const state: VaultState = { pairings: [migrated], active: migrated.hostDeviceId };
+    await this.deps.vault.save(state);
+    legacy.remove(LEGACY_CREDENTIALS_KEY);
+    return state;
   }
 
-  logout(): void {
+  private async persist(): Promise<void> {
+    await this.deps.vault.save({ pairings: this.list, active: this.creds?.hostDeviceId });
+    for (const listener of [...this.changeListeners]) listener();
+  }
+
+  /** Makes another pairing active. The caller reconnects. */
+  async select(hostDeviceId: string): Promise<void> {
+    const next = this.list.find((p) => p.hostDeviceId === hostDeviceId);
+    if (!next || next === this.creds) return;
+    this.disconnect();
+    this.creds = next;
+    this.mirrorCache = null;
+    await this.persist();
+  }
+
+  private disconnect(): void {
     this.connectAttempt++;
     this.socket?.close();
     this.socket = null;
     this.session = null;
-    this.creds = null;
-    this.access = null;
-    this.deps.storage.remove(CREDS_KEY);
+    this.earlyFrames = [];
   }
 
-  /** Enters a pairing code, claims it with a fresh identity, polls until the desktop approves. */
+  /** Forgets every pairing locally, without telling the relay (tests and a full reset). */
+  async logout(): Promise<void> {
+    this.disconnect();
+    this.list = [];
+    this.creds = null;
+    this.access.clear();
+    this.deps.legacy?.remove(LEGACY_CREDENTIALS_KEY);
+    await this.deps.vault.clear();
+    for (const listener of [...this.changeListeners]) listener();
+  }
+
+  /** Unpairs the active computer: revokes this browser's device at the relay, then forgets the
+   *  pairing locally. A relay that is unreachable or already forgot the device does not keep a
+   *  local copy alive. */
+  async unpair(): Promise<void> {
+    const pairing = this.creds;
+    if (!pairing) return;
+    try {
+      await this.revokeDevice(pairing.webDeviceId);
+    } catch {
+      // Best effort: the pairing goes locally either way.
+    }
+    await this.forget([pairing]);
+  }
+
+  private async forget(pairings: WebCredentials[]): Promise<void> {
+    if (!pairings.length) return;
+    if (this.creds && pairings.includes(this.creds)) {
+      this.disconnect();
+      this.creds = null;
+      this.mirrorCache = null;
+    }
+    for (const p of pairings) this.access.delete(p.webDeviceId);
+    this.list = this.list.filter((p) => !pairings.includes(p));
+    this.creds ??= this.list[0] ?? null;
+    await this.persist();
+  }
+
+  /** Enters a pairing code, claims it with a fresh identity, polls until the desktop approves.
+   *  The new pairing is added and made active. */
   async pair(input: { relayBase: string; code: string; deviceName: string }): Promise<WebCredentials> {
     const doFetch = this.deps.fetchImpl ?? fetch;
     const base = input.relayBase.replace(/\/$/, '');
     const code = input.code.trim().toUpperCase();
-    const identity = await (this.deps.newIdentity ?? generateIdentity)();
+    const identity = await (this.deps.newIdentity ?? generateKeyIdentity)();
     const claim = await doFetch(`${base}/v1/pair/claim`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ code, webPub: publicOf(identity), name: input.deviceName })
     });
+    if (claim.status === 409) throw new Error('this account already has the maximum number of paired browsers; revoke one first');
     if (!claim.ok) throw new Error(`claim failed: ${claim.status}`);
     const { pollToken } = (await claim.json()) as { pollToken?: string };
     if (typeof pollToken !== 'string' || !pollToken) throw new Error('claim did not return a poll capability');
@@ -157,31 +289,35 @@ export class RelayClient {
         // The relay sealed this browser's credential to the key it claimed with; only this
         // identity can open it, and only as this code's approved device.
         const webToken = await openSealedToKey(identity.enc, poll.sealedToken, pairingTokenContext(code, poll.webDeviceId));
-        this.creds = { relayBase: base, webToken, webDeviceId: poll.webDeviceId, hostPub: poll.hostPub, hostDeviceId: poll.hostDeviceId, identity };
-        this.access = null;
-        this.deps.storage.set(CREDS_KEY, JSON.stringify(this.creds));
-        return this.creds;
+        const pairing: WebCredentials = { relayBase: base, webToken, webDeviceId: poll.webDeviceId, hostDeviceId: poll.hostDeviceId, hostName: poll.hostName ?? 'Computer', hostPub: poll.hostPub, identity, pairedAt: now() };
+        // Pairing a computer again replaces the old pairing; its device must not linger at the
+        // relay (it would count against the device cap and keep a credential alive).
+        const previous = this.list.filter((p) => p.hostDeviceId === pairing.hostDeviceId && p.relayBase === base);
+        for (const old of previous) await this.revokeWith(old, old.webDeviceId).catch(() => undefined);
+        this.disconnect();
+        this.list = [...this.list.filter((p) => !previous.includes(p)), pairing];
+        this.creds = pairing;
+        this.mirrorCache = null;
+        await this.persist();
+        return pairing;
       }
       if (poll.status === 'denied') throw new Error('pairing denied on the desktop');
       if (poll.status === 'expired') throw new Error('pairing code expired');
     }
   }
 
-  /** Opens the relay socket and performs the e2e handshake with the paired host. */
+  /** Opens the relay socket and performs the e2e handshake with the active computer. */
   async connect(onClose?: () => void): Promise<void> {
     const creds = this.creds;
     if (!creds) throw new Error('not paired');
-    const attempt = ++this.connectAttempt;
     // A retry after a failed handshake opens a fresh socket; close the stale one so repeated
     // attempts cannot leak connections, and drop frames buffered for the abandoned session.
-    this.socket?.close();
-    this.socket = null;
-    this.session = null;
-    this.earlyFrames = [];
+    this.disconnect();
+    const attempt = this.connectAttempt;
     const base = creds.relayBase.replace(/\/$/, '');
     // The socket URL carries a 30-second single-use ticket, bought with an access token in a
     // header: neither credential ever appears in a URL.
-    const response = await this.relayFetch('/v1/ws/ticket', { method: 'POST' });
+    const response = await this.relayFetch(creds, '/v1/ws/ticket', { method: 'POST' });
     if (!response.ok) throw new Error(`socket ticket failed: ${response.status}`);
     const { ticket } = (await response.json()) as { ticket?: unknown };
     if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) throw new Error('invalid socket ticket');
@@ -271,9 +407,12 @@ export class RelayClient {
       return;
     }
     if (inner.type === 'mirror.key' && typeof inner.key === 'string' && this.creds) {
-      // The desktop hands the key over on every connect, so a browser that lost it recovers.
-      this.creds.mirrorKey = inner.key;
-      this.deps.storage.set(CREDS_KEY, JSON.stringify(this.creds));
+      // The desktop hands the key over on every connect (and again when it re-keys the mirror),
+      // so a browser that lost it or holds an old one recovers.
+      if (this.creds.mirrorKey !== inner.key) {
+        this.creds.mirrorKey = inner.key;
+        await this.persist();
+      }
       return;
     }
     if (inner.type === 'push' && inner.channel) {
@@ -311,31 +450,31 @@ export class RelayClient {
     });
   }
 
-  credentials(): WebCredentials | null {
-    return this.creds;
-  }
-
-  /** A short-lived access token for this pairing, refreshed a minute before expiry (§6.2).
+  /** A short-lived access token for a pairing, refreshed a minute before expiry (§6.2).
    *  Concurrent callers share one refresh. */
-  private async accessToken(): Promise<string> {
-    const creds = this.creds;
-    if (!creds) throw new Error('not paired');
-    const cached = this.access;
-    if (cached && cached.deviceId === creds.webDeviceId && cached.expiresAt - (this.deps.now ?? Date.now)() > ACCESS_REFRESH_MARGIN_MS) return cached.token;
-    this.refreshing ??= this.refreshAccess(creds).finally(() => {
-      this.refreshing = null;
-    });
-    return this.refreshing;
+  private async accessToken(creds: WebCredentials): Promise<string> {
+    const cached = this.access.get(creds.webDeviceId);
+    if (cached && cached.expiresAt - (this.deps.now ?? Date.now)() > ACCESS_REFRESH_MARGIN_MS) return cached.token;
+    let running = this.refreshing.get(creds.webDeviceId);
+    if (!running) {
+      running = this.refreshAccess(creds).finally(() => this.refreshing.delete(creds.webDeviceId));
+      this.refreshing.set(creds.webDeviceId, running);
+    }
+    return running;
   }
 
   /** Proof of possession: the refresh credential buys a one-time challenge, this browser's
-   *  device key signs it, and only that signature buys an access token. */
+   *  device key signs it, and only that signature buys an access token. A pairing the relay no
+   *  longer knows is forgotten. */
   private async refreshAccess(creds: WebCredentials): Promise<string> {
     const doFetch = this.deps.fetchImpl ?? fetch;
     const base = creds.relayBase.replace(/\/$/, '');
     const query = `?device=${encodeURIComponent(creds.webDeviceId)}`;
     const challengeRes = await doFetch(`${base}/v1/token/challenge${query}`, { method: 'POST', headers: { authorization: `Bearer ${creds.webToken}` } });
-    if (challengeRes.status === 401) throw new PairingRevokedError();
+    if (challengeRes.status === 401) {
+      await this.forget(this.list.filter((p) => p === creds));
+      throw new PairingRevokedError(creds.hostName ?? 'Computer');
+    }
     if (!challengeRes.ok) throw new Error(`token challenge failed: ${challengeRes.status}`);
     const { challenge } = (await challengeRes.json()) as { challenge?: unknown };
     if (typeof challenge !== 'string' || !challenge) throw new Error('relay returned no token challenge');
@@ -348,38 +487,44 @@ export class RelayClient {
     if (!tokenRes.ok) throw new Error(`token request failed: ${tokenRes.status}`);
     const body = (await tokenRes.json()) as { accessToken?: unknown; expiresAt?: unknown };
     if (typeof body.accessToken !== 'string' || typeof body.expiresAt !== 'number') throw new Error('relay returned no access token');
-    if (this.creds === creds) this.access = { token: body.accessToken, expiresAt: body.expiresAt, deviceId: creds.webDeviceId };
+    this.access.set(creds.webDeviceId, { token: body.accessToken, expiresAt: body.expiresAt });
     return body.accessToken;
   }
 
-  /** An authenticated relay REST call as this browser. A 401 means the access token expired or
-   *  was dropped: prove possession once more and retry, then report whatever the relay says. */
-  private async relayFetch(path: string, init: RequestInit = {}): Promise<Response> {
-    const creds = this.creds;
-    if (!creds) throw new Error('not paired');
+  /** An authenticated relay REST call as one pairing's device. A 401 means the access token
+   *  expired or was dropped: prove possession once more and retry, then report what the relay says. */
+  private async relayFetch(creds: WebCredentials, path: string, init: RequestInit = {}): Promise<Response> {
     const doFetch = this.deps.fetchImpl ?? fetch;
     const url = `${creds.relayBase.replace(/\/$/, '')}${path}${path.includes('?') ? '&' : '?'}device=${encodeURIComponent(creds.webDeviceId)}`;
     for (let attempt = 0; ; attempt++) {
-      const token = await this.accessToken();
+      const token = await this.accessToken(creds);
       const res = await doFetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
       if (res.status !== 401 || attempt > 0) return res;
-      if (this.access?.token === token) this.access = null;
+      if (this.access.get(creds.webDeviceId)?.token === token) this.access.delete(creds.webDeviceId);
     }
   }
 
-  /** Lists every device paired with the account (P4 device management), via the relay REST surface. */
+  /** Lists every device paired with the account (P4 device management), with live presence. */
   async listDevices(): Promise<RemoteDeviceInfo[]> {
     if (!this.creds) return [];
-    const res = await this.relayFetch('/v1/devices');
+    const res = await this.relayFetch(this.creds, '/v1/devices');
     if (!res.ok) throw new Error(`devices failed: ${res.status}`);
     return (await res.json()) as RemoteDeviceInfo[];
   }
 
-  /** Revokes any paired device — another browser, the desktop, or this browser itself. */
+  /** Revokes any paired device — another browser, a computer, or this browser itself. Local
+   *  pairings the revocation ended (this browser's, or ones through a revoked computer) go too. */
   async revokeDevice(deviceId: string): Promise<void> {
     if (!this.creds) return;
-    const res = await this.relayFetch(`/v1/devices?target=${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
+    const revoked = await this.revokeWith(this.creds, deviceId);
+    await this.forget(this.list.filter((p) => revoked.includes(p.webDeviceId) || revoked.includes(p.hostDeviceId)));
+  }
+
+  private async revokeWith(creds: WebCredentials, deviceId: string): Promise<string[]> {
+    const res = await this.relayFetch(creds, `/v1/devices?target=${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
+    const body = (await res.json().catch(() => ({}))) as { revoked?: unknown };
+    return Array.isArray(body.revoked) ? body.revoked.map(String) : [deviceId];
   }
 
   /** True once the desktop has handed over the mirror key (it does so on every connect). */
@@ -414,7 +559,7 @@ export class RelayClient {
   /** Reads an opaque mirror blob from the relay; the caller decrypts it. */
   private async mirrorFetch(path: string): Promise<{ iv: string; ct: string } | null> {
     if (!this.creds) return null;
-    const res = await this.relayFetch(`${path}?host=${encodeURIComponent(this.creds.hostDeviceId)}`);
+    const res = await this.relayFetch(this.creds, `${path}?host=${encodeURIComponent(this.creds.hostDeviceId)}`);
     if (!res.ok) throw new Error(`mirror fetch failed: ${res.status}`);
     const body = (await res.json()) as { iv?: string; ct?: string } | null;
     return body && typeof body.iv === 'string' && typeof body.ct === 'string' ? { iv: body.iv, ct: body.ct } : null;

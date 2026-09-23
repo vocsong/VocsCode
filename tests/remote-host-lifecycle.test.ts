@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
-import { RelayClient, type WebCredentials } from '../relay/src/web-client';
+import { memoryVault, RelayClient, type WebCredentials } from '../relay/src/web-client';
 import { RemoteAudit } from '../src/main/remote/audit';
 import { RemoteHost } from '../src/main/remote/host';
 import type { HandlerRegistry } from '../src/main/handlers';
@@ -50,7 +50,7 @@ interface Rig {
   secrets: Map<string, string>;
   audit: RemoteAudit;
   rotations: () => number;
-  browser: () => { client: RelayClient; storage: Map<string, string> };
+  browser: () => { client: RelayClient };
   pair: (client: RelayClient, name: string) => Promise<WebCredentials>;
   cleanup: () => Promise<void>;
 }
@@ -87,10 +87,9 @@ async function rig(): Promise<Rig> {
     audit,
     rotations: () => rotated,
     browser: () => {
-      const storage = new Map<string, string>();
-      const client = new RelayClient({ storage: { get: (k) => storage.get(k) ?? null, set: (k, v) => void storage.set(k, v), remove: (k) => void storage.delete(k) }, wsFactory });
+      const client = new RelayClient({ vault: memoryVault(), wsFactory });
       clients.push(client);
-      return { client, storage };
+      return { client };
     },
     pair: async (client, name) => {
       const { code } = await host.startPairing('Lifecycle PC');
@@ -102,7 +101,7 @@ async function rig(): Promise<Rig> {
       return creds;
     },
     cleanup: async () => {
-      for (const client of clients) client.logout();
+      for (const client of clients) await client.logout();
       await host.disable();
       await relay.stop();
       await audit.flush();

@@ -1473,6 +1473,8 @@ export interface RemoteDeviceInfo {
   name: string;
   platform: string;
   lastSeen: number;
+  /** Connected to the relay right now (absent from relays that predate presence). */
+  online?: boolean;
 }
 
 export interface DoctorReport {
