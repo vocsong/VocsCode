@@ -14,6 +14,7 @@ import { useStore } from '../store';
 import { systemPrefersDark } from '../theme';
 import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
+import { PairingQr } from './PairingQr';
 import { PiSection } from './PiSettings';
 
 type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
@@ -1181,6 +1182,9 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
                     Copy link
                   </Button>
                 </div>
+              </Field>
+              <Field label="Scan to pair" hint="Point a phone camera at the code to open the pairing link. The request still needs your approval here.">
+                <PairingQr link={pairingLink} />
               </Field>
             </div>
           ) : (

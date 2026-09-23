@@ -14,6 +14,7 @@ import { _electron as electron, type ElectronApplication, type Page } from 'play
 import { isolatedEnv, seedSettings } from './e2e-ui';
 import { ENROLL, FakeRelay } from './fake-relay';
 import { generateIdentity, publicOf } from '../src/shared/crypto';
+import { decodeQrPath } from './support/qr-decode';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -91,6 +92,10 @@ describe.runIf(enabled)('remote access settings', () => {
     // The link opens the relay this desktop is connected to: the page claims against its own origin.
     const pairingLink = `http://127.0.0.1:${port}/app?code=${pairingCode}`;
     expect(await win.getByTestId('remote-pair-link').inputValue()).toBe(pairingLink);
+    // The QR code a phone scans decodes to the same link.
+    const qr = win.getByTestId('remote-pair-qr');
+    const extent = Number((await qr.getAttribute('viewBox'))!.split(' ')[2]);
+    expect(decodeQrPath((await qr.locator('path').getAttribute('d'))!, extent)).toBe(pairingLink);
     await win.getByRole('button', { name: 'Copy link' }).click();
     await expect.poll(() => app!.evaluate(({ clipboard }) => clipboard.readText()), { timeout: 10_000 }).toBe(pairingLink);
 

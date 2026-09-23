@@ -14,6 +14,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { SettingsView } from '../src/renderer/src/components/SettingsView';
 import { useStore } from '../src/renderer/src/store';
 import type { AppSettings, RemoteAuditEntry, RemoteState } from '../src/shared/types';
+import { decodeQrPath } from './support/qr-decode';
 
 const baseSettings = {
   theme: 'system',
@@ -32,8 +33,8 @@ const baseSettings = {
   remote: { enabled: true, relayUrl: 'https://relay.example' }
 } as unknown as AppSettings;
 
-function remoteResult(viewOnly: boolean, audit: RemoteAuditEntry[] = []) {
-  const state: RemoteState = { status: 'online', onlineClients: ['w_1'], viewOnly };
+function remoteResult(viewOnly: boolean, audit: RemoteAuditEntry[] = [], extra: Partial<RemoteState> = {}) {
+  const state: RemoteState = { status: 'online', onlineClients: ['w_1'], viewOnly, ...extra };
   return {
     config: { enabled: true, relayUrl: 'https://relay.example', viewOnly },
     state,
@@ -45,9 +46,9 @@ function remoteResult(viewOnly: boolean, audit: RemoteAuditEntry[] = []) {
   };
 }
 
-function renderRemote(audit: RemoteAuditEntry[] = [], viewOnly = false): void {
+function renderRemote(audit: RemoteAuditEntry[] = [], viewOnly = false, extra: Partial<RemoteState> = {}): void {
   invokeMock.mockImplementation((channel: string) => {
-    if (channel === 'remote:get') return Promise.resolve(remoteResult(viewOnly, audit));
+    if (channel === 'remote:get') return Promise.resolve(remoteResult(viewOnly, audit, extra));
     return Promise.resolve({});
   });
   useStore.setState({ settings: { ...baseSettings } as AppSettings });
@@ -97,6 +98,16 @@ describe('remote access settings (P4)', () => {
     expect(toggle.checked).toBe(false);
     fireEvent.click(toggle);
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:setViewOnly', { viewOnly: true }));
+  });
+
+  it('shows a live pairing code as a link and a QR code that both open this relay', async () => {
+    renderRemote([], false, { pairing: { code: 'ABCD2345', expiresAt: Date.now() + 120_000 } });
+    const link = (await screen.findByTestId('remote-pair-link')) as HTMLInputElement;
+    // The page claims against its own origin, so the link must be the configured relay's.
+    expect(link.value).toBe('https://relay.example/app?code=ABCD2345');
+    const qr = screen.getByTestId('remote-pair-qr');
+    const extent = Number(qr.getAttribute('viewBox')?.split(' ')[2]);
+    expect(decodeQrPath(qr.querySelector('path')!.getAttribute('d')!, extent)).toBe(link.value);
   });
 
   it('toggles the offline mirror through remote:setMirror', async () => {
