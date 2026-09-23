@@ -111,6 +111,31 @@ describe('Claude adapter turn-state tracking', () => {
     expect(final?.type === 'usage' && final.totals).toMatchObject({ inputTokens: 100, outputTokens: 5, cacheReadTokens: 10, costUsd: 0.2, turns: 1 });
   });
 
+  /** Each assistant row's final state (id → streaming, text) as the transcript would hold it. */
+  const assistantRows = (events: SessionEvent[]) => {
+    const rows = new Map<string, { streaming: boolean; text: string }>();
+    for (const e of events) if (e.type === 'item.upsert' && e.item.kind === 'assistant') rows.set(e.item.id, { streaming: !!e.item.streaming, text: e.item.text });
+    return [...rows.values()];
+  };
+
+  // A row left streaming keeps its turn's "Working…" header spinning after the turn is over.
+  it('leaves no assistant row streaming when a message carried only a tool call', () => {
+    const { ctx, events } = stubCtx();
+    const a = new ClaudeAdapter(ctx);
+    // A bare tool call: its input streams as input_json_delta and omitted thinking as
+    // signature_delta, so no text or thinking ever lands in a bubble.
+    feed(a, { type: 'stream_event', event: { type: 'message_start', message: { model: 'claude-x' } } });
+    feed(a, { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'signature_delta', signature: 'sig' } } });
+    feed(a, { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '{"file_path":' } } });
+    feed(a, { type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 'sig' }, { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'a.ts' } }], model: 'claude-x' } });
+    feed(a, { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: 'ok' }] }] } });
+    feed(a, { type: 'stream_event', event: { type: 'message_start', message: { model: 'claude-x' } } });
+    feed(a, streamEvent('text_delta', 'done'));
+    feed(a, { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], model: 'claude-x' } });
+    feed(a, { type: 'result', subtype: 'success', duration_ms: 500 });
+    expect(assistantRows(events)).toEqual([{ streaming: false, text: 'done' }]);
+  });
+
   it('a tool result user message does not flip idle to running', () => {
     const { ctx } = stubCtx();
     const a = new ClaudeAdapter(ctx);

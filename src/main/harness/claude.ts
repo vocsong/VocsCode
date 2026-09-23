@@ -631,13 +631,15 @@ export class ClaudeAdapter implements HarnessAdapter {
         if (msg.parent_tool_use_id) return; // nested subagent streams are summarized via tool items
         const ev = msg.event as { type: string; index?: number; content_block?: ContentBlockLike; delta?: { type: string; text?: string; thinking?: string }; message?: { model?: string; usage?: Record<string, unknown> }; usage?: Record<string, unknown>; output_tokens?: number };
         if (!msg.parent_tool_use_id) this.reportStreamUsage(ev);
-        if (ev.type === 'message_start') this.ensureAssistant();
+        // The bubble opens on its first text or thinking: a message can be a bare tool call (its
+        // input streams as input_json_delta, omitted thinking as signature_delta) with nothing to show.
         if (ev.type === 'content_block_delta' && ev.delta) {
-          const a = this.ensureAssistant();
           if (ev.delta.type === 'text_delta' && ev.delta.text) {
+            const a = this.ensureAssistant();
             a.text += ev.delta.text;
             this.ctx.emit({ type: 'item.delta', id: a.id, textDelta: ev.delta.text });
           } else if (ev.delta.type === 'thinking_delta' && ev.delta.thinking) {
+            const a = this.ensureAssistant();
             a.thinking += ev.delta.thinking;
             this.ctx.emit({ type: 'item.delta', id: a.id, thinkingDelta: ev.delta.thinking });
           }
@@ -652,10 +654,12 @@ export class ClaudeAdapter implements HarnessAdapter {
         if (msg.parent_tool_use_id) this.subagents.onNestedAssistant(msg.parent_tool_use_id, msg as unknown as NestedAssistantLike);
         for (const block of content) {
           if (block.type === 'text' && !msg.parent_tool_use_id) {
+            if (!block.text && !this.currentAssistant) continue;
             const a = this.ensureAssistant();
             if (block.text && block.text.length >= a.text.length) a.text = block.text;
             this.ctx.emit({ type: 'item.upsert', item: { id: a.id, kind: 'assistant', ts: Date.now(), text: a.text, thinking: a.thinking || undefined, model: msg.message.model, streaming: true } });
           } else if (block.type === 'thinking' && !msg.parent_tool_use_id) {
+            if (!block.thinking && !this.currentAssistant) continue;
             const a = this.ensureAssistant();
             if (block.thinking && block.thinking.length >= a.thinking.length) a.thinking = block.thinking;
           } else if (block.type === 'tool_use' && block.id && block.name) {
@@ -783,7 +787,8 @@ export class ClaudeAdapter implements HarnessAdapter {
     const a = this.currentAssistant;
     if (!a) return;
     this.currentAssistant = null;
-    if (!a.text && !a.thinking) return;
+    // Settle it even when empty: ensureAssistant already announced it as streaming, and a row left
+    // streaming keeps its turn's "Working…" header spinning after the turn has ended.
     this.ctx.emit({ type: 'item.upsert', item: { id: a.id, kind: 'assistant', ts: Date.now(), text: a.text, thinking: a.thinking || undefined, model, streaming: false } });
   }
 
