@@ -10,6 +10,7 @@ on:
       - 'relay/**'
       - 'src/shared/crypto.ts'
       - 'src/shared/mirror.ts'
+      - 'src/shared/pairing.ts'
       - 'src/shared/types.ts'
   workflow_dispatch:
 
@@ -35,7 +36,8 @@ jobs:
         env:
           NODE_ENV: development
       - run: npm run typecheck:relay && npm run typecheck:relay-test && npm run typecheck:page
-      - run: npx vitest run tests/relay-core.test.ts tests/relay-routes.test.ts tests/remote-e2e.test.ts tests/remote-mirror.test.ts tests/web-client.test.ts tests/relay-page-layout.test.ts
+      # The relay's own suites, then the full flow against this checkout's Worker in local workerd.
+      - run: npx vitest run tests/relay-core.test.ts tests/relay-routes.test.ts tests/relay-edge.test.ts tests/remote-e2e.test.ts tests/remote-mirror.test.ts tests/remote-host-lifecycle.test.ts tests/web-client.test.ts tests/browser-socket.test.ts tests/relay-page-layout.test.ts tests/remote-workerd.test.ts
       - run: npm run test:relay-do
       # Never publish a stale checked-in bundle when page.ts changes.
       - run: npm run relay:page && git diff --exit-code -- relay/public/app/app.js
