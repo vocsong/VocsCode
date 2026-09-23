@@ -8,7 +8,7 @@
  *  runtime: the Durable Object, its storage adapter, WebSocket hibernation and frame routing. */
 import { resolvePairing, type RelayStore } from './core';
 import { FixedWindowLimiter } from './rate';
-import { authorizeSocket, handleHttp, json, type RouteContext } from './routes';
+import { authorizeSocket, BROADCAST_TAG, handleHttp, json, type RouteContext } from './routes';
 
 export interface Env {
   HUB: DurableObjectNamespace;
@@ -68,7 +68,9 @@ export class Hub {
       const auth = await authorizeSocket(kind, request, this.context(request));
       if (!auth.ok) return json({ error: auth.error }, auth.status);
       const pair = new WebSocketPair();
-      this.state.acceptWebSocket(pair[1], [`${kind}:${auth.deviceId}`]);
+      // Targeted tag for routing to this device, plus the broadcast tag for fan-out; DO tag
+      // matching is exact, so the bare tag has to be carried explicitly.
+      this.state.acceptWebSocket(pair[1], [`${kind}:${auth.deviceId}`, BROADCAST_TAG[kind]]);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
     return handleHttp(request, this.context(request));
@@ -86,7 +88,7 @@ export class Hub {
     }
     await this.state.storage.delete(key);
     // Tell hosts this client is back.
-    for (const host of this.state.getWebSockets('host:')) host.send(JSON.stringify({ t: 'client.here', client: clientId }));
+    for (const host of this.state.getWebSockets(BROADCAST_TAG.host)) host.send(JSON.stringify({ t: 'client.here', client: clientId }));
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -108,8 +110,8 @@ export class Hub {
     const tags = this.state.getTags(ws);
     const clientId = tags.find((t) => t.startsWith('client:'))?.slice(7);
     const hostId = tags.find((t) => t.startsWith('host:'))?.slice(5);
-    if (clientId) for (const host of this.state.getWebSockets('host:')) host.send(JSON.stringify({ t: 'client.gone', client: clientId }));
-    if (hostId) for (const client of this.state.getWebSockets('client:')) client.send(JSON.stringify({ t: 'host.gone', host: hostId }));
+    if (clientId) for (const host of this.state.getWebSockets(BROADCAST_TAG.host)) host.send(JSON.stringify({ t: 'client.gone', client: clientId }));
+    if (hostId) for (const client of this.state.getWebSockets(BROADCAST_TAG.client)) client.send(JSON.stringify({ t: 'host.gone', host: hostId }));
   }
 
   private async fromHost(ws: WebSocket, hostId: string, msg: HostIn): Promise<void> {
