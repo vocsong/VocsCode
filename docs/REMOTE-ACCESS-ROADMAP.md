@@ -289,8 +289,8 @@ Gotchas:
 
 | Secret | Where | Used by | Rotation |
 | --- | --- | --- | --- |
-| `ENROLL_TOKEN` | relay Worker secret; desktop keychain (`Settings → Remote access`) | a desktop's first pairing | [runbook](../relay/README.md#enrollment-secret); paired desktops keep working |
-| Device refresh credentials | desktop keychain; browser IndexedDB | buying access tokens, with a device-key signature | revoke the device; re-pair |
+| `ENROLL_TOKEN` | relay Worker secret; desktop secret store (`secrets.ts`, safeStorage), entered in `Settings → Remote access` | a desktop's first pairing | [runbook](../relay/README.md#enrollment-secret); paired desktops keep working |
+| Device refresh credentials | desktop secret store (`secrets.ts`, safeStorage); browser IndexedDB | buying access tokens, with a device-key signature | revoke the device; re-pair |
 | `SESSION_SECRET` | landing `vocs-code` Worker secret (not provisioned) | session and OAuth state signing (§2.1) | invalidates all sessions |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | landing Worker secrets (not provisioned) | GitHub OAuth (§2.1) | rotate in the GitHub app settings |
 | `ALLOWED_LOGINS` | landing Worker secret (not provisioned) | who may log in (§2.1) | update and invalidate excluded logins immediately |
