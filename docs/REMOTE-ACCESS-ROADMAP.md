@@ -5,8 +5,9 @@ design and decisions of record** — this file is the working backlog: what is l
 what to do next, in what order, and how each piece is verified. Update it as workstreams land;
 do not restate the design here.
 
-Last reviewed 2026-09-24 against the deployed relay and the implementation branch of PR #394. The
-first table is **production**; nothing on the branch is live until it is merged and deployed.
+Last reviewed 2026-09-24 against the deployed relay and the implementation branch, PR #407 (which
+completes #394). The first table is **production**; nothing on the branch is live until it is
+merged and deployed.
 
 ## 1. Status snapshot
 
@@ -25,7 +26,7 @@ fixed on the branch), so production almost certainly holds orphaned host devices
 Clean both up after deploying: Settings → Remote access lists every device, and **Revoke all**
 removes everything but the computer pulling it.
 
-### Implementation branch (PR #394)
+### Implementation branch (PR #407, completing #394)
 
 Every roadmap item below that does not need a credential, a production action or the separate
 `vocs.io` repo is implemented and verified: offline suites, the Hub in workerd
@@ -196,7 +197,8 @@ unvalidated names and keys.
 
 ## 3. Order of operations
 
-1. **Review and merge #394** (security review: tokens, keys, sealing, revocation).
+1. **Review and merge #407** (security review: tokens, keys, sealing, revocation). It contains
+   #394, which it supersedes.
 2. **Provision** `relay-production` secrets; **deploy** the relay (workflow or runbook) and release
    the desktop update together.
 3. **Verify live:** Appendix A, then `npm run test:remote-live` against `code.vocs.io`.
