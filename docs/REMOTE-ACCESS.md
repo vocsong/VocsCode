@@ -116,7 +116,7 @@ New pieces:
    routing is keyed by `(account, host)` and every frame carries the target host id, so
    the web client can browse and drive any of its paired instances.
 3. **Web client** — served at `code.vocs.io/app` on the **same origin as the landing page**: the
-   landing Worker owns the hostname and forwards `/app`, `/v1` and `/ws` to the relay Worker
+   landing Worker owns the hostname and forwards `/app` and `/v1` to the relay Worker
    (service binding), so the app, the API and the WebSocket share one origin with no CORS and no
    second DNS record. It is never pointed at a local machine's server; it reaches desktops only
    through the relay. A distinct web shell around the reused renderer core — different
@@ -230,8 +230,8 @@ transcript while the desktop is unreachable. The relay's HTTP surface is now a
 whole surface is unit-tested in plain Node (`tests/relay-routes.test.ts`) instead of relying on
 review. The public pairing endpoints also carry in-memory fixed-window rate limits.
 **Deployed.** The relay runs at `https://vocs-relay.vocs.workers.dev` (Worker + one Hub Durable
-Object + the `ENROLL_TOKEN` secret), and the landing Worker at `code.vocs.io` forwards `/app`,
-`/v1` and `/ws` to it through a service binding — one origin, no CORS, no second DNS record
+Object + the `ENROLL_TOKEN` secret), and the landing Worker at `code.vocs.io` forwards `/app`
+and `/v1` — REST plus the WebSocket endpoints under `/v1/ws/*` — to it through a service binding — one origin, no CORS, no second DNS record
 (vocs.io PR #18). Verified live: `/app/` serves the web client, `/v1/devices` is 401 without a
 device token, `/v1/pair/start` is 403 without the enrollment secret and mints a code with it, and
 an enrolling-host WebSocket opens while a bad token is refused.
