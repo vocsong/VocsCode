@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { abortAllDurableObjects, evictDurableObject, runInDurableObject, SELF } from 'cloudflare:test';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { hashToken } from '../src/core';
 import { generateIdentity, openSealedToKey, pairingDecisionPayload, pairingTokenContext, publicOf, sign, tokenProofPayload, type Identity, type SealedToKey } from '../../src/shared/crypto';
 import type { Env as RelayEnv } from '../src/worker';
@@ -15,8 +15,18 @@ declare global {
 const sockets = new Set<WebSocket>();
 const hub = () => env.HUB.get(env.HUB.idFromName(env.RELAY_ACCOUNT));
 
+/** Each test is its own caller: edge rate-limit counters, unlike the Hub's in-memory ones, outlive
+ *  the Durable Object between tests. */
+let callerIp = '203.0.113.1';
+let callers = 0;
+beforeEach(() => {
+  callerIp = `203.0.113.${(++callers % 250) + 1}`;
+});
+
 async function request(path: string, init?: RequestInit): Promise<Response> {
-  return SELF.fetch(new Request(`https://relay.test${path}`, init));
+  const headers = new Headers(init?.headers);
+  if (!headers.has('cf-connecting-ip')) headers.set('cf-connecting-ip', callerIp);
+  return SELF.fetch(new Request(`https://relay.test${path}`, { ...init, headers }));
 }
 
 function message(ws: WebSocket): Promise<Record<string, unknown>> {
@@ -292,6 +302,23 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(await closed).toBe(1008);
     expect(await notice).toEqual({ t: 'device.revoked', devices: [webId] });
     expect(await presence()).toEqual({ [hostId]: true });
+  });
+
+  it('refuses pairing traffic at the edge once the budget is spent, before the Hub is asked', async () => {
+    expect(typeof env.PAIR_LIMIT?.limit).toBe('function');
+    expect(typeof env.POLL_LIMIT?.limit).toBe('function');
+    expect(typeof env.TOKEN_LIMIT?.limit).toBe('function');
+    const claim = () => request('/v1/pair/claim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'ABCD2345', webPub: {} }) });
+    const statuses: Array<[number, string | null]> = [];
+    for (let i = 0; i < 11; i++) {
+      const res = await claim();
+      statuses.push([res.status, res.headers.get('x-relay-limit')]);
+    }
+    // Ten reach the Hub (and fail validation there); the eleventh never gets that far.
+    expect(statuses.slice(0, 10).every(([status, via]) => status === 400 && via === null)).toBe(true);
+    expect(statuses[10]).toEqual([429, 'edge']);
+    // Another address still gets through.
+    expect((await request('/v1/pair/claim', { method: 'POST', headers: { 'cf-connecting-ip': '198.51.100.200', 'content-type': 'application/json' }, body: '{}' })).status).toBe(400);
   });
 
   it('drops malformed and unsupported host frames without delivering them to a paired browser', async () => {

@@ -3,10 +3,12 @@
  *  plaintext. One Hub Durable Object per account hosts every socket.
  *
  *  This file is only the platform glue: the HTTP surface and its authentication live in the
- *  deny-by-default route table in ./routes, frame routing in ./hub and the pairing/registry logic
- *  in ./core — all Cloudflare-free and unit-tested in plain Node. What stays here is what genuinely
+ *  deny-by-default route table in ./routes, frame routing in ./hub, the entry's edge limits in
+ *  ./edge and the pairing/registry logic in ./core — all Cloudflare-free and unit-tested in
+ *  plain Node. What stays here is what genuinely
  *  needs the runtime: the Durable Object, its storage adapter and WebSocket hibernation. */
 import type { RelayStorage, RelayStore } from './core';
+import { forwardToHub } from './edge';
 import { HubRouter } from './hub';
 import { FixedWindowLimiter } from './rate';
 import { authorizeSocket, BROADCAST_TAG, handleHttp, json, type RouteContext } from './routes';
@@ -17,6 +19,10 @@ export interface Env {
   RELAY_ACCOUNT: string;
   /** Enrollment secret: the desktop must present it to request pairing codes. */
   ENROLL_TOKEN: string;
+  /** Edge rate limits (wrangler.jsonc `ratelimits`); absent from configs that predate them. */
+  PAIR_LIMIT?: RateLimit;
+  POLL_LIMIT?: RateLimit;
+  TOKEN_LIMIT?: RateLimit;
 }
 
 export class Hub {
@@ -111,12 +117,5 @@ export class Hub {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    if (!url.pathname.startsWith('/v1/')) return new Response('not found', { status: 404 });
-    const stub = env.HUB.get(env.HUB.idFromName(env.RELAY_ACCOUNT));
-    const inner = new URL(request.url);
-    inner.pathname = url.pathname.slice(3); // strip /v1
-    return stub.fetch(new Request(inner, request));
-  }
+  fetch: (request: Request, env: Env): Promise<Response> => forwardToHub(request, env, () => env.HUB.get(env.HUB.idFromName(env.RELAY_ACCOUNT)))
 } as ExportedHandler<Env>;
