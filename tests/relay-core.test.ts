@@ -2,29 +2,41 @@
  *  Runs in plain Node against an in-memory store — the DO is a thin binding over this. */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { generateIdentity, pairingDecisionPayload, publicOf, sign, type Identity } from '../src/shared/crypto';
-import { claimPairing, deviceInfos, hashToken, listDevices, listMirrorSessions, MirrorError, PAIRING_TTL_MS, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
+import { claimPairing, consumeSocketTicket, deviceInfos, hashToken, issueSocketTicket, listDevices, listMirrorSessions, MirrorError, PAIRING_TTL_MS, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyDeviceToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
 import type { PublicIdentity } from '../src/shared/crypto';
 
-function memStore(failPut?: (key: string) => boolean): RelayStore {
+function memStore(failWrite?: (key: string) => boolean): RelayStore {
   const map = new Map<string, unknown>();
+  let tail = Promise.resolve();
   const adapt = (target: Map<string, unknown>): RelayStorage => ({
     // DO storage deserializes on read. Returning the same object would mask competing claims.
     get: async <T,>(k: string) => target.has(k) ? structuredClone(target.get(k)) as T : undefined,
     put: async (k, v) => {
-      if (failPut?.(k)) throw new Error('injected storage failure');
+      if (failWrite?.(k)) throw new Error('injected storage failure');
       target.set(k, structuredClone(v));
     },
-    delete: async (k) => void target.delete(k),
+    delete: async (k) => {
+      if (failWrite?.(k)) throw new Error('injected storage failure');
+      target.delete(k);
+    },
     list: async <T,>(prefix: string) => [...target.entries()].filter(([k]) => k.startsWith(prefix)) as Array<[string, T]>
   });
   return {
     ...adapt(map),
     transaction: async (work) => {
-      const staged = new Map(structuredClone([...map]));
-      const result = await work(adapt(staged));
-      map.clear();
-      for (const [key, value] of staged) map.set(key, value);
-      return result;
+      const previous = tail;
+      let release!: () => void;
+      tail = new Promise<void>((resolve) => { release = resolve; });
+      await previous;
+      try {
+        const staged = new Map(structuredClone([...map]));
+        const result = await work(adapt(staged));
+        map.clear();
+        for (const [key, value] of staged) map.set(key, value);
+        return result;
+      } finally {
+        release();
+      }
     }
   };
 }
@@ -232,9 +244,12 @@ describe('relay pairing', () => {
     const verification = verifyDeviceToken(slowStore, { accountId: 'a', deviceId, token: webToken }, T0 + 1)
       .then(() => 'authorized', () => 'denied');
     await readStarted;
-    await revokeDevice(store, 'a', deviceId);
+    const revocation = revokeDevice(store, 'a', deviceId);
     releaseRead();
-    expect(await verification).toBe('denied');
+    // Whichever transaction wins first, the final state must be revoked, never
+    // resurrected by a last-seen write from an earlier verification.
+    await verification;
+    await revocation;
     expect(await listDevices(store, 'a')).toHaveLength(0);
     await expect(verifyDeviceToken(store, { accountId: 'a', deviceId, token: webToken }, T0 + 2)).rejects.toMatchObject({ code: 'invalid' });
   });
@@ -260,6 +275,88 @@ describe('relay pairing', () => {
     expect(shape).not.toContain(hostToken);
     // And each record is exactly the public shape, so a new private field cannot sneak out.
     for (const info of infos) expect(Object.keys(info).sort()).toEqual(['deviceId', 'kind', 'lastSeen', 'name', 'platform']);
+  });
+});
+
+describe('browser WebSocket upgrade tickets', () => {
+  it('stores only hashes, consumes once across competing upgrades and expires at 30 seconds', async () => {
+    const store = memStore();
+    const { deviceId, webToken } = await registerWebDevice(store, { accountId: 'a', name: 'browser', platform: 'web', pub: WEB_PUB }, T0);
+    const { ticket, expiresAt } = await issueSocketTicket(store, { accountId: 'a', deviceId, token: webToken }, T0);
+    expect(ticket).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(expiresAt).toBe(T0 + 30_000);
+    expect(SOCKET_TICKET_TTL_MS).toBe(30_000);
+    expect(JSON.stringify(await store.list('ws-ticket:'))).not.toContain(ticket);
+    expect(JSON.stringify(await store.list('ws-ticket:'))).not.toContain(webToken);
+    const settled = await Promise.allSettled([
+      consumeSocketTicket(store, { accountId: 'a', deviceId, ticket }, T0 + 1),
+      consumeSocketTicket(store, { accountId: 'a', deviceId, ticket }, T0 + 1)
+    ]);
+    expect(settled.filter((entry) => entry.status === 'fulfilled')).toHaveLength(1);
+    expect(settled.filter((entry) => entry.status === 'rejected')).toHaveLength(1);
+    expect(await store.list('ws-ticket:')).toHaveLength(0);
+    const next = await issueSocketTicket(store, { accountId: 'a', deviceId, token: webToken }, T0 + 2);
+    await expect(consumeSocketTicket(store, { accountId: 'a', deviceId, ticket: next.ticket }, next.expiresAt)).rejects.toMatchObject({ code: 'invalid' });
+    expect(await store.list('ws-ticket:')).toHaveLength(0);
+  });
+
+  it('replaces a prior ticket on issue and keeps exactly one bounded record per web device', async () => {
+    const store = memStore();
+    const { deviceId, webToken } = await registerWebDevice(store, { accountId: 'a', name: 'browser', platform: 'web', pub: WEB_PUB }, T0);
+    const first = await issueSocketTicket(store, { accountId: 'a', deviceId, token: webToken }, T0);
+    const second = await issueSocketTicket(store, { accountId: 'a', deviceId, token: webToken }, T0 + 1);
+    expect(await store.list('ws-ticket:')).toHaveLength(1);
+    await expect(consumeSocketTicket(store, { accountId: 'a', deviceId, ticket: first.ticket }, T0 + 2)).rejects.toMatchObject({ code: 'invalid' });
+    expect(await consumeSocketTicket(store, { accountId: 'a', deviceId, ticket: second.ticket }, T0 + 2)).toBe(deviceId);
+    for (let i = 0; i < 20; i++) await issueSocketTicket(store, { accountId: 'a', deviceId, token: webToken }, T0 + i);
+    expect(await store.list('ws-ticket:')).toHaveLength(1);
+  });
+
+  it('rejects wrong account, device, token and host; revocation removes every outstanding ticket', async () => {
+    const store = memStore();
+    const web = await registerWebDevice(store, { accountId: 'a', name: 'browser', platform: 'web', pub: WEB_PUB }, T0);
+    const other = await registerWebDevice(store, { accountId: 'a', name: 'other', platform: 'web', pub: WEB_PUB }, T0);
+    const host = await registerHostDevice(store, { accountId: 'a', name: 'host', platform: 'win', pub: HOST_PUB }, T0);
+    await expect(issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: 'wrong' }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    await expect(issueSocketTicket(store, { accountId: 'a', deviceId: host.deviceId, token: host.hostToken }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    const one = await issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.webToken }, T0);
+    await expect(consumeSocketTicket(store, { accountId: 'b', deviceId: web.deviceId, ticket: one.ticket }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    await expect(consumeSocketTicket(store, { accountId: 'a', deviceId: other.deviceId, ticket: one.ticket }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    await revokeDevice(store, 'a', web.deviceId);
+    expect(await store.list('ws-ticket:')).toHaveLength(0);
+    await expect(consumeSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, ticket: one.ticket }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    await expect(issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.webToken }, T0)).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it.each(['issue', 'consume', 'revoke'])('rolls back a %s storage failure and recovers', async (operation) => {
+    let failure = '';
+    const store = memStore((key) => key.startsWith('ws-ticket:') && failure === operation);
+    const web = await registerWebDevice(store, { accountId: 'a', name: 'browser', platform: 'web', pub: WEB_PUB }, T0);
+    if (operation === 'issue') {
+      failure = operation;
+      await expect(issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.webToken }, T0)).rejects.toThrow('injected storage failure');
+      expect(await store.list('ws-ticket:')).toHaveLength(0);
+      failure = '';
+    }
+    const { ticket } = await issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.webToken }, T0);
+    if (operation === 'consume') {
+      // The transaction must roll back even if deletion or the last-seen write fails.
+      failure = operation;
+      await expect(consumeSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, ticket }, T0 + 1)).rejects.toThrow('injected storage failure');
+      expect(await store.list('ws-ticket:')).toHaveLength(1);
+      failure = '';
+    }
+    if (operation === 'revoke') {
+      failure = operation;
+      await expect(revokeDevice(store, 'a', web.deviceId)).rejects.toThrow('injected storage failure');
+      expect(await listDevices(store, 'a')).toHaveLength(1);
+      failure = '';
+      await revokeDevice(store, 'a', web.deviceId);
+      await expect(consumeSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, ticket }, T0 + 1)).rejects.toMatchObject({ code: 'invalid' });
+    } else {
+      expect(await consumeSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, ticket }, T0 + 1)).toBe(web.deviceId);
+      expect(await store.list('ws-ticket:')).toHaveLength(0);
+    }
   });
 });
 

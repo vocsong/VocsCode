@@ -30,6 +30,9 @@ describe('web app layout (/app on the landing origin)', () => {
     expect(headers).toContain("default-src 'none'");
     expect(headers).toContain("script-src 'self'");
     expect(headers).toContain("frame-ancestors 'none'");
+    // app.js has an unversioned URL: caching old protocol code would fail reconnects after
+    // a relay rollout, so both the page and its bundle must be revalidated on each visit.
+    expect(headers).toMatch(/\/app\/\*[\s\S]*Cache-Control:\s*no-store/i);
     expect(headers).not.toMatch(/unsafe-inline|unsafe-eval/);
   });
 

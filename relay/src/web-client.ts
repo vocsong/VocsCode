@@ -77,6 +77,7 @@ export class RelayClient {
   private mirrorCache: { secret: string; value: CryptoKey } | null = null;
   /** Sealed frames that arrive while the handshake reply is still being finished. */
   private earlyFrames: Array<{ salt: string; seq: number; ct: string }> = [];
+  private connectAttempt = 0;
 
   constructor(
     private readonly deps: {
@@ -105,6 +106,7 @@ export class RelayClient {
   }
 
   logout(): void {
+    this.connectAttempt++;
     this.socket?.close();
     this.socket = null;
     this.session = null;
@@ -146,15 +148,25 @@ export class RelayClient {
 
   /** Opens the relay socket and performs the e2e handshake with the paired host. */
   async connect(onClose?: () => void): Promise<void> {
-    if (!this.creds) throw new Error('not paired');
+    const creds = this.creds;
+    if (!creds) throw new Error('not paired');
+    const attempt = ++this.connectAttempt;
     // A retry after a failed handshake opens a fresh socket; close the stale one so repeated
     // attempts cannot leak connections, and drop frames buffered for the abandoned session.
     this.socket?.close();
     this.socket = null;
     this.session = null;
     this.earlyFrames = [];
-    const base = this.creds.relayBase.replace(/^http/, 'ws').replace(/\/$/, '');
-    const url = `${base}/v1/ws/client?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}`;
+    const base = creds.relayBase.replace(/\/$/, '');
+    const response = await (this.deps.fetchImpl ?? fetch)(`${base}/v1/ws/ticket?device=${encodeURIComponent(creds.webDeviceId)}`, {
+      method: 'POST', headers: { authorization: `Bearer ${creds.webToken}` }
+    });
+    if (!response.ok) throw new Error(`socket ticket failed: ${response.status}`);
+    const { ticket } = (await response.json()) as { ticket?: unknown };
+    if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) throw new Error('invalid socket ticket');
+    if (attempt !== this.connectAttempt || this.creds !== creds) throw new Error('connection superseded');
+    const wsBase = base.replace(/^http/, 'ws');
+    const url = `${wsBase}/v1/ws/client?device=${encodeURIComponent(creds.webDeviceId)}&ticket=${encodeURIComponent(ticket)}`;
     let socket: SimpleSocket;
     const handleDrop = () => {
       if (this.socket !== socket) return;
@@ -170,15 +182,17 @@ export class RelayClient {
       : browserSocket(url, onMessage, handleDrop);
     this.socket = socket;
     // Bind to the host, then handshake over the relay (public values only).
-    this.socket.send(JSON.stringify({ t: 'hello', host: this.creds.hostDeviceId }));
-    const { hello, ephPriv } = await createHello(this.creds.identity);
-    this.socket.send(JSON.stringify({ t: 'hs', seq: 0, payload: hello }));
+    socket.send(JSON.stringify({ t: 'hello', host: creds.hostDeviceId }));
+    const { hello, ephPriv } = await createHello(creds.identity);
+    if (this.socket !== socket || attempt !== this.connectAttempt || this.creds !== creds) throw new Error('connection superseded');
+    socket.send(JSON.stringify({ t: 'hs', seq: 0, payload: hello }));
     const reply = await new Promise<never>((resolve, reject) => {
       this.hsWaiter = { resolve, reject };
       setTimeout(() => reject(new Error('handshake timed out')), 10_000);
     });
-    const session = await clientFinish(hello, ephPriv, reply, this.creds.hostPub, this.creds.identity);
-    if (this.socket !== socket) return;
+    if (this.socket !== socket || attempt !== this.connectAttempt) throw new Error('connection superseded');
+    const session = await clientFinish(hello, ephPriv, reply, creds.hostPub, creds.identity);
+    if (this.socket !== socket || attempt !== this.connectAttempt) throw new Error('connection superseded');
     this.session = { key: session.key, salt: session.salt, inSeq: -1, incoming: Promise.resolve(), outgoing: Promise.resolve() };
     // The desktop hands over the mirror key right after the handshake reply, so a sealed frame can
     // arrive before the session key finished deriving; replay anything buffered.

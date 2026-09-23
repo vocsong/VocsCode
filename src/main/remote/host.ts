@@ -371,10 +371,11 @@ export class RemoteHost {
         }, 3000);
       }
     });
-    ws.on('error', (e: Error) => {
-      this.deps.log('warn', `remote: relay connection error: ${e.message}`);
+    ws.on('error', () => {
+      // ws errors may include the full socket URL; never write it into logs or UI state.
+      this.deps.log('warn', 'remote: relay connection failed');
       this.status = 'error';
-      this.detail = e.message;
+      this.detail = 'relay connection failed';
       this.push();
     });
   }

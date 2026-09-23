@@ -1,7 +1,9 @@
 /** Relay core: pairing state machine and device registry (docs/REMOTE-ACCESS.md §6).
  *  Storage-agnostic — the Durable Object implements RelayStore over DO storage, tests
  *  over an in-memory map. The relay never sees private keys or plaintext session
- *  payloads; it stores public keys, token hashes, pairing codes and sealed blobs. */
+ *  payloads; it stores public keys, token hashes, pairing codes and sealed blobs.
+ *  Exception: the approved pair:done poll result temporarily holds the browser bearer
+ *  in plaintext until its five-minute expiry; device records hold only hashes. */
 
 export type Json = Record<string, unknown>;
 
@@ -87,6 +89,61 @@ function randomCode(): string {
 
 const deviceKey = (accountId: string, deviceId: string) => `device:${accountId}:${deviceId}`;
 const codeKey = (code: string) => `pair:${code}`;
+const socketTicketKey = (accountId: string, deviceId: string) => `ws-ticket:${accountId}:${deviceId}`;
+
+export const SOCKET_TICKET_TTL_MS = 30_000;
+interface SocketTicketRecord {
+  ticketHash: string;
+  expiresAt: number;
+}
+
+/** One short-lived pending upgrade capability per browser. A new issue replaces the old
+ *  capability. The bearer validation and hash write share a transaction with revocation. */
+export async function issueSocketTicket(
+  store: RelayStore,
+  input: { accountId: string; deviceId: string; token: string },
+  now: number
+): Promise<{ ticket: string; expiresAt: number }> {
+  const ticket = randomToken();
+  const [tokenHash, ticketHash] = await Promise.all([hashToken(input.token), hashToken(ticket)]);
+  const expiresAt = now + SOCKET_TICKET_TTL_MS;
+  await store.transaction(async (tx) => {
+    const key = deviceKey(input.accountId, input.deviceId);
+    const device = await tx.get<DeviceRecord>(key);
+    if (!device || device.kind !== 'web' || device.tokenHash !== tokenHash) throw new PairError('invalid');
+    device.lastSeen = now;
+    await tx.put(key, device);
+    await tx.put(socketTicketKey(input.accountId, input.deviceId), { ticketHash, expiresAt } satisfies SocketTicketRecord);
+  });
+  return { ticket, expiresAt };
+}
+
+/** Consume atomically with device existence: neither a replay nor a concurrent revocation
+ *  can authorize a later upgrade. Expired capabilities are removed, not renewed. */
+export async function consumeSocketTicket(
+  store: RelayStore,
+  input: { accountId: string; deviceId: string; ticket: string },
+  now: number
+): Promise<string> {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(input.ticket)) throw new PairError('invalid');
+  const ticketHash = await hashToken(input.ticket);
+  const valid = await store.transaction(async (tx) => {
+    const key = socketTicketKey(input.accountId, input.deviceId);
+    const record = await tx.get<SocketTicketRecord>(key);
+    if (!record || record.ticketHash !== ticketHash) return false;
+    const device = await tx.get<DeviceRecord>(deviceKey(input.accountId, input.deviceId));
+    if (!device || device.kind !== 'web' || now >= record.expiresAt) {
+      await tx.delete(key);
+      return false;
+    }
+    await tx.delete(key);
+    device.lastSeen = now;
+    await tx.put(deviceKey(input.accountId, input.deviceId), device);
+    return true;
+  });
+  if (!valid) throw new PairError('invalid');
+  return input.deviceId;
+}
 
 /** One Hub owns each account: serialize state transitions per code across async storage and
  *  crypto calls. DO storage returns separate copies, so a status check alone cannot be a lock. */
@@ -299,7 +356,13 @@ export async function deviceInfos(store: RelayStore, accountId: string): Promise
 }
 
 export async function revokeDevice(store: RelayStore, accountId: string, deviceId: string): Promise<void> {
-  await store.delete(deviceKey(accountId, deviceId));
+  await store.transaction(async (tx) => {
+    await tx.delete(deviceKey(accountId, deviceId));
+    await tx.delete(socketTicketKey(accountId, deviceId));
+    // A revoked browser must not leave an offline ciphertext queue behind or receive
+    // it after a hibernated Hub wakes. Enqueue validates the device in a transaction.
+    await tx.delete(`q:${deviceId}`);
+  });
 }
 
 // --- offline transcript mirror (docs/REMOTE-ACCESS.md P4) ---

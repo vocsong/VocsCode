@@ -4,12 +4,15 @@ import http from 'node:http';
  *  web-client.test.ts. Metadata-only routing, like the real Durable Object. */
 import { WebSocketServer, type WebSocket as WsLike } from 'ws';
 import { claimPairing, clearMirror, deleteMirrorSession, deviceInfos, getMirrorIndex, getMirrorSession, MirrorError, PairError, pollPairing, putMirrorIndex, putMirrorSession, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, type DeviceRecord, type MirrorBlob, type RelayStorage, type RelayStore } from '../relay/src/core';
+import { FixedWindowLimiter } from '../relay/src/rate';
+import { authorizeSocket, handleHttp, type RouteContext } from '../relay/src/routes';
 import type { PublicIdentity } from '../src/shared/crypto';
 
 export const ENROLL = 'enroll-secret';
 
 export function memStore(): RelayStore {
   const map = new Map<string, unknown>();
+  let tail = Promise.resolve();
   const adapt = (target: Map<string, unknown>): RelayStorage => ({
     get: async <T,>(k: string) => target.has(k) ? structuredClone(target.get(k)) as T : undefined,
     put: async (k, v) => void target.set(k, structuredClone(v)),
@@ -19,11 +22,20 @@ export function memStore(): RelayStore {
   return {
     ...adapt(map),
     transaction: async (work) => {
-      const staged = new Map(structuredClone([...map]));
-      const result = await work(adapt(staged));
-      map.clear();
-      for (const [key, value] of staged) map.set(key, value);
-      return result;
+      // Match the DO's serialized commit, not the read/copy/write race of an unlocked map.
+      const previous = tail;
+      let release!: () => void;
+      tail = new Promise<void>((resolve) => { release = resolve; });
+      await previous;
+      try {
+        const staged = new Map(structuredClone([...map]));
+        const result = await work(adapt(staged));
+        map.clear();
+        for (const [key, value] of staged) map.set(key, value);
+        return result;
+      } finally {
+        release();
+      }
     }
   };
 }
@@ -33,6 +45,12 @@ export class FakeRelay {
   readonly sockets = new Map<WsLike, { role: 'host' | 'client'; id: string }>();
   private server: http.Server | null = null;
   private wss = new WebSocketServer({ noServer: true });
+  private readonly rate = new FixedWindowLimiter();
+
+  private context(): RouteContext {
+    return { store: this.store, accountId: 'a', enrollToken: ENROLL, now: Date.now(), ip: '127.0.0.1', rate: this.rate,
+      sockets: (tag) => [...this.sockets].filter(([, meta]) => tag === (meta.role === 'host' ? 'hosts' : 'clients') || tag === `${meta.role}:${meta.id}`).map(([ws]) => ws) };
+  }
 
   async start(): Promise<number> {
     const server = http.createServer((req, res) => void this.rest(req, res));
@@ -59,6 +77,14 @@ export class FakeRelay {
       res.end(JSON.stringify(v));
     };
     const auth = (req.headers.authorization ?? '').replace('Bearer ', '');
+    if (url.pathname === '/v1/ws/ticket') {
+      const response = await handleHttp(new Request(`http://relay.test${url.pathname.slice(3)}${url.search}`, {
+        method: req.method, headers: { authorization: req.headers.authorization ?? '' }
+      }), this.context());
+      res.writeHead(response.status, Object.fromEntries(response.headers));
+      res.end(await response.text());
+      return;
+    }
     if (url.pathname === '/v1/pair/start' && req.method === 'POST') {
       if (auth !== ENROLL) {
         reply({ error: 'forbidden' }, 403);
@@ -164,27 +190,17 @@ export class FakeRelay {
 
   private upgrade(req: http.IncomingMessage, socket: import('node:stream').Duplex, head: Buffer): void {
     const url = new URL(req.url ?? '/', 'http://x');
-    const auth = (req.headers.authorization ?? '').replace('Bearer ', '') || url.searchParams.get('token') || '';
-    const fail = (): void => {
+    if (!['/v1/ws/host', '/v1/ws/client'].includes(url.pathname) || req.method !== 'GET' || req.headers.upgrade?.toLowerCase() !== 'websocket') {
       socket.destroy();
-    };
-    if (url.pathname === '/v1/ws/host') {
-      if (url.searchParams.get('device') === 'enrolling') {
-        if (auth !== ENROLL) return fail();
-        return this.accept(req, socket, head, 'host', 'enrolling');
-      }
-      void verifyDeviceToken(this.store, { accountId: 'a', deviceId: url.searchParams.get('device') ?? '', token: auth }, Date.now())
-        .then((device) => this.accept(req, socket, head, 'host', device.deviceId))
-        .catch(fail);
       return;
     }
-    if (url.pathname === '/v1/ws/client') {
-      void verifyDeviceToken(this.store, { accountId: 'a', deviceId: url.searchParams.get('device') ?? '', token: auth }, Date.now())
-        .then((device) => this.accept(req, socket, head, 'client', device.deviceId))
-        .catch(fail);
-      return;
-    }
-    fail();
+    const role = url.pathname === '/v1/ws/host' ? 'host' : 'client';
+    void authorizeSocket(role, new Request(`http://relay.test${url.pathname.slice(3)}${url.search}`, {
+      headers: req.headers.authorization ? { authorization: req.headers.authorization } : undefined
+    }), this.context()).then((auth) => {
+      if (!auth.ok || socket.destroyed) socket.destroy();
+      else this.accept(req, socket, head, role, auth.deviceId);
+    }).catch(() => socket.destroy());
   }
 
   private accept(req: http.IncomingMessage, socket: import('node:stream').Duplex, head: Buffer, role: 'host' | 'client', id: string): void {

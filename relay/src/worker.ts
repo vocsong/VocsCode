@@ -69,6 +69,12 @@ export class Hub {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/ws/host' || url.pathname === '/ws/client') {
+      // Do not burn a single-use ticket for a plain GET or malformed upgrade. The Worker
+      // entry point forwards the Upgrade header unchanged; only a real socket consumes it.
+      if (request.method !== 'GET') return json({ error: 'method not allowed' }, 405);
+      if (request.headers.get('upgrade')?.toLowerCase().trim() !== 'websocket') {
+        return json({ error: 'upgrade required' }, 426, { upgrade: 'websocket' });
+      }
       const kind = url.pathname === '/ws/host' ? 'host' : 'client';
       const auth = await authorizeSocket(kind, request, this.context(request));
       if (!auth.ok) return json({ error: auth.error }, auth.status);
@@ -78,10 +84,21 @@ export class Hub {
       this.state.acceptWebSocket(pair[1], [`${kind}:${auth.deviceId}`, BROADCAST_TAG[kind]]);
       // The hibernation API has message/close callbacks but no webSocketOpen callback.
       // Drain the offline queue at upgrade time, including after a previous eviction.
-      if (kind === 'client') await this.webSocketOpen(pair[1]);
+      if (kind === 'client') {
+        // Revocation may commit after ticket consumption but before acceptance.
+        if (!await this.clientExists(auth.deviceId)) pair[1].close(1008, 'device revoked');
+        else await this.webSocketOpen(pair[1]);
+        // A second check closes a late socket if revocation ran while draining.
+        if (!await this.clientExists(auth.deviceId)) pair[1].close(1008, 'device revoked');
+      }
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
     return handleHttp(request, this.context(request));
+  }
+
+  private async clientExists(clientId: string): Promise<boolean> {
+    const device = await this.store.get<DeviceRecord>(`device:${this.env.RELAY_ACCOUNT}:${clientId}`);
+    return device?.kind === 'web';
   }
 
   /** A revived (hibernated) or fresh socket: for clients, drain frames queued offline. */
@@ -89,8 +106,12 @@ export class Hub {
     const tags = this.state.getTags(ws);
     const clientId = tags.find((t) => t.startsWith('client:'))?.slice(7);
     if (!clientId) return;
+    // No queued ciphertext may leave for a revoked device. Recheck after the async read
+    // too: deletion can land while storage is loading the offline queue.
+    if (!await this.clientExists(clientId)) { ws.close(1008, 'device revoked'); return; }
     const key = `q:${clientId}`;
     const queued = await this.state.storage.get<DataMessage[]>(key);
+    if (!await this.clientExists(clientId)) { ws.close(1008, 'device revoked'); return; }
     if (queued?.length) {
       for (const m of queued) ws.send(JSON.stringify(m));
     }
@@ -120,8 +141,12 @@ export class Hub {
     const tags = this.state.getTags(ws);
     const clientId = tags.find((t) => t.startsWith('client:'))?.slice(7);
     const hostId = tags.find((t) => t.startsWith('host:'))?.slice(5);
-    if (clientId) for (const host of this.state.getWebSockets(BROADCAST_TAG.host)) host.send(JSON.stringify({ t: 'client.gone', client: clientId }));
-    if (hostId) for (const client of this.state.getWebSockets(BROADCAST_TAG.client)) client.send(JSON.stringify({ t: 'host.gone', host: hostId }));
+    if (clientId) for (const host of this.state.getWebSockets(BROADCAST_TAG.host)) {
+      if (host.readyState === WebSocket.OPEN) host.send(JSON.stringify({ t: 'client.gone', client: clientId }));
+    }
+    if (hostId) for (const client of this.state.getWebSockets(BROADCAST_TAG.client)) {
+      if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ t: 'host.gone', host: hostId }));
+    }
     // This Worker's compatibility date predates automatic close-frame replies.
     ws.close(code, reason);
   }
@@ -156,14 +181,15 @@ export class Hub {
       if (sealed && typeof sealed.salt === 'string' && sealed.salt.length <= 64 &&
           typeof sealed.seq === 'number' && Number.isSafeInteger(sealed.seq) &&
           typeof sealed.ct === 'string' && sealed.ct.length <= MAX_QUEUED_CIPHERTEXT_BYTES) {
-        const device = await this.store.get<DeviceRecord>(`device:${this.env.RELAY_ACCOUNT}:${msg.to}`);
-        if (device?.kind === 'web' && device.deviceId === msg.to) {
+        await this.store.transaction(async (tx) => {
+          const device = await tx.get<DeviceRecord>(`device:${this.env.RELAY_ACCOUNT}:${msg.to}`);
+          if (device?.kind !== 'web' || device.deviceId !== msg.to) return;
           const key = `q:${msg.to}`;
-          const q = (await this.state.storage.get<DataMessage[]>(key)) ?? [];
+          const q = (await tx.get<DataMessage[]>(key)) ?? [];
           q.push({ t: 'd', seq: msg.seq, payload: { salt: sealed.salt, seq: sealed.seq, ct: sealed.ct } });
           while (q.length > MAX_QUEUED || utf8Bytes(JSON.stringify(q)) > MAX_QUEUE_BYTES) q.shift();
-          if (q.length) await this.state.storage.put(key, q);
-        }
+          if (q.length) await tx.put(key, q);
+        });
       }
     }
     ws.send(JSON.stringify({ t: 'client.gone', client: msg.to }));

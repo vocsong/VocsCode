@@ -181,7 +181,8 @@ root of trust.)
    trust — the desktop-side confirm step is what makes a device binding.
 2. **The relay cannot read session payloads.** It never holds private or shared
    session keys; it does hold plaintext pairing-code lookup keys, device metadata,
-   token hashes, and encrypted blobs. A compromised relay can disrupt routing or
+   token hashes, a short-lived plaintext approved browser bearer, and encrypted blobs.
+   A compromised relay can disrupt routing or
    pairing even though established e2e payloads remain unreadable.
    e2e is **mandatory in shipped builds, not a setting** (§11): no TLS-only mode ships;
    a dev-only client flag may bypass the AEAD layer for relay debugging.
@@ -201,13 +202,18 @@ root of trust.)
 | Account | Single configured account id (`RELAY_ACCOUNT`); GitHub identity will gate `/app`, not isolate registry rows | passwordless gate planned | DO storage (Workers) |
 | Desktop host | device id + human name ("Work PC") | P-256 ECDSA + ECDH | private JWK via `secrets.ts` (safeStorage) |
 | Web device | device id + human name ("Chrome on Windows") | P-256 ECDSA + ECDH | extractable JWK in `localStorage` (IndexedDB migration planned) |
-| Relay | routing registry | public keys + token **hashes** only | DO storage (Workers) |
+| Relay | routing registry | public keys + device-token hashes; an approved poll record temporarily holds the browser bearer in plaintext | DO storage (Workers) |
 
 **Target token model, not the deployed v1:** after pairing, both sides hold a random 256-bit
 refresh token (relay stores only its hash) plus short-lived (~1 h) access tokens bound to the
 device's public key. Refreshing = signing a relay-issued challenge (proof of possession).
 The current device token is a long-lived bearer; a stolen one can invoke relay REST routes
-without the private key. See the ranked remediation in [REMOTE-ACCESS-ROADMAP.md](./REMOTE-ACCESS-ROADMAP.md#25-security-backlog-ranked).
+without the private key. **On this implementation branch, not verified live,** a paired browser
+uses that bearer only in an Authorization header to obtain a 30-second, single-use WebSocket
+upgrade ticket. The URL carries the ticket, not the device bearer; issuing another invalidates
+the previous ticket, and replay or a bearer URL is refused. The relay stores the ticket's hash,
+not its value. This does not make the device bearer proof-of-possession or short-lived. See the
+ranked remediation in [REMOTE-ACCESS-ROADMAP.md](./REMOTE-ACCESS-ROADMAP.md#25-security-backlog-ranked).
 
 v1 account model: **accounts-lite** — a single provisioned account, no signup or
 billing flow. The device registry and routing are account-keyed from day one, so
@@ -231,7 +237,7 @@ the desktop, which seals an index plus per-session snapshots with a shared mirro
 30-day-TTL blobs; the web client opens them locally and renders a read-only sidebar and
 transcript while the desktop is unreachable. The relay's HTTP surface is now a
 **deny-by-default route table** (`relay/src/routes.ts`): every route declares the auth it needs
-(`public`/`enroll`/`device`/`host`), the dispatcher authorizes before the handler runs, and the
+(`public`/`enroll`/`device`/`web`/`host`), the dispatcher authorizes before the handler runs, and the
 whole surface is unit-tested in plain Node (`tests/relay-routes.test.ts`) instead of relying on
 review. The public pairing endpoints also carry in-memory fixed-window rate limits.
 **Deployed.** The relay runs at `https://vocs-relay.vocs.workers.dev` (Worker + one Hub Durable
@@ -321,9 +327,13 @@ Web (browser)                Relay                      Desktop (host)
 - Accounts, devices (id, name, platform, public keys, token hashes, last seen, status)
   — held in Durable Object storage on the existing vocs.io Cloudflare account.
 - Routing state: which desktop is online for which account; short-lived queues of
-  *encrypted* payloads pending delivery.
+  *encrypted* payloads pending delivery. On this branch, one hashed, expiring, single-use
+  WebSocket upgrade ticket per paired browser is also stored until consumed or replaced.
 - Pairing codes (currently stored as plaintext lookup keys with an enforced TTL and single-use
-  state; hashing at rest is a planned hardening step).
+  state; hashing at rest is a planned hardening step). The approved poll record temporarily
+  stores the minted browser bearer **in plaintext** until its five-minute expiry; the relay
+  stores the durable device record as a hash. Do not treat a relay storage snapshot as
+  bearer-free during that window.
 - **Offline mirror blobs** (P4, opt-in): the sealed session index and transcript snapshots,
   keyed by `(account, host)`, capped at 200 sessions / 8 MB per blob with a 30-day TTL. The
   key is generated on the desktop, stored in the OS keychain, and handed to each browser

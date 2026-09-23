@@ -34,9 +34,22 @@ function message(ws: WebSocket): Promise<Record<string, unknown>> {
   });
 }
 
+async function ticketFor(device: string, token: string): Promise<string> {
+  const response = await request(`/v1/ws/ticket?device=${encodeURIComponent(device)}`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}` }
+  });
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  const body = await response.json<{ ticket: string; expiresAt: number }>();
+  expect(body.ticket).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(body.expiresAt - Date.now()).toBeLessThanOrEqual(30_000);
+  return body.ticket;
+}
+
 async function open(kind: 'host' | 'client', device: string, token: string): Promise<WebSocket> {
-  const response = await request(`/v1/ws/${kind}?device=${encodeURIComponent(device)}&token=${encodeURIComponent(token)}`, {
-    headers: { Upgrade: 'websocket', ...(kind === 'host' && device === 'enrolling' ? { Authorization: `Bearer ${token}` } : {}) }
+  const path = kind === 'client' ? `/v1/ws/client?device=${encodeURIComponent(device)}&ticket=${encodeURIComponent(await ticketFor(device, token))}` : `/v1/ws/host?device=${encodeURIComponent(device)}`;
+  const response = await request(path, {
+    headers: { Upgrade: 'websocket', ...(kind === 'host' ? { Authorization: `Bearer ${token}` } : {}) }
   });
   expect(response.status).toBe(101);
   const socket = response.webSocket;
@@ -95,7 +108,7 @@ async function tags(tag: string): Promise<string[][]> {
 
 afterEach(async () => {
   const closed = [...sockets].map((socket) => {
-    if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+    if (socket.readyState !== WebSocket.OPEN) return Promise.resolve();
     const done = new Promise<void>((resolve) => socket.addEventListener('close', () => resolve(), { once: true }));
     if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'test complete');
     return done;
@@ -197,6 +210,56 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(await message(client)).toEqual({ t: 'd', seq: 4, payload: { salt: 's', seq: 4, ct: 'AAAA' } });
     expect(await here).toEqual({ t: 'client.here', client: webId });
     expect(await queued(webId)).toBeUndefined();
+  });
+
+  it('requires a real upgrade before consuming a ticket and rejects replay, bearer URL, and revocation', async () => {
+    const webId = 'w_ticket_test';
+    const token = 'local-test-token';
+    await runInDurableObject(hub(), async (_instance, state) => {
+      await state.storage.put(`device:${env.RELAY_ACCOUNT}:${webId}`, {
+        deviceId: webId, kind: 'web', name: 'browser', platform: 'test',
+        pub: { sig: {}, enc: {} }, tokenHash: await hashToken(token), createdAt: Date.now(), lastSeen: Date.now()
+      });
+    });
+    const ticket = await ticketFor(webId, token);
+    const path = `/v1/ws/client?device=${webId}&ticket=${ticket}`;
+    expect((await request(path)).status).toBe(426);
+    expect((await request(path, { headers: { Upgrade: 'not-websocket' } })).status).toBe(426);
+    expect((await request(`/v1/ws/client?device=${webId}&token=${token}`, { headers: { Upgrade: 'websocket' } })).status).toBe(401);
+    const attempts = await Promise.all([request(path, { headers: { Upgrade: 'websocket' } }), request(path, { headers: { Upgrade: 'websocket' } })]);
+    expect(attempts.map((response) => response.status).sort()).toEqual([101, 401]);
+    const accepted = attempts.find((response) => response.status === 101)!.webSocket!;
+    accepted.accept();
+    sockets.add(accepted);
+    expect((await request(path, { headers: { Upgrade: 'websocket' } })).status).toBe(401);
+    const pending = await ticketFor(webId, token);
+    await runInDurableObject(hub(), async (_instance, state) => {
+      await state.storage.put(`q:${webId}`, [{ t: 'd', seq: 9, payload: { salt: 's', seq: 9, ct: 'AAAA' } }]);
+    });
+    const revoke = await request(`/v1/devices?device=${webId}&target=${webId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    expect(revoke.status).toBe(200);
+    expect(await queued(webId)).toBeUndefined();
+    expect((await request(`/v1/ws/client?device=${webId}&ticket=${pending}`, { headers: { Upgrade: 'websocket' } })).status).toBe(401);
+    expect((await request(`/v1/ws/ticket?device=${webId}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })).status).toBe(401);
+  });
+
+  it('consumes only once across DO eviction and fresh upgrade', async () => {
+    const webId = 'w_evicted_ticket';
+    const token = 'eviction-test-token';
+    await runInDurableObject(hub(), async (_instance, state) => {
+      await state.storage.put(`device:${env.RELAY_ACCOUNT}:${webId}`, {
+        deviceId: webId, kind: 'web', name: 'browser', platform: 'test',
+        pub: { sig: {}, enc: {} }, tokenHash: await hashToken(token), createdAt: Date.now(), lastSeen: Date.now()
+      });
+    });
+    const ticket = await ticketFor(webId, token);
+    await evictDurableObject(hub());
+    const path = `/v1/ws/client?device=${webId}&ticket=${ticket}`;
+    const first = await request(path, { headers: { Upgrade: 'websocket' } });
+    expect(first.status).toBe(101);
+    first.webSocket!.accept();
+    sockets.add(first.webSocket!);
+    expect((await request(path, { headers: { Upgrade: 'websocket' } })).status).toBe(401);
   });
 
   it('restores persisted ciphertext after eviction and a fresh socket upgrade', async () => {

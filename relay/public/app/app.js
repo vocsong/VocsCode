@@ -127,6 +127,7 @@
     mirrorCache = null;
     /** Sealed frames that arrive while the handshake reply is still being finished. */
     earlyFrames = [];
+    connectAttempt = 0;
     hasCredentials() {
       return !!this.deps.storage.get(CREDS_KEY);
     }
@@ -142,6 +143,7 @@
       }
     }
     logout() {
+      this.connectAttempt++;
       this.socket?.close();
       this.socket = null;
       this.session = null;
@@ -181,13 +183,24 @@
     }
     /** Opens the relay socket and performs the e2e handshake with the paired host. */
     async connect(onClose) {
-      if (!this.creds) throw new Error("not paired");
+      const creds = this.creds;
+      if (!creds) throw new Error("not paired");
+      const attempt = ++this.connectAttempt;
       this.socket?.close();
       this.socket = null;
       this.session = null;
       this.earlyFrames = [];
-      const base = this.creds.relayBase.replace(/^http/, "ws").replace(/\/$/, "");
-      const url = `${base}/v1/ws/client?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}`;
+      const base = creds.relayBase.replace(/\/$/, "");
+      const response = await (this.deps.fetchImpl ?? fetch)(`${base}/v1/ws/ticket?device=${encodeURIComponent(creds.webDeviceId)}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${creds.webToken}` }
+      });
+      if (!response.ok) throw new Error(`socket ticket failed: ${response.status}`);
+      const { ticket } = await response.json();
+      if (typeof ticket !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) throw new Error("invalid socket ticket");
+      if (attempt !== this.connectAttempt || this.creds !== creds) throw new Error("connection superseded");
+      const wsBase = base.replace(/^http/, "ws");
+      const url = `${wsBase}/v1/ws/client?device=${encodeURIComponent(creds.webDeviceId)}&ticket=${encodeURIComponent(ticket)}`;
       let socket;
       const handleDrop = () => {
         if (this.socket !== socket) return;
@@ -200,15 +213,17 @@
       };
       socket = this.deps.wsFactory ? this.deps.wsFactory(url, onMessage, handleDrop) : browserSocket(url, onMessage, handleDrop);
       this.socket = socket;
-      this.socket.send(JSON.stringify({ t: "hello", host: this.creds.hostDeviceId }));
-      const { hello, ephPriv } = await createHello(this.creds.identity);
-      this.socket.send(JSON.stringify({ t: "hs", seq: 0, payload: hello }));
+      socket.send(JSON.stringify({ t: "hello", host: creds.hostDeviceId }));
+      const { hello, ephPriv } = await createHello(creds.identity);
+      if (this.socket !== socket || attempt !== this.connectAttempt || this.creds !== creds) throw new Error("connection superseded");
+      socket.send(JSON.stringify({ t: "hs", seq: 0, payload: hello }));
       const reply = await new Promise((resolve, reject) => {
         this.hsWaiter = { resolve, reject };
         setTimeout(() => reject(new Error("handshake timed out")), 1e4);
       });
-      const session = await clientFinish(hello, ephPriv, reply, this.creds.hostPub, this.creds.identity);
-      if (this.socket !== socket) return;
+      if (this.socket !== socket || attempt !== this.connectAttempt) throw new Error("connection superseded");
+      const session = await clientFinish(hello, ephPriv, reply, creds.hostPub, creds.identity);
+      if (this.socket !== socket || attempt !== this.connectAttempt) throw new Error("connection superseded");
       this.session = { key: session.key, salt: session.salt, inSeq: -1, incoming: Promise.resolve(), outgoing: Promise.resolve() };
       const early = this.earlyFrames;
       this.earlyFrames = [];

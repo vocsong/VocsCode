@@ -10,7 +10,8 @@ import { RelayClient, relayBaseFor } from '../relay/src/web-client';
 import { ENROLL, FakeRelay } from './fake-relay';
 import { RemoteHost } from '../src/main/remote/host';
 import { RemoteAudit } from '../src/main/remote/audit';
-import { importAesKey, sealBlob } from '../src/shared/crypto';
+import { generateIdentity, importAesKey, publicOf, sealBlob } from '../src/shared/crypto';
+import { registerWebDevice } from '../relay/src/core';
 import type { HandlerRegistry } from '../src/main/handlers';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -43,7 +44,7 @@ describe('relay web client (browser-side protocol)', () => {
 
   function wsFactory(url: string, onMessage: (raw: string) => void, onClose: () => void) {
     const ws = new WebSocket(url);
-    // Browser semantics: sends issued while CONNECTING are queued by the spec.
+    // Emulates browserSocket's queue; native WebSocket.send throws while CONNECTING.
     const queue: string[] = [];
     ws.on('open', () => {
       for (const raw of queue.splice(0)) ws.send(raw);
@@ -121,7 +122,11 @@ describe('relay web client (browser-side protocol)', () => {
     let deliver: ((raw: string) => void) | undefined;
     let holdNext = false;
     let held: string | undefined;
+    let socketUrlSafe = false;
     const restored = new RelayClient({ storage: shared, fetchImpl: trackingFetch, wsFactory: (url, onMessage, onClose) => {
+      const parsed = new URL(url);
+      socketUrlSafe = parsed.pathname === '/v1/ws/client' && parsed.searchParams.has('ticket') &&
+        parsed.searchParams.get('ticket') !== creds.webToken && !parsed.searchParams.has('token') && !url.includes(creds.webToken);
       deliver = onMessage;
       return wsFactory(url, (raw) => {
       if ((JSON.parse(raw) as { t: string }).t === 'd') {
@@ -140,6 +145,9 @@ describe('relay web client (browser-side protocol)', () => {
 
     const pushes: Array<[string, unknown]> = [];
     await restored.connect();
+    expect(socketUrlSafe).toBe(true);
+    expect(rest.filter((entry) => entry.url.includes('/v1/ws/ticket'))).toHaveLength(1);
+    expect(rest.find((entry) => entry.url.includes('/v1/ws/ticket'))?.authorization).toBe(`Bearer ${creds.webToken}`);
     restored.onPush((channel, payload) => void pushes.push([channel, payload]));
 
     // Read-only invoke through the e2e channel reaches the real registry.
@@ -194,6 +202,61 @@ describe('relay web client (browser-side protocol)', () => {
     expect(rest.filter((entry) => entry.url.includes('/v1/devices') || entry.url.includes('/v1/mirror')).every((entry) => entry.authorization === `Bearer ${creds.webToken}`)).toBe(true);
     expect(rest.every((entry) => !entry.url.includes('token='))).toBe(true);
     await host.disable();
+  });
+
+  it('mints a fresh ticket for each attempt and never puts the device bearer in the socket URL', async () => {
+    const relay = new FakeRelay();
+    const port = await relay.start();
+    try {
+      const identity = await generateIdentity();
+      const web = await registerWebDevice(relay.store, { accountId: 'a', name: 'browser', platform: 'test', pub: publicOf(identity) }, Date.now());
+      const base = `http://127.0.0.1:${port}`;
+      const storage = new Map<string, string>([['vocs-web-credentials', JSON.stringify({
+        relayBase: base, webToken: web.webToken, webDeviceId: web.deviceId,
+        hostDeviceId: 'h_test', hostPub: publicOf(identity), identity
+      })]]);
+      const urls: string[] = [];
+      const requests: Array<{ url: string; header: string | null }> = [];
+      const client = new RelayClient({
+        storage: { get: (key) => storage.get(key) ?? null, set: (key, value) => void storage.set(key, value), remove: (key) => void storage.delete(key) },
+        fetchImpl: async (input, init) => {
+          requests.push({ url: String(input), header: new Headers(init?.headers).get('authorization') });
+          return fetch(input, init);
+        },
+        wsFactory: (url) => { urls.push(url); throw new Error('socket withheld'); }
+      });
+      expect(client.restore()).toBe(true);
+      await expect(client.connect()).rejects.toThrow('socket withheld');
+      await expect(client.connect()).rejects.toThrow('socket withheld');
+      expect(urls).toHaveLength(2);
+      expect(new URL(urls[0]).searchParams.get('ticket') !== new URL(urls[1]).searchParams.get('ticket')).toBe(true);
+      expect(urls.every((url) => new URL(url).pathname === '/v1/ws/client' && new URL(url).searchParams.has('ticket') && !url.includes(web.webToken) && !new URL(url).searchParams.has('token'))).toBe(true);
+      expect(requests).toHaveLength(2);
+      expect(requests.every((entry) => entry.url.endsWith(`/v1/ws/ticket?device=${web.deviceId}`) && entry.header === `Bearer ${web.webToken}`)).toBe(true);
+      expect(JSON.stringify(await relay.store.list('ws-ticket:'))).not.toContain(web.webToken);
+    } finally {
+      await relay.stop();
+    }
+  });
+
+  it('never sends a handshake on a socket closed while the hello is being prepared', async () => {
+    const identity = await generateIdentity();
+    const storage = new Map<string, string>([['vocs-web-credentials', JSON.stringify({
+      relayBase: 'https://relay.test', webToken: 'paired-bearer', webDeviceId: 'w_browser',
+      hostDeviceId: 'h_host', hostPub: publicOf(identity), identity
+    })]]);
+    const sent: string[] = [];
+    const client = new RelayClient({
+      storage: { get: (key) => storage.get(key) ?? null, set: (key, value) => void storage.set(key, value), remove: (key) => void storage.delete(key) },
+      fetchImpl: async () => new Response(JSON.stringify({ ticket: 'a'.repeat(43) })),
+      wsFactory: (_url, _onMessage, onClose) => ({
+        send: (raw) => { sent.push((JSON.parse(raw) as { t: string }).t); onClose(); },
+        close: () => undefined
+      })
+    });
+    expect(client.restore()).toBe(true);
+    await expect(client.connect()).rejects.toThrow('connection superseded');
+    expect(sent).toEqual(['hello']);
   });
 
   it('enforces view-only mode, records the audit trail and revokes devices', async () => {

@@ -39,8 +39,8 @@ diagnosed, repaired, and retested.
 | §2.1 Login gate | Dormant landing Worker gate, allowlist, signed cookie/state, sign-out and offline tests in vocs.io #27 | GitHub OAuth app and secrets, enable flag, real allow/deny/logout test, authenticated CSP check; #27 is open |
 | §2.2 CI flakes | Timer attribution and analytics recovery regressions pass locally | Green post-merge CI run |
 | §2.3 Deploy loop | Protected relay workflow, dry-run/tests/bundle check, rollback runbook | Production environment credentials; workflow run on `develop`; vocs.io #26 merge; direct `workers.dev` bypass migration/shutdown |
-| §2.4 Validation | Opt-in deployed smoke with private-capability cleanup recovery and fail-fast claim diagnostics; 6 real-workerd DO tests (including eviction between connections) | Earlier approve/poll failure remains unresolved; identify the deployed contract and rerun green with cleanup; live-socket eviction not proved |
-| §2.5 Security | Role-bound sockets, host-signed/serialized pairing approval, private poll, REST bearer headers, replay checks, bounded queues, transaction-safe revocation and malformed-frame filtering, a browser socket OPEN queue, static CSP and a manual enrollment-secret rotation runbook **in this branch** | PoP/short-lived tokens, non-extractable browser keys, mirror-key rotation, account-wide kill, device cap, edge rate limits and live CSP/secret-rotation verification; security review |
+| §2.4 Validation | Opt-in deployed smoke with private-capability cleanup recovery and fail-fast claim diagnostics; 8 real-workerd DO tests (including ticket replay and eviction between connections) | Earlier approve/poll failure remains unresolved; identify the deployed contract and rerun green with cleanup; live-socket eviction not proved |
+| §2.5 Security | Role-bound sockets, host-signed/serialized pairing approval, private poll, REST bearer headers and hashed single-use 30-second browser upgrade tickets, replay checks, bounded queues, transaction-safe revocation and malformed-frame filtering, a browser socket OPEN queue, static CSP and a manual enrollment-secret rotation runbook **in this branch** | PoP/short-lived device tokens, non-extractable browser keys, mirror-key rotation, account-wide kill, device cap, edge rate limits and live CSP/secret-rotation verification; security review |
 | §2.6 UX | Desktop copyable URL + browser prefill, distinct account sign-out | QR renderer/approval, multi-host UI, mirror pagination/cleanup, WAN terminal |
 | §2.7 Cloud/product | Account-keyed primitives only | Multi-account ownership/isolation and cloud workspaces remain a separate program, not launch requirements |
 
@@ -139,9 +139,10 @@ script against the deployed Worker found it in one run.
   that difference does not explain the earlier observed stage. A local workerd pass is not
   proof of the deployed version.
 - **Real DO suite added:** `npm run test:relay-do` uses `@cloudflare/vitest-pool-workers` to
-  exercise pairing fan-out, exact tags, routing and queue bounds in CI. Its eviction test runs
-  between connections; forced eviction while live sockets remained attached timed out in the
-  test pool, so live-socket hibernation still needs deployment verification.
+  exercise pairing fan-out, exact tags, routing, queue bounds and concurrent ticket consumption
+  in CI. Eviction tests run between connections; forced eviction while live sockets remained
+  attached timed out in the test pool, so live-socket hibernation still needs deployment
+  verification.
 
 ### 2.5 Security backlog (ranked)
 
@@ -158,13 +159,22 @@ A further browser-only launch blocker was found: the page sent its initial `hell
 native WebSocket was still CONNECTING. The transport now buffers those frames until OPEN;
 tests reproduce the browser's pre-OPEN exception. This is **local**, not deployed proof.
 
-1. **Short-lived access tokens + proof-of-possession.** Today's device token is a long-lived
-   bearer in `localStorage` and rides the WebSocket query string. Shorter tokens alone do not fix
-   it — the *refresh* token is what sits in storage, so the refresh must be bound to the device key
-   (a relay challenge the device signs).
-2. **CSP on `/app`.** `relay/public/_headers` now specifies a restrictive policy for static
-   assets locally; assert it on both live origins after deployment. An XSS can still read the
-   browser's current localStorage bearer/key until §2.5.1 migrates them.
+1. **Short-lived access tokens + proof-of-possession.** The browser device token remains a
+   long-lived bearer in `localStorage`, able to authorize REST calls without the device key.
+   This branch replaces its WebSocket query-string use with a 30-second, hashed, single-use
+   ticket: `POST /v1/ws/ticket` authenticates via the bearer header and atomically replaces
+   any outstanding ticket for that browser; a valid upgrade consumes it transactionally.
+   Bearer URLs fail closed. This limits URL exposure, **not** stolen-bearer access or the
+   current production version; the ticket path still needs security review and a green live
+   smoke. Shorter access tokens alone do not fix storage: the *refresh* token must be bound
+   to the device key (a relay challenge the device signs). The approved pairing poll also
+   keeps the new browser bearer in a short-lived plaintext relay record; bind its delivery
+   to the claimant without persisting the plaintext bearer before describing relay storage
+   as hashes-only.
+2. **CSP on `/app`.** `relay/public/_headers` now specifies a restrictive policy and
+   `Cache-Control: no-store` for the unversioned static bundle locally; assert both on live
+   origins after deployment. An XSS can still read the browser's current localStorage
+   bearer/key until §2.5.1 migrates them.
 3. **Edge rate limiting** (Cloudflare rules) in front of the in-memory limiter, which only guards a
    single isolate.
 4. **Mirror key lifecycle.** Revoking a device does not rotate the mirror key, and mirror

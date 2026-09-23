@@ -37,7 +37,7 @@ describe('relay route table', () => {
   it('classifies every route with an explicit auth requirement and a unique method+path', () => {
     expect(ROUTES.length).toBeGreaterThan(0);
     for (const route of ROUTES) {
-      expect(['public', 'enroll', 'device', 'host']).toContain(route.auth);
+      expect(['public', 'enroll', 'device', 'web', 'host']).toContain(route.auth);
       expect(route.path.startsWith('/')).toBe(true);
       // Nothing user-provided may be interpolated into a route path.
       expect(route.path).not.toContain(':');
@@ -91,6 +91,15 @@ describe('relay route table', () => {
     const ok = await handleHttp(req('POST', '/pair/start', { body, headers: { authorization: 'Bearer enroll-secret' } }), ctx());
     expect(ok.status).toBe(200);
     expect(((await ok.json()) as { code: string }).code).toMatch(/^[A-Z2-9]{8}$/);
+  });
+
+  it('fails closed when the enrollment secret is not configured', async () => {
+    const { ctx, store } = harness();
+    const body = JSON.stringify({ name: 'desk', hostPub: HOST_PUB });
+    const missing = ctx({ enrollToken: '' });
+    expect((await handleHttp(req('POST', '/pair/start', { body }), missing)).status).toBe(403);
+    expect((await handleHttp(req('POST', '/pair/start', { body, headers: { authorization: 'Bearer arbitrary' } }), missing)).status).toBe(403);
+    expect(await store.list('pair:')).toHaveLength(0);
   });
 
   it('rejects unauthenticated device routes and serves them to a paired device', async () => {
@@ -188,21 +197,46 @@ describe('relay route table', () => {
       .toMatchObject({ ok: false, status: 401 });
     expect(await authorizeSocket('client', req('GET', `/ws/client?device=${host.deviceId}&token=${host.hostToken}`), ctx()))
       .toMatchObject({ ok: false, status: 401 });
-    expect(await authorizeSocket('host', req('GET', `/ws/host?device=${host.deviceId}&token=${host.hostToken}`), ctx()))
+    expect(await authorizeSocket('host', req('GET', `/ws/host?device=${host.deviceId}`, { headers: { authorization: `Bearer ${host.hostToken}` } }), ctx()))
       .toEqual({ ok: true, deviceId: host.deviceId });
   });
 
-  it('authenticates client sockets by device token and refuses unknown ones', async () => {
+  it('issues browser-only tickets from Authorization, with no URL bearer fallback', async () => {
     const { ctx, store } = harness();
     const web = await registerWebDevice(store, { accountId: 'a', name: 'Chrome', platform: 'web', pub: WEB_PUB }, Date.now());
-    expect(await authorizeSocket('client', req('GET', `/ws/client?device=${web.deviceId}&token=${web.webToken}`), ctx())).toEqual({ ok: true, deviceId: web.deviceId });
-    expect((await authorizeSocket('client', req('GET', `/ws/client?device=${web.deviceId}&token=wrong`), ctx())).ok).toBe(false);
-    // A revoked device cannot open a socket (or use any other route) again.
-    await handleHttp(
-      req('DELETE', `/devices?device=${web.deviceId}&target=${web.deviceId}`, { headers: { authorization: `Bearer ${web.webToken}` } }),
-      ctx()
-    );
+    const host = await registerHostDevice(store, { accountId: 'a', name: 'PC', platform: 'win', pub: HOST_PUB }, Date.now());
+    const path = `/ws/ticket?device=${web.deviceId}`;
+    expect((await handleHttp(req('POST', `${path}&token=${web.webToken}`), ctx())).status).toBe(401);
+    expect((await handleHttp(req('POST', path), ctx())).status).toBe(401);
+    expect((await handleHttp(req('POST', `/ws/ticket?device=${host.deviceId}`, { headers: { authorization: `Bearer ${host.hostToken}` } }), ctx())).status).toBe(403);
+    const response = await handleHttp(req('POST', path, { headers: { authorization: `Bearer ${web.webToken}` } }), ctx());
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    const { ticket, expiresAt } = (await response.json()) as { ticket: string; expiresAt: number };
+    expect(ticket).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(expiresAt).toBe(ctx().now + 30_000);
+
+    const upgrade = (query: string, headers?: HeadersInit) => authorizeSocket('client', req('GET', `/ws/client?device=${web.deviceId}${query}`, { headers }), ctx());
+    expect((await upgrade(`&token=${web.webToken}`)).ok).toBe(false);
+    expect((await upgrade('', { authorization: `Bearer ${web.webToken}` })).ok).toBe(false);
+    expect((await upgrade(`&ticket=${ticket}&token=${web.webToken}`)).ok).toBe(false);
+    expect((await upgrade('&ticket=wrong')).ok).toBe(false);
+    expect(await upgrade(`&ticket=${ticket}`)).toEqual({ ok: true, deviceId: web.deviceId });
+    expect((await upgrade(`&ticket=${ticket}`)).ok).toBe(false);
+  });
+
+  it('uses Authorization only for host sockets and revocation invalidates unconsumed tickets', async () => {
+    const { ctx, store } = harness();
+    const web = await registerWebDevice(store, { accountId: 'a', name: 'Chrome', platform: 'web', pub: WEB_PUB }, Date.now());
+    const host = await registerHostDevice(store, { accountId: 'a', name: 'PC', platform: 'win', pub: HOST_PUB }, Date.now());
+    const hostPath = `/ws/host?device=${host.deviceId}`;
+    expect((await authorizeSocket('host', req('GET', `${hostPath}&token=${host.hostToken}`), ctx())).ok).toBe(false);
+    expect(await authorizeSocket('host', req('GET', hostPath, { headers: { authorization: `Bearer ${host.hostToken}` } }), ctx())).toEqual({ ok: true, deviceId: host.deviceId });
+    const response = await handleHttp(req('POST', `/ws/ticket?device=${web.deviceId}`, { headers: { authorization: `Bearer ${web.webToken}` } }), ctx());
+    const { ticket } = (await response.json()) as { ticket: string };
+    await handleHttp(req('DELETE', `/devices?device=${host.deviceId}&target=${web.deviceId}`, { headers: { authorization: `Bearer ${host.hostToken}` } }), ctx());
+    expect((await authorizeSocket('client', req('GET', `/ws/client?device=${web.deviceId}&ticket=${ticket}`), ctx())).ok).toBe(false);
+    expect((await handleHttp(req('POST', `/ws/ticket?device=${web.deviceId}`, { headers: { authorization: `Bearer ${web.webToken}` } }), ctx())).status).toBe(401);
     await expect(verifyDeviceToken(store, { accountId: 'a', deviceId: web.deviceId, token: web.webToken }, Date.now())).rejects.toThrow();
-    expect((await authorizeSocket('client', req('GET', `/ws/client?device=${web.deviceId}&token=${web.webToken}`), ctx())).ok).toBe(false);
   });
 });

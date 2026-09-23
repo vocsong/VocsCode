@@ -7,10 +7,12 @@ import type { PublicIdentity } from '../../src/shared/crypto';
 import {
   claimPairing,
   clearMirror,
+  consumeSocketTicket,
   deleteMirrorSession,
   deviceInfos,
   getMirrorIndex,
   getMirrorSession,
+  issueSocketTicket,
   MirrorError,
   PairError,
   pollPairing,
@@ -50,7 +52,7 @@ export interface RouteContext {
 }
 
 /** What a route requires before its handler runs. */
-export type RouteAuth = 'public' | 'enroll' | 'device' | 'host';
+export type RouteAuth = 'public' | 'enroll' | 'device' | 'web' | 'host';
 
 interface RateRule {
   bucket: string;
@@ -84,6 +86,7 @@ export const ROUTES: Route[] = [
   { method: 'POST', path: '/pair/claim', auth: 'public', rate: { bucket: 'pair-claim', limit: 10, windowMs: 60_000 }, run: pairClaim },
   // Polling runs ~50 times a minute for five minutes, so the budget only catches abuse.
   { method: 'GET', path: '/pair/poll', auth: 'public', rate: { bucket: 'pair-poll', limit: 120, windowMs: 60_000 }, run: pairPoll },
+  { method: 'POST', path: '/ws/ticket', auth: 'web', run: socketTicket },
   { method: 'GET', path: '/devices', auth: 'device', run: deviceList },
   { method: 'DELETE', path: '/devices', auth: 'device', run: deviceRevoke },
   { method: 'GET', path: '/mirror', auth: 'device', run: mirrorGetIndex },
@@ -116,20 +119,29 @@ export type SocketAuth = { ok: true; deviceId: string } | { ok: false; status: n
 /** Auth for the two WebSocket endpoints; the Worker owns the `WebSocketPair` itself. */
 export async function authorizeSocket(kind: 'host' | 'client', request: Request, ctx: RouteContext): Promise<SocketAuth> {
   const url = new URL(request.url);
-  // A freshly enabled desktop has no device token yet: it authenticates with the enrollment
-  // secret and stays in pairing-only mode until pair.result mints one.
-  if (kind === 'host' && url.searchParams.get('device') === 'enrolling') {
-    if (bearer(request) !== ctx.enrollToken) return { ok: false, status: 401, error: 'invalid' };
-    return { ok: true, deviceId: 'enrolling' };
+  const deviceId = url.searchParams.get('device') ?? '';
+  // Never accept the long-lived bearer in a socket URL, even if a valid ticket is present.
+  // Browsers cannot set upgrade headers; desktops can and must use Authorization only.
+  if (url.searchParams.has('token') || (kind === 'client' && (request.headers.has('authorization') || !url.searchParams.has('ticket'))) ||
+      (kind === 'host' && (url.searchParams.has('ticket') || !bearer(request)))) {
+    return { ok: false, status: 401, error: 'invalid' };
   }
   try {
-    const device = await authDevice(request, url, ctx, true);
-    // The tag assigned at upgrade determines what the socket may send. A browser device
-    // must never be tagged as a host (where it could answer pairing or publish host frames).
-    if (device.kind !== (kind === 'host' ? 'host' : 'web')) return { ok: false, status: 401, error: 'invalid' };
+    if (kind === 'client') {
+      return { ok: true, deviceId: await consumeSocketTicket(ctx.store, { accountId: ctx.accountId, deviceId, ticket: url.searchParams.get('ticket') ?? '' }, ctx.now) };
+    }
+    // A freshly enabled desktop has no device token yet: it authenticates with the
+    // enrollment secret and stays in pairing-only mode until pair.result mints one.
+    if (deviceId === 'enrolling') {
+      if (!ctx.enrollToken || bearer(request) !== ctx.enrollToken) throw new PairError('invalid');
+      return { ok: true, deviceId };
+    }
+    const device = await authDevice(request, url, ctx);
+    if (device.kind !== 'host') throw new PairError('invalid');
     return { ok: true, deviceId: device.deviceId };
   } catch (e) {
-    return { ok: false, status: 401, error: e instanceof PairError ? e.code : 'invalid' };
+    if (!(e instanceof PairError)) throw e;
+    return { ok: false, status: 401, error: e.code };
   }
 }
 
@@ -150,18 +162,18 @@ function matchRoute(method: string, pathname: string): Match {
 async function authorize(auth: RouteAuth, request: Request, url: URL, ctx: RouteContext): Promise<DeviceRecord | null> {
   if (auth === 'public') return null;
   if (auth === 'enroll') {
-    if (bearer(request) !== ctx.enrollToken) throw new HttpError('forbidden', 403);
+    if (!ctx.enrollToken || bearer(request) !== ctx.enrollToken) throw new HttpError('forbidden', 403);
     return null;
   }
-  const device = await authDevice(request, url, ctx, false);
-  // Writes to the mirror come from the desktop only; browsers read it.
+  const device = await authDevice(request, url, ctx);
   if (auth === 'host' && device.kind !== 'host') throw new HttpError('forbidden', 403);
+  if (auth === 'web' && device.kind !== 'web') throw new HttpError('forbidden', 403);
   return device;
 }
 
-async function authDevice(request: Request, url: URL, ctx: RouteContext, socket: boolean): Promise<DeviceRecord> {
-  // Only browser WebSockets cannot set headers. REST must never accept a token in its URL.
-  const token = bearer(request) || (socket ? url.searchParams.get('token') : '') || '';
+async function authDevice(request: Request, url: URL, ctx: RouteContext): Promise<DeviceRecord> {
+  // REST always requires Authorization; a query bearer is never a fallback.
+  const token = bearer(request);
   const deviceId = url.searchParams.get('device') ?? '';
   return verifyDeviceToken(ctx.store, { accountId: ctx.accountId, deviceId, token }, ctx.now);
 }
@@ -194,6 +206,15 @@ async function pairClaim({ ctx, request }: Call): Promise<Response> {
 
 async function pairPoll({ ctx, url, request }: Call): Promise<Response> {
   return json(await pollPairing(ctx.store, url.searchParams.get('code') ?? '', bearer(request), ctx.now));
+}
+
+async function socketTicket({ ctx, request, device }: Call): Promise<Response> {
+  // Re-check inside the issue transaction: revocation may race the route's preliminary
+  // authorization, and no ticket may survive a concurrent deletion of its device.
+  const { ticket, expiresAt } = await issueSocketTicket(ctx.store, {
+    accountId: ctx.accountId, deviceId: actor(device).deviceId, token: bearer(request)
+  }, ctx.now);
+  return json({ ticket, expiresAt }, 200, { 'cache-control': 'no-store' });
 }
 
 async function deviceList({ ctx }: Call): Promise<Response> {

@@ -136,10 +136,21 @@ describe('remote host end-to-end (fake relay, real core)', () => {
     expect(approved!.hostPub.sig).toBeDefined();
     expect((await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${code}`)).status).toBe(401);
 
-    // The host reconnected under its new device token; open the web data socket.
+    // The host reconnected under its new device token; exchange the browser bearer
+    // in an Authorization header for a one-use upgrade ticket.
     await sleep(300);
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws/client?device=${encodeURIComponent(approved!.webDeviceId)}&x=1`, { headers: { authorization: `Bearer ${approved!.webToken}` } } as never);
-    await new Promise((r) => ws.once('open', r));
+    const ticketResponse = await fetch(`http://127.0.0.1:${port}/v1/ws/ticket?device=${encodeURIComponent(approved!.webDeviceId)}`, {
+      method: 'POST', headers: { authorization: `Bearer ${approved!.webToken}` }
+    });
+    expect(ticketResponse.status).toBe(200);
+    const { ticket } = (await ticketResponse.json()) as { ticket: string };
+    const socketUrl = `ws://127.0.0.1:${port}/v1/ws/client?device=${encodeURIComponent(approved!.webDeviceId)}&ticket=${encodeURIComponent(ticket)}`;
+    expect(socketUrl.includes(approved!.webToken) || socketUrl.includes('token=')).toBe(false);
+    const ws = new WebSocket(socketUrl);
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', () => reject(new Error('browser upgrade failed')));
+    });
     ws.send(JSON.stringify({ t: 'hello', host: approved!.hostDeviceId }));
 
     // Handshake over the relay (public values only), then sealed traffic.

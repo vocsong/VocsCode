@@ -47,8 +47,8 @@ function wsFactory(url: string, onMessage: (raw: string) => void, onClose: () =>
   });
   ws.on('message', (data) => onMessage(String(data)));
   ws.on('close', onClose);
-  // The Node socket's error can contain its URL (including the browser's device token).
-  // The handshake's bounded timeout will report the failure without exposing that URL.
+  // The Node socket's error can contain its URL (including the one-use ticket).
+  // The handshake's bounded timeout reports failure without exposing that URL.
   ws.on('error', () => undefined);
   return {
     send: (raw) => {
@@ -146,11 +146,23 @@ it.skipIf(process.env.REMOTE_LIVE !== '1')('mints, claims, approves, handshakes,
     broadcast: () => undefined
   });
   let claimToken: string | undefined;
+  let socketUrlSafe = false;
+  let ticketRequestSafe = false;
   const client = new RelayClient({
     storage: { get: (key) => webStorage.get(key) ?? null, set: (key, value) => { webStorage.set(key, value); }, remove: (key) => { webStorage.delete(key); } },
-    wsFactory,
+    wsFactory: (url, onMessage, onClose) => {
+      const parsed = new URL(url);
+      socketUrlSafe = parsed.pathname === '/v1/ws/client' && /^[A-Za-z0-9_-]{43}$/.test(parsed.searchParams.get('ticket') ?? '') &&
+        !parsed.searchParams.has('token') && !url.includes(client.credentials()?.webToken ?? 'never-a-token');
+      return wsFactory(url, onMessage, onClose);
+    },
     fetchImpl: async (input, init) => {
       const response = await fetch(input, init);
+      if (new URL(String(input)).pathname === '/v1/ws/ticket') {
+        ticketRequestSafe = response.ok && init?.method === 'POST' &&
+          new Headers(init.headers).get('authorization') === `Bearer ${client.credentials()?.webToken}` &&
+          !new URL(String(input)).searchParams.has('token');
+      }
       if (String(input).endsWith('/v1/pair/claim') && response.ok) {
         // Keep this run's claimant-only capability in memory for cleanup if the browser's
         // approval response is lost. Never log it or use an unauthenticated code-only poll.
@@ -203,6 +215,7 @@ it.skipIf(process.env.REMOTE_LIVE !== '1')('mints, claims, approves, handshakes,
 
     phase = 'e2e handshake';
     await within(client.connect(), 15_000);
+    expect(ticketRequestSafe && socketUrlSafe).toBe(true);
     phase = 'sealed invoke';
     expect(await within(client.invoke('sessions:list', null), 35_000)).toEqual([{ id: 'remote-smoke', title: 'Remote smoke' }]);
     expect(calls).toEqual(['sessions:list']);
