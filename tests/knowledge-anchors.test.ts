@@ -159,6 +159,34 @@ describe('anchor resolution', () => {
     expect(urlAsked).toBe(false);
   });
 
+  it('reports the timer winning the registry or server lookup even when the clock reads before the deadline', async () => {
+    // A coarse clock can still read one tick before the deadline after setTimeout has fired.
+    // Timeout attribution must come from the race winner, not from a fresh clock reading.
+    let urlAsked = false;
+    const anchor = { file: 'src/main/x.ts', symbol: 'x' };
+    const unindexed = createGitnexusAnchorResolver({
+      repoName: () => new Promise<string | null>(() => undefined),
+      url: async () => {
+        urlAsked = true;
+        return 'http://127.0.0.1:1/mcp';
+      },
+      log: () => undefined,
+      budgetMs: 10,
+      now: () => 0
+    });
+    expect(await unindexed.resolve(scope(), [anchor])).toEqual([{ ...anchor, status: 'unavailable', note: 'Anchor resolution ran out of time.' }]);
+    expect(urlAsked).toBe(false);
+
+    const offline = createGitnexusAnchorResolver({
+      repoName: async () => 'Vocs-Code',
+      url: () => new Promise<string | null>(() => undefined),
+      log: () => undefined,
+      budgetMs: 10,
+      now: () => 0
+    });
+    expect(await offline.resolve(scope(), [anchor])).toEqual([{ ...anchor, status: 'unavailable', note: 'Anchor resolution ran out of time.' }]);
+  });
+
   it('stops waiting on a wedged lookup instead of holding the detail view', async () => {
     const url = await startGraph();
     const resolve = createGitnexusAnchorResolver({ url: async () => url, repoName: async () => 'Vocs-Code', log: () => undefined, budgetMs: 400 });

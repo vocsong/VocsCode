@@ -1,7 +1,8 @@
 /**
  * End-to-end test for the P4 remote-access settings panel: connect to a local relay test double,
  * watch the audit feed record the enable, then flip view-only mode and prove the policy is written
- * through to settings.json (not merely held in React). Requires `npm run build` first; gated by
+ * through to settings.json (not merely held in React). It also checks the copyable pairing link.
+ * Requires `npm run build` first; gated by
  * VOCS_CODE_E2E_UI=1 (the e2e guard sets it).
  */
 import os from 'node:os';
@@ -12,6 +13,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { isolatedEnv, seedSettings } from './e2e-ui';
 import { ENROLL, FakeRelay } from './fake-relay';
+import { generateIdentity, publicOf } from '../src/shared/crypto';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -25,7 +27,7 @@ afterAll(async () => {
 });
 
 describe.runIf(enabled)('remote access settings', () => {
-  it('connects to a relay, records the audit feed and persists view-only mode', async () => {
+  it('connects to a relay, persists policy, and approves a claimed browser from the desktop', async () => {
     relay = new FakeRelay();
     const port = await relay.start();
     const tmp = path.join(os.tmpdir(), `vocs-code-remote-${Date.now()}`);
@@ -77,7 +79,37 @@ describe.runIf(enabled)('remote access settings', () => {
     await mirrorToggle.click();
     await expect.poll(async () => (JSON.parse(await fs.readFile(settingsPath, 'utf8')) as { remote?: { mirror?: boolean } }).remote?.mirror).toBe(true);
 
-    // The status line reflects the live relay connection rather than a stale "off".
+    // A link is offered only for a live, unexpired code, and the clipboard carries the full URL.
+    // A new host stays "connecting" until its first browser approves enrollment.
     await expect.poll(async () => win.getByTestId('remote-status').innerText(), { timeout: 20_000 }).toMatch(/connecting|online/);
+    expect(await win.getByTestId('remote-pair-link').count()).toBe(0);
+    await win.getByRole('button', { name: 'Show pairing code' }).click();
+    const code = win.getByTestId('remote-pair-code');
+    await code.waitFor({ timeout: 20_000 });
+    const pairingCode = (await code.innerText()).trim();
+    expect(pairingCode).toMatch(/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/);
+    const pairingLink = `https://code.vocs.io/app?code=${pairingCode}`;
+    expect(await win.getByTestId('remote-pair-link').inputValue()).toBe(pairingLink);
+    await win.getByRole('button', { name: 'Copy link' }).click();
+    await expect.poll(() => app!.evaluate(({ clipboard }) => clipboard.readText()), { timeout: 10_000 }).toBe(pairingLink);
+
+    const browser = await generateIdentity();
+    const claimed = await fetch(`http://127.0.0.1:${port}/v1/pair/claim`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: pairingCode, name: 'E2E browser', webPub: publicOf(browser) })
+    });
+    expect(claimed.status).toBe(200);
+    const { pollToken } = (await claimed.json()) as { pollToken: string };
+    expect((await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${pairingCode}`)).status).toBe(401);
+    await expect.poll(async () => win.getByText('“E2E browser”', { exact: false }).count(), { timeout: 20_000 }).toBe(1);
+    await win.getByRole('button', { name: 'Allow' }).click();
+    const poll = async () => {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${pairingCode}`, { headers: { authorization: `Bearer ${pollToken}` } });
+      expect(response.status).toBe(200);
+      return (await response.json()) as { status: string; webDeviceId?: string };
+    };
+    await expect.poll(async () => (await poll()).status, { timeout: 20_000 }).toBe('approved');
+    expect((await poll()).webDeviceId).toMatch(/^w_/);
+    expect((await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${pairingCode}`)).status).toBe(401);
   });
 });

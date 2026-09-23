@@ -51,6 +51,15 @@ interface InnerFrame {
   key?: string;
 }
 
+interface WebSession {
+  key: CryptoKey;
+  salt: Uint8Array;
+  inSeq: number;
+  inSalt?: string;
+  incoming: Promise<void>;
+  outgoing: Promise<void>;
+}
+
 type PollResult =
   | { status: 'pending' | 'claimed' | 'denied' }
   | { status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string }
@@ -59,7 +68,7 @@ type PollResult =
 export class RelayClient {
   private creds: WebCredentials | null = null;
   private socket: SimpleSocket | null = null;
-  private session: { key: CryptoKey; salt: Uint8Array } | null = null;
+  private session: WebSession | null = null;
   private nextId = 0;
   private outCounter = 0;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -115,12 +124,16 @@ export class RelayClient {
       body: JSON.stringify({ code, webPub: publicOf(identity), name: input.deviceName })
     });
     if (!claim.ok) throw new Error(`claim failed: ${claim.status}`);
+    const { pollToken } = (await claim.json()) as { pollToken?: string };
+    if (typeof pollToken !== 'string' || !pollToken) throw new Error('claim did not return a poll capability');
     const now = this.deps.now ?? Date.now;
     const deadline = now() + 5 * 60_000;
     for (;;) {
       if (now() >= deadline) throw new Error('pairing timed out');
       await new Promise((r) => setTimeout(r, 1200));
-      const poll = (await (await doFetch(`${base}/v1/pair/poll?code=${encodeURIComponent(code)}`)).json()) as PollResult;
+      const response = await doFetch(`${base}/v1/pair/poll?code=${encodeURIComponent(code)}`, { headers: { authorization: `Bearer ${pollToken}` } });
+      if (!response.ok) throw new Error(`poll failed: ${response.status}`);
+      const poll = (await response.json()) as PollResult;
       if (poll.status === 'approved') {
         this.creds = { relayBase: base, webToken: poll.webToken, webDeviceId: poll.webDeviceId, hostPub: poll.hostPub, hostDeviceId: poll.hostDeviceId, identity };
         this.deps.storage.set(CREDS_KEY, JSON.stringify(this.creds));
@@ -142,14 +155,20 @@ export class RelayClient {
     this.earlyFrames = [];
     const base = this.creds.relayBase.replace(/^http/, 'ws').replace(/\/$/, '');
     const url = `${base}/v1/ws/client?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}`;
+    let socket: SimpleSocket;
     const handleDrop = () => {
+      if (this.socket !== socket) return;
       this.socket = null;
       this.session = null;
       onClose?.();
     };
-    this.socket = this.deps.wsFactory
-      ? this.deps.wsFactory(url, (raw) => this.onMessage(raw), handleDrop)
-      : browserSocket(url, (raw) => this.onMessage(raw), handleDrop);
+    const onMessage = (raw: string) => {
+      if (this.socket === socket) this.onMessage(raw);
+    };
+    socket = this.deps.wsFactory
+      ? this.deps.wsFactory(url, onMessage, handleDrop)
+      : browserSocket(url, onMessage, handleDrop);
+    this.socket = socket;
     // Bind to the host, then handshake over the relay (public values only).
     this.socket.send(JSON.stringify({ t: 'hello', host: this.creds.hostDeviceId }));
     const { hello, ephPriv } = await createHello(this.creds.identity);
@@ -159,12 +178,13 @@ export class RelayClient {
       setTimeout(() => reject(new Error('handshake timed out')), 10_000);
     });
     const session = await clientFinish(hello, ephPriv, reply, this.creds.hostPub, this.creds.identity);
-    this.session = { key: session.key, salt: session.salt };
+    if (this.socket !== socket) return;
+    this.session = { key: session.key, salt: session.salt, inSeq: -1, incoming: Promise.resolve(), outgoing: Promise.resolve() };
     // The desktop hands over the mirror key right after the handshake reply, so a sealed frame can
     // arrive before the session key finished deriving; replay anything buffered.
     const early = this.earlyFrames;
     this.earlyFrames = [];
-    for (const frame of early) void this.onSealed(this.session, frame);
+    for (const frame of early) this.queueSealed(this.session, frame);
   }
 
   private onMessage(raw: string): void {
@@ -185,17 +205,28 @@ export class RelayClient {
         if (this.earlyFrames.length < 32) this.earlyFrames.push(msg.payload as { salt: string; seq: number; ct: string });
         return;
       }
-      void this.onSealed(this.session, msg.payload as { salt: string; seq: number; ct: string });
+      this.queueSealed(this.session, msg.payload as { salt: string; seq: number; ct: string });
     }
   }
 
-  private async onSealed(session: { key: CryptoKey }, sealed: { salt: string; seq: number; ct: string }): Promise<void> {
+  private queueSealed(session: WebSession, sealed: { salt: string; seq: number; ct: string }): void {
+    // A WebSocket preserves arrival order, but separate async decryptions do not.
+    session.incoming = session.incoming.then(() => this.onSealed(session, sealed)).catch(() => undefined);
+  }
+
+  private async onSealed(session: WebSession, sealed: { salt: string; seq: number; ct: string }): Promise<void> {
+    if (this.session !== session || !sealed || !Number.isSafeInteger(sealed.seq) || sealed.seq < 0 ||
+        typeof sealed.salt !== 'string' || typeof sealed.ct !== 'string' || sealed.seq <= session.inSeq ||
+        (session.inSalt !== undefined && sealed.salt !== session.inSalt)) return;
     let inner: InnerFrame;
     try {
       inner = await openFrame(session.key, sealed);
     } catch {
       return;
     }
+    if (this.session !== session) return;
+    session.inSeq = sealed.seq;
+    session.inSalt = sealed.salt;
     if (inner.type === 'result' && typeof inner.id === 'number') {
       const entry = this.pending.get(inner.id);
       if (!entry) return;
@@ -226,10 +257,19 @@ export class RelayClient {
     const id = ++this.nextId;
     const inner: Record<string, unknown> = { type: 'invoke', id, channel, request };
     if (channel === 'approvals:respond' && this.creds) inner.sig = await sign(this.creds.identity, request);
-    const sealed = await sealFrame(this.session.key, this.session.salt, ++this.outCounter, inner);
+    const session = this.session;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-        this.socket?.send(JSON.stringify({ t: 'd', seq: sealed.seq, payload: sealed }));
+      const send = session.outgoing.then(async () => {
+        if (this.session !== session || !this.socket) throw new Error('not connected');
+        const sealed = await sealFrame(session.key, session.salt, ++this.outCounter, inner);
+        if (this.session !== session || !this.socket) throw new Error('not connected');
+        this.socket.send(JSON.stringify({ t: 'd', seq: sealed.seq, payload: sealed }));
+      });
+      session.outgoing = send.catch(() => undefined);
+      void send.catch((e: unknown) => {
+        if (this.pending.delete(id)) reject(e);
+      });
       setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error('invoke timed out'));
       }, 30_000);
@@ -245,7 +285,7 @@ export class RelayClient {
     if (!this.creds) return [];
     const doFetch = this.deps.fetchImpl ?? fetch;
     const base = this.creds.relayBase.replace(/\/$/, '');
-    const res = await doFetch(`${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}`);
+    const res = await doFetch(`${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}`, { headers: { authorization: `Bearer ${this.creds.webToken}` } });
     if (!res.ok) throw new Error(`devices failed: ${res.status}`);
     return (await res.json()) as RemoteDeviceInfo[];
   }
@@ -255,8 +295,8 @@ export class RelayClient {
     if (!this.creds) return;
     const doFetch = this.deps.fetchImpl ?? fetch;
     const base = this.creds.relayBase.replace(/\/$/, '');
-    const url = `${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}&target=${encodeURIComponent(deviceId)}`;
-    const res = await doFetch(url, { method: 'DELETE' });
+    const url = `${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}&target=${encodeURIComponent(deviceId)}`;
+    const res = await doFetch(url, { method: 'DELETE', headers: { authorization: `Bearer ${this.creds.webToken}` } });
     if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
   }
 
@@ -294,20 +334,41 @@ export class RelayClient {
     if (!this.creds) return null;
     const doFetch = this.deps.fetchImpl ?? fetch;
     const base = this.creds.relayBase.replace(/\/$/, '');
-    const query = new URLSearchParams({ host: this.creds.hostDeviceId, device: this.creds.webDeviceId, token: this.creds.webToken });
-    const res = await doFetch(`${base}${path}?${query.toString()}`);
+    const query = new URLSearchParams({ host: this.creds.hostDeviceId, device: this.creds.webDeviceId });
+    const res = await doFetch(`${base}${path}?${query.toString()}`, { headers: { authorization: `Bearer ${this.creds.webToken}` } });
     if (!res.ok) throw new Error(`mirror fetch failed: ${res.status}`);
     const body = (await res.json()) as { iv?: string; ct?: string } | null;
     return body && typeof body.iv === 'string' && typeof body.ct === 'string' ? { iv: body.iv, ct: body.ct } : null;
   }
 }
 
-function browserSocket(url: string, onMessage: (raw: string) => void, onClose: () => void): SimpleSocket {
+export function browserSocket(url: string, onMessage: (raw: string) => void, onClose: () => void): SimpleSocket {
   const ws = new WebSocket(url);
+  const queued: string[] = [];
+  let closed = false;
+  ws.addEventListener('open', () => {
+    if (closed) return;
+    for (const raw of queued.splice(0)) ws.send(raw);
+  });
   ws.addEventListener('message', (ev) => onMessage(String((ev as MessageEvent).data)));
-  ws.addEventListener('close', () => onClose());
+  ws.addEventListener('close', () => {
+    closed = true;
+    queued.length = 0;
+    onClose();
+  });
   return {
-    send: (raw) => ws.send(raw),
-    close: () => ws.close()
+    // A browser WebSocket throws when send() is called before OPEN; connect() must be able
+    // to enqueue its hello and handshake immediately, in order, without exposing a retry race.
+    send: (raw) => {
+      if (closed) throw new Error('socket closed');
+      if (ws.readyState === WebSocket.OPEN) ws.send(raw);
+      else if (ws.readyState === WebSocket.CONNECTING && queued.length < 32) queued.push(raw);
+      else throw new Error('socket unavailable');
+    },
+    close: () => {
+      closed = true;
+      queued.length = 0;
+      ws.close();
+    }
   };
 }

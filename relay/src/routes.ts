@@ -123,7 +123,11 @@ export async function authorizeSocket(kind: 'host' | 'client', request: Request,
     return { ok: true, deviceId: 'enrolling' };
   }
   try {
-    return { ok: true, deviceId: (await authDevice(request, url, ctx)).deviceId };
+    const device = await authDevice(request, url, ctx, true);
+    // The tag assigned at upgrade determines what the socket may send. A browser device
+    // must never be tagged as a host (where it could answer pairing or publish host frames).
+    if (device.kind !== (kind === 'host' ? 'host' : 'web')) return { ok: false, status: 401, error: 'invalid' };
+    return { ok: true, deviceId: device.deviceId };
   } catch (e) {
     return { ok: false, status: 401, error: e instanceof PairError ? e.code : 'invalid' };
   }
@@ -149,15 +153,15 @@ async function authorize(auth: RouteAuth, request: Request, url: URL, ctx: Route
     if (bearer(request) !== ctx.enrollToken) throw new HttpError('forbidden', 403);
     return null;
   }
-  const device = await authDevice(request, url, ctx);
+  const device = await authDevice(request, url, ctx, false);
   // Writes to the mirror come from the desktop only; browsers read it.
   if (auth === 'host' && device.kind !== 'host') throw new HttpError('forbidden', 403);
   return device;
 }
 
-async function authDevice(request: Request, url: URL, ctx: RouteContext): Promise<DeviceRecord> {
-  // Browsers cannot set custom WS headers, so the device token may ride in the query.
-  const token = bearer(request) || url.searchParams.get('token') || '';
+async function authDevice(request: Request, url: URL, ctx: RouteContext, socket: boolean): Promise<DeviceRecord> {
+  // Only browser WebSockets cannot set headers. REST must never accept a token in its URL.
+  const token = bearer(request) || (socket ? url.searchParams.get('token') : '') || '';
   const deviceId = url.searchParams.get('device') ?? '';
   return verifyDeviceToken(ctx.store, { accountId: ctx.accountId, deviceId, token }, ctx.now);
 }
@@ -180,16 +184,16 @@ async function pairStart({ ctx, request }: Call): Promise<Response> {
 async function pairClaim({ ctx, request }: Call): Promise<Response> {
   const body = (await request.json()) as { code?: string; name?: string; platform?: string; webPub?: PublicIdentity };
   if (!body.code || !body.webPub) throw new HttpError('invalid', 400);
-  await claimPairing(ctx.store, { code: body.code, webName: body.name ?? 'browser', webPlatform: body.platform ?? '', webPub: body.webPub }, ctx.now);
-  // Ask every online desktop of the account to confirm; first responder wins.
+  const { pollToken, hostPub } = await claimPairing(ctx.store, { code: body.code, webName: body.name ?? 'browser', webPlatform: body.platform ?? '', webPub: body.webPub }, ctx.now);
+  // Broadcast public identities; only the owning desktop may display or sign this request.
   for (const ws of ctx.sockets(BROADCAST_TAG.host)) {
-    ws.send(JSON.stringify({ t: 'pair.request', code: body.code, name: body.name ?? 'browser', platform: body.platform ?? '' }));
+    ws.send(JSON.stringify({ t: 'pair.request', code: body.code, name: body.name ?? 'browser', platform: body.platform ?? '', hostPub, webPub: body.webPub }));
   }
-  return json({ ok: true });
+  return json({ pollToken });
 }
 
-async function pairPoll({ ctx, url }: Call): Promise<Response> {
-  return json(await pollPairing(ctx.store, url.searchParams.get('code') ?? '', ctx.now));
+async function pairPoll({ ctx, url, request }: Call): Promise<Response> {
+  return json(await pollPairing(ctx.store, url.searchParams.get('code') ?? '', bearer(request), ctx.now));
 }
 
 async function deviceList({ ctx }: Call): Promise<Response> {
@@ -198,7 +202,7 @@ async function deviceList({ ctx }: Call): Promise<Response> {
 }
 
 async function deviceRevoke({ ctx, url }: Call): Promise<Response> {
-  // `device`/`token` authenticate the caller (either a paired desktop or browser); `target`
+  // `device` plus the Authorization bearer authenticate the caller; `target`
   // names the device to drop, so one side can revoke the other (lost-laptop / lost-desktop).
   const target = url.searchParams.get('target');
   if (!target) throw new HttpError('invalid', 400);

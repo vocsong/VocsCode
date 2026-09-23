@@ -42,6 +42,18 @@ Worth grepping for when a feature misbehaves:
 - `git … timed out` / `gh … timed out` — why the Changes or Branches panel is missing data.
 - `log file … is not writable` (console only) — the log itself could not be opened; this run is console-only.
 
+## Remote relay operations
+
+The relay and landing deploy separately. A `develop` push touching `relay/**` or its shared
+protocol triggers `.github/workflows/deploy-relay.yml` after the protected `relay-production`
+environment is approved; it needs `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets.
+The landing Worker (`code.vocs.io`) is owned by the separate `vocs.io` repo and deploys with
+`npm run deploy:code`. Neither deploy provisions the GitHub OAuth app or rotates enrollment
+secrets. For manual deploy, rollback, verification and secret-rotation instructions see
+[`relay/README.md`](../relay/README.md) and the live checklist in
+[`REMOTE-ACCESS-ROADMAP.md`](./REMOTE-ACCESS-ROADMAP.md#appendix-a--live-verification-checklist).
+Keep `workers.dev` enabled until the login gate is live and the direct-origin policy is settled.
+
 ## Environment variables
 
 None of these are required to run the app; they exist for headless runs and the test suites.

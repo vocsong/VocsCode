@@ -740,8 +740,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       return remote.state();
     });
     handle('remote:pairStart', ({ hostName }) => remote.startPairing(hostName || 'This computer'));
-    handle('remote:pairRespond', ({ decision }) => {
-      remote.respondPairing(decision);
+    handle('remote:pairRespond', async ({ decision }) => {
+      await remote.respondPairing(decision);
       return undefined;
     });
     handle('remote:revoke', async ({ deviceId }) => {

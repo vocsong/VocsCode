@@ -45,6 +45,20 @@ function setConnection(state: string): void {
 }
 
 function boot(): void {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('code')) {
+    const codes = params.getAll('code');
+    const code = codes[0]?.trim().toUpperCase() ?? '';
+    if (codes.length === 1 && /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/.test(code)) {
+      (el('code') as HTMLInputElement).value = code;
+    } else {
+      el('pair-error').textContent = 'Invalid code in pairing link. Enter the code shown on the desktop.';
+    }
+    // A pairing code is short-lived but should not linger in the address bar or browser history.
+    params.delete('code');
+    const search = params.toString();
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`);
+  }
   el('pair-form').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const code = (el('code') as HTMLInputElement).value.trim();
@@ -72,6 +86,25 @@ function boot(): void {
   });
   if (client.restore()) void enter();
   else show('screen-pair');
+  void loadAccount();
+}
+
+/** The login gate is on the landing origin. A local/ungated preview has no /v1/me, so keep
+ *  account sign-out hidden there; unpairing this browser remains a separate device action. */
+async function loadAccount(): Promise<void> {
+  try {
+    const res = await fetch('/v1/me', { credentials: 'same-origin', cache: 'no-store' });
+    if (!res.ok) return;
+    const body = (await res.json()) as { login?: unknown };
+    if (typeof body.login !== 'string' || !body.login) return;
+    for (const form of document.querySelectorAll<HTMLFormElement>('.account-signout')) {
+      const label = form.querySelector('.account-name');
+      if (label) label.textContent = `@${body.login}`;
+      form.hidden = false;
+    }
+  } catch {
+    // Pre-gate deployments do not have /v1/me. Never expose an account control without it.
+  }
 }
 
 async function sendComposer(): Promise<void> {

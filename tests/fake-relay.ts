@@ -3,18 +3,28 @@ import http from 'node:http';
  *  over the REAL relay core (relay/src/core.ts). Used by remote-e2e.test.ts and
  *  web-client.test.ts. Metadata-only routing, like the real Durable Object. */
 import { WebSocketServer, type WebSocket as WsLike } from 'ws';
-import { claimPairing, clearMirror, deleteMirrorSession, deviceInfos, getMirrorIndex, getMirrorSession, MirrorError, pollPairing, putMirrorIndex, putMirrorSession, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, type DeviceRecord, type MirrorBlob, type RelayStore } from '../relay/src/core';
+import { claimPairing, clearMirror, deleteMirrorSession, deviceInfos, getMirrorIndex, getMirrorSession, MirrorError, PairError, pollPairing, putMirrorIndex, putMirrorSession, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, type DeviceRecord, type MirrorBlob, type RelayStorage, type RelayStore } from '../relay/src/core';
 import type { PublicIdentity } from '../src/shared/crypto';
 
 export const ENROLL = 'enroll-secret';
 
 export function memStore(): RelayStore {
   const map = new Map<string, unknown>();
+  const adapt = (target: Map<string, unknown>): RelayStorage => ({
+    get: async <T,>(k: string) => target.has(k) ? structuredClone(target.get(k)) as T : undefined,
+    put: async (k, v) => void target.set(k, structuredClone(v)),
+    delete: async (k) => void target.delete(k),
+    list: async <T,>(prefix: string) => [...target.entries()].filter(([k]) => k.startsWith(prefix)) as Array<[string, T]>
+  });
   return {
-    get: async <T,>(k: string) => map.get(k) as T | undefined,
-    put: async (k, v) => void map.set(k, v),
-    delete: async (k) => void map.delete(k),
-    list: async <T,>(prefix: string) => [...map.entries()].filter(([k]) => k.startsWith(prefix)) as Array<[string, T]>
+    ...adapt(map),
+    transaction: async (work) => {
+      const staged = new Map(structuredClone([...map]));
+      const result = await work(adapt(staged));
+      map.clear();
+      for (const [key, value] of staged) map.set(key, value);
+      return result;
+    }
   };
 }
 
@@ -48,7 +58,7 @@ export class FakeRelay {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(v));
     };
-    const auth = (req.headers.authorization ?? '').replace('Bearer ', '') || new URL(req.url ?? '/', 'http://x').searchParams.get('token') || '';
+    const auth = (req.headers.authorization ?? '').replace('Bearer ', '');
     if (url.pathname === '/v1/pair/start' && req.method === 'POST') {
       if (auth !== ENROLL) {
         reply({ error: 'forbidden' }, 403);
@@ -60,17 +70,22 @@ export class FakeRelay {
     }
     if (url.pathname === '/v1/pair/claim' && req.method === 'POST') {
       const parsed = JSON.parse(body) as { code: string; webPub: PublicIdentity; name: string };
-      await claimPairing(this.store, { code: parsed.code, webName: parsed.name, webPlatform: 'node-test', webPub: parsed.webPub }, Date.now());
-      for (const [ws, meta] of this.sockets) if (meta.role === 'host') ws.send(JSON.stringify({ t: 'pair.request', code: parsed.code, name: parsed.name, platform: 'node-test' }));
-      reply({ ok: true });
+      const { pollToken, hostPub } = await claimPairing(this.store, { code: parsed.code, webName: parsed.name, webPlatform: 'node-test', webPub: parsed.webPub }, Date.now());
+      for (const [ws, meta] of this.sockets) if (meta.role === 'host') ws.send(JSON.stringify({ t: 'pair.request', code: parsed.code, name: parsed.name, platform: 'node-test', hostPub, webPub: parsed.webPub }));
+      reply({ pollToken });
       return;
     }
     if (url.pathname === '/v1/pair/poll' && req.method === 'GET') {
-      reply(await pollPairing(this.store, url.searchParams.get('code') ?? '', Date.now()));
+      try {
+        reply(await pollPairing(this.store, url.searchParams.get('code') ?? '', auth, Date.now()));
+      } catch (error) {
+        if (!(error instanceof PairError)) throw error;
+        reply({ error: error.code }, 401);
+      }
       return;
     }
     if (url.pathname === '/v1/devices' && (req.method === 'GET' || req.method === 'DELETE')) {
-      // Matches the Worker: device/token authenticate the caller, target names the victim,
+      // Matches the Worker: device/bearer authenticate the caller, target names the victim,
       // and only public metadata is returned.
       let caller: DeviceRecord;
       try {
@@ -94,7 +109,7 @@ export class FakeRelay {
       return;
     }
     if (url.pathname === '/v1/mirror' || url.pathname.startsWith('/v1/mirror/')) {
-      // Mirror routing mirrors the Worker: device/token authenticate, only the desktop may
+      // Mirror routing mirrors the Worker: device/bearer authenticate, only the desktop may
       // write, and the blobs stay opaque.
       let caller: DeviceRecord;
       try {
@@ -186,10 +201,19 @@ export class FakeRelay {
     if (!meta) return;
     const msg = JSON.parse(raw) as Record<string, unknown>;
     if (msg.t === 'pair.respond') {
+      if (meta.role !== 'host') return;
       void (async () => {
-        const result = await resolvePairing(this.store, { code: String(msg.code), decision: msg.decision as 'approve' | 'deny' }, Date.now());
-        if ('denied' in result) return;
-        ws.send(JSON.stringify({ t: 'pair.result', code: msg.code, decision: msg.decision, hostToken: result.hostToken, hostDeviceId: result.hostDeviceId, webDeviceId: result.webDeviceId, webPub: result.webPub }));
+        try {
+          const result = await resolvePairing(this.store, { code: msg.code as string, decision: msg.decision as 'approve' | 'deny', signature: msg.signature as string }, Date.now());
+          if ('denied' in result) {
+            ws.send(JSON.stringify({ t: 'pair.result', code: msg.code, decision: msg.decision }));
+            return;
+          }
+          ws.send(JSON.stringify({ t: 'pair.result', code: msg.code, decision: msg.decision, hostToken: result.hostToken, hostDeviceId: result.hostDeviceId, webDeviceId: result.webDeviceId, webPub: result.webPub }));
+        } catch (error) {
+          if (!(error instanceof PairError)) throw error;
+          ws.send(JSON.stringify({ t: 'pair.error', error: 'forbidden' }));
+        }
       })();
       return;
     }

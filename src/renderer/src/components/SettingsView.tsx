@@ -1043,6 +1043,7 @@ function UpdatesPanel({ state, currentVersion }: { state: UpdateState; currentVe
 /** Remote access (docs/REMOTE-ACCESS.md §6): relay connection, browser pairing, devices.
  *  The enrollment secret is stored in the OS keychain via secrets:set, never in settings. */
 function RemoteSection({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+  const toast = useStore((s) => s.toast);
   const config = settings.remote ?? { enabled: false };
   const [state, setState] = useState<RemoteState | null>(null);
   const [devices, setDevices] = useState<RemoteDeviceInfo[]>([]);
@@ -1089,6 +1090,16 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   };
 
   const secondsLeft = pairing ? Math.max(0, Math.ceil((pairing.expiresAt - Date.now()) / 1000)) : 0;
+  const pairingLink = pairing && secondsLeft > 0 ? `https://code.vocs.io/app?code=${encodeURIComponent(pairing.code)}` : null;
+  const copyPairingLink = async () => {
+    if (!pairingLink) return;
+    try {
+      await navigator.clipboard.writeText(pairingLink);
+      toast('Pairing link copied', 'success');
+    } catch {
+      setError('Could not copy the link. Select the link above and copy it manually.');
+    }
+  };
   const statusLine = state ? `${state.status}${state.detail ? ` — ${state.detail}` : ''}` : 'unknown';
 
   return (
@@ -1153,13 +1164,21 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
         </Field>
       )}
 
-      {config.enabled && state?.status === 'online' && (
+      {config.enabled && (state?.status === 'online' || state?.status === 'connecting') && (
         <>
           <h3>Pair a browser</h3>
-          {pairing && secondsLeft > 0 ? (
+          {pairing && pairingLink ? (
             <div>
               <p className="muted small">Enter this code at code.vocs.io → “Add a computer” (expires in {secondsLeft}s):</p>
-              <p style={{ fontSize: 28, letterSpacing: 6, fontWeight: 600 }}>{pairing.code}</p>
+              <p data-testid="remote-pair-code" style={{ fontSize: 28, letterSpacing: 6, fontWeight: 600 }}>{pairing.code}</p>
+              <Field label="Pairing link" hint="Open in a browser to fill the code, then press Pair. Approve the request here to finish pairing.">
+                <div className="row gap8">
+                  <input data-testid="remote-pair-link" aria-label="Pairing link" readOnly value={pairingLink} onFocus={(e) => e.currentTarget.select()} />
+                  <Button size="sm" variant="ghost" icon="copy" onClick={() => void copyPairingLink()}>
+                    Copy link
+                  </Button>
+                </div>
+              </Field>
             </div>
           ) : (
             <Button size="sm" disabled={busy} onClick={() => void act(() => invoke('remote:pairStart', { hostName: undefined }))}>

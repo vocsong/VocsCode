@@ -30,6 +30,11 @@ export async function generateIdentity(): Promise<Identity> {
   };
 }
 
+/** Domain-separated pairing approval: bind one code and decision to the identity that claimed it. */
+export function pairingDecisionPayload(code: string, decision: 'approve' | 'deny', webPub: PublicIdentity): unknown[] {
+  return ['pair.respond', code, decision, webPub];
+}
+
 export async function sign(identity: Identity, data: unknown): Promise<string> {
   const key = await subtle.importKey('jwk', identity.sig.priv, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
   const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, canonical(data) as BufferSource);

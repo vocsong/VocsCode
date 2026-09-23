@@ -77,7 +77,11 @@ describe('relay route table', () => {
     expect(res.status).toBe(200);
     expect(seen).toContain(BROADCAST_TAG.host);
     expect(sent).toHaveLength(1);
-    expect(JSON.parse(sent[0])).toMatchObject({ t: 'pair.request', code, name: 'Chrome' });
+    expect(JSON.parse(sent[0])).toMatchObject({ t: 'pair.request', code, name: 'Chrome', hostPub: HOST_PUB, webPub: WEB_PUB });
+    const { pollToken } = (await res.json()) as { pollToken: string };
+    expect(pollToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect((await handleHttp(req('GET', `/pair/poll?code=${code}`), ctx())).status).toBe(401);
+    expect((await handleHttp(req('GET', `/pair/poll?code=${code}`, { headers: { authorization: `Bearer ${pollToken}` } }), ctx())).status).toBe(200);
   });
 
   it('requires the enrollment secret to start pairing', async () => {
@@ -94,18 +98,19 @@ describe('relay route table', () => {
     const web = await registerWebDevice(store, { accountId: 'a', name: 'Chrome', platform: 'web', pub: WEB_PUB }, Date.now());
     expect((await handleHttp(req('GET', '/devices'), ctx())).status).toBe(401);
     expect((await handleHttp(req('GET', '/devices?device=nope&token=nope'), ctx())).status).toBe(401);
-    const ok = await handleHttp(req('GET', `/devices?device=${web.deviceId}&token=${web.webToken}`), ctx());
+    const ok = await handleHttp(req('GET', `/devices?device=${web.deviceId}`, { headers: { authorization: `Bearer ${web.webToken}` } }), ctx());
     expect(ok.status).toBe(200);
     const list = (await ok.json()) as Array<Record<string, unknown>>;
     expect(list[0]).toMatchObject({ deviceId: web.deviceId, kind: 'web' });
     expect(JSON.stringify(list)).not.toContain('tokenHash');
   });
 
-  it('accepts a device token in the Authorization header as well as the query', async () => {
+  it('accepts a device token only in Authorization for REST, not in the query', async () => {
     const { ctx, store } = harness();
     const web = await registerWebDevice(store, { accountId: 'a', name: 'Chrome', platform: 'web', pub: WEB_PUB }, Date.now());
     const res = await handleHttp(req('GET', `/devices?device=${web.deviceId}`, { headers: { authorization: `Bearer ${web.webToken}` } }), ctx());
     expect(res.status).toBe(200);
+    expect((await handleHttp(req('GET', `/devices?device=${web.deviceId}&token=${web.webToken}`), ctx())).status).toBe(401);
   });
 
   it('refuses mirror writes from a browser and allows them from the desktop', async () => {
@@ -113,25 +118,27 @@ describe('relay route table', () => {
     const web = await registerWebDevice(store, { accountId: 'a', name: 'Chrome', platform: 'web', pub: WEB_PUB }, Date.now());
     const host = await registerHostDevice(store, { accountId: 'a', name: 'Work PC', platform: 'win32', pub: HOST_PUB }, Date.now());
     expect((await handleHttp(put('/mirror'), ctx())).status).toBe(401);
-    expect((await handleHttp(put(`/mirror?device=${web.deviceId}&token=${web.webToken}`), ctx())).status).toBe(403);
-    expect((await handleHttp(put(`/mirror?device=${host.deviceId}&token=${host.hostToken}`), ctx())).status).toBe(200);
+    expect((await handleHttp(put(`/mirror?device=${web.deviceId}`, { iv: 'AAAA', ct: 'BBBB' }), ctx())).status).toBe(401);
+    expect((await handleHttp(req('PUT', `/mirror?device=${web.deviceId}`, { body: JSON.stringify({ iv: 'AAAA', ct: 'BBBB' }), headers: { authorization: `Bearer ${web.webToken}` } }), ctx())).status).toBe(403);
+    expect((await handleHttp(req('PUT', `/mirror?device=${host.deviceId}`, { body: JSON.stringify({ iv: 'AAAA', ct: 'BBBB' }), headers: { authorization: `Bearer ${host.hostToken}` } }), ctx())).status).toBe(200);
 
     // Reads are open to any paired device, and default to the caller's own host.
-    const read = await handleHttp(req('GET', `/mirror?device=${web.deviceId}&token=${web.webToken}&host=${host.deviceId}`), ctx());
+    const read = await handleHttp(req('GET', `/mirror?device=${web.deviceId}&host=${host.deviceId}`, { headers: { authorization: `Bearer ${web.webToken}` } }), ctx());
     expect(read.status).toBe(200);
     expect(await read.json()).toMatchObject({ iv: 'AAAA' });
 
     // A browser cannot clear the desktop's mirror either.
-    expect((await handleHttp(req('DELETE', `/mirror?device=${web.deviceId}&token=${web.webToken}`), ctx())).status).toBe(403);
+    expect((await handleHttp(req('DELETE', `/mirror?device=${web.deviceId}`, { headers: { authorization: `Bearer ${web.webToken}` } }), ctx())).status).toBe(403);
   });
 
   it('rejects a malformed mirror blob and an oversized one with the right status', async () => {
     const { ctx, store } = harness();
     const host = await registerHostDevice(store, { accountId: 'a', name: 'PC', platform: 'win32', pub: HOST_PUB }, Date.now());
-    const url = `/mirror?device=${host.deviceId}&token=${host.hostToken}`;
-    expect((await handleHttp(put(url, { iv: 'AAAA' }), ctx())).status).toBe(400);
+    const url = `/mirror?device=${host.deviceId}`;
+    const upload = (blob: unknown) => req('PUT', url, { body: JSON.stringify(blob), headers: { authorization: `Bearer ${host.hostToken}` } });
+    expect((await handleHttp(upload({ iv: 'AAAA' }), ctx())).status).toBe(400);
     const huge = { iv: 'AAAA', ct: 'a'.repeat(12 * 1024 * 1024) };
-    expect((await handleHttp(put(url, huge), ctx())).status).toBe(413);
+    expect((await handleHttp(upload(huge), ctx())).status).toBe(413);
   });
 
   it('rate limits pairing claims per caller and recovers after the window', async () => {
@@ -150,7 +157,7 @@ describe('relay route table', () => {
     const { ctx } = harness();
     const poll = () => handleHttp(req('GET', '/pair/poll?code=ABCD2345'), ctx());
     // 100 polls inside one minute — the pairing page's own cadence — must all get through.
-    for (let i = 0; i < 100; i++) expect((await poll()).status).toBe(200);
+    for (let i = 0; i < 100; i++) expect((await poll()).status).toBe(401);
     for (let i = 0; i < 20; i++) await poll();
     expect((await poll()).status).toBe(429);
   });
@@ -171,6 +178,20 @@ describe('relay route table', () => {
     expect(ok).toEqual({ ok: true, deviceId: 'enrolling' });
   });
 
+  it('never lets a paired browser take the host socket role (or a host take the browser role)', async () => {
+    const { ctx, store } = harness();
+    const web = await registerWebDevice(store, { accountId: 'a', name: 'Chrome', platform: 'web', pub: WEB_PUB }, Date.now());
+    const host = await registerHostDevice(store, { accountId: 'a', name: 'Work PC', platform: 'win32', pub: HOST_PUB }, Date.now());
+    // A host-role socket can answer pairing requests and publish host frames. Authentication
+    // must check the device kind, not merely that the token belongs to some paired device.
+    expect(await authorizeSocket('host', req('GET', `/ws/host?device=${web.deviceId}&token=${web.webToken}`), ctx()))
+      .toMatchObject({ ok: false, status: 401 });
+    expect(await authorizeSocket('client', req('GET', `/ws/client?device=${host.deviceId}&token=${host.hostToken}`), ctx()))
+      .toMatchObject({ ok: false, status: 401 });
+    expect(await authorizeSocket('host', req('GET', `/ws/host?device=${host.deviceId}&token=${host.hostToken}`), ctx()))
+      .toEqual({ ok: true, deviceId: host.deviceId });
+  });
+
   it('authenticates client sockets by device token and refuses unknown ones', async () => {
     const { ctx, store } = harness();
     const web = await registerWebDevice(store, { accountId: 'a', name: 'Chrome', platform: 'web', pub: WEB_PUB }, Date.now());
@@ -178,7 +199,7 @@ describe('relay route table', () => {
     expect((await authorizeSocket('client', req('GET', `/ws/client?device=${web.deviceId}&token=wrong`), ctx())).ok).toBe(false);
     // A revoked device cannot open a socket (or use any other route) again.
     await handleHttp(
-      req('DELETE', `/devices?device=${web.deviceId}&token=${web.webToken}&target=${web.deviceId}`),
+      req('DELETE', `/devices?device=${web.deviceId}&target=${web.deviceId}`, { headers: { authorization: `Bearer ${web.webToken}` } }),
       ctx()
     );
     await expect(verifyDeviceToken(store, { accountId: 'a', deviceId: web.deviceId, token: web.webToken }, Date.now())).rejects.toThrow();

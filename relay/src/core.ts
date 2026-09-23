@@ -1,19 +1,24 @@
 /** Relay core: pairing state machine and device registry (docs/REMOTE-ACCESS.md §6).
  *  Storage-agnostic — the Durable Object implements RelayStore over DO storage, tests
- *  over an in-memory map. The relay never sees private keys or plaintext payloads: it
- *  holds public keys and token hashes only. */
+ *  over an in-memory map. The relay never sees private keys or plaintext session
+ *  payloads; it stores public keys, token hashes, pairing codes and sealed blobs. */
 
 export type Json = Record<string, unknown>;
 
-import type { PublicIdentity } from '../../src/shared/crypto';
+import { pairingDecisionPayload, verify, type PublicIdentity } from '../../src/shared/crypto';
 
 /** Implemented by Durable Object storage (worker) and in-memory maps (tests). */
-export interface RelayStore {
+export interface RelayStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<void>;
   /** All entries whose key starts with `prefix`, with the full key. */
   list<T>(prefix: string): Promise<Array<[string, T]>>;
+}
+
+export interface RelayStore extends RelayStorage {
+  /** Atomic multi-key commit for device minting; never publish a partially approved pair. */
+  transaction<T>(work: (tx: RelayStorage) => Promise<T>): Promise<T>;
 }
 
 export interface DeviceRecord {
@@ -42,6 +47,8 @@ export interface PairingRecord {
   webName?: string;
   webPlatform?: string;
   webPub?: PublicIdentity;
+  /** SHA-256 of the claim's private poll capability, never the plaintext capability. */
+  pollTokenHash?: string;
   expiresAt: number;
 }
 
@@ -81,6 +88,29 @@ function randomCode(): string {
 const deviceKey = (accountId: string, deviceId: string) => `device:${accountId}:${deviceId}`;
 const codeKey = (code: string) => `pair:${code}`;
 
+/** One Hub owns each account: serialize state transitions per code across async storage and
+ *  crypto calls. DO storage returns separate copies, so a status check alone cannot be a lock. */
+const pairLocks = new WeakMap<RelayStore, Map<string, Promise<void>>>();
+async function withPairCode<T>(store: RelayStore, code: string, work: () => Promise<T>): Promise<T> {
+  let locks = pairLocks.get(store);
+  if (!locks) {
+    locks = new Map();
+    pairLocks.set(store, locks);
+  }
+  const previous = locks.get(code);
+  let release!: () => void;
+  const turn = new Promise<void>((resolve) => { release = resolve; });
+  locks.set(code, turn);
+  if (previous) await previous;
+  try {
+    return await work();
+  } finally {
+    if (locks.get(code) === turn) locks.delete(code);
+    if (!locks.size) pairLocks.delete(store);
+    release();
+  }
+}
+
 /** Creates a pairing code for a desktop asking to be paired. Single-use, 5-minute TTL. */
 export async function startPairing(
   store: RelayStore,
@@ -106,7 +136,11 @@ export async function claimPairing(
   store: RelayStore,
   input: { code: string; webName: string; webPlatform: string; webPub: PublicIdentity },
   now: number
-): Promise<{ ok: true }> {
+): Promise<{ pollToken: string; hostPub: PublicIdentity }> {
+  return withPairCode(store, input.code, () => claimPairingUnlocked(store, input, now));
+}
+
+async function claimPairingUnlocked(store: RelayStore, input: { code: string; webName: string; webPlatform: string; webPub: PublicIdentity }, now: number): Promise<{ pollToken: string; hostPub: PublicIdentity }> {
   const key = codeKey(input.code);
   const record = await store.get<PairingRecord>(key);
   if (!record) throw new PairError('not-found');
@@ -119,36 +153,31 @@ export async function claimPairing(
   record.webName = input.webName;
   record.webPlatform = input.webPlatform;
   record.webPub = input.webPub;
+  const pollToken = randomToken();
+  record.pollTokenHash = await hashToken(pollToken);
   await store.put(key, record);
-  return { ok: true };
+  return { pollToken, hostPub: record.hostPub };
 }
 
-/** The web client polls its claim: pending/claimed → approved(+webToken, host identity) / denied / expired. */
-export async function pollPairing(store: RelayStore, code: string, now: number): Promise<{ status: 'pending' | 'claimed' | 'denied' } | { status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string } | { status: 'expired' }> {
+/** Only the claimant's private capability can read pairing state or the one-time web token. */
+export async function pollPairing(store: RelayStore, code: string, pollToken: string, now: number): Promise<{ status: 'claimed' | 'denied' } | { status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string } | { status: 'expired' }> {
   const live = await store.get<PairingRecord>(codeKey(code));
-  if (live) {
-    if (now >= live.expiresAt) {
-      await store.delete(codeKey(code));
-      return { status: 'expired' };
-    }
-    return { status: live.status === 'denied' ? 'denied' : live.status === 'claimed' ? 'claimed' : 'pending' };
+  const settled = live ? undefined : await store.get<{ status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string; pollTokenHash: string; expiresAt: number }>(codeKey(`${code}:done`));
+  const record = live ?? settled;
+  if (!record || !pollToken || !record.pollTokenHash || record.pollTokenHash !== (await hashToken(pollToken))) throw new PairError('forbidden');
+  if (now >= record.expiresAt) {
+    await store.delete(live ? codeKey(code) : codeKey(`${code}:done`));
+    return { status: 'expired' };
   }
-  const settled = await store.get<{ status: string; webToken?: string; webDeviceId?: string; hostPub?: PublicIdentity; hostDeviceId?: string; expiresAt: number }>(codeKey(`${code}:done`));
-  if (settled && settled.status === 'approved' && settled.webToken && settled.webDeviceId && settled.hostPub && settled.hostDeviceId) {
-    if (now >= settled.expiresAt) {
-      await store.delete(codeKey(`${code}:done`));
-      return { status: 'expired' };
-    }
-    return { status: 'approved', webToken: settled.webToken, webDeviceId: settled.webDeviceId, hostPub: settled.hostPub, hostDeviceId: settled.hostDeviceId };
-  }
-  return { status: 'expired' };
+  if (live) return { status: live.status === 'denied' ? 'denied' : 'claimed' };
+  return { status: 'approved', webToken: settled!.webToken, webDeviceId: settled!.webDeviceId, hostPub: settled!.hostPub, hostDeviceId: settled!.hostDeviceId };
 }
 
 /** Desktop decision. On approve, BOTH devices are minted: the host (token returned here,
  *  shown once) and the web client (token delivered via its claim poll). */
 export async function resolvePairing(
   store: RelayStore,
-  input: { code: string; decision: 'approve' | 'deny' },
+  input: { code: string; decision: 'approve' | 'deny'; signature: string },
   now: number
 ): Promise<
   | {
@@ -156,6 +185,14 @@ export async function resolvePairing(
     }
   | { hostToken: string; hostDeviceId: string; webToken: string; webDeviceId: string; webPub: PublicIdentity; hostPub: PublicIdentity }
 > {
+  return withPairCode(store, input.code, () => resolvePairingUnlocked(store, input, now));
+}
+
+async function resolvePairingUnlocked(
+  store: RelayStore,
+  input: { code: string; decision: 'approve' | 'deny'; signature: string },
+  now: number
+): Promise<{ denied: true } | { hostToken: string; hostDeviceId: string; webToken: string; webDeviceId: string; webPub: PublicIdentity; hostPub: PublicIdentity }> {
   const key = codeKey(input.code);
   const record = await store.get<PairingRecord>(key);
   if (!record) throw new PairError('invalid');
@@ -163,22 +200,31 @@ export async function resolvePairing(
     await store.delete(key);
     throw new PairError('expired');
   }
-  if (record.status !== 'claimed' || !record.webPub) throw new PairError('used');
+  if (record.status !== 'claimed' || !record.webPub || !record.pollTokenHash) throw new PairError('used');
+  if (input.decision !== 'approve' && input.decision !== 'deny') throw new PairError('invalid');
+  if (typeof input.signature !== 'string' || !input.signature) throw new PairError('forbidden');
+  try {
+    if (!(await verify(record.hostPub, pairingDecisionPayload(input.code, input.decision, record.webPub), input.signature))) throw new PairError('forbidden');
+  } catch {
+    // Bad JWKs and malformed signatures are auth failures, not internal errors.
+    throw new PairError('forbidden');
+  }
   if (input.decision === 'deny') {
     record.status = 'denied';
     await store.put(key, record);
     return { denied: true };
   }
-  const host = await registerHostDevice(store, { accountId: record.accountId, name: record.hostName, platform: record.hostPlatform, pub: record.hostPub }, now);
-  const web = await registerWebDevice(store, { accountId: record.accountId, name: record.webName ?? 'web', platform: record.webPlatform ?? 'web', pub: record.webPub }, now);
-  record.status = 'approved';
-  await store.put(codeKey(`${record.code}:done`), { code: record.code, status: 'approved', webToken: web.webToken, webDeviceId: web.deviceId, hostPub: record.hostPub, hostDeviceId: host.deviceId, expiresAt: now + PAIRING_TTL_MS });
-  await store.delete(key);
-  return { hostToken: host.hostToken, hostDeviceId: host.deviceId, webToken: web.webToken, webDeviceId: web.deviceId, webPub: record.webPub, hostPub: record.hostPub };
+  return store.transaction(async (tx) => {
+    const host = await registerHostDevice(tx, { accountId: record.accountId, name: record.hostName, platform: record.hostPlatform, pub: record.hostPub }, now);
+    const web = await registerWebDevice(tx, { accountId: record.accountId, name: record.webName ?? 'web', platform: record.webPlatform ?? 'web', pub: record.webPub! }, now);
+    await tx.put(codeKey(`${record.code}:done`), { code: record.code, status: 'approved', webToken: web.webToken, webDeviceId: web.deviceId, hostPub: record.hostPub, hostDeviceId: host.deviceId, pollTokenHash: record.pollTokenHash, expiresAt: now + PAIRING_TTL_MS });
+    await tx.delete(key);
+    return { hostToken: host.hostToken, hostDeviceId: host.deviceId, webToken: web.webToken, webDeviceId: web.deviceId, webPub: record.webPub!, hostPub: record.hostPub };
+  });
 }
 
 /** Registers a web device directly (used when the desktop approves via its control socket). */
-export async function registerWebDevice(store: RelayStore, input: { accountId: string; name: string; platform: string; pub: PublicIdentity }, now: number): Promise<{ webToken: string; deviceId: string }> {
+export async function registerWebDevice(store: RelayStorage, input: { accountId: string; name: string; platform: string; pub: PublicIdentity }, now: number): Promise<{ webToken: string; deviceId: string }> {
   const webToken = randomToken();
   const id = `w_${toBase64Url(crypto.getRandomValues(new Uint8Array(8)))}`;
   const device: DeviceRecord = {
@@ -196,7 +242,7 @@ export async function registerWebDevice(store: RelayStore, input: { accountId: s
 }
 
 /** Mints the host's device record + one-time token after the human approves. */
-export async function registerHostDevice(store: RelayStore, input: { accountId: string; name: string; platform: string; pub: PublicIdentity }, now: number): Promise<{ hostToken: string; deviceId: string }> {
+export async function registerHostDevice(store: RelayStorage, input: { accountId: string; name: string; platform: string; pub: PublicIdentity }, now: number): Promise<{ hostToken: string; deviceId: string }> {
   const hostToken = randomToken();
   const id = `h_${toBase64Url(crypto.getRandomValues(new Uint8Array(8)))}`;
   const device: DeviceRecord = {
@@ -214,12 +260,17 @@ export async function registerHostDevice(store: RelayStore, input: { accountId: 
 }
 
 export async function verifyDeviceToken(store: RelayStore, input: { accountId: string; deviceId: string; token: string }, now: number): Promise<DeviceRecord> {
-  const device = await store.get<DeviceRecord>(deviceKey(input.accountId, input.deviceId));
-  if (!device) throw new PairError('invalid');
-  if (device.tokenHash !== (await hashToken(input.token))) throw new PairError('invalid');
-  device.lastSeen = now;
-  await store.put(deviceKey(input.accountId, input.deviceId), device);
-  return device;
+  const key = deviceKey(input.accountId, input.deviceId);
+  const tokenHash = await hashToken(input.token);
+  // The last-seen write must be atomic with the existence/token check. A concurrent
+  // revoke must never be undone by a stale authentication write.
+  return store.transaction(async (tx) => {
+    const device = await tx.get<DeviceRecord>(key);
+    if (!device || device.tokenHash !== tokenHash) throw new PairError('invalid');
+    device.lastSeen = now;
+    await tx.put(key, device);
+    return device;
+  });
 }
 
 export async function listDevices(store: RelayStore, accountId: string): Promise<DeviceRecord[]> {

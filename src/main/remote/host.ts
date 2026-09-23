@@ -3,7 +3,7 @@
  *  registry over an e2e-encrypted session. Off by default; device credentials and the
  *  identity keys live in the secret store, never in settings or logs. */
 import { WebSocket } from 'ws';
-import { generateIdentity, hostAccept, openFrame, publicOf, randomKeyB64, sealFrame, verify, type Identity, type PublicIdentity, type SealedBlob } from '../../shared/crypto';
+import { generateIdentity, hostAccept, openFrame, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, verify, type Identity, type PublicIdentity, type SealedBlob } from '../../shared/crypto';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
@@ -112,6 +112,9 @@ interface Session {
   key: CryptoKey;
   salt: Uint8Array;
   out: number;
+  inSeq: number;
+  inSalt?: string;
+  outgoing: Promise<void>;
   identity: PublicIdentity;
 }
 
@@ -126,6 +129,7 @@ interface WsMessage {
   webToken?: string;
   webDeviceId?: string;
   webPub?: PublicIdentity;
+  hostPub?: PublicIdentity;
   from?: string;
   to?: string;
   client?: string;
@@ -139,8 +143,10 @@ export class RemoteHost {
   private status: RemoteState['status'] = 'off';
   private detail: string | undefined;
   private pairing: { code: string; expiresAt: number } | undefined;
-  private pendingRequest: { code: string; name: string; platform: string } | undefined;
+  private pendingRequest: { code: string; name: string; platform: string; webPub: PublicIdentity } | undefined;
   private readonly sessions = new Map<string, Session>();
+  /** Serialize handshake and ciphertext delivery per peer, not across unrelated clients. */
+  private readonly incoming = new Map<string, Promise<void>>();
   /** Bumped on enable/disable so a pending reconnect timer can be invalidated. */
   private generation = 0;
 
@@ -210,6 +216,7 @@ export class RemoteHost {
     this.ws?.close();
     this.ws = null;
     this.sessions.clear();
+    this.incoming.clear();
     this.status = 'off';
     this.detail = undefined;
     this.pendingRequest = undefined;
@@ -234,9 +241,16 @@ export class RemoteHost {
   }
 
   /** The human decision on a pending pairing request. */
-  respondPairing(decision: 'approve' | 'deny'): void {
-    if (!this.pendingRequest || !this.ws) return;
-    this.ws.send(JSON.stringify({ t: 'pair.respond', code: this.pendingRequest.code, decision }));
+  async respondPairing(decision: 'approve' | 'deny'): Promise<void> {
+    if (decision !== 'approve' && decision !== 'deny') return;
+    const pending = this.pendingRequest;
+    const socket = this.ws;
+    const creds = this.creds;
+    if (!pending || !socket || !creds) return;
+    const signature = await sign(creds.identity, pairingDecisionPayload(pending.code, decision, pending.webPub));
+    if (this.ws === socket && this.creds === creds && this.pendingRequest === pending) {
+      socket.send(JSON.stringify({ t: 'pair.respond', code: pending.code, decision, signature }));
+    }
   }
 
   /** Fan a local push event out to every connected web client, sealed per client. */
@@ -248,22 +262,22 @@ export class RemoteHost {
 
   async listDevices(): Promise<RemoteDeviceInfo[]> {
     if (!this.creds?.deviceId || !this.creds.deviceToken) return [];
-    // The relay authenticates the caller by the `device`/`token` pair; a bare bearer header
-    // carries no device id, so the host must name itself here just like the web client does.
-    const url = `${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices?device=${encodeURIComponent(this.creds.deviceId)}&token=${encodeURIComponent(this.creds.deviceToken)}`;
+    // The device id is routing metadata; the token travels only in Authorization.
+    const url = `${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices?device=${encodeURIComponent(this.creds.deviceId)}`;
     const res = await fetch(url, { headers: { authorization: `Bearer ${this.creds.deviceToken}` } });
-    if (!res.ok) return [];
+    if (!res.ok) throw new Error(`devices failed: ${res.status}`);
     return (await res.json()) as RemoteDeviceInfo[];
   }
 
   async revokeDevice(deviceId: string): Promise<void> {
     if (!this.creds?.deviceId || !this.creds.deviceToken) return;
-    // `device`/`token` authenticate the caller; `target` names the device to drop.
-    const url = `${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices?device=${encodeURIComponent(this.creds.deviceId)}&token=${encodeURIComponent(this.creds.deviceToken)}&target=${encodeURIComponent(deviceId)}`;
-    await fetch(url, {
+    // `device` and the bearer authenticate the caller; `target` names the device to drop.
+    const url = `${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices?device=${encodeURIComponent(this.creds.deviceId)}&target=${encodeURIComponent(deviceId)}`;
+    const res = await fetch(url, {
       method: 'DELETE',
       headers: { authorization: `Bearer ${this.creds.deviceToken}` }
     });
+    if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
     if (this.creds.clients[deviceId]) {
       delete this.creds.clients[deviceId];
       await this.saveCreds();
@@ -283,7 +297,7 @@ export class RemoteHost {
     if (!this.creds?.deviceId || !this.creds.deviceToken) return false;
     const base = this.creds.relayUrl.replace(/\/$/, '');
     const url = kind === 'index' ? `${base}/v1/mirror` : `${base}/v1/mirror/${encodeURIComponent(sessionId ?? '')}`;
-    const res = await fetch(`${url}?device=${encodeURIComponent(this.creds.deviceId)}&token=${encodeURIComponent(this.creds.deviceToken)}`, {
+    const res = await fetch(`${url}?device=${encodeURIComponent(this.creds.deviceId)}`, {
       method: 'PUT',
       headers: { authorization: `Bearer ${this.creds.deviceToken}`, 'content-type': 'application/json' },
       body: JSON.stringify(blob)
@@ -296,7 +310,7 @@ export class RemoteHost {
   async clearMirror(): Promise<void> {
     if (!this.creds?.deviceId || !this.creds.deviceToken) return;
     const base = this.creds.relayUrl.replace(/\/$/, '');
-    await fetch(`${base}/v1/mirror?device=${encodeURIComponent(this.creds.deviceId)}&token=${encodeURIComponent(this.creds.deviceToken)}`, {
+    await fetch(`${base}/v1/mirror?device=${encodeURIComponent(this.creds.deviceId)}`, {
       method: 'DELETE',
       headers: { authorization: `Bearer ${this.creds.deviceToken}` }
     }).catch(() => undefined);
@@ -331,12 +345,13 @@ export class RemoteHost {
     const device = this.creds.deviceId ?? 'enrolling';
     const ws = new WebSocket(`${this.creds.relayUrl.replace(/\/$/, '')}/v1/ws/host?device=${encodeURIComponent(device)}`, { headers: { authorization: `Bearer ${auth}` } });
     this.ws = ws;
+    this.incoming.clear();
     ws.on('open', () => {
       this.status = this.creds?.deviceId ? 'online' : 'connecting';
       this.deps.log('info', `remote: relay connection open (${this.creds?.deviceId ? 'online' : 'awaiting enrollment'})`);
       this.push();
     });
-    ws.on('message', (data) => void this.onMessage(String(data)));
+    ws.on('message', (data) => void this.onMessage(String(data), ws));
     ws.on('close', (code: number) => {
       // Only the current socket's close counts: a stale socket (closed on reconnect)
       // must not clobber the new connection or wipe live sessions.
@@ -344,6 +359,7 @@ export class RemoteHost {
       this.ws = null;
       const dropped = [...this.sessions.keys()];
       this.sessions.clear();
+      this.incoming.clear();
       for (const client of dropped) this.deps.audit?.record('client-disconnect', { device: client });
       if (this.status !== 'off') {
         this.deps.log('info', `remote: relay connection closed (code ${code}${dropped.length ? `, ${dropped.length} client session(s) dropped` : ''}); reconnecting in 3s`);
@@ -363,7 +379,8 @@ export class RemoteHost {
     });
   }
 
-  private async onMessage(raw: string): Promise<void> {
+  private async onMessage(raw: string, socket: WebSocket): Promise<void> {
+    if (this.ws !== socket) return;
     let msg: WsMessage;
     try {
       msg = JSON.parse(raw) as WsMessage;
@@ -373,7 +390,9 @@ export class RemoteHost {
     }
     switch (msg.t) {
       case 'pair.request': {
-        this.pendingRequest = { code: String(msg.code), name: String(msg.name ?? ''), platform: String(msg.platform ?? '') };
+        if (!this.creds || !this.pairing || msg.code !== this.pairing.code ||
+            !msg.hostPub || !msg.webPub || stable(msg.hostPub) !== stable(publicOf(this.creds.identity))) return;
+        this.pendingRequest = { code: msg.code, name: String(msg.name ?? ''), platform: String(msg.platform ?? ''), webPub: msg.webPub };
         this.deps.log('info', `remote: pairing request from "${this.pendingRequest.name}" (${this.pendingRequest.platform}); awaiting the user's decision`);
         this.deps.audit?.record('pair-request', { detail: `${this.pendingRequest.name} (${this.pendingRequest.platform})` });
         this.push();
@@ -397,24 +416,37 @@ export class RemoteHost {
         return;
       }
       case 'hs': {
-        if (msg.from) await this.onHandshake(String(msg.from), msg.payload);
+        if (msg.from) this.enqueue(String(msg.from), socket, () => this.onHandshake(String(msg.from), msg.payload));
         return;
       }
       case 'd': {
-        if (msg.from) await this.onFrame(String(msg.from), msg.seq ?? 0, msg.payload);
+        if (msg.from) this.enqueue(String(msg.from), socket, () => this.onFrame(String(msg.from), msg.seq as number, msg.payload));
         return;
       }
       case 'client.gone': {
-        if (msg.client && this.sessions.delete(String(msg.client))) {
-          this.deps.log('info', `remote: client ${msg.client} disconnected (${this.sessions.size} online)`);
-          this.deps.audit?.record('client-disconnect', { device: String(msg.client) });
-        }
-        this.push();
+        if (msg.client) this.enqueue(String(msg.client), socket, async () => {
+          if (this.sessions.delete(String(msg.client))) {
+            this.deps.log('info', `remote: client ${msg.client} disconnected (${this.sessions.size} online)`);
+            this.deps.audit?.record('client-disconnect', { device: String(msg.client) });
+          }
+          this.push();
+        });
         return;
       }
       default:
         return;
     }
+  }
+
+  private enqueue(from: string, socket: WebSocket, task: () => Promise<void>): void {
+    const previous = this.incoming.get(from) ?? Promise.resolve();
+    const next = previous.then(() => this.ws === socket ? task() : undefined).catch((e: unknown) => {
+      this.deps.log('warn', `remote: message from ${from} failed: ${e instanceof Error ? e.message : String(e)}`);
+    });
+    this.incoming.set(from, next);
+    void next.then(() => {
+      if (this.incoming.get(from) === next) this.incoming.delete(from);
+    });
   }
 
   private async onHandshake(from: string, payload: unknown): Promise<void> {
@@ -426,9 +458,11 @@ export class RemoteHost {
       this.deps.audit?.record('handshake-failed', { device: from, detail: 'unpaired device' });
       return;
     }
+    const socket = this.ws;
     try {
       const session = await hostAccept(this.creds.identity, payload as never, expected);
-      this.sessions.set(from, { key: session.key, salt: session.salt, out: 0, identity: expected });
+      if (!socket || this.ws !== socket || this.creds?.clients[from] !== expected) return;
+      this.sessions.set(from, { key: session.key, salt: session.salt, out: 0, inSeq: -1, outgoing: Promise.resolve(), identity: expected });
       this.ws?.send(JSON.stringify({ t: 'hs', to: from, seq: 0, payload: session.reply }));
       this.deps.log('info', `remote: client ${from} connected (${this.sessions.size} online)`);
       this.deps.audit?.record('client-connect', { device: from });
@@ -443,14 +477,20 @@ export class RemoteHost {
 
   private async onFrame(from: string, seq: number, payload: unknown): Promise<void> {
     const session = this.sessions.get(from);
-    if (!session || typeof seq !== 'number') return;
+    const sealed = payload as { salt?: unknown; seq?: unknown; ct?: unknown } | null;
+    if (!session || !sealed || !Number.isSafeInteger(seq) || seq < 0 || sealed.seq !== seq ||
+        typeof sealed.salt !== 'string' || typeof sealed.ct !== 'string' || seq <= session.inSeq ||
+        (session.inSalt !== undefined && sealed.salt !== session.inSalt)) return;
     let inner: { type: string; id?: number; channel?: string; request?: unknown; sig?: string };
     try {
-      inner = await openFrame(session.key, payload as { salt: string; seq: number; ct: string });
+      inner = await openFrame(session.key, sealed as { salt: string; seq: number; ct: string });
     } catch {
       this.deps.log('warn', `remote: undecryptable frame from ${from} (seq ${seq})`);
       return;
     }
+    if (this.sessions.get(from) !== session) return;
+    session.inSalt = sealed.salt;
+    session.inSeq = seq;
     if (inner.type === 'invoke' && inner.channel) {
       const allowed = REMOTE_CHANNELS.has(inner.channel);
       // Approvals are signed inside the e2e channel (§6.8): only a paired device key resolves.
@@ -486,9 +526,17 @@ export class RemoteHost {
 
   private async sendTo(clientId: string, inner: unknown): Promise<void> {
     const session = this.sessions.get(clientId);
-    if (!session || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const sealed = await sealFrame(session.key, session.salt, session.out++, inner);
-    this.ws.send(JSON.stringify({ t: 'd', to: clientId, seq: sealed.seq, payload: sealed }));
+    if (!session) return;
+    const send = session.outgoing.then(async () => {
+      const socket = this.ws;
+      if (this.sessions.get(clientId) !== session || !socket || socket.readyState !== WebSocket.OPEN) return;
+      const sealed = await sealFrame(session.key, session.salt, session.out++, inner);
+      if (this.sessions.get(clientId) === session && this.ws === socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ t: 'd', to: clientId, seq: sealed.seq, payload: sealed }));
+      }
+    });
+    session.outgoing = send.catch(() => undefined);
+    await send;
   }
 }
 

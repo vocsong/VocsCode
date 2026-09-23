@@ -84,7 +84,18 @@ describe('relay web client (browser-side protocol)', () => {
 
     // Browser side: start the pairing (claim + poll loop).
     const storage = new Map<string, string>();
+    const rest: Array<{ url: string; authorization: string | null }> = [];
+    let pollToken: string | undefined;
+    const trackingFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const authorization = new Headers(init?.headers).get('authorization');
+      rest.push({ url, authorization });
+      const response = await fetch(input, init);
+      if (url.endsWith('/v1/pair/claim') && response.ok) pollToken = ((await response.clone().json()) as { pollToken: string }).pollToken;
+      return response;
+    };
     const client = new RelayClient({
+      fetchImpl: trackingFetch,
       storage: {
         get: (k) => storage.get(k) ?? null,
         set: (k, v) => void storage.set(k, v),
@@ -100,10 +111,30 @@ describe('relay web client (browser-side protocol)', () => {
     const creds = await pairing;
     expect(creds.webToken).toBeTruthy();
     expect(client.hasCredentials()).toBe(true);
+    expect(pollToken).toBeTruthy();
+    expect(JSON.stringify([...storage])).not.toContain(pollToken);
+    expect(rest.filter((entry) => entry.url.includes('/v1/pair/poll')).every((entry) => entry.authorization === `Bearer ${pollToken}`)).toBe(true);
 
     // A fresh client restores its pairing from storage.
     const shared = { get: (k: string) => storage.get(k) ?? null, set: (k: string, v: string) => void storage.set(k, v), remove: (k: string) => void storage.delete(k) };
-    const restored = new RelayClient({ storage: shared, wsFactory });
+    const inbound: string[] = [];
+    let deliver: ((raw: string) => void) | undefined;
+    let holdNext = false;
+    let held: string | undefined;
+    const restored = new RelayClient({ storage: shared, fetchImpl: trackingFetch, wsFactory: (url, onMessage, onClose) => {
+      deliver = onMessage;
+      return wsFactory(url, (raw) => {
+      if ((JSON.parse(raw) as { t: string }).t === 'd') {
+        inbound.push(raw);
+        if (holdNext) {
+          held = raw;
+          holdNext = false;
+          return;
+        }
+      }
+      onMessage(raw);
+      }, onClose);
+    } });
     expect(restored.restore()).toBe(true);
     await sleep(400); // host reconnects under its new device token
 
@@ -128,13 +159,40 @@ describe('relay web client (browser-side protocol)', () => {
     await expect(restored.invoke('settings:update', { remote: { enabled: true } })).rejects.toThrow('channel not available remotely');
     expect(calls).not.toContain('settings:update');
 
-    // Host pushes reach the browser, sealed.
+    // Host pushes reach the browser, sealed, but captured ciphertext cannot be replayed.
+    const beforePush = inbound.length;
     await host.broadcastPush('push:settingsChanged', { notifications: true });
-    await sleep(200);
-    expect(pushes).toContainEqual(['push:settingsChanged', { notifications: true }]);
+    for (let i = 0; i < 40 && pushes.length < 1; i++) await sleep(25);
+    expect(pushes).toEqual([['push:settingsChanged', { notifications: true }]]);
+    const captured = inbound[beforePush];
+    expect(captured).toBeDefined();
+    deliver!(captured);
+    deliver!(captured);
+
+    // A later frame with a different salt (but unchanged GCM nonce and ciphertext)
+    // must be refused, without consuming its counter or losing the real push.
+    holdNext = true;
+    await host.broadcastPush('push:settingsChanged', { notifications: false });
+    for (let i = 0; i < 40 && !held; i++) await sleep(25);
+    expect(held).toBeDefined();
+    const altered = JSON.parse(held!) as { payload: { salt: string } };
+    const salt = Buffer.from(altered.payload.salt, 'base64url');
+    salt[15] ^= 1;
+    altered.payload.salt = salt.toString('base64url');
+    deliver!(JSON.stringify(altered));
+    deliver!(held!);
+    deliver!(captured); // stale after a newer accepted frame
+    for (let i = 0; i < 40 && pushes.length < 2; i++) await sleep(25);
+    await sleep(100); // let the independently scheduled pre-fix decryptions settle
+    expect(pushes).toEqual([
+      ['push:settingsChanged', { notifications: true }],
+      ['push:settingsChanged', { notifications: false }]
+    ]);
 
     restored.logout();
     expect(storage.has('vocs-web-credentials')).toBe(false);
+    expect(rest.filter((entry) => entry.url.includes('/v1/devices') || entry.url.includes('/v1/mirror')).every((entry) => entry.authorization === `Bearer ${creds.webToken}`)).toBe(true);
+    expect(rest.every((entry) => !entry.url.includes('token='))).toBe(true);
     await host.disable();
   });
 
@@ -169,8 +227,13 @@ describe('relay web client (browser-side protocol)', () => {
       await host.enable(`http://127.0.0.1:${port}`, ENROLL);
       const { code } = await host.startPairing('Test PC');
       const storage = new Map<string, string>();
+      const rest: Array<{ url: string; authorization: string | null }> = [];
       const client = new RelayClient({
         storage: { get: (k) => storage.get(k) ?? null, set: (k, v) => void storage.set(k, v), remove: (k) => void storage.delete(k) },
+        fetchImpl: async (input, init) => {
+          rest.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') });
+          return fetch(input, init);
+        },
         wsFactory
       });
       const pairing = client.pair({ relayBase: `http://127.0.0.1:${port}`, code, deviceName: 'Test Browser' });
@@ -199,6 +262,19 @@ describe('relay web client (browser-side protocol)', () => {
       expect(JSON.stringify(hostDevices)).not.toContain('tokenHash');
       const webDevices = await client.listDevices();
       expect(webDevices.map((d) => d.deviceId).sort()).toEqual(hostDevices.map((d) => d.deviceId).sort());
+      // A relay refusal must not be reported as a successful revocation or an empty registry.
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (input, init) => String(input).includes('/v1/devices')
+        ? Promise.resolve(new Response(JSON.stringify({ error: 'forbidden' }), { status: 403 }))
+        : originalFetch(input, init);
+      try {
+        await expect(host.revokeDevice(creds.webDeviceId)).rejects.toThrow('revoke failed: 403');
+        await expect(host.listDevices()).rejects.toThrow('devices failed: 403');
+        expect(audit.list().filter((entry) => entry.action === 'device-revoke')).toHaveLength(0);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+      expect((await host.listDevices()).map((device) => device.deviceId).sort()).toEqual(hostDevices.map((device) => device.deviceId).sort());
 
       // The audit trail names the approval, the connection and the refused write.
       expect(audit.list().some((e) => e.action === 'pair-approve' && e.device === creds.webDeviceId)).toBe(true);
@@ -239,6 +315,10 @@ describe('relay web client (browser-side protocol)', () => {
       expect(host.state().onlineClients).not.toContain(creds.webDeviceId);
       await expect(client.listDevices()).rejects.toThrow();
       expect(audit.list().some((e) => e.action === 'device-revoke' && e.device === creds.webDeviceId)).toBe(true);
+      const protectedRest = rest.filter((entry) => entry.url.includes('/v1/devices') || entry.url.includes('/v1/mirror'));
+      expect(protectedRest.length).toBeGreaterThan(3);
+      expect(protectedRest.every((entry) => entry.authorization === `Bearer ${creds.webToken}`)).toBe(true);
+      expect(rest.every((entry) => !entry.url.includes('token='))).toBe(true);
     } finally {
       await host.disable();
       await relay.stop();

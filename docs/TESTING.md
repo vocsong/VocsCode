@@ -24,6 +24,25 @@ isolate every launch with their own `VOCS_CODE_USER_DATA` temp directory.
 permission-gating changes must keep `tests/review-fixes.test.ts` passing and extend execution-level
 coverage. Screenshots land in `tests/artifacts/` (gitignored).
 
+The relay Durable Object's socket tags and lifecycle require the Workers runtime, not the
+in-memory fake: run `npm run test:relay-do` after relay glue changes. The deploy workflow also
+runs this suite; a fake-relay pass alone does not establish that routing works in Cloudflare.
+The opt-in **deployed** smoke uses an existing enrollment secret kept outside the repo:
+
+```bash
+REMOTE_LIVE=1 REMOTE_LIVE_ORIGIN=https://code.vocs.io \
+  REMOTE_LIVE_TOKEN_FILE=/absolute/path/to/relay-enroll-token.txt npm run test:remote-live
+```
+
+It attempts to revoke temporary devices and clear its mirror, including recovery through the
+claimant-only poll capability if the approved browser response is lost. A failed run can still
+leave devices when neither side receives credentials; inspect/revoke them through an existing
+authenticated desktop before rerunning. Never run it against a shared account without
+authorization. With `REMOTE_LIVE=1`, missing origin or token file fails loudly before network
+access. `npm test` excludes it, so a green offline run is not live verification. Run it
+after any production relay/landing deploy and after pairing, socket or mirror changes; if no
+credentials or deployment are available, report the live tier as unverified.
+
 ## Opt-in Electron suites (no provider key)
 
 ```bash
@@ -81,8 +100,9 @@ suites alive** below):
 | Project knowledge (wiki store, docs scan, distillation, PR reflection, relation graph), `src/main/knowledge/**`, `resources/mcp/vocs-memory.mjs` | `e2e.knowledge` |
 | MCP layer (`src/main/mcp/**`), built-in servers, computer use (`mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`) | `tests/mcp.test.ts`, `tests/mcp-gitnexus.test.ts`, `tests/mcp-client.test.ts`, `tests/cua.test.ts`, `tests/cua-preview.test.ts`, `tests/cua-card.test.tsx`, `tests/desktop-tab.test.tsx`, `tests/right-panel-bottom.test.tsx` |
 | Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/web-client.test.ts` |
-| Relay routing, auth or rate limiting (`relay/src/routes.ts`, `relay/src/rate.ts`) | `tests/relay-routes.test.ts` + `tests/remote-e2e.test.ts`, `e2e.remote` |
-| Relay web app layout (`relay/public/app/**`, `relay/src/page.ts`) | `tests/relay-page-layout.test.ts` + `tests/web-client.test.ts` |
+| Relay routing, auth or rate limiting (`relay/src/routes.ts`, `relay/src/rate.ts`) | `tests/relay-routes.test.ts` + `tests/remote-e2e.test.ts`, `e2e.remote`, `test:relay-do` |
+| Relay web app layout (`relay/public/app/**`, `relay/src/page.ts`, `relay/public/_headers`) | `tests/relay-page-layout.test.ts` + `tests/web-client.test.ts`; verify CSP on the deployed origin (the workerd pool does not serve static assets) |
+| Relay Durable Object (`relay/src/worker.ts`, socket lifecycle/tags/queues) | `test:relay-do` + `test:remote-live` against the deployed origin after deploy |
 | Transcript rendering — message rows, work/command collapse groups, tool cards, shell panels (`components/Transcript.tsx`, `transcript-window.ts`) | `tests/tool-group.test.tsx`, `tests/transcript-window.test.ts`, `tests/transcript-virtual.test.tsx` + `e2e.transcript` |
 | Anything else under `src/renderer/**` | `npm run test:e2e:ci` |
 

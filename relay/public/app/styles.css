@@ -50,6 +50,7 @@ button.ghost { background: transparent; }
 #screen-app[hidden] { display: none; }
 .topbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
@@ -58,6 +59,9 @@ button.ghost { background: transparent; }
 }
 .topbar b { font-size: 15px; }
 .topbar #logout { margin-left: auto; }
+.account-signout { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fg-muted); }
+.account-signout[hidden] { display: none; }
+.card form.account-signout { flex-direction: row; flex-wrap: wrap; }
 
 .layout { display: flex; height: calc(100vh - 49px); }
 .session-list {
@@ -124,5 +128,6 @@ button.ghost { background: transparent; }
 @media (max-width: 720px) {
   .layout { flex-direction: column; height: auto; }
   .session-list { width: 100%; max-height: 34vh; }
+  .account-signout { width: 100%; justify-content: space-between; }
   .transcript { height: calc(100vh - 320px); }
 }

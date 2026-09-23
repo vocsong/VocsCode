@@ -179,31 +179,35 @@ root of trust.)
 
 1. **No pairing without a human at the desktop.** The code alone is never sufficient
    trust — the desktop-side confirm step is what makes a device binding.
-2. **The relay is blind.** It never holds private keys, shared keys, or plaintext
-   payloads. Compromise of the relay yields routing metadata and opaque blobs only.
+2. **The relay cannot read session payloads.** It never holds private or shared
+   session keys; it does hold plaintext pairing-code lookup keys, device metadata,
+   token hashes, and encrypted blobs. A compromised relay can disrupt routing or
+   pairing even though established e2e payloads remain unreadable.
    e2e is **mandatory in shipped builds, not a setting** (§11): no TLS-only mode ships;
    a dev-only client flag may bypass the AEAD layer for relay debugging.
 3. **Per-device identity.** Every browser is its own device with its own keypair; trust
    and revocation are per-device, never per-account.
-4. **Private keys never leave their machine.** Desktop keys live in the existing
-   safeStorage-backed secrets store; web keys are non-extractable WebCrypto keys in
-   IndexedDB.
-5. **Everything is revocable.** One toggle kills remote access entirely; each device is
-   individually revocable from desktop or web.
+4. **Private keys never leave their machine (target storage).** Desktop keys live in the
+   safeStorage-backed secrets store. Web keys are currently extractable JWKs in
+   `localStorage`; non-extractable WebCrypto/IndexedDB is the migration target.
+5. **Revocation and pause are distinct.** A paired device can be revoked at the relay.
+   The desktop toggle currently closes its socket but leaves relay tokens and an uploaded
+   mirror intact; a true account-wide kill switch remains planned.
 
 ### 6.2 Identities and key material
 
 | Party | Identity | Key material | Storage |
 | --- | --- | --- | --- |
-| Account | code.vocs.io user id (GitHub OAuth in v1; email deferred to productization) | passwordless | DO storage (Workers) |
-| Desktop host | device id + human name ("Work PC") | Ed25519 signing + X25519 key-agreement keypair | private half via `secrets.ts` (safeStorage) |
-| Web device | device id + human name ("Chrome on Windows") | Ed25519 signing + X25519 key-agreement keypair | non-extractable WebCrypto (IndexedDB) |
+| Account | Single configured account id (`RELAY_ACCOUNT`); GitHub identity will gate `/app`, not isolate registry rows | passwordless gate planned | DO storage (Workers) |
+| Desktop host | device id + human name ("Work PC") | P-256 ECDSA + ECDH | private JWK via `secrets.ts` (safeStorage) |
+| Web device | device id + human name ("Chrome on Windows") | P-256 ECDSA + ECDH | extractable JWK in `localStorage` (IndexedDB migration planned) |
 | Relay | routing registry | public keys + token **hashes** only | DO storage (Workers) |
 
-Token model: after pairing, both sides hold a random 256-bit refresh token (relay stores
-only its hash) plus short-lived (~1 h) access tokens bound to the device's public key.
-Refreshing = signing a relay-issued challenge with the device key (proof of possession).
-A stolen token without the private key is useless.
+**Target token model, not the deployed v1:** after pairing, both sides hold a random 256-bit
+refresh token (relay stores only its hash) plus short-lived (~1 h) access tokens bound to the
+device's public key. Refreshing = signing a relay-issued challenge (proof of possession).
+The current device token is a long-lived bearer; a stolen one can invoke relay REST routes
+without the private key. See the ranked remediation in [REMOTE-ACCESS-ROADMAP.md](./REMOTE-ACCESS-ROADMAP.md#25-security-backlog-ranked).
 
 v1 account model: **accounts-lite** — a single provisioned account, no signup or
 billing flow. The device registry and routing are account-keyed from day one, so
@@ -237,19 +241,28 @@ and `/v1` — REST plus the WebSocket endpoints under `/v1/ws/*` — to it throu
 device token, `/v1/pair/start` is 403 without the enrollment secret and mints a code with it, and
 an enrolling-host WebSocket opens while a bad token is refused.
 
-A login still gates the web client. `remote.status` stays `in-development` on the landing so its
-CTAs stay inert until the GitHub OAuth flow and its `/login`, `/auth/*` and `/logout` paths exist.
+A login gate is **not yet live**: `/app` is currently public. `remote.status` stays
+`in-development` so landing CTAs remain inert until GitHub OAuth is provisioned, the
+landing Worker gate is enabled and verified, and the direct Worker bypass is resolved.
 
-The relay has **no deploy workflow**: `cd relay && npx wrangler deploy` is a manual step, so a
-merged relay change is not live until someone runs it.
+A **deploy workflow is proposed locally** for reviewed `develop` changes with a protected
+production environment. Until its credentials are provisioned and it runs, relay deploys
+remain manual and merged changes are not necessarily live.
 
-Remaining: the login gate (needs a GitHub OAuth app for `code.vocs.io`); QR pairing (the payload
-is already `https://code.vocs.io/app?code=…`); P3.5 terminal over WAN.
+Remaining: activate the login gate (needs a GitHub OAuth app for `code.vocs.io`); QR *rendering*
+(the code-as-URL fallback is implemented locally); multi-host web UI; P3.5 terminal over WAN.
+The login code lives in the **landing Worker**, not the relay's `/v1` route table: the latter
+receives only paths stripped of `/v1`. The gate is an access screen for the single account, not
+per-account isolation or a replacement for paired-device authorization.
 
 Implementation notes: crypto primitives are P-256 ECDSA + ECDH, HKDF-SHA-256 and
 AES-256-GCM — all via WebCrypto so the identical module runs in Node and browsers with
 zero new dependencies (the X25519/Ed25519/XChaCha choice in §6.2 needed a library; the
-WebCrypto-universal set has the same trust properties and was adopted instead). v1 adds
+WebCrypto-universal set has the same trust properties and was adopted instead). **Current browser
+private JWKs and the bearer/mirror key are exported together to `localStorage`, not non-extractable
+IndexedDB keys; do not describe the target storage row above as shipped.** Pausing remote closes
+the outbound desktop socket but does not revoke relay device tokens. Revocation does not yet
+rotate the mirror key. These are open security work, not verified guarantees. v1 adds
 an **enrollment secret** (`ENROLL_TOKEN`): the desktop must present it to request
 pairing codes, so random parties cannot spam the desktop with pairing prompts.
 
@@ -259,8 +272,8 @@ pairing codes, so random parties cannot spam the desktop with pairing prompts.
 Web (browser)                Relay                      Desktop (host)
       │                        │                            │
       │                        │ ◀─ enable, request code ──│  (1)
-      │                        │── code MVBT-K7Q2 ────────▶│  (2)
-      │  enter code / scan QR  │                            │
+      │                        │── code MVBTK7Q2 ─────────▶│  (2)
+      │  enter code / open URL │                            │
       │── {code, web_pub} ────▶│  (3)                       │
       │                        │── pairing request ────────▶│  (4)
       │                        │                            │  human: Allow / Deny
@@ -273,34 +286,35 @@ Web (browser)                Relay                      Desktop (host)
 1. **Enable (desktop).** Settings → Remote access → Enable. Desktop generates its device
    keypair, stores the private half in the secrets store, connects outbound WSS to the
    relay, and requests a pairing code.
-2. **Code.** Relay returns a single-use code (`MVBT-K7Q2`, ~2^40 space, 8 chars from a
-   32-symbol alphabet — no ambiguous glyphs) with a **5-minute TTL**, plus a QR payload
-   (`https://code.vocs.io/app?code=…`). Desktop shows the QR **prominently** with the
-   code as fallback — scanning from a phone opens the web client pre-filled. QR
-   rendering is a small, accepted runtime dependency (§11).
-3. **Claim (web).** Logged-in user opens "Add a computer", enters the code or scans the
-   QR. The browser generates its keypair and posts `{code, web_public_key, device_name}`
-   to the relay. Relay rate-limits attempts per account/IP (the TTL plus single-use
-   already makes brute force impractical; rate limiting is defense in depth).
+2. **Code (current fallback).** Relay returns a single-use 8-character code (e.g.
+   `MVBTK7Q2`, ~2^40 space, no ambiguous glyphs) with a **5-minute TTL**. Desktop
+   offers a copyable `https://code.vocs.io/app?code=…` URL, which prefills the browser
+   without automatically claiming. QR rendering is not implemented or approved as a
+   runtime dependency (§11).
+3. **Claim (web).** The browser enters/prefills the code, generates a keypair, and posts
+   `{code, web_public_key, device_name}`. `/v1/pair/claim` is public even when the
+   landing login gate is enabled; knowing the code alone cannot approve pairing, but
+   login is not checked here. The relay has a per-IP, in-memory fixed-window limit;
+   account-level/edge limits remain planned.
 4. **Confirm (desktop).** Relay pushes a pairing request to the desktop: account,
    device name, browser/OS. Desktop shows a confirm dialog — **Allow / Deny**. Deny or
    timeout expires the code; nothing is recorded. This is the deliberate redundancy: the
    code alone proves nothing, the human at the desktop does.
 5. **Handshake (relay goes blind).** On approval, both sides run a Noise-XX-style
    handshake *through* the relay: mutual ECDH + verification of each other's signatures
-   → shared symmetric key `K`. The relay shuttles opaque handshake blobs only — it never
-   sees `K`.
-6. **Live.** Every payload frame after that is AEAD-encrypted (XChaCha20-Poly1305) with
-   `K`, with per-direction counters for replay protection. The relay routes on
+   → shared symmetric key `K`. The relay sees public handshake metadata but never
+   derives `K`.
+6. **Live.** Every payload frame after that is AEAD-encrypted (AES-256-GCM) with
+   `K`; the current implementation branch also enforces inbound counters against replay. The relay routes on
    `{account, device, seq}` metadata only: it can see *that* you chat, never *what*.
 
 | Step | Why it exists |
 | --- | --- |
-| 5-min single-use code | A stale or shoulder-surfed code is worthless |
+| 5-min single-use code | Limits the claim window; desktop confirmation is still required if the code leaks |
 | Desktop confirm prompt | Possession ≠ trust; the human approves the actual device |
 | Per-device keypairs | Revoking one browser breaks nothing else; private keys never cross the wire |
-| Tokens bound to signing keys | A stolen token alone is useless without the device key |
-| E2E under the relay | Relay compromise = timing metadata only; cannot read or forge |
+| Tokens bound to signing keys (target) | Not implemented: the current long-lived bearer can authorize REST reads/writes without the device key |
+| E2E under the relay | Established session payloads are opaque; a compromised relay can still deny service, misroute and manipulate pairing metadata |
 
 ### 6.4 What the relay stores
 
@@ -308,7 +322,8 @@ Web (browser)                Relay                      Desktop (host)
   — held in Durable Object storage on the existing vocs.io Cloudflare account.
 - Routing state: which desktop is online for which account; short-lived queues of
   *encrypted* payloads pending delivery.
-- Pairing codes (hashed, TTL'd, single-use).
+- Pairing codes (currently stored as plaintext lookup keys with an enforced TTL and single-use
+  state; hashing at rest is a planned hardening step).
 - **Offline mirror blobs** (P4, opt-in): the sealed session index and transcript snapshots,
   keyed by `(account, host)`, capped at 200 sessions / 8 MB per blob with a 30-day TTL. The
   key is generated on the desktop, stored in the OS keychain, and handed to each browser
@@ -318,40 +333,42 @@ Web (browser)                Relay                      Desktop (host)
 
 ### 6.5 Session lifecycle and revocation
 
-- **Reconnect.** Tokens are refreshed by signing relay challenges; a device key that is
-  gone (cleared IndexedDB, new browser profile) simply fails refresh → new pairing.
+- **Reconnect (current).** The paired bearer is reused; signed relay challenges and
+  non-extractable IndexedDB keys are the planned token/key migration, not shipped behavior.
 - **Revoke one device.** Desktop settings device list, or the web account page — either
   side invalidates the token at the relay and drops the route. The two are independent
   escape hatches (lost laptop → revoke from the desktop; lost desktop → revoke from web).
-- **Pause remote access.** One toggle on the desktop invalidates all tokens and drops all
-  routes; the persistent "remote connected" indicator is the same surface.
+- **Pause remote access (current).** The toggle closes the desktop socket and drops live
+  sessions; it does **not** invalidate relay tokens or delete a previously uploaded mirror.
+  Full token invalidation is a security backlog item, not a guarantee of the toggle.
 - **Audit.** Pairing, approval, revocation, and connection events land in the audit log
   (§8) with device name, timestamp, and action class.
-- **Device cap.** Start with a small per-account device limit (e.g. 10) to bound abuse.
+- **Device cap (target).** A small per-account limit (e.g. 10) is still missing.
 
 ### 6.6 Edge cases
 
 | Case | Behavior |
 | --- | --- |
-| Code expires / wrong code | Nothing is recorded; start over with a fresh code |
+| Code expires / wrong code | No device is minted; start over with a fresh code |
 | Deny or ignore at desktop | Pairing never completes; web sees "request denied/expired" |
 | Two browsers | Two devices, two pairings, both receive pushes; approvals resolve first-wins (§8.1) |
-| Multiple paired desktops | Each desktop pairs separately; the web client targets one host per connection and every frame names its target; revocation is per desktop |
+| Multiple paired desktops | Each desktop pairs separately, but the browser currently persists one pairing; a multi-host picker/storage model is still missing |
 | New browser on same machine | New pairing: fresh code + desktop confirm — no codeless/auto path in v1 (codeless-with-confirm is a v2 convenience) |
 | Desktop reinstall / wiped userData | New desktop identity; revoke the old device from the web account page |
-| Desktop offline during claim | Relay queues the pairing request for the code TTL; expires after |
-| Replayed/late frames | Per-direction AEAD counters; replayed frames fail decryption and drop |
-| Lost device | Revoke from desktop or web account page; token dead, key never had value without the token |
+| Desktop offline during claim | No pending pairing request is queued in v1; the claim expires and must be restarted while the desktop is online |
+| Replayed/late frames | AEAD authenticates content; host and web receiver counter checks reject duplicate or stale ciphertext in the current implementation branch (not yet deployed) |
+| Lost device | Revoke from desktop or web account page to invalidate its relay token; a browser that already received the shared mirror key can still decrypt previously obtained blobs until rotation and re-upload are implemented |
 
 ### 6.7 UI touchpoints
 
-- **Desktop Settings → Remote access:** enable/disable toggle, pairing code + QR display
+- **Desktop Settings → Remote access:** enable/disable toggle, pairing code + URL fallback (QR display planned)
   with countdown, paired-device list (name, platform, last seen) with per-device revoke,
   "pause all" kill switch, recent activity feed.
 - **Confirm dialog:** account, device name, browser/OS, Allow / Deny — mirrors the
   existing approval-prompt styling (§5 of the approval flow, same pattern).
-- **Web:** login → "Add a computer" → code entry → waiting-for-approval state → device
-  connected. Account page lists paired desktops with last-seen + revoke.
+- **Web (target login, current device UI):** login will precede `/app`; today code entry,
+  waiting-for-approval and device management are in the web client. An account-wide
+  device page/multi-host picker remains future work.
 
 ### 6.8 Approvals ride signed, encrypted frames
 
@@ -365,7 +382,8 @@ pending approval, so neither a stolen token nor a compromised relay can forge an
 - Pairing itself (code + claim + confirm + handshake, both clients) ≈ **2–3 days inside
   P2**. The relay device registry + token service it requires is the real work (~1 wk).
 
-All pairing decisions are resolved (§11).
+The code + desktop confirmation decision is resolved; QR rendering remains an open
+runtime-dependency decision (§11).
 
 ## 7. Threat model
 
@@ -376,13 +394,16 @@ security bar must go up, not sideways:
   pairing with explicit desktop-side confirmation, per-device revocable tokens, approval
   parity (dangerous commands always prompt, even remotely — the existing invariant),
   timeout = default-deny on approvals, optional "view-only" remote mode, audit log.
-- **Compromised/malicious relay → can it drive sessions?** With e2e encryption the relay
-  can only route opaque frames; it cannot forge approved actions because decisions are
-  signed inside the encrypted channel. Relay holds no keys.
+- **Compromised/malicious relay → can it drive sessions?** Established e2e session
+  frames and approval decisions are encrypted and signed by paired devices; the relay
+  holds no session keys. It can still deny service, replay/misroute unauthenticated
+  handshake metadata and interfere with pairing. The user's desktop confirmation and
+  device identity checks matter; an access cookie alone does not secure the relay.
 - **Desktop exposure.** Remote access is off by default, requires explicit opt-in,
-  shows a persistent indicator when connected, and one click kills all remote sessions.
-- **Transport.** TLS + e2e payload encryption; replay-resistant framing (nonce/counter);
-  short-lived tokens refreshed over the paired channel.
+  and shows a persistent indicator; the toggle closes active desktop sessions but
+  does not revoke tokens or delete a stored mirror.
+- **Transport.** TLS + e2e payload encryption; the current branch rejects replayed
+  ciphertext. Short-lived proof-of-possession tokens remain a target, not a shipped claim.
 
 ## 8. The honest list of hard problems
 
@@ -449,8 +470,8 @@ static-path check; the relay-side account/pairing header is P2 scope.
 - **Is "desktop must be online for chat" acceptable for v1?** Yes — implied by starting
   with Model A; always-on arrives with cloud workspaces later.
 - **Personal first, product later.** The relay and protocol are multi-tenant-capable
-  from day one (everything is keyed by account), but v1 ships with a single provisioned
-  account and no billing. Full auth + billing becomes the P4 → cloud-track on-ramp,
+  structurally account-keyed, but the deployed Hub uses one `RELAY_ACCOUNT` and one
+  provisioned account without per-account isolation or billing. Full auth + billing becomes the P4 → cloud-track on-ramp,
   not P2 scope.
 
 - **Chat-first launch.** v1 remote is chat + transcript + approvals — no terminal in
@@ -461,7 +482,8 @@ static-path check; the relay-side account/pairing header is P2 scope.
 
 - **e2e encryption: default and mandatory.** The §6.3 handshake is not a setting; every
   paired session is end-to-end encrypted in shipped builds — the relay cannot read or
-  forge. Relay-side debugging is metadata-only; a dev-only client flag may bypass the
+  forge established session payloads. It can still disrupt pairing and availability.
+  Relay-side debugging is metadata-only; a dev-only client flag may bypass the
   AEAD layer during development, never shipped as a user-facing toggle.
 
 - **Distinct web identity.** The web client is a dedicated web shell around the reused
@@ -471,7 +493,7 @@ static-path check; the relay-side account/pairing header is P2 scope.
 
 - **One origin: landing at the root, app under `/app`.** `code.vocs.io` is the landing page;
   a login gates the web client, which lives at `code.vocs.io/app` and talks to the relay at
-  `/v1` (REST) and `/ws` (sockets) on that same origin. Cloudflare binds a hostname to one
+  `/v1` (REST and `/v1/ws/*` sockets) on that same origin. Cloudflare binds a hostname to one
   Worker, and path routes to a second Worker on the same host depend on route precedence, so
   the landing Worker keeps the custom domain and forwards the app paths to the relay through a
   service binding instead. One origin means one cookie scope, no CORS, and no second DNS
@@ -486,10 +508,9 @@ static-path check; the relay-side account/pairing header is P2 scope.
 
 Pairing-level questions from §6.9:
 
-- **QR prominent + code fallback.** The desktop renders the pairing code as a QR (small,
-  accepted runtime dependency); the 8-char code is always shown as fallback. Scanning
-  from a phone camera opens the web client pre-filled — the phone-pairing case matters
-  because the web client is fully responsive (§11).
+- **QR rendering decision still open.** The 8-char code and copyable URL fallback are
+  implemented locally, with validated `?code=` prefill. An actual QR image needs a
+  renderer; a new runtime dependency must be approved before adding it.
 
 **Open (resolve one at a time, before P2):**
 
@@ -501,17 +522,17 @@ Pairing-level questions from §6.9:
 **Open (resolve one at a time, before P2):**
 
 - **Relay on Cloudflare Workers + Durable Objects** (vocs.io already runs on
-  Cloudflare). One DO per desktop connection, WebSocket-native, hibernation for idle
-  desktops, global anycast; the same deployment scales into the product/cloud track
-  without re-architecture.
+  Cloudflare). One Hub DO per account, WebSocket-native with hibernation for idle
+  sockets; a multi-account tenancy migration remains §2.7 of the roadmap.
 
 - **GitHub-only auth in v1.** Passwordless, no email infrastructure, and the audience
   is coders — a GitHub account is a given. v1 allowlists the provisioned account at the
   provider. The auth provider is a swappable module (the registry is account-keyed);
   email magic-link arrives with signup + billing at productization.
 
-**Open:** none — all pre-P2 product and pairing questions are resolved. P2 is
-unblocked; next concrete step is P0 (§12).
+**Open today:** QR rendering/dependency, live OAuth setup and gate verification,
+proof-of-possession token/key migration, multi-host UI and the live security checks in
+[the roadmap](./REMOTE-ACCESS-ROADMAP.md). The original P0 sketch (§12) is historical.
 
 ## 12. The first PR (P0 sketch)
 

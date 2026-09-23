@@ -1,0 +1,58 @@
+# Deploy only reviewed relay changes, after verifying the exact checkout to be published.
+# Production credentials live in GitHub's protected `relay-production` environment.
+name: Deploy relay
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - '.github/workflows/deploy-relay.yml'
+      - 'relay/**'
+      - 'src/shared/crypto.ts'
+      - 'src/shared/mirror.ts'
+      - 'src/shared/types.ts'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: relay-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --include=dev
+        env:
+          NODE_ENV: development
+      - run: npm run typecheck:relay && npm run typecheck:relay-test && npm run typecheck:page
+      - run: npx vitest run tests/relay-core.test.ts tests/relay-routes.test.ts tests/remote-e2e.test.ts tests/remote-mirror.test.ts tests/web-client.test.ts tests/relay-page-layout.test.ts
+      - run: npm run test:relay-do
+      # Never publish a stale checked-in bundle when page.ts changes.
+      - run: npm run relay:page && git diff --exit-code -- relay/public/app/app.js
+      - run: npx wrangler deploy --dry-run
+        working-directory: relay
+      - name: Require deployment credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo 'Configure CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the relay-production environment.' >&2
+            exit 1
+          fi
+      - name: Publish vocs-relay
+        working-directory: relay
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy

@@ -1,0 +1,246 @@
+import { env } from 'cloudflare:workers';
+import { abortAllDurableObjects, evictDurableObject, runInDurableObject, SELF } from 'cloudflare:test';
+import { afterEach, describe, expect, it } from 'vitest';
+import { hashToken } from '../src/core';
+import { generateIdentity, pairingDecisionPayload, publicOf, sign } from '../../src/shared/crypto';
+import type { Env as RelayEnv } from '../src/worker';
+
+// This file runs in workerd, with the production Wrangler DO binding and a test-only token.
+declare global {
+  namespace Cloudflare {
+    interface Env extends RelayEnv {}
+  }
+}
+
+const sockets = new Set<WebSocket>();
+const hub = () => env.HUB.get(env.HUB.idFromName(env.RELAY_ACCOUNT));
+
+async function request(path: string, init?: RequestInit): Promise<Response> {
+  return SELF.fetch(new Request(`https://relay.test${path}`, init));
+}
+
+function message(ws: WebSocket): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      ws.removeEventListener('message', onMessage);
+      reject(new Error('no WebSocket message received'));
+    }, 2500);
+    function onMessage(event: MessageEvent): void {
+      clearTimeout(timeout);
+      ws.removeEventListener('message', onMessage);
+      resolve(JSON.parse(String(event.data)) as Record<string, unknown>);
+    }
+    ws.addEventListener('message', onMessage);
+  });
+}
+
+async function open(kind: 'host' | 'client', device: string, token: string): Promise<WebSocket> {
+  const response = await request(`/v1/ws/${kind}?device=${encodeURIComponent(device)}&token=${encodeURIComponent(token)}`, {
+    headers: { Upgrade: 'websocket', ...(kind === 'host' && device === 'enrolling' ? { Authorization: `Bearer ${token}` } : {}) }
+  });
+  expect(response.status).toBe(101);
+  const socket = response.webSocket;
+  expect(socket).toBeDefined();
+  socket!.accept();
+  sockets.add(socket!);
+  return socket!;
+}
+
+function send(ws: WebSocket, value: unknown): void {
+  ws.send(JSON.stringify(value));
+}
+
+async function pair(): Promise<{ hostId: string; hostToken: string; webId: string; webToken: string }> {
+  const enrolling = await open('host', 'enrolling', env.ENROLL_TOKEN);
+  const host = await generateIdentity();
+  const webIdentity = await generateIdentity();
+  const webPub = publicOf(webIdentity);
+  const started = await request('/v1/pair/start', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.ENROLL_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'desktop', hostPub: publicOf(host) })
+  });
+  expect(started.status).toBe(200);
+  const { code } = await started.json<{ code: string }>();
+  const incoming = message(enrolling);
+  const claim = await request('/v1/pair/claim', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code, name: 'browser', webPub })
+  });
+  expect(claim.status).toBe(200);
+  const { pollToken } = await claim.json<{ pollToken: string }>();
+  expect(await incoming).toMatchObject({ t: 'pair.request', code, name: 'browser', hostPub: JSON.parse(JSON.stringify(publicOf(host))), webPub: JSON.parse(JSON.stringify(webPub)) });
+  expect((await request(`/v1/pair/poll?code=${code}`)).status).toBe(401);
+  const result = message(enrolling);
+  send(enrolling, { t: 'pair.respond', code, decision: 'approve', signature: await sign(host, pairingDecisionPayload(code, 'approve', webPub)) });
+  const approved = await result;
+  expect(approved).toMatchObject({ t: 'pair.result', code, decision: 'approve' });
+  expect((await request(`/v1/pair/poll?code=${code}`)).status).toBe(401);
+  const poll = await request(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } });
+  expect(poll.status).toBe(200);
+  const web = await poll.json<{ status: string; webToken: string; webDeviceId: string; hostDeviceId: string }>();
+  expect(web.status).toBe('approved');
+  expect(web.hostDeviceId).toBe(approved.hostDeviceId);
+  enrolling.close(1000, 'paired');
+  return { hostId: approved.hostDeviceId as string, hostToken: approved.hostToken as string, webId: web.webDeviceId, webToken: web.webToken };
+}
+
+async function queued(id: string): Promise<Array<{ t: string; seq: number; payload: unknown }> | undefined> {
+  return runInDurableObject(hub(), async (_instance, state) => state.storage.get(`q:${id}`));
+}
+
+async function tags(tag: string): Promise<string[][]> {
+  return runInDurableObject(hub(), async (_instance, state) => state.getWebSockets(tag).map((s) => state.getTags(s)));
+}
+
+afterEach(async () => {
+  const closed = [...sockets].map((socket) => {
+    if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+    const done = new Promise<void>((resolve) => socket.addEventListener('close', () => resolve(), { once: true }));
+    if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'test complete');
+    return done;
+  });
+  await Promise.all(closed);
+  sockets.clear();
+  await abortAllDurableObjects();
+});
+
+describe('relay Hub in the Cloudflare runtime', () => {
+  it('refuses a different desktop signature and undefined decision before minting either device', async () => {
+    const owner = await generateIdentity();
+    const stranger = await generateIdentity();
+    const web = await generateIdentity();
+    const webPub = publicOf(web);
+    const ownerSocket = await open('host', 'enrolling', env.ENROLL_TOKEN);
+    const otherSocket = await open('host', 'enrolling', env.ENROLL_TOKEN);
+    const started = await request('/v1/pair/start', { method: 'POST', headers: { Authorization: `Bearer ${env.ENROLL_TOKEN}`, 'content-type': 'application/json' }, body: JSON.stringify({ hostPub: publicOf(owner) }) });
+    const { code } = await started.json<{ code: string }>();
+    const ownerRequest = message(ownerSocket);
+    const otherRequest = message(otherSocket);
+    const claim = await request('/v1/pair/claim', { method: 'POST', body: JSON.stringify({ code, webPub }), headers: { 'content-type': 'application/json' } });
+    const { pollToken } = await claim.json<{ pollToken: string }>();
+    expect(await ownerRequest).toMatchObject({ hostPub: JSON.parse(JSON.stringify(publicOf(owner))), webPub: JSON.parse(JSON.stringify(webPub)) });
+    expect(await otherRequest).toMatchObject({ hostPub: JSON.parse(JSON.stringify(publicOf(owner))), webPub: JSON.parse(JSON.stringify(webPub)) });
+    const bad = message(otherSocket);
+    send(otherSocket, { t: 'pair.respond', code, decision: 'approve', signature: await sign(stranger, pairingDecisionPayload(code, 'approve', webPub)) });
+    expect(await bad).toEqual({ t: 'pair.error', error: 'forbidden' });
+    const malformed = message(ownerSocket);
+    send(ownerSocket, { t: 'pair.respond', code, signature: await sign(owner, pairingDecisionPayload(code, 'approve', webPub)) });
+    expect(await malformed).toEqual({ t: 'pair.error', error: 'forbidden' });
+    expect((await request(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } })).status).toBe(200);
+    const final = message(ownerSocket);
+    send(ownerSocket, { t: 'pair.respond', code, decision: 'approve', signature: await sign(owner, pairingDecisionPayload(code, 'approve', webPub)) });
+    expect(await final).toMatchObject({ t: 'pair.result', decision: 'approve' });
+    expect((await request(`/v1/pair/poll?code=${code}`)).status).toBe(401);
+  });
+  it('fans pairing to enrolling hosts and routes by exact device tags and client attachment', async () => {
+    const { hostId, hostToken, webId, webToken } = await pair();
+    const host = await open('host', hostId, hostToken);
+    expect((await tags('hosts')).some((found) => found.join(',') === `host:${hostId},hosts`)).toBe(true);
+    expect(await tags(`host:${hostId}`)).toEqual([[`host:${hostId}`, 'hosts']]);
+    const here = message(host);
+    const client = await open('client', webId, webToken);
+    expect(await here).toEqual({ t: 'client.here', client: webId });
+    expect(await tags(`client:${webId}`)).toEqual([[`client:${webId}`, 'clients']]);
+    expect(await tags('clients')).toEqual([[`client:${webId}`, 'clients']]);
+
+    send(client, { t: 'hello', host: hostId });
+    const handshake = message(host);
+    send(client, { t: 'hs', seq: 1, payload: { hello: 'opaque' } });
+    expect(await handshake).toEqual({ t: 'hs', from: webId, seq: 1, payload: { hello: 'opaque' } });
+    const afterWake = message(host);
+    send(client, { t: 'd', seq: 2, payload: { ct: 'sealed' } });
+    expect(await afterWake).toEqual({ t: 'd', from: webId, seq: 2, payload: { ct: 'sealed' } });
+    const reply = message(client);
+    send(host, { t: 'hs', to: webId, seq: 3, payload: { reply: 'opaque' } });
+    expect(await reply).toEqual({ t: 'hs', from: hostId, seq: 3, payload: { reply: 'opaque' } });
+    const gone = message(host);
+    client.close(1000, 'bye');
+    expect(await gone).toEqual({ t: 'client.gone', client: webId });
+  });
+
+  it('drops malformed and unsupported host frames without delivering them to a paired browser', async () => {
+    const { hostId, hostToken, webId, webToken } = await pair();
+    const host = await open('host', hostId, hostToken);
+    const client = await open('client', webId, webToken);
+    const delivered = message(client);
+    send(host, null);
+    send(host, { t: 'unsupported', to: webId, seq: 1, payload: { forged: true } });
+    send(host, { t: 'hs', to: webId, seq: 2, payload: { reply: 'valid' } });
+    expect(await delivered).toEqual({ t: 'hs', from: hostId, seq: 2, payload: { reply: 'valid' } });
+  });
+
+  it('queues only for registered web devices in this account and drains only data on reconnect', async () => {
+    const { hostId, hostToken, webId, webToken } = await pair();
+    const host = await open('host', hostId, hostToken);
+    const unknown = message(host);
+    send(host, { t: 'd', to: 'w_not-registered', seq: 1, payload: { ct: 'AAAA' } });
+    expect(await unknown).toEqual({ t: 'client.gone', client: 'w_not-registered' });
+    expect(await queued('w_not-registered')).toBeUndefined();
+    await runInDurableObject(hub(), async (_instance, state) => {
+      await state.storage.put('device:other-account:w_other', { deviceId: 'w_other', kind: 'web' });
+    });
+    const cross = message(host);
+    send(host, { t: 'd', to: 'w_other', seq: 2, payload: { ct: 'AAAA' } });
+    expect(await cross).toEqual({ t: 'client.gone', client: 'w_other' });
+    expect(await queued('w_other')).toBeUndefined();
+    const offline = message(host);
+    send(host, { t: 'hs', to: webId, seq: 3, payload: { hello: 'no queue' } });
+    expect(await offline).toEqual({ t: 'client.gone', client: webId });
+    expect(await queued(webId)).toBeUndefined();
+    const absent = message(host);
+    send(host, { t: 'd', to: webId, seq: 4, payload: { salt: 's', seq: 4, ct: 'AAAA' } });
+    expect(await absent).toEqual({ t: 'client.gone', client: webId });
+    expect(await queued(webId)).toEqual([{ t: 'd', seq: 4, payload: { salt: 's', seq: 4, ct: 'AAAA' } }]);
+    const here = message(host);
+    const client = await open('client', webId, webToken);
+    expect(await message(client)).toEqual({ t: 'd', seq: 4, payload: { salt: 's', seq: 4, ct: 'AAAA' } });
+    expect(await here).toEqual({ t: 'client.here', client: webId });
+    expect(await queued(webId)).toBeUndefined();
+  });
+
+  it('restores persisted ciphertext after eviction and a fresh socket upgrade', async () => {
+    const webId = 'w_reconnect';
+    const token = 'local-test-token';
+    await runInDurableObject(hub(), async (_instance, state) => {
+      await state.storage.put(`device:${env.RELAY_ACCOUNT}:${webId}`, {
+        deviceId: webId, kind: 'web', name: 'browser', platform: 'test',
+        pub: { sig: {}, enc: {} }, tokenHash: await hashToken(token), createdAt: Date.now(), lastSeen: Date.now()
+      });
+      await state.storage.put(`q:${webId}`, [{ t: 'd', seq: 8, payload: { salt: 's', seq: 8, ct: 'AAAA' } }]);
+    });
+    await evictDurableObject(hub());
+    const client = await open('client', webId, token);
+    expect(await message(client)).toEqual({ t: 'd', seq: 8, payload: { salt: 's', seq: 8, ct: 'AAAA' } });
+    expect(await queued(webId)).toBeUndefined();
+    expect(await tags(`client:${webId}`)).toEqual([[`client:${webId}`, 'clients']]);
+  });
+
+  it('rejects oversized raw frames before routing and bounds ciphertext and total offline bytes', async () => {
+    const { hostId, hostToken, webId, webToken } = await pair();
+    const host = await open('host', hostId, hostToken);
+    const client = await open('client', webId, webToken);
+    send(client, { t: 'hello', host: hostId });
+    const toHost = message(host);
+    send(client, { t: 'd', seq: 1, payload: { ct: 'A'.repeat(1024 * 1024) } });
+    send(client, { t: 'd', seq: 2, payload: { ct: 'okay' } });
+    expect(await toHost).toEqual({ t: 'd', from: webId, seq: 2, payload: { ct: 'okay' } });
+    const gone = message(host);
+    client.close(1000, 'offline');
+    expect(await gone).toEqual({ t: 'client.gone', client: webId });
+    const oversized = message(host);
+    send(host, { t: 'd', to: webId, seq: 3, payload: { salt: 's', seq: 3, ct: 'A'.repeat(70 * 1024) } });
+    expect(await oversized).toEqual({ t: 'client.gone', client: webId });
+    expect(await queued(webId)).toBeUndefined();
+    for (let seq = 4; seq < 24; seq++) {
+      const notice = message(host);
+      send(host, { t: 'd', to: webId, seq, payload: { salt: 's', seq, ct: 'A'.repeat(40 * 1024) } });
+      expect(await notice).toEqual({ t: 'client.gone', client: webId });
+    }
+    const backlog = await queued(webId);
+    expect(backlog?.length).toBeGreaterThan(0);
+    expect(backlog?.length).toBeLessThan(20);
+    expect(new TextEncoder().encode(JSON.stringify(backlog)).byteLength).toBeLessThanOrEqual(512 * 1024);
+    expect(backlog?.at(-1)?.seq).toBe(23);
+  });
+});

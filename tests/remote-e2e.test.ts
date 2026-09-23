@@ -28,6 +28,46 @@ function waitFrame(ws: WsLike, match: (m: Record<string, unknown>) => boolean): 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe('remote host end-to-end (fake relay, real core)', () => {
+  it('shows a claimed request only on the desktop that minted its code', async () => {
+    const relay = new FakeRelay();
+    const port = await relay.start();
+    const host = () => new RemoteHost({
+      registry: () => ({ channels: () => [], invoke: async () => undefined } as unknown as HandlerRegistry),
+      secrets: { get: async () => undefined, set: async () => undefined },
+      pushState: () => undefined,
+      log: () => undefined,
+      broadcast: () => undefined
+    });
+    const owner = host();
+    const stranger = host();
+    try {
+      await owner.enable(`http://127.0.0.1:${port}`, ENROLL);
+      await stranger.enable(`http://127.0.0.1:${port}`, ENROLL);
+      const { code } = await owner.startPairing('Owner');
+      const other = await stranger.startPairing('Other');
+      expect(other.code).not.toBe(code);
+      const webPub = publicOf(await generateIdentity());
+      const claim = await fetch(`http://127.0.0.1:${port}/v1/pair/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, webPub, name: 'Browser' }) });
+      const { pollToken } = (await claim.json()) as { pollToken: string };
+      for (let i = 0; i < 40 && !owner.state().pendingRequest; i++) await sleep(50);
+      expect(owner.state().pendingRequest?.code).toBe(code);
+      expect(stranger.state().pendingRequest).toBeUndefined();
+      await stranger.respondPairing('approve');
+      const poll = () => fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${code}`, { headers: { authorization: `Bearer ${pollToken}` } });
+      expect(await (await poll()).json()).toEqual({ status: 'claimed' });
+      await owner.respondPairing('approve');
+      for (let i = 0; i < 40; i++) {
+        if (((await (await poll()).json()) as { status: string }).status === 'approved') return;
+        await sleep(50);
+      }
+      throw new Error('owning desktop did not approve');
+    } finally {
+      await owner.disable();
+      await stranger.disable();
+      await relay.stop();
+    }
+  });
+
   let relay: FakeRelay;
   let port = 0;
 
@@ -43,9 +83,10 @@ describe('remote host end-to-end (fake relay, real core)', () => {
   it('pairs, handshakes, serves filtered invokes and pushes over e2e', async () => {
     const calls: string[] = [];
     const registry = {
-      channels: () => ['sessions:list', 'secrets:has'],
+      channels: () => ['sessions:list', 'sessions:send', 'secrets:has'],
       invoke: async (channel: string) => {
         calls.push(channel);
+        if (channel === 'sessions:send') return undefined;
         if (channel === 'sessions:list') return [{ id: 's1', title: 'T' }];
         if (channel === 'secrets:has') return 'LEAK';
         throw new Error('unknown');
@@ -72,6 +113,10 @@ describe('remote host end-to-end (fake relay, real core)', () => {
       body: JSON.stringify({ code, webPub: publicOf(web), name: 'Test Browser' })
     });
     expect(claim.status).toBe(200);
+    const { pollToken } = (await claim.json()) as { pollToken: string };
+    expect(pollToken).toBeTruthy();
+    // A code exposed on the pairing screen cannot be used to steal the approved web token.
+    expect((await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${code}`)).status).toBe(401);
 
     // The desktop (enrolling socket) sees the request; the human approves.
     for (let i = 0; i < 40 && !host.state().pendingRequest; i++) await sleep(100);
@@ -80,13 +125,16 @@ describe('remote host end-to-end (fake relay, real core)', () => {
     // The web client polls until approved, learning its token and the host identity.
     let approved: Extract<Awaited<ReturnType<typeof pollPairing>>, { status: 'approved' }> | null = null;
     for (let i = 0; i < 40 && !approved; i++) {
-      const poll = (await (await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${code}`)).json()) as Awaited<ReturnType<typeof pollPairing>>;
+      const response = await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${code}`, { headers: { authorization: `Bearer ${pollToken}` } });
+      expect(response.status).toBe(200);
+      const poll = (await response.json()) as Awaited<ReturnType<typeof pollPairing>>;
       if (poll.status === 'approved') approved = poll;
       else await sleep(100);
     }
     expect(approved).not.toBeNull();
     expect(approved!.webToken).toBeTruthy();
     expect(approved!.hostPub.sig).toBeDefined();
+    expect((await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${code}`)).status).toBe(401);
 
     // The host reconnected under its new device token; open the web data socket.
     await sleep(300);
@@ -101,9 +149,10 @@ describe('remote host end-to-end (fake relay, real core)', () => {
     const session = await clientFinish(hello, ephPriv, hsReply.payload as never, approved!.hostPub, web);
     expect(session.key).toBeDefined();
 
-    const send = async (inner: unknown) => {
-      const sealed = await sealFrame(session.key, session.salt, sealedSeq(), inner);
+    const send = async (inner: unknown, salt = session.salt) => {
+      const sealed = await sealFrame(session.key, salt, sealedSeq(), inner);
       ws.send(JSON.stringify({ t: 'd', seq: sealed.seq, payload: sealed }));
+      return sealed;
     };
 
     // Allowed channel: an e2e invoke reaches the real registry.
@@ -118,6 +167,29 @@ describe('remote host end-to-end (fake relay, real core)', () => {
     const result2 = await openFrame<{ ok: boolean; error?: string }>(session.key, ((await waitFrame(ws, (m) => m.t === 'd')) as { payload: never }).payload);
     expect(result2.ok).toBe(false);
     expect(calls).toEqual(['sessions:list']); // no leak call reached the registry
+
+    // A captured, valid ciphertext cannot execute a send twice, even if replayed while
+    // the first async handler is still decrypting, or after another frame advanced the counter.
+    const firstReply = waitFrame(ws, (m) => m.t === 'd');
+    const captured = await send({ type: 'invoke', id: 3, channel: 'sessions:send', request: { id: 's1', input: { text: 'once' } } });
+    ws.send(JSON.stringify({ t: 'd', seq: captured.seq, payload: captured }));
+    expect((await openFrame<{ id: number; ok: boolean }>(session.key, (await firstReply).payload as never))).toMatchObject({ id: 3, ok: true });
+    await sleep(100);
+    expect(calls.filter((channel) => channel === 'sessions:send')).toHaveLength(1);
+    const secondReply = waitFrame(ws, (m) => m.t === 'd');
+    await send({ type: 'invoke', id: 4, channel: 'sessions:send', request: { id: 's1', input: { text: 'twice' } } });
+    expect((await openFrame<{ id: number; ok: boolean }>(session.key, (await secondReply).payload as never))).toMatchObject({ id: 4, ok: true });
+    ws.send(JSON.stringify({ t: 'd', seq: captured.seq, payload: captured }));
+
+    // Only the first authenticated inbound salt is valid for this session. Changing the
+    // unused tail keeps the GCM nonce/ciphertext valid, but must not invoke the registry.
+    const otherSalt = Uint8Array.from(session.salt);
+    otherSalt[15] ^= 1;
+    await send({ type: 'invoke', id: 5, channel: 'sessions:send', request: { id: 's1', input: { text: 'wrong salt' } } }, otherSalt);
+    const finalReply = waitFrame(ws, (m) => m.t === 'd');
+    await send({ type: 'invoke', id: 6, channel: 'sessions:send', request: { id: 's1', input: { text: 'third' } } });
+    expect((await openFrame<{ id: number; ok: boolean }>(session.key, (await finalReply).payload as never))).toMatchObject({ id: 6, ok: true });
+    expect(calls).toEqual(['sessions:list', 'sessions:send', 'sessions:send', 'sessions:send']);
 
     // Local pushes fan out sealed.
     await host.broadcastPush('push:settingsChanged', { notifications: false });

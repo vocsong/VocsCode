@@ -1,40 +1,153 @@
 /** Unit tests for the relay core (relay/src/core.ts): pairing lifecycle, tokens, revocation.
  *  Runs in plain Node against an in-memory store — the DO is a thin binding over this. */
-import { describe, expect, it } from 'vitest';
-import { claimPairing, deviceInfos, hashToken, listDevices, listMirrorSessions, MirrorError, PAIRING_TTL_MS, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, PairError, type RelayStore } from '../relay/src/core';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { generateIdentity, pairingDecisionPayload, publicOf, sign, type Identity } from '../src/shared/crypto';
+import { claimPairing, deviceInfos, hashToken, listDevices, listMirrorSessions, MirrorError, PAIRING_TTL_MS, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
 import type { PublicIdentity } from '../src/shared/crypto';
 
-function memStore(): RelayStore {
+function memStore(failPut?: (key: string) => boolean): RelayStore {
   const map = new Map<string, unknown>();
+  const adapt = (target: Map<string, unknown>): RelayStorage => ({
+    // DO storage deserializes on read. Returning the same object would mask competing claims.
+    get: async <T,>(k: string) => target.has(k) ? structuredClone(target.get(k)) as T : undefined,
+    put: async (k, v) => {
+      if (failPut?.(k)) throw new Error('injected storage failure');
+      target.set(k, structuredClone(v));
+    },
+    delete: async (k) => void target.delete(k),
+    list: async <T,>(prefix: string) => [...target.entries()].filter(([k]) => k.startsWith(prefix)) as Array<[string, T]>
+  });
   return {
-    get: async <T,>(k: string) => map.get(k) as T | undefined,
-    put: async (k, v) => void map.set(k, v),
-    delete: async (k) => void map.delete(k),
-    list: async <T,>(prefix: string) => [...map.entries()].filter(([k]) => k.startsWith(prefix)) as Array<[string, T]>
+    ...adapt(map),
+    transaction: async (work) => {
+      const staged = new Map(structuredClone([...map]));
+      const result = await work(adapt(staged));
+      map.clear();
+      for (const [key, value] of staged) map.set(key, value);
+      return result;
+    }
   };
 }
 
-const HOST_PUB = { sig: { kty: "EC", crv: "P-256", x: "a", y: "b" }, enc: { kty: "EC", crv: "P-256", x: "c", y: "d" } } as PublicIdentity;
-const WEB_PUB = { sig: { kty: 'EC', crv: 'P-256', x: 'e', y: 'f' }, enc: { kty: 'EC', crv: 'P-256', x: 'g', y: 'h' } } as PublicIdentity;
+let hostIdentity: Identity;
+let HOST_PUB: PublicIdentity;
+let WEB_PUB: PublicIdentity;
 const T0 = 1_700_000_000_000;
+beforeAll(async () => {
+  hostIdentity = await generateIdentity();
+  HOST_PUB = publicOf(hostIdentity);
+  WEB_PUB = publicOf(await generateIdentity());
+});
+const approval = async (code: string, decision: 'approve' | 'deny') => ({ code, decision, signature: await sign(hostIdentity, pairingDecisionPayload(code, decision, WEB_PUB)) });
 
 describe('relay pairing', () => {
+  it('requires the claiming browser poll capability and the owning desktop signature before minting', async () => {
+    const store = memStore();
+    const host = await generateIdentity();
+    const stranger = await generateIdentity();
+    const web = await generateIdentity();
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'owner', hostPlatform: '', hostPub: publicOf(host) }, T0);
+    const claim = await claimPairing(store, { code, webName: 'browser', webPlatform: '', webPub: publicOf(web) }, T0);
+    expect(claim).toHaveProperty('pollToken');
+    const pollToken = (claim as { pollToken: string }).pollToken;
+    expect(JSON.stringify(await store.list('pair:'))).not.toContain(pollToken);
+    await expect(pollPairing(store, code, '', T0)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(pollPairing(store, code, 'wrong', T0)).rejects.toMatchObject({ code: 'forbidden' });
+    const payload = pairingDecisionPayload(code, 'approve', publicOf(web));
+    const wrongSignature = await sign(stranger, payload);
+    await expect(resolvePairing(store, { code, decision: 'approve', signature: wrongSignature }, T0)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(resolvePairing(store, { code, decision: undefined, signature: await sign(host, payload) } as never, T0)).rejects.toMatchObject({ code: 'invalid' });
+    expect(await listDevices(store, 'a')).toEqual([]);
+    const signature = await sign(host, payload);
+    const approved = await resolvePairing(store, { code, decision: 'approve', signature }, T0 + 1);
+    expect('denied' in approved).toBe(false);
+    await expect(pollPairing(store, code, '', T0 + 2)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(pollPairing(store, code, 'wrong', T0 + 2)).rejects.toMatchObject({ code: 'forbidden' });
+    expect(await pollPairing(store, code, pollToken, T0 + 2)).toMatchObject({ status: 'approved' });
+  });
+  it('serializes competing claims so only one browser obtains the poll capability', async () => {
+    const store = memStore();
+    const first = await generateIdentity();
+    const second = await generateIdentity();
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'owner', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    const results = await Promise.all([
+      claimPairing(store, { code, webName: 'first', webPlatform: '', webPub: publicOf(first) }, T0).then((value) => ({ ok: true as const, value, webPub: publicOf(first) }), (error: unknown) => ({ ok: false as const, error })),
+      claimPairing(store, { code, webName: 'second', webPlatform: '', webPub: publicOf(second) }, T0).then((value) => ({ ok: true as const, value, webPub: publicOf(second) }), (error: unknown) => ({ ok: false as const, error }))
+    ]);
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    expect((results.find((result) => !result.ok) as { error: unknown }).error).toMatchObject({ code: 'used' });
+    const winner = results.find((result) => result.ok) as { value: { pollToken: string }; webPub: PublicIdentity };
+    expect(await pollPairing(store, code, winner.value.pollToken, T0)).toEqual({ status: 'claimed' });
+    const signature = await sign(hostIdentity, pairingDecisionPayload(code, 'approve', winner.webPub));
+    const resolved = await resolvePairing(store, { code, decision: 'approve', signature }, T0 + 1);
+    expect('denied' in resolved).toBe(false);
+    expect((await listDevices(store, 'a')).find((device) => device.kind === 'web')?.pub).toEqual(winner.webPub);
+  });
+
+  it('serializes two concurrent signed approvals so exactly one pair is minted', async () => {
+    const store = memStore();
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'owner', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    const { pollToken } = await claimPairing(store, { code, webName: 'web', webPlatform: '', webPub: WEB_PUB }, T0);
+    const input = await approval(code, 'approve');
+    const results = await Promise.all([
+      resolvePairing(store, input, T0 + 1).then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error })),
+      resolvePairing(store, input, T0 + 1).then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }))
+    ]);
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    expect(results.filter((result) => !result.ok)).toHaveLength(1);
+    expect((results.find((result) => !result.ok) as { error: unknown }).error).toBeInstanceOf(PairError);
+    const minted = results.find((result) => result.ok) as { value: { webToken: string; webDeviceId: string; hostDeviceId: string } };
+    expect((await listDevices(store, 'a')).map((device) => device.kind).sort()).toEqual(['host', 'web']);
+    expect(await pollPairing(store, code, pollToken, T0 + 2)).toMatchObject({ status: 'approved', webToken: minted.value.webToken, webDeviceId: minted.value.webDeviceId, hostDeviceId: minted.value.hostDeviceId });
+  });
+
+  it.each(['device:a:w_', 'pair:done'])('rolls back an approval when %s cannot be stored', async (failure) => {
+    let failOnce = true;
+    const store = memStore((key) => {
+      const matches = failure === 'pair:done' ? key.endsWith(':done') : key.startsWith(failure);
+      if (!matches || !failOnce) return false;
+      failOnce = false;
+      return true;
+    });
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'owner', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    const { pollToken } = await claimPairing(store, { code, webName: 'web', webPlatform: '', webPub: WEB_PUB }, T0);
+    const input = await approval(code, 'approve');
+    await expect(resolvePairing(store, input, T0 + 1)).rejects.toThrow('injected storage failure');
+    expect(await listDevices(store, 'a')).toEqual([]);
+    expect(await pollPairing(store, code, pollToken, T0 + 2)).toEqual({ status: 'claimed' });
+    await resolvePairing(store, input, T0 + 3);
+    expect((await listDevices(store, 'a')).map((device) => device.kind).sort()).toEqual(['host', 'web']);
+  });
+
+  it('rejects unsigned or incorrectly signed denial without consuming the claim', async () => {
+    const store = memStore();
+    const stranger = await generateIdentity();
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'owner', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    const { pollToken } = await claimPairing(store, { code, webName: 'web', webPlatform: '', webPub: WEB_PUB }, T0);
+    await expect(resolvePairing(store, { code, decision: 'deny', signature: '' }, T0)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(resolvePairing(store, { code, decision: 'deny', signature: await sign(stranger, pairingDecisionPayload(code, 'deny', WEB_PUB)) }, T0)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(resolvePairing(store, { code, decision: 'deny', signature: await sign(hostIdentity, pairingDecisionPayload(code, 'approve', WEB_PUB)) }, T0)).rejects.toMatchObject({ code: 'forbidden' });
+    expect(await pollPairing(store, code, pollToken, T0)).toEqual({ status: 'claimed' });
+    expect(await listDevices(store, 'a')).toEqual([]);
+    expect(await resolvePairing(store, await approval(code, 'deny'), T0 + 1)).toEqual({ denied: true });
+    expect(await pollPairing(store, code, pollToken, T0 + 2)).toEqual({ status: 'denied' });
+  });
+
   it('runs the full pairing lifecycle: start → claim → approve → tokens', async () => {
     const store = memStore();
     const { code, expiresAt } = await startPairing(store, { accountId: 'vocs-v1', hostName: 'Work PC', hostPlatform: 'win32', hostPub: HOST_PUB }, T0);
     expect(code).toMatch(/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/);
     expect(expiresAt).toBe(T0 + PAIRING_TTL_MS);
 
-    expect(await pollPairing(store, code, T0)).toEqual({ status: 'pending' });
-    await claimPairing(store, { code, webName: 'Chrome', webPlatform: 'mac', webPub: WEB_PUB }, T0);
-    expect(await pollPairing(store, code, T0)).toEqual({ status: 'claimed' });
+    const { pollToken } = await claimPairing(store, { code, webName: 'Chrome', webPlatform: 'mac', webPub: WEB_PUB }, T0);
+    expect(await pollPairing(store, code, pollToken, T0)).toEqual({ status: 'claimed' });
 
-    const resolved = await resolvePairing(store, { code, decision: 'approve' }, T0 + 1);
+    const resolved = await resolvePairing(store, await approval(code, 'approve'), T0 + 1);
     if ('denied' in resolved) throw new Error('expected approval');
     expect(resolved.hostToken).toHaveLength(43); // 32 bytes base64url
     expect(resolved.webDeviceId.startsWith('w_')).toBe(true);
 
-    const poll = await pollPairing(store, code, T0 + 2);
+    const poll = await pollPairing(store, code, pollToken, T0 + 2);
     expect(poll.status).toBe('approved');
     if (poll.status !== 'approved') throw new Error('unreachable');
     expect(poll.webToken).toBe(resolved.webToken);
@@ -49,10 +162,10 @@ describe('relay pairing', () => {
   it('rejects a denied code and reports denial to the web poll', async () => {
     const store = memStore();
     const { code } = await startPairing(store, { accountId: 'a', hostName: 'h', hostPlatform: '', hostPub: HOST_PUB }, T0);
-    await claimPairing(store, { code, webName: 'w', webPlatform: '', webPub: WEB_PUB }, T0);
-    const resolved = await resolvePairing(store, { code, decision: 'deny' }, T0 + 1);
+    const { pollToken } = await claimPairing(store, { code, webName: 'w', webPlatform: '', webPub: WEB_PUB }, T0);
+    const resolved = await resolvePairing(store, await approval(code, 'deny'), T0 + 1);
     expect(resolved).toEqual({ denied: true });
-    expect(await pollPairing(store, code, T0 + 2)).toEqual({ status: 'denied' });
+    expect(await pollPairing(store, code, pollToken, T0 + 2)).toEqual({ status: 'denied' });
     expect(await listDevices(store, 'a')).toEqual([]);
   });
 
@@ -61,7 +174,7 @@ describe('relay pairing', () => {
     const { code } = await startPairing(store, { accountId: 'a', hostName: 'h', hostPlatform: '', hostPub: HOST_PUB }, T0);
     const late = T0 + PAIRING_TTL_MS + 1;
     await expect(claimPairing(store, { code, webName: 'w', webPlatform: '', webPub: WEB_PUB }, late)).rejects.toMatchObject({ code: 'expired' });
-    expect(await pollPairing(store, code, late)).toEqual({ status: 'expired' });
+    await expect(pollPairing(store, code, 'no-claim', late)).rejects.toMatchObject({ code: 'forbidden' });
   });
 
   it('refuses double claims and double resolutions', async () => {
@@ -69,8 +182,8 @@ describe('relay pairing', () => {
     const { code } = await startPairing(store, { accountId: 'a', hostName: 'h', hostPlatform: '', hostPub: HOST_PUB }, T0);
     await claimPairing(store, { code, webName: 'w', webPlatform: '', webPub: WEB_PUB }, T0);
     await expect(claimPairing(store, { code, webName: 'w2', webPlatform: '', webPub: WEB_PUB }, T0)).rejects.toBeInstanceOf(PairError);
-    await resolvePairing(store, { code, decision: 'approve' }, T0 + 1);
-    await expect(resolvePairing(store, { code, decision: 'approve' }, T0 + 2)).rejects.toBeInstanceOf(PairError);
+    await resolvePairing(store, await approval(code, 'approve'), T0 + 1);
+    await expect(resolvePairing(store, await approval(code, 'approve'), T0 + 2)).rejects.toBeInstanceOf(PairError);
   });
 
   it('verifies device tokens and rejects wrong ones', async () => {
@@ -88,6 +201,42 @@ describe('relay pairing', () => {
     await verifyDeviceToken(store, { accountId: 'a', deviceId, token: webToken }, T0 + 1);
     await revokeDevice(store, 'a', deviceId);
     await expect(verifyDeviceToken(store, { accountId: 'a', deviceId, token: webToken }, T0 + 2)).rejects.toBeInstanceOf(PairError);
+  });
+
+  it('never resurrects a revoked device when verification races with deletion', async () => {
+    const store = memStore();
+    const { webToken, deviceId } = await registerWebDevice(store, { accountId: 'a', name: 'w', platform: 'web', pub: WEB_PUB }, T0);
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    const resume = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const key = `device:a:${deviceId}`;
+    const slowStore: RelayStore = {
+      ...store,
+      // The old read-then-write path captures a record before revoke, then resumes.
+      get: async <T,>(k: string) => {
+        const value = await store.get<T>(k);
+        if (k === key) { signalRead(); await resume; }
+        return value;
+      },
+      transaction: (work) => store.transaction((tx) => work({
+        ...tx,
+        // A transactional read observes the deletion when it resumes; a failed
+        // transaction must not commit the prior snapshot.
+        get: async <T,>(k: string) => {
+          if (k === key) { signalRead(); await resume; return store.get<T>(k); }
+          return tx.get<T>(k);
+        }
+      }))
+    };
+    const verification = verifyDeviceToken(slowStore, { accountId: 'a', deviceId, token: webToken }, T0 + 1)
+      .then(() => 'authorized', () => 'denied');
+    await readStarted;
+    await revokeDevice(store, 'a', deviceId);
+    releaseRead();
+    expect(await verification).toBe('denied');
+    expect(await listDevices(store, 'a')).toHaveLength(0);
+    await expect(verifyDeviceToken(store, { accountId: 'a', deviceId, token: webToken }, T0 + 2)).rejects.toMatchObject({ code: 'invalid' });
   });
 
   it('hashes tokens with sha-256 and never stores plaintext', async () => {
