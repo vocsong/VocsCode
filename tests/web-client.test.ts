@@ -147,7 +147,10 @@ describe('relay web client (browser-side protocol)', () => {
     await restored.connect();
     expect(socketUrlSafe).toBe(true);
     expect(rest.filter((entry) => entry.url.includes('/v1/ws/ticket'))).toHaveLength(1);
-    expect(rest.find((entry) => entry.url.includes('/v1/ws/ticket'))?.authorization).toBe(`Bearer ${creds.webToken}`);
+    // The ticket is bought with a short-lived access token, never the stored refresh credential.
+    const ticketAuth = rest.find((entry) => entry.url.includes('/v1/ws/ticket'))?.authorization;
+    expect(ticketAuth).toMatch(/^Bearer [A-Za-z0-9_-]{43}$/);
+    expect(ticketAuth).not.toBe(`Bearer ${creds.webToken}`);
     restored.onPush((channel, payload) => void pushes.push([channel, payload]));
 
     // Read-only invoke through the e2e channel reaches the real registry.
@@ -199,7 +202,8 @@ describe('relay web client (browser-side protocol)', () => {
 
     restored.logout();
     expect(storage.has('vocs-web-credentials')).toBe(false);
-    expect(rest.filter((entry) => entry.url.includes('/v1/devices') || entry.url.includes('/v1/mirror')).every((entry) => entry.authorization === `Bearer ${creds.webToken}`)).toBe(true);
+    // The refresh credential is presented to the token endpoints and nowhere else.
+    expect(rest.filter((entry) => entry.authorization === `Bearer ${creds.webToken}`).every((entry) => /\/v1\/token(\/challenge)?\?/.test(entry.url))).toBe(true);
     expect(rest.every((entry) => !entry.url.includes('token='))).toBe(true);
     await host.disable();
   });
@@ -279,8 +283,11 @@ describe('relay web client (browser-side protocol)', () => {
       expect(urls).toHaveLength(2);
       expect(new URL(urls[0]).searchParams.get('ticket') !== new URL(urls[1]).searchParams.get('ticket')).toBe(true);
       expect(urls.every((url) => new URL(url).pathname === '/v1/ws/client' && new URL(url).searchParams.has('ticket') && !url.includes(web.webToken) && !new URL(url).searchParams.has('token'))).toBe(true);
-      expect(requests).toHaveLength(2);
-      expect(requests.every((entry) => entry.url.endsWith(`/v1/ws/ticket?device=${web.deviceId}`) && entry.header === `Bearer ${web.webToken}`)).toBe(true);
+      const tickets = requests.filter((entry) => entry.url.includes('/v1/ws/ticket'));
+      expect(tickets).toHaveLength(2);
+      // One proof of possession serves both attempts: the access token is cached until expiry.
+      expect(requests.filter((entry) => entry.url.includes('/v1/token?'))).toHaveLength(1);
+      expect(tickets.every((entry) => entry.url.endsWith(`/v1/ws/ticket?device=${web.deviceId}`) && entry.header !== `Bearer ${web.webToken}` && entry.header === tickets[0].header)).toBe(true);
       expect(JSON.stringify(await relay.store.list('ws-ticket:'))).not.toContain(web.webToken);
     } finally {
       await relay.stop();
@@ -296,7 +303,12 @@ describe('relay web client (browser-side protocol)', () => {
     const sent: string[] = [];
     const client = new RelayClient({
       storage: { get: (key) => storage.get(key) ?? null, set: (key, value) => void storage.set(key, value), remove: (key) => void storage.delete(key) },
-      fetchImpl: async () => new Response(JSON.stringify({ ticket: 'a'.repeat(43) })),
+      fetchImpl: async (input) => {
+        const path = new URL(String(input)).pathname;
+        if (path === '/v1/token/challenge') return new Response(JSON.stringify({ challenge: 'c'.repeat(43), expiresAt: Date.now() + 60_000 }));
+        if (path === '/v1/token') return new Response(JSON.stringify({ accessToken: 'b'.repeat(43), expiresAt: Date.now() + 3_600_000 }));
+        return new Response(JSON.stringify({ ticket: 'a'.repeat(43) }));
+      },
       wsFactory: (_url, _onMessage, onClose) => ({
         send: (raw) => { sent.push((JSON.parse(raw) as { t: string }).t); onClose(); },
         close: () => undefined
@@ -428,7 +440,7 @@ describe('relay web client (browser-side protocol)', () => {
       expect(audit.list().some((e) => e.action === 'device-revoke' && e.device === creds.webDeviceId)).toBe(true);
       const protectedRest = rest.filter((entry) => entry.url.includes('/v1/devices') || entry.url.includes('/v1/mirror'));
       expect(protectedRest.length).toBeGreaterThan(3);
-      expect(protectedRest.every((entry) => entry.authorization === `Bearer ${creds.webToken}`)).toBe(true);
+      expect(protectedRest.every((entry) => /^Bearer [A-Za-z0-9_-]{43}$/.test(entry.authorization ?? '') && entry.authorization !== `Bearer ${creds.webToken}`)).toBe(true);
       expect(rest.every((entry) => !entry.url.includes('token='))).toBe(true);
     } finally {
       await host.disable();

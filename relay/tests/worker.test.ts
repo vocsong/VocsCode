@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { abortAllDurableObjects, evictDurableObject, runInDurableObject, SELF } from 'cloudflare:test';
 import { afterEach, describe, expect, it } from 'vitest';
 import { hashToken } from '../src/core';
-import { generateIdentity, pairingDecisionPayload, publicOf, sign, type Identity } from '../../src/shared/crypto';
+import { generateIdentity, openSealedToKey, pairingDecisionPayload, pairingTokenContext, publicOf, sign, tokenProofPayload, type Identity, type SealedToKey } from '../../src/shared/crypto';
 import type { Env as RelayEnv } from '../src/worker';
 
 // This file runs in workerd, with the production Wrangler DO binding and a test-only token.
@@ -63,8 +63,36 @@ function send(ws: WebSocket, value: unknown): void {
   ws.send(JSON.stringify(value));
 }
 
+/** Proof of possession through the Worker, as the clients do it. */
+async function accessToken(device: string, refresh: string, identity: Identity): Promise<string> {
+  const query = `?device=${encodeURIComponent(device)}`;
+  const challenge = await request(`/v1/token/challenge${query}`, { method: 'POST', headers: { Authorization: `Bearer ${refresh}` } });
+  expect(challenge.status).toBe(200);
+  const { challenge: value } = await challenge.json<{ challenge: string }>();
+  const issued = await request(`/v1/token${query}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${refresh}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ challenge: value, signature: await sign(identity, tokenProofPayload(device, value)) })
+  });
+  expect(issued.status).toBe(200);
+  return (await issued.json<{ accessToken: string }>()).accessToken;
+}
+
+/** A web device written straight into storage, with `token` already granted as an access token:
+ *  for the socket-glue tests that are not about how tokens are obtained. */
+async function seedBrowser(webId: string, token: string): Promise<void> {
+  await runInDurableObject(hub(), async (_instance, state) => {
+    await state.storage.put(`device:${env.RELAY_ACCOUNT}:${webId}`, {
+      deviceId: webId, kind: 'web', name: 'browser', platform: 'test',
+      pub: { sig: {}, enc: {} }, tokenHash: await hashToken(`refresh-${token}`), access: [{ hash: await hashToken(token), expiresAt: Date.now() + 3_600_000 }],
+      createdAt: Date.now(), lastSeen: Date.now()
+    });
+  });
+}
+
 /** Pairs one browser. By default a fresh desktop enrolls over an `enrolling` socket with the
- *  enrollment secret; pass an enrolled desktop's socket and device credential to pair it again. */
+ *  enrollment secret; pass an enrolled desktop's socket and access token to pair it again.
+ *  Returns ACCESS tokens (`hostToken` only when the approval issued the desktop a credential). */
 async function pair(options: { identity?: Identity; enrolled?: { socket: WebSocket; device: string; token: string } } = {}): Promise<{ hostId: string; hostToken: string; webId: string; webToken: string }> {
   const { enrolled } = options;
   const enrolling = enrolled?.socket ?? await open('host', 'enrolling', env.ENROLL_TOKEN);
@@ -94,11 +122,18 @@ async function pair(options: { identity?: Identity; enrolled?: { socket: WebSock
   expect((await request(`/v1/pair/poll?code=${code}`)).status).toBe(401);
   const poll = await request(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } });
   expect(poll.status).toBe(200);
-  const web = await poll.json<{ status: string; webToken: string; webDeviceId: string; hostDeviceId: string }>();
+  const web = await poll.json<{ status: string; sealedToken: SealedToKey; webDeviceId: string; hostDeviceId: string }>();
   expect(web.status).toBe('approved');
   expect(web.hostDeviceId).toBe(approved.hostDeviceId);
   if (!enrolled) enrolling.close(1000, 'paired');
-  return { hostId: approved.hostDeviceId as string, hostToken: approved.hostToken as string, webId: web.webDeviceId, webToken: web.webToken };
+  const webRefresh = await openSealedToKey(webIdentity.enc, web.sealedToken, pairingTokenContext(code, web.webDeviceId));
+  const hostRefresh = approved.hostToken as string | undefined;
+  return {
+    hostId: approved.hostDeviceId as string,
+    hostToken: hostRefresh ? await accessToken(approved.hostDeviceId as string, hostRefresh, host) : (undefined as unknown as string),
+    webId: web.webDeviceId,
+    webToken: await accessToken(web.webDeviceId, webRefresh, webIdentity)
+  };
 }
 
 async function queued(id: string): Promise<Array<{ t: string; seq: number; payload: unknown }> | undefined> {
@@ -200,6 +235,42 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(hosts).toEqual([other.hostId, original.hostId].sort());
   });
 
+  it('accepts only access tokens on sockets and tickets, and a refresh credential only at the token endpoints', async () => {
+    const hostIdentity = await generateIdentity();
+    const enrolling = await open('host', 'enrolling', env.ENROLL_TOKEN);
+    const webIdentity = await generateIdentity();
+    const webPub = publicOf(webIdentity);
+    const started = await request('/v1/pair/start', { method: 'POST', headers: { Authorization: `Bearer ${env.ENROLL_TOKEN}`, 'content-type': 'application/json' }, body: JSON.stringify({ hostPub: publicOf(hostIdentity) }) });
+    const { code } = await started.json<{ code: string }>();
+    const incoming = message(enrolling);
+    const claim = await request('/v1/pair/claim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, webPub }) });
+    const { pollToken } = await claim.json<{ pollToken: string }>();
+    await incoming;
+    const result = message(enrolling);
+    send(enrolling, { t: 'pair.respond', code, decision: 'approve', signature: await sign(hostIdentity, pairingDecisionPayload(code, 'approve', webPub)) });
+    const approved = await result;
+    const hostRefresh = approved.hostToken as string;
+    const hostId = approved.hostDeviceId as string;
+    const poll = await (await request(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } })).json<{ sealedToken: SealedToKey; webDeviceId: string }>();
+    // Nothing in storage holds either credential in the clear.
+    const stored = await runInDurableObject(hub(), async (_instance, state) => JSON.stringify([...(await state.storage.list())]));
+    const webRefresh = await openSealedToKey(webIdentity.enc, poll.sealedToken, pairingTokenContext(code, poll.webDeviceId));
+    expect(stored).not.toContain(webRefresh);
+    expect(stored).not.toContain(hostRefresh);
+
+    const hostUpgrade = (token: string) => request(`/v1/ws/host?device=${hostId}`, { headers: { Upgrade: 'websocket', Authorization: `Bearer ${token}` } });
+    expect((await hostUpgrade(hostRefresh)).status).toBe(401);
+    expect((await request(`/v1/ws/ticket?device=${poll.webDeviceId}`, { method: 'POST', headers: { Authorization: `Bearer ${webRefresh}` } })).status).toBe(401);
+    expect((await request(`/v1/devices?device=${poll.webDeviceId}`, { headers: { Authorization: `Bearer ${webRefresh}` } })).status).toBe(401);
+    const hostAccess = await accessToken(hostId, hostRefresh, hostIdentity);
+    const upgraded = await hostUpgrade(hostAccess);
+    expect(upgraded.status).toBe(101);
+    upgraded.webSocket!.accept();
+    sockets.add(upgraded.webSocket!);
+    const client = await open('client', poll.webDeviceId, await accessToken(poll.webDeviceId, webRefresh, webIdentity));
+    expect(client.readyState).toBe(WebSocket.OPEN);
+  });
+
   it('drops malformed and unsupported host frames without delivering them to a paired browser', async () => {
     const { hostId, hostToken, webId, webToken } = await pair();
     const host = await open('host', hostId, hostToken);
@@ -243,12 +314,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
   it('requires a real upgrade before consuming a ticket and rejects replay, bearer URL, and revocation', async () => {
     const webId = 'w_ticket_test';
     const token = 'local-test-token';
-    await runInDurableObject(hub(), async (_instance, state) => {
-      await state.storage.put(`device:${env.RELAY_ACCOUNT}:${webId}`, {
-        deviceId: webId, kind: 'web', name: 'browser', platform: 'test',
-        pub: { sig: {}, enc: {} }, tokenHash: await hashToken(token), createdAt: Date.now(), lastSeen: Date.now()
-      });
-    });
+    await seedBrowser(webId, token);
     const ticket = await ticketFor(webId, token);
     const path = `/v1/ws/client?device=${webId}&ticket=${ticket}`;
     expect((await request(path)).status).toBe(426);
@@ -274,12 +340,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
   it('consumes only once across DO eviction and fresh upgrade', async () => {
     const webId = 'w_evicted_ticket';
     const token = 'eviction-test-token';
-    await runInDurableObject(hub(), async (_instance, state) => {
-      await state.storage.put(`device:${env.RELAY_ACCOUNT}:${webId}`, {
-        deviceId: webId, kind: 'web', name: 'browser', platform: 'test',
-        pub: { sig: {}, enc: {} }, tokenHash: await hashToken(token), createdAt: Date.now(), lastSeen: Date.now()
-      });
-    });
+    await seedBrowser(webId, token);
     const ticket = await ticketFor(webId, token);
     await evictDurableObject(hub());
     const path = `/v1/ws/client?device=${webId}&ticket=${ticket}`;
@@ -293,11 +354,8 @@ describe('relay Hub in the Cloudflare runtime', () => {
   it('restores persisted ciphertext after eviction and a fresh socket upgrade', async () => {
     const webId = 'w_reconnect';
     const token = 'local-test-token';
+    await seedBrowser(webId, token);
     await runInDurableObject(hub(), async (_instance, state) => {
-      await state.storage.put(`device:${env.RELAY_ACCOUNT}:${webId}`, {
-        deviceId: webId, kind: 'web', name: 'browser', platform: 'test',
-        pub: { sig: {}, enc: {} }, tokenHash: await hashToken(token), createdAt: Date.now(), lastSeen: Date.now()
-      });
       await state.storage.put(`q:${webId}`, [{ t: 'd', seq: 8, payload: { salt: 's', seq: 8, ct: 'AAAA' } }]);
     });
     await evictDurableObject(hub());

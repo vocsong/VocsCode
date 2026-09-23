@@ -2,12 +2,17 @@
  *  Storage-agnostic — the Durable Object implements RelayStore over DO storage, tests
  *  over an in-memory map. The relay never sees private keys or plaintext session
  *  payloads; it stores public keys, token hashes, pairing codes and sealed blobs.
- *  Exception: the approved pair:done poll result temporarily holds the browser bearer
- *  in plaintext until its five-minute expiry; device records hold only hashes. */
+ *
+ *  Tokens (§6.2): pairing gives each device a long-lived refresh credential, stored here only as
+ *  a hash. It authorizes nothing by itself. Holding it, a device asks for a one-time challenge and
+ *  signs it with its device key; only then does it get a short-lived access token, which is what
+ *  every REST route and desktop socket requires. A stolen refresh credential without the private
+ *  key is useless, and a leaked access token expires within the hour. A browser's refresh
+ *  credential reaches it sealed to the key it claimed with, so none is ever stored in plaintext. */
 
 export type Json = Record<string, unknown>;
 
-import { pairingDecisionPayload, stable, verify, type PublicIdentity } from '../../src/shared/crypto';
+import { pairingDecisionPayload, pairingTokenContext, sealToKey, stable, tokenProofPayload, verify, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
 
 /** Implemented by Durable Object storage (worker) and in-memory maps (tests). */
 export interface RelayStorage {
@@ -29,12 +34,23 @@ export interface DeviceRecord {
   kind: 'host' | 'web';
   name: string;
   platform: string;
-  /** Public identity key (JWK, P-256). Handshake signatures bind to this key. */
+  /** Public identity key (JWK, P-256). Handshake signatures and token proofs bind to this key. */
   pub: PublicIdentity;
-  /** SHA-256 hex of the device token; the plaintext token is shown once at pairing. */
+  /** SHA-256 hex of the refresh credential; the plaintext is delivered once, at pairing. */
   tokenHash: string;
+  /** Outstanding short-lived access tokens, as hashes. Bounded; expired entries are pruned. */
+  access?: AccessGrant[];
+  /** The one pending token challenge, if any: single-use and short-lived. */
+  challenge?: { value: string; expiresAt: number };
+  /** For a browser: the desktop it paired with. Revoking that desktop revokes this browser. */
+  hostDeviceId?: string;
   createdAt: number;
   lastSeen: number;
+}
+
+export interface AccessGrant {
+  hash: string;
+  expiresAt: number;
 }
 
 export interface PairingRecord {
@@ -104,8 +120,20 @@ interface SocketTicketRecord {
   expiresAt: number;
 }
 
+/** Access tokens last about an hour (§6.2); challenges only long enough to sign one. */
+export const ACCESS_TTL_MS = 60 * 60_000;
+export const CHALLENGE_TTL_MS = 60_000;
+/** Concurrent tabs of one browser each hold a token; the oldest beyond this are dropped. */
+const MAX_ACCESS_GRANTS = 4;
+/** `lastSeen` is display metadata: refresh it at most this often, not on every request. */
+const LAST_SEEN_RESOLUTION_MS = 60_000;
+
+function liveGrants(device: DeviceRecord, now: number): AccessGrant[] {
+  return (device.access ?? []).filter((grant) => grant.expiresAt > now);
+}
+
 /** One short-lived pending upgrade capability per browser. A new issue replaces the old
- *  capability. The bearer validation and hash write share a transaction with revocation. */
+ *  capability. The access-token check and hash write share a transaction with revocation. */
 export async function issueSocketTicket(
   store: RelayStore,
   input: { accountId: string; deviceId: string; token: string },
@@ -117,7 +145,7 @@ export async function issueSocketTicket(
   await store.transaction(async (tx) => {
     const key = deviceKey(input.accountId, input.deviceId);
     const device = await tx.get<DeviceRecord>(key);
-    if (!device || device.kind !== 'web' || device.tokenHash !== tokenHash) throw new PairError('invalid');
+    if (!device || device.kind !== 'web' || !liveGrants(device, now).some((grant) => grant.hash === tokenHash)) throw new PairError('invalid');
     device.lastSeen = now;
     await tx.put(key, device);
     await tx.put(socketTicketKey(input.accountId, input.deviceId), { ticketHash, expiresAt } satisfies SocketTicketRecord);
@@ -226,33 +254,55 @@ async function claimPairingUnlocked(store: RelayStore, input: { code: string; we
   return { pollToken, hostPub: record.hostPub };
 }
 
-/** Only the claimant's private capability can read pairing state or the one-time web token. */
-export async function pollPairing(store: RelayStore, code: string, pollToken: string, now: number): Promise<{ status: 'claimed' | 'denied' } | { status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string; hostName: string } | { status: 'expired' }> {
+/** The approved pairing as the claimant's poll sees it. The browser's refresh credential is sealed
+ *  to the ECDH key it claimed with: the relay keeps only that ciphertext until the record expires. */
+export interface ApprovedPoll {
+  status: 'approved';
+  sealedToken: SealedToKey;
+  webDeviceId: string;
+  hostPub: PublicIdentity;
+  hostDeviceId: string;
+  hostName: string;
+}
+
+interface ApprovedRecord extends Omit<ApprovedPoll, 'status'> {
+  code: string;
+  status: 'approved';
+  pollTokenHash: string;
+  expiresAt: number;
+}
+
+/** Only the claimant's private capability can read pairing state or its sealed credential. */
+export async function pollPairing(store: RelayStore, code: string, pollToken: string, now: number): Promise<{ status: 'claimed' | 'denied' } | ApprovedPoll | { status: 'expired' }> {
   const live = await store.get<PairingRecord>(codeKey(code));
-  const settled = live ? undefined : await store.get<{ status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string; hostName?: string; pollTokenHash: string; expiresAt: number }>(codeKey(`${code}:done`));
+  const settled = live ? undefined : await store.get<ApprovedRecord>(codeKey(`${code}:done`));
   const record = live ?? settled;
   if (!record || !pollToken || !record.pollTokenHash || record.pollTokenHash !== (await hashToken(pollToken))) throw new PairError('forbidden');
-  if (now >= record.expiresAt) {
+  if (now >= record.expiresAt || (settled && !settled.sealedToken)) {
     await store.delete(live ? codeKey(code) : codeKey(`${code}:done`));
     return { status: 'expired' };
   }
   if (live) return { status: live.status === 'denied' ? 'denied' : 'claimed' };
-  return { status: 'approved', webToken: settled!.webToken, webDeviceId: settled!.webDeviceId, hostPub: settled!.hostPub, hostDeviceId: settled!.hostDeviceId, hostName: settled!.hostName ?? 'Computer' };
+  const done = settled!;
+  return { status: 'approved', sealedToken: done.sealedToken, webDeviceId: done.webDeviceId, hostPub: done.hostPub, hostDeviceId: done.hostDeviceId, hostName: done.hostName };
 }
 
 export type PairingApproval = {
-  /** Present only when this approval enrolled the desktop; an enrolled desktop keeps its device. */
+  /** The desktop's refresh credential, present only when this approval (re-)registered it. A
+   *  desktop that authenticated as its device keeps the credential it has. */
   hostToken?: string;
   hostDeviceId: string;
+  /** In memory only: the claimant receives it sealed through its poll; it is never stored. */
   webToken: string;
   webDeviceId: string;
   webPub: PublicIdentity;
   hostPub: PublicIdentity;
 };
 
-/** Desktop decision. On approve the web client is minted (token delivered via its claim poll)
- *  and so is the desktop, unless it is already enrolled: a second browser must not give the
- *  desktop a new host id, or every browser paired before it would greet a host that is gone. */
+/** Desktop decision. On approve the web client is minted (its credential delivered sealed via its
+ *  claim poll) and so is the desktop, unless it is already registered: a second browser must not
+ *  give the desktop a new host id, or every browser paired before it would greet a host that is
+ *  gone. */
 export async function resolvePairing(
   store: RelayStore,
   input: { code: string; decision: 'approve' | 'deny'; signature: string },
@@ -287,6 +337,11 @@ async function resolvePairingUnlocked(
     await store.put(key, record);
     return { denied: true };
   }
+  // Mint and seal the browser credential before the transaction: its plaintext never reaches
+  // storage, only the hash and the ciphertext the claimant alone can open.
+  const webDeviceId = newDeviceId('w');
+  const webToken = randomToken();
+  const sealedToken = await sealToKey(record.webPub.enc, webToken, pairingTokenContext(record.code, webDeviceId));
   return store.transaction(async (tx) => {
     const devices = (await tx.list<DeviceRecord>(`device:${record.accountId}:`)).map(([, d]) => d);
     // The signature above proves the approver holds hostPub's private key, so a registered host
@@ -297,20 +352,48 @@ async function resolvePairingUnlocked(
     if (record.hostDeviceId && !existing) throw new PairError('invalid');
     if (devices.filter((d) => d.kind === 'web').length >= MAX_WEB_DEVICES) throw new PairError('limit');
     if (!existing && devices.filter((d) => d.kind === 'host').length >= MAX_HOST_DEVICES) throw new PairError('limit');
-    const host = existing
-      ? { deviceId: existing.deviceId, hostToken: undefined }
-      : await registerHostDevice(tx, { accountId: record.accountId, name: record.hostName, platform: record.hostPlatform, pub: record.hostPub }, now);
-    const web = await registerWebDevice(tx, { accountId: record.accountId, name: record.webName ?? 'web', platform: record.webPlatform ?? 'web', pub: record.webPub! }, now);
-    await tx.put(codeKey(`${record.code}:done`), { code: record.code, status: 'approved', webToken: web.webToken, webDeviceId: web.deviceId, hostPub: record.hostPub, hostDeviceId: host.deviceId, hostName: record.hostName, pollTokenHash: record.pollTokenHash, expiresAt: now + PAIRING_TTL_MS });
+    let hostDeviceId: string;
+    let hostToken: string | undefined;
+    if (existing && record.hostDeviceId) {
+      // Authenticated as this device: it keeps the credential it already holds.
+      hostDeviceId = existing.deviceId;
+    } else if (existing) {
+      // Proved the key but came in with the enrollment secret, so it no longer holds this
+      // device's credential (a reinstall that kept the keychain, a relay switched back). Keep
+      // the host id every earlier browser greets; rotate the credential.
+      hostDeviceId = existing.deviceId;
+      hostToken = randomToken();
+      await tx.put(deviceKey(record.accountId, existing.deviceId), { ...withoutGrants(existing), tokenHash: await hashToken(hostToken), lastSeen: now });
+    } else {
+      const minted = await registerHostDevice(tx, { accountId: record.accountId, name: record.hostName, platform: record.hostPlatform, pub: record.hostPub }, now);
+      hostDeviceId = minted.deviceId;
+      hostToken = minted.hostToken;
+    }
+    await registerWebDevice(tx, { accountId: record.accountId, name: record.webName ?? 'web', platform: record.webPlatform ?? 'web', pub: record.webPub!, hostDeviceId, deviceId: webDeviceId, token: webToken }, now);
+    await tx.put(codeKey(`${record.code}:done`), { code: record.code, status: 'approved', sealedToken, webDeviceId, hostPub: record.hostPub, hostDeviceId, hostName: record.hostName, pollTokenHash: record.pollTokenHash!, expiresAt: now + PAIRING_TTL_MS } satisfies ApprovedRecord);
     await tx.delete(key);
-    return { ...(host.hostToken ? { hostToken: host.hostToken } : {}), hostDeviceId: host.deviceId, webToken: web.webToken, webDeviceId: web.deviceId, webPub: record.webPub!, hostPub: record.hostPub };
+    return { ...(hostToken ? { hostToken } : {}), hostDeviceId, webToken, webDeviceId, webPub: record.webPub!, hostPub: record.hostPub };
   });
 }
 
-/** Registers a web device directly (used when the desktop approves via its control socket). */
-export async function registerWebDevice(store: RelayStorage, input: { accountId: string; name: string; platform: string; pub: PublicIdentity }, now: number): Promise<{ webToken: string; deviceId: string }> {
-  const webToken = randomToken();
-  const id = `w_${toBase64Url(crypto.getRandomValues(new Uint8Array(8)))}`;
+function newDeviceId(prefix: 'h' | 'w'): string {
+  return `${prefix}_${toBase64Url(crypto.getRandomValues(new Uint8Array(8)))}`;
+}
+
+/** A device record with every outstanding access token and challenge dropped. */
+function withoutGrants(device: DeviceRecord): DeviceRecord {
+  const { access: _access, challenge: _challenge, ...rest } = device;
+  return rest;
+}
+
+/** Registers a web device and its refresh credential (pairing approval, and tests). */
+export async function registerWebDevice(
+  store: RelayStorage,
+  input: { accountId: string; name: string; platform: string; pub: PublicIdentity; hostDeviceId?: string; deviceId?: string; token?: string },
+  now: number
+): Promise<{ webToken: string; deviceId: string }> {
+  const webToken = input.token ?? randomToken();
+  const id = input.deviceId ?? newDeviceId('w');
   const device: DeviceRecord = {
     deviceId: id,
     kind: 'web',
@@ -318,6 +401,7 @@ export async function registerWebDevice(store: RelayStorage, input: { accountId:
     platform: input.platform,
     pub: input.pub,
     tokenHash: await hashToken(webToken),
+    ...(input.hostDeviceId ? { hostDeviceId: input.hostDeviceId } : {}),
     createdAt: now,
     lastSeen: now
   };
@@ -325,10 +409,10 @@ export async function registerWebDevice(store: RelayStorage, input: { accountId:
   return { webToken, deviceId: id };
 }
 
-/** Mints the host's device record + one-time token after the human approves. */
+/** Mints the host's device record + refresh credential after the human approves. */
 export async function registerHostDevice(store: RelayStorage, input: { accountId: string; name: string; platform: string; pub: PublicIdentity }, now: number): Promise<{ hostToken: string; deviceId: string }> {
   const hostToken = randomToken();
-  const id = `h_${toBase64Url(crypto.getRandomValues(new Uint8Array(8)))}`;
+  const id = newDeviceId('h');
   const device: DeviceRecord = {
     deviceId: id,
     kind: 'host',
@@ -343,17 +427,91 @@ export async function registerHostDevice(store: RelayStorage, input: { accountId
   return { hostToken, deviceId: id };
 }
 
-export async function verifyDeviceToken(store: RelayStore, input: { accountId: string; deviceId: string; token: string }, now: number): Promise<DeviceRecord> {
+/** Checks a refresh credential. It is accepted only by the token endpoints, never by an API
+ *  route, so on its own it cannot read or change anything. */
+export async function verifyRefreshToken(store: RelayStore, input: { accountId: string; deviceId: string; token: string }): Promise<DeviceRecord> {
+  if (!input.deviceId || !input.token) throw new PairError('invalid');
+  const device = await store.get<DeviceRecord>(deviceKey(input.accountId, input.deviceId));
+  if (!device || device.tokenHash !== (await hashToken(input.token))) throw new PairError('invalid');
+  return device;
+}
+
+/** Token step 1: the refresh-credential holder gets a one-time challenge to sign. A new
+ *  challenge replaces the pending one; only the credential holder can ask, so nobody else can
+ *  keep displacing it. */
+export async function issueChallenge(store: RelayStore, input: { accountId: string; deviceId: string; token: string }, now: number): Promise<{ challenge: string; expiresAt: number }> {
+  if (!input.deviceId || !input.token) throw new PairError('invalid');
   const key = deviceKey(input.accountId, input.deviceId);
   const tokenHash = await hashToken(input.token);
+  const challenge = randomToken();
+  const expiresAt = now + CHALLENGE_TTL_MS;
+  await store.transaction(async (tx) => {
+    const device = await tx.get<DeviceRecord>(key);
+    if (!device || device.tokenHash !== tokenHash) throw new PairError('invalid');
+    device.challenge = { value: challenge, expiresAt };
+    await tx.put(key, device);
+  });
+  return { challenge, expiresAt };
+}
+
+/** Token step 2 — proof of possession: the device signs the challenge with the key it paired
+ *  with. The challenge is spent by any attempt, so a failed signature cannot be retried. */
+export async function issueAccessToken(
+  store: RelayStore,
+  input: { accountId: string; deviceId: string; token: string; challenge: unknown; signature: unknown },
+  now: number
+): Promise<{ accessToken: string; expiresAt: number }> {
+  if (!input.deviceId || !input.token || typeof input.challenge !== 'string' || !input.challenge || typeof input.signature !== 'string' || !input.signature) throw new PairError('invalid');
+  const challenge = input.challenge;
+  const key = deviceKey(input.accountId, input.deviceId);
+  const tokenHash = await hashToken(input.token);
+  const device = await store.get<DeviceRecord>(key);
+  if (!device || device.tokenHash !== tokenHash) throw new PairError('invalid');
+  let proven = false;
+  try {
+    proven = await verify(device.pub, tokenProofPayload(input.deviceId, challenge), input.signature);
+  } catch {
+    // A malformed signature is a failed proof, not a server error.
+  }
+  const accessToken = randomToken();
+  const accessHash = await hashToken(accessToken);
+  const expiresAt = now + ACCESS_TTL_MS;
+  const outcome = await store.transaction(async (tx) => {
+    const current = await tx.get<DeviceRecord>(key);
+    // Revocation, credential rotation or a newer challenge may have landed since the read above.
+    if (!current || current.tokenHash !== tokenHash || stable(current.pub) !== stable(device.pub)) return 'invalid' as const;
+    const pending = current.challenge;
+    if (!pending || pending.value !== challenge) return 'invalid' as const;
+    delete current.challenge;
+    if (now >= pending.expiresAt || !proven) {
+      await tx.put(key, current);
+      return 'forbidden' as const;
+    }
+    current.access = [...liveGrants(current, now), { hash: accessHash, expiresAt }].slice(-MAX_ACCESS_GRANTS);
+    current.lastSeen = now;
+    await tx.put(key, current);
+    return 'ok' as const;
+  });
+  if (outcome !== 'ok') throw new PairError(outcome);
+  return { accessToken, expiresAt };
+}
+
+/** Checks a short-lived access token: what every authenticated route and desktop socket needs. */
+export async function verifyAccessToken(store: RelayStore, input: { accountId: string; deviceId: string; token: string }, now: number): Promise<DeviceRecord> {
+  if (!input.deviceId || !input.token) throw new PairError('invalid');
+  const key = deviceKey(input.accountId, input.deviceId);
+  const hash = await hashToken(input.token);
+  const device = await store.get<DeviceRecord>(key);
+  if (!device || !liveGrants(device, now).some((grant) => grant.hash === hash)) throw new PairError('invalid');
+  if (now - device.lastSeen < LAST_SEEN_RESOLUTION_MS) return device;
   // The last-seen write must be atomic with the existence/token check. A concurrent
   // revoke must never be undone by a stale authentication write.
   return store.transaction(async (tx) => {
-    const device = await tx.get<DeviceRecord>(key);
-    if (!device || device.tokenHash !== tokenHash) throw new PairError('invalid');
-    device.lastSeen = now;
-    await tx.put(key, device);
-    return device;
+    const current = await tx.get<DeviceRecord>(key);
+    if (!current || !liveGrants(current, now).some((grant) => grant.hash === hash)) throw new PairError('invalid');
+    current.lastSeen = now;
+    await tx.put(key, current);
+    return current;
   });
 }
 
@@ -382,13 +540,26 @@ export async function deviceInfos(store: RelayStore, accountId: string): Promise
   }));
 }
 
-export async function revokeDevice(store: RelayStore, accountId: string, deviceId: string): Promise<void> {
-  await store.transaction(async (tx) => {
-    await tx.delete(deviceKey(accountId, deviceId));
-    await tx.delete(socketTicketKey(accountId, deviceId));
-    // A revoked browser must not leave an offline ciphertext queue behind or receive
-    // it after a hibernated Hub wakes. Enqueue validates the device in a transaction.
-    await tx.delete(`q:${deviceId}`);
+/** Revokes a device and returns every device id that stopped existing. Revoking a desktop also
+ *  revokes the browsers paired with it: they route to that host id alone, so their credentials
+ *  would otherwise outlive the only thing they could reach (the lost-desktop case, §6.5). */
+export async function revokeDevice(store: RelayStore, accountId: string, deviceId: string): Promise<string[]> {
+  return store.transaction(async (tx) => {
+    const target = await tx.get<DeviceRecord>(deviceKey(accountId, deviceId));
+    const victims = [deviceId];
+    if (target?.kind === 'host') {
+      for (const [, device] of await tx.list<DeviceRecord>(`device:${accountId}:`)) {
+        if (device.kind === 'web' && device.hostDeviceId === deviceId) victims.push(device.deviceId);
+      }
+    }
+    for (const id of victims) {
+      await tx.delete(deviceKey(accountId, id));
+      await tx.delete(socketTicketKey(accountId, id));
+      // A revoked browser must not leave an offline ciphertext queue behind or receive
+      // it after a hibernated Hub wakes. Enqueue validates the device in a transaction.
+      await tx.delete(`q:${id}`);
+    }
+    return victims;
   });
 }
 

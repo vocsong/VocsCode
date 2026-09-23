@@ -121,8 +121,14 @@ export class FakeRelay {
     void authorizeSocket(kind, new Request(`http://relay.test${url.pathname.slice(3)}${url.search}`, {
       headers: req.headers.authorization ? { authorization: req.headers.authorization } : undefined
     }), this.context()).then((auth) => {
-      if (!auth.ok || socket.destroyed) socket.destroy();
-      else this.accept(req, socket, head, kind, auth.deviceId);
+      if (socket.destroyed) return;
+      if (auth.ok) {
+        this.accept(req, socket, head, kind, auth.deviceId);
+        return;
+      }
+      // Answer like the Durable Object: an HTTP error status, not a dropped connection.
+      const body = JSON.stringify({ error: auth.error });
+      socket.end(`HTTP/1.1 ${auth.status} Unauthorized\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`);
     }).catch(() => socket.destroy());
   }
 

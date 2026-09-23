@@ -756,6 +756,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       return remote.state();
     });
     handle('remote:setMirror', ({ mirror }) => {
+      remote.auditMirror(mirror === true);
       void (async () => {
         await settings.update({ remote: { ...remoteConfig(), mirror: mirror === true } });
         deps.push(PUSH_CHANNELS.settingsChanged, settings.get());

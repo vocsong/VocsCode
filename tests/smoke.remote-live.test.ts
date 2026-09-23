@@ -12,12 +12,13 @@ import { expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import { RelayClient, type SimpleSocket, type WebCredentials } from '../relay/src/web-client';
 import { RemoteHost } from '../src/main/remote/host';
-import { importAesKey, sealBlob } from '../src/shared/crypto';
+import { generateIdentity, importAesKey, sealBlob, sign, tokenProofPayload, type AnyIdentity, type Identity } from '../src/shared/crypto';
 import type { HandlerRegistry } from '../src/main/handlers';
 import { recoverApprovedClaim } from './support/remote-live-recovery';
 
-type Auth = { deviceId: string; token: string };
-type SavedHost = { deviceId?: string; deviceToken?: string; clients?: Record<string, unknown> };
+/** A created device as cleanup sees it: its refresh credential plus the key that proves it. */
+type Auth = { deviceId: string; refresh: string; identity: AnyIdentity };
+type SavedHost = { deviceId?: string; deviceToken?: string; identity?: Identity; clients?: Record<string, unknown> };
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -91,26 +92,42 @@ async function tokenFromEnv(): Promise<string> {
   return token;
 }
 
+/** Proof of possession, as the clients do it: a refresh credential and a signed challenge buy a
+ *  short-lived access token. Returns the failing status instead of throwing. */
+async function accessFor(origin: string, auth: Auth): Promise<{ status: number; token?: string }> {
+  const query = `?device=${encodeURIComponent(auth.deviceId)}`;
+  const challengeRes = await fetch(`${origin}/v1/token/challenge${query}`, { method: 'POST', headers: { authorization: `Bearer ${auth.refresh}` } });
+  if (!challengeRes.ok) return { status: challengeRes.status };
+  const { challenge } = (await challengeRes.json()) as { challenge: string };
+  const tokenRes = await fetch(`${origin}/v1/token${query}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${auth.refresh}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ challenge, signature: await sign(auth.identity, tokenProofPayload(auth.deviceId, challenge)) })
+  });
+  if (!tokenRes.ok) return { status: tokenRes.status };
+  return { status: 200, token: ((await tokenRes.json()) as { accessToken: string }).accessToken };
+}
+
+/** 401 once the relay no longer knows the device; otherwise the status of an authenticated read. */
 async function deviceStatus(origin: string, auth: Auth): Promise<number> {
-  const res = await fetch(`${origin}/v1/devices?device=${encodeURIComponent(auth.deviceId)}`, { headers: { authorization: `Bearer ${auth.token}` } });
-  return res.status;
+  const access = await accessFor(origin, auth);
+  if (!access.token) return access.status;
+  return (await fetch(`${origin}/v1/devices?device=${encodeURIComponent(auth.deviceId)}`, { headers: { authorization: `Bearer ${access.token}` } })).status;
 }
 
 async function revokeRemaining(origin: string, target: string, targetAuth: Auth | null, actors: Auth[]): Promise<void> {
   if (targetAuth && (await deviceStatus(origin, targetAuth)) === 401) return;
   for (const actor of actors) {
-    if ((await deviceStatus(origin, actor)) !== 200) continue;
+    const access = await accessFor(origin, actor);
+    if (!access.token) continue;
     const res = await fetch(`${origin}/v1/devices?device=${encodeURIComponent(actor.deviceId)}&target=${encodeURIComponent(target)}`, {
       method: 'DELETE',
-      headers: { authorization: `Bearer ${actor.token}` }
+      headers: { authorization: `Bearer ${access.token}` }
     });
     if (!res.ok) throw new Error('device cleanup was refused');
-    if (targetAuth) {
-      if ((await deviceStatus(origin, targetAuth)) !== 401) throw new Error('revoked device is still authorized');
-    } else if (actor.deviceId !== target) {
-      const list = await fetch(`${origin}/v1/devices?device=${encodeURIComponent(actor.deviceId)}`, { headers: { authorization: `Bearer ${actor.token}` } });
-      if (!list.ok || ((await list.json()) as Array<{ deviceId: string }>).some((d) => d.deviceId === target)) throw new Error('device remains in the registry');
-    }
+    // The relay reports every device it removed (revoking a desktop cascades to its browsers).
+    if (!((await res.json()) as { revoked?: string[] }).revoked?.includes(target)) throw new Error('device remains in the registry');
+    if (targetAuth && (await deviceStatus(origin, targetAuth)) !== 401) throw new Error('revoked device is still authorized');
     return;
   }
   throw new Error('no live device can revoke a created device');
@@ -146,10 +163,13 @@ it.skipIf(process.env.REMOTE_LIVE !== '1')('mints, claims, approves, handshakes,
     broadcast: () => undefined
   });
   let claimToken: string | undefined;
+  let browserIdentity: Identity | undefined;
   let socketUrlSafe = false;
   let ticketRequestSafe = false;
   const client = new RelayClient({
     storage: { get: (key) => webStorage.get(key) ?? null, set: (key, value) => { webStorage.set(key, value); }, remove: (key) => { webStorage.delete(key); } },
+    // Keep the claim identity: recovery after a lost approval poll must open the sealed credential.
+    newIdentity: async () => (browserIdentity = await generateIdentity()),
     wsFactory: (url, onMessage, onClose) => {
       const parsed = new URL(url);
       socketUrlSafe = parsed.pathname === '/v1/ws/client' && /^[A-Za-z0-9_-]{43}$/.test(parsed.searchParams.get('ticket') ?? '') &&
@@ -159,9 +179,10 @@ it.skipIf(process.env.REMOTE_LIVE !== '1')('mints, claims, approves, handshakes,
     fetchImpl: async (input, init) => {
       const response = await fetch(input, init);
       if (new URL(String(input)).pathname === '/v1/ws/ticket') {
-        ticketRequestSafe = response.ok && init?.method === 'POST' &&
-          new Headers(init.headers).get('authorization') === `Bearer ${client.credentials()?.webToken}` &&
-          !new URL(String(input)).searchParams.has('token');
+        // Bought with a short-lived access token in the header, never the refresh credential.
+        const authorization = new Headers(init?.headers).get('authorization') ?? '';
+        ticketRequestSafe = response.ok && init?.method === 'POST' && /^Bearer [A-Za-z0-9_-]{43}$/.test(authorization) &&
+          authorization !== `Bearer ${client.credentials()?.webToken}` && !new URL(String(input)).searchParams.has('token');
       }
       if (String(input).endsWith('/v1/pair/claim') && response.ok) {
         // Keep this run's claimant-only capability in memory for cleanup if the browser's
@@ -229,21 +250,28 @@ it.skipIf(process.env.REMOTE_LIVE !== '1')('mints, claims, approves, handshakes,
     expect(await host.putMirror('index', undefined, await sealBlob(key, { hostName: 'Remote live smoke', updatedAt: Date.now(), sessions: [] }))).toBe(true);
     expect((await client.mirrorIndex())?.hostName).toBe('Remote live smoke');
 
-    phase = 'clear test mirror before revocation';
+    phase = 'refresh credentials alone authorize nothing';
     const saved = JSON.parse(hostSecrets.get('remote-host') ?? '{}') as SavedHost;
-    expect(!!saved.deviceId && !!saved.deviceToken).toBe(true);
-    const cleared = await fetch(`${origin}/v1/mirror?device=${encodeURIComponent(saved.deviceId!)}`, {
-      method: 'DELETE', headers: { authorization: `Bearer ${saved.deviceToken}` }
+    expect(!!saved.deviceId && !!saved.deviceToken && !!saved.identity).toBe(true);
+    const hostAuth: Auth = { deviceId: saved.deviceId!, refresh: saved.deviceToken!, identity: saved.identity! };
+    const webAuth: Auth = { deviceId: credentials.webDeviceId, refresh: credentials.webToken, identity: credentials.identity };
+    expect((await fetch(`${origin}/v1/devices?device=${encodeURIComponent(hostAuth.deviceId)}`, { headers: { authorization: `Bearer ${hostAuth.refresh}` } })).status).toBe(401);
+
+    phase = 'clear test mirror before revocation';
+    const hostAccess = await accessFor(origin, hostAuth);
+    expect(hostAccess.status).toBe(200);
+    const cleared = await fetch(`${origin}/v1/mirror?device=${encodeURIComponent(hostAuth.deviceId)}`, {
+      method: 'DELETE', headers: { authorization: `Bearer ${hostAccess.token}` }
     });
     expect(cleared.status).toBe(200);
     mirrorTouched = false;
     expect(await client.mirrorIndex()).toBeNull();
 
     phase = 'revoke both created devices';
+    // Revoking the desktop cascades to the browser paired through it.
     await client.revokeDevice(credentials.hostDeviceId);
-    expect(await deviceStatus(origin, { deviceId: saved.deviceId!, token: saved.deviceToken! })).toBe(401);
-    await client.revokeDevice(credentials.webDeviceId);
-    expect(await deviceStatus(origin, { deviceId: credentials.webDeviceId, token: credentials.webToken })).toBe(401);
+    expect(await deviceStatus(origin, hostAuth)).toBe(401);
+    expect(await deviceStatus(origin, webAuth)).toBe(401);
   } catch {
     // Do not print caught exceptions: WebSocket/fetch errors and failed assertions can carry
     // device tokens, private identity material or the mirror key.
@@ -260,22 +288,24 @@ it.skipIf(process.env.REMOTE_LIVE !== '1')('mints, claims, approves, handshakes,
       // never arrived. Use only this run's privately captured claim capability to recover the
       // browser credential; a code-only poll would expose a bearer to anyone seeing the code.
       let recovered: { webToken: string; webDeviceId: string; hostDeviceId: string } | null = null;
-      if (approvalSent && code && claimToken && !credentials) {
-        try { recovered = await recoverApprovedClaim(origin, code, claimToken); }
+      if (approvalSent && code && claimToken && browserIdentity && !credentials) {
+        try { recovered = await recoverApprovedClaim(origin, code, claimToken, browserIdentity); }
         catch { cleanupFailures.push('private claim recovery failed'); }
       }
       const hostId = saved.deviceId ?? credentials?.hostDeviceId ?? recovered?.hostDeviceId;
       const webId = credentials?.webDeviceId ?? recovered?.webDeviceId ?? Object.keys(saved.clients ?? {})[0];
-      const hostAuth = saved.deviceId && saved.deviceToken ? { deviceId: saved.deviceId, token: saved.deviceToken } : null;
-      const webAuth = credentials?.webToken && credentials.webDeviceId
-        ? { deviceId: credentials.webDeviceId, token: credentials.webToken }
-        : recovered ? { deviceId: recovered.webDeviceId, token: recovered.webToken } : null;
+      const hostAuth: Auth | null = saved.deviceId && saved.deviceToken && saved.identity ? { deviceId: saved.deviceId, refresh: saved.deviceToken, identity: saved.identity } : null;
+      const webAuth: Auth | null = credentials?.webToken && credentials.webDeviceId
+        ? { deviceId: credentials.webDeviceId, refresh: credentials.webToken, identity: credentials.identity }
+        : recovered && browserIdentity ? { deviceId: recovered.webDeviceId, refresh: recovered.webToken, identity: browserIdentity } : null;
       if (approvalSent && (!hostId || !webId)) cleanupFailures.push('could not identify all minted devices');
       if (mirrorTouched) {
         try {
           if (!hostAuth) throw new Error('no host credential');
+          const access = await accessFor(origin, hostAuth);
+          if (!access.token) throw new Error('no host access');
           const res = await fetch(`${origin}/v1/mirror?device=${encodeURIComponent(hostAuth.deviceId)}`, {
-            method: 'DELETE', headers: { authorization: `Bearer ${hostAuth.token}` }
+            method: 'DELETE', headers: { authorization: `Bearer ${access.token}` }
           });
           if (!res.ok) throw new Error('mirror cleanup refused');
         } catch { cleanupFailures.push('mirror cleanup failed'); }

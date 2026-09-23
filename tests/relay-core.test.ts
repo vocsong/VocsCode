@@ -1,8 +1,9 @@
 /** Unit tests for the relay core (relay/src/core.ts): pairing lifecycle, tokens, revocation.
  *  Runs in plain Node against an in-memory store — the DO is a thin binding over this. */
 import { beforeAll, describe, expect, it } from 'vitest';
-import { generateIdentity, pairingDecisionPayload, publicOf, sign, type Identity } from '../src/shared/crypto';
-import { claimPairing, consumeSocketTicket, deviceInfos, hashToken, issueSocketTicket, listDevices, listMirrorSessions, MAX_HOST_DEVICES, MAX_WEB_DEVICES, MirrorError, PAIRING_TTL_MS, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyDeviceToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
+import { generateIdentity, openSealedToKey, pairingDecisionPayload, pairingTokenContext, publicOf, sign, tokenProofPayload, type Identity } from '../src/shared/crypto';
+import { ACCESS_TTL_MS, CHALLENGE_TTL_MS, claimPairing, consumeSocketTicket, deviceInfos, hashToken, issueAccessToken, issueChallenge, issueSocketTicket, listDevices, listMirrorSessions, MAX_HOST_DEVICES, MAX_WEB_DEVICES, MirrorError, PAIRING_TTL_MS, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyAccessToken, verifyRefreshToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
+import { accessFor, testDevice } from './support/relay-auth';
 import type { PublicIdentity } from '../src/shared/crypto';
 
 function memStore(failWrite?: (key: string) => boolean): RelayStore {
@@ -110,7 +111,7 @@ describe('relay pairing', () => {
     expect((results.find((result) => !result.ok) as { error: unknown }).error).toBeInstanceOf(PairError);
     const minted = results.find((result) => result.ok) as { value: { webToken: string; webDeviceId: string; hostDeviceId: string } };
     expect((await listDevices(store, 'a')).map((device) => device.kind).sort()).toEqual(['host', 'web']);
-    expect(await pollPairing(store, code, pollToken, T0 + 2)).toMatchObject({ status: 'approved', webToken: minted.value.webToken, webDeviceId: minted.value.webDeviceId, hostDeviceId: minted.value.hostDeviceId });
+    expect(await pollPairing(store, code, pollToken, T0 + 2)).toMatchObject({ status: 'approved', webDeviceId: minted.value.webDeviceId, hostDeviceId: minted.value.hostDeviceId });
   });
 
   it.each(['device:a:w_', 'pair:done'])('rolls back an approval when %s cannot be stored', async (failure) => {
@@ -147,14 +148,15 @@ describe('relay pairing', () => {
 
   it('runs the full pairing lifecycle: start → claim → approve → tokens', async () => {
     const store = memStore();
+    const web = await generateIdentity();
     const { code, expiresAt } = await startPairing(store, { accountId: 'vocs-v1', hostName: 'Work PC', hostPlatform: 'win32', hostPub: HOST_PUB }, T0);
     expect(code).toMatch(/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/);
     expect(expiresAt).toBe(T0 + PAIRING_TTL_MS);
 
-    const { pollToken } = await claimPairing(store, { code, webName: 'Chrome', webPlatform: 'mac', webPub: WEB_PUB }, T0);
+    const { pollToken } = await claimPairing(store, { code, webName: 'Chrome', webPlatform: 'mac', webPub: publicOf(web) }, T0);
     expect(await pollPairing(store, code, pollToken, T0)).toEqual({ status: 'claimed' });
 
-    const resolved = await resolvePairing(store, await approval(code, 'approve'), T0 + 1);
+    const resolved = await resolvePairing(store, { code, decision: 'approve', signature: await sign(hostIdentity, pairingDecisionPayload(code, 'approve', publicOf(web))) }, T0 + 1);
     if ('denied' in resolved) throw new Error('expected approval');
     expect(resolved.hostToken).toHaveLength(43); // 32 bytes base64url
     expect(resolved.webDeviceId.startsWith('w_')).toBe(true);
@@ -162,9 +164,12 @@ describe('relay pairing', () => {
     const poll = await pollPairing(store, code, pollToken, T0 + 2);
     expect(poll.status).toBe('approved');
     if (poll.status !== 'approved') throw new Error('unreachable');
-    expect(poll.webToken).toBe(resolved.webToken);
+    // The browser credential travels sealed to the key the browser claimed with.
+    expect(JSON.stringify(poll)).not.toContain(resolved.webToken);
+    expect(await openSealedToKey(web.enc, poll.sealedToken, pairingTokenContext(code, poll.webDeviceId))).toBe(resolved.webToken);
     expect(poll.webDeviceId).toBe(resolved.webDeviceId);
     expect(poll.hostPub).toEqual(HOST_PUB);
+    expect(poll.hostName).toBe('Work PC');
 
     const devices = await listDevices(store, 'vocs-v1');
     expect(devices.map((d) => d.kind).sort()).toEqual(['host', 'web']);
@@ -182,19 +187,34 @@ describe('relay pairing', () => {
     };
     const first = await pairWith(WEB_PUB);
     expect(first.resolved.hostToken).toHaveLength(43);
-    // Started with the enrollment secret (no device id): still recognized by its signing key.
-    const second = await pairWith(publicOf(await generateIdentity()));
-    expect(second.resolved.hostDeviceId).toBe(first.resolved.hostDeviceId);
+    const hostId = first.resolved.hostDeviceId;
+    // Started with its own device credential: it keeps both its host id and its credential.
+    const second = await pairWith(publicOf(await generateIdentity()), hostId);
+    expect(second.resolved.hostDeviceId).toBe(hostId);
     expect(second.resolved.hostToken).toBeUndefined();
-    expect(second.poll).toMatchObject({ status: 'approved', hostDeviceId: first.resolved.hostDeviceId, hostName: 'Work PC' });
-    // Started with its own device credential: named exactly.
-    const third = await pairWith(publicOf(await generateIdentity()), first.resolved.hostDeviceId);
-    expect(third.resolved.hostDeviceId).toBe(first.resolved.hostDeviceId);
+    expect(second.poll).toMatchObject({ status: 'approved', hostDeviceId: hostId, hostName: 'Work PC' });
+    await expect(verifyRefreshToken(store, { accountId: 'a', deviceId: hostId, token: first.resolved.hostToken! })).resolves.toMatchObject({ kind: 'host' });
+    // Started with the enrollment secret: the signing key identifies the same desktop, which
+    // evidently lost its credential. It keeps its host id; the credential is rotated.
+    const third = await pairWith(publicOf(await generateIdentity()));
+    expect(third.resolved.hostDeviceId).toBe(hostId);
+    expect(third.resolved.hostToken).toHaveLength(43);
+    expect(third.resolved.hostToken).not.toBe(first.resolved.hostToken);
+    await expect(verifyRefreshToken(store, { accountId: 'a', deviceId: hostId, token: first.resolved.hostToken! })).rejects.toMatchObject({ code: 'invalid' });
+    await expect(verifyRefreshToken(store, { accountId: 'a', deviceId: hostId, token: third.resolved.hostToken! })).resolves.toMatchObject({ kind: 'host' });
     const devices = await listDevices(store, 'a');
     expect(devices.filter((d) => d.kind === 'host')).toHaveLength(1);
-    expect(devices.filter((d) => d.kind === 'web')).toHaveLength(3);
-    // Nothing re-keyed the desktop: its first token still verifies.
-    await expect(verifyDeviceToken(store, { accountId: 'a', deviceId: first.resolved.hostDeviceId, token: first.resolved.hostToken! }, T0 + 3)).resolves.toMatchObject({ kind: 'host' });
+    expect(devices.filter((d) => d.kind === 'web').map((d) => d.hostDeviceId)).toEqual([hostId, hostId, hostId]);
+  });
+
+  it('drops outstanding access tokens when a re-registration rotates the credential', async () => {
+    const store = memStore();
+    const host = await testDevice(store, 'host', { identity: hostIdentity, now: T0 });
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'Work PC', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    await claimPairing(store, { code, webName: 'w', webPlatform: '', webPub: WEB_PUB }, T0);
+    const resolved = await resolvePairing(store, await approval(code, 'approve'), T0 + 1);
+    expect(resolved).toMatchObject({ hostDeviceId: host.deviceId, hostToken: expect.any(String) });
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId: host.deviceId, token: host.access }, T0 + 2)).rejects.toMatchObject({ code: 'invalid' });
   });
 
   it('refuses to approve for an enrolled desktop revoked while its code was pending', async () => {
@@ -235,7 +255,7 @@ describe('relay pairing', () => {
     await expect(resolvePairing(store, { code, decision: 'approve', signature: await sign(other, pairingDecisionPayload(code, 'approve', WEB_PUB)) }, T0 + 1)).rejects.toMatchObject({ code: 'limit' });
     const again = await startPairing(store, { accountId: 'a', hostName: 'enrolled', hostPlatform: '', hostPub: HOST_PUB }, T0);
     await claimPairing(store, { code: again.code, webName: 'w', webPlatform: '', webPub: WEB_PUB }, T0);
-    await expect(resolvePairing(store, await approval(again.code, 'approve'), T0 + 1)).resolves.not.toHaveProperty('hostToken');
+    await expect(resolvePairing(store, await approval(again.code, 'approve'), T0 + 1)).resolves.toMatchObject({ hostToken: expect.any(String) });
     expect((await listDevices(store, 'a')).filter((d) => d.kind === 'host')).toHaveLength(MAX_HOST_DEVICES);
   });
 
@@ -266,26 +286,46 @@ describe('relay pairing', () => {
     await expect(resolvePairing(store, await approval(code, 'approve'), T0 + 2)).rejects.toBeInstanceOf(PairError);
   });
 
-  it('verifies device tokens and rejects wrong ones', async () => {
+  it('verifies refresh credentials and rejects wrong ones', async () => {
     const store = memStore();
     const { hostToken, deviceId } = await registerHostDevice(store, { accountId: 'a', name: 'h', platform: 'win', pub: HOST_PUB }, T0);
-    const device = await verifyDeviceToken(store, { accountId: 'a', deviceId, token: hostToken }, T0 + 1);
+    const device = await verifyRefreshToken(store, { accountId: 'a', deviceId, token: hostToken });
     expect(device.name).toBe('h');
-    await expect(verifyDeviceToken(store, { accountId: 'a', deviceId, token: 'wrong' }, T0 + 1)).rejects.toBeInstanceOf(PairError);
-    await expect(verifyDeviceToken(store, { accountId: 'a', deviceId: 'nope', token: hostToken }, T0 + 1)).rejects.toBeInstanceOf(PairError);
+    await expect(verifyRefreshToken(store, { accountId: 'a', deviceId, token: 'wrong' })).rejects.toBeInstanceOf(PairError);
+    await expect(verifyRefreshToken(store, { accountId: 'a', deviceId: 'nope', token: hostToken })).rejects.toBeInstanceOf(PairError);
+    await expect(verifyRefreshToken(store, { accountId: 'a', deviceId, token: '' })).rejects.toBeInstanceOf(PairError);
   });
 
-  it('revokes devices so their tokens stop verifying', async () => {
+  it('revokes devices so neither their access tokens nor their refresh credentials work', async () => {
     const store = memStore();
-    const { webToken, deviceId } = await registerWebDevice(store, { accountId: 'a', name: 'w', platform: 'web', pub: WEB_PUB }, T0);
-    await verifyDeviceToken(store, { accountId: 'a', deviceId, token: webToken }, T0 + 1);
-    await revokeDevice(store, 'a', deviceId);
-    await expect(verifyDeviceToken(store, { accountId: 'a', deviceId, token: webToken }, T0 + 2)).rejects.toBeInstanceOf(PairError);
+    const web = await testDevice(store, 'web', { now: T0 });
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId: web.deviceId, token: web.access }, T0 + 1)).resolves.toMatchObject({ kind: 'web' });
+    expect(await revokeDevice(store, 'a', web.deviceId)).toEqual([web.deviceId]);
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId: web.deviceId, token: web.access }, T0 + 2)).rejects.toBeInstanceOf(PairError);
+    await expect(issueChallenge(store, { accountId: 'a', deviceId: web.deviceId, token: web.refresh }, T0 + 2)).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it('revoking a desktop revokes the browsers paired through it, and only those', async () => {
+    const store = memStore();
+    const host = await testDevice(store, 'host', { now: T0 });
+    const other = await testDevice(store, 'host', { now: T0 });
+    const mine = await testDevice(store, 'web', { hostDeviceId: host.deviceId, now: T0 });
+    const theirs = await testDevice(store, 'web', { hostDeviceId: other.deviceId, now: T0 });
+    await store.put(`q:${mine.deviceId}`, [{ t: 'd', seq: 1, payload: {} }]);
+    await issueSocketTicket(store, { accountId: 'a', deviceId: mine.deviceId, token: mine.access }, T0);
+    expect((await revokeDevice(store, 'a', host.deviceId)).sort()).toEqual([host.deviceId, mine.deviceId].sort());
+    expect((await listDevices(store, 'a')).map((d) => d.deviceId).sort()).toEqual([other.deviceId, theirs.deviceId].sort());
+    expect(await store.get(`q:${mine.deviceId}`)).toBeUndefined();
+    expect(await store.list('ws-ticket:')).toHaveLength(0);
+    // Revoking a browser never takes its desktop with it.
+    expect(await revokeDevice(store, 'a', theirs.deviceId)).toEqual([theirs.deviceId]);
+    expect((await listDevices(store, 'a')).map((d) => d.deviceId)).toEqual([other.deviceId]);
   });
 
   it('never resurrects a revoked device when verification races with deletion', async () => {
     const store = memStore();
-    const { webToken, deviceId } = await registerWebDevice(store, { accountId: 'a', name: 'w', platform: 'web', pub: WEB_PUB }, T0);
+    const web = await testDevice(store, 'web', { now: T0 });
+    const deviceId = web.deviceId;
     let signalRead!: () => void;
     let releaseRead!: () => void;
     const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
@@ -309,7 +349,8 @@ describe('relay pairing', () => {
         }
       }))
     };
-    const verification = verifyDeviceToken(slowStore, { accountId: 'a', deviceId, token: webToken }, T0 + 1)
+    // Late enough that verification refreshes lastSeen: the path that writes the record back.
+    const verification = verifyAccessToken(slowStore, { accountId: 'a', deviceId, token: web.access }, T0 + 120_000)
       .then(() => 'authorized', () => 'denied');
     await readStarted;
     const revocation = revokeDevice(store, 'a', deviceId);
@@ -319,7 +360,7 @@ describe('relay pairing', () => {
     await verification;
     await revocation;
     expect(await listDevices(store, 'a')).toHaveLength(0);
-    await expect(verifyDeviceToken(store, { accountId: 'a', deviceId, token: webToken }, T0 + 2)).rejects.toMatchObject({ code: 'invalid' });
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId, token: web.access }, T0 + 120_001)).rejects.toMatchObject({ code: 'invalid' });
   });
 
   it('hashes tokens with sha-256 and never stores plaintext', async () => {
@@ -346,16 +387,98 @@ describe('relay pairing', () => {
   });
 });
 
+describe('access tokens (proof of possession)', () => {
+  it('buys an access token only with the refresh credential AND a signature by the device key', async () => {
+    const store = memStore();
+    const identity = await generateIdentity();
+    const { deviceId, webToken: refresh } = await registerWebDevice(store, { accountId: 'a', name: 'w', platform: 'web', pub: publicOf(identity) }, T0);
+    await expect(issueChallenge(store, { accountId: 'a', deviceId, token: 'stolen-guess' }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    // The refresh credential alone authorizes no API call.
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId, token: refresh }, T0)).rejects.toMatchObject({ code: 'invalid' });
+
+    // A thief with the refresh credential but not the key: the signature fails and the
+    // challenge is spent, so even the right signature cannot reuse it afterwards.
+    const thief = await generateIdentity();
+    const { challenge } = await issueChallenge(store, { accountId: 'a', deviceId, token: refresh }, T0);
+    await expect(issueAccessToken(store, { accountId: 'a', deviceId, token: refresh, challenge, signature: await sign(thief, tokenProofPayload(deviceId, challenge)) }, T0)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(issueAccessToken(store, { accountId: 'a', deviceId, token: refresh, challenge, signature: await sign(identity, tokenProofPayload(deviceId, challenge)) }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    // A signature over another device id is not a proof for this one.
+    const second = await issueChallenge(store, { accountId: 'a', deviceId, token: refresh }, T0);
+    await expect(issueAccessToken(store, { accountId: 'a', deviceId, token: refresh, challenge: second.challenge, signature: await sign(identity, tokenProofPayload('w_other', second.challenge)) }, T0)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(issueAccessToken(store, { accountId: 'a', deviceId, token: refresh, challenge: 'x', signature: 'not-base64!' }, T0)).rejects.toBeInstanceOf(PairError);
+
+    const access = await accessFor(store, { deviceId, refresh, identity }, { now: T0 });
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId, token: access }, T0 + 1)).resolves.toMatchObject({ deviceId });
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId: 'w_other', token: access }, T0 + 1)).rejects.toMatchObject({ code: 'invalid' });
+    const stored = JSON.stringify(await store.list('device:'));
+    expect(stored).not.toContain(access);
+    expect(stored).not.toContain(refresh);
+  });
+
+  it('expires challenges and access tokens, and a newer challenge replaces the pending one', async () => {
+    const store = memStore();
+    const identity = await generateIdentity();
+    const { deviceId, webToken: refresh } = await registerWebDevice(store, { accountId: 'a', name: 'w', platform: 'web', pub: publicOf(identity) }, T0);
+    const proof = async (challenge: string) => sign(identity, tokenProofPayload(deviceId, challenge));
+    const late = await issueChallenge(store, { accountId: 'a', deviceId, token: refresh }, T0);
+    expect(late.expiresAt).toBe(T0 + CHALLENGE_TTL_MS);
+    await expect(issueAccessToken(store, { accountId: 'a', deviceId, token: refresh, challenge: late.challenge, signature: await proof(late.challenge) }, T0 + CHALLENGE_TTL_MS)).rejects.toMatchObject({ code: 'forbidden' });
+    const older = await issueChallenge(store, { accountId: 'a', deviceId, token: refresh }, T0);
+    const newer = await issueChallenge(store, { accountId: 'a', deviceId, token: refresh }, T0);
+    await expect(issueAccessToken(store, { accountId: 'a', deviceId, token: refresh, challenge: older.challenge, signature: await proof(older.challenge) }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    const issued = await issueAccessToken(store, { accountId: 'a', deviceId, token: refresh, challenge: newer.challenge, signature: await proof(newer.challenge) }, T0);
+    expect(issued.expiresAt).toBe(T0 + ACCESS_TTL_MS);
+    expect(ACCESS_TTL_MS).toBe(60 * 60_000);
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId, token: issued.accessToken }, T0 + ACCESS_TTL_MS - 1)).resolves.toMatchObject({ deviceId });
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId, token: issued.accessToken }, T0 + ACCESS_TTL_MS)).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it('keeps a bounded set of concurrent access tokens per device', async () => {
+    const store = memStore();
+    const identity = await generateIdentity();
+    const { deviceId, webToken: refresh } = await registerWebDevice(store, { accountId: 'a', name: 'w', platform: 'web', pub: publicOf(identity) }, T0);
+    const tokens: string[] = [];
+    for (let i = 0; i < 6; i++) tokens.push(await accessFor(store, { deviceId, refresh, identity }, { now: T0 + i }));
+    const verdicts = await Promise.all(tokens.map((token) => verifyAccessToken(store, { accountId: 'a', deviceId, token }, T0 + 10).then(() => true, () => false)));
+    expect(verdicts).toEqual([false, false, true, true, true, true]);
+    expect((await store.get<{ access: unknown[] }>(`device:a:${deviceId}`))?.access).toHaveLength(4);
+  });
+
+  it('seals the browser credential to its claim key: nothing else opens it, and storage holds only ciphertext', async () => {
+    const store = memStore();
+    const web = await generateIdentity();
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'PC', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    const { pollToken } = await claimPairing(store, { code, webName: 'w', webPlatform: '', webPub: publicOf(web) }, T0);
+    const resolved = await resolvePairing(store, { code, decision: 'approve', signature: await sign(hostIdentity, pairingDecisionPayload(code, 'approve', publicOf(web))) }, T0 + 1);
+    if ('denied' in resolved) throw new Error('expected approval');
+    const everything = JSON.stringify(await store.list(''));
+    expect(everything).not.toContain(resolved.webToken);
+    expect(everything).not.toContain(resolved.hostToken!);
+    const poll = await pollPairing(store, code, pollToken, T0 + 2);
+    if (poll.status !== 'approved') throw new Error('expected approval');
+    const stranger = await generateIdentity();
+    await expect(openSealedToKey(stranger.enc, poll.sealedToken, pairingTokenContext(code, poll.webDeviceId))).rejects.toThrow();
+    await expect(openSealedToKey(web.enc, poll.sealedToken, pairingTokenContext(code, 'w_other'))).rejects.toThrow();
+    const refresh = await openSealedToKey(web.enc, poll.sealedToken, pairingTokenContext(code, poll.webDeviceId));
+    // The browser completes the proof of possession with the identity it claimed with.
+    const access = await accessFor(store, { deviceId: poll.webDeviceId, refresh, identity: web }, { now: T0 + 3 });
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId: poll.webDeviceId, token: access }, T0 + 4)).resolves.toMatchObject({ hostDeviceId: resolved.hostDeviceId });
+  });
+});
+
 describe('browser WebSocket upgrade tickets', () => {
   it('stores only hashes, consumes once across competing upgrades and expires at 30 seconds', async () => {
     const store = memStore();
-    const { deviceId, webToken } = await registerWebDevice(store, { accountId: 'a', name: 'browser', platform: 'web', pub: WEB_PUB }, T0);
+    const web = await testDevice(store, 'web', { now: T0 });
+    const { deviceId, access: webToken } = web;
     const { ticket, expiresAt } = await issueSocketTicket(store, { accountId: 'a', deviceId, token: webToken }, T0);
     expect(ticket).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(expiresAt).toBe(T0 + 30_000);
     expect(SOCKET_TICKET_TTL_MS).toBe(30_000);
     expect(JSON.stringify(await store.list('ws-ticket:'))).not.toContain(ticket);
     expect(JSON.stringify(await store.list('ws-ticket:'))).not.toContain(webToken);
+    // A refresh credential is not an access token.
+    await expect(issueSocketTicket(store, { accountId: 'a', deviceId, token: web.refresh }, T0)).rejects.toMatchObject({ code: 'invalid' });
     const settled = await Promise.allSettled([
       consumeSocketTicket(store, { accountId: 'a', deviceId, ticket }, T0 + 1),
       consumeSocketTicket(store, { accountId: 'a', deviceId, ticket }, T0 + 1)
@@ -370,7 +493,7 @@ describe('browser WebSocket upgrade tickets', () => {
 
   it('replaces a prior ticket on issue and keeps exactly one bounded record per web device', async () => {
     const store = memStore();
-    const { deviceId, webToken } = await registerWebDevice(store, { accountId: 'a', name: 'browser', platform: 'web', pub: WEB_PUB }, T0);
+    const { deviceId, access: webToken } = await testDevice(store, 'web', { now: T0 });
     const first = await issueSocketTicket(store, { accountId: 'a', deviceId, token: webToken }, T0);
     const second = await issueSocketTicket(store, { accountId: 'a', deviceId, token: webToken }, T0 + 1);
     expect(await store.list('ws-ticket:')).toHaveLength(1);
@@ -382,31 +505,31 @@ describe('browser WebSocket upgrade tickets', () => {
 
   it('rejects wrong account, device, token and host; revocation removes every outstanding ticket', async () => {
     const store = memStore();
-    const web = await registerWebDevice(store, { accountId: 'a', name: 'browser', platform: 'web', pub: WEB_PUB }, T0);
-    const other = await registerWebDevice(store, { accountId: 'a', name: 'other', platform: 'web', pub: WEB_PUB }, T0);
-    const host = await registerHostDevice(store, { accountId: 'a', name: 'host', platform: 'win', pub: HOST_PUB }, T0);
+    const web = await testDevice(store, 'web', { now: T0 });
+    const other = await testDevice(store, 'web', { now: T0 });
+    const host = await testDevice(store, 'host', { now: T0 });
     await expect(issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: 'wrong' }, T0)).rejects.toMatchObject({ code: 'invalid' });
-    await expect(issueSocketTicket(store, { accountId: 'a', deviceId: host.deviceId, token: host.hostToken }, T0)).rejects.toMatchObject({ code: 'invalid' });
-    const one = await issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.webToken }, T0);
+    await expect(issueSocketTicket(store, { accountId: 'a', deviceId: host.deviceId, token: host.access }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    const one = await issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.access }, T0);
     await expect(consumeSocketTicket(store, { accountId: 'b', deviceId: web.deviceId, ticket: one.ticket }, T0)).rejects.toMatchObject({ code: 'invalid' });
     await expect(consumeSocketTicket(store, { accountId: 'a', deviceId: other.deviceId, ticket: one.ticket }, T0)).rejects.toMatchObject({ code: 'invalid' });
     await revokeDevice(store, 'a', web.deviceId);
     expect(await store.list('ws-ticket:')).toHaveLength(0);
     await expect(consumeSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, ticket: one.ticket }, T0)).rejects.toMatchObject({ code: 'invalid' });
-    await expect(issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.webToken }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    await expect(issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.access }, T0)).rejects.toMatchObject({ code: 'invalid' });
   });
 
   it.each(['issue', 'consume', 'revoke'])('rolls back a %s storage failure and recovers', async (operation) => {
     let failure = '';
     const store = memStore((key) => key.startsWith('ws-ticket:') && failure === operation);
-    const web = await registerWebDevice(store, { accountId: 'a', name: 'browser', platform: 'web', pub: WEB_PUB }, T0);
+    const web = await testDevice(store, 'web', { now: T0 });
     if (operation === 'issue') {
       failure = operation;
-      await expect(issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.webToken }, T0)).rejects.toThrow('injected storage failure');
+      await expect(issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.access }, T0)).rejects.toThrow('injected storage failure');
       expect(await store.list('ws-ticket:')).toHaveLength(0);
       failure = '';
     }
-    const { ticket } = await issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.webToken }, T0);
+    const { ticket } = await issueSocketTicket(store, { accountId: 'a', deviceId: web.deviceId, token: web.access }, T0);
     if (operation === 'consume') {
       // The transaction must roll back even if deletion or the last-seen write fails.
       failure = operation;

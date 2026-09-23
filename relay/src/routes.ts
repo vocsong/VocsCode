@@ -1,8 +1,10 @@
 /** HTTP routing for the relay hub (docs/REMOTE-ACCESS.md). Deliberately a declarative,
- *  deny-by-default table: every route names the authentication it needs — `public`, `enroll`,
- *  `device` or `host` — and the dispatcher authorizes before the handler runs, so a new route
- *  cannot ship unauthenticated by forgetting a check. Cloudflare-free (no DurableObjectState, no
- *  WebSocketPair), so the whole surface is exercised in plain Node (tests/relay-routes.test.ts). */
+ *  deny-by-default table: every route names the authentication it needs and the dispatcher
+ *  authorizes before the handler runs, so a new route cannot ship unauthenticated by forgetting a
+ *  check. `device`/`web`/`host` require a short-lived access token; only the two token endpoints
+ *  accept the long-lived refresh credential, and only together with a signed challenge.
+ *  Cloudflare-free (no DurableObjectState, no WebSocketPair), so the whole surface is exercised in
+ *  plain Node (tests/relay-routes.test.ts). */
 import type { PublicIdentity } from '../../src/shared/crypto';
 import {
   claimPairing,
@@ -12,6 +14,8 @@ import {
   deviceInfos,
   getMirrorIndex,
   getMirrorSession,
+  issueAccessToken,
+  issueChallenge,
   issueSocketTicket,
   MirrorError,
   PairError,
@@ -21,7 +25,8 @@ import {
   resolvePairing,
   revokeDevice,
   startPairing,
-  verifyDeviceToken,
+  verifyAccessToken,
+  verifyRefreshToken,
   type DeviceRecord,
   type MirrorBlob,
   type RelayStore
@@ -51,10 +56,11 @@ export interface RouteContext {
   sockets: (tag: string) => SocketLike[];
 }
 
-/** What a route requires before its handler runs. `enroll-or-host` accepts the enrollment secret
- *  (a desktop enrolling for the first time) or an enrolled desktop's own device credential, so
- *  rotating the secret never strands an already-paired computer. */
-export type RouteAuth = 'public' | 'enroll' | 'enroll-or-host' | 'device' | 'web' | 'host';
+/** What a route requires before its handler runs. `refresh` is a device's refresh credential
+ *  (token endpoints only). `enroll-or-host` accepts the enrollment secret (a desktop enrolling for
+ *  the first time) or an enrolled desktop's access token, so rotating the secret never strands an
+ *  already-paired computer. */
+export type RouteAuth = 'public' | 'enroll' | 'enroll-or-host' | 'refresh' | 'device' | 'web' | 'host';
 
 interface RateRule {
   bucket: string;
@@ -88,6 +94,10 @@ export const ROUTES: Route[] = [
   { method: 'POST', path: '/pair/claim', auth: 'public', rate: { bucket: 'pair-claim', limit: 10, windowMs: 60_000 }, run: pairClaim },
   // Polling runs ~50 times a minute for five minutes, so the budget only catches abuse.
   { method: 'GET', path: '/pair/poll', auth: 'public', rate: { bucket: 'pair-poll', limit: 120, windowMs: 60_000 }, run: pairPoll },
+  // Access tokens: a refresh credential buys a challenge; signing it with the device key buys an
+  // hour-long access token. Rate limited per caller so neither can be hammered.
+  { method: 'POST', path: '/token/challenge', auth: 'refresh', rate: { bucket: 'token', limit: 30, windowMs: 60_000 }, run: tokenChallenge },
+  { method: 'POST', path: '/token', auth: 'refresh', rate: { bucket: 'token', limit: 30, windowMs: 60_000 }, run: tokenIssue },
   { method: 'POST', path: '/ws/ticket', auth: 'web', run: socketTicket },
   { method: 'GET', path: '/devices', auth: 'device', run: deviceList },
   { method: 'DELETE', path: '/devices', auth: 'device', run: deviceRevoke },
@@ -167,6 +177,9 @@ async function authorize(auth: RouteAuth, request: Request, url: URL, ctx: Route
     if (!ctx.enrollToken || bearer(request) !== ctx.enrollToken) throw new HttpError('forbidden', 403);
     return null;
   }
+  if (auth === 'refresh') {
+    return verifyRefreshToken(ctx.store, { accountId: ctx.accountId, deviceId: url.searchParams.get('device') ?? '', token: bearer(request) });
+  }
   const device = await authDevice(request, url, ctx);
   if (auth === 'enroll-or-host' && device.kind !== 'host') throw new HttpError('forbidden', 403);
   if (auth === 'host' && device.kind !== 'host') throw new HttpError('forbidden', 403);
@@ -175,10 +188,11 @@ async function authorize(auth: RouteAuth, request: Request, url: URL, ctx: Route
 }
 
 async function authDevice(request: Request, url: URL, ctx: RouteContext): Promise<DeviceRecord> {
-  // REST always requires Authorization; a query bearer is never a fallback.
+  // REST always requires Authorization; a query bearer is never a fallback. The bearer must be
+  // an access token: a refresh credential alone authorizes nothing here.
   const token = bearer(request);
   const deviceId = url.searchParams.get('device') ?? '';
-  return verifyDeviceToken(ctx.store, { accountId: ctx.accountId, deviceId, token }, ctx.now);
+  return verifyAccessToken(ctx.store, { accountId: ctx.accountId, deviceId, token }, ctx.now);
 }
 
 /** The authenticated device, asserted for routes whose auth guarantees one. */
@@ -221,6 +235,19 @@ async function pairPoll({ ctx, url, request }: Call): Promise<Response> {
   return json(await pollPairing(ctx.store, url.searchParams.get('code') ?? '', bearer(request), ctx.now));
 }
 
+async function tokenChallenge({ ctx, request, device }: Call): Promise<Response> {
+  const issued = await issueChallenge(ctx.store, { accountId: ctx.accountId, deviceId: actor(device).deviceId, token: bearer(request) }, ctx.now);
+  return json(issued, 200, { 'cache-control': 'no-store' });
+}
+
+async function tokenIssue({ ctx, request, device }: Call): Promise<Response> {
+  const body = await readJson(request);
+  const issued = await issueAccessToken(ctx.store, {
+    accountId: ctx.accountId, deviceId: actor(device).deviceId, token: bearer(request), challenge: body.challenge, signature: body.signature
+  }, ctx.now);
+  return json(issued, 200, { 'cache-control': 'no-store' });
+}
+
 async function socketTicket({ ctx, request, device }: Call): Promise<Response> {
   // Re-check inside the issue transaction: revocation may race the route's preliminary
   // authorization, and no ticket may survive a concurrent deletion of its device.
@@ -240,11 +267,16 @@ async function deviceRevoke({ ctx, url }: Call): Promise<Response> {
   // names the device to drop, so one side can revoke the other (lost-laptop / lost-desktop).
   const target = url.searchParams.get('target');
   if (!target) throw new HttpError('invalid', 400);
-  await revokeDevice(ctx.store, ctx.accountId, target);
-  for (const tag of [`client:${target}`, `host:${target}`]) {
-    for (const ws of ctx.sockets(tag)) ws.close(1008, 'device revoked');
+  const revoked = await revokeDevice(ctx.store, ctx.accountId, target);
+  for (const id of revoked) {
+    for (const tag of [`client:${id}`, `host:${id}`]) {
+      for (const ws of ctx.sockets(tag)) ws.close(1008, 'device revoked');
+    }
   }
-  return json({ ok: true });
+  // Desktops reconcile their paired-browser lists (and rotate mirror keys) on this notice. It is
+  // a hint, not authority: a desktop re-reads the registry before dropping anything.
+  for (const ws of ctx.sockets(BROADCAST_TAG.host)) ws.send(JSON.stringify({ t: 'device.revoked', devices: revoked }));
+  return json({ ok: true, revoked });
 }
 
 async function mirrorGetIndex({ ctx, url, device }: Call): Promise<Response> {

@@ -6,11 +6,12 @@ import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket, WebSocketServer, type WebSocket as WsLike } from 'ws';
 import { REMOTE_CHANNELS, REMOTE_PUSH_CHANNELS, REMOTE_READ_CHANNELS, REMOTE_WRITE_CHANNELS, RemoteHost } from '../src/main/remote/host';
-import { claimPairing, pollPairing, resolvePairing, startPairing, verifyDeviceToken, type RelayStore } from '../relay/src/core';
-import { clientFinish, createHello, generateIdentity, openFrame, publicOf, sealFrame, type PublicIdentity } from '../src/shared/crypto';
+import { pollPairing } from '../relay/src/core';
+import { clientFinish, createHello, generateIdentity, openFrame, openSealedToKey, pairingTokenContext, publicOf, sealFrame, type PublicIdentity } from '../src/shared/crypto';
 import type { HandlerRegistry } from '../src/main/handlers';
 
 import { ENROLL, FakeRelay } from './fake-relay';
+import { accessOverHttp } from './support/relay-auth';
 
 function waitFrame(ws: WsLike, match: (m: Record<string, unknown>) => boolean): Promise<Record<string, unknown>> {
   return new Promise((resolve) => {
@@ -132,20 +133,26 @@ describe('remote host end-to-end (fake relay, real core)', () => {
       else await sleep(100);
     }
     expect(approved).not.toBeNull();
-    expect(approved!.webToken).toBeTruthy();
     expect(approved!.hostPub.sig).toBeDefined();
     expect((await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${code}`)).status).toBe(401);
+    // The browser credential arrives sealed to the claim key; only this browser opens it.
+    const refresh = await openSealedToKey(web.enc, approved!.sealedToken, pairingTokenContext(code, approved!.webDeviceId));
+    expect(JSON.stringify(approved)).not.toContain(refresh);
+    // The refresh credential alone buys no ticket: proof of possession comes first.
+    const withRefresh = await fetch(`http://127.0.0.1:${port}/v1/ws/ticket?device=${encodeURIComponent(approved!.webDeviceId)}`, { method: 'POST', headers: { authorization: `Bearer ${refresh}` } });
+    expect(withRefresh.status).toBe(401);
+    const access = await accessOverHttp(`http://127.0.0.1:${port}`, { deviceId: approved!.webDeviceId, refresh, identity: web });
 
-    // The host reconnected under its new device token; exchange the browser bearer
-    // in an Authorization header for a one-use upgrade ticket.
+    // The host reconnected under its new device token; exchange the access token in an
+    // Authorization header for a one-use upgrade ticket.
     await sleep(300);
     const ticketResponse = await fetch(`http://127.0.0.1:${port}/v1/ws/ticket?device=${encodeURIComponent(approved!.webDeviceId)}`, {
-      method: 'POST', headers: { authorization: `Bearer ${approved!.webToken}` }
+      method: 'POST', headers: { authorization: `Bearer ${access}` }
     });
     expect(ticketResponse.status).toBe(200);
     const { ticket } = (await ticketResponse.json()) as { ticket: string };
     const socketUrl = `ws://127.0.0.1:${port}/v1/ws/client?device=${encodeURIComponent(approved!.webDeviceId)}&ticket=${encodeURIComponent(ticket)}`;
-    expect(socketUrl.includes(approved!.webToken) || socketUrl.includes('token=')).toBe(false);
+    expect(socketUrl.includes(access) || socketUrl.includes(refresh) || socketUrl.includes('token=')).toBe(false);
     const ws = new WebSocket(socketUrl);
     await new Promise<void>((resolve, reject) => {
       ws.once('open', () => resolve());

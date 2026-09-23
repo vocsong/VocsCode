@@ -14,8 +14,23 @@
       enc: { pub: await subtle.exportKey("jwk", ecdh2.publicKey), priv: await subtle.exportKey("jwk", ecdh2.privateKey) }
     };
   }
+  function isJwk(key) {
+    return typeof key.kty === "string";
+  }
+  async function signingKey(priv) {
+    return isJwk(priv) ? subtle.importKey("jwk", priv, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]) : priv;
+  }
+  async function agreementKey(priv) {
+    return isJwk(priv) ? subtle.importKey("jwk", priv, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]) : priv;
+  }
+  function tokenProofPayload(deviceId, challenge) {
+    return ["relay.token", deviceId, challenge];
+  }
+  function pairingTokenContext(code, webDeviceId) {
+    return ["relay.pair-token", code, webDeviceId];
+  }
   async function sign(identity, data) {
-    const key = await subtle.importKey("jwk", identity.sig.priv, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    const key = await signingKey(identity.sig.priv);
     const sig = await subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, canonical(data));
     return toB64Url(sig);
   }
@@ -45,8 +60,8 @@
     const pair = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
     return { pub: await subtle.exportKey("jwk", pair.publicKey), priv: await subtle.exportKey("jwk", pair.privateKey) };
   }
-  async function ecdh(privJwk, peerPubJwk) {
-    const priv = await subtle.importKey("jwk", privJwk, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+  async function ecdh(privKey, peerPubJwk) {
+    const priv = await agreementKey(privKey);
     const peer = await subtle.importKey("jwk", peerPubJwk, { name: "ECDH", namedCurve: "P-256" }, true, []);
     return new Uint8Array(await subtle.deriveBits({ name: "ECDH", public: peer }, priv, 256));
   }
@@ -106,12 +121,34 @@
     const pt = await subtle.decrypt({ name: "AES-GCM", iv: fromB64Url(blob.iv), tagLength: 128 }, key, fromB64Url(blob.ct));
     return JSON.parse(new TextDecoder().decode(pt));
   }
+  async function sealingKey(shared, ephPub, recipientPub) {
+    const salt = await subtle.digest("SHA-256", enc.encode(stable([ephPub, recipientPub])));
+    const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+    return subtle.deriveKey(
+      { name: "HKDF", hash: "SHA-256", salt, info: enc.encode("vocs-remote/sealed-to-key/v1") },
+      ikm,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"]
+    );
+  }
+  async function openSealedToKey(recipient, sealed, context) {
+    const key = await sealingKey(await ecdh(recipient.priv, sealed.eph), sealed.eph, recipient.pub);
+    const pt = await subtle.decrypt({ name: "AES-GCM", iv: fromB64Url(sealed.iv), additionalData: canonical(context), tagLength: 128 }, key, fromB64Url(sealed.ct));
+    return new TextDecoder().decode(pt);
+  }
 
   // relay/src/web-client.ts
   var CREDS_KEY = "vocs-web-credentials";
   function relayBaseFor(origin, override) {
     return (override?.trim() || origin).replace(/\/$/, "");
   }
+  var ACCESS_REFRESH_MARGIN_MS = 6e4;
+  var PairingRevokedError = class extends Error {
+    constructor() {
+      super("this browser is no longer paired");
+    }
+  };
   var RelayClient = class {
     constructor(deps) {
       this.deps = deps;
@@ -128,6 +165,9 @@
     /** Sealed frames that arrive while the handshake reply is still being finished. */
     earlyFrames = [];
     connectAttempt = 0;
+    /** The short-lived relay access token (§6.2), in memory only. */
+    access = null;
+    refreshing = null;
     hasCredentials() {
       return !!this.deps.storage.get(CREDS_KEY);
     }
@@ -148,6 +188,7 @@
       this.socket = null;
       this.session = null;
       this.creds = null;
+      this.access = null;
       this.deps.storage.remove(CREDS_KEY);
     }
     /** Enters a pairing code, claims it with a fresh identity, polls until the desktop approves. */
@@ -155,7 +196,7 @@
       const doFetch = this.deps.fetchImpl ?? fetch;
       const base = input.relayBase.replace(/\/$/, "");
       const code = input.code.trim().toUpperCase();
-      const identity = await generateIdentity();
+      const identity = await (this.deps.newIdentity ?? generateIdentity)();
       const claim = await doFetch(`${base}/v1/pair/claim`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -173,7 +214,9 @@
         if (!response.ok) throw new Error(`poll failed: ${response.status}`);
         const poll = await response.json();
         if (poll.status === "approved") {
-          this.creds = { relayBase: base, webToken: poll.webToken, webDeviceId: poll.webDeviceId, hostPub: poll.hostPub, hostDeviceId: poll.hostDeviceId, identity };
+          const webToken = await openSealedToKey(identity.enc, poll.sealedToken, pairingTokenContext(code, poll.webDeviceId));
+          this.creds = { relayBase: base, webToken, webDeviceId: poll.webDeviceId, hostPub: poll.hostPub, hostDeviceId: poll.hostDeviceId, identity };
+          this.access = null;
           this.deps.storage.set(CREDS_KEY, JSON.stringify(this.creds));
           return this.creds;
         }
@@ -191,10 +234,7 @@
       this.session = null;
       this.earlyFrames = [];
       const base = creds.relayBase.replace(/\/$/, "");
-      const response = await (this.deps.fetchImpl ?? fetch)(`${base}/v1/ws/ticket?device=${encodeURIComponent(creds.webDeviceId)}`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${creds.webToken}` }
-      });
+      const response = await this.relayFetch("/v1/ws/ticket", { method: "POST" });
       if (!response.ok) throw new Error(`socket ticket failed: ${response.status}`);
       const { ticket } = await response.json();
       if (typeof ticket !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) throw new Error("invalid socket ticket");
@@ -311,22 +351,66 @@
     credentials() {
       return this.creds;
     }
+    /** A short-lived access token for this pairing, refreshed a minute before expiry (§6.2).
+     *  Concurrent callers share one refresh. */
+    async accessToken() {
+      const creds = this.creds;
+      if (!creds) throw new Error("not paired");
+      const cached = this.access;
+      if (cached && cached.deviceId === creds.webDeviceId && cached.expiresAt - (this.deps.now ?? Date.now)() > ACCESS_REFRESH_MARGIN_MS) return cached.token;
+      this.refreshing ??= this.refreshAccess(creds).finally(() => {
+        this.refreshing = null;
+      });
+      return this.refreshing;
+    }
+    /** Proof of possession: the refresh credential buys a one-time challenge, this browser's
+     *  device key signs it, and only that signature buys an access token. */
+    async refreshAccess(creds) {
+      const doFetch = this.deps.fetchImpl ?? fetch;
+      const base = creds.relayBase.replace(/\/$/, "");
+      const query = `?device=${encodeURIComponent(creds.webDeviceId)}`;
+      const challengeRes = await doFetch(`${base}/v1/token/challenge${query}`, { method: "POST", headers: { authorization: `Bearer ${creds.webToken}` } });
+      if (challengeRes.status === 401) throw new PairingRevokedError();
+      if (!challengeRes.ok) throw new Error(`token challenge failed: ${challengeRes.status}`);
+      const { challenge } = await challengeRes.json();
+      if (typeof challenge !== "string" || !challenge) throw new Error("relay returned no token challenge");
+      const signature = await sign(creds.identity, tokenProofPayload(creds.webDeviceId, challenge));
+      const tokenRes = await doFetch(`${base}/v1/token${query}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${creds.webToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ challenge, signature })
+      });
+      if (!tokenRes.ok) throw new Error(`token request failed: ${tokenRes.status}`);
+      const body = await tokenRes.json();
+      if (typeof body.accessToken !== "string" || typeof body.expiresAt !== "number") throw new Error("relay returned no access token");
+      if (this.creds === creds) this.access = { token: body.accessToken, expiresAt: body.expiresAt, deviceId: creds.webDeviceId };
+      return body.accessToken;
+    }
+    /** An authenticated relay REST call as this browser. A 401 means the access token expired or
+     *  was dropped: prove possession once more and retry, then report whatever the relay says. */
+    async relayFetch(path, init = {}) {
+      const creds = this.creds;
+      if (!creds) throw new Error("not paired");
+      const doFetch = this.deps.fetchImpl ?? fetch;
+      const url = `${creds.relayBase.replace(/\/$/, "")}${path}${path.includes("?") ? "&" : "?"}device=${encodeURIComponent(creds.webDeviceId)}`;
+      for (let attempt = 0; ; attempt++) {
+        const token = await this.accessToken();
+        const res = await doFetch(url, { ...init, headers: { ...init.headers, authorization: `Bearer ${token}` } });
+        if (res.status !== 401 || attempt > 0) return res;
+        if (this.access?.token === token) this.access = null;
+      }
+    }
     /** Lists every device paired with the account (P4 device management), via the relay REST surface. */
     async listDevices() {
       if (!this.creds) return [];
-      const doFetch = this.deps.fetchImpl ?? fetch;
-      const base = this.creds.relayBase.replace(/\/$/, "");
-      const res = await doFetch(`${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}`, { headers: { authorization: `Bearer ${this.creds.webToken}` } });
+      const res = await this.relayFetch("/v1/devices");
       if (!res.ok) throw new Error(`devices failed: ${res.status}`);
       return await res.json();
     }
     /** Revokes any paired device — another browser, the desktop, or this browser itself. */
     async revokeDevice(deviceId) {
       if (!this.creds) return;
-      const doFetch = this.deps.fetchImpl ?? fetch;
-      const base = this.creds.relayBase.replace(/\/$/, "");
-      const url = `${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}&target=${encodeURIComponent(deviceId)}`;
-      const res = await doFetch(url, { method: "DELETE", headers: { authorization: `Bearer ${this.creds.webToken}` } });
+      const res = await this.relayFetch(`/v1/devices?target=${encodeURIComponent(deviceId)}`, { method: "DELETE" });
       if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
     }
     /** True once the desktop has handed over the mirror key (it does so on every connect). */
@@ -357,10 +441,7 @@
     /** Reads an opaque mirror blob from the relay; the caller decrypts it. */
     async mirrorFetch(path) {
       if (!this.creds) return null;
-      const doFetch = this.deps.fetchImpl ?? fetch;
-      const base = this.creds.relayBase.replace(/\/$/, "");
-      const query = new URLSearchParams({ host: this.creds.hostDeviceId, device: this.creds.webDeviceId });
-      const res = await doFetch(`${base}${path}?${query.toString()}`, { headers: { authorization: `Bearer ${this.creds.webToken}` } });
+      const res = await this.relayFetch(`${path}?host=${encodeURIComponent(this.creds.hostDeviceId)}`);
       if (!res.ok) throw new Error(`mirror fetch failed: ${res.status}`);
       const body = await res.json();
       return body && typeof body.iv === "string" && typeof body.ct === "string" ? { iv: body.iv, ct: body.ct } : null;

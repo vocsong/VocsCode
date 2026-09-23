@@ -3,7 +3,7 @@
  *  registry over an e2e-encrypted session. Off by default; device credentials and the
  *  identity keys live in the secret store, never in settings or logs. */
 import { WebSocket } from 'ws';
-import { generateIdentity, hostAccept, openFrame, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, verify, type Identity, type PublicIdentity, type SealedBlob } from '../../shared/crypto';
+import { generateIdentity, hostAccept, openFrame, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob } from '../../shared/crypto';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
@@ -110,6 +110,8 @@ interface HostCredentials {
   identity: Identity;
   relayUrl: string;
   deviceId?: string;
+  /** The relay refresh credential. It buys short-lived access tokens only together with a
+   *  signature by `identity`; it is dropped once the relay stops accepting it. */
   deviceToken?: string;
   enrollToken?: string;
   /** Web devices paired with this host, by deviceId — the handshake trust anchors. */
@@ -118,6 +120,10 @@ interface HostCredentials {
    *  browser over the e2e session; never written to the relay. */
   mirrorKey?: string;
 }
+
+/** Refresh the access token this long before it expires. */
+const ACCESS_REFRESH_MARGIN_MS = 60_000;
+const RECONNECT_MS = 3000;
 
 interface Session {
   key: CryptoKey;
@@ -130,9 +136,10 @@ interface Session {
 }
 
 interface WsMessage {
-  t: 'pair.request' | 'pair.result' | 'pair.error' | 'hs' | 'd' | 'client.gone';
+  t: 'pair.request' | 'pair.result' | 'pair.error' | 'hs' | 'd' | 'client.gone' | 'device.revoked';
   code?: string;
   error?: string;
+  devices?: unknown;
   name?: string;
   platform?: string;
   decision?: 'approve' | 'deny';
@@ -161,6 +168,9 @@ export class RemoteHost {
   private readonly incoming = new Map<string, Promise<void>>();
   /** Bumped on enable/disable so a pending reconnect timer can be invalidated. */
   private generation = 0;
+  /** The short-lived relay access token (§6.2), in memory only. */
+  private access: { token: string; expiresAt: number; deviceId: string } | null = null;
+  private refreshing: Promise<string> | null = null;
 
   constructor(
     private readonly deps: {
@@ -174,6 +184,8 @@ export class RemoteHost {
       audit?: RemoteAudit;
       /** P4 view-only policy, read live so a toggle applies without a reconnect. */
       viewOnly?: () => boolean;
+      /** The mirror key changed (a browser holding it lost its pairing): re-seal and re-upload. */
+      onMirrorRotated?: () => void;
     }
   ) {}
 
@@ -239,15 +251,17 @@ export class RemoteHost {
   /** Requests a pairing code. An enrolled desktop authenticates as its own device; only the first
    *  enrollment needs the account's enrollment secret, so rotating it never strands this host. */
   async startPairing(hostName: string): Promise<{ code: string; expiresAt: number }> {
-    if (!this.creds) throw new Error('remote access is not enabled');
-    const base = this.creds.relayUrl.replace(/\/$/, '');
-    const enrolled = !!(this.creds.deviceId && this.creds.deviceToken);
-    const url = enrolled ? `${base}/v1/pair/start?device=${encodeURIComponent(this.creds.deviceId!)}` : `${base}/v1/pair/start`;
-    const res = await fetch(url, {
+    const creds = this.creds;
+    if (!creds) throw new Error('remote access is not enabled');
+    const init = {
       method: 'POST',
-      headers: { authorization: `Bearer ${enrolled ? this.creds.deviceToken : this.creds.enrollToken ?? ''}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ name: hostName, platform: `${process.platform} ${process.arch}`, hostPub: publicOf(this.creds.identity) })
-    });
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: hostName, platform: `${process.platform} ${process.arch}`, hostPub: publicOf(creds.identity) })
+    };
+    // An enrolled desktop pairs as itself. If the relay rejects its credential on the way, the
+    // desktop is no longer enrolled and falls back to the enrollment secret.
+    let res = this.enrolled() ? await this.relayFetch('/v1/pair/start', init).catch((e: unknown) => (this.enrolled() ? Promise.reject(e) : null)) : null;
+    res ??= await fetch(`${this.base()}/v1/pair/start`, { ...init, headers: { ...init.headers, authorization: `Bearer ${creds.enrollToken ?? ''}` } });
     if (!res.ok) throw new Error(`pair/start failed: ${res.status}`);
     const body = (await res.json()) as { code: string; expiresAt: number };
     this.pairing = { code: body.code, expiresAt: body.expiresAt };
@@ -279,30 +293,33 @@ export class RemoteHost {
   }
 
   async listDevices(): Promise<RemoteDeviceInfo[]> {
-    if (!this.creds?.deviceId || !this.creds.deviceToken) return [];
-    // The device id is routing metadata; the token travels only in Authorization.
-    const url = `${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices?device=${encodeURIComponent(this.creds.deviceId)}`;
-    const res = await fetch(url, { headers: { authorization: `Bearer ${this.creds.deviceToken}` } });
+    if (!this.enrolled()) return [];
+    // The device id is routing metadata; the access token travels only in Authorization.
+    const res = await this.relayFetch('/v1/devices');
     if (!res.ok) throw new Error(`devices failed: ${res.status}`);
     return (await res.json()) as RemoteDeviceInfo[];
   }
 
   async revokeDevice(deviceId: string): Promise<void> {
-    if (!this.creds?.deviceId || !this.creds.deviceToken) return;
-    // `device` and the bearer authenticate the caller; `target` names the device to drop.
-    const url = `${this.creds.relayUrl.replace(/\/$/, '')}/v1/devices?device=${encodeURIComponent(this.creds.deviceId)}&target=${encodeURIComponent(deviceId)}`;
-    const res = await fetch(url, {
-      method: 'DELETE',
-      headers: { authorization: `Bearer ${this.creds.deviceToken}` }
-    });
+    const creds = this.creds;
+    if (!creds || !this.enrolled()) return;
+    // The caller authenticates as itself; `target` names the device to drop.
+    const res = await this.relayFetch(`/v1/devices?target=${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
-    if (this.creds.clients[deviceId]) {
-      delete this.creds.clients[deviceId];
-      await this.saveCreds();
-    }
-    this.sessions.delete(deviceId);
+    const revoked = await res.json().then((body: { revoked?: unknown }) => (Array.isArray(body.revoked) ? body.revoked.map(String) : [deviceId]), () => [deviceId]);
     this.deps.audit?.record('device-revoke', { device: deviceId });
-    this.push();
+    if (revoked.includes(creds.deviceId ?? '')) {
+      // This desktop revoked itself: its credential is gone, and with it every browser paired
+      // through it (the relay cascades). Keep the identity so re-pairing is one step.
+      await this.forgetRegistration(creds, 'this computer was revoked; pair a browser to register it again');
+      return;
+    }
+    await this.dropClients(creds, revoked.filter((id) => creds.clients[id]), 'revoked from this computer');
+  }
+
+  /** The offline-mirror policy changed: part of the audit trail like any other trust decision. */
+  auditMirror(enabled: boolean): void {
+    this.deps.audit?.record(enabled ? 'mirror-enable' : 'mirror-disable');
   }
 
   /** The key that seals the offline mirror, or null before remote access was ever enabled. */
@@ -312,12 +329,11 @@ export class RemoteHost {
 
   /** Publishes a sealed mirror blob to the relay. False when not enrolled or the relay refused it. */
   async putMirror(kind: 'index' | 'session', sessionId: string | undefined, blob: SealedBlob): Promise<boolean> {
-    if (!this.creds?.deviceId || !this.creds.deviceToken) return false;
-    const base = this.creds.relayUrl.replace(/\/$/, '');
-    const url = kind === 'index' ? `${base}/v1/mirror` : `${base}/v1/mirror/${encodeURIComponent(sessionId ?? '')}`;
-    const res = await fetch(`${url}?device=${encodeURIComponent(this.creds.deviceId)}`, {
+    if (!this.enrolled()) return false;
+    const path = kind === 'index' ? '/v1/mirror' : `/v1/mirror/${encodeURIComponent(sessionId ?? '')}`;
+    const res = await this.relayFetch(path, {
       method: 'PUT',
-      headers: { authorization: `Bearer ${this.creds.deviceToken}`, 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify(blob)
     }).catch(() => null);
     if (!res?.ok) this.deps.log('warn', `remote: mirror upload refused (${res?.status ?? 'network error'})`);
@@ -326,18 +342,142 @@ export class RemoteHost {
 
   /** Drops the whole mirror at the relay (used when the user turns mirroring off). */
   async clearMirror(): Promise<void> {
-    if (!this.creds?.deviceId || !this.creds.deviceToken) return;
-    const base = this.creds.relayUrl.replace(/\/$/, '');
-    await fetch(`${base}/v1/mirror?device=${encodeURIComponent(this.creds.deviceId)}`, {
-      method: 'DELETE',
-      headers: { authorization: `Bearer ${this.creds.deviceToken}` }
-    }).catch(() => undefined);
+    if (!this.enrolled()) return;
+    await this.relayFetch('/v1/mirror', { method: 'DELETE' }).catch(() => undefined);
   }
 
   // --- internals ---
 
   private push(): void {
     this.deps.pushState();
+  }
+
+  private base(): string {
+    return (this.creds?.relayUrl ?? '').replace(/\/$/, '');
+  }
+
+  /** Registered with the relay: a device id and a refresh credential it still accepts. */
+  private enrolled(): boolean {
+    return !!(this.creds?.deviceId && this.creds.deviceToken);
+  }
+
+  /** A short-lived access token, refreshed a minute before expiry (§6.2). Concurrent callers
+   *  share one refresh. */
+  private async accessToken(): Promise<string> {
+    const creds = this.creds;
+    if (!creds?.deviceId || !creds.deviceToken) throw new Error('remote access is not enrolled');
+    const cached = this.access;
+    if (cached && cached.deviceId === creds.deviceId && cached.expiresAt - Date.now() > ACCESS_REFRESH_MARGIN_MS) return cached.token;
+    this.refreshing ??= this.refreshAccess(creds).finally(() => {
+      this.refreshing = null;
+    });
+    return this.refreshing;
+  }
+
+  /** Proof of possession: the refresh credential buys a one-time challenge, the device key signs
+   *  it, and only that signature buys an access token. A stolen credential alone gets nothing. */
+  private async refreshAccess(creds: HostCredentials): Promise<string> {
+    const deviceId = creds.deviceId!;
+    const refresh = creds.deviceToken!;
+    const query = `?device=${encodeURIComponent(deviceId)}`;
+    const challengeRes = await fetch(`${this.base()}/v1/token/challenge${query}`, { method: 'POST', headers: { authorization: `Bearer ${refresh}` } });
+    if (challengeRes.status === 401) {
+      await this.forgetRegistration(creds, 'this computer is no longer registered with the relay; pair a browser to register it again', refresh);
+      throw new Error('relay credential rejected');
+    }
+    if (!challengeRes.ok) throw new Error(`token challenge failed: ${challengeRes.status}`);
+    const { challenge } = (await challengeRes.json()) as { challenge?: unknown };
+    if (typeof challenge !== 'string' || !challenge) throw new Error('relay returned no token challenge');
+    const signature = await sign(creds.identity, tokenProofPayload(deviceId, challenge));
+    const tokenRes = await fetch(`${this.base()}/v1/token${query}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${refresh}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ challenge, signature })
+    });
+    if (!tokenRes.ok) throw new Error(`token request failed: ${tokenRes.status}`);
+    const body = (await tokenRes.json()) as { accessToken?: unknown; expiresAt?: unknown };
+    if (typeof body.accessToken !== 'string' || typeof body.expiresAt !== 'number') throw new Error('relay returned no access token');
+    if (this.creds === creds && creds.deviceToken === refresh) this.access = { token: body.accessToken, expiresAt: body.expiresAt, deviceId };
+    return body.accessToken;
+  }
+
+  /** An authenticated relay REST call as this device. A 401 means the access token expired or was
+   *  dropped: prove possession once more and retry, then report whatever the relay says. */
+  private async relayFetch(path: string, init: RequestInit = {}): Promise<Response> {
+    const creds = this.creds;
+    if (!creds?.deviceId) throw new Error('remote access is not enrolled');
+    const url = `${this.base()}${path}${path.includes('?') ? '&' : '?'}device=${encodeURIComponent(creds.deviceId)}`;
+    for (let attempt = 0; ; attempt++) {
+      const token = await this.accessToken();
+      const res = await fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
+      if (res.status !== 401 || attempt > 0) return res;
+      if (this.access?.token === token) this.access = null;
+    }
+  }
+
+  /** The relay no longer accepts this desktop's credential: revoked (from any device, or with a
+   *  revoke-all), or issued by a different relay. Stop using it, but keep the identity and the
+   *  paired browsers: re-pairing re-registers the same key, and a relay that still knows this
+   *  desktop keeps its host id; reconciliation then drops the browsers it no longer lists. */
+  private async forgetRegistration(creds: HostCredentials, detail: string, rejected?: string): Promise<void> {
+    if (this.creds !== creds || (rejected !== undefined && creds.deviceToken !== rejected) || !creds.deviceToken) return;
+    delete creds.deviceToken;
+    this.access = null;
+    await this.saveCreds();
+    this.detail = detail;
+    this.deps.log('warn', `remote: ${detail}`);
+    this.deps.audit?.record('host-revoked');
+    // Sessions keyed to the old registration are dead; reconnect in enrolling mode.
+    this.ws?.close();
+    this.push();
+  }
+
+  /** Forget paired browsers that lost their pairing, and re-key the mirror they could read. */
+  private async dropClients(creds: HostCredentials, ids: string[], why: string): Promise<void> {
+    const dropped = ids.filter((id) => creds.clients[id]);
+    for (const id of ids) this.sessions.delete(id);
+    if (!dropped.length) {
+      this.push();
+      return;
+    }
+    for (const id of dropped) delete creds.clients[id];
+    await this.saveCreds();
+    this.deps.log('info', `remote: forgot ${dropped.length} browser pairing(s) (${why})`);
+    await this.rotateMirrorKey(why);
+    this.push();
+  }
+
+  /** The relay's registry is the record of who is still paired: drop local trust anchors for any
+   *  browser it no longer lists (revoked from another device, or cascaded with this desktop). */
+  private async reconcile(): Promise<void> {
+    const creds = this.creds;
+    if (!creds || !this.enrolled()) return;
+    try {
+      const live = new Set((await this.listDevices()).map((d) => d.deviceId));
+      await this.dropClients(creds, Object.keys(creds.clients).filter((id) => !live.has(id)), 'revoked on another device');
+    } catch (e) {
+      this.deps.log('debug', `remote: could not reconcile paired devices: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** A browser that held the mirror key lost its pairing. Seal the mirror under a fresh key: drop
+   *  the relay copy, re-upload, and hand the new key to the browsers still paired, over e2e. */
+  private async rotateMirrorKey(why: string): Promise<void> {
+    const creds = this.creds;
+    if (!creds) return;
+    creds.mirrorKey = randomKeyB64();
+    await this.saveCreds();
+    this.deps.audit?.record('mirror-rotate', { detail: why });
+    await this.clearMirror();
+    this.deps.onMirrorRotated?.();
+    for (const clientId of [...this.sessions.keys()]) await this.sendTo(clientId, { type: 'mirror.key', key: creds.mirrorKey });
+  }
+
+  private scheduleReconnect(): void {
+    const gen = this.generation;
+    setTimeout(() => {
+      if (gen === this.generation) void this.connect();
+    }, RECONNECT_MS);
   }
 
   private async loadCreds(): Promise<HostCredentials | null> {
@@ -356,21 +496,50 @@ export class RemoteHost {
   }
 
   private async connect(): Promise<void> {
-    if (!this.creds) return;
+    const creds = this.creds;
+    if (!creds) return;
+    const gen = this.generation;
     this.status = 'connecting';
     this.push();
-    const auth = this.creds.deviceToken ?? this.creds.enrollToken ?? '';
-    const device = this.creds.deviceId ?? 'enrolling';
-    const ws = new WebSocket(`${this.creds.relayUrl.replace(/\/$/, '')}/v1/ws/host?device=${encodeURIComponent(device)}`, { headers: { authorization: `Bearer ${auth}` } });
+    let auth = creds.enrollToken ?? '';
+    if (this.enrolled()) {
+      try {
+        auth = await this.accessToken();
+      } catch {
+        if (gen !== this.generation || this.creds !== creds) return;
+        // Still enrolled means the relay was unreachable: retry. Otherwise the credential was just
+        // rejected and this desktop reconnects in enrolling mode below.
+        if (this.enrolled()) {
+          this.status = 'error';
+          this.detail = 'relay unreachable';
+          this.push();
+          this.scheduleReconnect();
+          return;
+        }
+        auth = creds.enrollToken ?? '';
+      }
+    }
+    if (gen !== this.generation || this.creds !== creds) return;
+    const enrolled = this.enrolled();
+    const device = enrolled ? creds.deviceId! : 'enrolling';
+    const ws = new WebSocket(`${this.base()}/v1/ws/host?device=${encodeURIComponent(device)}`, { headers: { authorization: `Bearer ${auth}` } });
     this.ws = ws;
     this.incoming.clear();
+    let opened = false;
     ws.on('open', () => {
-      this.status = this.creds?.deviceId ? 'online' : 'connecting';
-      this.deps.log('info', `remote: relay connection open (${this.creds?.deviceId ? 'online' : 'awaiting enrollment'})`);
+      opened = true;
+      if (this.ws !== ws) return;
+      this.status = enrolled ? 'online' : 'connecting';
+      if (enrolled) this.detail = undefined;
+      this.deps.log('info', `remote: relay connection open (${enrolled ? 'online' : 'awaiting enrollment'})`);
       this.push();
+      if (enrolled) void this.reconcile();
     });
     ws.on('message', (data) => void this.onMessage(String(data), ws));
     ws.on('close', (code: number) => {
+      // A refused upgrade may mean this access token is no longer good (expired, or the device
+      // was revoked): the next attempt proves possession again, which settles which it was.
+      if (!opened && this.access?.token === auth) this.access = null;
       // Only the current socket's close counts: a stale socket (closed on reconnect)
       // must not clobber the new connection or wipe live sessions.
       if (this.ws !== ws) return;
@@ -383,17 +552,14 @@ export class RemoteHost {
         this.deps.log('info', `remote: relay connection closed (code ${code}${dropped.length ? `, ${dropped.length} client session(s) dropped` : ''}); reconnecting in 3s`);
         this.status = 'connecting';
         this.push();
-        const gen = this.generation;
-        setTimeout(() => {
-          if (gen === this.generation) void this.connect();
-        }, 3000);
+        this.scheduleReconnect();
       }
     });
     ws.on('error', () => {
-      // ws errors may include the full socket URL; never write it into logs or UI state.
+      // Never log the error itself: ws messages may include the socket URL.
       this.deps.log('warn', 'remote: relay connection failed');
       this.status = 'error';
-      this.detail = 'relay connection failed';
+      if (this.enrolled() || !this.detail) this.detail = 'relay connection failed';
       this.push();
     });
   }
@@ -463,6 +629,11 @@ export class RemoteHost {
       }
       case 'd': {
         if (msg.from) this.enqueue(String(msg.from), socket, () => this.onFrame(String(msg.from), msg.seq as number, msg.payload));
+        return;
+      }
+      case 'device.revoked': {
+        // A hint that some device was revoked: re-read the registry rather than trust the list.
+        void this.reconcile();
         return;
       }
       case 'client.gone': {

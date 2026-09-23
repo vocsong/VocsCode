@@ -1,13 +1,14 @@
 /** The web client core (code.vocs.io, docs/REMOTE-ACCESS.md §6): the pairing flow and the
  *  e2e Transport a browser uses to drive a paired desktop through the relay. Framework-
  *  free and DOM-free — the page (relay/public) mounts it; tests run it in Node. */
-import { clientFinish, createHello, generateIdentity, importAesKey, openBlob, openFrame, publicOf, sealFrame, sign, type Identity, type PublicIdentity } from '../../src/shared/crypto';
+import { clientFinish, createHello, generateIdentity, importAesKey, openBlob, openFrame, openSealedToKey, pairingTokenContext, publicOf, sealFrame, sign, tokenProofPayload, type Identity, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
 import type { MirrorIndex, MirrorSnapshot } from '../../src/shared/mirror';
 import type { RemoteDeviceInfo } from '../../src/shared/types';
 
 /** A paired browser's stored identity: relay URL, tokens, host trust anchor, own keys. */
 export interface WebCredentials {
   relayBase: string;
+  /** The relay refresh credential: it buys access tokens only with a signature by `identity`. */
   webToken: string;
   webDeviceId: string;
   hostDeviceId: string;
@@ -62,8 +63,18 @@ interface WebSession {
 
 type PollResult =
   | { status: 'pending' | 'claimed' | 'denied' }
-  | { status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string }
+  | { status: 'approved'; sealedToken: SealedToKey; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string; hostName?: string }
   | { status: 'expired' };
+
+/** Refresh the access token this long before it expires. */
+const ACCESS_REFRESH_MARGIN_MS = 60_000;
+
+/** The relay no longer accepts this browser's pairing (revoked, from any device). */
+export class PairingRevokedError extends Error {
+  constructor() {
+    super('this browser is no longer paired');
+  }
+}
 
 export class RelayClient {
   private creds: WebCredentials | null = null;
@@ -78,6 +89,9 @@ export class RelayClient {
   /** Sealed frames that arrive while the handshake reply is still being finished. */
   private earlyFrames: Array<{ salt: string; seq: number; ct: string }> = [];
   private connectAttempt = 0;
+  /** The short-lived relay access token (§6.2), in memory only. */
+  private access: { token: string; expiresAt: number; deviceId: string } | null = null;
+  private refreshing: Promise<string> | null = null;
 
   constructor(
     private readonly deps: {
@@ -86,6 +100,8 @@ export class RelayClient {
       /** Defaults to the browser WebSocket; tests inject a stub. */
       wsFactory?: (url: string, onMessage: (raw: string) => void, onClose: () => void) => SimpleSocket;
       now?: () => number;
+      /** Creates the identity a new pairing claims with; tests keep a handle on it. */
+      newIdentity?: () => Promise<Identity>;
     }
   ) {}
 
@@ -111,6 +127,7 @@ export class RelayClient {
     this.socket = null;
     this.session = null;
     this.creds = null;
+    this.access = null;
     this.deps.storage.remove(CREDS_KEY);
   }
 
@@ -119,7 +136,7 @@ export class RelayClient {
     const doFetch = this.deps.fetchImpl ?? fetch;
     const base = input.relayBase.replace(/\/$/, '');
     const code = input.code.trim().toUpperCase();
-    const identity = await generateIdentity();
+    const identity = await (this.deps.newIdentity ?? generateIdentity)();
     const claim = await doFetch(`${base}/v1/pair/claim`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -137,7 +154,11 @@ export class RelayClient {
       if (!response.ok) throw new Error(`poll failed: ${response.status}`);
       const poll = (await response.json()) as PollResult;
       if (poll.status === 'approved') {
-        this.creds = { relayBase: base, webToken: poll.webToken, webDeviceId: poll.webDeviceId, hostPub: poll.hostPub, hostDeviceId: poll.hostDeviceId, identity };
+        // The relay sealed this browser's credential to the key it claimed with; only this
+        // identity can open it, and only as this code's approved device.
+        const webToken = await openSealedToKey(identity.enc, poll.sealedToken, pairingTokenContext(code, poll.webDeviceId));
+        this.creds = { relayBase: base, webToken, webDeviceId: poll.webDeviceId, hostPub: poll.hostPub, hostDeviceId: poll.hostDeviceId, identity };
+        this.access = null;
         this.deps.storage.set(CREDS_KEY, JSON.stringify(this.creds));
         return this.creds;
       }
@@ -158,9 +179,9 @@ export class RelayClient {
     this.session = null;
     this.earlyFrames = [];
     const base = creds.relayBase.replace(/\/$/, '');
-    const response = await (this.deps.fetchImpl ?? fetch)(`${base}/v1/ws/ticket?device=${encodeURIComponent(creds.webDeviceId)}`, {
-      method: 'POST', headers: { authorization: `Bearer ${creds.webToken}` }
-    });
+    // The socket URL carries a 30-second single-use ticket, bought with an access token in a
+    // header: neither credential ever appears in a URL.
+    const response = await this.relayFetch('/v1/ws/ticket', { method: 'POST' });
     if (!response.ok) throw new Error(`socket ticket failed: ${response.status}`);
     const { ticket } = (await response.json()) as { ticket?: unknown };
     if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(ticket)) throw new Error('invalid socket ticket');
@@ -294,12 +315,62 @@ export class RelayClient {
     return this.creds;
   }
 
+  /** A short-lived access token for this pairing, refreshed a minute before expiry (§6.2).
+   *  Concurrent callers share one refresh. */
+  private async accessToken(): Promise<string> {
+    const creds = this.creds;
+    if (!creds) throw new Error('not paired');
+    const cached = this.access;
+    if (cached && cached.deviceId === creds.webDeviceId && cached.expiresAt - (this.deps.now ?? Date.now)() > ACCESS_REFRESH_MARGIN_MS) return cached.token;
+    this.refreshing ??= this.refreshAccess(creds).finally(() => {
+      this.refreshing = null;
+    });
+    return this.refreshing;
+  }
+
+  /** Proof of possession: the refresh credential buys a one-time challenge, this browser's
+   *  device key signs it, and only that signature buys an access token. */
+  private async refreshAccess(creds: WebCredentials): Promise<string> {
+    const doFetch = this.deps.fetchImpl ?? fetch;
+    const base = creds.relayBase.replace(/\/$/, '');
+    const query = `?device=${encodeURIComponent(creds.webDeviceId)}`;
+    const challengeRes = await doFetch(`${base}/v1/token/challenge${query}`, { method: 'POST', headers: { authorization: `Bearer ${creds.webToken}` } });
+    if (challengeRes.status === 401) throw new PairingRevokedError();
+    if (!challengeRes.ok) throw new Error(`token challenge failed: ${challengeRes.status}`);
+    const { challenge } = (await challengeRes.json()) as { challenge?: unknown };
+    if (typeof challenge !== 'string' || !challenge) throw new Error('relay returned no token challenge');
+    const signature = await sign(creds.identity, tokenProofPayload(creds.webDeviceId, challenge));
+    const tokenRes = await doFetch(`${base}/v1/token${query}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${creds.webToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ challenge, signature })
+    });
+    if (!tokenRes.ok) throw new Error(`token request failed: ${tokenRes.status}`);
+    const body = (await tokenRes.json()) as { accessToken?: unknown; expiresAt?: unknown };
+    if (typeof body.accessToken !== 'string' || typeof body.expiresAt !== 'number') throw new Error('relay returned no access token');
+    if (this.creds === creds) this.access = { token: body.accessToken, expiresAt: body.expiresAt, deviceId: creds.webDeviceId };
+    return body.accessToken;
+  }
+
+  /** An authenticated relay REST call as this browser. A 401 means the access token expired or
+   *  was dropped: prove possession once more and retry, then report whatever the relay says. */
+  private async relayFetch(path: string, init: RequestInit = {}): Promise<Response> {
+    const creds = this.creds;
+    if (!creds) throw new Error('not paired');
+    const doFetch = this.deps.fetchImpl ?? fetch;
+    const url = `${creds.relayBase.replace(/\/$/, '')}${path}${path.includes('?') ? '&' : '?'}device=${encodeURIComponent(creds.webDeviceId)}`;
+    for (let attempt = 0; ; attempt++) {
+      const token = await this.accessToken();
+      const res = await doFetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
+      if (res.status !== 401 || attempt > 0) return res;
+      if (this.access?.token === token) this.access = null;
+    }
+  }
+
   /** Lists every device paired with the account (P4 device management), via the relay REST surface. */
   async listDevices(): Promise<RemoteDeviceInfo[]> {
     if (!this.creds) return [];
-    const doFetch = this.deps.fetchImpl ?? fetch;
-    const base = this.creds.relayBase.replace(/\/$/, '');
-    const res = await doFetch(`${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}`, { headers: { authorization: `Bearer ${this.creds.webToken}` } });
+    const res = await this.relayFetch('/v1/devices');
     if (!res.ok) throw new Error(`devices failed: ${res.status}`);
     return (await res.json()) as RemoteDeviceInfo[];
   }
@@ -307,10 +378,7 @@ export class RelayClient {
   /** Revokes any paired device — another browser, the desktop, or this browser itself. */
   async revokeDevice(deviceId: string): Promise<void> {
     if (!this.creds) return;
-    const doFetch = this.deps.fetchImpl ?? fetch;
-    const base = this.creds.relayBase.replace(/\/$/, '');
-    const url = `${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}&target=${encodeURIComponent(deviceId)}`;
-    const res = await doFetch(url, { method: 'DELETE', headers: { authorization: `Bearer ${this.creds.webToken}` } });
+    const res = await this.relayFetch(`/v1/devices?target=${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
   }
 
@@ -346,10 +414,7 @@ export class RelayClient {
   /** Reads an opaque mirror blob from the relay; the caller decrypts it. */
   private async mirrorFetch(path: string): Promise<{ iv: string; ct: string } | null> {
     if (!this.creds) return null;
-    const doFetch = this.deps.fetchImpl ?? fetch;
-    const base = this.creds.relayBase.replace(/\/$/, '');
-    const query = new URLSearchParams({ host: this.creds.hostDeviceId, device: this.creds.webDeviceId });
-    const res = await doFetch(`${base}${path}?${query.toString()}`, { headers: { authorization: `Bearer ${this.creds.webToken}` } });
+    const res = await this.relayFetch(`${path}?host=${encodeURIComponent(this.creds.hostDeviceId)}`);
     if (!res.ok) throw new Error(`mirror fetch failed: ${res.status}`);
     const body = (await res.json()) as { iv?: string; ct?: string } | null;
     return body && typeof body.iv === 'string' && typeof body.ct === 'string' ? { iv: body.iv, ct: body.ct } : null;
