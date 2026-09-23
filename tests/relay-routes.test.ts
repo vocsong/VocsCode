@@ -3,7 +3,7 @@
  *  Node against an in-memory store — no Cloudflare runtime involved, which is the point of the
  *  extraction: the layer that makes auth decisions is the layer that gets tested. */
 import { describe, expect, it } from 'vitest';
-import { registerHostDevice, registerWebDevice, startPairing, verifyDeviceToken } from '../relay/src/core';
+import { MAX_WEB_DEVICES, registerHostDevice, registerWebDevice, startPairing, verifyDeviceToken } from '../relay/src/core';
 import { FixedWindowLimiter } from '../relay/src/rate';
 import { authorizeSocket, BROADCAST_TAG, handleHttp, ROUTES, type RouteContext, type SocketLike } from '../relay/src/routes';
 import type { PublicIdentity } from '../src/shared/crypto';
@@ -37,7 +37,7 @@ describe('relay route table', () => {
   it('classifies every route with an explicit auth requirement and a unique method+path', () => {
     expect(ROUTES.length).toBeGreaterThan(0);
     for (const route of ROUTES) {
-      expect(['public', 'enroll', 'device', 'web', 'host']).toContain(route.auth);
+      expect(['public', 'enroll', 'enroll-or-host', 'device', 'web', 'host']).toContain(route.auth);
       expect(route.path.startsWith('/')).toBe(true);
       // Nothing user-provided may be interpolated into a route path.
       expect(route.path).not.toContain(':');
@@ -91,6 +91,54 @@ describe('relay route table', () => {
     const ok = await handleHttp(req('POST', '/pair/start', { body, headers: { authorization: 'Bearer enroll-secret' } }), ctx());
     expect(ok.status).toBe(200);
     expect(((await ok.json()) as { code: string }).code).toMatch(/^[A-Z2-9]{8}$/);
+  });
+
+  it('lets an enrolled desktop start pairing as itself, without the enrollment secret', async () => {
+    const { ctx, store } = harness();
+    const host = await registerHostDevice(store, { accountId: 'a', name: 'Work PC', platform: 'win32', pub: HOST_PUB }, Date.now());
+    const web = await registerWebDevice(store, { accountId: 'a', name: 'Chrome', platform: 'web', pub: WEB_PUB }, Date.now());
+    // The body names another key; an authenticated desktop pairs with its registered one.
+    const body = JSON.stringify({ name: 'Work PC', hostPub: WEB_PUB });
+    const rotated = ctx({ enrollToken: 'rotated-secret' });
+    const ok = await handleHttp(req('POST', `/pair/start?device=${host.deviceId}`, { body, headers: { authorization: `Bearer ${host.hostToken}` } }), rotated);
+    expect(ok.status).toBe(200);
+    const { code } = (await ok.json()) as { code: string };
+    expect(await store.get(`pair:${code}`)).toMatchObject({ hostDeviceId: host.deviceId, hostPub: HOST_PUB, hostName: 'Work PC' });
+    // A browser credential is not a desktop, and the enrollment secret is not a device token.
+    expect((await handleHttp(req('POST', `/pair/start?device=${web.deviceId}`, { body, headers: { authorization: `Bearer ${web.webToken}` } }), rotated)).status).toBe(403);
+    expect((await handleHttp(req('POST', `/pair/start?device=${host.deviceId}`, { body, headers: { authorization: 'Bearer rotated-secret' } }), rotated)).status).toBe(401);
+  });
+
+  it('accepts only bounded labels and public P-256 identities in pairing bodies', async () => {
+    const { ctx, store } = harness();
+    const start = (body: unknown) => handleHttp(req('POST', '/pair/start', { body: typeof body === 'string' ? body : JSON.stringify(body), headers: { authorization: 'Bearer enroll-secret' } }), ctx());
+    expect((await start('not json')).status).toBe(400);
+    expect((await start([HOST_PUB])).status).toBe(400);
+    expect((await start({ hostPub: { sig: HOST_PUB.sig } })).status).toBe(400);
+    expect((await start({ hostPub: { ...HOST_PUB, extra: HOST_PUB.sig } })).status).toBe(400);
+    // A private JWK must never be stored or broadcast, even when a client sends one by mistake.
+    expect((await start({ hostPub: { sig: { ...HOST_PUB.sig, d: 'private-scalar' }, enc: HOST_PUB.enc } })).status).toBe(400);
+    expect((await start({ hostPub: { sig: { ...HOST_PUB.sig, x: 'x'.repeat(500) }, enc: HOST_PUB.enc } })).status).toBe(400);
+    expect(await store.list('pair:')).toHaveLength(0);
+    const ok = await start({ name: `  ${'N'.repeat(200)}\u0007 `, hostPub: HOST_PUB });
+    expect(ok.status).toBe(200);
+    const { code } = (await ok.json()) as { code: string };
+    expect(await store.get(`pair:${code}`)).toMatchObject({ hostName: 'N'.repeat(64) });
+
+    const claim = (body: unknown) => handleHttp(req('POST', '/pair/claim', { body: JSON.stringify(body) }), ctx());
+    expect((await claim({ code, webPub: 'nope' })).status).toBe(400);
+    expect((await claim({ code: 42, webPub: WEB_PUB })).status).toBe(400);
+    expect((await claim({ code, name: 'Chrome\n<b>', webPub: WEB_PUB })).status).toBe(200);
+    expect(await store.get(`pair:${code}`)).toMatchObject({ status: 'claimed', webName: 'Chrome <b>' });
+  });
+
+  it('answers a claim on a full account with 409 device-limit', async () => {
+    const { ctx, store } = harness();
+    for (let i = 0; i < MAX_WEB_DEVICES; i++) await registerWebDevice(store, { accountId: 'a', name: `w${i}`, platform: 'web', pub: WEB_PUB }, Date.now());
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'PC', hostPlatform: 'win32', hostPub: HOST_PUB }, Date.now());
+    const res = await handleHttp(req('POST', '/pair/claim', { body: JSON.stringify({ code, webPub: WEB_PUB }) }), ctx());
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'device-limit' });
   });
 
   it('fails closed when the enrollment secret is not configured', async () => {

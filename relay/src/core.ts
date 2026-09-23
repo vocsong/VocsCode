@@ -7,7 +7,7 @@
 
 export type Json = Record<string, unknown>;
 
-import { pairingDecisionPayload, verify, type PublicIdentity } from '../../src/shared/crypto';
+import { pairingDecisionPayload, stable, verify, type PublicIdentity } from '../../src/shared/crypto';
 
 /** Implemented by Durable Object storage (worker) and in-memory maps (tests). */
 export interface RelayStorage {
@@ -44,6 +44,9 @@ export interface PairingRecord {
   hostPlatform: string;
   /** The desktop's long-term public key, registered at pair/start. */
   hostPub: PublicIdentity;
+  /** Set when an already-enrolled desktop started the pairing with its own device credential:
+   *  approval then reuses that device instead of minting a second host identity. */
+  hostDeviceId?: string;
   status: 'pending' | 'claimed' | 'approved' | 'denied';
   /** Filled by the web client at claim. */
   webName?: string;
@@ -55,7 +58,7 @@ export interface PairingRecord {
 }
 
 export class PairError extends Error {
-  constructor(readonly code: 'not-found' | 'expired' | 'used' | 'invalid' | 'forbidden') {
+  constructor(readonly code: 'not-found' | 'expired' | 'used' | 'invalid' | 'forbidden' | 'limit') {
     super(`pairing: ${code}`);
   }
 }
@@ -63,6 +66,10 @@ export class PairError extends Error {
 /** 31 symbols, no ambiguous glyphs (I/L/O/0/1); 8 chars ≈ 2^39.7. */
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 export const PAIRING_TTL_MS = 5 * 60_000;
+/** Per-account device cap (docs/REMOTE-ACCESS.md §6.5): bounds what one leaked pairing flow or
+ *  enrollment secret can add. A browser paired with two computers holds two web devices. */
+export const MAX_WEB_DEVICES = 10;
+export const MAX_HOST_DEVICES = 5;
 
 function toBase64Url(buf: Uint8Array): string {
   let s = '';
@@ -171,7 +178,7 @@ async function withPairCode<T>(store: RelayStore, code: string, work: () => Prom
 /** Creates a pairing code for a desktop asking to be paired. Single-use, 5-minute TTL. */
 export async function startPairing(
   store: RelayStore,
-  input: { accountId: string; hostName: string; hostPlatform: string; hostPub: PublicIdentity },
+  input: { accountId: string; hostName: string; hostPlatform: string; hostPub: PublicIdentity; hostDeviceId?: string },
   now: number
 ): Promise<{ code: string; expiresAt: number }> {
   const record: PairingRecord = {
@@ -180,6 +187,7 @@ export async function startPairing(
     hostName: input.hostName,
     hostPlatform: input.hostPlatform,
     hostPub: input.hostPub,
+    ...(input.hostDeviceId ? { hostDeviceId: input.hostDeviceId } : {}),
     status: 'pending',
     expiresAt: now + PAIRING_TTL_MS
   };
@@ -206,6 +214,8 @@ async function claimPairingUnlocked(store: RelayStore, input: { code: string; we
     await store.delete(key);
     throw new PairError('expired');
   }
+  // Fail before the desktop is asked: approval re-checks the cap inside its transaction.
+  if ((await listDevices(store, record.accountId)).filter((d) => d.kind === 'web').length >= MAX_WEB_DEVICES) throw new PairError('limit');
   record.status = 'claimed';
   record.webName = input.webName;
   record.webPlatform = input.webPlatform;
@@ -217,9 +227,9 @@ async function claimPairingUnlocked(store: RelayStore, input: { code: string; we
 }
 
 /** Only the claimant's private capability can read pairing state or the one-time web token. */
-export async function pollPairing(store: RelayStore, code: string, pollToken: string, now: number): Promise<{ status: 'claimed' | 'denied' } | { status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string } | { status: 'expired' }> {
+export async function pollPairing(store: RelayStore, code: string, pollToken: string, now: number): Promise<{ status: 'claimed' | 'denied' } | { status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string; hostName: string } | { status: 'expired' }> {
   const live = await store.get<PairingRecord>(codeKey(code));
-  const settled = live ? undefined : await store.get<{ status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string; pollTokenHash: string; expiresAt: number }>(codeKey(`${code}:done`));
+  const settled = live ? undefined : await store.get<{ status: 'approved'; webToken: string; webDeviceId: string; hostPub: PublicIdentity; hostDeviceId: string; hostName?: string; pollTokenHash: string; expiresAt: number }>(codeKey(`${code}:done`));
   const record = live ?? settled;
   if (!record || !pollToken || !record.pollTokenHash || record.pollTokenHash !== (await hashToken(pollToken))) throw new PairError('forbidden');
   if (now >= record.expiresAt) {
@@ -227,21 +237,27 @@ export async function pollPairing(store: RelayStore, code: string, pollToken: st
     return { status: 'expired' };
   }
   if (live) return { status: live.status === 'denied' ? 'denied' : 'claimed' };
-  return { status: 'approved', webToken: settled!.webToken, webDeviceId: settled!.webDeviceId, hostPub: settled!.hostPub, hostDeviceId: settled!.hostDeviceId };
+  return { status: 'approved', webToken: settled!.webToken, webDeviceId: settled!.webDeviceId, hostPub: settled!.hostPub, hostDeviceId: settled!.hostDeviceId, hostName: settled!.hostName ?? 'Computer' };
 }
 
-/** Desktop decision. On approve, BOTH devices are minted: the host (token returned here,
- *  shown once) and the web client (token delivered via its claim poll). */
+export type PairingApproval = {
+  /** Present only when this approval enrolled the desktop; an enrolled desktop keeps its device. */
+  hostToken?: string;
+  hostDeviceId: string;
+  webToken: string;
+  webDeviceId: string;
+  webPub: PublicIdentity;
+  hostPub: PublicIdentity;
+};
+
+/** Desktop decision. On approve the web client is minted (token delivered via its claim poll)
+ *  and so is the desktop, unless it is already enrolled: a second browser must not give the
+ *  desktop a new host id, or every browser paired before it would greet a host that is gone. */
 export async function resolvePairing(
   store: RelayStore,
   input: { code: string; decision: 'approve' | 'deny'; signature: string },
   now: number
-): Promise<
-  | {
-      denied: true;
-    }
-  | { hostToken: string; hostDeviceId: string; webToken: string; webDeviceId: string; webPub: PublicIdentity; hostPub: PublicIdentity }
-> {
+): Promise<{ denied: true } | PairingApproval> {
   return withPairCode(store, input.code, () => resolvePairingUnlocked(store, input, now));
 }
 
@@ -249,7 +265,7 @@ async function resolvePairingUnlocked(
   store: RelayStore,
   input: { code: string; decision: 'approve' | 'deny'; signature: string },
   now: number
-): Promise<{ denied: true } | { hostToken: string; hostDeviceId: string; webToken: string; webDeviceId: string; webPub: PublicIdentity; hostPub: PublicIdentity }> {
+): Promise<{ denied: true } | PairingApproval> {
   const key = codeKey(input.code);
   const record = await store.get<PairingRecord>(key);
   if (!record) throw new PairError('invalid');
@@ -272,11 +288,22 @@ async function resolvePairingUnlocked(
     return { denied: true };
   }
   return store.transaction(async (tx) => {
-    const host = await registerHostDevice(tx, { accountId: record.accountId, name: record.hostName, platform: record.hostPlatform, pub: record.hostPub }, now);
+    const devices = (await tx.list<DeviceRecord>(`device:${record.accountId}:`)).map(([, d]) => d);
+    // The signature above proves the approver holds hostPub's private key, so a registered host
+    // with that key is this desktop. A pairing started with a device credential names it exactly.
+    const hostKey = stable(record.hostPub);
+    const existing = devices.find((d) => d.kind === 'host' && stable(d.pub) === hostKey && (!record.hostDeviceId || d.deviceId === record.hostDeviceId));
+    // The enrolled desktop that started this pairing was revoked while it was pending.
+    if (record.hostDeviceId && !existing) throw new PairError('invalid');
+    if (devices.filter((d) => d.kind === 'web').length >= MAX_WEB_DEVICES) throw new PairError('limit');
+    if (!existing && devices.filter((d) => d.kind === 'host').length >= MAX_HOST_DEVICES) throw new PairError('limit');
+    const host = existing
+      ? { deviceId: existing.deviceId, hostToken: undefined }
+      : await registerHostDevice(tx, { accountId: record.accountId, name: record.hostName, platform: record.hostPlatform, pub: record.hostPub }, now);
     const web = await registerWebDevice(tx, { accountId: record.accountId, name: record.webName ?? 'web', platform: record.webPlatform ?? 'web', pub: record.webPub! }, now);
-    await tx.put(codeKey(`${record.code}:done`), { code: record.code, status: 'approved', webToken: web.webToken, webDeviceId: web.deviceId, hostPub: record.hostPub, hostDeviceId: host.deviceId, pollTokenHash: record.pollTokenHash, expiresAt: now + PAIRING_TTL_MS });
+    await tx.put(codeKey(`${record.code}:done`), { code: record.code, status: 'approved', webToken: web.webToken, webDeviceId: web.deviceId, hostPub: record.hostPub, hostDeviceId: host.deviceId, hostName: record.hostName, pollTokenHash: record.pollTokenHash, expiresAt: now + PAIRING_TTL_MS });
     await tx.delete(key);
-    return { hostToken: host.hostToken, hostDeviceId: host.deviceId, webToken: web.webToken, webDeviceId: web.deviceId, webPub: record.webPub!, hostPub: record.hostPub };
+    return { ...(host.hostToken ? { hostToken: host.hostToken } : {}), hostDeviceId: host.deviceId, webToken: web.webToken, webDeviceId: web.deviceId, webPub: record.webPub!, hostPub: record.hostPub };
   });
 }
 

@@ -1,6 +1,7 @@
 /** code.vocs.io page logic (docs/REMOTE-ACCESS.md): pairing, then a read-only view of the
  *  paired desktop's sessions, transcripts and approval prompts. DOM layer over RelayClient. */
 import { RelayClient, relayBaseFor } from './web-client';
+import { PAIRING_CODE_PATTERN } from '../../src/shared/pairing';
 import type { TranscriptItem } from '../../src/shared/types';
 
 const client = new RelayClient({ storage: localStorageApi() });
@@ -49,7 +50,7 @@ function boot(): void {
   if (params.has('code')) {
     const codes = params.getAll('code');
     const code = codes[0]?.trim().toUpperCase() ?? '';
-    if (codes.length === 1 && /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/.test(code)) {
+    if (codes.length === 1 && PAIRING_CODE_PATTERN.test(code)) {
       (el('code') as HTMLInputElement).value = code;
     } else {
       el('pair-error').textContent = 'Invalid code in pairing link. Enter the code shown on the desktop.';

@@ -88,7 +88,8 @@ describe.runIf(enabled)('remote access settings', () => {
     await code.waitFor({ timeout: 20_000 });
     const pairingCode = (await code.innerText()).trim();
     expect(pairingCode).toMatch(/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/);
-    const pairingLink = `https://code.vocs.io/app?code=${pairingCode}`;
+    // The link opens the relay this desktop is connected to: the page claims against its own origin.
+    const pairingLink = `http://127.0.0.1:${port}/app?code=${pairingCode}`;
     expect(await win.getByTestId('remote-pair-link').inputValue()).toBe(pairingLink);
     await win.getByRole('button', { name: 'Copy link' }).click();
     await expect.poll(() => app!.evaluate(({ clipboard }) => clipboard.readText()), { timeout: 10_000 }).toBe(pairingLink);

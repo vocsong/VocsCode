@@ -397,6 +397,9 @@
     };
   }
 
+  // src/shared/pairing.ts
+  var PAIRING_CODE_PATTERN = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
+
   // relay/src/page.ts
   var client = new RelayClient({ storage: localStorageApi() });
   var sessions = [];
@@ -436,7 +439,7 @@
     if (params.has("code")) {
       const codes = params.getAll("code");
       const code = codes[0]?.trim().toUpperCase() ?? "";
-      if (codes.length === 1 && /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/.test(code)) {
+      if (codes.length === 1 && PAIRING_CODE_PATTERN.test(code)) {
         el("code").value = code;
       } else {
         el("pair-error").textContent = "Invalid code in pairing link. Enter the code shown on the desktop.";

@@ -51,8 +51,10 @@ export interface RouteContext {
   sockets: (tag: string) => SocketLike[];
 }
 
-/** What a route requires before its handler runs. */
-export type RouteAuth = 'public' | 'enroll' | 'device' | 'web' | 'host';
+/** What a route requires before its handler runs. `enroll-or-host` accepts the enrollment secret
+ *  (a desktop enrolling for the first time) or an enrolled desktop's own device credential, so
+ *  rotating the secret never strands an already-paired computer. */
+export type RouteAuth = 'public' | 'enroll' | 'enroll-or-host' | 'device' | 'web' | 'host';
 
 interface RateRule {
   bucket: string;
@@ -82,7 +84,7 @@ export interface Route {
 
 /** The whole HTTP surface. Anything not listed here is a 404 — that is the point. */
 export const ROUTES: Route[] = [
-  { method: 'POST', path: '/pair/start', auth: 'enroll', rate: { bucket: 'pair-start', limit: 10, windowMs: 60_000 }, run: pairStart },
+  { method: 'POST', path: '/pair/start', auth: 'enroll-or-host', rate: { bucket: 'pair-start', limit: 10, windowMs: 60_000 }, run: pairStart },
   { method: 'POST', path: '/pair/claim', auth: 'public', rate: { bucket: 'pair-claim', limit: 10, windowMs: 60_000 }, run: pairClaim },
   // Polling runs ~50 times a minute for five minutes, so the budget only catches abuse.
   { method: 'GET', path: '/pair/poll', auth: 'public', rate: { bucket: 'pair-poll', limit: 120, windowMs: 60_000 }, run: pairPoll },
@@ -161,11 +163,12 @@ function matchRoute(method: string, pathname: string): Match {
 
 async function authorize(auth: RouteAuth, request: Request, url: URL, ctx: RouteContext): Promise<DeviceRecord | null> {
   if (auth === 'public') return null;
-  if (auth === 'enroll') {
+  if (auth === 'enroll' || (auth === 'enroll-or-host' && !url.searchParams.has('device'))) {
     if (!ctx.enrollToken || bearer(request) !== ctx.enrollToken) throw new HttpError('forbidden', 403);
     return null;
   }
   const device = await authDevice(request, url, ctx);
+  if (auth === 'enroll-or-host' && device.kind !== 'host') throw new HttpError('forbidden', 403);
   if (auth === 'host' && device.kind !== 'host') throw new HttpError('forbidden', 403);
   if (auth === 'web' && device.kind !== 'web') throw new HttpError('forbidden', 403);
   return device;
@@ -186,20 +189,30 @@ function actor(device: DeviceRecord | null): DeviceRecord {
 
 // --- handlers ---
 
-async function pairStart({ ctx, request }: Call): Promise<Response> {
-  const body = (await request.json()) as { name?: string; platform?: string; hostPub?: PublicIdentity };
-  if (!body.hostPub) throw new HttpError('invalid', 400);
-  const r = await startPairing(ctx.store, { accountId: ctx.accountId, hostName: body.name ?? 'desktop', hostPlatform: body.platform ?? '', hostPub: body.hostPub }, ctx.now);
+async function pairStart({ ctx, request, device }: Call): Promise<Response> {
+  const body = await readJson(request);
+  // An enrolled desktop pairs as itself: its registered key, not whatever the body claims.
+  const hostPub = device ? device.pub : publicIdentity(body.hostPub);
+  const r = await startPairing(ctx.store, {
+    accountId: ctx.accountId,
+    hostName: label(body.name, device?.name ?? 'desktop'),
+    hostPlatform: label(body.platform, device?.platform ?? ''),
+    hostPub,
+    hostDeviceId: device?.deviceId
+  }, ctx.now);
   return json(r);
 }
 
 async function pairClaim({ ctx, request }: Call): Promise<Response> {
-  const body = (await request.json()) as { code?: string; name?: string; platform?: string; webPub?: PublicIdentity };
-  if (!body.code || !body.webPub) throw new HttpError('invalid', 400);
-  const { pollToken, hostPub } = await claimPairing(ctx.store, { code: body.code, webName: body.name ?? 'browser', webPlatform: body.platform ?? '', webPub: body.webPub }, ctx.now);
+  const body = await readJson(request);
+  if (typeof body.code !== 'string' || !body.code) throw new HttpError('invalid', 400);
+  const webPub = publicIdentity(body.webPub);
+  const name = label(body.name, 'browser');
+  const platform = label(body.platform, '');
+  const { pollToken, hostPub } = await claimPairing(ctx.store, { code: body.code, webName: name, webPlatform: platform, webPub }, ctx.now);
   // Broadcast public identities; only the owning desktop may display or sign this request.
   for (const ws of ctx.sockets(BROADCAST_TAG.host)) {
-    ws.send(JSON.stringify({ t: 'pair.request', code: body.code, name: body.name ?? 'browser', platform: body.platform ?? '', hostPub, webPub: body.webPub }));
+    ws.send(JSON.stringify({ t: 'pair.request', code: body.code, name, platform, hostPub, webPub }));
   }
   return json({ pollToken });
 }
@@ -284,15 +297,50 @@ export class HttpError extends Error {
 function errorResponse(e: unknown): Response {
   if (e instanceof HttpError) return json({ error: e.message }, e.status);
   if (e instanceof MirrorError) return json({ error: e.code }, e.code === 'too-large' ? 413 : 400);
+  // The account is full: a conflict the user resolves by revoking a device, not an auth failure.
+  if (e instanceof PairError && e.code === 'limit') return json({ error: 'device-limit' }, 409);
   // An unverifiable device token is an auth failure, not a server error — and the code in the
   // body is the only detail a caller gets.
   if (e instanceof PairError) return json({ error: e.code }, 401);
+  // A malformed body is the caller's error; never echo parser internals.
+  if (e instanceof SyntaxError) return json({ error: 'invalid' }, 400);
   return json({ error: e instanceof Error ? e.message : String(e) }, 500);
 }
 
 function bearer(request: Request): string {
   const h = request.headers.get('authorization') ?? '';
   return h.startsWith('Bearer ') ? h.slice(7) : '';
+}
+
+const MAX_LABEL = 64;
+const MAX_JWK_FIELD = 128;
+
+async function readJson(request: Request): Promise<Record<string, unknown>> {
+  const body = (await request.json()) as unknown;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError('invalid', 400);
+  return body as Record<string, unknown>;
+}
+
+/** Device names and platforms are shown to the user and stored per device: bounded plain text. */
+function label(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback;
+  const text = value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  return text ? text.slice(0, MAX_LABEL) : fallback;
+}
+
+/** A P-256 public identity as the clients export it. Checked for shape and size because it is
+ *  stored per device and broadcast to desktops; the exact JWK is kept, since both ends compare
+ *  identities by their canonical JSON. */
+function publicIdentity(value: unknown): PublicIdentity {
+  const jwk = (v: unknown): boolean => {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+    const k = v as Record<string, unknown>;
+    return k.kty === 'EC' && k.crv === 'P-256' && typeof k.x === 'string' && typeof k.y === 'string' &&
+      k.d === undefined && Object.values(k).every((f) => (typeof f === 'string' ? f.length <= MAX_JWK_FIELD : typeof f === 'boolean' || (Array.isArray(f) && f.length <= 8 && f.every((op) => typeof op === 'string' && op.length <= 16))));
+  };
+  const id = value as { sig?: unknown; enc?: unknown } | null;
+  if (!id || typeof id !== 'object' || !jwk(id.sig) || !jwk(id.enc) || Object.keys(id).length !== 2) throw new HttpError('invalid', 400);
+  return value as PublicIdentity;
 }
 
 /** Reads and shape-checks a sealed mirror blob; the relay never looks inside `ct`. */

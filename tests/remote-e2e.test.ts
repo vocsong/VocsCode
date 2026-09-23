@@ -5,7 +5,7 @@
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket, WebSocketServer, type WebSocket as WsLike } from 'ws';
-import { REMOTE_CHANNELS, REMOTE_READ_CHANNELS, REMOTE_WRITE_CHANNELS, RemoteHost } from '../src/main/remote/host';
+import { REMOTE_CHANNELS, REMOTE_PUSH_CHANNELS, REMOTE_READ_CHANNELS, REMOTE_WRITE_CHANNELS, RemoteHost } from '../src/main/remote/host';
 import { claimPairing, pollPairing, resolvePairing, startPairing, verifyDeviceToken, type RelayStore } from '../relay/src/core';
 import { clientFinish, createHello, generateIdentity, openFrame, publicOf, sealFrame, type PublicIdentity } from '../src/shared/crypto';
 import type { HandlerRegistry } from '../src/main/handlers';
@@ -206,6 +206,18 @@ describe('remote host end-to-end (fake relay, real core)', () => {
     await host.broadcastPush('push:settingsChanged', { notifications: false });
     const push = await openFrame<{ type: string; channel: string; payload: unknown }>(session.key, ((await waitFrame(ws, (m) => m.t === 'd')) as { payload: never }).payload);
     expect(push).toEqual({ type: 'push', channel: 'push:settingsChanged', payload: { notifications: false } });
+
+    // Only the remote push surface leaves the machine. The desktop fans every push through here,
+    // including push:remoteState (the live pairing code), PTY output and the assistant panel.
+    // Listen first: frames are delivered in order, so the first one must be the allowed push.
+    const firstAfter = waitFrame(ws, (m) => m.t === 'd');
+    await host.broadcastPush('push:remoteState', { status: 'online', pairing: { code: 'SECRET22', expiresAt: 1 }, onlineClients: [], viewOnly: false });
+    await host.broadcastPush('push:terminalData', { terminalId: 't1', seq: 1, data: 'terminal secret' });
+    await host.broadcastPush('push:agentState', { messages: [{ text: 'assistant secret' }] });
+    await host.broadcastPush('push:sessionEvent', { sessionId: 's1', event: { type: 'status', status: 'idle' } });
+    const allowed = await openFrame<{ type: string; channel: string; payload: unknown }>(session.key, ((await firstAfter) as { payload: never }).payload);
+    expect(allowed).toEqual({ type: 'push', channel: 'push:sessionEvent', payload: { sessionId: 's1', event: { type: 'status', status: 'idle' } } });
+    expect([...REMOTE_PUSH_CHANNELS].sort()).toEqual(['push:remotePolicy', 'push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged']);
 
     ws.close();
     await host.disable();

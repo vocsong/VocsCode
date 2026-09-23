@@ -95,6 +95,17 @@ export const REMOTE_WRITE_CHANNELS = new Set<string>([
   'approvals:respond'
 ]);
 
+/** Push channels a paired browser receives: the ones the remote surface consumes. Everything else
+ *  the desktop pushes stays on this machine — terminal output (not remote until P3.5), the
+ *  assistant panel, update prompts, and push:remoteState, which carries the live pairing code
+ *  and pending pairing requests. */
+export const REMOTE_PUSH_CHANNELS = new Set<string>([
+  'push:sessionEvent',
+  'push:sessionsChanged',
+  'push:settingsChanged',
+  'push:remotePolicy'
+]);
+
 interface HostCredentials {
   identity: Identity;
   relayUrl: string;
@@ -119,8 +130,9 @@ interface Session {
 }
 
 interface WsMessage {
-  t: 'pair.request' | 'pair.result' | 'hs' | 'd' | 'client.gone';
+  t: 'pair.request' | 'pair.result' | 'pair.error' | 'hs' | 'd' | 'client.gone';
   code?: string;
+  error?: string;
   name?: string;
   platform?: string;
   decision?: 'approve' | 'deny';
@@ -224,12 +236,16 @@ export class RemoteHost {
     this.push();
   }
 
-  /** Requests a pairing code (needs the account's enrollment secret). */
+  /** Requests a pairing code. An enrolled desktop authenticates as its own device; only the first
+   *  enrollment needs the account's enrollment secret, so rotating it never strands this host. */
   async startPairing(hostName: string): Promise<{ code: string; expiresAt: number }> {
     if (!this.creds) throw new Error('remote access is not enabled');
-    const res = await fetch(`${this.creds.relayUrl.replace(/\/$/, '')}/v1/pair/start`, {
+    const base = this.creds.relayUrl.replace(/\/$/, '');
+    const enrolled = !!(this.creds.deviceId && this.creds.deviceToken);
+    const url = enrolled ? `${base}/v1/pair/start?device=${encodeURIComponent(this.creds.deviceId!)}` : `${base}/v1/pair/start`;
+    const res = await fetch(url, {
       method: 'POST',
-      headers: { authorization: `Bearer ${this.creds.enrollToken ?? ''}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${enrolled ? this.creds.deviceToken : this.creds.enrollToken ?? ''}`, 'content-type': 'application/json' },
       body: JSON.stringify({ name: hostName, platform: `${process.platform} ${process.arch}`, hostPub: publicOf(this.creds.identity) })
     });
     if (!res.ok) throw new Error(`pair/start failed: ${res.status}`);
@@ -253,9 +269,11 @@ export class RemoteHost {
     }
   }
 
-  /** Fan a local push event out to every connected web client, sealed per client. */
+  /** Fan a local push event out to every connected web client, sealed per client. Only the
+   *  remote push surface leaves the machine; the rest is dropped here, before sealing. */
   async broadcastPush(channel: string, payload: unknown): Promise<void> {
-    for (const [clientId, session] of this.sessions) {
+    if (!REMOTE_PUSH_CHANNELS.has(channel)) return;
+    for (const clientId of [...this.sessions.keys()]) {
       await this.sendTo(clientId, { type: 'push', channel, payload });
     }
   }
@@ -400,19 +418,42 @@ export class RemoteHost {
         return;
       }
       case 'pair.result': {
+        if (!this.pendingRequest || msg.code !== this.pendingRequest.code) return;
         this.pendingRequest = undefined;
         this.pairing = undefined;
+        this.detail = undefined;
         this.deps.log('info', `remote: pairing ${msg.decision === 'approve' ? 'approved' : 'denied'}${msg.webDeviceId ? ` for device ${msg.webDeviceId}` : ''}`);
         this.deps.audit?.record(msg.decision === 'approve' ? 'pair-approve' : 'pair-deny', { device: msg.webDeviceId ? String(msg.webDeviceId) : undefined });
-        if (msg.decision === 'approve' && msg.hostToken && msg.hostDeviceId && msg.webDeviceId && msg.webPub && this.creds) {
-          this.creds.deviceId = msg.hostDeviceId;
-          this.creds.deviceToken = msg.hostToken;
-          this.creds.clients[msg.webDeviceId] = msg.webPub;
+        const creds = this.creds;
+        if (msg.decision === 'approve' && msg.hostDeviceId && msg.webDeviceId && msg.webPub && creds) {
+          creds.clients[msg.webDeviceId] = msg.webPub;
+          // The relay mints a host device only when this approval enrolled the desktop; an
+          // enrolled desktop keeps its id and token, so browsers paired before stay routable.
+          const enrolledNow = !!msg.hostToken && (creds.deviceId !== msg.hostDeviceId || creds.deviceToken !== msg.hostToken);
+          if (msg.hostToken) {
+            creds.deviceId = msg.hostDeviceId;
+            creds.deviceToken = msg.hostToken;
+          }
           await this.saveCreds();
-          // Reconnect under the real device token.
-          this.ws?.close();
-          await this.connect();
+          if (enrolledNow) {
+            // Reconnect under the real device token.
+            this.ws?.close();
+            await this.connect();
+          }
         }
+        this.push();
+        return;
+      }
+      case 'pair.error': {
+        // The relay refused the decision: the request is spent, so do not leave it on screen.
+        if (!this.pendingRequest || (msg.code !== undefined && msg.code !== this.pendingRequest.code)) return;
+        this.pendingRequest = undefined;
+        this.pairing = undefined;
+        this.detail = msg.error === 'device-limit'
+          ? 'pairing refused: this account already has the maximum number of paired devices; revoke one first'
+          : 'pairing refused by the relay';
+        this.deps.log('warn', `remote: ${this.detail}`);
+        this.deps.audit?.record('pair-deny', { detail: this.detail });
         this.push();
         return;
       }

@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { abortAllDurableObjects, evictDurableObject, runInDurableObject, SELF } from 'cloudflare:test';
 import { afterEach, describe, expect, it } from 'vitest';
 import { hashToken } from '../src/core';
-import { generateIdentity, pairingDecisionPayload, publicOf, sign } from '../../src/shared/crypto';
+import { generateIdentity, pairingDecisionPayload, publicOf, sign, type Identity } from '../../src/shared/crypto';
 import type { Env as RelayEnv } from '../src/worker';
 
 // This file runs in workerd, with the production Wrangler DO binding and a test-only token.
@@ -63,14 +63,17 @@ function send(ws: WebSocket, value: unknown): void {
   ws.send(JSON.stringify(value));
 }
 
-async function pair(): Promise<{ hostId: string; hostToken: string; webId: string; webToken: string }> {
-  const enrolling = await open('host', 'enrolling', env.ENROLL_TOKEN);
-  const host = await generateIdentity();
+/** Pairs one browser. By default a fresh desktop enrolls over an `enrolling` socket with the
+ *  enrollment secret; pass an enrolled desktop's socket and device credential to pair it again. */
+async function pair(options: { identity?: Identity; enrolled?: { socket: WebSocket; device: string; token: string } } = {}): Promise<{ hostId: string; hostToken: string; webId: string; webToken: string }> {
+  const { enrolled } = options;
+  const enrolling = enrolled?.socket ?? await open('host', 'enrolling', env.ENROLL_TOKEN);
+  const host = options.identity ?? await generateIdentity();
   const webIdentity = await generateIdentity();
   const webPub = publicOf(webIdentity);
-  const started = await request('/v1/pair/start', {
+  const started = await request(enrolled ? `/v1/pair/start?device=${encodeURIComponent(enrolled.device)}` : '/v1/pair/start', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${env.ENROLL_TOKEN}`, 'content-type': 'application/json' },
+    headers: { Authorization: `Bearer ${enrolled?.token ?? env.ENROLL_TOKEN}`, 'content-type': 'application/json' },
     body: JSON.stringify({ name: 'desktop', hostPub: publicOf(host) })
   });
   expect(started.status).toBe(200);
@@ -94,7 +97,7 @@ async function pair(): Promise<{ hostId: string; hostToken: string; webId: strin
   const web = await poll.json<{ status: string; webToken: string; webDeviceId: string; hostDeviceId: string }>();
   expect(web.status).toBe('approved');
   expect(web.hostDeviceId).toBe(approved.hostDeviceId);
-  enrolling.close(1000, 'paired');
+  if (!enrolled) enrolling.close(1000, 'paired');
   return { hostId: approved.hostDeviceId as string, hostToken: approved.hostToken as string, webId: web.webDeviceId, webToken: web.webToken };
 }
 
@@ -115,6 +118,9 @@ afterEach(async () => {
   });
   await Promise.all(closed);
   sockets.clear();
+  // Storage outlives an aborted instance; each test starts from an empty account (the device
+  // cap would otherwise see every earlier test's devices).
+  await runInDurableObject(hub(), async (_instance, state) => state.storage.deleteAll());
   await abortAllDurableObjects();
 });
 
@@ -136,10 +142,10 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(await otherRequest).toMatchObject({ hostPub: JSON.parse(JSON.stringify(publicOf(owner))), webPub: JSON.parse(JSON.stringify(webPub)) });
     const bad = message(otherSocket);
     send(otherSocket, { t: 'pair.respond', code, decision: 'approve', signature: await sign(stranger, pairingDecisionPayload(code, 'approve', webPub)) });
-    expect(await bad).toEqual({ t: 'pair.error', error: 'forbidden' });
+    expect(await bad).toEqual({ t: 'pair.error', code, error: 'forbidden' });
     const malformed = message(ownerSocket);
     send(ownerSocket, { t: 'pair.respond', code, signature: await sign(owner, pairingDecisionPayload(code, 'approve', webPub)) });
-    expect(await malformed).toEqual({ t: 'pair.error', error: 'forbidden' });
+    expect(await malformed).toEqual({ t: 'pair.error', code, error: 'forbidden' });
     expect((await request(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } })).status).toBe(200);
     const final = message(ownerSocket);
     send(ownerSocket, { t: 'pair.respond', code, decision: 'approve', signature: await sign(owner, pairingDecisionPayload(code, 'approve', webPub)) });
@@ -170,6 +176,28 @@ describe('relay Hub in the Cloudflare runtime', () => {
     const gone = message(host);
     client.close(1000, 'bye');
     expect(await gone).toEqual({ t: 'client.gone', client: webId });
+  });
+
+  it('keeps one host id when an enrolled desktop pairs a second browser, and routes each by its hello', async () => {
+    const identity = await generateIdentity();
+    const other = await pair(); // an unrelated desktop in the same account
+    const original = await pair({ identity });
+    const host = await open('host', original.hostId, original.hostToken);
+    const second = await pair({ identity, enrolled: { socket: host, device: original.hostId, token: original.hostToken } });
+    expect(second.hostId).toBe(original.hostId);
+    expect(second.hostToken).toBeUndefined();
+    for (const web of [original, second]) {
+      const here = message(host);
+      const client = await open('client', web.webId, web.webToken);
+      expect(await here).toEqual({ t: 'client.here', client: web.webId });
+      send(client, { t: 'hello', host: web.hostId });
+      const delivered = message(host);
+      send(client, { t: 'hs', seq: 1, payload: { from: web.webId } });
+      expect(await delivered).toEqual({ t: 'hs', from: web.webId, seq: 1, payload: { from: web.webId } });
+    }
+    const listed = await request(`/v1/devices?device=${second.webId}`, { headers: { Authorization: `Bearer ${second.webToken}` } });
+    const hosts = (await listed.json<Array<{ deviceId: string; kind: string }>>()).filter((d) => d.kind === 'host').map((d) => d.deviceId).sort();
+    expect(hosts).toEqual([other.hostId, original.hostId].sort());
   });
 
   it('drops malformed and unsupported host frames without delivering them to a paired browser', async () => {

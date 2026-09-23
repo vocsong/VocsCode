@@ -5,6 +5,7 @@ import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ModelInfo, P
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
+import { pairingLink as pairingLinkFor, remoteOrigin } from '../../../shared/pairing';
 import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
 import { BUILTIN_SHORTCUT_GROUPS, SHORTCUT_COMMANDS, accelFromEvent, formatAccelerator, isReservedAccel, shortcutCommandInfo, type ShortcutCommand } from '../../../shared/shortcuts';
 import { invoke, isMac, on, platform } from '../api';
@@ -1090,7 +1091,9 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   };
 
   const secondsLeft = pairing ? Math.max(0, Math.ceil((pairing.expiresAt - Date.now()) / 1000)) : 0;
-  const pairingLink = pairing && secondsLeft > 0 ? `https://code.vocs.io/app?code=${encodeURIComponent(pairing.code)}` : null;
+  // The browser claims the code against the origin it opened, so the link must be this relay's.
+  const pairingLink = pairing && secondsLeft > 0 ? pairingLinkFor(config.relayUrl, pairing.code) : null;
+  const webHost = new URL(remoteOrigin(config.relayUrl)).host;
   const copyPairingLink = async () => {
     if (!pairingLink) return;
     try {
@@ -1169,7 +1172,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
           <h3>Pair a browser</h3>
           {pairing && pairingLink ? (
             <div>
-              <p className="muted small">Enter this code at code.vocs.io → “Add a computer” (expires in {secondsLeft}s):</p>
+              <p className="muted small">Open the link below, or enter this code in the web client at {webHost}/app (expires in {secondsLeft}s):</p>
               <p data-testid="remote-pair-code" style={{ fontSize: 28, letterSpacing: 6, fontWeight: 600 }}>{pairing.code}</p>
               <Field label="Pairing link" hint="Open in a browser to fill the code, then press Pair. Approve the request here to finish pairing.">
                 <div className="row gap8">

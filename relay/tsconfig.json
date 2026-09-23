@@ -11,5 +11,5 @@
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/core.ts", "src/rate.ts", "src/routes.ts", "src/worker.ts", "src/web-client.ts"]
+  "include": ["src/core.ts", "src/hub.ts", "src/rate.ts", "src/routes.ts", "src/worker.ts", "src/web-client.ts"]
 }

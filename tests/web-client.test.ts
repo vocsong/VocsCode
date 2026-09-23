@@ -204,6 +204,54 @@ describe('relay web client (browser-side protocol)', () => {
     await host.disable();
   });
 
+  it('keeps the first browser routable after the same desktop pairs a second one', async () => {
+    // The Hub routes a browser's frames to the host id it greeted. Minting a new host device per
+    // pairing re-keyed the desktop and silently stranded every browser paired before it.
+    const relay = new FakeRelay();
+    const port = await relay.start();
+    const base = `http://127.0.0.1:${port}`;
+    const host = new RemoteHost({
+      registry: () => ({ channels: () => ['sessions:list'], invoke: async () => [{ id: 's1', title: 'Shared host' }] } as unknown as HandlerRegistry),
+      secrets: { get: async () => undefined, set: async () => undefined },
+      pushState: () => undefined,
+      log: () => undefined,
+      broadcast: () => undefined
+    });
+    const browser = () => {
+      const storage = new Map<string, string>();
+      return new RelayClient({ storage: { get: (k) => storage.get(k) ?? null, set: (k, v) => void storage.set(k, v), remove: (k) => void storage.delete(k) }, wsFactory });
+    };
+    const pairOne = async (client: RelayClient, name: string) => {
+      const { code } = await host.startPairing('Shared PC');
+      const pairing = client.pair({ relayBase: base, code, deviceName: name });
+      for (let i = 0; i < 40 && host.state().pendingRequest?.code !== code; i++) await sleep(50);
+      await host.respondPairing('approve');
+      const creds = await pairing;
+      for (let i = 0; i < 40 && host.state().status !== 'online'; i++) await sleep(50);
+      return creds;
+    };
+    try {
+      await host.enable(base, ENROLL);
+      const first = browser();
+      const second = browser();
+      const firstCreds = await pairOne(first, 'First browser');
+      const secondCreds = await pairOne(second, 'Second browser');
+      expect(secondCreds.hostDeviceId).toBe(firstCreds.hostDeviceId);
+      expect((await host.listDevices()).filter((d) => d.kind === 'host')).toHaveLength(1);
+
+      await first.connect();
+      expect(await first.invoke('sessions:list', null)).toEqual([{ id: 's1', title: 'Shared host' }]);
+      await second.connect();
+      expect(await second.invoke('sessions:list', null)).toEqual([{ id: 's1', title: 'Shared host' }]);
+      expect(host.state().onlineClients.sort()).toEqual([firstCreds.webDeviceId, secondCreds.webDeviceId].sort());
+      first.logout();
+      second.logout();
+    } finally {
+      await host.disable();
+      await relay.stop();
+    }
+  });
+
   it('mints a fresh ticket for each attempt and never puts the device bearer in the socket URL', async () => {
     const relay = new FakeRelay();
     const port = await relay.start();

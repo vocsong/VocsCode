@@ -2,7 +2,7 @@
  *  Runs in plain Node against an in-memory store — the DO is a thin binding over this. */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { generateIdentity, pairingDecisionPayload, publicOf, sign, type Identity } from '../src/shared/crypto';
-import { claimPairing, consumeSocketTicket, deviceInfos, hashToken, issueSocketTicket, listDevices, listMirrorSessions, MirrorError, PAIRING_TTL_MS, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyDeviceToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
+import { claimPairing, consumeSocketTicket, deviceInfos, hashToken, issueSocketTicket, listDevices, listMirrorSessions, MAX_HOST_DEVICES, MAX_WEB_DEVICES, MirrorError, PAIRING_TTL_MS, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyDeviceToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
 import type { PublicIdentity } from '../src/shared/crypto';
 
 function memStore(failWrite?: (key: string) => boolean): RelayStore {
@@ -169,6 +169,74 @@ describe('relay pairing', () => {
     const devices = await listDevices(store, 'vocs-v1');
     expect(devices.map((d) => d.kind).sort()).toEqual(['host', 'web']);
     expect(devices.find((d) => d.kind === 'host')?.pub).toEqual(HOST_PUB);
+  });
+
+  it('reuses an enrolled desktop on its next pairing instead of minting a second host identity', async () => {
+    const store = memStore();
+    const pairWith = async (webPub: PublicIdentity, hostDeviceId?: string) => {
+      const { code } = await startPairing(store, { accountId: 'a', hostName: 'Work PC', hostPlatform: 'win32', hostPub: HOST_PUB, hostDeviceId }, T0);
+      const { pollToken } = await claimPairing(store, { code, webName: 'browser', webPlatform: '', webPub }, T0);
+      const resolved = await resolvePairing(store, { code, decision: 'approve', signature: await sign(hostIdentity, pairingDecisionPayload(code, 'approve', webPub)) }, T0 + 1);
+      if ('denied' in resolved) throw new Error('expected approval');
+      return { resolved, poll: await pollPairing(store, code, pollToken, T0 + 2) };
+    };
+    const first = await pairWith(WEB_PUB);
+    expect(first.resolved.hostToken).toHaveLength(43);
+    // Started with the enrollment secret (no device id): still recognized by its signing key.
+    const second = await pairWith(publicOf(await generateIdentity()));
+    expect(second.resolved.hostDeviceId).toBe(first.resolved.hostDeviceId);
+    expect(second.resolved.hostToken).toBeUndefined();
+    expect(second.poll).toMatchObject({ status: 'approved', hostDeviceId: first.resolved.hostDeviceId, hostName: 'Work PC' });
+    // Started with its own device credential: named exactly.
+    const third = await pairWith(publicOf(await generateIdentity()), first.resolved.hostDeviceId);
+    expect(third.resolved.hostDeviceId).toBe(first.resolved.hostDeviceId);
+    const devices = await listDevices(store, 'a');
+    expect(devices.filter((d) => d.kind === 'host')).toHaveLength(1);
+    expect(devices.filter((d) => d.kind === 'web')).toHaveLength(3);
+    // Nothing re-keyed the desktop: its first token still verifies.
+    await expect(verifyDeviceToken(store, { accountId: 'a', deviceId: first.resolved.hostDeviceId, token: first.resolved.hostToken! }, T0 + 3)).resolves.toMatchObject({ kind: 'host' });
+  });
+
+  it('refuses to approve for an enrolled desktop revoked while its code was pending', async () => {
+    const store = memStore();
+    const host = await registerHostDevice(store, { accountId: 'a', name: 'PC', platform: '', pub: HOST_PUB }, T0);
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'PC', hostPlatform: '', hostPub: HOST_PUB, hostDeviceId: host.deviceId }, T0);
+    await claimPairing(store, { code, webName: 'w', webPlatform: '', webPub: WEB_PUB }, T0);
+    await revokeDevice(store, 'a', host.deviceId);
+    await expect(resolvePairing(store, await approval(code, 'approve'), T0 + 1)).rejects.toMatchObject({ code: 'invalid' });
+    expect(await listDevices(store, 'a')).toEqual([]);
+  });
+
+  it('caps paired browsers at claim time and again inside the approval transaction', async () => {
+    const store = memStore();
+    for (let i = 0; i < MAX_WEB_DEVICES - 1; i++) await registerWebDevice(store, { accountId: 'a', name: `w${i}`, platform: '', pub: WEB_PUB }, T0);
+    // Both claims pass the pre-check while one slot remains; only one approval may fill it.
+    const codes: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const { code } = await startPairing(store, { accountId: 'a', hostName: 'h', hostPlatform: '', hostPub: HOST_PUB }, T0);
+      await claimPairing(store, { code, webName: `late${i}`, webPlatform: '', webPub: WEB_PUB }, T0);
+      codes.push(code);
+    }
+    await expect(resolvePairing(store, await approval(codes[0], 'approve'), T0 + 1)).resolves.toMatchObject({ webDeviceId: expect.stringMatching(/^w_/) });
+    await expect(resolvePairing(store, await approval(codes[1], 'approve'), T0 + 1)).rejects.toMatchObject({ code: 'limit' });
+    // A full account refuses the claim before any desktop is asked.
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'h', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    await expect(claimPairing(store, { code, webName: 'over', webPlatform: '', webPub: WEB_PUB }, T0)).rejects.toMatchObject({ code: 'limit' });
+    expect((await listDevices(store, 'a')).filter((d) => d.kind === 'web')).toHaveLength(MAX_WEB_DEVICES);
+  });
+
+  it('caps paired computers but still lets an enrolled one pair more browsers', async () => {
+    const store = memStore();
+    for (let i = 0; i < MAX_HOST_DEVICES - 1; i++) await registerHostDevice(store, { accountId: 'a', name: `h${i}`, platform: '', pub: publicOf(await generateIdentity()) }, T0);
+    await registerHostDevice(store, { accountId: 'a', name: 'enrolled', platform: '', pub: HOST_PUB }, T0);
+    const other = await generateIdentity();
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'new', hostPlatform: '', hostPub: publicOf(other) }, T0);
+    await claimPairing(store, { code, webName: 'w', webPlatform: '', webPub: WEB_PUB }, T0);
+    await expect(resolvePairing(store, { code, decision: 'approve', signature: await sign(other, pairingDecisionPayload(code, 'approve', WEB_PUB)) }, T0 + 1)).rejects.toMatchObject({ code: 'limit' });
+    const again = await startPairing(store, { accountId: 'a', hostName: 'enrolled', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    await claimPairing(store, { code: again.code, webName: 'w', webPlatform: '', webPub: WEB_PUB }, T0);
+    await expect(resolvePairing(store, await approval(again.code, 'approve'), T0 + 1)).resolves.not.toHaveProperty('hostToken');
+    expect((await listDevices(store, 'a')).filter((d) => d.kind === 'host')).toHaveLength(MAX_HOST_DEVICES);
   });
 
   it('rejects a denied code and reports denial to the web poll', async () => {
