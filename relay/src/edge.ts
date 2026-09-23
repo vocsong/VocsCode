@@ -41,7 +41,13 @@ export async function edgeLimited(request: Request, limiters: EdgeLimiters): Pro
   return success ? null : json({ error: 'rate limited' }, 429, { 'retry-after': '60', 'x-relay-limit': 'edge' });
 }
 
-/** The Worker entry: `/v1/*` only, edge-limited, then handed to the Hub with `/v1` stripped. */
+/** Larger than any route's body: the biggest is a sealed mirror blob (at most 1.9M characters). */
+export const MAX_BODY_BYTES = 2_500_000;
+
+/** The Worker entry: `/v1/*` only, edge-limited, then handed to the Hub with `/v1` stripped.
+ *  Bodies are read here, bounded, before the Hub sees the request: the Hub may answer before
+ *  reading one (a refused credential), and a body still streaming through would then be read after
+ *  the response was sent — an uncaught error the runtime raises on every such request. */
 export async function forwardToHub(request: Request, limiters: EdgeLimiters, hub: () => { fetch(request: Request): Promise<Response> }): Promise<Response> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith('/v1/')) return new Response('not found', { status: 404 });
@@ -49,5 +55,36 @@ export async function forwardToHub(request: Request, limiters: EdgeLimiters, hub
   if (limited) return limited;
   const inner = new URL(request.url);
   inner.pathname = url.pathname.slice(3); // strip /v1
-  return hub().fetch(new Request(inner, request));
+  if (request.method === 'GET' || request.method === 'HEAD' || !request.body) return hub().fetch(new Request(inner, request));
+  const body = await readBounded(request, MAX_BODY_BYTES);
+  if (!body) return json({ error: 'too large' }, 413);
+  return hub().fetch(new Request(inner, { method: request.method, headers: request.headers, body }));
+}
+
+/** The whole body, or null once it passes `limit` bytes (declared or actual). */
+async function readBounded(request: Request, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  if (Number(request.headers.get('content-length') ?? 0) > limit) {
+    await request.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  const reader = request.body!.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(new ArrayBuffer(size));
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 }

@@ -184,7 +184,9 @@ async function authorize(auth: RouteAuth, request: Request, url: URL, ctx: Route
     return null;
   }
   if (auth === 'refresh') {
-    return verifyRefreshToken(ctx.store, { accountId: ctx.accountId, deviceId: url.searchParams.get('device') ?? '', token: bearer(request) });
+    // Awaited, not returned: a rejection must be handled in this frame (workerd reports a
+    // rejected promise handed up a frame as unhandled).
+    return await verifyRefreshToken(ctx.store, { accountId: ctx.accountId, deviceId: url.searchParams.get('device') ?? '', token: bearer(request) });
   }
   const device = await authDevice(request, url, ctx);
   if (auth === 'enroll-or-host' && device.kind !== 'host') throw new HttpError('forbidden', 403);
@@ -198,7 +200,7 @@ async function authDevice(request: Request, url: URL, ctx: RouteContext): Promis
   // an access token: a refresh credential alone authorizes nothing here.
   const token = bearer(request);
   const deviceId = url.searchParams.get('device') ?? '';
-  return verifyAccessToken(ctx.store, { accountId: ctx.accountId, deviceId, token }, ctx.now);
+  return await verifyAccessToken(ctx.store, { accountId: ctx.accountId, deviceId, token }, ctx.now);
 }
 
 /** The authenticated device, asserted for routes whose auth guarantees one. */
@@ -231,9 +233,8 @@ async function pairClaim({ ctx, request }: Call): Promise<Response> {
   const platform = label(body.platform, '');
   const { pollToken, hostPub } = await claimPairing(ctx.store, { code: body.code, webName: name, webPlatform: platform, webPub }, ctx.now);
   // Broadcast public identities; only the owning desktop may display or sign this request.
-  for (const ws of ctx.sockets(BROADCAST_TAG.host)) {
-    ws.send(JSON.stringify({ t: 'pair.request', code: body.code, name, platform, hostPub, webPub }));
-  }
+  const request_ = JSON.stringify({ t: 'pair.request', code: body.code, name, platform, hostPub, webPub });
+  for (const ws of ctx.sockets(BROADCAST_TAG.host)) trySend(ws, request_);
   return json({ pollToken });
 }
 
@@ -289,12 +290,32 @@ async function deviceRevokeAll({ ctx, device }: Call): Promise<Response> {
  *  rotate mirror keys) on the notice: a hint, not authority, since a desktop re-reads the
  *  registry before dropping anything. */
 function closeAndNotify(ctx: RouteContext, revoked: string[]): void {
+  const closed = new Set<SocketLike>();
   for (const id of revoked) {
     for (const tag of [`client:${id}`, `host:${id}`]) {
-      for (const ws of ctx.sockets(tag)) ws.close(1008, 'device revoked');
+      for (const ws of ctx.sockets(tag)) {
+        closed.add(ws);
+        try {
+          ws.close(1008, 'device revoked');
+        } catch {
+          // Already closing.
+        }
+      }
     }
   }
-  for (const ws of ctx.sockets(BROADCAST_TAG.host)) ws.send(JSON.stringify({ t: 'device.revoked', devices: revoked }));
+  // A revoked desktop's own socket was just closed: sending to it would throw.
+  const notice = JSON.stringify({ t: 'device.revoked', devices: revoked });
+  for (const ws of ctx.sockets(BROADCAST_TAG.host)) if (!closed.has(ws)) trySend(ws, notice);
+}
+
+/** A fan-out send. The runtime throws for a socket that is closing; one departing peer must not
+ *  fail the request that is broadcasting to the others. */
+function trySend(ws: SocketLike, data: string): void {
+  try {
+    ws.send(data);
+  } catch {
+    // Closing; its close handler reports the departure.
+  }
 }
 
 async function mirrorList({ ctx, device }: Call): Promise<Response> {

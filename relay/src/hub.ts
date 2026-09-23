@@ -61,7 +61,7 @@ export class HubRouter<S extends HubSocket> {
       ws.close(1008, 'device revoked');
       return;
     }
-    for (const m of queued ?? []) ws.send(JSON.stringify(m));
+    for (const m of queued ?? []) this.trySend(ws, JSON.stringify(m));
     await this.deps.store.delete(key);
     for (const host of this.deps.sockets.byTag(BROADCAST_TAG.host)) this.sendIfOpen(host, { t: 'client.here', client: clientId });
   }
@@ -101,8 +101,18 @@ export class HubRouter<S extends HubSocket> {
     return null;
   }
 
+  /** Fan-out and reply sends. The runtime throws for a socket that is closing, and one departing
+   *  peer must not abort routing for the rest. */
   private sendIfOpen(ws: S, value: unknown): void {
-    if (this.deps.sockets.isOpen(ws)) ws.send(JSON.stringify(value));
+    if (this.deps.sockets.isOpen(ws)) this.trySend(ws, JSON.stringify(value));
+  }
+
+  private trySend(ws: S, data: string): void {
+    try {
+      ws.send(data);
+    } catch {
+      // Closing; its close handler reports the departure.
+    }
   }
 
   private async clientExists(clientId: string): Promise<boolean> {
@@ -115,15 +125,15 @@ export class HubRouter<S extends HubSocket> {
       try {
         const result = await resolvePairing(this.deps.store, { code: msg.code, decision: msg.decision, signature: msg.signature }, this.deps.now());
         if ('denied' in result) {
-          ws.send(JSON.stringify({ t: 'pair.result', code: msg.code, decision: msg.decision }));
+          this.trySend(ws, JSON.stringify({ t: 'pair.result', code: msg.code, decision: msg.decision }));
           return;
         }
         // A desktop that was already enrolled keeps its device: no new host token is minted, so
         // browsers paired earlier keep routing to the same host id.
-        ws.send(JSON.stringify({ t: 'pair.result', code: msg.code, decision: msg.decision, hostDeviceId: result.hostDeviceId, ...(result.hostToken ? { hostToken: result.hostToken } : {}), webDeviceId: result.webDeviceId, webPub: result.webPub }));
+        this.trySend(ws, JSON.stringify({ t: 'pair.result', code: msg.code, decision: msg.decision, hostDeviceId: result.hostDeviceId, ...(result.hostToken ? { hostToken: result.hostToken } : {}), webDeviceId: result.webDeviceId, webPub: result.webPub }));
       } catch (error) {
         if (!(error instanceof PairError)) throw error;
-        ws.send(JSON.stringify({ t: 'pair.error', code: typeof msg.code === 'string' ? msg.code : undefined, error: error.code === 'limit' ? 'device-limit' : 'forbidden' }));
+        this.trySend(ws, JSON.stringify({ t: 'pair.error', code: typeof msg.code === 'string' ? msg.code : undefined, error: error.code === 'limit' ? 'device-limit' : 'forbidden' }));
       }
       return;
     }
@@ -132,11 +142,11 @@ export class HubRouter<S extends HubSocket> {
     const targets = this.deps.sockets.byTag(`client:${msg.to}`);
     if (targets.length) {
       const frame = JSON.stringify({ t: msg.t, from: hostId, seq: msg.seq, payload: msg.payload });
-      for (const c of targets) c.send(frame);
+      for (const c of targets) this.trySend(c, frame);
       return;
     }
     if (msg.t === 'd') await this.enqueue(msg.to, msg.seq, msg.payload);
-    ws.send(JSON.stringify({ t: 'client.gone', client: msg.to }));
+    this.trySend(ws, JSON.stringify({ t: 'client.gone', client: msg.to }));
   }
 
   /** Only sealed data for a registered browser of this account is persisted. An enrolling or
@@ -169,9 +179,9 @@ export class HubRouter<S extends HubSocket> {
     const targets = this.deps.sockets.byTag(`host:${host}`);
     if (targets.length) {
       const frame = JSON.stringify({ t: msg.t, from: clientId, seq: msg.seq, payload: msg.payload });
-      for (const h of targets) h.send(frame);
+      for (const h of targets) this.trySend(h, frame);
       return;
     }
-    ws.send(JSON.stringify({ t: 'host.gone', host }));
+    this.trySend(ws, JSON.stringify({ t: 'host.gone', host }));
   }
 }

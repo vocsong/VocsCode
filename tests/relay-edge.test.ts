@@ -3,7 +3,7 @@
  *  entry logic in Node with counting stand-ins for the Workers Rate Limiting bindings; the
  *  workerd suite checks the bindings exist in the real runtime config. */
 import { describe, expect, it } from 'vitest';
-import { edgeLimited, forwardToHub, type EdgeLimiters } from '../relay/src/edge';
+import { edgeLimited, forwardToHub, MAX_BODY_BYTES, type EdgeLimiters } from '../relay/src/edge';
 
 function limiter(allow: number) {
   const counts = new Map<string, number>();
@@ -55,6 +55,25 @@ describe('relay edge rate limits', () => {
     // The noisy address is limited; the device still refreshes from its own.
     expect((await call('/v1/token/challenge?device=w_victim', '192.0.2.44')).status).toBe(200);
     expect((await call('/v1/token?device=w_other', '198.51.100.7')).status).toBe(200);
+  });
+
+  it('reads each body fully before the Hub sees it, and refuses one larger than any route takes', async () => {
+    const bodies: string[] = [];
+    const hub = () => ({ fetch: async (request: Request) => { bodies.push(await request.text()); return new Response('ok'); } });
+    const put = (body: BodyInit, headers: Record<string, string> = {}) =>
+      forwardToHub(new Request('https://relay.test/v1/mirror/s_1?device=h_1', { method: 'PUT', body, headers, duplex: 'half' } as RequestInit), {}, hub);
+    expect((await put(JSON.stringify({ iv: 'AAAA', ct: 'B'.repeat(1_900_000) }))).status).toBe(200);
+    expect(bodies[0].length).toBe(1_900_000 + '{"iv":"AAAA","ct":""}'.length);
+    // Over the cap by declared length, and by streamed length without one.
+    expect((await put('x'.repeat(MAX_BODY_BYTES + 1))).status).toBe(413);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < 30; i++) controller.enqueue(new Uint8Array(100_000));
+        controller.close();
+      }
+    });
+    expect((await put(stream)).status).toBe(413);
+    expect(bodies).toHaveLength(1);
   });
 
   it('leaves authenticated routes and sockets to the Hub, and passes through without bindings', async () => {

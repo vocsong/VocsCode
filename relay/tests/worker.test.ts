@@ -304,6 +304,39 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(await presence()).toEqual({ [hostId]: true });
   });
 
+  it('revokes a connected desktop from its browser: closes both, tells the other desktops, answers 200', async () => {
+    // Closing the revoked desktop's socket and then broadcasting to every desktop used to send on
+    // the socket just closed, which throws in this runtime: the revocation committed but the
+    // request answered 500 (the deployed smoke's last step).
+    const { hostId, hostToken, webId, webToken } = await pair();
+    const other = await pair();
+    const host = await open('host', hostId, hostToken);
+    const bystander = await open('host', other.hostId, other.hostToken);
+    const hostClosed = new Promise<number>((resolve) => host.addEventListener('close', (event) => resolve(event.code), { once: true }));
+    const notice = message(bystander);
+    const res = await request(`/v1/devices?device=${webId}&target=${hostId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${webToken}` } });
+    expect(res.status).toBe(200);
+    expect(((await res.json<{ revoked: string[] }>()).revoked).sort()).toEqual([hostId, webId].sort());
+    expect(await hostClosed).toBe(1008);
+    expect(await notice).toMatchObject({ t: 'device.revoked' });
+  });
+
+  it('answers a refused request with a body cleanly, whether or not the Hub read the body', async () => {
+    // The Hub refuses these before reading their bodies. Streamed through, the runtime would be
+    // left reading a request whose response was already sent, an uncaught error that ended a
+    // `wrangler dev` session and would log an exception on every refused request.
+    const body = JSON.stringify({ hostPub: { sig: { kty: 'EC' }, enc: { kty: 'EC' } }, name: 'x'.repeat(4096) });
+    for (let i = 0; i < 3; i++) {
+      const refused = await request('/v1/pair/start', { method: 'POST', headers: { Authorization: 'Bearer wrong', 'content-type': 'application/json' }, body });
+      expect(refused.status).toBe(403);
+    }
+    expect((await request('/v1/devices?target=x', { method: 'DELETE', body: 'ignored' })).status).toBe(401);
+    expect((await request('/v1/token?device=w_x', { method: 'POST', headers: { Authorization: 'Bearer nope' }, body })).status).toBe(401);
+    // A body over the largest route payload never reaches the Hub.
+    const huge = await request('/v1/mirror/s_1?device=h_x', { method: 'PUT', headers: { Authorization: 'Bearer nope' }, body: 'x'.repeat(3_000_000) });
+    expect(huge.status).toBe(413);
+  });
+
   it('refuses pairing traffic at the edge once the budget is spent, before the Hub is asked', async () => {
     expect(typeof env.PAIR_LIMIT?.limit).toBe('function');
     expect(typeof env.POLL_LIMIT?.limit).toBe('function');

@@ -134,6 +134,14 @@ export class FakeRelay {
 
   private accept(req: http.IncomingMessage, socket: import('node:stream').Duplex, head: Buffer, kind: 'host' | 'client', id: string): void {
     this.wss.handleUpgrade(req, socket, head, (ws) => {
+      // Like a Durable Object's WebSocket (and unlike `ws`), sending on a closing or closed socket
+      // throws: a relay that closes a socket and then broadcasts to it must not reach a 500 here
+      // first in production.
+      const send = ws.send.bind(ws);
+      ws.send = ((data: string) => {
+        if (ws.readyState !== WebSocket.OPEN) throw new TypeError("Can't call WebSocket send() after close().");
+        send(data);
+      }) as typeof ws.send;
       this.meta.set(ws, { tags: [`${kind}:${id}`, BROADCAST_TAG[kind]], attachment: null });
       // Serialize one socket's frames like the Durable Object's per-message delivery.
       let inbox = Promise.resolve();
