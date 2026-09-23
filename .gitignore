@@ -6,3 +6,5 @@ dist/
 .vite/
 tests/artifacts/
 /audit/
+.gitnexus
+.claude/skills/gitnexus/
