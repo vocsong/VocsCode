@@ -17,12 +17,14 @@ import {
   issueAccessToken,
   issueChallenge,
   issueSocketTicket,
+  listMirrorSessions,
   MirrorError,
   PairError,
   pollPairing,
   putMirrorIndex,
   putMirrorSession,
   resolvePairing,
+  revokeAllExcept,
   revokeDevice,
   startPairing,
   verifyAccessToken,
@@ -101,6 +103,10 @@ export const ROUTES: Route[] = [
   { method: 'POST', path: '/ws/ticket', auth: 'web', run: socketTicket },
   { method: 'GET', path: '/devices', auth: 'device', run: deviceList },
   { method: 'DELETE', path: '/devices', auth: 'device', run: deviceRevoke },
+  // The kill switch: a desktop revokes every other device of the account at once.
+  { method: 'POST', path: '/devices/revoke-all', auth: 'host', run: deviceRevokeAll },
+  // A desktop's own mirrored-session catalogue (ids, sizes, times), to delete what it no longer lists.
+  { method: 'GET', path: '/mirrors', auth: 'host', run: mirrorList },
   { method: 'GET', path: '/mirror', auth: 'device', run: mirrorGetIndex },
   { method: 'PUT', path: '/mirror', auth: 'host', run: mirrorPutIndex },
   { method: 'DELETE', path: '/mirror', auth: 'host', run: mirrorClear },
@@ -259,7 +265,8 @@ async function socketTicket({ ctx, request, device }: Call): Promise<Response> {
 
 async function deviceList({ ctx }: Call): Promise<Response> {
   // Authenticated, and only public metadata leaves the DO: token hashes and key material stay put.
-  return json(await deviceInfos(ctx.store, ctx.accountId));
+  // Presence is which devices have a socket open right now.
+  return json(await deviceInfos(ctx.store, ctx.accountId, (d) => ctx.sockets(`${d.kind === 'host' ? 'host' : 'client'}:${d.deviceId}`).length > 0));
 }
 
 async function deviceRevoke({ ctx, url }: Call): Promise<Response> {
@@ -268,15 +275,30 @@ async function deviceRevoke({ ctx, url }: Call): Promise<Response> {
   const target = url.searchParams.get('target');
   if (!target) throw new HttpError('invalid', 400);
   const revoked = await revokeDevice(ctx.store, ctx.accountId, target);
+  closeAndNotify(ctx, revoked);
+  return json({ ok: true, revoked });
+}
+
+async function deviceRevokeAll({ ctx, device }: Call): Promise<Response> {
+  const revoked = await revokeAllExcept(ctx.store, ctx.accountId, actor(device).deviceId);
+  closeAndNotify(ctx, revoked);
+  return json({ ok: true, revoked });
+}
+
+/** Revoked devices lose their sockets at once. Desktops reconcile their paired-browser lists (and
+ *  rotate mirror keys) on the notice: a hint, not authority, since a desktop re-reads the
+ *  registry before dropping anything. */
+function closeAndNotify(ctx: RouteContext, revoked: string[]): void {
   for (const id of revoked) {
     for (const tag of [`client:${id}`, `host:${id}`]) {
       for (const ws of ctx.sockets(tag)) ws.close(1008, 'device revoked');
     }
   }
-  // Desktops reconcile their paired-browser lists (and rotate mirror keys) on this notice. It is
-  // a hint, not authority: a desktop re-reads the registry before dropping anything.
   for (const ws of ctx.sockets(BROADCAST_TAG.host)) ws.send(JSON.stringify({ t: 'device.revoked', devices: revoked }));
-  return json({ ok: true, revoked });
+}
+
+async function mirrorList({ ctx, device }: Call): Promise<Response> {
+  return json(await listMirrorSessions(ctx.store, ctx.accountId, actor(device).deviceId, ctx.now));
 }
 
 async function mirrorGetIndex({ ctx, url, device }: Call): Promise<Response> {

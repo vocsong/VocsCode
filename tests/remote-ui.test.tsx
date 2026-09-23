@@ -12,6 +12,7 @@ const invokeMock = vi.fn().mockResolvedValue({});
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { SettingsView } from '../src/renderer/src/components/SettingsView';
+import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
 import type { AppSettings, RemoteAuditEntry, RemoteState } from '../src/shared/types';
 import { decodeQrPath } from './support/qr-decode';
@@ -108,6 +109,25 @@ describe('remote access settings (P4)', () => {
     const qr = screen.getByTestId('remote-pair-qr');
     const extent = Number(qr.getAttribute('viewBox')?.split(' ')[2]);
     expect(decodeQrPath(qr.querySelector('path')!.getAttribute('d')!, extent)).toBe(link.value);
+  });
+
+  it('pulls the kill switch only after the confirmation dialog', async () => {
+    invokeMock.mockImplementation((channel: string) => (channel === 'remote:get' ? Promise.resolve(remoteResult(false)) : Promise.resolve({})));
+    useStore.setState({ settings: { ...baseSettings } as AppSettings });
+    render(<><SettingsView /><ConfirmHost /></>);
+    fireEvent.click(screen.getByText('Remote access'));
+    fireEvent.click(await screen.findByTestId('remote-revoke-all'));
+    await screen.findByText('Revoke every paired device?');
+    expect(invokeMock).not.toHaveBeenCalledWith('remote:revokeAll', undefined);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await vi.waitFor(() => expect(screen.queryByText('Revoke every paired device?')).toBeNull());
+    expect(invokeMock).not.toHaveBeenCalledWith('remote:revokeAll', undefined);
+
+    fireEvent.click(screen.getByTestId('remote-revoke-all'));
+    await screen.findByText('Revoke every paired device?');
+    const confirm = screen.getAllByRole('button', { name: 'Revoke all' }).find((b) => !b.hasAttribute('data-testid'))!;
+    fireEvent.click(confirm);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:revokeAll', undefined));
   });
 
   it('toggles the offline mirror through remote:setMirror', async () => {

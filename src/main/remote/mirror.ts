@@ -13,8 +13,11 @@ import type { RemoteHost } from './host';
 const DEBOUNCE_MS = 4_000;
 const MAX_INDEX_SESSIONS = 50;
 const MAX_SNAPSHOT_ITEMS = 800;
-/** Stay well under the relay's 8 MB per-blob cap; the plaintext JSON is bigger than the ciphertext. */
-const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024;
+/** UTF-8 bytes of transcript items per snapshot. The relay stores a blob only while its base64
+ *  ciphertext fits a Durable Object value (2 MB with the key; relay MIRROR_MAX_BLOB_CHARS is
+ *  1.9M characters), and base64 grows bytes by a third: 1.35 MB of plaintext seals to ~1.8M. */
+export const MAX_SNAPSHOT_BYTES = 1_350_000;
+const utf8 = new TextEncoder();
 
 export class RemoteMirror {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -110,16 +113,32 @@ export class RemoteMirror {
       }))
     };
     try {
-      await host.putMirror('index', undefined, await sealBlob(key, index));
+      if (!(await host.putMirror('index', undefined, await sealBlob(key, index)))) return;
+      // The relay keeps only what the index lists: a deleted session, or one that fell out of
+      // the recent window, must not stay readable offline for the rest of its 30-day TTL.
+      const listed = new Set(index.sessions.map((s) => s.id));
+      for (const id of await host.mirroredSessions()) {
+        if (listed.has(id)) continue;
+        this.cancel(id);
+        await host.deleteMirrorSession(id);
+      }
     } catch (e) {
       this.deps.log('warn', `remote: mirror index upload failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
+  /** Drops a pending snapshot upload for a session that is no longer mirrored. */
+  private cancel(sessionId: string): void {
+    const timer = this.timers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(sessionId);
+  }
+
   private async uploadSession(sessionId: string): Promise<void> {
     const host = this.deps.host();
     const key = await this.mirrorKey();
-    const meta = this.deps.sessions().find((s) => s.id === sessionId);
+    // Only sessions the index lists are mirrored; the index upload prunes the rest.
+    const meta = this.recentSessions().find((s) => s.id === sessionId);
     if (!host || !key || !meta || !this.deps.enabled()) return;
     try {
       const { items, truncated } = capItems(await this.deps.transcript(sessionId));
@@ -146,13 +165,14 @@ export class RemoteMirror {
   }
 }
 
-/** Keeps the newest items that fit the byte cap; reports whether anything was dropped. */
-function capItems(items: TranscriptItem[]): { items: TranscriptItem[]; truncated: boolean } {
-  if (items.length <= MAX_SNAPSHOT_ITEMS && JSON.stringify(items).length <= MAX_SNAPSHOT_BYTES) {
-    return { items, truncated: false };
-  }
+/** Keeps the newest items that fit the byte cap (measured as the UTF-8 the blob is sealed from,
+ *  one pass over the items); reports whether anything was dropped. */
+export function capItems(items: TranscriptItem[]): { items: TranscriptItem[]; truncated: boolean } {
   const tail = items.slice(-MAX_SNAPSHOT_ITEMS);
+  // Each item's JSON plus its separating comma, inside the array brackets.
+  const sizes = tail.map((item) => utf8.encode(JSON.stringify(item)).byteLength + 1);
+  let total = sizes.reduce((sum, size) => sum + size, 1);
   let start = 0;
-  while (start < tail.length && JSON.stringify(tail.slice(start)).length > MAX_SNAPSHOT_BYTES) start++;
-  return { items: tail.slice(start), truncated: true };
+  while (start < tail.length && total > MAX_SNAPSHOT_BYTES) total -= sizes[start++];
+  return { items: tail.slice(start), truncated: start > 0 || tail.length < items.length };
 }

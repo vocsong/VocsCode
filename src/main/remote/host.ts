@@ -317,6 +317,35 @@ export class RemoteHost {
     await this.dropClients(creds, revoked.filter((id) => creds.clients[id]), 'revoked from this computer');
   }
 
+  /** The kill switch (docs/REMOTE-ACCESS.md §6.5): revokes every other device of the account —
+   *  each browser and every other computer — and aborts pending pairings. This desktop keeps its
+   *  identity and stays connected; the mirror its browsers could read is re-keyed. */
+  async revokeAll(): Promise<void> {
+    const creds = this.creds;
+    if (!creds || !this.enrolled()) throw new Error('remote access is not enrolled with a relay');
+    const res = await this.relayFetch('/v1/devices/revoke-all', { method: 'POST' });
+    if (!res.ok) throw new Error(`revoke all failed: ${res.status}`);
+    this.deps.audit?.record('revoke-all');
+    this.pendingRequest = undefined;
+    this.pairing = undefined;
+    await this.dropClients(creds, Object.keys(creds.clients), 'every other device revoked');
+    this.push();
+  }
+
+  /** Session ids this desktop has mirrored at the relay (routing metadata only). */
+  async mirroredSessions(): Promise<string[]> {
+    if (!this.enrolled()) return [];
+    const res = await this.relayFetch('/v1/mirrors');
+    if (!res.ok) throw new Error(`mirror list failed: ${res.status}`);
+    return ((await res.json()) as Array<{ sessionId: string }>).map((entry) => entry.sessionId);
+  }
+
+  async deleteMirrorSession(sessionId: string): Promise<void> {
+    if (!this.enrolled()) return;
+    const res = await this.relayFetch(`/v1/mirror/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`mirror delete failed: ${res.status}`);
+  }
+
   /** The offline-mirror policy changed: part of the audit trail like any other trust decision. */
   auditMirror(enabled: boolean): void {
     this.deps.audit?.record(enabled ? 'mirror-enable' : 'mirror-disable');

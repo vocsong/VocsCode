@@ -271,6 +271,8 @@ export interface IpcContract {
   'remote:pairStart': [{ hostName?: string }, { code: string; expiresAt: number }];
   'remote:pairRespond': [{ decision: 'approve' | 'deny' }, void];
   'remote:revoke': [{ deviceId: string }, void];
+  /** Kill switch: revoke every other device of the account (browsers and other computers). */
+  'remote:revokeAll': [void, RemoteState];
   /** P4: view-only mode is a desktop policy, persisted in settings and pushed to paired browsers. */
   'remote:setViewOnly': [{ viewOnly: boolean }, RemoteState];
   /** P4: the offline mirror is opt-in; enabling it syncs the existing sessions, disabling clears it. */

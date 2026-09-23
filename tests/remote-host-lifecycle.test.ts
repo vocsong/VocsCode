@@ -12,6 +12,7 @@ import { RemoteAudit } from '../src/main/remote/audit';
 import { RemoteHost } from '../src/main/remote/host';
 import type { HandlerRegistry } from '../src/main/handlers';
 import type { DeviceRecord } from '../relay/src/core';
+import { generateIdentity, publicOf } from '../src/shared/crypto';
 import { ACCOUNT, ENROLL, FakeRelay } from './fake-relay';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -168,6 +169,29 @@ describe('remote host token and trust lifecycle', () => {
     expect(saved(r).clients).toEqual({});
     expect(r.host.mirrorSecret()).not.toBe(before);
     expect(r.rotations()).toBe(1);
+  });
+
+  it('pulls the kill switch: every other device revoked, pending codes dead, mirror re-keyed, still online', async () => {
+    const r = await rig();
+    const a = r.browser();
+    const b = r.browser();
+    await r.pair(a.client, 'Browser A');
+    await r.pair(b.client, 'Browser B');
+    const pending = await r.host.startPairing('Lifecycle PC'); // shown on screen, not yet claimed
+    const before = r.host.mirrorSecret();
+    await r.host.revokeAll();
+    const hostId = saved(r).deviceId!;
+    expect((await r.host.listDevices()).map((d) => d.deviceId)).toEqual([hostId]);
+    expect(saved(r).clients).toEqual({});
+    expect(r.host.mirrorSecret()).not.toBe(before);
+    await sleep(100); // the relay's device.revoked notice must not rotate a second time
+    expect(r.rotations()).toBe(1);
+    expect(r.audit.list().some((e) => e.action === 'revoke-all')).toBe(true);
+    expect(r.host.state().status).toBe('online');
+    await expect(a.client.connect()).rejects.toThrow('no longer paired');
+    await expect(b.client.listDevices()).rejects.toThrow('no longer paired');
+    const claim = await fetch(`${r.base}/v1/pair/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: pending.code, webPub: publicOf(await generateIdentity()) }) });
+    expect(claim.status).toBe(401);
   });
 
   it('survives its own revocation: keeps its identity, re-enrolls on the next pairing, and drops stale browsers', async () => {

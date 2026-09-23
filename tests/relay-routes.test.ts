@@ -201,6 +201,53 @@ describe('relay route table', () => {
     expect((await handleHttp(req('GET', `/devices?device=${mine.deviceId}`, { headers: { authorization: `Bearer ${mine.access}` } }), ctx())).status).toBe(401);
   });
 
+  it('lets only a desktop pull the kill switch, and closes and announces every revoked device', async () => {
+    const { ctx, store } = harness();
+    const me = await testDevice(store, 'host', { name: 'Mine', now: T });
+    const other = await testDevice(store, 'host', { name: 'Other', now: T });
+    const browser = await testDevice(store, 'web', { hostDeviceId: me.deviceId, now: T });
+    const closed: string[] = [];
+    const notices: unknown[] = [];
+    const withSockets = ctx({
+      sockets: (tag) => (tag === BROADCAST_TAG.host ? [{ send: (data: string) => void notices.push(JSON.parse(data)), close: () => undefined }] : [{ send: () => undefined, close: () => void closed.push(tag) }])
+    });
+    const pull = (device: { deviceId: string; access: string }) => handleHttp(req('POST', `/devices/revoke-all?device=${device.deviceId}`, { headers: { authorization: `Bearer ${device.access}` } }), withSockets);
+    expect((await pull(browser)).status).toBe(403);
+    expect((await handleHttp(req('POST', `/devices/revoke-all?device=${me.deviceId}`), withSockets)).status).toBe(401);
+    const res = await pull(me);
+    expect(res.status).toBe(200);
+    const { revoked } = (await res.json()) as { revoked: string[] };
+    expect(revoked.sort()).toEqual([other.deviceId, browser.deviceId].sort());
+    expect(closed.sort()).toEqual([`client:${browser.deviceId}`, `client:${other.deviceId}`, `host:${browser.deviceId}`, `host:${other.deviceId}`].sort());
+    expect(notices).toEqual([{ t: 'device.revoked', devices: revoked }]);
+    expect(closed.some((tag) => tag.endsWith(me.deviceId))).toBe(false);
+  });
+
+  it('reports which devices are connected right now, from the Hub\'s sockets', async () => {
+    const { ctx, store } = harness();
+    const host = await testDevice(store, 'host', { now: T });
+    const web = await testDevice(store, 'web', { now: T });
+    const online = ctx({ sockets: (tag) => (tag === `host:${host.deviceId}` ? [{ send: () => undefined, close: () => undefined }] : []) });
+    const res = await handleHttp(req('GET', `/devices?device=${web.deviceId}`, { headers: { authorization: `Bearer ${web.access}` } }), online);
+    const list = (await res.json()) as Array<{ deviceId: string; online: boolean }>;
+    expect(Object.fromEntries(list.map((d) => [d.deviceId, d.online]))).toEqual({ [host.deviceId]: true, [web.deviceId]: false });
+  });
+
+  it('lists only the calling desktop\'s mirrored sessions, and only to a desktop', async () => {
+    const { ctx, store } = harness();
+    const host = await testDevice(store, 'host', { now: T });
+    const web = await testDevice(store, 'web', { now: T });
+    const upload = (id: string) => handleHttp(req('PUT', `/mirror/${id}?device=${host.deviceId}`, { body: JSON.stringify({ iv: 'AAAA', ct: 'BBBB' }), headers: { authorization: `Bearer ${host.access}` } }), ctx());
+    expect((await upload('s_1')).status).toBe(200);
+    expect((await upload('s_2')).status).toBe(200);
+    const res = await handleHttp(req('GET', `/mirrors?device=${host.deviceId}`, { headers: { authorization: `Bearer ${host.access}` } }), ctx());
+    expect(((await res.json()) as Array<{ sessionId: string }>).map((m) => m.sessionId).sort()).toEqual(['s_1', 's_2']);
+    expect((await handleHttp(req('GET', `/mirrors?device=${web.deviceId}`, { headers: { authorization: `Bearer ${web.access}` } }), ctx())).status).toBe(403);
+    // A blob that cannot fit a Durable Object value is refused as too large, not a server error.
+    const oversized = await handleHttp(req('PUT', `/mirror/s_3?device=${host.deviceId}`, { body: JSON.stringify({ iv: 'AAAA', ct: 'B'.repeat(2_500_000) }), headers: { authorization: `Bearer ${host.access}` } }), ctx());
+    expect(oversized.status).toBe(413);
+  });
+
   it('rejects unauthenticated device routes and serves them to a paired device', async () => {
     const { ctx, store } = harness();
     const web = await testDevice(store, 'web', { name: 'Chrome', now: T });

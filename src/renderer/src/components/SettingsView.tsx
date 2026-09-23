@@ -1226,6 +1226,29 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
               </Button>
             </Field>
           ))}
+          {devices.length > 1 && (
+            <Field label="Revoke every device" hint="The kill switch: signs out every paired browser and every other computer at once, cancels pending pairing codes and re-keys the offline mirror. This computer stays connected.">
+              <Button
+                size="sm"
+                variant="danger"
+                data-testid="remote-revoke-all"
+                disabled={busy}
+                onClick={() =>
+                  void (async () => {
+                    const confirmed = await askConfirm({
+                      title: 'Revoke every paired device?',
+                      body: 'Every browser and every other computer paired with this account loses access immediately. Pairing any of them again needs a new code and your approval here.',
+                      confirmLabel: 'Revoke all',
+                      danger: true
+                    });
+                    if (confirmed) await act(() => invoke('remote:revokeAll', undefined));
+                  })()
+                }
+              >
+                Revoke all
+              </Button>
+            </Field>
+          )}
         </>
       )}
 

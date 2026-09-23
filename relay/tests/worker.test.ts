@@ -271,6 +271,29 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(client.readyState).toBe(WebSocket.OPEN);
   });
 
+  it('reports live presence from the Hub sockets and the kill switch closes every other device', async () => {
+    const { hostId, hostToken, webId, webToken } = await pair();
+    const presence = async () => {
+      const res = await request(`/v1/devices?device=${hostId}`, { headers: { Authorization: `Bearer ${hostToken}` } });
+      return Object.fromEntries((await res.json<Array<{ deviceId: string; online: boolean }>>()).map((d) => [d.deviceId, d.online]));
+    };
+    expect(await presence()).toEqual({ [hostId]: false, [webId]: false });
+    const host = await open('host', hostId, hostToken);
+    const here = message(host);
+    const client = await open('client', webId, webToken);
+    await here;
+    expect(await presence()).toEqual({ [hostId]: true, [webId]: true });
+
+    const closed = new Promise<number>((resolve) => client.addEventListener('close', (event) => resolve(event.code), { once: true }));
+    const notice = message(host);
+    const res = await request(`/v1/devices/revoke-all?device=${hostId}`, { method: 'POST', headers: { Authorization: `Bearer ${hostToken}` } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, revoked: [webId] });
+    expect(await closed).toBe(1008);
+    expect(await notice).toEqual({ t: 'device.revoked', devices: [webId] });
+    expect(await presence()).toEqual({ [hostId]: true });
+  });
+
   it('drops malformed and unsupported host frames without delivering them to a paired browser', async () => {
     const { hostId, hostToken, webId, webToken } = await pair();
     const host = await open('host', hostId, hostToken);

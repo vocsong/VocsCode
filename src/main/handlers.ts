@@ -748,6 +748,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       await remote.revokeDevice(deviceId);
       return undefined;
     });
+    handle('remote:revokeAll', async () => {
+      await remote.revokeAll();
+      return remote.state();
+    });
     handle('remote:setViewOnly', async ({ viewOnly }) => {
       await settings.update({ remote: { ...remoteConfig(), viewOnly: viewOnly === true } });
       deps.push(PUSH_CHANNELS.settingsChanged, settings.get());

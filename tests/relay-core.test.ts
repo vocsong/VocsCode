@@ -2,7 +2,7 @@
  *  Runs in plain Node against an in-memory store — the DO is a thin binding over this. */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { generateIdentity, openSealedToKey, pairingDecisionPayload, pairingTokenContext, publicOf, sign, tokenProofPayload, type Identity } from '../src/shared/crypto';
-import { ACCESS_TTL_MS, CHALLENGE_TTL_MS, claimPairing, consumeSocketTicket, deviceInfos, hashToken, issueAccessToken, issueChallenge, issueSocketTicket, listDevices, listMirrorSessions, MAX_HOST_DEVICES, MAX_WEB_DEVICES, MirrorError, PAIRING_TTL_MS, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyAccessToken, verifyRefreshToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
+import { ACCESS_TTL_MS, CHALLENGE_TTL_MS, claimPairing, consumeSocketTicket, deleteMirrorSession, deviceInfos, hashToken, issueAccessToken, issueChallenge, issueSocketTicket, listDevices, listMirrorSessions, MAX_HOST_DEVICES, MAX_WEB_DEVICES, MIRROR_MAX_BLOB_CHARS, MirrorError, PAIRING_TTL_MS, revokeAllExcept, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyAccessToken, verifyRefreshToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
 import { accessFor, testDevice } from './support/relay-auth';
 import type { PublicIdentity } from '../src/shared/crypto';
 
@@ -383,7 +383,36 @@ describe('relay pairing', () => {
     expect(shape).not.toContain('tokenHash');
     expect(shape).not.toContain(hostToken);
     // And each record is exactly the public shape, so a new private field cannot sneak out.
-    for (const info of infos) expect(Object.keys(info).sort()).toEqual(['deviceId', 'kind', 'lastSeen', 'name', 'platform']);
+    for (const info of infos) expect(Object.keys(info).sort()).toEqual(['deviceId', 'kind', 'lastSeen', 'name', 'online', 'platform']);
+    // Presence comes from the caller (the Hub's open sockets), never from storage.
+    const hostId = infos.find((d) => d.kind === 'host')!.deviceId;
+    expect((await deviceInfos(store, 'a', (d) => d.deviceId === hostId)).map((d) => [d.kind, d.online]).sort()).toEqual([['host', true], ['web', false]]);
+  });
+});
+
+describe('revoke all (the kill switch)', () => {
+  it('revokes every other device, pending pairings and the other hosts\' mirrors, and keeps the caller', async () => {
+    const store = memStore();
+    const me = await testDevice(store, 'host', { now: T0 });
+    const other = await testDevice(store, 'host', { now: T0 });
+    const browsers = [await testDevice(store, 'web', { hostDeviceId: me.deviceId, now: T0 }), await testDevice(store, 'web', { hostDeviceId: other.deviceId, now: T0 })];
+    await issueSocketTicket(store, { accountId: 'a', deviceId: browsers[0].deviceId, token: browsers[0].access }, T0);
+    await store.put(`q:${browsers[1].deviceId}`, [{ t: 'd', seq: 1, payload: {} }]);
+    await putMirrorIndex(store, { accountId: 'a', hostId: me.deviceId, blob: { iv: 'AAAA', ct: 'MINE' } }, T0);
+    await putMirrorIndex(store, { accountId: 'a', hostId: other.deviceId, blob: { iv: 'AAAA', ct: 'THEIRS' } }, T0);
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'h', hostPlatform: '', hostPub: HOST_PUB }, T0);
+    await claimPairing(store, { code, webName: 'late', webPlatform: '', webPub: WEB_PUB }, T0);
+
+    const revoked = await revokeAllExcept(store, 'a', me.deviceId);
+    expect(revoked.sort()).toEqual([other.deviceId, ...browsers.map((b) => b.deviceId)].sort());
+    expect((await listDevices(store, 'a')).map((d) => d.deviceId)).toEqual([me.deviceId]);
+    await expect(verifyAccessToken(store, { accountId: 'a', deviceId: me.deviceId, token: me.access }, T0 + 1)).resolves.toMatchObject({ kind: 'host' });
+    expect(await store.list('pair:')).toEqual([]);
+    expect(await store.list('ws-ticket:')).toEqual([]);
+    expect(await store.list('q:')).toEqual([]);
+    expect((await getMirrorIndex(store, 'a', me.deviceId, T0))?.blob.ct).toBe('MINE');
+    expect(await getMirrorIndex(store, 'a', other.deviceId, T0)).toBeUndefined();
+    await expect(resolvePairing(store, await approval(code, 'approve'), T0 + 1)).rejects.toBeInstanceOf(PairError);
   });
 });
 
@@ -572,12 +601,67 @@ describe('relay offline mirror (opaque sealed blobs)', () => {
     expect(await getMirrorIndex(store, 'a', 'h_3', T0)).toBeUndefined();
   });
 
-  it('rejects a malformed session id and an oversized blob', async () => {
+  it('rejects a malformed session id and any blob too large to store in a Durable Object value', async () => {
     const store = memStore();
     await expect(putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: '../../etc', blob: blob('X') }, T0)).rejects.toBeInstanceOf(MirrorError);
     const huge = { iv: 'AAAAAAAAAAAAAAAA', ct: 'a'.repeat(12 * 1024 * 1024) };
     await expect(putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 's_1', blob: huge }, T0)).rejects.toMatchObject({ code: 'too-large' });
+    // SQLite-backed Durable Objects cap key + value at 2 MB: a 3 MB blob used to reach put() and 500.
+    await expect(putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 's_1', blob: blob('a'.repeat(MIRROR_MAX_BLOB_CHARS + 1)) }, T0)).rejects.toMatchObject({ code: 'too-large' });
+    await expect(putMirrorIndex(store, { accountId: 'a', hostId: 'h_1', blob: blob('a'.repeat(3_000_000)) }, T0)).rejects.toMatchObject({ code: 'too-large' });
+    await expect(putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 's_1', blob: { iv: 'A'.repeat(64), ct: 'AAAA' } }, T0)).rejects.toMatchObject({ code: 'too-large' });
+    expect(MIRROR_MAX_BLOB_CHARS).toBeLessThan(2_000_000);
     expect(await listMirrorSessions(store, 'a', 'h_1', T0)).toEqual([]);
+    await putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 's_1', blob: blob('a'.repeat(MIRROR_MAX_BLOB_CHARS)) }, T0);
+    expect(await listMirrorSessions(store, 'a', 'h_1', T0)).toHaveLength(1);
+  });
+
+  it('prunes, lists and clears from the catalogue without reading a single blob', async () => {
+    const base = memStore();
+    let blobReads = 0;
+    const isBlob = (key: string) => key.includes(':s:');
+    const counting = (storage: RelayStorage): RelayStorage => ({
+      ...storage,
+      get: async <T,>(key: string) => {
+        if (isBlob(key)) blobReads++;
+        return storage.get<T>(key);
+      },
+      list: async <T,>(prefix: string) => {
+        const entries = await storage.list<T>(prefix);
+        blobReads += entries.filter(([key]) => isBlob(key)).length;
+        return entries;
+      }
+    });
+    const store: RelayStore = { ...counting(base), transaction: (work) => base.transaction((tx) => work(counting(tx))) };
+    await putMirrorIndex(store, { accountId: 'a', hostId: 'h_1', blob: blob('I') }, T0); // creates the catalogue
+    for (let i = 0; i < 205; i++) await putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: `s_${i}`, blob: blob(`S${i}`) }, T0 + i);
+    expect((await listMirrorSessions(store, 'a', 'h_1', T0 + 1000)).map((m) => m.sessionId).slice(0, 2)).toEqual(['s_204', 's_203']);
+    await deleteMirrorSession(store, 'a', 'h_1', 's_204');
+    expect((await listMirrorSessions(store, 'a', 'h_1', T0 + 1000))[0].sessionId).toBe('s_203');
+    await clearMirror(store, 'a', 'h_1');
+    expect(blobReads).toBe(0);
+    expect(await base.list('mirror:')).toEqual([]);
+  });
+
+  it('builds the catalogue once from mirror records written before it existed', async () => {
+    const store = memStore();
+    await store.put('mirror:a:h_1:s:old_1', { blob: blob('A'), updatedAt: T0, bytes: 3 });
+    await store.put('mirror:a:h_1:s:old_2', { blob: blob('B'), updatedAt: T0 + 5, bytes: 3 });
+    expect((await listMirrorSessions(store, 'a', 'h_1', T0 + 10)).map((m) => m.sessionId)).toEqual(['old_2', 'old_1']);
+    await putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 'new_1', blob: blob('C') }, T0 + 20);
+    expect((await listMirrorSessions(store, 'a', 'h_1', T0 + 30)).map((m) => m.sessionId)).toEqual(['new_1', 'old_2', 'old_1']);
+    await clearMirror(store, 'a', 'h_1');
+    expect(await store.list('mirror:')).toEqual([]);
+  });
+
+  it('drops a desktop\'s mirror when the desktop is revoked', async () => {
+    const store = memStore();
+    const host = await testDevice(store, 'host', { now: T0 });
+    await putMirrorIndex(store, { accountId: 'a', hostId: host.deviceId, blob: blob('I') }, T0);
+    await putMirrorSession(store, { accountId: 'a', hostId: host.deviceId, sessionId: 's_1', blob: blob('S') }, T0);
+    await putMirrorIndex(store, { accountId: 'a', hostId: 'h_other', blob: blob('KEEP') }, T0);
+    await revokeDevice(store, 'a', host.deviceId);
+    expect((await store.list<unknown>('mirror:')).map(([key]) => key)).toEqual(['mirror:a:h_other:index', 'mirror:a:h_other:meta']);
   });
 
   it('caps the number of mirrored sessions, dropping the oldest', async () => {

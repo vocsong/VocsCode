@@ -528,23 +528,28 @@ export interface DeviceInfo {
   name: string;
   platform: string;
   lastSeen: number;
+  /** A socket is connected for this device right now: a browser's host switcher shows which
+   *  computers are reachable before it tries one. */
+  online: boolean;
 }
 
-export async function deviceInfos(store: RelayStore, accountId: string): Promise<DeviceInfo[]> {
+export async function deviceInfos(store: RelayStore, accountId: string, online: (device: Pick<DeviceRecord, 'deviceId' | 'kind'>) => boolean = () => false): Promise<DeviceInfo[]> {
   return (await listDevices(store, accountId)).map((d) => ({
     deviceId: d.deviceId,
     kind: d.kind,
     name: d.name,
     platform: d.platform,
-    lastSeen: d.lastSeen
+    lastSeen: d.lastSeen,
+    online: online(d)
   }));
 }
 
 /** Revokes a device and returns every device id that stopped existing. Revoking a desktop also
  *  revokes the browsers paired with it: they route to that host id alone, so their credentials
- *  would otherwise outlive the only thing they could reach (the lost-desktop case, §6.5). */
+ *  would otherwise outlive the only thing they could reach (the lost-desktop case, §6.5). A
+ *  revoked desktop's offline mirror goes too. */
 export async function revokeDevice(store: RelayStore, accountId: string, deviceId: string): Promise<string[]> {
-  return store.transaction(async (tx) => {
+  const { victims, hosts } = await store.transaction(async (tx) => {
     const target = await tx.get<DeviceRecord>(deviceKey(accountId, deviceId));
     const victims = [deviceId];
     if (target?.kind === 'host') {
@@ -552,15 +557,41 @@ export async function revokeDevice(store: RelayStore, accountId: string, deviceI
         if (device.kind === 'web' && device.hostDeviceId === deviceId) victims.push(device.deviceId);
       }
     }
-    for (const id of victims) {
-      await tx.delete(deviceKey(accountId, id));
-      await tx.delete(socketTicketKey(accountId, id));
-      // A revoked browser must not leave an offline ciphertext queue behind or receive
-      // it after a hibernated Hub wakes. Enqueue validates the device in a transaction.
-      await tx.delete(`q:${id}`);
-    }
-    return victims;
+    for (const id of victims) await deleteDevice(tx, accountId, id);
+    return { victims, hosts: target?.kind === 'host' ? [deviceId] : [] };
   });
+  for (const host of hosts) await clearMirror(store, accountId, host);
+  return victims;
+}
+
+/** The kill switch (§6.5): every device of the account except the desktop pulling it — each
+ *  browser and every other computer — plus pending pairings and the mirrors of revoked hosts. The
+ *  caller keeps its identity and its own mirror, which it re-keys. */
+export async function revokeAllExcept(store: RelayStore, accountId: string, keepDeviceId: string): Promise<string[]> {
+  const { victims, hosts } = await store.transaction(async (tx) => {
+    const victims: string[] = [];
+    const hosts: string[] = [];
+    for (const [, device] of await tx.list<DeviceRecord>(`device:${accountId}:`)) {
+      if (device.deviceId === keepDeviceId) continue;
+      victims.push(device.deviceId);
+      if (device.kind === 'host') hosts.push(device.deviceId);
+      await deleteDevice(tx, accountId, device.deviceId);
+    }
+    // In-flight pairings die with it: a code shown a minute ago must not mint a new device. One
+    // Hub holds exactly one account, so every pairing record here is this account's.
+    for (const [key] of await tx.list<PairingRecord>('pair:')) await tx.delete(key);
+    return { victims, hosts };
+  });
+  for (const host of hosts) await clearMirror(store, accountId, host);
+  return victims;
+}
+
+async function deleteDevice(tx: RelayStorage, accountId: string, id: string): Promise<void> {
+  await tx.delete(deviceKey(accountId, id));
+  await tx.delete(socketTicketKey(accountId, id));
+  // A revoked browser must not leave an offline ciphertext queue behind or receive it after a
+  // hibernated Hub wakes. Enqueue validates the device in a transaction.
+  await tx.delete(`q:${id}`);
 }
 
 // --- offline transcript mirror (docs/REMOTE-ACCESS.md P4) ---
@@ -587,12 +618,16 @@ export class MirrorError extends Error {
 }
 
 const MIRROR_MAX_SESSIONS = 200;
-/** Per-blob cap, so a single transcript cannot exhaust Durable Object storage. */
-const MIRROR_MAX_BYTES = 8 * 1024 * 1024;
+/** Per-blob cap on the base64 ciphertext. SQLite-backed Durable Objects store at most 2 MB of key
+ *  and value together, so anything larger could never be written; the desktop sizes its
+ *  snapshots to fit (src/main/remote/mirror.ts). */
+export const MIRROR_MAX_BLOB_CHARS = 1_900_000;
+const MIRROR_MAX_IV_CHARS = 32;
 const MIRROR_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 const mirrorIndexKey = (accountId: string, hostId: string) => `mirror:${accountId}:${hostId}:index`;
+const mirrorMetaKey = (accountId: string, hostId: string) => `mirror:${accountId}:${hostId}:meta`;
 const mirrorPrefix = (accountId: string, hostId: string) => `mirror:${accountId}:${hostId}:s:`;
 const mirrorSessionKey = (accountId: string, hostId: string, sessionId: string) => `${mirrorPrefix(accountId, hostId)}${sessionId}`;
 
@@ -607,16 +642,57 @@ interface MirrorSessionRecord {
   bytes: number;
 }
 
+/** The per-host catalogue of mirrored sessions. Pruning, listing and clearing read this, never the
+ *  multi-megabyte blobs themselves, which would not fit in a Durable Object's memory together. */
+interface MirrorCatalogue {
+  sessions: Record<string, { updatedAt: number; bytes: number }>;
+}
+
+async function catalogue(tx: RelayStorage, accountId: string, hostId: string): Promise<MirrorCatalogue> {
+  const existing = await tx.get<MirrorCatalogue>(mirrorMetaKey(accountId, hostId));
+  if (existing) return existing;
+  // Written before the catalogue existed: build it once from the records themselves.
+  const prefix = mirrorPrefix(accountId, hostId);
+  const sessions: MirrorCatalogue['sessions'] = {};
+  for (const [key, record] of await tx.list<MirrorSessionRecord>(prefix)) sessions[key.slice(prefix.length)] = { updatedAt: record.updatedAt, bytes: record.bytes };
+  return { sessions };
+}
+
 /** base64 length → decoded byte length, without decoding. */
 function sealedBytes(blob: MirrorBlob): number {
   return Math.floor((blob.ct.length * 3) / 4);
 }
 
+function checkBlob(blob: MirrorBlob): number {
+  if (blob.ct.length > MIRROR_MAX_BLOB_CHARS || blob.iv.length > MIRROR_MAX_IV_CHARS) throw new MirrorError('too-large');
+  return sealedBytes(blob);
+}
+
+/** Drops expired sessions and the oldest past the budget, by id: no blob is read. */
+async function pruneCatalogue(tx: RelayStorage, accountId: string, hostId: string, meta: MirrorCatalogue, now: number): Promise<void> {
+  for (const [id, entry] of Object.entries(meta.sessions)) {
+    if (now - entry.updatedAt <= MIRROR_TTL_MS) continue;
+    await tx.delete(mirrorSessionKey(accountId, hostId, id));
+    delete meta.sessions[id];
+  }
+  const live = Object.entries(meta.sessions).sort((a, b) => a[1].updatedAt - b[1].updatedAt);
+  for (const [id] of live.slice(0, Math.max(0, live.length - MIRROR_MAX_SESSIONS))) {
+    await tx.delete(mirrorSessionKey(accountId, hostId, id));
+    delete meta.sessions[id];
+  }
+  const index = await tx.get<MirrorIndexRecord>(mirrorIndexKey(accountId, hostId));
+  if (index && now - index.updatedAt > MIRROR_TTL_MS) await tx.delete(mirrorIndexKey(accountId, hostId));
+}
+
 /** Stores the sealed session index the browser's offline sidebar renders. */
 export async function putMirrorIndex(store: RelayStore, input: { accountId: string; hostId: string; blob: MirrorBlob }, now: number): Promise<void> {
-  if (sealedBytes(input.blob) > MIRROR_MAX_BYTES) throw new MirrorError('too-large');
-  await store.put<MirrorIndexRecord>(mirrorIndexKey(input.accountId, input.hostId), { blob: input.blob, updatedAt: now });
-  await pruneMirror(store, input.accountId, input.hostId, now);
+  checkBlob(input.blob);
+  await store.transaction(async (tx) => {
+    await tx.put<MirrorIndexRecord>(mirrorIndexKey(input.accountId, input.hostId), { blob: input.blob, updatedAt: now });
+    const meta = await catalogue(tx, input.accountId, input.hostId);
+    await pruneCatalogue(tx, input.accountId, input.hostId, meta, now);
+    await tx.put(mirrorMetaKey(input.accountId, input.hostId), meta);
+  });
 }
 
 export async function getMirrorIndex(store: RelayStore, accountId: string, hostId: string, now: number): Promise<{ blob: MirrorBlob; updatedAt: number } | undefined> {
@@ -636,13 +712,14 @@ export async function putMirrorSession(
   now: number
 ): Promise<void> {
   if (!SESSION_ID.test(input.sessionId)) throw new MirrorError('invalid-id');
-  if (sealedBytes(input.blob) > MIRROR_MAX_BYTES) throw new MirrorError('too-large');
-  await store.put<MirrorSessionRecord>(mirrorSessionKey(input.accountId, input.hostId, input.sessionId), {
-    blob: input.blob,
-    updatedAt: now,
-    bytes: sealedBytes(input.blob)
+  const bytes = checkBlob(input.blob);
+  await store.transaction(async (tx) => {
+    await tx.put<MirrorSessionRecord>(mirrorSessionKey(input.accountId, input.hostId, input.sessionId), { blob: input.blob, updatedAt: now, bytes });
+    const meta = await catalogue(tx, input.accountId, input.hostId);
+    meta.sessions[input.sessionId] = { updatedAt: now, bytes };
+    await pruneCatalogue(tx, input.accountId, input.hostId, meta, now);
+    await tx.put(mirrorMetaKey(input.accountId, input.hostId), meta);
   });
-  await pruneMirror(store, input.accountId, input.hostId, now);
 }
 
 export async function getMirrorSession(
@@ -654,7 +731,7 @@ export async function getMirrorSession(
   const record = await store.get<MirrorSessionRecord>(mirrorSessionKey(input.accountId, input.hostId, input.sessionId));
   if (!record) return undefined;
   if (now - record.updatedAt > MIRROR_TTL_MS) {
-    await store.delete(mirrorSessionKey(input.accountId, input.hostId, input.sessionId));
+    await deleteMirrorSession(store, input.accountId, input.hostId, input.sessionId);
     return undefined;
   }
   return record.blob;
@@ -662,44 +739,31 @@ export async function getMirrorSession(
 
 /** Plaintext routing metadata only: the session id, when it last changed and its size. */
 export async function listMirrorSessions(store: RelayStore, accountId: string, hostId: string, now: number): Promise<MirrorSessionMeta[]> {
-  const entries = await store.list<MirrorSessionRecord>(mirrorPrefix(accountId, hostId));
-  const prefixLength = mirrorPrefix(accountId, hostId).length;
-  const out: MirrorSessionMeta[] = [];
-  for (const [key, record] of entries) {
-    if (now - record.updatedAt > MIRROR_TTL_MS) {
-      await store.delete(key);
-      continue;
-    }
-    out.push({ sessionId: key.slice(prefixLength), updatedAt: record.updatedAt, bytes: record.bytes });
-  }
-  return out.sort((a, b) => b.updatedAt - a.updatedAt);
+  const meta = await store.transaction((tx) => catalogue(tx, accountId, hostId));
+  return Object.entries(meta.sessions)
+    .filter(([, entry]) => now - entry.updatedAt <= MIRROR_TTL_MS)
+    .map(([sessionId, entry]) => ({ sessionId, updatedAt: entry.updatedAt, bytes: entry.bytes }))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export async function deleteMirrorSession(store: RelayStore, accountId: string, hostId: string, sessionId: string): Promise<void> {
-  await store.delete(mirrorSessionKey(accountId, hostId, sessionId));
+  await store.transaction(async (tx) => {
+    await tx.delete(mirrorSessionKey(accountId, hostId, sessionId));
+    const meta = await catalogue(tx, accountId, hostId);
+    if (!(sessionId in meta.sessions)) return;
+    delete meta.sessions[sessionId];
+    await tx.put(mirrorMetaKey(accountId, hostId), meta);
+  });
 }
 
-/** Drops the whole mirror for a host — used when the user disables mirroring. */
+/** Drops the whole mirror for a host — mirroring turned off, the key rotated, or the host revoked. */
 export async function clearMirror(store: RelayStore, accountId: string, hostId: string): Promise<void> {
-  const entries = await store.list<MirrorSessionRecord>(mirrorPrefix(accountId, hostId));
-  for (const [key] of entries) await store.delete(key);
-  await store.delete(mirrorIndexKey(accountId, hostId));
-}
-
-/** Deletes expired entries and trims the oldest sessions past the budget. */
-async function pruneMirror(store: RelayStore, accountId: string, hostId: string, now: number): Promise<void> {
-  const entries = await store.list<MirrorSessionRecord>(mirrorPrefix(accountId, hostId));
-  const live: Array<[string, MirrorSessionRecord]> = [];
-  for (const [key, record] of entries) {
-    if (now - record.updatedAt > MIRROR_TTL_MS) await store.delete(key);
-    else live.push([key, record]);
-  }
-  if (live.length > MIRROR_MAX_SESSIONS) {
-    live.sort((a, b) => a[1].updatedAt - b[1].updatedAt);
-    for (const [key] of live.slice(0, live.length - MIRROR_MAX_SESSIONS)) await store.delete(key);
-  }
-  const index = await store.get<MirrorIndexRecord>(mirrorIndexKey(accountId, hostId));
-  if (index && now - index.updatedAt > MIRROR_TTL_MS) await store.delete(mirrorIndexKey(accountId, hostId));
+  await store.transaction(async (tx) => {
+    const meta = await catalogue(tx, accountId, hostId);
+    for (const id of Object.keys(meta.sessions)) await tx.delete(mirrorSessionKey(accountId, hostId, id));
+    await tx.delete(mirrorIndexKey(accountId, hostId));
+    await tx.delete(mirrorMetaKey(accountId, hostId));
+  });
 }
 
 async function sweepExpired(store: RelayStore, now: number): Promise<void> {
