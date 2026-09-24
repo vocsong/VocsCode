@@ -22,8 +22,9 @@ agreements stay there.
 - A one-commit PR must carry that Conventional Commits title on the commit itself, because the squash
   takes the commit subject. See [RELEASING.md](RELEASING.md#conventions-that-feed-the-bot) for why the
   prefix matters and how the ship PR is merged.
-- Never append `Co-Authored-By` or "Generated with …" trailers; every commit is authored and
-  committed as Vocs Ong only.
+- Never append `Co-Authored-By` or "Generated with …" trailers. Every commit is authored and
+  committed under the committing person's own git identity (`git config user.name`/`user.email`),
+  never a fixed name or an identity override.
 
 ## What never gets committed
 
