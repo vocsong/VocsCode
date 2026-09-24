@@ -12,8 +12,10 @@ const invokeMock = vi.fn().mockResolvedValue({});
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { SettingsView } from '../src/renderer/src/components/SettingsView';
+import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
 import type { AppSettings, RemoteAuditEntry, RemoteState } from '../src/shared/types';
+import { decodeQrPath } from './support/qr-decode';
 
 const baseSettings = {
   theme: 'system',
@@ -32,8 +34,8 @@ const baseSettings = {
   remote: { enabled: true, relayUrl: 'https://relay.example' }
 } as unknown as AppSettings;
 
-function remoteResult(viewOnly: boolean, audit: RemoteAuditEntry[] = []) {
-  const state: RemoteState = { status: 'online', onlineClients: ['w_1'], viewOnly };
+function remoteResult(viewOnly: boolean, audit: RemoteAuditEntry[] = [], extra: Partial<RemoteState> = {}) {
+  const state: RemoteState = { status: 'online', onlineClients: ['w_1'], viewOnly, ...extra };
   return {
     config: { enabled: true, relayUrl: 'https://relay.example', viewOnly },
     state,
@@ -45,9 +47,9 @@ function remoteResult(viewOnly: boolean, audit: RemoteAuditEntry[] = []) {
   };
 }
 
-function renderRemote(audit: RemoteAuditEntry[] = [], viewOnly = false): void {
+function renderRemote(audit: RemoteAuditEntry[] = [], viewOnly = false, extra: Partial<RemoteState> = {}): void {
   invokeMock.mockImplementation((channel: string) => {
-    if (channel === 'remote:get') return Promise.resolve(remoteResult(viewOnly, audit));
+    if (channel === 'remote:get') return Promise.resolve(remoteResult(viewOnly, audit, extra));
     return Promise.resolve({});
   });
   useStore.setState({ settings: { ...baseSettings } as AppSettings });
@@ -97,6 +99,35 @@ describe('remote access settings (P4)', () => {
     expect(toggle.checked).toBe(false);
     fireEvent.click(toggle);
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:setViewOnly', { viewOnly: true }));
+  });
+
+  it('shows a live pairing code as a link and a QR code that both open this relay', async () => {
+    renderRemote([], false, { pairing: { code: 'ABCD2345', expiresAt: Date.now() + 120_000 } });
+    const link = (await screen.findByTestId('remote-pair-link')) as HTMLInputElement;
+    // The page claims against its own origin, so the link must be the configured relay's.
+    expect(link.value).toBe('https://relay.example/app?code=ABCD2345');
+    const qr = screen.getByTestId('remote-pair-qr');
+    const extent = Number(qr.getAttribute('viewBox')?.split(' ')[2]);
+    expect(decodeQrPath(qr.querySelector('path')!.getAttribute('d')!, extent)).toBe(link.value);
+  });
+
+  it('pulls the kill switch only after the confirmation dialog', async () => {
+    invokeMock.mockImplementation((channel: string) => (channel === 'remote:get' ? Promise.resolve(remoteResult(false)) : Promise.resolve({})));
+    useStore.setState({ settings: { ...baseSettings } as AppSettings });
+    render(<><SettingsView /><ConfirmHost /></>);
+    fireEvent.click(screen.getByText('Remote access'));
+    fireEvent.click(await screen.findByTestId('remote-revoke-all'));
+    await screen.findByText('Revoke every paired device?');
+    expect(invokeMock).not.toHaveBeenCalledWith('remote:revokeAll', undefined);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await vi.waitFor(() => expect(screen.queryByText('Revoke every paired device?')).toBeNull());
+    expect(invokeMock).not.toHaveBeenCalledWith('remote:revokeAll', undefined);
+
+    fireEvent.click(screen.getByTestId('remote-revoke-all'));
+    await screen.findByText('Revoke every paired device?');
+    const confirm = screen.getAllByRole('button', { name: 'Revoke all' }).find((b) => !b.hasAttribute('data-testid'))!;
+    fireEvent.click(confirm);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:revokeAll', undefined));
   });
 
   it('toggles the offline mirror through remote:setMirror', async () => {

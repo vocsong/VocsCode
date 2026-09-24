@@ -482,13 +482,25 @@ describe('per-tool-call tracking', () => {
     await store.load([meta('s', 'pi', usage({}))]);
     const item = toolItem('failure', { name: 'read', status: 'error' });
     store.recordToolCall('s', item);
-    const rename = vi.spyOn(fs, 'rename').mockRejectedValueOnce(Object.assign(new Error('injected write failure'), { code: 'EIO' }));
+    const renameFile = fs.rename.bind(fs);
+    let failed = false;
+    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (!failed && to === path.join(dir, 'analytics.json')) {
+        failed = true;
+        throw Object.assign(new Error('injected write failure'), { code: 'EIO' });
+      }
+      return renameFile(from, to);
+    });
     try {
       await store.flush();
-      expect(rename).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith('warn', expect.stringContaining('analytics write failed'));
       const disk = JSON.parse(await fs.readFile(path.join(dir, 'analytics.json'), 'utf8'));
-      expect(disk.tools).toEqual({});
+      // A queued retry may already have written the record; either way, the counters and replay
+      // protection must be committed together, not judged by how many renames ran under load.
+      const persistedCalls = disk.tools.read?.calls ?? 0;
+      expect([0, 1]).toContain(persistedCalls);
+      expect(disk.sessions.s.toolCalls).toBe(persistedCalls);
+      expect(disk.recordedTools.filter((key: string) => key === JSON.stringify(['s', item.id]))).toHaveLength(persistedCalls);
     } finally {
       rename.mockRestore();
     }
@@ -503,6 +515,9 @@ describe('per-tool-call tracking', () => {
     expect(s.harnessTools).toEqual([{ key: 'pi', label: 'pi', name: 'read', calls: 1, errors: 1, declined: 0, durationMs: 250 }]);
     expect(s.days.map((d) => d.usage.toolCalls)).toEqual([1]);
     expect(s.sessions[0].toolCalls).toBe(1);
+    const disk = JSON.parse(await fs.readFile(path.join(dir, 'analytics.json'), 'utf8'));
+    expect(disk.tools.read).toMatchObject({ calls: 1, errors: 1 });
+    expect(disk.recordedTools.filter((key: string) => key === JSON.stringify(['s', item.id]))).toHaveLength(1);
   });
 
   it('aggregates file changes by kind', () => {

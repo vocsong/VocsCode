@@ -344,7 +344,9 @@ async function main(): Promise<void> {
     broadcast: (channel, payload) => void remoteHost?.broadcastPush(channel, payload),
     audit: remoteAudit,
     // Read live: toggling view-only must apply to an already-connected browser without a reconnect.
-    viewOnly: () => settings.get().remote?.viewOnly === true
+    viewOnly: () => settings.get().remote?.viewOnly === true,
+    // A re-keyed mirror must be re-sealed: the relay copy under the old key was just dropped.
+    onMirrorRotated: () => remoteMirror?.sync()
   });
 
   // Offline mirror (P4): the desktop seals transcript snapshots for paired browsers to read while

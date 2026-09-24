@@ -8,3 +8,7 @@ tests/artifacts/
 /audit/
 .gitnexus
 .claude/skills/gitnexus/
+
+# Local Cloudflare Workers runs (relay/): wrangler dev state and local secrets
+.wrangler/
+.dev.vars

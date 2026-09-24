@@ -199,6 +199,8 @@ export interface IpcContract {
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
+  /** Tail-first window of a transcript for remote clients: items [start, end), newest by default. */
+  'sessions:transcriptPage': [{ id: string; start?: number; end?: number; limit?: number }, { items: TranscriptItem[]; start: number; total: number }];
   /** Subagent runs recorded for a pi session, newest first. */
   'subagents:list': [{ id: string }, SubagentRunSummary[]];
   /** One run with its transcript items and per-call rows, or null when it is gone. */
@@ -271,6 +273,8 @@ export interface IpcContract {
   'remote:pairStart': [{ hostName?: string }, { code: string; expiresAt: number }];
   'remote:pairRespond': [{ decision: 'approve' | 'deny' }, void];
   'remote:revoke': [{ deviceId: string }, void];
+  /** Kill switch: revoke every other device of the account (browsers and other computers). */
+  'remote:revokeAll': [void, RemoteState];
   /** P4: view-only mode is a desktop policy, persisted in settings and pushed to paired browsers. */
   'remote:setViewOnly': [{ viewOnly: boolean }, RemoteState];
   /** P4: the offline mirror is opt-in; enabling it syncs the existing sessions, disabling clears it. */
@@ -350,6 +354,8 @@ export interface IpcContract {
   'knowledge:delete': [{ sessionId: string; id: string }, KnowledgeView];
 
   'terminal:list': [void, TerminalInfo[]];
+  /** Read-only plain-text screen of one terminal (remote P3.5): never attaches, pauses or resizes it. */
+  'terminal:screen': [{ terminalId: string; lines?: number }, { info: TerminalInfo; lines: string[]; seq: number }];
   'terminal:shells': [void, ShellOption[]];
   'terminal:create': [{ sessionId: string; shell?: ShellKind; cols?: number; rows?: number }, TerminalInfo];
   /** Start showing a terminal: the screen as it is now plus the seq of the last chunk it contains. */
