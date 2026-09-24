@@ -89,6 +89,8 @@ interface ActiveSession {
   autoCompactionWindow: number | undefined;
   /** Pending or waiting goal auto-continuation, so a newer turn can replace it instead of racing it. */
   goalContinuationTimer: NodeJS.Timeout | null;
+  /** A goal set during another turn must first reach the harness, even when auto-continue is off. */
+  pendingGoalKickoff: { goal: GoalState; resume: boolean } | null;
   /** Last on-disk copy of each still-streaming assistant item: when it was written and how big it was. */
   checkpoints: Map<string, StreamCheckpoint>;
   /** Wakes the checkpointer when an item has grown enough but was written too recently. */
@@ -752,6 +754,7 @@ export class SessionManager {
       compactionInFlight: null,
       autoCompactionWindow: undefined,
       goalContinuationTimer: null,
+      pendingGoalKickoff: null,
       checkpoints: new Map(),
       checkpointTimer: null
     };
@@ -1340,6 +1343,15 @@ export class SessionManager {
           if (event.status === 'idle') {
             this.scheduleAutoCompaction(meta.id);
             this.scheduleGitStateCheck(meta.id);
+            // A goal installed while another turn was in flight belongs to the next turn, not
+            // the old reply. Wait for this idle boundary even if that turn was interrupted.
+            const pending = active?.pendingGoalKickoff;
+            if (pending && meta.goal === pending.goal && meta.goal.status === 'active') {
+              const prompt = pending.resume
+                ? `Resuming the goal: ${pending.goal.objective}\nContinue where you left off.`
+                : this.goalKickoffPrompt(pending.goal);
+              this.scheduleGoalContinuation(sessionId, prompt, 0, pending);
+            }
           }
         }
         break;
@@ -1486,10 +1498,16 @@ export class SessionManager {
     if (this.settings().notifications && turn.status !== 'interrupted') {
       this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);
     }
+    // An answer belongs to one turn only. In particular, a pre-goal answer must not be
+    // mistaken for the next kickoff's answer if that turn produces no assistant text.
+    const text = active?.lastAssistantText ?? '';
+    if (active) active.lastAssistantText = '';
     const goal = meta.goal;
     if (!goal || goal.status !== 'active' || !active) return;
+    // This reply began before the new goal was submitted. Its token (or lack of one) says
+    // nothing about that goal; the idle transition will deliver the kickoff separately.
+    if (active.pendingGoalKickoff?.goal === goal) return;
     if (turn.status !== 'completed') return;
-    const text = active.lastAssistantText;
     if (text.includes(GOAL_COMPLETE_TOKEN)) {
       goal.status = 'complete';
       goal.updatedAt = Date.now();
@@ -1524,9 +1542,10 @@ export class SessionManager {
    * runs silently, so a busy session is waited out instead. Each attempt re-reads the session, and
    * a newer turn's continuation replaces this one rather than racing it.
    */
-  private scheduleGoalContinuation(id: string, prompt: string, attempt = 0): void {
+  private scheduleGoalContinuation(id: string, prompt: string, attempt = 0, pending?: ActiveSession['pendingGoalKickoff']): void {
     const active = this.active.get(id);
     if (!active) return;
+    const expectedGoal = pending?.goal ?? this.get(id)?.goal;
     if (attempt === 0 && active.goalContinuationTimer) {
       clearTimeout(active.goalContinuationTimer);
       active.goalContinuationTimer = null;
@@ -1535,18 +1554,20 @@ export class SessionManager {
       active.goalContinuationTimer = null;
       if (this.active.get(id) !== active) return;
       const meta = this.get(id);
-      if (!meta || meta.goal?.status !== 'active') return;
-      // An awaiting session has a turn in flight behind that approval; that turn's own end
-      // schedules the next continuation, so only a session still working needs waiting out.
-      if (meta.status === 'awaiting') return;
-      if (meta.status === 'running') {
+      if (!meta || meta.goal !== expectedGoal || meta.goal?.status !== 'active') return;
+      if (pending && active.pendingGoalKickoff !== pending) return;
+      // A normal continuation belongs to the turn behind an approval. A new goal's kickoff,
+      // however, must survive that turn, even if it pauses for approval in the meantime.
+      if (meta.status === 'awaiting' && !pending) return;
+      if (meta.status === 'running' || meta.status === 'starting' || meta.status === 'awaiting' || active.adapter.busy) {
         if (attempt + 1 >= GOAL_CONTINUATION_MAX_ATTEMPTS) {
           this.deps.log('warn', `[${id}] goal continuation gave up after ${attempt + 1} attempts with the session busy`);
           return;
         }
-        this.scheduleGoalContinuation(id, prompt, attempt + 1);
+        this.scheduleGoalContinuation(id, prompt, attempt + 1, pending);
         return;
       }
+      if (pending) active.pendingGoalKickoff = null;
       void this.sendAs(id, { text: prompt }, 'goal').catch((e) => this.deps.log('warn', `[${id}] goal continue failed: ${errorMessage(e)}`));
     }, attempt === 0 ? 1500 : GOAL_CONTINUATION_RETRY_MS);
     timer.unref?.();
@@ -1557,6 +1578,13 @@ export class SessionManager {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     const s = this.settings();
+    const active = this.active.get(id);
+    if (action !== 'update' && active) {
+      // Replacing, pausing or clearing a goal invalidates its pending kickoff/continuation.
+      if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
+      active.goalContinuationTimer = null;
+      active.pendingGoalKickoff = null;
+    }
     this.deps.log('info', `[${id}] goal ${action}${opts.maxIterations !== undefined ? ` maxIterations=${opts.maxIterations}` : ''}${opts.autoContinue !== undefined ? ` autoContinue=${opts.autoContinue}` : ''}`);
     switch (action) {
       case 'set': {
@@ -1570,7 +1598,8 @@ export class SessionManager {
           autoContinue: opts.autoContinue ?? s.goalDefaults.autoContinue
         };
         this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Goal set: ${meta.goal.objective}` } });
-        if (meta.status === 'idle') void this.sendAs(id, { text: this.goalKickoffPrompt(meta.goal) }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+        this.startGoal(id, meta, false);
+
         break;
       }
       case 'pause':
@@ -1579,7 +1608,7 @@ export class SessionManager {
       case 'resume':
         if (meta.goal) {
           meta.goal.status = 'active';
-          if (meta.status === 'idle') void this.sendAs(id, { text: `Resuming the goal: ${meta.goal.objective}\nContinue where you left off.` }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+          this.startGoal(id, meta, true);
         }
         break;
       case 'clear':
@@ -1600,6 +1629,20 @@ export class SessionManager {
     await this.deps.store.upsert(meta);
     this.pushSessions();
     return meta;
+  }
+
+  /** Kick off now if free; otherwise reserve the first idle boundary after the current turn. */
+  private startGoal(id: string, meta: SessionMeta, resume: boolean): void {
+    const goal = meta.goal!;
+    const prompt = resume ? `Resuming the goal: ${goal.objective}\nContinue where you left off.` : this.goalKickoffPrompt(goal);
+    const active = this.active.get(id);
+    if (active && (meta.status === 'running' || meta.status === 'awaiting' || meta.status === 'starting' || active.adapter.busy)) {
+      active.pendingGoalKickoff = { goal, resume };
+      // A busy adapter can be compacting while metadata is idle, without another status event.
+      if (meta.status === 'idle') this.scheduleGoalContinuation(id, prompt, 0, active.pendingGoalKickoff);
+    } else {
+      void this.sendAs(id, { text: prompt }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+    }
   }
 
   /**

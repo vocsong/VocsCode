@@ -1,8 +1,6 @@
 /** Reads a rendered pairing QR code back the way a phone would: rasterize the SVG path the UI
  *  drew (one unit per module) and decode the pixels with jsQR, an independent decoder. */
-import { createRequire } from 'node:module';
-
-const jsQR = createRequire(import.meta.url)('jsqr') as (data: Uint8ClampedArray, width: number, height: number) => { data: string } | null;
+import jsQR from 'jsqr';
 
 /** `d` is a path of `M{x} {y}h{n}v1h-{n}z` runs in a `extent`×`extent` viewBox. */
 export function decodeQrPath(d: string, extent: number, scale = 4): string | null {
