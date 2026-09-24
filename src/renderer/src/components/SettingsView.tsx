@@ -5,6 +5,7 @@ import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ModelInfo, P
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
+import { pairingLink as pairingLinkFor, remoteOrigin } from '../../../shared/pairing';
 import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
 import { BUILTIN_SHORTCUT_GROUPS, SHORTCUT_COMMANDS, accelFromEvent, formatAccelerator, isReservedAccel, shortcutCommandInfo, type ShortcutCommand } from '../../../shared/shortcuts';
 import { invoke, isMac, on, platform } from '../api';
@@ -13,6 +14,7 @@ import { useStore } from '../store';
 import { systemPrefersDark } from '../theme';
 import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
+import { PairingQr } from './PairingQr';
 import { PiSection } from './PiSettings';
 
 type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
@@ -1043,6 +1045,7 @@ function UpdatesPanel({ state, currentVersion }: { state: UpdateState; currentVe
 /** Remote access (docs/REMOTE-ACCESS.md §6): relay connection, browser pairing, devices.
  *  The enrollment secret is stored in the OS keychain via secrets:set, never in settings. */
 function RemoteSection({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+  const toast = useStore((s) => s.toast);
   const config = settings.remote ?? { enabled: false };
   const [state, setState] = useState<RemoteState | null>(null);
   const [devices, setDevices] = useState<RemoteDeviceInfo[]>([]);
@@ -1089,6 +1092,18 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   };
 
   const secondsLeft = pairing ? Math.max(0, Math.ceil((pairing.expiresAt - Date.now()) / 1000)) : 0;
+  // The browser claims the code against the origin it opened, so the link must be this relay's.
+  const pairingLink = pairing && secondsLeft > 0 ? pairingLinkFor(config.relayUrl, pairing.code) : null;
+  const webHost = new URL(remoteOrigin(config.relayUrl)).host;
+  const copyPairingLink = async () => {
+    if (!pairingLink) return;
+    try {
+      await navigator.clipboard.writeText(pairingLink);
+      toast('Pairing link copied', 'success');
+    } catch {
+      setError('Could not copy the link. Select the link above and copy it manually.');
+    }
+  };
   const statusLine = state ? `${state.status}${state.detail ? ` — ${state.detail}` : ''}` : 'unknown';
 
   return (
@@ -1153,13 +1168,24 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
         </Field>
       )}
 
-      {config.enabled && state?.status === 'online' && (
+      {config.enabled && (state?.status === 'online' || state?.status === 'connecting') && (
         <>
           <h3>Pair a browser</h3>
-          {pairing && secondsLeft > 0 ? (
+          {pairing && pairingLink ? (
             <div>
-              <p className="muted small">Enter this code at code.vocs.io → “Add a computer” (expires in {secondsLeft}s):</p>
-              <p style={{ fontSize: 28, letterSpacing: 6, fontWeight: 600 }}>{pairing.code}</p>
+              <p className="muted small">Open the link below, or enter this code in the web client at {webHost}/app (expires in {secondsLeft}s):</p>
+              <p data-testid="remote-pair-code" style={{ fontSize: 28, letterSpacing: 6, fontWeight: 600 }}>{pairing.code}</p>
+              <Field label="Pairing link" hint="Open in a browser to fill the code, then press Pair. Approve the request here to finish pairing.">
+                <div className="row gap8">
+                  <input data-testid="remote-pair-link" aria-label="Pairing link" readOnly value={pairingLink} onFocus={(e) => e.currentTarget.select()} />
+                  <Button size="sm" variant="ghost" icon="copy" onClick={() => void copyPairingLink()}>
+                    Copy link
+                  </Button>
+                </div>
+              </Field>
+              <Field label="Scan to pair" hint="Point a phone camera at the code to open the pairing link. The request still needs your approval here.">
+                <PairingQr link={pairingLink} />
+              </Field>
             </div>
           ) : (
             <Button size="sm" disabled={busy} onClick={() => void act(() => invoke('remote:pairStart', { hostName: undefined }))}>
@@ -1200,6 +1226,29 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
               </Button>
             </Field>
           ))}
+          {devices.length > 1 && (
+            <Field label="Revoke every device" hint="The kill switch: signs out every paired browser and every other computer at once, cancels pending pairing codes and re-keys the offline mirror. This computer stays connected.">
+              <Button
+                size="sm"
+                variant="danger"
+                data-testid="remote-revoke-all"
+                disabled={busy}
+                onClick={() =>
+                  void (async () => {
+                    const confirmed = await askConfirm({
+                      title: 'Revoke every paired device?',
+                      body: 'Every browser and every other computer paired with this account loses access immediately. Pairing any of them again needs a new code and your approval here.',
+                      confirmLabel: 'Revoke all',
+                      danger: true
+                    });
+                    if (confirmed) await act(() => invoke('remote:revokeAll', undefined));
+                  })()
+                }
+              >
+                Revoke all
+              </Button>
+            </Field>
+          )}
         </>
       )}
 

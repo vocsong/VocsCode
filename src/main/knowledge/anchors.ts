@@ -49,18 +49,18 @@ const DEFAULT_CONCURRENCY = 4;
 const TIMED_OUT = 'Anchor resolution ran out of time.';
 
 /**
- * Resolves `work`, or the fallback once `ms` have passed. The loser is left running — a GitNexus
- * start cannot be cancelled — but its rejection is already handled by the race, and nothing it does
- * afterwards touches this resolver's cache.
+ * Resolves `work`, or the fallback once `ms` have passed, retaining which side won. The loser
+ * is left running — a GitNexus start cannot be cancelled — but its rejection is already handled
+ * by the race, and nothing it does afterwards touches this resolver's cache.
  */
-async function withinBudget<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
-  if (ms <= 0) return fallback;
+async function withinBudget<T>(work: Promise<T>, ms: number, fallback: T): Promise<{ value: T; timedOut: boolean }> {
+  if (ms <= 0) return { value: fallback, timedOut: true };
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
-      work,
-      new Promise<T>((resolve) => {
-        timer = setTimeout(() => resolve(fallback), ms);
+      work.then((value) => ({ value, timedOut: false })),
+      new Promise<{ value: T; timedOut: boolean }>((resolve) => {
+        timer = setTimeout(() => resolve({ value: fallback, timedOut: true }), ms);
         timer.unref?.();
       })
     ]);
@@ -109,10 +109,10 @@ export function createGitnexusAnchorResolver(deps: GitnexusAnchorDeps): AnchorRe
       const spent = () => left() <= 0;
       // Ask the registry first: an unindexed project must not start the GitNexus server at all (on a
       // machine without the binary that is a slow npx attempt the panel would visibly wait on).
-      const repo = await withinBudget(deps.repoName(scope), left(), null);
-      if (!repo) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: spent() ? TIMED_OUT : 'This project is not indexed by GitNexus.' }));
-      const url = await withinBudget(deps.url(), left(), null);
-      if (!url) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: spent() ? TIMED_OUT : 'GitNexus is not running.' }));
+      const { value: repo, timedOut: repoTimedOut } = await withinBudget(deps.repoName(scope), left(), null);
+      if (!repo) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: repoTimedOut ? TIMED_OUT : 'This project is not indexed by GitNexus.' }));
+      const { value: url, timedOut: urlTimedOut } = await withinBudget(deps.url(), left(), null);
+      if (!url) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: urlTimedOut ? TIMED_OUT : 'GitNexus is not running.' }));
 
       const now = clock();
       const ttl = deps.ttlMs ?? 300_000;

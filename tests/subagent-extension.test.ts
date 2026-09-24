@@ -294,13 +294,16 @@ describe('foreground runs', () => {
 });
 
 describe('caps', () => {
-  it('refuses a fifth background run and an eleventh run overall', async () => {
+  it('refuses a fifth background run and a ninth run overall', async () => {
     const h = harness({ childDriver: neverFinishes }); // never finishes
     await createVocsCodeSubagents(h.pi as never, h.deps);
     const spawn = (background: boolean) => h.tools.get('subagent')!.execute('c', { ...subagentCall, background }, undefined, undefined, h.parentCtx);
     for (let i = 0; i < 4; i++) await spawn(true);
     await expect(spawn(true)).rejects.toThrow(/4 background subagent runs/);
     for (let i = 0; i < 4; i++) void spawn(false); // foreground is uncapped, up to the session cap
+    // Wait for all four asynchronous starters to reserve their slots. Otherwise the
+    // supposedly refused call can win the race and block forever in neverFinishes.
+    await vi.waitFor(() => expect(h.children).toHaveLength(8));
     await expect(spawn(false)).rejects.toThrow(/8 active subagent runs/);
   });
 

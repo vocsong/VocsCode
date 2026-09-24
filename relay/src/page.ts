@@ -1,18 +1,50 @@
-/** code.vocs.io page logic (docs/REMOTE-ACCESS.md): pairing, then a read-only view of the
- *  paired desktop's sessions, transcripts and approval prompts. DOM layer over RelayClient. */
-import { RelayClient, relayBaseFor } from './web-client';
-import type { TranscriptItem } from '../../src/shared/types';
+/** code.vocs.io page logic (docs/REMOTE-ACCESS.md): pairing, then the paired computers' sessions,
+ *  transcripts and approval prompts. DOM layer over RelayClient. A browser can pair with several
+ *  computers; the switcher in the top bar picks the one to drive and shows which are online. */
+import { PairingRevokedError, RelayClient, relayBaseFor, type PairingVault, type VaultState } from './web-client';
+import { PAIRING_CODE_PATTERN } from '../../src/shared/pairing';
+import type { TerminalInfo } from '../../src/shared/terminal';
+import type { RemoteDeviceInfo, TranscriptItem } from '../../src/shared/types';
 
-const client = new RelayClient({ storage: localStorageApi() });
-let sessions: Array<{ id: string; title: string; status: string }> = [];
-let active: string | null = null;
-let activeStatus = 'idle';
-/** Desktop view-only policy (P4): read-only, so every write control is hidden. */
-let viewOnly = false;
-/** 'live' = driving the desktop; 'mirror' = reading the encrypted snapshots it left behind. */
-let mode: 'live' | 'mirror' = 'live';
-let reconnectTimer: ReturnType<typeof setInterval> | null = null;
-let connecting = false;
+/** Pairings (with their non-extractable keys) live in IndexedDB: structured clone keeps a
+ *  CryptoKey usable without ever making it readable, which localStorage cannot. */
+function indexedDbVault(): PairingVault {
+  const open = () =>
+    new Promise<IDBDatabase>((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') {
+        reject(new Error('IndexedDB is unavailable'));
+        return;
+      }
+      const request = indexedDB.open('vocs-code-remote', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('vault');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));
+    });
+  const run = async <T>(mode: IDBTransactionMode, work: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> => {
+    const db = await open();
+    return new Promise<T>((resolve, reject) => {
+      const tx = db.transaction('vault', mode);
+      const request = work(tx.objectStore('vault'));
+      tx.oncomplete = () => {
+        db.close();
+        resolve(request.result);
+      };
+      tx.onerror = tx.onabort = () => {
+        db.close();
+        reject(tx.error ?? new Error('IndexedDB transaction failed'));
+      };
+    });
+  };
+  return {
+    load: async () => ((await run('readonly', (store) => store.get('state'))) as VaultState | undefined) ?? null,
+    save: async (state) => {
+      await run('readwrite', (store) => store.put(state, 'state'));
+    },
+    clear: async () => {
+      await run('readwrite', (store) => store.delete('state'));
+    }
+  };
+}
 
 function localStorageApi() {
   return {
@@ -21,6 +53,32 @@ function localStorageApi() {
     remove: (k: string) => window.localStorage.removeItem(k)
   };
 }
+
+const client = new RelayClient({ vault: indexedDbVault(), legacy: localStorageApi() });
+let sessions: Array<{ id: string; title: string; status: string }> = [];
+let active: string | null = null;
+let activeStatus = 'idle';
+/** Desktop view-only policy (P4): read-only, so every write control is hidden. */
+let viewOnly = false;
+/** 'live' = driving the desktop; 'mirror' = reading the encrypted snapshots it left behind. */
+let mode: 'live' | 'mirror' = 'live';
+let reconnectTimer: ReturnType<typeof setInterval> | null = null;
+let presenceTimer: ReturnType<typeof setInterval> | null = null;
+let connecting = false;
+/** Which paired computers have a relay connection right now (from the device list). */
+let online = new Map<string, boolean>();
+
+/** The transcript window: newest items first, older pages on request (docs §8.5). */
+const PAGE = 150;
+let windowStart = 0;
+let windowItems: TranscriptItem[] = [];
+/** Streaming turns push many events: coalesce them into at most one refresh in flight. */
+let refreshing: Promise<void> | null = null;
+let refreshAgain = false;
+/** The read-only terminal view (P3.5): polled while open, one request in flight at a time. */
+let terminalOpen = false;
+let terminalTimer: ReturnType<typeof setInterval> | null = null;
+let terminalBusy = false;
 
 function el(id: string): HTMLElement {
   const e = document.getElementById(id);
@@ -44,25 +102,50 @@ function setConnection(state: string): void {
   el('conn').textContent = state;
 }
 
-function boot(): void {
+function notice(text: string): void {
+  const box = el('notice');
+  box.textContent = text;
+  box.hidden = !text;
+}
+
+async function boot(): Promise<void> {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('code')) {
+    const codes = params.getAll('code');
+    const code = codes[0]?.trim().toUpperCase() ?? '';
+    if (codes.length === 1 && PAIRING_CODE_PATTERN.test(code)) {
+      (el('code') as HTMLInputElement).value = code;
+    } else {
+      el('pair-error').textContent = 'Invalid code in pairing link. Enter the code shown on the desktop.';
+    }
+    // A pairing code is short-lived but should not linger in the address bar or browser history.
+    params.delete('code');
+    const search = params.toString();
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`);
+  }
   el('pair-form').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const code = (el('code') as HTMLInputElement).value.trim();
     const name = (el('device-name') as HTMLInputElement).value.trim() || 'Browser';
     void startPairing(code, name);
   });
-  el('logout').addEventListener('click', () => {
-    client.logout();
-    location.reload();
+  el('pair-cancel').addEventListener('click', () => {
+    if (client.hasCredentials()) show('screen-app');
   });
+  el('add-host').addEventListener('click', () => openPairScreen());
+  el('host-select').addEventListener('change', (ev) => void switchHost((ev.target as HTMLSelectElement).value));
+  el('logout').addEventListener('click', () => void unpairActive());
   el('new-session').addEventListener('click', () => void toggleNewSession(true));
   el('ns-cancel').addEventListener('click', () => void toggleNewSession(false));
   el('ns-create').addEventListener('click', () => void createSession());
   el('devices').addEventListener('click', () => void toggleDevices());
   el('devices-close').addEventListener('click', () => el('devices-panel').setAttribute('hidden', ''));
+  el('load-earlier').addEventListener('click', () => void loadEarlier());
   el('send').addEventListener('click', () => void sendComposer());
   el('act-interrupt').addEventListener('click', () => void actOnActive('sessions:interrupt', null));
   el('act-stop').addEventListener('click', () => void actOnActive('sessions:stop', null));
+  el('act-terminal').addEventListener('click', () => void toggleTerminal());
+  el('terminal-select').addEventListener('change', () => void pollTerminal());
   const composer = el('composer') as HTMLTextAreaElement;
   composer.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter' && !ev.shiftKey) {
@@ -70,8 +153,47 @@ function boot(): void {
       void sendComposer();
     }
   });
-  if (client.restore()) void enter();
-  else show('screen-pair');
+  client.onPush((channel, payload) => void onPush(channel, payload));
+  client.onPairingsChanged(() => renderHosts());
+  void loadAccount();
+  let restored = false;
+  try {
+    restored = await client.restore();
+  } catch {
+    // Without IndexedDB the page cannot keep a key it cannot read out. Refuse rather than fall
+    // back to storing exportable keys.
+    el('pair-error').textContent = 'This browser cannot store pairing keys securely (IndexedDB is unavailable, for example in some private windows). Use a regular window to pair.';
+    (el('pair-form').querySelector('button[type="submit"]') as HTMLButtonElement).disabled = true;
+    show('screen-pair');
+    return;
+  }
+  if (restored) void enter();
+  else openPairScreen();
+}
+
+/** The login gate is on the landing origin. A local/ungated preview has no /v1/me, so keep
+ *  account sign-out hidden there; unpairing this browser remains a separate device action. */
+async function loadAccount(): Promise<void> {
+  try {
+    const res = await fetch('/v1/me', { credentials: 'same-origin', cache: 'no-store' });
+    if (!res.ok) return;
+    const body = (await res.json()) as { login?: unknown };
+    if (typeof body.login !== 'string' || !body.login) return;
+    for (const form of document.querySelectorAll<HTMLFormElement>('.account-signout')) {
+      const label = form.querySelector('.account-name');
+      if (label) label.textContent = `@${body.login}`;
+      form.hidden = false;
+    }
+  } catch {
+    // Pre-gate deployments do not have /v1/me. Never expose an account control without it.
+  }
+}
+
+/** The pairing form, first run or "Add a computer": Cancel returns to the app when paired. */
+function openPairScreen(): void {
+  el('pair-cancel').toggleAttribute('hidden', !client.hasCredentials());
+  el('pair-title').textContent = client.hasCredentials() ? 'Add a computer' : 'Vocs Code';
+  show('screen-pair');
 }
 
 async function sendComposer(): Promise<void> {
@@ -138,13 +260,17 @@ async function createSession(): Promise<void> {
 }
 
 async function startPairing(code: string, name: string): Promise<void> {
+  el('pair-error').textContent = '';
   show('screen-pairing');
   try {
     await client.pair({ relayBase: relayBaseFor(window.location.origin, relayOverride()), code, deviceName: name });
+    (el('code') as HTMLInputElement).value = '';
+    notice('');
+    resetView();
     await enter();
   } catch (e) {
     el('pair-error').textContent = e instanceof Error ? e.message : String(e);
-    show('screen-pair');
+    openPairScreen();
   }
 }
 
@@ -156,26 +282,109 @@ function relayOverride(): string | null {
 
 async function enter(): Promise<void> {
   show('screen-app');
-  client.onPush((channel, payload) => void onPush(channel, payload));
-  await connectLoop();
+  renderHosts();
+  presenceTimer ??= setInterval(() => void refreshPresence(), 15_000);
+  void refreshPresence();
+  await connectLoop(true);
 }
 
-/** Connects to the desktop; on failure shows the offline mirror and keeps retrying. */
-async function connectLoop(): Promise<void> {
-  if (connecting || !client.hasCredentials()) return;
+/** The switcher: one entry per paired computer, with whether it is reachable right now. */
+function renderHosts(): void {
+  const select = el('host-select') as HTMLSelectElement;
+  const current = client.credentials();
+  select.innerHTML = client
+    .pairings()
+    .map((p) => {
+      const state = online.has(p.hostDeviceId) ? (online.get(p.hostDeviceId) ? 'online' : 'offline') : '…';
+      return `<option value="${esc(p.hostDeviceId)}"${p === current ? ' selected' : ''}>${esc(p.hostName ?? 'Computer')} · ${state}</option>`;
+    })
+    .join('');
+  select.disabled = client.pairings().length < 2;
+}
+
+async function refreshPresence(): Promise<void> {
+  if (!client.hasCredentials()) return;
+  try {
+    const devices = await client.listDevices();
+    online = new Map(devices.filter((d) => d.kind === 'host').map((d) => [d.deviceId, d.online === true]));
+    // A paired computer missing from the registry was revoked; the relay no longer routes to it.
+    for (const p of client.pairings()) if (!online.has(p.hostDeviceId)) online.set(p.hostDeviceId, false);
+    renderHosts();
+  } catch (e) {
+    if (e instanceof PairingRevokedError) await pairingEnded(e);
+  }
+}
+
+async function switchHost(hostDeviceId: string): Promise<void> {
+  if (hostDeviceId === client.credentials()?.hostDeviceId) return;
+  await client.select(hostDeviceId);
+  resetView();
+  await connectLoop(true);
+}
+
+function resetView(): void {
+  closeTerminal();
+  sessions = [];
+  active = null;
+  mode = 'live';
+  windowItems = [];
+  windowStart = 0;
+  renderSessionList();
+  renderTranscript();
+  (el('active-title') as HTMLElement).textContent = '';
+}
+
+async function unpairActive(): Promise<void> {
+  const current = client.credentials();
+  if (!current) return;
+  await client.unpair();
+  notice(`Unpaired from ${current.hostName ?? 'the computer'}.`);
+  await afterPairingRemoved();
+}
+
+/** The relay revoked the pairing (from another device, or the desktop pulled the kill switch). */
+async function pairingEnded(e: PairingRevokedError): Promise<void> {
+  notice(`This browser is no longer paired with ${e.hostName}. Pair again from the desktop if you still need it.`);
+  await afterPairingRemoved();
+}
+
+async function afterPairingRemoved(): Promise<void> {
+  resetView();
+  if (client.hasCredentials()) {
+    renderHosts();
+    await connectLoop(true);
+    return;
+  }
+  if (reconnectTimer) clearInterval(reconnectTimer);
+  if (presenceTimer) clearInterval(presenceTimer);
+  reconnectTimer = presenceTimer = null;
+  openPairScreen();
+}
+
+/** Connects to the active computer; on failure shows the offline mirror and keeps retrying. */
+async function connectLoop(force = false): Promise<void> {
+  if ((connecting && !force) || !client.hasCredentials()) return;
   connecting = true;
+  const target = client.credentials();
+  setConnection('connecting…');
   try {
     await client.connect(() => {
       setConnection('reconnecting…');
       scheduleReconnect();
     });
-  } catch {
+  } catch (e) {
     connecting = false;
+    if (e instanceof PairingRevokedError) {
+      await pairingEnded(e);
+      return;
+    }
+    if (client.credentials() !== target) return; // switched meanwhile
     await showMirror();
     scheduleReconnect();
     return;
   }
   connecting = false;
+  if (client.credentials() !== target) return;
   mode = 'live';
   if (reconnectTimer) {
     clearInterval(reconnectTimer);
@@ -221,7 +430,9 @@ async function showMirror(): Promise<void> {
     const first = sessions[0]?.id;
     if (first) await openSession(first);
   } catch (e) {
-    setConnection(`desktop offline — ${e instanceof Error ? e.message : String(e)}`);
+    // A mirror sealed under a key rotated since this browser last connected cannot be opened.
+    const message = e instanceof Error && e.name === 'OperationError' ? 'the mirror was re-keyed; connect once while the desktop is online' : e instanceof Error ? e.message : String(e);
+    setConnection(`desktop offline — ${message}`);
   }
 }
 
@@ -239,24 +450,133 @@ async function refreshSessions(): Promise<void> {
   }
 }
 
+type Page = { items: TranscriptItem[]; start: number; total: number };
+
 async function openSession(id: string): Promise<void> {
   active = id;
   const meta = sessions.find((s) => s.id === id);
   if (mode === 'mirror') {
     const snapshot = await client.mirrorSession(id);
     if (!snapshot || active !== id) return;
-    renderTranscript(snapshot.items);
+    windowItems = snapshot.items;
+    windowStart = 0;
+    renderTranscript(true);
     activeStatus = snapshot.status;
     (el('active-title') as HTMLElement).textContent = `${snapshot.title} · ${snapshot.status}${snapshot.truncated ? ' · earlier history trimmed' : ''}`;
   } else {
-    const items = (await client.invoke('sessions:transcript', { id })) as TranscriptItem[];
+    // Newest page first: a long session does not replay whole over a phone connection.
+    const page = (await client.invoke('sessions:transcriptPage', { id, limit: PAGE })) as Page;
     if (active !== id) return;
-    renderTranscript(items);
+    windowItems = page.items;
+    windowStart = page.start;
+    renderTranscript(true);
     activeStatus = meta?.status ?? 'idle';
     (el('active-title') as HTMLElement).textContent = meta ? `${meta.title} · ${activeStatus}` : '';
   }
   syncControls();
+  if (terminalOpen) void refreshTerminals();
   for (const row of Array.from(document.querySelectorAll('.session-row'))) row.classList.toggle('active', (row as HTMLElement).dataset.id === id);
+}
+
+/** Read-only terminal view (docs/REMOTE-ACCESS.md P3.5, read-only first): the desktop's terminals
+ *  for the active session as plain text, refreshed once a second while open. The desktop never
+ *  attaches, resizes or pauses a terminal for it, and nothing can be typed from here. */
+async function toggleTerminal(): Promise<void> {
+  if (terminalOpen) {
+    closeTerminal();
+    return;
+  }
+  terminalOpen = true;
+  el('terminal-panel').hidden = false;
+  await refreshTerminals();
+}
+
+function closeTerminal(): void {
+  terminalOpen = false;
+  el('terminal-panel').hidden = true;
+  if (terminalTimer) clearInterval(terminalTimer);
+  terminalTimer = null;
+}
+
+async function refreshTerminals(): Promise<void> {
+  const id = active;
+  if (!terminalOpen || !id || mode !== 'live') return closeTerminal();
+  const screen = el('terminal-screen');
+  let mine: TerminalInfo[];
+  try {
+    mine = ((await client.invoke('terminal:list', null)) as TerminalInfo[]).filter((t) => t.sessionId === id);
+  } catch {
+    // A desktop from before remote terminals refuses the channel.
+    screen.textContent = 'This computer does not share terminals yet. Update Vocs Code on it.';
+    return;
+  }
+  if (active !== id || !terminalOpen) return;
+  const select = el('terminal-select') as HTMLSelectElement;
+  const previous = select.value;
+  select.innerHTML = mine.map((t) => `<option value="${esc(t.id)}">${esc(t.title)}${t.exit ? ' (exited)' : ''}</option>`).join('');
+  if (mine.some((t) => t.id === previous)) select.value = previous;
+  if (!mine.length) {
+    screen.textContent = 'No terminal is open for this session on the desktop.';
+    return;
+  }
+  terminalTimer ??= setInterval(() => void pollTerminal(), 1000);
+  await pollTerminal();
+}
+
+async function pollTerminal(): Promise<void> {
+  const terminalId = (el('terminal-select') as HTMLSelectElement).value;
+  if (!terminalOpen || !terminalId || mode !== 'live' || terminalBusy) return;
+  terminalBusy = true;
+  try {
+    const view = (await client.invoke('terminal:screen', { terminalId, lines: 200 })) as { lines: string[] };
+    if (!terminalOpen || (el('terminal-select') as HTMLSelectElement).value !== terminalId) return;
+    const screen = el('terminal-screen');
+    const atBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 24;
+    screen.textContent = view.lines.join('\n');
+    if (atBottom) screen.scrollTop = screen.scrollHeight;
+  } catch {
+    // The terminal closed or the desktop left; the next list refresh or reconnect decides.
+  } finally {
+    terminalBusy = false;
+  }
+}
+
+/** Re-reads the loaded window (and anything appended after it). One refresh runs at a time; events
+ *  that arrive meanwhile fold into a single follow-up. */
+function refreshTranscript(): Promise<void> {
+  if (refreshing) {
+    refreshAgain = true;
+    return refreshing;
+  }
+  refreshing = (async () => {
+    do {
+      refreshAgain = false;
+      const id = active;
+      if (!id || mode !== 'live') break;
+      try {
+        const page = (await client.invoke('sessions:transcriptPage', { id, start: windowStart })) as Page;
+        if (active !== id || mode !== 'live') break;
+        windowItems = page.items;
+        windowStart = page.start;
+        renderTranscript(false);
+      } catch {
+        break;
+      }
+    } while (refreshAgain);
+  })().finally(() => {
+    refreshing = null;
+  });
+  return refreshing;
+}
+
+async function loadEarlier(): Promise<void> {
+  const id = active;
+  if (!id || mode !== 'live' || windowStart === 0) return;
+  const page = (await client.invoke('sessions:transcriptPage', { id, start: Math.max(0, windowStart - PAGE), end: windowStart })) as Page;
+  if (active !== id) return;
+  windowItems = [...page.items, ...windowItems];
+  windowStart = page.start;
+  renderTranscript(false, true);
 }
 
 function isRunning(status: string): boolean {
@@ -268,6 +588,9 @@ function syncControls(): void {
   const running = mode === 'live' && !viewOnly && isRunning(activeStatus);
   (el('act-interrupt') as HTMLElement).hidden = !running;
   (el('act-stop') as HTMLElement).hidden = !running;
+  // Viewing is read-only, so view-only mode keeps it; a mirror has no live terminal.
+  (el('act-terminal') as HTMLElement).hidden = mode !== 'live' || !active;
+  if (mode !== 'live' && terminalOpen) closeTerminal();
 }
 
 /** Apply the desktop's view-only policy; the mirror is read-only regardless of what it said. */
@@ -286,9 +609,15 @@ function updateWriteControls(): void {
   if (readOnly) el('new-session-panel').setAttribute('hidden', '');
 }
 
-function renderTranscript(items: TranscriptItem[]): void {
+/** `jumpToEnd` for a newly opened session; `keepOffset` when older items were prepended. */
+function renderTranscript(jumpToEnd = false, keepOffset = false): void {
   const root = el('transcript');
-  root.innerHTML = items
+  const atBottom = root.scrollHeight - root.scrollTop - root.clientHeight < 40;
+  const fromBottom = root.scrollHeight - root.scrollTop;
+  const earlier = el('load-earlier') as HTMLButtonElement;
+  earlier.hidden = mode !== 'live' || windowStart === 0;
+  earlier.textContent = `Load earlier messages (${windowStart})`;
+  root.innerHTML = windowItems
     .map((i) => {
       switch (i.kind) {
         case 'user':
@@ -306,7 +635,8 @@ function renderTranscript(items: TranscriptItem[]): void {
       }
     })
     .join('');
-  root.scrollTop = root.scrollHeight;
+  if (keepOffset) root.scrollTop = root.scrollHeight - fromBottom;
+  else if (jumpToEnd || atBottom) root.scrollTop = root.scrollHeight;
 }
 
 function renderApproval(item: Extract<TranscriptItem, { kind: 'approval' }>): string {
@@ -330,15 +660,21 @@ async function refreshDevices(): Promise<void> {
   list.innerHTML = '<p class="muted small">Loading…</p>';
   try {
     const devices = await client.listDevices();
-    list.innerHTML = devices
-      .map(
-        (d) =>
-          `<div class="device-row"><span>${esc(d.kind === 'host' ? 'Computer' : 'Browser')}: ${esc(d.name)}<br><small class="muted">${esc(d.platform)} · last seen ${esc(new Date(d.lastSeen).toLocaleString())}</small></span><button class="danger" data-revoke="${esc(d.deviceId)}">Revoke</button></div>`
-      )
-      .join('');
+    const own = client.credentials()?.webDeviceId;
+    list.innerHTML = devices.map((d) => deviceRow(d, d.deviceId === own)).join('');
   } catch (e) {
+    if (e instanceof PairingRevokedError) {
+      await pairingEnded(e);
+      return;
+    }
     el('devices-error').textContent = e instanceof Error ? e.message : String(e);
   }
+}
+
+function deviceRow(d: RemoteDeviceInfo, self: boolean): string {
+  const what = d.kind === 'host' ? 'Computer' : 'Browser';
+  const state = d.online ? 'online now' : `last seen ${new Date(d.lastSeen).toLocaleString()}`;
+  return `<div class="device-row"><span>${esc(what)}: ${esc(d.name)}${self ? ' <small class="muted">(this browser)</small>' : ''}<br><small class="muted">${esc(d.platform)} · ${esc(state)}</small></span><button class="danger" data-revoke="${esc(d.deviceId)}">Revoke</button></div>`;
 }
 
 async function onPush(channel: string, payload: unknown): Promise<void> {
@@ -357,14 +693,14 @@ async function onPush(channel: string, payload: unknown): Promise<void> {
         (el('active-title') as HTMLElement).textContent = meta ? `${meta.title} · ${activeStatus}` : '';
         syncControls();
       }
-      await openSession(active);
+      await refreshTranscript();
     }
     return;
   }
   if (channel === 'push:sessionsChanged') {
     sessions = (payload as typeof sessions) ?? sessions;
     renderSessionList();
-    if (active) await openSession(active);
+    if (active) await refreshTranscript();
   }
 }
 
@@ -382,9 +718,14 @@ document.addEventListener('click', (ev) => {
   const target = ev.target as HTMLElement;
   const revoke = target.closest('button[data-revoke]') as HTMLElement | null;
   if (revoke?.dataset.revoke) {
+    const before = client.pairings().length;
     void client
       .revokeDevice(revoke.dataset.revoke)
-      .then(() => refreshDevices())
+      .then(async () => {
+        // Revoking this browser, or a computer it was paired with, ends those pairings here too.
+        if (client.pairings().length < before) await afterPairingRemoved();
+        else await refreshDevices();
+      })
       .catch((e) => {
         el('devices-error').textContent = e instanceof Error ? e.message : String(e);
       });
@@ -398,4 +739,4 @@ document.addEventListener('click', (ev) => {
   if (requestId) void client.invoke('approvals:respond', { sessionId: active, requestId, decision });
 });
 
-boot();
+void boot();

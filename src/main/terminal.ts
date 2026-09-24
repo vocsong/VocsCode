@@ -277,6 +277,26 @@ export class TerminalManager {
     return { snapshot, seq, info: { ...t.info } };
   }
 
+  /**
+   * A read-only, plain-text view of a terminal for a paired browser (docs/REMOTE-ACCESS.md P3.5,
+   * read-only first): the last `maxLines` rows of scrollback and screen once pending output has
+   * reached the headless screen. It never attaches, pauses, resizes or spawns, so a remote viewer
+   * cannot disturb the desktop's own view, its flow control or a restored tab's lazy shell.
+   */
+  async screenText(id: string, maxLines = 200): Promise<{ info: TerminalInfo; lines: string[]; seq: number }> {
+    const t = this.must(id);
+    await new Promise<void>((r) => t.screen.write('', r));
+    if (this.terms.get(id) !== t) throw new Error('Terminal not found');
+    const buffer = t.screen.buffer.active;
+    const lines: string[] = [];
+    for (let i = Math.max(0, buffer.length - Math.min(Math.max(1, Math.floor(maxLines)), 1000)); i < buffer.length; i++) {
+      lines.push(buffer.getLine(i)?.translateToString(true) ?? '');
+    }
+    // The blank rows under the prompt are screen, not output.
+    while (lines.length && !lines[lines.length - 1]) lines.pop();
+    return { info: { ...t.info }, lines, seq: t.seq };
+  }
+
   detach(id: string): void {
     const t = this.terms.get(id);
     if (t) this.release(t);
