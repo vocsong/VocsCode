@@ -1,17 +1,13 @@
-# Deploy only reviewed relay changes, after verifying the exact checkout to be published.
-# Production credentials live in GitHub's protected `relay-production` environment.
+# Deploy the relay with each release, from the same vX.Y.Z tag the installers are built from, so
+# production always speaks the protocol of the released desktop. Verifies the exact checkout
+# before publishing. Credentials live in GitHub's protected `relay-production` environment, which
+# admits release tags only and waits for approval. Every release redeploys (tags skip path filters).
 name: Deploy relay
 
 on:
   push:
-    branches: [develop]
-    paths:
-      - '.github/workflows/deploy-relay.yml'
-      - 'relay/**'
-      - 'src/shared/crypto.ts'
-      - 'src/shared/mirror.ts'
-      - 'src/shared/pairing.ts'
-      - 'src/shared/types.ts'
+    tags: ['v*']
+  # Redeploy or recover a release: gh workflow run deploy-relay.yml --ref vX.Y.Z
   workflow_dispatch:
 
 permissions:
@@ -23,7 +19,7 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.ref == 'refs/heads/develop'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: relay-production
     steps:

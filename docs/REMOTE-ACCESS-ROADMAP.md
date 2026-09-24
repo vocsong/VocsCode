@@ -5,44 +5,43 @@ design and decisions of record** — this file is the working backlog: what is l
 what to do next, in what order, and how each piece is verified. Update it as workstreams land;
 do not restate the design here.
 
-Last reviewed 2026-09-24 against the deployed relay and the implementation branch, PR #407 (which
-completes #394). The first table is **production**; nothing on the branch is live until it is
-merged and deployed.
+Last reviewed 2026-09-25, after #407 (which completes #394) was merged and deployed.
 
 ## 1. Status snapshot
 
-### Production (`code.vocs.io`), probed 2026-09-24
+### Production (`code.vocs.io`), probed 2026-09-25
 
 | Surface | State | How it was verified |
 | --- | --- | --- |
 | `code.vocs.io/` | Landing (Astro, `vocs-code` Worker, custom domain) | `curl` 200 |
-| `code.vocs.io/app` | Web client SPA, **ungated**, pre-#394 build | `/app/` and `/app/app.js` 200; the bundle still puts `token=` in URLs; no CSP header |
-| `code.vocs.io/v1/*` | Relay **predating #394** | `/v1/devices` 401, `/v1/pair/start` 403, `POST /v1/ws/ticket` **404** (the route #394 added) |
-| Pairing → handshake → invoke on production | **Not verified live** | the deployed relay predates the protocol the #394 clients speak, so the deployed smoke cannot pass until the branch is deployed |
+| `code.vocs.io/app` | Web client SPA from #407, **ungated** | `/app/` and `/app/app.js` 200; CSP and the security headers arrive through the landing; no `token=` in the bundle |
+| `code.vocs.io/v1/*` | Relay from #407, deployed 2026-09-25 by the approved `deploy-relay` run 36033701244 | `/v1/devices` 401, `/v1/pair/start` 403, `POST /v1/ws/ticket` 401, `POST /v1/token/challenge` 401 |
+| Pairing → handshake → invoke on production | **Verified live** | `npm run test:remote-live` against `code.vocs.io` executed and passed: pairing, sealed credential, proof-of-possession tokens, handshake, invoke, mirror key, revocation |
 
-The earlier failed run of the deployed smoke is explained by that version gap. It may also have
-left temporary devices, and the pre-#394 relay minted a new host device on **every** pairing (a bug,
-fixed on the branch), so production almost certainly holds orphaned host devices with valid tokens.
-Clean both up after deploying: Settings → Remote access lists every device, and **Revoke all**
-removes everything but the computer pulling it.
+Still to clean up (**user**): the pre-#394 relay minted a new host device on **every** pairing, so
+production almost certainly holds orphaned host devices with valid credentials, plus any the
+earlier failed smoke left. Settings → Remote access lists every device, and **Revoke all** removes
+everything but the computer pulling it. Desktops older than #407 cannot reach this relay until they
+run the new code; they keep their pairings.
 
-### Implementation branch (PR #407, completing #394)
+### What #407 delivered
 
-Every roadmap item below that does not need a credential, a production action or the separate
-`vocs.io` repo is implemented and verified: offline suites, the Hub in workerd
-(`npm run test:relay-do`), the full flow against the real Worker in local workerd on every
-`npm test` (`tests/remote-workerd.test.ts`), and the web app in a real browser (`e2e.remote-web`).
+Every roadmap item that does not need a credential, a production action or the separate `vocs.io`
+repo is implemented, verified and live. Verification covered the offline suites, the Hub in
+workerd (`npm run test:relay-do`), the full flow against the real Worker in local workerd on every
+`npm test` (`tests/remote-workerd.test.ts`), the web app in a real browser (`e2e.remote-web`), and
+the deployed smoke.
 
-| Roadmap item | Implemented on the branch | Still needs (owner) |
+| Roadmap item | Delivered | Still needs (owner) |
 | --- | --- | --- |
 | §2.1 Login gate | Landing gate staged disabled in vocs.io #27; the web app shows the account and a separate sign-out | GitHub OAuth app, landing secrets, review/merge #27, enable, live allow/deny/logout check (**user**) |
-| §2.2 CI flakes | Timer attribution, analytics recovery, subagent cap race | a green post-merge CI run |
-| §2.3 Deploy loop | Protected `deploy-relay` workflow, now also running the local-workerd flow; rollback runbook | `relay-production` secrets, merge vocs.io #26, first workflow run (**user**); `workers_dev: false` after the gate is live and clients use `code.vocs.io` |
-| §2.4 Live path testable | Opt-in deployed smoke; the same flow against local workerd in `npm test`; real-browser e2e; 14 workerd DO tests. These found three runtime bugs no fake could (§2.4) | a deploy, then `npm run test:remote-live` against `code.vocs.io` (**user**) |
-| §2.5.1 PoP / short-lived tokens | Refresh credential + signed challenge → 1 h access token everywhere; sealed pairing delivery (no plaintext bearer at rest); non-extractable browser keys in IndexedDB with one-way migration | security review of the branch |
-| §2.5.2 CSP | Restrictive `_headers` policy, no-store bundle; verified in a real browser with zero violations | assert on the deployed origin |
-| §2.5.3 Edge rate limits | Workers Rate Limiting on pairing and token endpoints before the Hub (namespaces 4101–4103) | none beyond deploy |
-| §2.5.4 Mirror key lifecycle | Re-keyed whenever a browser that held it loses its pairing (revoke here or elsewhere, kill switch); mirror enable/disable audited | none beyond deploy |
+| §2.2 CI flakes | Timer attribution, analytics recovery, subagent cap race; post-merge CI on `develop` green | — |
+| §2.3 Deploy loop | Protected `deploy-relay` workflow, run from release tags with approval; first deploy done; rollback runbook | merge vocs.io #26; `workers_dev: false` after the gate is live and clients use `code.vocs.io` |
+| §2.4 Live path testable | Deployed smoke passing against production; the same flow against local workerd in `npm test`; real-browser e2e; 14 workerd DO tests. These found three runtime bugs no fake could (§2.4) | — |
+| §2.5.1 PoP / short-lived tokens | Refresh credential + signed challenge → 1 h access token everywhere; sealed pairing delivery (no plaintext bearer at rest); non-extractable browser keys in IndexedDB with one-way migration | — |
+| §2.5.2 CSP | Restrictive `_headers` policy, no-store bundle; zero violations in a real browser; served on the deployed origin | recheck with a login cookie once the gate is on |
+| §2.5.3 Edge rate limits | Workers Rate Limiting on pairing and token endpoints before the Hub (namespaces 4101–4103) | — |
+| §2.5.4 Mirror key lifecycle | Re-keyed whenever a browser that held it loses its pairing (revoke here or elsewhere, kill switch); mirror enable/disable audited | — |
 | §2.5.5 `ENROLL_TOKEN` rotation | Enrolled desktops pair with their own credential, so rotation strands no paired computer; runbook rewritten | a production rotation rehearsal (**user**, optional) |
 | §2.5 extras | Kill switch (Revoke all), device cap (10 browsers / 5 computers), revoking a desktop cascades to its browsers and drops its mirror, host device reused across pairings, remote push allowlist | — |
 | §2.6 QR pairing | In-house QR encoder (no runtime dependency) in Settings; link follows the configured relay | — |
@@ -51,9 +50,8 @@ Every roadmap item below that does not need a credential, a production action or
 | §2.6 P3.5 terminal | Read-only first: plain-text terminal view polled while open; nothing typed, resized or attached | read/write: input, streaming output, coalescing, ack windows, snapshot-on-reconnect mid-PTY (next phase) |
 | §2.7 Cloud/product | Account-keyed primitives only | separate program by design, not a launch requirement |
 
-**Release verdict: ready for review, not for launch.** Merging needs a security review (auth,
-tokens, keys). Launch needs the deploy, a green deployed smoke, the production cleanup above and
-the login gate — each an action only the user can take.
+**Status: live, not launched.** Launch needs the production cleanup above and the login gate —
+actions only the user can take.
 
 ## 2. Workstreams
 
@@ -94,26 +92,31 @@ new `/v1/token*`, `/v1/devices/revoke-all` and `/v1/mirrors` routes with no land
 expiry, app/assets and WebSocket pass-through. Test the redirect in the Worker and on a
 preview/live origin; OAuth credentials and the live flow remain required before enabling.
 
-### 2.2 Fix the flaky tests first — done on the branch
+### 2.2 Fix the flaky tests first — done
 
 - `tests/knowledge-anchors.test.ts`: timeout attribution uses the race winner.
 - `tests/analytics.test.ts`: asserts the persisted recovery, not a rename count.
 - `tests/subagent-extension.test.ts`: waits for all reserved slots before the cap assertion.
 
-Verify CI after merge.
+Post-merge CI on `develop` passed (run 36020242688).
 
 ### 2.3 Close the deploy loop
 
 - **Merge vocs.io #26 and `npm run deploy:code`** — the dead `/ws/*` forwarding rule currently
   exists only in the repo; deploying keeps the config and the deployed Worker in step.
-- **Relay deploy automation chosen:** `.github/workflows/deploy-relay.yml` on reviewed `develop`
-  pushes and explicit dispatch. Before uploading it typechecks, runs the relay suites including the
-  full flow against the checkout's own Worker in local workerd, runs the workerd DO suite, checks the
-  bundle is current and dry-runs. Provision the protected `relay-production` environment's
-  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets first; missing credentials fail it.
-- **Ship relay and desktop together.** The branch's protocol (access tokens, sealed pairing,
-  socket tickets) is incompatible with the deployed relay. Existing pairings survive: their stored
-  token becomes their refresh credential, and browsers migrate their keys on the next load.
+- **Relay deploys run from release tags — done.** `.github/workflows/deploy-relay.yml` starts on
+  the `vX.Y.Z` tag push that also builds the installers (or an explicit dispatch on a tag), and
+  publishes after approval in the protected `relay-production` environment, which admits release
+  tags only and holds the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets. Before
+  uploading it typechecks, runs the relay suites including the full flow against the checkout's own
+  Worker in local workerd, runs the workerd DO suite, checks the bundle is current and dry-runs.
+  Because the production relay follows releases, not `develop`, it always speaks the released
+  desktop's protocol ([RELEASING.md](./RELEASING.md#shipping-a-release) step 4).
+- **The #407 protocol went live on 2026-09-25, ahead of a release**, by an approved dispatch from
+  `develop`: only desktops holding the enrollment secret can use the relay, so the only clients
+  affected were the owner's. Desktops older than #407 cannot connect until they run the new code;
+  their pairings survive (the stored token becomes the refresh credential), and browsers migrate
+  their keys on the next load.
 - **`workers_dev: false`** once login covers `/app` and desktops point at `code.vocs.io` — until then
   the relay is also reachable on `*.workers.dev`, which serves the same code and CSP but no gate.
 - Runbooks: `relay/README.md` and [OPERATIONS.md](./OPERATIONS.md).
@@ -136,12 +139,12 @@ when the test relay re-implemented routing. Now:
 - **A real browser.** `e2e.remote-web` (in `test:e2e:ci`) drives the web app in Electron's Chromium
   against that local relay. Reverting the socket's pre-OPEN queue — the browser bug #394 found by
   hand — turns it red.
-- **The deployed smoke** (`npm run test:remote-live`) runs the same flow against a real origin. It
-  must be run after the deploy; until then production is unverified.
+- **The deployed smoke** (`npm run test:remote-live`) runs the same flow against a real origin.
+  It passed against `code.vocs.io` on 2026-09-25; run it after every relay or landing deploy.
 
 ### 2.5 Security backlog
 
-All items are implemented on the branch; none is deployed.
+All items are live since 2026-09-25.
 
 1. **Short-lived access tokens + proof of possession.** Pairing gives each device a refresh
    credential that authorizes nothing by itself. A device signs a one-time relay challenge with its
@@ -151,8 +154,8 @@ All items are implemented on the branch; none is deployed.
    non-extractable CryptoKeys in IndexedDB, and a page with no IndexedDB refuses to pair rather than
    fall back to exportable keys.
 2. **CSP on `/app`.** `relay/public/_headers`: restrictive policy, `Cache-Control: no-store` for the
-   unversioned bundle. Verified with zero violations in a real browser; assert on the deployed
-   origin after deploy.
+   unversioned bundle. Zero violations in a real browser, and served on the deployed origin; recheck
+   with a login cookie once the gate is on.
 3. **Edge rate limiting.** Workers Rate Limiting bindings guard `pair/start`, `pair/claim`,
    `pair/poll` and the token endpoints before a request can wake the Hub; the counters survive the
    Hub hibernating, which resets its in-memory limiter. Token endpoints key on device and address.
@@ -197,13 +200,12 @@ unvalidated names and keys.
 
 ## 3. Order of operations
 
-1. **Review and merge #407** (security review: tokens, keys, sealing, revocation). It contains
-   #394, which it supersedes.
-2. **Provision** `relay-production` secrets; **deploy** the relay (workflow or runbook) and release
-   the desktop update together.
-3. **Verify live:** Appendix A, then `npm run test:remote-live` against `code.vocs.io`.
+1. ~~Review and merge #407~~ — merged 2026-09-24 (`cd18ac7`); it superseded #394.
+2. ~~Provision `relay-production`, deploy~~ — secrets provisioned, approval required; deployed
+   2026-09-25.
+3. ~~Verify live~~ — Appendix A and `npm run test:remote-live` passed against `code.vocs.io`.
 4. **Clean up production:** revoke orphaned host devices and smoke leftovers (Settings → Remote
-   access; Revoke all if in doubt).
+   access; Revoke all if in doubt), after updating each desktop to the new code.
 5. **Login gate:** create the OAuth app, review/merge vocs.io #26 and #27, enable, verify live, then
    flip `remote.status`.
 6. **`workers_dev: false`** once every desktop points at `code.vocs.io`.
@@ -216,7 +218,7 @@ unvalidated names and keys.
 | --- | --- | --- | --- |
 | 1 | Create the GitHub OAuth app (callback `https://code.vocs.io/auth/callback`, scope `read:user`) | user | open |
 | 2 | Login scope: access gate on the single account, or per-account isolation now | user | access gate staged; per-account is §2.7 |
-| 3 | Relay deploys: CI workflow or manual runbook | — | workflow, with the manual runbook for recovery |
+| 3 | Relay deploys: CI workflow or manual runbook, from which ref | user | workflow from release tags with approval; manual runbook for recovery |
 | 4 | Keep `workers.dev` public for debugging | user | keep until login and client migration, then off |
 | 5 | QR renderer: a runtime dependency, or code-as-URL only | — | resolved: in-house encoder, no runtime dependency |
 | 6 | Device cap | — | ten browsers and five computers per account; change `MAX_WEB_DEVICES` / `MAX_HOST_DEVICES` |
@@ -225,8 +227,8 @@ unvalidated names and keys.
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Relay and desktop deployed out of step | New clients fail against an old relay (as the first deployed smoke did) | ship together (§2.3); the deploy workflow runs the full flow against its own Worker first |
-| Manual relay deploys drift from `develop` | Production runs unreviewed or stale code | §2.3 workflow |
+| Relay and desktop deployed out of step | Released desktops fail against a newer or older relay (as the first deployed smoke did) | the relay deploys from the release tag (§2.3); the workflow runs the full flow against its own Worker first |
+| Production relay drifts from the release | Production runs unreleased or stale code | deploys only from release tags, with approval (§2.3) |
 | Orphaned devices in production | Valid tokens for devices nobody holds | §3 step 4 cleanup; the kill switch |
 | Single-account login gives no isolation | A second person shares one device registry | §2.7 before inviting anyone |
 | XSS on the app origin | Can use (not steal) the browser's keys while the page is open | CSP (§2.5.2); non-extractable keys; one-hour access tokens |
@@ -264,8 +266,9 @@ Then run `npm run test:remote-live` against the origin (it must execute, not ski
 ## Appendix B — deploy runbook
 
 ```bash
-# Relay (Vocs-Code repo) — normal path: the protected deploy-relay workflow on develop;
-# manual recovery only, after the suites and dry-run in relay/README.md
+# Relay (Vocs-Code repo) — normal path: the release tag starts the protected deploy-relay
+# workflow; approve it in Actions. Redeploy a release: gh workflow run deploy-relay.yml --ref vX.Y.Z
+# Manual recovery only, from the release tag's checkout, after the suites and dry-run in relay/README.md
 cd relay && npx wrangler deploy
 npx wrangler secret put ENROLL_TOKEN          # first setup or rotation; enter the value at its prompt
 
