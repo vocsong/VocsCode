@@ -60,6 +60,13 @@ async function diskCopies(id: string): Promise<TranscriptItem[]> {
   return raw.split('\n').filter(Boolean).map((line) => JSON.parse(line) as TranscriptItem).filter((item) => item.id === id);
 }
 
+async function startStream(live: SessionManager, text: string): Promise<void> {
+  await live.send('s', { text });
+  // Settle the metadata write before the fake-clock checkpoint and the second store race
+  // over sessions.json; a Windows rename retry on a fake timer would hang teardown.
+  await live.flushPendingPersists();
+}
+
 beforeEach(async () => {
   vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-stream-checkpoint-'));
@@ -98,7 +105,7 @@ afterEach(async () => {
 
 it('recovers the partial answer of a stream that crashed mid-response, no longer streaming', async () => {
   const live = manager();
-  await live.send('s', { text: 'explain' });
+  await startStream(live, 'explain');
   context.emit({ type: 'item.delta', id: 'a1', thinkingDelta: 'weighing it' });
   context.emit({ type: 'item.delta', id: 'a1', textDelta: 'The answer is' });
   // Deltas arrived, then the stream went quiet: the timer must still save what was said.
@@ -115,7 +122,7 @@ it('recovers the partial answer of a stream that crashed mid-response, no longer
 
 it('saves a partial answer as final when the session stops before any checkpoint', async () => {
   const live = manager();
-  await live.send('s', { text: 'explain' });
+  await startStream(live, 'explain');
   context.emit({ type: 'item.delta', id: 'a1', textDelta: 'Half an ans' });
   expect(await diskCopies('a1')).toEqual([]);
   const { pushEvent } = lastDeps;
@@ -132,7 +139,7 @@ it('saves a partial answer as final when the session stops before any checkpoint
 
 it('bounds checkpoint writes for a long stream by interval and geometric growth', async () => {
   const live = manager();
-  await live.send('s', { text: 'write a lot' });
+  await startStream(live, 'write a lot');
   const chunk = 'x'.repeat(50);
   // Ten minutes of a delta every 100 ms: 6000 deltas, 300 000 characters.
   for (let i = 0; i < 6_000; i++) {
@@ -158,7 +165,7 @@ it('bounds checkpoint writes for a long stream by interval and geometric growth'
 it('settles a checkpoint left streaming by an earlier run while a new run is live', async () => {
   await store.appendTranscript('s', { id: 'old', kind: 'assistant', ts: 0, text: 'cut off', streaming: true });
   const live = manager();
-  await live.send('s', { text: 'next' });
+  await startStream(live, 'next');
   context.emit({ type: 'item.delta', id: 'a1', textDelta: 'still going' });
   const items = await live.transcript('s');
   expect(items.find((item) => item.id === 'old')).toMatchObject({ streaming: false, text: 'cut off' });
@@ -171,7 +178,7 @@ it.each([
   ['the harness fails fatally', { type: 'error', message: 'engine crashed', fatal: true }],
 ] as const)('saves the partial answer as final when %s', async (_case, event) => {
   const live = manager();
-  await live.send('s', { text: 'explain' });
+  await startStream(live, 'explain');
   context.emit({ type: 'item.delta', id: 'a1', textDelta: 'Partly there' });
   context.emit(event);
   // The flush runs in the background of the event; the store's queue orders the read after it.
@@ -185,7 +192,7 @@ it.each([
 
 it('keeps checkpointing after a failed checkpoint write and recovers the later copy', async () => {
   const live = manager();
-  await live.send('s', { text: 'explain' });
+  await startStream(live, 'explain');
   const append = store.appendTranscript.bind(store);
   let failures = 0;
   vi.spyOn(store, 'appendTranscript').mockImplementation(async (id, item) => {
