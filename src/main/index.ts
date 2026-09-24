@@ -35,6 +35,7 @@ import { electronUpdaterFacade } from './updater-electron';
 import { RemoteHost } from './remote/host';
 import { RemoteAudit } from './remote/audit';
 import { RemoteMirror } from './remote/mirror';
+import { relayUrl } from './remote/relay-url';
 import { WebServer } from './web-server';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -380,11 +381,11 @@ async function main(): Promise<void> {
   });
   registryRef = registry;
 
-  // Resume remote access across restarts when it was left enabled.
+  // Resume remote access across restarts when it was left enabled; the relay is always relayUrl().
   const remoteConfig = settings.get().remote;
-  if (remoteConfig?.enabled && remoteConfig.relayUrl) {
+  if (remoteConfig?.enabled) {
     const enrollToken = await secrets.get('remote-enroll');
-    if (enrollToken) await remoteHost.enable(remoteConfig.relayUrl, enrollToken);
+    if (enrollToken) await remoteHost.enable(relayUrl(), enrollToken);
     // The mirror resumes with it, reading the last snapshots back up from the same store.
     if (remoteConfig.mirror) remoteMirror?.sync();
   }
