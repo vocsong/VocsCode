@@ -208,7 +208,7 @@ root of trust.)
 | Web device | device id + human name ("Chrome on Windows"), one per paired computer | P-256 ECDSA + ECDH | non-extractable CryptoKeys in IndexedDB |
 | Relay | routing registry | public keys, refresh- and access-token hashes; an approved poll record holds the browser's credential sealed to its key, never in plaintext | DO storage (Workers) |
 
-**Token model (implemented on this branch; not yet deployed).** After pairing, each device holds a
+**Token model (live since 2026-09-25).** After pairing, each device holds a
 random 256-bit **refresh credential**; the relay stores only its hash, and it authorizes no API
 call by itself. To act, a device asks for a one-time challenge (`POST /v1/token/challenge`, the
 refresh credential in Authorization), signs it with its device key
@@ -260,16 +260,17 @@ A login gate is **not yet live**: `/app` is currently public. `remote.status` st
 `in-development` so landing CTAs remain inert until GitHub OAuth is provisioned, the
 landing Worker gate is enabled and verified, and the direct Worker bypass is resolved.
 
-A **deploy workflow is proposed locally** for reviewed `develop` changes with a protected
-production environment. Until its credentials are provisioned and it runs, relay deploys
-remain manual and merged changes are not necessarily live.
+Relay deploys run from **release tags**: `.github/workflows/deploy-relay.yml` publishes from the
+`vX.Y.Z` tag the installers are built from, after approval in the protected `relay-production`
+environment, so the production relay speaks the released desktop's protocol. `develop` merges
+are not live until a release ships them.
 
-Implemented on this branch, verified against the real Worker in local workerd and in a real
-browser, **not yet deployed**: the token model above; non-extractable browser keys; a per-account
-device cap; the kill switch; mirror re-keying on revocation; QR pairing; the multi-computer web
-client; tail-first transcripts; a read-only terminal view (P3.5, step one); edge rate limits.
-Remaining: activate the login gate (needs a GitHub OAuth app for `code.vocs.io`), deploy and run
-the deployed smoke, then interactive terminal (P3.5 read/write). The login code lives in the
+**Live since 2026-09-25** (#407, deployed through that workflow; the live checklist and the
+deployed smoke passed against `code.vocs.io`): the token model above; non-extractable browser
+keys; a per-account device cap; the kill switch; mirror re-keying on revocation; QR pairing; the
+multi-computer web client; tail-first transcripts; a read-only terminal view (P3.5, step one);
+edge rate limits. Remaining: activate the login gate (needs a GitHub OAuth app for
+`code.vocs.io`), then interactive terminal (P3.5 read/write). The login code lives in the
 **landing Worker**, not the relay's `/v1` route table: the latter receives only paths stripped of
 `/v1`. The gate is an access screen for the single account, not per-account isolation or a
 replacement for paired-device authorization.
@@ -324,7 +325,7 @@ Web (browser)                Relay                      Desktop (host)
    → shared symmetric key `K`. The relay sees public handshake metadata but never
    derives `K`.
 6. **Live.** Every payload frame after that is AEAD-encrypted (AES-256-GCM) with
-   `K`; the current implementation branch also enforces inbound counters against replay. The relay routes on
+   `K`; receivers also enforce inbound counters against replay. The relay routes on
    `{account, device, seq}` metadata only: it can see *that* you chat, never *what*.
 
 | Step | Why it exists |
@@ -340,7 +341,7 @@ Web (browser)                Relay                      Desktop (host)
 - Accounts, devices (id, name, platform, public keys, token hashes, last seen, status)
   — held in Durable Object storage on the existing vocs.io Cloudflare account.
 - Routing state: which desktop is online for which account; short-lived queues of
-  *encrypted* payloads pending delivery. On this branch, one hashed, expiring, single-use
+  *encrypted* payloads pending delivery. One hashed, expiring, single-use
   WebSocket upgrade ticket per paired browser is also stored until consumed or replaced.
 - Pairing codes, as plaintext lookup keys with an enforced TTL and single-use state. Hashing a
   40-bit code at rest would not resist offline guessing, and a code alone cannot pair (the
@@ -391,7 +392,7 @@ Web (browser)                Relay                      Desktop (host)
 | New browser on same machine | New pairing: fresh code + desktop confirm — no codeless/auto path in v1 (codeless-with-confirm is a v2 convenience) |
 | Desktop reinstall / wiped userData | New desktop identity; revoke the old device from the web account page |
 | Desktop offline during claim | No pending pairing request is queued in v1; the claim expires and must be restarted while the desktop is online |
-| Replayed/late frames | AEAD authenticates content; host and web receiver counter checks reject duplicate or stale ciphertext in the current implementation branch (not yet deployed) |
+| Replayed/late frames | AEAD authenticates content; host and web receiver counter checks reject duplicate or stale ciphertext |
 | Lost device | Revoke from desktop or web account page to invalidate it at the relay; the desktop re-keys the mirror and re-uploads it, so the lost browser's old key opens nothing new |
 
 ### 6.7 UI touchpoints
@@ -438,7 +439,7 @@ security bar must go up, not sideways:
   and shows a persistent indicator; the toggle closes active desktop sessions but
   does not revoke tokens or delete a stored mirror.
 - **Transport.** TLS + e2e payload encryption; replayed ciphertext is rejected, and API access
-  needs short-lived proof-of-possession tokens (on this branch, not yet deployed).
+  needs short-lived proof-of-possession tokens.
 
 ## 8. The honest list of hard problems
 
