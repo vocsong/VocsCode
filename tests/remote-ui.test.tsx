@@ -31,19 +31,21 @@ const baseSettings = {
   customShortcuts: {},
   folders: [],
   terminal: { shell: 'auto', customShellPath: '', customShellArgs: [], fontSize: 13, scrollback: 1000, cursorStyle: 'block', cursorBlink: true },
-  remote: { enabled: true, relayUrl: 'https://relay.example' }
+  remote: { enabled: true }
 } as unknown as AppSettings;
 
 function remoteResult(viewOnly: boolean, audit: RemoteAuditEntry[] = [], extra: Partial<RemoteState> = {}) {
   const state: RemoteState = { status: 'online', onlineClients: ['w_1'], viewOnly, ...extra };
   return {
-    config: { enabled: true, relayUrl: 'https://relay.example', viewOnly },
+    config: { enabled: true, viewOnly },
     state,
     devices: [
       { deviceId: 'h_1', kind: 'host', name: 'Work PC', platform: 'win32', lastSeen: Date.now() },
       { deviceId: 'w_1', kind: 'web', name: 'Chrome', platform: 'web', lastSeen: Date.now() }
     ],
-    audit
+    audit,
+    // The relay main reports; the panel offers no way to change it.
+    relayUrl: 'https://relay.example'
   };
 }
 
@@ -70,6 +72,25 @@ afterEach(() => {
 });
 
 describe('remote access settings (P4)', () => {
+  it('connects with only the enrollment secret and names the relay it uses', async () => {
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'remote:get') return Promise.resolve({ config: { enabled: false }, state: { status: 'off' }, devices: [], audit: [], relayUrl: 'https://code.vocs.io' });
+      return Promise.resolve({ status: 'connecting' });
+    });
+    useStore.setState({ settings: { ...baseSettings, remote: { enabled: false } } as AppSettings });
+    render(<SettingsView />);
+    fireEvent.click(screen.getByText('Remote access'));
+    await vi.waitFor(() => expect(screen.getByTestId('remote-relay').textContent).toBe('code.vocs.io'));
+    // There is no relay URL to type: the secret alone enables Connect.
+    expect(screen.queryByTestId('remote-relay-url')).toBeNull();
+    const connect = screen.getByTestId('remote-connect') as HTMLButtonElement;
+    expect(connect.disabled).toBe(true);
+    fireEvent.change(screen.getByTestId('remote-enroll'), { target: { value: ' enroll-secret ' } });
+    expect(connect.disabled).toBe(false);
+    fireEvent.click(connect);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:enable', { enrollToken: 'enroll-secret' }));
+  });
+
   it('renders the audit feed and clears it on demand', async () => {
     renderRemote([
       { at: Date.now(), action: 'pair-approve', device: 'w_1' },
@@ -104,7 +125,7 @@ describe('remote access settings (P4)', () => {
   it('shows a live pairing code as a link and a QR code that both open this relay', async () => {
     renderRemote([], false, { pairing: { code: 'ABCD2345', expiresAt: Date.now() + 120_000 } });
     const link = (await screen.findByTestId('remote-pair-link')) as HTMLInputElement;
-    // The page claims against its own origin, so the link must be the configured relay's.
+    // The page claims against its own origin, so the link must be the relay main reports.
     expect(link.value).toBe('https://relay.example/app?code=ABCD2345');
     const qr = screen.getByTestId('remote-pair-qr');
     const extent = Number(qr.getAttribute('viewBox')?.split(' ')[2]);
