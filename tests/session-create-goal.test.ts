@@ -19,11 +19,14 @@ type AnyRecord = Record<string, any>;
 
 const mocks = vi.hoisted(() => ({
   /** Every input the manager handed an adapter, in order. */
-  sent: [] as { harness: HarnessId; input: UserInput }[]
+  sent: [] as { harness: HarnessId; input: UserInput }[],
+  contexts: new Map<string, HarnessContext>(),
+  disposed: [] as string[]
 }));
 
 vi.mock('../src/main/harness/registry', () => ({
   createAdapter: (id: HarnessId, ctx: HarnessContext) => {
+    mocks.contexts.set(ctx.sessionId, ctx);
     const adapter: HarnessAdapter = {
       id,
       get busy() {
@@ -37,7 +40,7 @@ vi.mock('../src/main/harness/registry', () => ({
       setModel: async () => undefined,
       setEffort: async () => undefined,
       setPermissionMode: async () => undefined,
-      dispose: async () => undefined,
+      dispose: async () => { mocks.disposed.push(ctx.sessionId); },
       _ctx: ctx
     } as unknown as HarnessAdapter;
     return adapter;
@@ -64,14 +67,16 @@ async function configDirWithGoalSkill(): Promise<string> {
 
 beforeEach(() => {
   mocks.sent.length = 0;
+  mocks.contexts.clear();
+  mocks.disposed.length = 0;
   delete process.env.CLAUDE_CONFIG_DIR;
 });
 afterEach(() => {
   delete process.env.CLAUDE_CONFIG_DIR;
 });
 
-async function makeManager(overrides: Partial<ReturnType<typeof defaultSettings>> = {}): Promise<SessionManager> {
-  const dir = path.join(tmpRoot, `store${++counter}`);
+async function makeManager(overrides: Partial<ReturnType<typeof defaultSettings>> = {}, existingDir?: string): Promise<SessionManager> {
+  const dir = existingDir ?? path.join(tmpRoot, `store${++counter}`);
   const store = new SessionStore(dir);
   await store.load();
   // No providers keeps the one-shot title call offline; it never runs in these tests anyway.
@@ -149,5 +154,92 @@ describe('session create with a goal', () => {
 
     expect(meta.nativeGoal).toBeUndefined();
     expect(meta.goal).toMatchObject({ objective: 'ship the release' });
+  });
+
+  it.each(['completed', 'interrupted', 'failed'] as const)('delivers a goal set during a %s turn exactly once, even without auto-continuation', async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      const manager = await makeManager();
+      const meta = await create(manager, 'native', { goal: undefined });
+      await manager.send(meta.id, { text: 'Work on the old task' });
+      const ctx = mocks.contexts.get(meta.id)!;
+      ctx.emit({ type: 'status', status: 'running' });
+      await manager.goal(meta.id, 'set', { objective: 'Fix the new task', autoContinue: false });
+      expect(mocks.sent.map((s) => s.input.text)).toEqual(['Work on the old task']);
+
+      // The old reply must not finish the newly set goal, even if it ends with the token.
+      ctx.emit({ type: 'item.upsert', item: { id: 'old-answer', kind: 'assistant', ts: Date.now(), text: 'Old task done. GOAL_COMPLETE' } });
+      ctx.emit({ type: 'item.upsert', item: { id: 'old-turn', kind: 'turn', ts: Date.now(), status: outcome } });
+      expect(meta.goal?.status).toBe('active');
+      expect(meta.goal?.iterations).toBe(0);
+      ctx.emit({ type: 'status', status: 'idle' });
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(mocks.sent).toHaveLength(2);
+      expect(mocks.sent[1].input.text).toContain('Fix the new task');
+      expect(mocks.sent[1].input.text).toContain('GOAL_COMPLETE');
+      expect((await manager.transcript(meta.id)).filter((item) => item.kind === 'user' && item.text.includes('Fix the new task'))).toHaveLength(1);
+      expect(meta.goal).toMatchObject({ status: 'active', iterations: 0, autoContinue: false });
+      // The kickoff can finish without an answer; the old turn's GOAL_COMPLETE cannot be reused.
+      ctx.emit({ type: 'item.upsert', item: { id: 'kickoff-turn', kind: 'turn', ts: Date.now(), status: 'completed' } });
+      ctx.emit({ type: 'status', status: 'idle' });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(meta.goal).toMatchObject({ status: 'active', iterations: 0 });
+      expect(mocks.sent).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('recovers a pending goal after stop and restart only when explicitly resumed', async () => {
+    vi.useFakeTimers();
+    try {
+      const dir = path.join(tmpRoot, `restart${++counter}`);
+      const manager = await makeManager({}, dir);
+      const meta = await create(manager, 'native', { goal: undefined });
+      await manager.send(meta.id, { text: 'Old task' });
+      const ctx = mocks.contexts.get(meta.id)!;
+      ctx.emit({ type: 'status', status: 'running' });
+      await manager.goal(meta.id, 'set', { objective: 'Continue after restart', autoContinue: false });
+      await manager.stop(meta.id);
+      expect(mocks.disposed).toEqual([meta.id]);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(mocks.sent).toHaveLength(1);
+
+      const restored = await makeManager({}, dir);
+      expect(restored.get(meta.id)?.goal).toMatchObject({ objective: 'Continue after restart', status: 'active' });
+      await restored.goal(meta.id, 'resume', {});
+      expect(mocks.sent).toHaveLength(2);
+      expect(mocks.sent[1].input.text).toContain('Resuming the goal: Continue after restart');
+      expect((await restored.transcript(meta.id)).filter((item) => item.kind === 'user' && item.text.includes('Continue after restart'))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replaces a pending goal when it is reset during the old turn and does not deliver one after pause', async () => {
+    vi.useFakeTimers();
+    try {
+      const manager = await makeManager();
+      const meta = await create(manager, 'native', { goal: undefined });
+      await manager.send(meta.id, { text: 'Old task' });
+      const ctx = mocks.contexts.get(meta.id)!;
+      ctx.emit({ type: 'status', status: 'running' });
+      await manager.goal(meta.id, 'set', { objective: 'First objective' });
+      await manager.goal(meta.id, 'set', { objective: 'Second objective' });
+      ctx.emit({ type: 'status', status: 'idle' });
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(mocks.sent).toHaveLength(2);
+      expect(mocks.sent[1].input.text).toContain('Second objective');
+      expect(mocks.sent[1].input.text).not.toContain('First objective');
+
+      ctx.emit({ type: 'status', status: 'running' });
+      await manager.goal(meta.id, 'set', { objective: 'Paused objective' });
+      await manager.goal(meta.id, 'pause', {});
+      ctx.emit({ type: 'status', status: 'idle' });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(mocks.sent).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

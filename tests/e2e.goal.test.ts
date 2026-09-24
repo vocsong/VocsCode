@@ -101,6 +101,13 @@ describe.runIf(enabled)('electron e2e: delegated /goal', () => {
     expect(await win.locator('.goal').getByText('Restart goal').count()).toBe(1);
     expect(await win.locator('.goal').getByText('Iteration guard').count()).toBeGreaterThan(0);
 
+    // A mid-session /goal command is handled by the app, not forwarded as a literal harness
+    // command: the objective changes and a separate kickoff appears in the transcript.
+    await win.locator('.composer textarea').fill('/goal fix mid-session delivery');
+    await win.locator('.composer textarea').press('Enter');
+    await expect.poll(() => win.locator('.goal textarea').inputValue()).toBe('fix mid-session delivery');
+    await win.getByText(/You have a persistent goal for this session:/).waitFor({ timeout: 30_000 });
+
     // And back: the delegated state is per session, not a one-way switch.
     await win.getByTestId('session-row').filter({ hasText: 'Harness goal' }).click();
     await win.locator('.goal').getByText(/belongs to Claude Agent SDK/).waitFor({ timeout: 30_000 });
