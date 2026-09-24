@@ -89,9 +89,27 @@ interface ActiveSession {
   autoCompactionWindow: number | undefined;
   /** Pending or waiting goal auto-continuation, so a newer turn can replace it instead of racing it. */
   goalContinuationTimer: NodeJS.Timeout | null;
+  /** Last on-disk copy of each still-streaming assistant item: when it was written and how big it was. */
+  checkpoints: Map<string, StreamCheckpoint>;
+  /** Wakes the checkpointer when an item has grown enough but was written too recently. */
+  checkpointTimer: NodeJS.Timeout | null;
+}
+
+interface StreamCheckpoint {
+  at: number;
+  size: number;
 }
 
 const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
+/**
+ * A streaming answer lives in memory until it settles, so a crash would lose all of it. It is
+ * checkpointed to the transcript no more often than this, and only once its text and thinking have
+ * grown by STREAM_CHECKPOINT_GROWTH of the last copy: every checkpoint appends the whole item, and
+ * geometric growth keeps the bytes written under (1 + 1/growth)× the final size however long it
+ * streams. A crash loses at most the last interval of text or its last fifth, whichever is more.
+ */
+const STREAM_CHECKPOINT_MS = 2_000;
+const STREAM_CHECKPOINT_GROWTH = 0.25;
 const AUTO_COMPACTION_RETRY_MS = 30_000;
 /** A goal continuation lands on the first free moment; a compaction can hold the session for minutes. */
 const GOAL_CONTINUATION_RETRY_MS = 5_000;
@@ -624,8 +642,11 @@ export class SessionManager {
 
   transcript(id: string): Promise<TranscriptItem[]> {
     if (!this.get(id)) return Promise.reject(new Error('Session not found'));
-    return this.deps.store.readTranscript(id).then((items) => {
+    return this.deps.store.readTranscript(id).then((stored) => {
       const live = this.active.get(id)?.liveItems;
+      // A persisted answer still marked streaming is a checkpoint from a run that ended before it
+      // finished (a crash, or an older build); only the live copy can still be streaming.
+      const items = stored.map((i) => (i.kind === 'assistant' && i.streaming && !live?.has(i.id) ? { ...i, streaming: false } : i));
       if (!live) return items;
       // Overlay in-memory streaming state.
       const map = new Map(items.map((i) => [i.id, i]));
@@ -730,7 +751,9 @@ export class SessionManager {
       autoCompactionRetryTimer: null,
       compactionInFlight: null,
       autoCompactionWindow: undefined,
-      goalContinuationTimer: null
+      goalContinuationTimer: null,
+      checkpoints: new Map(),
+      checkpointTimer: null
     };
     this.active.set(id, active);
     meta.status = 'starting';
@@ -835,6 +858,7 @@ export class SessionManager {
     // Context is now safely at the same boundary, so the persistence rewrite cannot diverge.
     active.liveItems.clear();
     active.dirty.clear();
+    this.resetCheckpoints(active);
     active.lastAssistantText = '';
     await this.deps.store.rewriteTranscript(id, [...items.slice(0, index), revised]);
     // A re-sent prompt is a user message too, so the sidebar treats this as its latest one.
@@ -947,7 +971,7 @@ export class SessionManager {
     if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
     if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
     this.active.delete(id);
-    await this.flushLive(id, active);
+    await this.flushLive(id, active, true);
     try {
       await active.adapter.dispose();
     } catch (e) {
@@ -1178,7 +1202,10 @@ export class SessionManager {
   async clearTranscript(id: string): Promise<void> {
     if (!this.get(id)) throw new Error('Session not found');
     const active = this.active.get(id);
-    if (active) active.liveItems.clear();
+    if (active) {
+      active.liveItems.clear();
+      this.resetCheckpoints(active);
+    }
     await this.deps.store.rewriteTranscript(id, []);
     this.deps.log('info', `[${id}] transcript cleared`);
   }
@@ -1249,6 +1276,10 @@ export class SessionManager {
         }
         const streaming = item.kind === 'assistant' && item.streaming;
         if (!streaming || !active) this.appendTranscript(sessionId, item);
+        if (active && item.kind === 'assistant') {
+          if (streaming) this.checkpointStream(sessionId, active, item);
+          else active.checkpoints?.delete(item.id);
+        }
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
         if (item.kind === 'user' && meta) this.deps.analytics.recordUserMessage(meta, item);
         if (item.kind === 'tool') {
@@ -1270,6 +1301,7 @@ export class SessionManager {
           if (item.kind === 'assistant') {
             if (event.textDelta) item.text += event.textDelta;
             if (event.thinkingDelta) item.thinking = (item.thinking ?? '') + event.thinkingDelta;
+            if (item.streaming) this.checkpointStream(sessionId, active!, item);
           } else if (item.kind === 'tool' && event.outputDelta) item.output = (item.output ?? '') + event.outputDelta;
           active?.dirty.add(event.id);
         }
@@ -1290,7 +1322,8 @@ export class SessionManager {
           else if (event.status === 'error') this.deps.log('warn', `[${sessionId}] harness reported an error status${event.detail ? `: ${event.detail}` : ''}`);
           if (event.status === 'idle' || event.status === 'stopped' || event.status === 'error') {
             if (active) {
-              void this.flushLive(sessionId, active).catch((e) => this.deps.log('warn', `[${sessionId}] live flush failed: ${errorMessage(e)}`));
+              // A harness that exited will never finish its streaming answer; save what it said.
+              void this.flushLive(sessionId, active, event.status === 'stopped').catch((e) => this.deps.log('warn', `[${sessionId}] live flush failed: ${errorMessage(e)}`));
               if (event.status === 'stopped') {
                 // The harness exited on its own: pending approvals would hang forever and the
                 // adapter must be disposed, mirroring the fatal-error path.
@@ -1356,7 +1389,7 @@ export class SessionManager {
               // Tear the adapter down cleanly so no approval waits forever and streamed items are saved.
               this.active.delete(sessionId);
               this.cancelApprovals(sessionId, active, 'Harness failed');
-              void this.flushLive(sessionId, active).then(() => active.adapter.dispose()).catch((e) => this.deps.log('warn', `[${sessionId}] dispose after fatal error failed: ${errorMessage(e)}`));
+              void this.flushLive(sessionId, active, true).then(() => active.adapter.dispose()).catch((e) => this.deps.log('warn', `[${sessionId}] dispose after fatal error failed: ${errorMessage(e)}`));
             }
           }
           this.schedulePersist(meta);
@@ -1375,14 +1408,71 @@ export class SessionManager {
     this.deps.store.appendTranscript(sessionId, item).catch((e) => this.deps.log('warn', `[${sessionId}] transcript append failed (${item.kind} ${item.id}): ${errorMessage(e)}`));
   }
 
-  private async flushLive(sessionId: string, active: ActiveSession): Promise<void> {
+  /**
+   * Persists every live item changed since its last write. A streaming answer is skipped while its
+   * harness may still finish it; with `settle` the harness is gone, so the partial answer is saved
+   * as final and the renderer is told it stopped streaming.
+   */
+  private async flushLive(sessionId: string, active: ActiveSession, settle = false): Promise<void> {
+    if (settle) this.resetCheckpoints(active);
     for (const id of [...active.dirty]) {
       const item = active.liveItems.get(id);
       if (!item) continue;
-      if (item.kind === 'assistant' && item.streaming) continue;
-      await this.deps.store.appendTranscript(sessionId, item);
+      const streaming = item.kind === 'assistant' && item.streaming;
+      if (streaming && !settle) continue;
+      const saved: TranscriptItem = streaming ? { ...item, streaming: false } : item;
+      await this.deps.store.appendTranscript(sessionId, saved);
       active.dirty.delete(id);
+      if (streaming) this.deps.pushEvent({ sessionId, event: { type: 'item.upsert', item: saved }, ts: Date.now() });
     }
+  }
+
+  /**
+   * Appends a copy of a streaming answer once it is due under STREAM_CHECKPOINT_MS and
+   * STREAM_CHECKPOINT_GROWTH, so a crash mid-response leaves the partial text on disk. An item
+   * that has grown enough but was written too recently is picked up by a timer, so a stream that
+   * goes quiet is still saved; one that has not grown enough waits for its next delta.
+   */
+  private checkpointStream(sessionId: string, active: ActiveSession, item: Extract<TranscriptItem, { kind: 'assistant' }>): void {
+    const checkpoints = (active.checkpoints ??= new Map());
+    const now = Date.now();
+    const size = item.text.length + (item.thinking?.length ?? 0);
+    const last = checkpoints.get(item.id);
+    // The first sighting starts the clock; nothing is worth saving before the first interval.
+    if (!last) {
+      checkpoints.set(item.id, { at: now, size: 0 });
+      if (size > 0) this.scheduleCheckpoint(sessionId, active, STREAM_CHECKPOINT_MS);
+      return;
+    }
+    if (size - last.size < Math.max(1, Math.ceil(last.size * STREAM_CHECKPOINT_GROWTH))) return;
+    const wait = last.at + STREAM_CHECKPOINT_MS - now;
+    if (wait > 0) {
+      this.scheduleCheckpoint(sessionId, active, wait);
+      return;
+    }
+    checkpoints.set(item.id, { at: now, size });
+    // Copied: the live item keeps mutating while the append waits its turn in the write queue.
+    this.appendTranscript(sessionId, { ...item });
+  }
+
+  private scheduleCheckpoint(sessionId: string, active: ActiveSession, wait: number): void {
+    if (active.checkpointTimer) return;
+    active.checkpointTimer = setTimeout(() => {
+      active.checkpointTimer = null;
+      if (this.active.get(sessionId) !== active) return;
+      for (const id of [...(active.checkpoints?.keys() ?? [])]) {
+        const item = active.liveItems.get(id);
+        if (item?.kind === 'assistant' && item.streaming) this.checkpointStream(sessionId, active, item);
+        else active.checkpoints.delete(id);
+      }
+    }, wait);
+    active.checkpointTimer.unref?.();
+  }
+
+  private resetCheckpoints(active: ActiveSession): void {
+    if (active.checkpointTimer) clearTimeout(active.checkpointTimer);
+    active.checkpointTimer = null;
+    active.checkpoints?.clear();
   }
 
   private onTurnFinished(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>): void {
