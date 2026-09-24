@@ -57,6 +57,12 @@ The bot reads master's **first-parent history**: it represents each merge commit
    git tag vX.Y.Z origin/master && git push origin vX.Y.Z
    gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file <the new CHANGELOG section>
    ```
+
+   The same tag push starts `deploy-relay`, which waits for approval in the protected
+   `relay-production` environment. Approve it when the installers are on the release page, so the
+   production relay and the desktop that speaks its protocol ship together. Then run the live
+   checklist and the deployed smoke (see [relay/README.md](../relay/README.md#deploy-and-recovery)).
+   Every release redeploys the relay, even when it did not change.
 5. Sync back: cherry-pick the release commit onto a branch off `develop` and rebase-merge that PR, so `develop` gets the version bump and changelog. The tree-identity check is what proves the sync carried exactly that commit, and the CI on the PR verifies it.
 
    ```bash
