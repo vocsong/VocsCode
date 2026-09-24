@@ -1,7 +1,9 @@
 /**
- * End-to-end test for the P4 remote-access settings panel: connect to a local relay test double,
- * watch the audit feed record the enable, then flip view-only mode and prove the policy is written
- * through to settings.json (not merely held in React). It also checks the copyable pairing link.
+ * End-to-end test for the P4 remote-access settings panel: connect to a local relay test double
+ * (VOCS_CODE_RELAY_URL; the relay is not a setting) with only the enrollment secret, watch the audit
+ * feed record the enable, then flip view-only mode and prove the policy is written through to
+ * settings.json (not merely held in React). It also checks the copyable pairing link, and that a
+ * restart reconnects as the same enrolled computer without any stored relay URL.
  * Requires `npm run build` first; gated by
  * VOCS_CODE_E2E_UI=1 (the e2e guard sets it).
  */
@@ -40,21 +42,26 @@ describe.runIf(enabled)('remote access settings', () => {
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
     const settingsPath = path.join(userData, 'settings.json');
 
-    app = await electron.launch({
-      executablePath: require('electron') as string,
-      args: [path.join(root, 'out', 'main', 'index.js')],
-      env: isolatedEnv(userData),
-      timeout: 60_000
-    });
-    const win: Page = await app.firstWindow();
-    await win.waitForSelector('.brand', { timeout: 60_000 });
+    // The relay is not a setting (production is always code.vocs.io); the override points this
+    // build at the local test relay the way a developer points it at `wrangler dev`.
+    const launch = async (): Promise<Page> => {
+      app = await electron.launch({
+        executablePath: require('electron') as string,
+        args: [path.join(root, 'out', 'main', 'index.js')],
+        env: isolatedEnv(userData, { VOCS_CODE_RELAY_URL: `http://127.0.0.1:${port}` }),
+        timeout: 60_000
+      });
+      const page = await app.firstWindow();
+      await page.waitForSelector('.brand', { timeout: 60_000 });
+      await page.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
+      await page.locator('.settings-link:has-text("Remote access")').click({ timeout: 20_000 });
+      return page;
+    };
+    const win = await launch();
 
-    await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
-    await win.locator('.settings-link:has-text("Remote access")').click({ timeout: 20_000 });
-    await win.getByTestId('remote-relay-url').waitFor({ timeout: 20_000 });
-
-    // Connect to the local relay with its enrollment secret.
-    await win.getByTestId('remote-relay-url').fill(`http://127.0.0.1:${port}`);
+    // Nothing to type but the enrollment secret: the panel names the relay it will use.
+    await expect.poll(async () => win.getByTestId('remote-relay').innerText(), { timeout: 20_000 }).toBe(`127.0.0.1:${port}`);
+    expect(await win.getByTestId('remote-relay-url').count()).toBe(0);
     await win.getByTestId('remote-enroll').fill(ENROLL);
     await win.getByTestId('remote-connect').click();
 
@@ -117,5 +124,17 @@ describe.runIf(enabled)('remote access settings', () => {
     await expect.poll(async () => (await poll()).status, { timeout: 20_000 }).toBe('approved');
     expect((await poll()).webDeviceId).toMatch(/^w_/);
     expect((await fetch(`http://127.0.0.1:${port}/v1/pair/poll?code=${pairingCode}`)).status).toBe(401);
+
+    // No relay URL is stored anywhere, yet a restart comes back to the same relay as the same
+    // enrolled computer: remote access resumes from the enabled flag and the keychain alone.
+    const hostId = async () => relay!.connected().find((c) => c.kind === 'host' && c.id.startsWith('h_'))?.id;
+    await expect.poll(hostId, { timeout: 20_000 }).toMatch(/^h_/);
+    const enrolledAs = await hostId();
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).remote).not.toHaveProperty('relayUrl');
+    await app!.close();
+    await expect.poll(hostId, { timeout: 20_000 }).toBeUndefined();
+    const again = await launch();
+    await expect.poll(hostId, { timeout: 30_000 }).toBe(enrolledAs);
+    await expect.poll(async () => again.getByTestId('remote-status').innerText(), { timeout: 20_000 }).toMatch(/online/);
   });
 });

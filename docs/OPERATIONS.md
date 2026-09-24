@@ -73,6 +73,7 @@ None of these are required to run the app; they exist for headless runs and the 
 | `VOCS_CODE_DEBUG` | main process | `1` keeps debug-level lines (harness stderr, MCP resolution, git probes, renderer `console.log`) in a packaged build. Renderer warnings and errors are logged regardless. |
 | `VOCS_CODE_WEB` | main process | `1` starts the localhost web client: serves the built renderer (`npm run build` first) at `http://localhost:5177/?token=…` and bridges the same handler registry to a browser tab. See docs/REMOTE-ACCESS.md. |
 | `VOCS_CODE_WEB_PORT` | main process | Port for the web client. Defaults to `5177`. |
+| `VOCS_CODE_RELAY_URL` | main process | Relay for remote access instead of `https://code.vocs.io`, e.g. `http://localhost:8787` for a local `wrangler dev`. There is no setting for it; `e2e.remote` uses it to reach the test relay. |
 | `VOCS_CODE_SCREENSHOT` | main process | Writes a PNG of the window to this path once the UI has settled, then continues running. |
 | `VOCS_CODE_SCREENSHOT_DELAY` | main process | Milliseconds to wait before that screenshot. Defaults to `2500`. |
 | `VOCS_CODE_AUTOQUIT` | main process | Quits the app after this many milliseconds. Used to bound headless runs. |

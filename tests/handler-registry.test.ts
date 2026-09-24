@@ -6,7 +6,7 @@ import path from 'node:path';
 import fsSync from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry } from '../src/main/handlers';
 import { PUSH_CHANNELS } from '../src/shared/ipc';
 import { agentChannels } from '../src/shared/agent-manifest';
@@ -14,7 +14,8 @@ import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
 import type { SessionManager } from '../src/main/session-manager';
-import type { SessionMeta } from '../src/shared/types';
+import type { RemoteConfig, SessionMeta } from '../src/shared/types';
+import type { RemoteHost } from '../src/main/remote/host';
 import { SettingsStore } from '../src/main/settings';
 import { PiConfigStore } from '../src/main/pi-config';
 import type { SearchIndex } from '../src/main/search';
@@ -540,5 +541,51 @@ describe('vesta handlers', () => {
     const user = states.at(-1)?.items.find((item) => item.kind === 'user');
     expect(user).toMatchObject({ text: '', images: [{ mimeType: 'image/png', data: 'iVBORw==' }] });
     expect(states.at(-1)?.items.some((item) => item.kind === 'error')).toBe(true);
+  });
+});
+
+describe('remote handlers', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  /** The registered remote:* handlers with the privileged pieces mocked: the host records what it
+   *  was asked to connect to, the secret store what it was asked to keep. */
+  function remoteRig() {
+    const enabled: [string, string][] = [];
+    const saved = new Map<string, string>();
+    const remote = {
+      state: () => ({ status: 'off' }),
+      listDevices: async () => [],
+      auditEntries: () => [],
+      enable: async (url: string, token: string) => void enabled.push([url, token]),
+      disable: async () => undefined
+    } as unknown as RemoteHost;
+    const secrets = {
+      has: () => false,
+      get: async (id: string) => saved.get(id),
+      set: async (id: string, value: string) => void saved.set(id, value),
+      clear: async () => undefined
+    } as unknown as SecretStore;
+    return { enabled, saved, ...stubDeps({ remote, secrets }) };
+  }
+
+  it('connects to code.vocs.io with only the enrollment secret, dropping a relay URL an older build stored', async () => {
+    vi.stubEnv('VOCS_CODE_RELAY_URL', undefined);
+    const { registry, deps, enabled, saved } = remoteRig();
+    await deps.settings.update({ remote: { enabled: false, viewOnly: true, relayUrl: 'https://old-relay.workers.dev' } as RemoteConfig });
+    expect(((await registry.invoke('remote:get', undefined)) as { relayUrl: string }).relayUrl).toBe('https://code.vocs.io');
+
+    await registry.invoke('remote:enable', { enrollToken: 'enroll-secret' });
+    expect(enabled).toEqual([['https://code.vocs.io', 'enroll-secret']]);
+    expect(saved.get('remote-enroll')).toBe('enroll-secret');
+    // The view-only policy survives; the typed-in relay of an older build does not.
+    expect(deps.settings.get().remote).toEqual({ enabled: true, viewOnly: true });
+  });
+
+  it('points a development build at another relay through VOCS_CODE_RELAY_URL', async () => {
+    vi.stubEnv('VOCS_CODE_RELAY_URL', 'http://127.0.0.1:8787/');
+    const { registry, enabled } = remoteRig();
+    expect(((await registry.invoke('remote:get', undefined)) as { relayUrl: string }).relayUrl).toBe('http://127.0.0.1:8787');
+    await registry.invoke('remote:enable', { enrollToken: 'enroll-secret' });
+    expect(enabled).toEqual([['http://127.0.0.1:8787', 'enroll-secret']]);
   });
 });

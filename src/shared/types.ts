@@ -1417,7 +1417,6 @@ export interface FsEntry {
 /** Remote access (docs/REMOTE-ACCESS.md §6): config + live state surfaced to the renderer. */
 export interface RemoteConfig {
   enabled: boolean;
-  relayUrl?: string;
   /** P4 view-only mode: paired browsers may browse but not send, approve or change anything. */
   viewOnly?: boolean;
   /** P4 offline mirror: upload sealed transcript snapshots so browsers can read history while

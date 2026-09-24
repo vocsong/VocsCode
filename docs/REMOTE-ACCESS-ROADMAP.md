@@ -36,7 +36,7 @@ the deployed smoke.
 | --- | --- | --- |
 | §2.1 Login gate | Landing gate staged disabled in vocs.io #27; the web app shows the account and a separate sign-out | GitHub OAuth app, landing secrets, review/merge #27, enable, live allow/deny/logout check (**user**) |
 | §2.2 CI flakes | Timer attribution, analytics recovery, subagent cap race; post-merge CI on `develop` green | — |
-| §2.3 Deploy loop | Protected `deploy-relay` workflow, run from release tags with approval; first deploy done; rollback runbook | merge vocs.io #26; `workers_dev: false` after the gate is live and clients use `code.vocs.io` |
+| §2.3 Deploy loop | Protected `deploy-relay` workflow, run from release tags with approval; first deploy done; rollback runbook | merge vocs.io #26; `workers_dev: false` after the gate is live (desktops always use `code.vocs.io`) |
 | §2.4 Live path testable | Deployed smoke passing against production; the same flow against local workerd in `npm test`; real-browser e2e; 14 workerd DO tests. These found three runtime bugs no fake could (§2.4) | — |
 | §2.5.1 PoP / short-lived tokens | Refresh credential + signed challenge → 1 h access token everywhere; sealed pairing delivery (no plaintext bearer at rest); non-extractable browser keys in IndexedDB with one-way migration | — |
 | §2.5.2 CSP | Restrictive `_headers` policy, no-store bundle; zero violations in a real browser; served on the deployed origin | recheck with a login cookie once the gate is on |
@@ -117,8 +117,10 @@ Post-merge CI on `develop` passed (run 36020242688).
   affected were the owner's. Desktops older than #407 cannot connect until they run the new code;
   their pairings survive (the stored token becomes the refresh credential), and browsers migrate
   their keys on the next load.
-- **`workers_dev: false`** once login covers `/app` and desktops point at `code.vocs.io` — until then
-  the relay is also reachable on `*.workers.dev`, which serves the same code and CSP but no gate.
+- **`workers_dev: false`** once login covers `/app` — until then the relay is also reachable on
+  `*.workers.dev`, which serves the same code and CSP but no gate. Desktops no longer have a relay
+  URL setting and always connect to `code.vocs.io`, so only desktops older than that change still
+  point elsewhere.
 - Runbooks: `relay/README.md` and [OPERATIONS.md](./OPERATIONS.md).
 
 ### 2.4 Make the live path testable
@@ -208,7 +210,7 @@ unvalidated names and keys.
    access; Revoke all if in doubt), after updating each desktop to the new code.
 5. **Login gate:** create the OAuth app, review/merge vocs.io #26 and #27, enable, verify live, then
    flip `remote.status`.
-6. **`workers_dev: false`** once every desktop points at `code.vocs.io`.
+6. **`workers_dev: false`** once the login gate is live (desktops now always use `code.vocs.io`).
 7. **P3.5 read/write terminal.**
 8. **2.7**.
 
