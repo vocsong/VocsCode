@@ -44,9 +44,10 @@ Worth grepping for when a feature misbehaves:
 
 ## Remote relay operations
 
-The relay and landing deploy separately. A `develop` push touching `relay/**` or its shared
-protocol triggers `.github/workflows/deploy-relay.yml` after the protected `relay-production`
-environment is approved; it needs `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets.
+The relay and landing deploy separately. The relay deploys with each release: the `vX.Y.Z` tag
+push starts `.github/workflows/deploy-relay.yml`, which publishes once the protected
+`relay-production` environment is approved (release tags only; it holds the
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets). A `develop` merge never deploys it.
 The landing Worker (`code.vocs.io`) is owned by the separate `vocs.io` repo and deploys with
 `npm run deploy:code`. Neither deploy provisions the GitHub OAuth app or rotates the enrollment
 secret. For manual deploy, rollback, verification and secret-rotation instructions see
@@ -54,9 +55,9 @@ secret. For manual deploy, rollback, verification and secret-rotation instructio
 [`REMOTE-ACCESS-ROADMAP.md`](./REMOTE-ACCESS-ROADMAP.md#appendix-a--live-verification-checklist).
 Keep `workers.dev` enabled until the login gate is live and the direct-origin policy is settled.
 
-The relay protocol changed incompatibly with the version deployed before this work (access tokens,
-sealed pairing delivery, socket tickets): deploy the relay and ship the desktop update together.
-Existing pairings survive the switch. Desktop log lines worth grepping: `remote: this computer is no
+The proof-of-possession relay (access tokens, sealed pairing delivery, socket tickets) has been live
+since 2026-09-25 and is incompatible with older desktops: they cannot connect until they run the new
+code, but keep their pairings. Desktop log lines worth grepping: `remote: this computer is no
 longer registered with the relay` (its credential was rejected — revoked, or a different relay; it
 falls back to enrolling and keeps its identity), `remote: forgot N browser pairing(s)` (reconciled
 against the relay's registry; the offline mirror was re-keyed), `remote: pairing refused by the relay`

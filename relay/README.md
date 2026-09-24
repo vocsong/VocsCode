@@ -7,15 +7,17 @@ read payload content — it sees routing metadata and ciphertext only.
 
 ## Deploy and recovery
 
-`.github/workflows/deploy-relay.yml` deploys a reviewed `develop` push that touches the relay,
-its shared protocol types, or the workflow itself. Configure a protected GitHub environment
-named `relay-production` with `CLOUDFLARE_API_TOKEN` (scoped to deploy this Worker and its DO)
-and `CLOUDFLARE_ACCOUNT_ID` as environment secrets, plus required reviewers if desired. The
-workflow checks the relay types and tests — including the full pairing flow against this
-checkout's Worker in local workerd — verifies the generated web bundle and dry-run, and fails
-loudly when credentials are absent. It does **not** create or rotate `ENROLL_TOKEN`.
+`.github/workflows/deploy-relay.yml` deploys the relay with each release. Pushing the `vX.Y.Z` tag
+that the installers are built from ([RELEASING.md](../docs/RELEASING.md#shipping-a-release)) starts
+it, so production always speaks the protocol of the released desktop. The protected GitHub
+environment `relay-production` holds `CLOUDFLARE_API_TOKEN` (an "Edit Cloudflare Workers" token
+limited to this account) and `CLOUDFLARE_ACCOUNT_ID`, admits release tags only, and waits for the
+owner's approval. The workflow checks the relay types and tests — including the full pairing flow
+against this checkout's Worker in local workerd — verifies the generated web bundle and dry-run,
+and fails loudly when credentials are absent. Redeploy a release with
+`gh workflow run deploy-relay.yml --ref vX.Y.Z`. It does **not** create or rotate `ENROLL_TOKEN`.
 
-For a manual deploy or recovery (run from a reviewed checkout, not an unmerged branch):
+For a manual deploy or recovery (run from a release tag's checkout, not an unmerged branch):
 
 ```bash
 npm ci --include=dev
@@ -33,10 +35,11 @@ command: forced termination during a config write can corrupt its local credenti
 deployment, use `wrangler versions list` and `wrangler rollback` from `relay/`, then investigate
 before redeploying.
 
-This protocol is not backward compatible with the relay deployed before it: browsers and desktops
-now need short-lived access tokens, sealed pairing delivery and socket tickets. Deploy the relay and
-update the desktop app together; a browser simply reloads the page, and pairings made before
-(their old device token is now their refresh credential) keep working after the update.
+A relay protocol change reaches production with the release that carries the matching desktop,
+because the deploy runs from the release tag. The proof-of-possession protocol (#407) is not
+backward compatible: it went live on 2026-09-25, ahead of a release, and desktops older than it
+cannot connect until they run the new code. They keep their pairings, because their old device
+token is now their refresh credential; a browser simply reloads the page.
 
 The rate limits in `wrangler.jsonc` (`ratelimits`, namespaces 4101–4103) are Workers Rate Limiting
 bindings: checked at the edge before a request can wake the Hub, per Cloudflare location, eventually
