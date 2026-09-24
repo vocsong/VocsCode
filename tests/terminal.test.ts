@@ -170,6 +170,27 @@ describe('TerminalManager (fake pty)', () => {
     expect(b.seq).toBe(data()[0].seq);
   });
 
+  it('reads a plain-text screen for a remote viewer without attaching, pausing or resizing', async () => {
+    const fake = fakePty();
+    const { m, data } = manager([fake], await tmpDir());
+    const info = m.create('s1', { cols: 40, rows: 6 });
+    fake.emit('\x1b[32mgreen\x1b[0m line one\r\nsecond line\r\n');
+    const before = [...fake.calls];
+    const view = await m.screenText(info.id);
+    // Colours are stripped and the blank rows under the prompt dropped.
+    expect(view.lines).toEqual(['green line one', 'second line']);
+    expect(view.info.id).toBe(info.id);
+    // The desktop's own view is untouched: no pause, resume or resize, and nothing streamed.
+    expect(fake.calls).toEqual(before);
+    expect(data()).toHaveLength(0);
+    for (let i = 0; i < 300; i++) fake.emit(`row ${i}\r\n`);
+    const tail = await m.screenText(info.id, 50);
+    expect(tail.lines[0]).toBe('row 251');
+    expect(tail.lines.at(-1)).toBe('row 299');
+    expect(tail.lines).toHaveLength(49);
+    await expect(m.screenText('t_missing')).rejects.toThrow();
+  });
+
   it('pauses a flooding pty until the renderer acknowledges, and lets it run on detach', async () => {
     const fake = fakePty();
     const { m, data } = manager([fake], await tmpDir());

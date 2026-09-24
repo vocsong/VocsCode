@@ -1445,6 +1445,14 @@ export type RemoteAuditAction =
   | 'pair-approve'
   | 'pair-deny'
   | 'device-revoke'
+  /** Every other device of the account revoked at once (the kill switch). */
+  | 'revoke-all'
+  /** The relay stopped accepting this desktop's credential (it was revoked). */
+  | 'host-revoked'
+  /** The offline mirror was re-keyed because a browser that could read it lost its pairing. */
+  | 'mirror-rotate'
+  | 'mirror-enable'
+  | 'mirror-disable'
   | 'client-connect'
   | 'client-disconnect'
   | 'handshake-failed'
@@ -1465,6 +1473,8 @@ export interface RemoteDeviceInfo {
   name: string;
   platform: string;
   lastSeen: number;
+  /** Connected to the relay right now (absent from relays that predate presence). */
+  online?: boolean;
 }
 
 export interface DoctorReport {

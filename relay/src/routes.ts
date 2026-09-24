@@ -1,25 +1,34 @@
 /** HTTP routing for the relay hub (docs/REMOTE-ACCESS.md). Deliberately a declarative,
- *  deny-by-default table: every route names the authentication it needs — `public`, `enroll`,
- *  `device` or `host` — and the dispatcher authorizes before the handler runs, so a new route
- *  cannot ship unauthenticated by forgetting a check. Cloudflare-free (no DurableObjectState, no
- *  WebSocketPair), so the whole surface is exercised in plain Node (tests/relay-routes.test.ts). */
+ *  deny-by-default table: every route names the authentication it needs and the dispatcher
+ *  authorizes before the handler runs, so a new route cannot ship unauthenticated by forgetting a
+ *  check. `device`/`web`/`host` require a short-lived access token; only the two token endpoints
+ *  accept the long-lived refresh credential, and only together with a signed challenge.
+ *  Cloudflare-free (no DurableObjectState, no WebSocketPair), so the whole surface is exercised in
+ *  plain Node (tests/relay-routes.test.ts). */
 import type { PublicIdentity } from '../../src/shared/crypto';
 import {
   claimPairing,
   clearMirror,
+  consumeSocketTicket,
   deleteMirrorSession,
   deviceInfos,
   getMirrorIndex,
   getMirrorSession,
+  issueAccessToken,
+  issueChallenge,
+  issueSocketTicket,
+  listMirrorSessions,
   MirrorError,
   PairError,
   pollPairing,
   putMirrorIndex,
   putMirrorSession,
   resolvePairing,
+  revokeAllExcept,
   revokeDevice,
   startPairing,
-  verifyDeviceToken,
+  verifyAccessToken,
+  verifyRefreshToken,
   type DeviceRecord,
   type MirrorBlob,
   type RelayStore
@@ -49,8 +58,11 @@ export interface RouteContext {
   sockets: (tag: string) => SocketLike[];
 }
 
-/** What a route requires before its handler runs. */
-export type RouteAuth = 'public' | 'enroll' | 'device' | 'host';
+/** What a route requires before its handler runs. `refresh` is a device's refresh credential
+ *  (token endpoints only). `enroll-or-host` accepts the enrollment secret (a desktop enrolling for
+ *  the first time) or an enrolled desktop's access token, so rotating the secret never strands an
+ *  already-paired computer. */
+export type RouteAuth = 'public' | 'enroll' | 'enroll-or-host' | 'refresh' | 'device' | 'web' | 'host';
 
 interface RateRule {
   bucket: string;
@@ -80,12 +92,21 @@ export interface Route {
 
 /** The whole HTTP surface. Anything not listed here is a 404 — that is the point. */
 export const ROUTES: Route[] = [
-  { method: 'POST', path: '/pair/start', auth: 'enroll', rate: { bucket: 'pair-start', limit: 10, windowMs: 60_000 }, run: pairStart },
+  { method: 'POST', path: '/pair/start', auth: 'enroll-or-host', rate: { bucket: 'pair-start', limit: 10, windowMs: 60_000 }, run: pairStart },
   { method: 'POST', path: '/pair/claim', auth: 'public', rate: { bucket: 'pair-claim', limit: 10, windowMs: 60_000 }, run: pairClaim },
   // Polling runs ~50 times a minute for five minutes, so the budget only catches abuse.
   { method: 'GET', path: '/pair/poll', auth: 'public', rate: { bucket: 'pair-poll', limit: 120, windowMs: 60_000 }, run: pairPoll },
+  // Access tokens: a refresh credential buys a challenge; signing it with the device key buys an
+  // hour-long access token. Rate limited per caller so neither can be hammered.
+  { method: 'POST', path: '/token/challenge', auth: 'refresh', rate: { bucket: 'token', limit: 30, windowMs: 60_000 }, run: tokenChallenge },
+  { method: 'POST', path: '/token', auth: 'refresh', rate: { bucket: 'token', limit: 30, windowMs: 60_000 }, run: tokenIssue },
+  { method: 'POST', path: '/ws/ticket', auth: 'web', run: socketTicket },
   { method: 'GET', path: '/devices', auth: 'device', run: deviceList },
   { method: 'DELETE', path: '/devices', auth: 'device', run: deviceRevoke },
+  // The kill switch: a desktop revokes every other device of the account at once.
+  { method: 'POST', path: '/devices/revoke-all', auth: 'host', run: deviceRevokeAll },
+  // A desktop's own mirrored-session catalogue (ids, sizes, times), to delete what it no longer lists.
+  { method: 'GET', path: '/mirrors', auth: 'host', run: mirrorList },
   { method: 'GET', path: '/mirror', auth: 'device', run: mirrorGetIndex },
   { method: 'PUT', path: '/mirror', auth: 'host', run: mirrorPutIndex },
   { method: 'DELETE', path: '/mirror', auth: 'host', run: mirrorClear },
@@ -116,16 +137,29 @@ export type SocketAuth = { ok: true; deviceId: string } | { ok: false; status: n
 /** Auth for the two WebSocket endpoints; the Worker owns the `WebSocketPair` itself. */
 export async function authorizeSocket(kind: 'host' | 'client', request: Request, ctx: RouteContext): Promise<SocketAuth> {
   const url = new URL(request.url);
-  // A freshly enabled desktop has no device token yet: it authenticates with the enrollment
-  // secret and stays in pairing-only mode until pair.result mints one.
-  if (kind === 'host' && url.searchParams.get('device') === 'enrolling') {
-    if (bearer(request) !== ctx.enrollToken) return { ok: false, status: 401, error: 'invalid' };
-    return { ok: true, deviceId: 'enrolling' };
+  const deviceId = url.searchParams.get('device') ?? '';
+  // Never accept the long-lived bearer in a socket URL, even if a valid ticket is present.
+  // Browsers cannot set upgrade headers; desktops can and must use Authorization only.
+  if (url.searchParams.has('token') || (kind === 'client' && (request.headers.has('authorization') || !url.searchParams.has('ticket'))) ||
+      (kind === 'host' && (url.searchParams.has('ticket') || !bearer(request)))) {
+    return { ok: false, status: 401, error: 'invalid' };
   }
   try {
-    return { ok: true, deviceId: (await authDevice(request, url, ctx)).deviceId };
+    if (kind === 'client') {
+      return { ok: true, deviceId: await consumeSocketTicket(ctx.store, { accountId: ctx.accountId, deviceId, ticket: url.searchParams.get('ticket') ?? '' }, ctx.now) };
+    }
+    // A freshly enabled desktop has no device token yet: it authenticates with the
+    // enrollment secret and stays in pairing-only mode until pair.result mints one.
+    if (deviceId === 'enrolling') {
+      if (!ctx.enrollToken || bearer(request) !== ctx.enrollToken) throw new PairError('invalid');
+      return { ok: true, deviceId };
+    }
+    const device = await authDevice(request, url, ctx);
+    if (device.kind !== 'host') throw new PairError('invalid');
+    return { ok: true, deviceId: device.deviceId };
   } catch (e) {
-    return { ok: false, status: 401, error: e instanceof PairError ? e.code : 'invalid' };
+    if (!(e instanceof PairError)) throw e;
+    return { ok: false, status: 401, error: e.code };
   }
 }
 
@@ -145,21 +179,28 @@ function matchRoute(method: string, pathname: string): Match {
 
 async function authorize(auth: RouteAuth, request: Request, url: URL, ctx: RouteContext): Promise<DeviceRecord | null> {
   if (auth === 'public') return null;
-  if (auth === 'enroll') {
-    if (bearer(request) !== ctx.enrollToken) throw new HttpError('forbidden', 403);
+  if (auth === 'enroll' || (auth === 'enroll-or-host' && !url.searchParams.has('device'))) {
+    if (!ctx.enrollToken || bearer(request) !== ctx.enrollToken) throw new HttpError('forbidden', 403);
     return null;
   }
+  if (auth === 'refresh') {
+    // Awaited, not returned: a rejection must be handled in this frame (workerd reports a
+    // rejected promise handed up a frame as unhandled).
+    return await verifyRefreshToken(ctx.store, { accountId: ctx.accountId, deviceId: url.searchParams.get('device') ?? '', token: bearer(request) });
+  }
   const device = await authDevice(request, url, ctx);
-  // Writes to the mirror come from the desktop only; browsers read it.
+  if (auth === 'enroll-or-host' && device.kind !== 'host') throw new HttpError('forbidden', 403);
   if (auth === 'host' && device.kind !== 'host') throw new HttpError('forbidden', 403);
+  if (auth === 'web' && device.kind !== 'web') throw new HttpError('forbidden', 403);
   return device;
 }
 
 async function authDevice(request: Request, url: URL, ctx: RouteContext): Promise<DeviceRecord> {
-  // Browsers cannot set custom WS headers, so the device token may ride in the query.
-  const token = bearer(request) || url.searchParams.get('token') || '';
+  // REST always requires Authorization; a query bearer is never a fallback. The bearer must be
+  // an access token: a refresh credential alone authorizes nothing here.
+  const token = bearer(request);
   const deviceId = url.searchParams.get('device') ?? '';
-  return verifyDeviceToken(ctx.store, { accountId: ctx.accountId, deviceId, token }, ctx.now);
+  return await verifyAccessToken(ctx.store, { accountId: ctx.accountId, deviceId, token }, ctx.now);
 }
 
 /** The authenticated device, asserted for routes whose auth guarantees one. */
@@ -170,43 +211,115 @@ function actor(device: DeviceRecord | null): DeviceRecord {
 
 // --- handlers ---
 
-async function pairStart({ ctx, request }: Call): Promise<Response> {
-  const body = (await request.json()) as { name?: string; platform?: string; hostPub?: PublicIdentity };
-  if (!body.hostPub) throw new HttpError('invalid', 400);
-  const r = await startPairing(ctx.store, { accountId: ctx.accountId, hostName: body.name ?? 'desktop', hostPlatform: body.platform ?? '', hostPub: body.hostPub }, ctx.now);
+async function pairStart({ ctx, request, device }: Call): Promise<Response> {
+  const body = await readJson(request);
+  // An enrolled desktop pairs as itself: its registered key, not whatever the body claims.
+  const hostPub = device ? device.pub : publicIdentity(body.hostPub);
+  const r = await startPairing(ctx.store, {
+    accountId: ctx.accountId,
+    hostName: label(body.name, device?.name ?? 'desktop'),
+    hostPlatform: label(body.platform, device?.platform ?? ''),
+    hostPub,
+    hostDeviceId: device?.deviceId
+  }, ctx.now);
   return json(r);
 }
 
 async function pairClaim({ ctx, request }: Call): Promise<Response> {
-  const body = (await request.json()) as { code?: string; name?: string; platform?: string; webPub?: PublicIdentity };
-  if (!body.code || !body.webPub) throw new HttpError('invalid', 400);
-  await claimPairing(ctx.store, { code: body.code, webName: body.name ?? 'browser', webPlatform: body.platform ?? '', webPub: body.webPub }, ctx.now);
-  // Ask every online desktop of the account to confirm; first responder wins.
-  for (const ws of ctx.sockets(BROADCAST_TAG.host)) {
-    ws.send(JSON.stringify({ t: 'pair.request', code: body.code, name: body.name ?? 'browser', platform: body.platform ?? '' }));
-  }
-  return json({ ok: true });
+  const body = await readJson(request);
+  if (typeof body.code !== 'string' || !body.code) throw new HttpError('invalid', 400);
+  const webPub = publicIdentity(body.webPub);
+  const name = label(body.name, 'browser');
+  const platform = label(body.platform, '');
+  const { pollToken, hostPub } = await claimPairing(ctx.store, { code: body.code, webName: name, webPlatform: platform, webPub }, ctx.now);
+  // Broadcast public identities; only the owning desktop may display or sign this request.
+  const request_ = JSON.stringify({ t: 'pair.request', code: body.code, name, platform, hostPub, webPub });
+  for (const ws of ctx.sockets(BROADCAST_TAG.host)) trySend(ws, request_);
+  return json({ pollToken });
 }
 
-async function pairPoll({ ctx, url }: Call): Promise<Response> {
-  return json(await pollPairing(ctx.store, url.searchParams.get('code') ?? '', ctx.now));
+async function pairPoll({ ctx, url, request }: Call): Promise<Response> {
+  return json(await pollPairing(ctx.store, url.searchParams.get('code') ?? '', bearer(request), ctx.now));
+}
+
+async function tokenChallenge({ ctx, request, device }: Call): Promise<Response> {
+  const issued = await issueChallenge(ctx.store, { accountId: ctx.accountId, deviceId: actor(device).deviceId, token: bearer(request) }, ctx.now);
+  return json(issued, 200, { 'cache-control': 'no-store' });
+}
+
+async function tokenIssue({ ctx, request, device }: Call): Promise<Response> {
+  const body = await readJson(request);
+  const issued = await issueAccessToken(ctx.store, {
+    accountId: ctx.accountId, deviceId: actor(device).deviceId, token: bearer(request), challenge: body.challenge, signature: body.signature
+  }, ctx.now);
+  return json(issued, 200, { 'cache-control': 'no-store' });
+}
+
+async function socketTicket({ ctx, request, device }: Call): Promise<Response> {
+  // Re-check inside the issue transaction: revocation may race the route's preliminary
+  // authorization, and no ticket may survive a concurrent deletion of its device.
+  const { ticket, expiresAt } = await issueSocketTicket(ctx.store, {
+    accountId: ctx.accountId, deviceId: actor(device).deviceId, token: bearer(request)
+  }, ctx.now);
+  return json({ ticket, expiresAt }, 200, { 'cache-control': 'no-store' });
 }
 
 async function deviceList({ ctx }: Call): Promise<Response> {
   // Authenticated, and only public metadata leaves the DO: token hashes and key material stay put.
-  return json(await deviceInfos(ctx.store, ctx.accountId));
+  // Presence is which devices have a socket open right now.
+  return json(await deviceInfos(ctx.store, ctx.accountId, (d) => ctx.sockets(`${d.kind === 'host' ? 'host' : 'client'}:${d.deviceId}`).length > 0));
 }
 
 async function deviceRevoke({ ctx, url }: Call): Promise<Response> {
-  // `device`/`token` authenticate the caller (either a paired desktop or browser); `target`
+  // `device` plus the Authorization bearer authenticate the caller; `target`
   // names the device to drop, so one side can revoke the other (lost-laptop / lost-desktop).
   const target = url.searchParams.get('target');
   if (!target) throw new HttpError('invalid', 400);
-  await revokeDevice(ctx.store, ctx.accountId, target);
-  for (const tag of [`client:${target}`, `host:${target}`]) {
-    for (const ws of ctx.sockets(tag)) ws.close(1008, 'device revoked');
+  const revoked = await revokeDevice(ctx.store, ctx.accountId, target);
+  closeAndNotify(ctx, revoked);
+  return json({ ok: true, revoked });
+}
+
+async function deviceRevokeAll({ ctx, device }: Call): Promise<Response> {
+  const revoked = await revokeAllExcept(ctx.store, ctx.accountId, actor(device).deviceId);
+  closeAndNotify(ctx, revoked);
+  return json({ ok: true, revoked });
+}
+
+/** Revoked devices lose their sockets at once. Desktops reconcile their paired-browser lists (and
+ *  rotate mirror keys) on the notice: a hint, not authority, since a desktop re-reads the
+ *  registry before dropping anything. */
+function closeAndNotify(ctx: RouteContext, revoked: string[]): void {
+  const closed = new Set<SocketLike>();
+  for (const id of revoked) {
+    for (const tag of [`client:${id}`, `host:${id}`]) {
+      for (const ws of ctx.sockets(tag)) {
+        closed.add(ws);
+        try {
+          ws.close(1008, 'device revoked');
+        } catch {
+          // Already closing.
+        }
+      }
+    }
   }
-  return json({ ok: true });
+  // A revoked desktop's own socket was just closed: sending to it would throw.
+  const notice = JSON.stringify({ t: 'device.revoked', devices: revoked });
+  for (const ws of ctx.sockets(BROADCAST_TAG.host)) if (!closed.has(ws)) trySend(ws, notice);
+}
+
+/** A fan-out send. The runtime throws for a socket that is closing; one departing peer must not
+ *  fail the request that is broadcasting to the others. */
+function trySend(ws: SocketLike, data: string): void {
+  try {
+    ws.send(data);
+  } catch {
+    // Closing; its close handler reports the departure.
+  }
+}
+
+async function mirrorList({ ctx, device }: Call): Promise<Response> {
+  return json(await listMirrorSessions(ctx.store, ctx.accountId, actor(device).deviceId, ctx.now));
 }
 
 async function mirrorGetIndex({ ctx, url, device }: Call): Promise<Response> {
@@ -259,15 +372,50 @@ export class HttpError extends Error {
 function errorResponse(e: unknown): Response {
   if (e instanceof HttpError) return json({ error: e.message }, e.status);
   if (e instanceof MirrorError) return json({ error: e.code }, e.code === 'too-large' ? 413 : 400);
+  // The account is full: a conflict the user resolves by revoking a device, not an auth failure.
+  if (e instanceof PairError && e.code === 'limit') return json({ error: 'device-limit' }, 409);
   // An unverifiable device token is an auth failure, not a server error — and the code in the
   // body is the only detail a caller gets.
   if (e instanceof PairError) return json({ error: e.code }, 401);
+  // A malformed body is the caller's error; never echo parser internals.
+  if (e instanceof SyntaxError) return json({ error: 'invalid' }, 400);
   return json({ error: e instanceof Error ? e.message : String(e) }, 500);
 }
 
 function bearer(request: Request): string {
   const h = request.headers.get('authorization') ?? '';
   return h.startsWith('Bearer ') ? h.slice(7) : '';
+}
+
+const MAX_LABEL = 64;
+const MAX_JWK_FIELD = 128;
+
+async function readJson(request: Request): Promise<Record<string, unknown>> {
+  const body = (await request.json()) as unknown;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError('invalid', 400);
+  return body as Record<string, unknown>;
+}
+
+/** Device names and platforms are shown to the user and stored per device: bounded plain text. */
+function label(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback;
+  const text = value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  return text ? text.slice(0, MAX_LABEL) : fallback;
+}
+
+/** A P-256 public identity as the clients export it. Checked for shape and size because it is
+ *  stored per device and broadcast to desktops; the exact JWK is kept, since both ends compare
+ *  identities by their canonical JSON. */
+function publicIdentity(value: unknown): PublicIdentity {
+  const jwk = (v: unknown): boolean => {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+    const k = v as Record<string, unknown>;
+    return k.kty === 'EC' && k.crv === 'P-256' && typeof k.x === 'string' && typeof k.y === 'string' &&
+      k.d === undefined && Object.values(k).every((f) => (typeof f === 'string' ? f.length <= MAX_JWK_FIELD : typeof f === 'boolean' || (Array.isArray(f) && f.length <= 8 && f.every((op) => typeof op === 'string' && op.length <= 16))));
+  };
+  const id = value as { sig?: unknown; enc?: unknown } | null;
+  if (!id || typeof id !== 'object' || !jwk(id.sig) || !jwk(id.enc) || Object.keys(id).length !== 2) throw new HttpError('invalid', 400);
+  return value as PublicIdentity;
 }
 
 /** Reads and shape-checks a sealed mirror blob; the relay never looks inside `ct`. */

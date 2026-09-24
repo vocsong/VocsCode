@@ -34,6 +34,7 @@ import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readS
 import { PiConfigStore, runPiCommand } from './pi-config';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
+import { transcriptPage } from './remote/transcript-page';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
@@ -574,6 +575,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
+  handle('sessions:transcriptPage', async (req) => transcriptPage(await sessions.transcript(req.id), req));
   handle('subagents:list', ({ id }) => sessions.subagentRuns(id));
   handle('subagents:get', ({ id, runId }) => sessions.subagentRun(id, runId));
   handle('subagents:stop', ({ id, runId }) => sessions.subagentCommand(id, runId, 'stop'));
@@ -740,13 +742,17 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       return remote.state();
     });
     handle('remote:pairStart', ({ hostName }) => remote.startPairing(hostName || 'This computer'));
-    handle('remote:pairRespond', ({ decision }) => {
-      remote.respondPairing(decision);
+    handle('remote:pairRespond', async ({ decision }) => {
+      await remote.respondPairing(decision);
       return undefined;
     });
     handle('remote:revoke', async ({ deviceId }) => {
       await remote.revokeDevice(deviceId);
       return undefined;
+    });
+    handle('remote:revokeAll', async () => {
+      await remote.revokeAll();
+      return remote.state();
     });
     handle('remote:setViewOnly', async ({ viewOnly }) => {
       await settings.update({ remote: { ...remoteConfig(), viewOnly: viewOnly === true } });
@@ -756,6 +762,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       return remote.state();
     });
     handle('remote:setMirror', ({ mirror }) => {
+      remote.auditMirror(mirror === true);
       void (async () => {
         await settings.update({ remote: { ...remoteConfig(), mirror: mirror === true } });
         deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
@@ -1003,6 +1010,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
 
   handle('terminal:list', () => terminals.list());
+  handle('terminal:screen', ({ terminalId, lines }) => terminals.screenText(String(terminalId ?? ''), typeof lines === 'number' ? lines : undefined));
   handle('terminal:shells', () => terminals.shells());
   handle('terminal:create', ({ sessionId, shell, cols, rows }) => terminals.create(sessionId, { shell, cols, rows }));
   handle('terminal:attach', ({ terminalId, cols, rows }) => terminals.attach(terminalId, cols, rows));
