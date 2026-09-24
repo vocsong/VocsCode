@@ -97,6 +97,8 @@ suspected of compromise. A Worker code rollback does not restore an old secret.
 cd relay && npx wrangler dev   # http://localhost:8787 — state under relay/.wrangler (gitignored)
 ```
 
-Pass `--var ENROLL_TOKEN:<value>` (or a gitignored `.dev.vars`) for a local secret. Tests start the
+Pass `--var ENROLL_TOKEN:<value>` (or a gitignored `.dev.vars`) for a local secret. Desktops always
+connect to `https://code.vocs.io`; start a development build with
+`VOCS_CODE_RELAY_URL=http://localhost:8787` to point it at this local relay instead. Tests start the
 same Worker programmatically (`tests/support/local-relay.ts`) with a throwaway secret and state
 directory, so no local setup is needed to run them.

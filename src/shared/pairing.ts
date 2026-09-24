@@ -2,7 +2,8 @@
  *  `/app` on its own origin and the page claims codes against that origin, so a link must open
  *  the relay this desktop is connected to — a link to any other origin can never pair. */
 
-/** The production web client, used until a relay URL is configured. */
+/** The production relay: web client, API and sockets on one origin. Desktops always use it unless
+ *  VOCS_CODE_RELAY_URL overrides it (src/main/remote/relay-url.ts). */
 export const DEFAULT_REMOTE_ORIGIN = 'https://code.vocs.io';
 
 /** Code alphabet from relay/src/core.ts: 8 symbols, no ambiguous glyphs (I/L/O/0/1). */

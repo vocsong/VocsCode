@@ -304,9 +304,11 @@ Web (browser)                Relay                      Desktop (host)
       │◀═══════ AEAD frames under K, routed by relay ═════▶│  (6)
 ```
 
-1. **Enable (desktop).** Settings → Remote access → Enable. Desktop generates its device
-   keypair, stores the private half in the secrets store, connects outbound WSS to the
-   relay, and requests a pairing code.
+1. **Enable (desktop).** Settings → Remote access → paste the enrollment secret → Connect. The relay
+   is not a setting: desktops always use `https://code.vocs.io` (`VOCS_CODE_RELAY_URL` points a
+   development build or a test at another relay). Desktop generates its device keypair, stores the
+   private half in the secrets store, connects outbound WSS to the relay, and requests a pairing
+   code.
 2. **Code.** Relay returns a single-use 8-character code (e.g. `MVBTK7Q2`, ~2^40 space, no
    ambiguous glyphs) with a **5-minute TTL**. The desktop shows it, a copyable link to the web
    client on the relay it is connected to (`<relay>/app?code=…`), and that link as a **QR code**
@@ -397,7 +399,8 @@ Web (browser)                Relay                      Desktop (host)
 
 ### 6.7 UI touchpoints
 
-- **Desktop Settings → Remote access:** enable/disable toggle, pairing code, link and QR code
+- **Desktop Settings → Remote access:** the relay it uses (named, not editable), the enrollment
+  secret, Connect/Disconnect, pairing code, link and QR code
   with countdown, paired-device list (name, platform, last seen) with per-device revoke,
   **Revoke all** kill switch, recent activity feed.
 - **Confirm dialog:** account, device name, browser/OS, Allow / Deny — mirrors the

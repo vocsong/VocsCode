@@ -11,7 +11,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import { Vesta } from './agents';
 import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAgent, setProjectAgentTracked } from './agent-files';
 import { createClaudeAgent, isPinnedModel, listClaudeAgents, setClaudeAgentModel } from './claude-agents';
-import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment, SessionMeta } from '../shared/types';
+import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment, RemoteConfig, SessionMeta } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
 import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssueComments, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequestComments, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitRoot, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
@@ -34,6 +34,7 @@ import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readS
 import { PiConfigStore, runPiCommand } from './pi-config';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
+import { relayUrl } from './remote/relay-url';
 import { transcriptPage } from './remote/transcript-page';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
 import { errorMessage } from './util/async';
@@ -719,18 +720,23 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   // secret store, never in settings; enable() stores them and opens the relay socket.
   if (deps.remote) {
     const remote = deps.remote;
-    const remoteConfig = () => settings.get().remote ?? { enabled: false };
+    // Older builds stored a typed-in relay URL here; the relay is fixed now, so drop it.
+    const remoteConfig = (): RemoteConfig => {
+      const { relayUrl: _legacy, ...config } = (settings.get().remote ?? { enabled: false }) as RemoteConfig & { relayUrl?: unknown };
+      return config;
+    };
     handle('remote:get', async () => ({
       config: remoteConfig(),
       state: remote.state(),
       devices: settings.get().remote?.enabled ? await remote.listDevices() : [],
-      audit: remote.auditEntries()
+      audit: remote.auditEntries(),
+      relayUrl: relayUrl()
     }));
-    handle('remote:enable', async ({ relayUrl, enrollToken }) => {
+    handle('remote:enable', async ({ enrollToken }) => {
       await secrets.set('remote-enroll', enrollToken);
       // Keep the view-only policy across a reconnect; enable() only replaces relay fields.
-      await settings.update({ remote: { ...remoteConfig(), enabled: true, relayUrl } });
-      await remote.enable(relayUrl, enrollToken);
+      await settings.update({ remote: { ...remoteConfig(), enabled: true } });
+      await remote.enable(relayUrl(), enrollToken);
       // The renderer's copy of settings drives the toggle/Disconnect UI, so push it like settings:update.
       deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
       return remote.state();

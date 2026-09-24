@@ -5,7 +5,7 @@ import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ModelInfo, P
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
-import { pairingLink as pairingLinkFor, remoteOrigin } from '../../../shared/pairing';
+import { DEFAULT_REMOTE_ORIGIN, pairingLink as pairingLinkFor, remoteOrigin } from '../../../shared/pairing';
 import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
 import { BUILTIN_SHORTCUT_GROUPS, SHORTCUT_COMMANDS, accelFromEvent, formatAccelerator, isReservedAccel, shortcutCommandInfo, type ShortcutCommand } from '../../../shared/shortcuts';
 import { invoke, isMac, on, platform } from '../api';
@@ -1043,24 +1043,26 @@ function UpdatesPanel({ state, currentVersion }: { state: UpdateState; currentVe
 }
 
 /** Remote access (docs/REMOTE-ACCESS.md §6): relay connection, browser pairing, devices.
- *  The enrollment secret is stored in the OS keychain via secrets:set, never in settings. */
+ *  The enrollment secret is stored in the OS keychain via secrets:set, never in settings. The relay
+ *  is not configurable here: main reports the one this desktop uses (code.vocs.io in production). */
 function RemoteSection({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   const toast = useStore((s) => s.toast);
   const config = settings.remote ?? { enabled: false };
   const [state, setState] = useState<RemoteState | null>(null);
   const [devices, setDevices] = useState<RemoteDeviceInfo[]>([]);
   const [audit, setAudit] = useState<RemoteAuditEntry[]>([]);
-  const [relayUrl, setRelayUrl] = useState(config.relayUrl ?? '');
+  const [relay, setRelay] = useState(DEFAULT_REMOTE_ORIGIN);
   const [enroll, setEnroll] = useState('');
   const [pairing, setPairing] = useState<{ code: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
-  const applyResult = (r: { state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[] }) => {
+  const applyResult = (r: { state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string }) => {
     setState(r.state);
     setDevices(r.devices);
     setPairing(r.state.pairing ?? null);
     setAudit(r.audit ?? []);
+    setRelay(r.relayUrl);
   };
 
   useEffect(() => {
@@ -1093,8 +1095,8 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
 
   const secondsLeft = pairing ? Math.max(0, Math.ceil((pairing.expiresAt - Date.now()) / 1000)) : 0;
   // The browser claims the code against the origin it opened, so the link must be this relay's.
-  const pairingLink = pairing && secondsLeft > 0 ? pairingLinkFor(config.relayUrl, pairing.code) : null;
-  const webHost = new URL(remoteOrigin(config.relayUrl)).host;
+  const pairingLink = pairing && secondsLeft > 0 ? pairingLinkFor(relay, pairing.code) : null;
+  const webHost = new URL(remoteOrigin(relay)).host;
   const copyPairingLink = async () => {
     if (!pairingLink) return;
     try {
@@ -1110,24 +1112,22 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
     <div className="settings-body">
       <h3>Remote access</h3>
       <p className="muted small">
-        Let a paired browser at code.vocs.io drive sessions on this computer. Sessions, keys and terminals
-        stay on this machine; the traffic is end-to-end encrypted and the relay sees metadata only.
+        Let a paired browser at <strong data-testid="remote-relay">{webHost}</strong> drive sessions on this computer.
+        Sessions, keys and terminals stay on this machine; the traffic is end-to-end encrypted and the relay sees
+        metadata only.
       </p>
-      <Field label="Relay URL" hint="WebSocket relay that routes paired sessions, e.g. wss://relay.your-domain.dev">
-        <input data-testid="remote-relay-url" value={relayUrl} placeholder="https://your-relay.workers.dev" onChange={(e) => setRelayUrl(e.target.value)} />
-      </Field>
       <Field label="Enrollment secret" hint="Shared secret from the relay deployment (wrangler secret ENROLL_TOKEN). Stored in the OS keychain.">
-        <input data-testid="remote-enroll" type="password" value={enroll} placeholder="••••••••" onChange={(e) => setEnroll(e.target.value)} />
+        <input data-testid="remote-enroll" type="password" value={enroll} placeholder="Paste the secret" onChange={(e) => setEnroll(e.target.value)} />
       </Field>
       <div className="settings-actions">
         <Button
           size="sm"
           variant="primary"
           data-testid="remote-connect"
-          disabled={busy || !relayUrl || !enroll}
+          disabled={busy || !enroll.trim()}
           onClick={() =>
             void act(async () => {
-              await invoke('remote:enable', { relayUrl: relayUrl.trim(), enrollToken: enroll.trim() });
+              await invoke('remote:enable', { enrollToken: enroll.trim() });
               setEnroll('');
             })
           }
