@@ -4,6 +4,7 @@ import { invoke } from '../api';
 import { fmtCost, fmtDuration, fmtRate, fmtTokens } from '../format';
 import { installMarkdownHandlers } from '../markdown';
 import { useStore } from '../store';
+import { MISSION_MANAGED_REASON } from '../missions';
 import { chunkKey, estimateChunkHeight, windowRange, type RenderChunk } from '../transcript-window';
 import { useStreamingMarkdown } from '../use-streaming-markdown';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
@@ -11,6 +12,7 @@ import { DiffView } from './DiffView';
 import { ImageLightbox, type LightboxImage } from './ImageLightbox';
 import { TranscriptFind } from './TranscriptFind';
 import { askConfirm, Badge, Button, Icon, Spinner } from './ui';
+import { MissionCompletion } from './mission/MissionCompletion';
 
 interface ImageLightboxState {
   images: LightboxImage[];
@@ -37,6 +39,7 @@ const VIRTUALIZE_MIN = 150;
 
 export function Transcript({ session }: { session: SessionMeta }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
+  const mission = useStore((s) => session.mission?.role === 'lead' ? s.missions[session.mission.missionId] : undefined);
   const loaded = useStore((s) => s.loaded[session.id]);
   const transcriptError = useStore((s) => s.transcriptErrors[session.id]);
   const loadTranscript = useStore((s) => s.loadTranscript);
@@ -58,7 +61,15 @@ export function Transcript({ session }: { session: SessionMeta }) {
   /** Inline file references (`\`src/store.ts\``) open in the Files tab of the right panel. */
   const openFile = useCallback((path: string, line?: number) => useStore.getState().revealFile(session.id, path, line), [session.id]);
 
-  const chunks = useMemo(() => groupTranscript(items), [items]);
+  const chunks = useMemo(() => {
+    const grouped = groupTranscript(items);
+    if (mission?.status !== 'completed' || !mission.completionReport) return grouped;
+    // Completion precedes later answer-only questions. Do not append it after each new answer
+    // or forge an assistant item; this host projection has its own measured virtual-list row.
+    const nextQuestion = grouped.findIndex((chunk) => chunk.kind === 'single' && chunk.item.kind === 'user' && chunk.item.ts > mission.completionReport!.completedAt);
+    grouped.splice(nextQuestion < 0 ? grouped.length : nextQuestion, 0, { kind: 'mission-completion', record: mission });
+    return grouped;
+  }, [items, mission]);
   const running = session.status === 'running' || session.status === 'starting';
   // The in-flight turn's work stays open while it runs; finished work collapses to its header.
   const liveWorkId = useMemo(() => {
@@ -166,7 +177,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
     if (stick && !findOpen && !jumpHere && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [items, stick, findOpen, jumpHere, measureVersion]);
+  }, [items, mission?.completionReport, stick, findOpen, jumpHere, measureVersion]);
 
   const onScroll = () => {
     const el = ref.current;
@@ -269,7 +280,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
             </Button>
           </div>
         )}
-        {loaded && items.length === 0 && (
+        {loaded && items.length === 0 && !mission?.completionReport && (
           <div className="transcript-empty">
             <Icon name="sparkles" size={28} />
             <p>Send a message to start. Type <code>/</code> for commands, <code>@</code> to mention files, paste images to attach them.</p>
@@ -277,7 +288,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
         )}
         {virtual && range.start > 0 && <div className="transcript-spacer" style={{ height: tops[range.start] }} aria-hidden />}
         {visible.map((chunk) => (
-          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} canEdit={session.config.harness === 'native' && session.status === 'idle'} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} live={chunk.kind === 'work' && chunk.id === liveWorkId} />
+          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} canEdit={!session.mission && session.config.harness === 'native' && session.status === 'idle'} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} live={chunk.kind === 'work' && chunk.id === liveWorkId} />
         ))}
         {virtual && range.end < chunks.length && <div className="transcript-spacer" style={{ height: tops[chunks.length]! - tops[range.end]! }} aria-hidden />}
         {(session.status === 'running' || session.status === 'starting') && (
@@ -293,7 +304,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
           onClose={() => setLightbox(null)}
         />
       )}
-      <TranscriptFind open={findOpen} onClose={() => setFindOpen(false)} container={ref} revision={items} />
+      <TranscriptFind open={findOpen} onClose={() => setFindOpen(false)} container={ref} revision={chunks} />
       {!stick && (
         <button type="button" className="jump-bottom" onClick={() => { setStick(true); if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }}>
           <Icon name="chevron" size={14} /> {pendingApprovals ? `${pendingApprovals} approval pending` : 'Jump to latest'}
@@ -341,7 +352,9 @@ const TranscriptRow = memo(function TranscriptRow({
   }, [key, measureRow]);
   return (
     <div className="transcript-row" ref={ref}>
-      {chunk.kind === 'work' ? (
+      {chunk.kind === 'mission-completion' ? (
+        <MissionCompletion record={chunk.record} />
+      ) : chunk.kind === 'work' ? (
         <WorkGroup chunk={chunk} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} live={live} />
       ) : chunk.kind === 'group' ? (
         <ToolGroup entries={chunk.entries} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} />
@@ -355,6 +368,7 @@ const TranscriptRow = memo(function TranscriptRow({
 
 /** Grouping recreates wrappers; unchanged constituent items still have stable store identities. */
 function sameChunk(a: RenderChunk, b: RenderChunk): boolean {
+  if (a.kind === 'mission-completion' && b.kind === 'mission-completion') return a.record === b.record;
   if (a.kind === 'single' && b.kind === 'single') return a.item === b.item;
   if (a.kind === 'group' && b.kind === 'group') return a.id === b.id && sameEntries(a.entries, b.entries);
   return a.kind === 'work' && b.kind === 'work' && a.id === b.id && sameEntries(a.entries, b.entries) &&
@@ -412,6 +426,7 @@ function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, s
 }
 
 export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; sessionId?: string; canEdit?: boolean; onImageExpand?: OnImageExpand }) {
+  const managed = useStore((s) => !!s.sessions.find((session) => session.id === sessionId)?.mission);
   const images = item.images ?? [];
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.text);
@@ -431,7 +446,7 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
   const rerun = async () => {
     const text = draft.trim();
     if (!text && !images.length) return;
-    if (!sessionId) return;
+    if (!sessionId || managed) return;
     const confirmed = await askConfirm({
       title: 'Edit and rerun this message?',
       body: 'All transcript items after this message will be discarded. Files changed by those turns are not rolled back.',
@@ -490,7 +505,7 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
       <div className="msg-user-meta">
         <time dateTime={new Date(item.ts).toISOString()} title={new Date(item.ts).toLocaleString()}>{timestamp}</time>
         <button type="button" className="msg-action" title="Copy message" aria-label="Copy message" onClick={() => void copy()}><Icon name="copy" size={14} /></button>
-        {sessionId && canEdit && <button type="button" className="msg-action" title="Edit and rerun message" aria-label="Edit and rerun message" onClick={() => setEditing(true)} disabled={rerunning}><Icon name="edit" size={14} /></button>}
+        {sessionId && (canEdit || managed) && <button type="button" className="msg-action" title={managed ? MISSION_MANAGED_REASON : 'Edit and rerun message'} aria-label={managed ? 'Rewind unavailable for Mission' : 'Edit and rerun message'} onClick={() => !managed && setEditing(true)} disabled={rerunning || managed}><Icon name="edit" size={14} /></button>}
       </div>
     </div>
   );
@@ -780,7 +795,7 @@ function ToolCard({ item, sessionId, dataItemId }: { item: Extract<TranscriptIte
   );
 }
 
-function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem, { kind: 'approval' }>; sessionId: string }) {
+export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem, { kind: 'approval' }>; sessionId: string }) {
   const req = item.request;
   const [note, setNote] = useState('');
   const [answers, setAnswers] = useState<Record<string, string>>({});

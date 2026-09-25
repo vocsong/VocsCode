@@ -23,6 +23,7 @@ import { ContextMenuHost } from './components/ContextMenu';
 import { handleCustomShortcut } from './shortcuts';
 import { createTerminal } from './terminal/host';
 import { applyTheme } from './theme';
+import { isTopLevelSession, pauseMissionSession } from './missions';
 
 export function App() {
   const booted = useStore((s) => s.booted);
@@ -102,7 +103,7 @@ export function App() {
           requestAnimationFrame(() => document.querySelector(`[data-session-id="${CSS.escape(target.sessionId)}"]`)?.scrollIntoView({ block: 'nearest' }));
         }
       } else if (mod && /^[1-9]$/.test(e.key)) {
-        const list = st.sessions.filter((s) => !s.archived);
+        const list = st.sessions.filter((s) => !s.archived && isTopLevelSession(s));
         const target = list[Number(e.key) - 1];
         if (target) {
           e.preventDefault();
@@ -129,7 +130,7 @@ export function App() {
         const onEmptyComposer = el?.tagName === 'TEXTAREA' && el.closest('.composer') !== null && !(el as HTMLTextAreaElement).value;
         if (!onBody && !onEmptyComposer) return;
         const s = st.sessions.find((x) => x.id === st.activeId);
-        if (s && (s.status === 'running' || s.status === 'awaiting')) void invoke('sessions:interrupt', { id: s.id });
+        if (s && (s.status === 'running' || s.status === 'awaiting')) pauseMissionSession(s);
       }
     };
     window.addEventListener('keydown', onKey);

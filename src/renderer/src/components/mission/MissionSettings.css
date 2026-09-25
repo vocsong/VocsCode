@@ -1,0 +1,16 @@
+.mission-settings { max-width: 880px; }
+.mission-settings .mission-form { border: 0; margin: 0; padding: 0; min-width: 0; }
+.mission-settings .mission-card { border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 12px 0; }
+.mission-settings .mission-toolbar, .mission-settings .mission-model, .mission-settings .mission-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.mission-settings .mission-toolbar { justify-content: space-between; }
+.mission-settings .mission-toolbar h3 { margin: 0; }
+.mission-settings .mission-membership { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.mission-settings .mission-membership input[type="checkbox"] { width: auto; margin-right: 6px; }
+.mission-settings .mission-limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 20px; }
+.mission-settings .mission-project-tier { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.mission-settings .model-picker { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 12px; }
+.mission-settings .mp-list { max-height: 280px; overflow-y: auto; }
+.mission-settings textarea { min-height: 60px; resize: vertical; }
+.mission-settings p { overflow-wrap: anywhere; }
+.mission-settings [role="alert"] { color: var(--red); }
+.mission-settings .mission-actions { padding: 16px 0; }

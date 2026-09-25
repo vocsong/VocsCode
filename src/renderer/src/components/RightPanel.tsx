@@ -19,6 +19,8 @@ import { SessionUsage } from './SessionUsage';
 import { SubagentsTab } from './SubagentsTab';
 import { TerminalPanel } from './TerminalPanel';
 import { Badge, Button, Field, Icon, Spinner, Toggle } from './ui';
+import { MissionPanel, MissionUsage, useMission } from './mission/MissionPanel';
+import { MissionChanges, MissionWorkspacePicker } from './mission/MissionWorkspace';
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
 const EMPTY: never[] = [];
@@ -41,6 +43,19 @@ const BOTTOM_TABS: { id: PanelBottomTab; label: string; icon: string }[] = [
 ];
 
 export function RightPanel({ session }: { session: SessionMeta }) {
+  const { record: mission } = useMission(session);
+  const [workspace, setWorkspace] = useState({ sessionId: session.id, id: '' });
+  const reveal = useStore((s) => s.fileReveal);
+  const leadWorkspace = mission?.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission?.workspaces.find((w) => w.role === 'lead');
+  const workspaceId = reveal?.sessionId === session.id && leadWorkspace ? leadWorkspace.id : workspace.sessionId === session.id ? workspace.id : '';
+  useEffect(() => {
+    if (mission && reveal?.sessionId === session.id) {
+      const lead = mission.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id) ?? mission.workspaces.find((w) => w.role === 'lead');
+      if (lead) setWorkspace({ sessionId: session.id, id: lead.id });
+    }
+  }, [reveal, mission?.id, session.id]);
+  const selectedWorkspace = mission?.workspaces.find((w) => w.id === workspaceId) ?? mission?.workspaces.find((w) => w.role === 'integration');
+  const fileSession = session.mission ? { ...session, cwd: selectedWorkspace?.path ?? session.cwd } : session;
   const tab = useStore((s) => s.panelTab);
   const setTab = useStore((s) => s.setPanelTab);
   const bottomTab = useStore((s) => s.panelBottomTab);
@@ -56,8 +71,8 @@ export function RightPanel({ session }: { session: SessionMeta }) {
       <div className="panel-section panel-top">
         <div className="panel-tabs">
           {TABS.map((t) => (
-            <button key={t.id} type="button" className={`panel-tab ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
-              <Icon name={t.icon} size={13} /> {t.label}
+            <button key={t.id} type="button" className={`panel-tab ${tab === t.id ? 'active' : ''}`} onClick={() => { if (session.mission && t.id === 'changes') setWorkspace({ sessionId: session.id, id: '' }); setTab(t.id); }}>
+              <Icon name={t.icon} size={13} /> {session.mission && t.id === 'goal' ? 'Mission' : session.mission && t.id === 'changes' ? 'Mission result' : t.label}
               {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
             </button>
           ))}
@@ -65,18 +80,19 @@ export function RightPanel({ session }: { session: SessionMeta }) {
           <Button variant="ghost" size="sm" icon="x" onClick={() => togglePanel(false)} aria-label="Close panel" />
         </div>
         <div className="panel-body">
-          {tab === 'changes' && <ChangesTab session={session} />}
-          {tab === 'files' && <FilesTab session={session} />}
-          {tab === 'branches' && <BranchesTab session={session} />}
-          {tab === 'goal' && <GoalTab session={session} />}
-          {tab === 'usage' && <UsageTabPanel session={session} />}
-          {tab === 'terminal' && <TerminalPanel session={session} />}
+          {session.mission && (tab === 'changes' || tab === 'files') && (mission ? <MissionWorkspacePicker record={mission} value={workspaceId} onChange={(id) => setWorkspace({ sessionId: session.id, id })} /> : <div className="pad muted">Loading Mission workspace state…</div>)}
+          {tab === 'changes' && (session.mission ? mission && <MissionChanges record={mission} workspaceId={workspaceId} /> : <ChangesTab session={session} />)}
+          {tab === 'files' && (!session.mission || mission) && <FilesTab key={`${session.id}:${workspaceId}`} session={fileSession} missionWorkspaceId={workspaceId || undefined} />}
+          {tab === 'branches' && (session.mission ? <div className="pad muted">Mission integration and delivery are managed by the principal engineer. Inspect the delivery target and result in Mission; generic Git publish controls are unavailable.</div> : <BranchesTab session={session} />)}
+          {tab === 'goal' && (session.mission ? <MissionPanel session={session} /> : <GoalTab session={session} />)}
+          {tab === 'usage' && <>{mission && <div className="pad"><MissionUsage record={mission} /><p className="muted small">The breakdown below is this lead session only, not the Mission total.</p></div>}<UsageTabPanel session={session} /></>}
+          {tab === 'terminal' && (session.mission && (session.archived || mission?.archived) ? <div className="pad muted">Archived Mission — terminals are closed. Restore the Mission to use its lead terminal.</div> : <>{session.mission && <div className="mission-ui mission-workspace"><strong>Lead interactive terminal</strong><p className="mono small">{session.cwd}</p><p className="muted small">Actual lead tool cwd. Integration and specialist workspaces have no writable terminal here.</p></div>}<TerminalPanel session={session} /></>)}
         </div>
       </div>
       <SplitResizer />
       <div className="panel-section panel-bottom">
         <div className="panel-tabs">
-          {BOTTOM_TABS.map((t) => (
+          {BOTTOM_TABS.filter((t) => !session.mission || t.id !== 'subagents').map((t) => (
             <button key={t.id} type="button" className={`panel-tab ${bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
               <Icon name={t.icon} size={13} /> {t.label}
             </button>
@@ -86,7 +102,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
         <div className="panel-body">
           {bottomTab === 'mcp' && opened.includes('mcp') && <McpTab session={session} />}
           {bottomTab === 'desktop' && opened.includes('desktop') && <DesktopTab session={session} />}
-          {bottomTab === 'subagents' && opened.includes('subagents') && <SubagentsTab session={session} />}
+          {bottomTab === 'subagents' && opened.includes('subagents') && (session.mission ? <div className="pad muted">Managed specialists are in the Mission panel. Native subagent controls are unavailable here.</div> : <SubagentsTab session={session} />)}
           {bottomTab === 'knowledge' && opened.includes('knowledge') && <KnowledgeTab session={session} />}
         </div>
       </div>
@@ -215,7 +231,7 @@ function ChangesTab({ session }: { session: SessionMeta }) {
   }
 }
 
-function FilesTab({ session }: { session: SessionMeta }) {
+function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missionWorkspaceId?: string }) {
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [preview, setPreview] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
@@ -238,7 +254,7 @@ function FilesTab({ session }: { session: SessionMeta }) {
     const sid = session.id;
     const seq = ++readSeq.current;
     try {
-      const r = await invoke('fs:read', { sessionId: sid, path: rel, maxBytes: 200_000 });
+      const r = await invoke('fs:read', { sessionId: sid, path: rel, maxBytes: 200_000, ...(session.mission ? { missionWorkspaceId } : {}) });
       if (liveId.current !== sid || readSeq.current !== seq) return;
       const p = rel.replace(/\\/g, '/');
       setPreview({ path: p, ...r });
@@ -300,7 +316,7 @@ function FilesTab({ session }: { session: SessionMeta }) {
   useEffect(() => {
     const sid = session.id;
     let stale = false;
-    invoke('fs:list', { sessionId: sid, relPath: path || undefined })
+    invoke('fs:list', { sessionId: sid, relPath: path || undefined, ...(session.mission ? { missionWorkspaceId } : {}) })
       .then((list) => {
         if (!stale && liveId.current === sid) setEntries(list);
       })
@@ -347,7 +363,7 @@ function FilesTab({ session }: { session: SessionMeta }) {
                 title={mdView ? 'Show source' : 'Show markdown preview'}
               />
             )}
-            <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}`, sessionId: session.id })} title="Open in editor" />
+            {!session.mission && <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}`, sessionId: session.id })} title="Open in editor" />}
             <Button size="sm" variant="ghost" icon="x" onClick={() => setPreview(null)} />
           </div>
           {isMd && mdView ? (

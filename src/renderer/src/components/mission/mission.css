@@ -1,0 +1,21 @@
+/** Scoped Mission surfaces; ordinary session chrome keeps its existing layout. */
+.mission-kind { margin-bottom: 16px; }
+.mission-ui { min-width: 0; overflow-wrap: anywhere; }
+.mission-ui p { white-space: pre-wrap; }
+.mission-ui h3, .mission-ui h4 { margin: 0 0 8px; }
+.mission-ui section { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.mission-ui select { max-width: 100%; min-width: 0; }
+.mission-ui pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.mission-header { display: flex; flex: 1; flex-direction: column; gap: 8px; font-size: 12px; }
+.mission-header details { max-width: 100%; }
+.mission-header summary { cursor: pointer; color: var(--text-muted); }
+.mission-launch .field { margin: 14px 0; }
+.mission-workspace { padding: 12px; border-bottom: 1px solid var(--border); }
+.mission-workspace label { display: flex; flex-direction: column; gap: 6px; }
+.mission-card { margin: 8px 0; padding: 10px; border: 1px solid var(--border); border-radius: 6px; }
+.mission-agent { display: flex; flex-direction: column; gap: 6px; width: 100%; text-align: left; color: inherit; background: transparent; cursor: pointer; }
+.mission-inspector { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 12px; }
+.mission-match { outline: 2px solid var(--accent); }
+.mission-links { padding: 4px 12px; border-top: 1px solid var(--border); }
+.mission-completion { padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; }
+.mission-completion .msg-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

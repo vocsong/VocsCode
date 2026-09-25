@@ -67,6 +67,7 @@ PRs are squash-merged, and titles follow [Conventional Commits](https://www.conv
 | --- | --- |
 | [Architecture & harness reference](docs/ARCHITECTURE.md) | Source layout, harness engines, permission modes, security model |
 | [Terminal reference](docs/TERMINAL.md) | PTY handling, shells, tabs, shortcuts, packaging notes |
+| [Missions](docs/MISSIONS.md) | Principal engineer, approved presets, planning, workspaces, verification, delivery and support limits |
 | [Themes](docs/THEMES.md) | All 23 themes and how they're built |
 | [Testing & verification](docs/TESTING.md) | Dev commands, offline and live test suites |
 | [Tool reliability](docs/TOOL-RELIABILITY.md) | Harness/tool analytics, Pi compatibility, native file safeguards and verification |

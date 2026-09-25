@@ -36,7 +36,7 @@ describe.skipIf(!enabled)('Vocs Code subagents over the real Pi runtime', () => 
   });
   afterEach(async () => {
     await Promise.all(runners.splice(0).map((runner) => runner.close()));
-    if (root) await fs.rm(root, { recursive: true, force: true });
+    if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   const start = (options: Partial<ConstructorParameters<typeof PiOfflineRunner>[0]> = {}) => {

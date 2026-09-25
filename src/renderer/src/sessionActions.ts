@@ -62,6 +62,17 @@ export async function setSessionEffort(id: string, effort: EffortLevel, toast: T
 
 /** Archive like the sidebar row does: a worktree is removed after confirmation; uncommitted changes block, then force. */
 export async function archiveSession(s: SessionMeta, toast: Toast) {
+  if (s.archived || useStore.getState().archiving[s.id]) return;
+  if (s.mission) {
+    if (s.mission.role === 'worker') { toast('Archive the owning Mission; specialists cannot be archived independently.', 'info'); return; }
+    useStore.getState().setArchiving(s.id, true);
+    try {
+      await invoke('sessions:archive', { id: s.id, archived: true });
+      toast('Mission archived; worktrees and unresolved artifacts are retained.', 'success');
+    } catch (e) { toast(e instanceof Error ? e.message : String(e), 'error'); }
+    finally { useStore.getState().setArchiving(s.id, false); }
+    return;
+  }
   if (s.worktreeBranch) {
     const ok = await askConfirm({
       title: `Remove the worktree for "${s.title}"?`,
@@ -115,6 +126,10 @@ export async function archiveSession(s: SessionMeta, toast: Toast) {
  */
 export async function removeFolder(root: string, sessions: SessionMeta[], toast: Toast): Promise<void> {
   const inFolder = sessions.filter((s) => s.config.projectRoot === root);
+  if (inFolder.some((s) => s.mission)) {
+    toast('This folder contains Mission-owned work. Archive the Mission and use its explicit managed cleanup before removing the folder.', 'info');
+    return;
+  }
   const worktrees = inFolder.filter((s) => s.worktreeBranch).length;
   const count = (n: number, one: string) => `${n} ${n === 1 ? one : `${one}s`}`;
   const body = [

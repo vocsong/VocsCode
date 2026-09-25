@@ -59,7 +59,7 @@ credentials or deployment are available, report the live tier as unverified.
 ## Opt-in Electron suites (no provider key)
 
 ```bash
-npm run build && npm run test:e2e:ci       # all fifteen below; fails if any reports skipped
+npm run build && npm run test:e2e:ci       # all seventeen below; fails if any reports skipped
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:themes
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:models
@@ -74,6 +74,7 @@ npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.goal.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.doctor.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.context-menu.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.transcript.test.ts
+npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.mission-settings.test.ts tests/e2e.mission.test.ts
 npm run build && HARNESS_E2E=1 npm run test:e2e:terminal
 # Vesta on the real pi runtime, offline scripted model (installed Pi 0.85.1; HARNESS_E2E_EXE for the packaged app).
 npm run build && VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/e2e.vesta.test.ts
@@ -84,7 +85,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.subagents.test.ts
 ```
 
-`npm run test:e2e:ci` runs the fifteen suites and fails if any of them reports *skipped*.
+`npm run test:e2e:ci` runs the seventeen suites and fails if any of them reports *skipped*.
 
 Any run with `VOCS_CODE_E2E_UI=1` or `HARNESS_E2E=1` parks its window outside every display and never
 takes focus, so suites can run while you work. `VOCS_CODE_E2E_VISIBLE=1` brings the window back on
@@ -107,6 +108,7 @@ suites alive** below):
 | Themes, `styles.css`, terminal colours | `e2e.themes` |
 | Terminal panel, PTY, `terminal/host.ts` | `e2e.terminal` |
 | Approval cards, `harness/permissions.ts` | `e2e.approval` (live) |
+| Mission configuration, orchestration, controls or managed workspaces | `tests/mission-*.test.ts` + `e2e.mission-settings`, `e2e.mission`; managed Pi also needs `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/mission-pi.integration.test.ts` and the matching live smoke. See the acceptance ledger in `docs/MISSION-IMPLEMENTATION.md`. |
 | Vesta panel, `agents/` pi bridge, `resources/pi/vocs-code-vesta.ts` | `tests/vesta.test.ts` + `e2e.vesta` (opt-in, real pi) |
 | Updater, `main/updater*.ts`, update pill, About updates panel | `tests/updater.test.ts`, `tests/update-ui.test.tsx` + `e2e.update` (opt-in, packaged + mock feed) |
 | pi harness (`harness/pi.ts`), `resources/pi/**` | `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-tool-compatibility.integration.test.ts tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts` + live `HARNESS_SMOKE_ONLY=pi` |

@@ -26,6 +26,12 @@ export const REMOTE_CHANNELS = new Set<string>([
   'sessions:transcript',
   'sessions:transcriptPage',
   'sessions:search',
+  'missions:list',
+  'missions:get',
+  'missions:exportPlan',
+  'missions:create',
+  'missions:control',
+  'missions:command',
   'sessions:send',
   'sessions:interrupt',
   'sessions:stop',
@@ -71,6 +77,9 @@ export const REMOTE_READ_CHANNELS = new Set<string>([
   'sessions:transcript',
   'sessions:transcriptPage',
   'sessions:search',
+  'missions:list',
+  'missions:get',
+  'missions:exportPlan',
   'analytics:summary',
   'analytics:executions',
   'skills:list',
@@ -95,6 +104,10 @@ export const REMOTE_READ_CHANNELS = new Set<string>([
 ]);
 
 export const REMOTE_WRITE_CHANNELS = new Set<string>([
+  'missions:create',
+  'missions:control',
+  // Even `/mission status` travels on a mixed command channel: never classify it as a read.
+  'missions:command',
   'sessions:send',
   'sessions:interrupt',
   'sessions:stop',
@@ -113,6 +126,8 @@ export const REMOTE_WRITE_CHANNELS = new Set<string>([
 export const REMOTE_PUSH_CHANNELS = new Set<string>([
   'push:sessionEvent',
   'push:sessionsChanged',
+  // Mission records contain public coordination state, not broker credentials or provider keys.
+  'push:missionsChanged',
   'push:settingsChanged',
   'push:remotePolicy'
 ]);

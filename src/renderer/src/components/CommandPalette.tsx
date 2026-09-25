@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '../api';
 import { harnessShort } from '../format';
 import { useStore } from '../store';
+import { isTopLevelSession, MISSION_MANAGED_REASON, pauseMissionSession } from '../missions';
 import { createTerminal } from '../terminal/host';
 import { Icon } from './ui';
 
@@ -13,6 +14,7 @@ interface Cmd {
   hint?: string;
   icon: string;
   run: () => void;
+  disabled?: boolean;
 }
 
 export function CommandPalette() {
@@ -26,6 +28,7 @@ export function CommandPalette() {
 
   const cmds = useMemo<Cmd[]>(() => {
     const st = useStore.getState();
+    const active = sessions.find((session) => session.id === activeId);
     const base: Cmd[] = [
       { id: 'new', label: 'New session in folder…', hint: 'Ctrl+Alt+N', icon: 'plus', run: () => void st.startNewSession() },
       { id: 'new-quick', label: 'New session (quick picker)', hint: 'Ctrl+N', icon: 'folder', run: () => st.openQuickSession(true) },
@@ -36,7 +39,7 @@ export function CommandPalette() {
       { id: 'panel', label: 'Toggle right side panel', hint: 'Ctrl+J', icon: 'layout', run: () => st.togglePanel() },
       { id: 'sidebar', label: 'Toggle left sidebar', hint: 'Ctrl+B', icon: 'sidebar', run: () => st.toggleSidebar() },
       { id: 'changes', label: 'Show changes', icon: 'diff', run: () => st.setPanelTab('changes') },
-      { id: 'goal', label: 'Show goal', icon: 'target', run: () => st.setPanelTab('goal') },
+      { id: 'goal', label: active?.mission ? 'Show Mission' : 'Show goal', icon: 'target', run: () => st.setPanelTab('goal') },
       { id: 'terminal', label: 'Show terminal', hint: 'Ctrl+`', icon: 'terminal', run: () => { st.setPanelTab('terminal'); st.focusTerminal(); } },
       { id: 'thinking', label: 'Toggle thinking visibility', icon: 'brain', run: () => st.toggleThinking() }
     ];
@@ -44,13 +47,13 @@ export function CommandPalette() {
       base.push(
         { id: 'new-here', label: 'New session in this folder', hint: 'Ctrl+Shift+N', icon: 'sessionPlus', run: () => void st.startNewSession(st.sessions.find((x) => x.id === st.activeId)?.config.projectRoot) },
         { id: 'new-terminal', label: 'New terminal', hint: 'Ctrl+Shift+`', icon: 'terminal', run: () => void createTerminal(activeId) },
-        { id: 'stop', label: 'Interrupt current turn', hint: 'Esc', icon: 'stop', run: () => void invoke('sessions:interrupt', { id: activeId }) },
+        { id: 'stop', label: active?.mission ? 'Pause Mission' : 'Interrupt current turn', hint: 'Esc', icon: 'stop', run: () => active && pauseMissionSession(active) },
         { id: 'export', label: 'Export transcript as Markdown', icon: 'download', run: () => void invoke('sessions:export', { id: activeId }) },
-        { id: 'fork', label: 'Fork session', icon: 'fork', run: () => void invoke('sessions:fork', { id: activeId }).then((f) => f && st.setActive(f.id)) },
+        { id: 'fork', label: 'Fork session', icon: 'fork', disabled: !!active?.mission, hint: active?.mission ? MISSION_MANAGED_REASON : undefined, run: () => void invoke('sessions:fork', { id: activeId }).then((f) => f && st.setActive(f.id)) },
         { id: 'compact', label: 'Compact context', icon: 'compact', run: () => void invoke('sessions:compact', { id: activeId }) }
       );
     }
-    for (const s of sessions.filter((s) => !s.archived)) base.push({ id: `s:${s.id}`, label: s.title, hint: `${harnessShort(s.config.harness)} · ${s.config.projectRoot.split(/[\\/]/).pop()}`, icon: 'sparkles', run: () => void st.setActive(s.id) });
+    for (const s of sessions.filter((s) => !s.archived && isTopLevelSession(s))) base.push({ id: `s:${s.id}`, label: s.title, hint: `${harnessShort(s.config.harness)} · ${s.config.projectRoot.split(/[\\/]/).pop()}`, icon: 'sparkles', run: () => void st.setActive(s.id) });
     return base;
   }, [sessions, activeId]);
 
@@ -75,7 +78,7 @@ export function CommandPalette() {
             onKeyDown={(e) => {
               if (e.key === 'ArrowDown') setIdx((i) => Math.min(i + 1, filtered.length - 1));
               else if (e.key === 'ArrowUp') setIdx((i) => Math.max(i - 1, 0));
-              else if (e.key === 'Enter' && filtered[idx]) {
+              else if (e.key === 'Enter' && filtered[idx] && !filtered[idx].disabled) {
                 close();
                 filtered[idx].run();
               } else if (e.key === 'Escape') close();
@@ -84,7 +87,7 @@ export function CommandPalette() {
         </div>
         <div className="palette-list">
           {filtered.slice(0, 40).map((c, i) => (
-            <button key={c.id} type="button" className={`palette-item ${i === idx ? 'active' : ''}`} onMouseEnter={() => setIdx(i)} onClick={() => { close(); c.run(); }}>
+            <button key={c.id} type="button" disabled={c.disabled} className={`palette-item ${i === idx ? 'active' : ''}`} onMouseEnter={() => setIdx(i)} onClick={() => { close(); c.run(); }}>
               <Icon name={c.icon} size={14} />
               <span>{c.label}</span>
               <span className="spacer" />

@@ -16,8 +16,9 @@ import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './
 import { ModelPicker } from './ModelPicker';
 import { PairingQr } from './PairingQr';
 import { PiSection } from './PiSettings';
+import { MissionSettings } from './mission/MissionSettings';
 
-type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
+type Section = 'general' | 'mission' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
 
 export function SettingsView() {
   const settings = useStore((s) => s.settings)!;
@@ -34,6 +35,7 @@ export function SettingsView() {
         {(
           [
             ['general', 'General', 'settings'],
+            ['mission', 'Mission', 'flag'],
             ['shortcuts', 'Shortcuts', 'keyboard'],
             ['terminal', 'Terminal', 'terminal'],
             ['providers', 'Providers & keys', 'key'],
@@ -51,6 +53,7 @@ export function SettingsView() {
       </div>
       <div className="settings-body">
         {section === 'general' && <General settings={settings} update={update} />}
+        {section === 'mission' && <MissionSettings settings={settings} />}
         {section === 'shortcuts' && <ShortcutsSection settings={settings} />}
         {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
         {section === 'providers' && <Providers settings={settings} />}

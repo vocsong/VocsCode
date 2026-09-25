@@ -6,12 +6,16 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { z } from 'zod';
+import type { CreateMissionRequest, MissionControlRequest, MissionRecord, MissionUserControl } from '../shared/mission';
+import { parseMissionCommand } from '../shared/mission-command';
 import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
-import { PUSH_CHANNELS } from '../shared/ipc';
+import { PUSH_CHANNELS, TEXT_EXPORT_MAX_BYTES } from '../shared/ipc';
+import { missionPlanMarkdown } from './mission/context';
 import { Vesta } from './agents';
 import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAgent, setProjectAgentTracked } from './agent-files';
 import { createClaudeAgent, isPinnedModel, listClaudeAgents, setClaudeAgentModel } from './claude-agents';
-import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment, RemoteConfig, SessionMeta } from '../shared/types';
+import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment, RemoteConfig, SessionMeta, UserInput } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
 import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssueComments, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequestComments, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitRoot, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
@@ -70,10 +74,22 @@ export interface DesktopBridge {
   edit(command: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll'): void;
 }
 
+/** The registry consumes the public coordination port, never the model-facing tool broker. */
+export interface MissionHandlerService {
+  create(request: CreateMissionRequest): Promise<MissionRecord>;
+  get(id: string): MissionRecord | undefined;
+  list(): MissionRecord[];
+  control(request: MissionControlRequest & { submittedCommand?: string }): Promise<MissionRecord>;
+  sendUser(leadSessionId: string, input: UserInput, idempotencyKey?: string): Promise<void | MissionRecord>;
+  /** Stops the owned group and archives its sessions without removing any worktrees. */
+  archive?(missionId: string, archived: boolean): Promise<unknown>;
+}
+
 export interface HandlerDeps {
   settings: SettingsStore;
   secrets: SecretStore;
   sessions: SessionManager;
+  missions?: MissionHandlerService;
   terminals: TerminalManager;
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
@@ -108,6 +124,46 @@ export interface HandlerRegistry {
 /** A handler holding the host process this long has already frozen the UI; say so. */
 const SLOW_HANDLER_MS = 1000;
 
+const missionIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/, 'Invalid Mission/session identifier');
+const missionKeySchema = z.string().min(1).max(200);
+const missionTextSchema = z.string().min(1).max(100_000).refine((text) => !!text.trim(), 'Text must not be empty');
+const missionImageSchema = z.strictObject({ mimeType: z.string().regex(/^image\/[a-z0-9.+-]+$/i), data: z.string().min(1).max(32_000_000), name: z.string().max(1000).optional() });
+const missionImagesSchema = z.array(missionImageSchema).max(100).optional();
+const missionCreateSchema = z.strictObject({
+  idempotencyKey: missionKeySchema, projectRoot: missionTextSchema, originSessionId: missionIdSchema.optional(),
+  objective: missionTextSchema, mode: z.enum(['interactive_plan', 'autonomous']), leadPresetId: missionIdSchema.optional(),
+  permissionMode: z.enum(['ask', 'accept-edits', 'plan', 'auto', 'full-auto']), submittedCommand: missionTextSchema.optional(), images: missionImagesSchema
+});
+const missionControlSchema = z.strictObject({
+  missionId: missionIdSchema, idempotencyKey: missionKeySchema, expectedRevision: z.number().int().nonnegative(), submittedCommand: missionTextSchema.optional(),
+  control: z.discriminatedUnion('action', [
+    z.strictObject({ action: z.literal('execute'), proposalId: missionIdSchema, specificationRevision: z.number().int().positive() }),
+    z.strictObject({ action: z.enum(['pause', 'resume', 'stop', 'continue_planning', 'cleanup', 'apply_configuration']) }),
+    z.strictObject({ action: z.literal('steer'), text: missionTextSchema, images: missionImagesSchema }),
+    z.strictObject({ action: z.literal('replace_lead'), presetId: missionIdSchema }),
+    z.strictObject({ action: z.literal('narrow_delivery'), endpoint: z.enum(['local_commit', 'open_pr']) })
+  ])
+});
+const missionCommandSchema = z.strictObject({ sessionId: missionIdSchema, text: missionTextSchema, idempotencyKey: missionKeySchema, images: missionImagesSchema });
+const missionInputSchema = z.strictObject({ text: z.string().max(100_000), images: missionImagesSchema, mode: z.enum(['now', 'steer', 'queue']).optional() });
+
+/** All generic writer/lifecycle entry points must pass the same resource check, including
+ * ordinary-session aliases. Read channels deliberately do not acquire mutation authority. */
+const MISSION_SESSION_CONTROLS = new Set<string>([
+  'sessions:delete', 'sessions:editAndResend', 'sessions:interrupt', 'sessions:stop', 'sessions:setModel',
+  'sessions:setEffort', 'sessions:setPermissionMode', 'sessions:compact', 'sessions:clearTranscript',
+  'sessions:fork', 'sessions:moveTo', 'sessions:goal', 'subagents:stop', 'subagents:steer',
+  'agents:save', 'agents:delete', 'agents:track', 'claude-agents:setModel', 'claude-agents:create'
+]);
+const MISSION_GIT_MUTATIONS = new Set<string>([
+  'git:revert', 'git:stageAll', 'git:commit', 'git:pr', 'git:merge', 'git:checkout', 'git:init',
+  'git:initialCommit', 'git:setRemote', 'git:push', 'git:createGitHubRepo', 'git:setIdentity',
+  'git:deleteBranch', 'git:updateBranch', 'git:removeWorktree', 'git:pruneWorktrees', 'git:fetchPrune'
+]);
+const MISSION_REPO_MUTATIONS = new Set<string>(['git:setRemote', 'git:createGitHubRepo', 'git:setIdentity', 'git:pruneWorktrees', 'git:fetchPrune']);
+const MISSION_PROJECT_WRITES = new Set<string>(['mcp:project:save', 'mcp:project:state', 'mcp:export', 'knowledge:publish']);
+const MISSION_TERMINAL_CONTROLS = new Set<string>(['terminal:attach', 'terminal:input', 'terminal:resize', 'terminal:restart', 'terminal:kill', 'terminal:close', 'terminal:clear']);
+
 export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const { settings, secrets, sessions, terminals, runtime } = deps;
   const piConfig =
@@ -130,7 +186,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     handlers.set(channel, fn as (req: never) => unknown);
   }
 
-  async function invokeChannel(channel: string, req: unknown): Promise<unknown> {
+  async function invokeChannel(channel: string, req: unknown, actor: 'user' | 'agent' = 'user'): Promise<unknown> {
     const fn = handlers.get(channel as IpcChannel);
     if (!fn) {
       deps.log('warn', `ipc: unknown channel ${channel}`);
@@ -138,6 +194,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     }
     const t0 = Date.now();
     try {
+      await guardMissionBoundary(channel, req, actor);
       return await fn(req as never);
     } catch (e) {
       // The renderer shows the message as a toast, but a toast is gone in seconds; the log line
@@ -150,6 +207,245 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       if (ms >= SLOW_HANDLER_MS) deps.log('warn', `slow ipc ${channel}: ${ms}ms`);
     }
   }
+
+  const missionService = (): MissionHandlerService => {
+    if (!deps.missions) throw new Error('Mission service is unavailable in this run.');
+    return deps.missions;
+  };
+  const sessionFor = (id: unknown): SessionMeta => {
+    const session = sessions.get(missionIdSchema.parse(id));
+    if (!session) throw new Error('Session not found');
+    return session;
+  };
+  const missionFor = (session: SessionMeta): MissionRecord | undefined => {
+    const record = session.mission ? deps.missions?.get(session.mission.missionId) : deps.missions?.list().find((m) =>
+      m.leadSessionId === session.id || m.attempts.some((a) => a.sessionId === session.id) || m.workspaces.some((w) => w.ownerSessionId === session.id));
+    if (session.mission && !record) throw new Error('Mission ownership cannot be resolved. Resume/reconcile the Mission before changing this session.');
+    return record;
+  };
+  const denyMissionControl = (): never => { throw new Error('Mission owns this session/workspace. Use the principal engineer and Mission controls; generic changes cannot reconcile owned work.'); };
+  const isLead = (session: SessionMeta, mission: MissionRecord): boolean => mission.leadSessionId === session.id && session.mission?.role !== 'worker';
+  const requireLead = (session: SessionMeta, mission: MissionRecord): void => {
+    if (!isLead(session, mission)) throw new Error('Mission workers are read-only. Send instructions to the principal engineer instead.');
+  };
+  const pathKey = (p: string): string => process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p);
+  const containsPath = (root: string, target: string): boolean => !isOutsideWorkspace(root, target, path);
+  // Resolve existing ancestors too: a missing leaf below a junction must not escape ownership.
+  const realResource = async (p: string): Promise<string> => {
+    const absolute = path.resolve(missionTextSchema.parse(p));
+    try { return pathKey(await fs.realpath(absolute)); } catch (e) {
+      if (!['ENOENT', 'ENOTDIR'].includes((e as NodeJS.ErrnoException).code ?? '')) throw e;
+      const parent = path.dirname(absolute);
+      if (parent === absolute) return pathKey(absolute);
+      return pathKey(path.join(await realResource(parent), path.basename(absolute)));
+    }
+  };
+  async function workspaceOwners(target: string, includeDescendants = false) {
+    const real = await realResource(target);
+    const owners: Array<{ mission: MissionRecord; workspace: MissionRecord['workspaces'][number] }> = [];
+    for (const mission of deps.missions?.list() ?? []) for (const workspace of mission.workspaces) {
+      if (workspace.cleanedAt !== undefined) continue;
+      const root = await realResource(workspace.path);
+      if (containsPath(root, real) || includeDescendants && containsPath(real, root)) owners.push({ mission, workspace });
+    }
+    return owners;
+  }
+  async function assertOrdinaryWorkspace(target: string, includeDescendants = false): Promise<void> {
+    if (deps.missions && (await workspaceOwners(target, includeDescendants)).length) denyMissionControl();
+    // A corrupt Mission journal must not turn retained managed sessions into ordinary writable
+    // aliases. Session ownership is a second, independent fence; planning's original source is
+    // not a managed worktree and deliberately has no worktreeBranch marker.
+    const real = await realResource(target);
+    for (const session of sessions.list().filter((s) => s.mission && s.worktreeBranch)) {
+      const root = await realResource(session.cwd);
+      if (containsPath(root, real) || includeDescendants && containsPath(real, root)) denyMissionControl();
+    }
+  }
+  async function assertOrdinarySession(id: unknown): Promise<SessionMeta> {
+    const session = sessionFor(id);
+    if (missionFor(session)) denyMissionControl();
+    await assertOrdinaryWorkspace(session.cwd);
+    return session;
+  }
+  async function assertInteractiveWorkspace(session: SessionMeta | undefined, cwd: string): Promise<void> {
+    const mission = session && missionFor(session);
+    if (mission) {
+      requireLead(session!, mission);
+      if (!mission.executionAuthorization || session!.mission?.sourceAccess === 'read_only' || mission.status !== 'running' || mission.phase !== 'executing') throw new Error('Mission planning, paused and non-executing workspaces do not allow interactive shells.');
+    } else await assertOrdinaryWorkspace(cwd);
+    const owners = await workspaceOwners(cwd);
+    if (mission && !owners.length) denyMissionControl();
+    for (const owner of owners) {
+      if (!session || !isLead(session, owner.mission) || owner.workspace.role !== 'lead' || owner.workspace.ownerSessionId !== session.id) denyMissionControl();
+    }
+  }
+  async function assertOrdinaryBranch(session: SessionMeta, branches: unknown[], repositoryWide = false): Promise<Set<string>> {
+    const protectedBranches = new Set<string>();
+    const candidates = (deps.missions?.list() ?? []).filter((m) => m.workspaces.some((w) => w.cleanedAt === undefined));
+    if (!candidates.length) return protectedBranches;
+    const root = await realResource(session.config.projectRoot);
+    let registered: Awaited<ReturnType<typeof gitWorktrees>> | undefined;
+    for (const mission of candidates) {
+      let sameRepo = root === await realResource(mission.projectRoot);
+      if (!sameRepo) {
+        // A session can have been opened in another worktree with a different projectRoot label.
+        registered ??= await gitWorktrees(session.cwd);
+        for (const workspace of mission.workspaces.filter((w) => w.cleanedAt === undefined)) {
+          const actual = await realResource(workspace.path);
+          if ((await Promise.all(registered.worktrees.map((w) => realResource(w.path)))).includes(actual)) { sameRepo = true; break; }
+        }
+      }
+      if (!sameRepo) continue;
+      if (repositoryWide) denyMissionControl();
+      const ownedBranches = new Set([...mission.workspaces.filter((w) => w.cleanedAt === undefined).map((w) => w.branch), `mission/${mission.id}-delivery`]);
+      for (const branch of ownedBranches) protectedBranches.add(branch);
+      for (const branch of branches) {
+        if (typeof branch === 'string' && ownedBranches.has(branch.trim().replace(/^refs\/heads\//, '').split(':').at(-1)!)) denyMissionControl();
+      }
+    }
+    return protectedBranches;
+  }
+  async function guardMissionBoundary(channel: string, input: unknown, actor: 'user' | 'agent'): Promise<void> {
+    if (actor === 'agent' && (channel.startsWith('missions:') || channel === 'app:fileSaveAs')) throw new Error('User export and Mission actions cannot originate from an agent tool.');
+    const req = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    if (MISSION_SESSION_CONTROLS.has(channel)) {
+      const session = await assertOrdinarySession(req.id);
+      if (channel === 'sessions:moveTo') await assertOrdinaryWorkspace(missionTextSchema.parse(req.cwd));
+      if (channel.startsWith('agents:') || channel.startsWith('claude-agents:')) await assertOrdinaryWorkspace(session.config.projectRoot);
+    } else if (channel === 'sessions:send' || channel === 'sessions:archive') {
+      const session = sessionFor(req.id);
+      const mission = missionFor(session);
+      if (mission) {
+        requireLead(session, mission);
+        if (actor !== 'user') throw new Error('Mission user actions cannot originate from an agent tool.');
+      } else await assertOrdinaryWorkspace(session.cwd);
+    } else if (channel === 'sessions:create') {
+      const config = req.config && typeof req.config === 'object' ? req.config as Record<string, unknown> : {};
+      if (['mission', 'missionId', 'missionRole', 'ownership', 'activeAttemptId'].some((key) => key in req || key in config)) throw new Error('Mission ownership is host-only; use missions:create.');
+      if (typeof config.projectRoot === 'string') {
+        await assertOrdinaryWorkspace(config.projectRoot);
+        if (req.checkoutBranch) await assertOrdinaryBranch({ cwd: config.projectRoot, config } as unknown as SessionMeta, [req.checkoutBranch]);
+      }
+    } else if (channel === 'folders:remove' && deps.missions) {
+      const root = await realResource(missionTextSchema.parse(req.root));
+      for (const mission of deps.missions.list()) if (await realResource(mission.projectRoot) === root) denyMissionControl();
+      for (const session of sessions.list().filter((s) => pathKey(s.config.projectRoot) === pathKey(String(req.root)))) await assertOrdinarySession(session.id);
+      await assertOrdinaryWorkspace(String(req.root), true);
+    } else if (MISSION_GIT_MUTATIONS.has(channel)) {
+      const session = await assertOrdinarySession(req.sessionId);
+      if (typeof req.path === 'string') await assertOrdinaryWorkspace(path.resolve(session.cwd, req.path), channel === 'git:removeWorktree');
+      const currentBranch = deps.missions?.list().some((m) => m.workspaces.some((w) => w.cleanedAt === undefined)) ? (await gitFolderBranch(session.cwd)).branch : undefined;
+      await assertOrdinaryBranch(session, [req.branch, req.head, req.base, session.worktreeBranch, currentBranch], MISSION_REPO_MUTATIONS.has(channel));
+    } else if (MISSION_PROJECT_WRITES.has(channel) || channel === 'mcp:import' && req.to === 'repo') {
+      const session = await assertOrdinarySession(req.sessionId);
+      await assertOrdinaryWorkspace(session.config.projectRoot);
+    } else if (channel === 'terminal:create') {
+      const session = sessionFor(req.sessionId);
+      await assertInteractiveWorkspace(session, session.cwd);
+    } else if (MISSION_TERMINAL_CONTROLS.has(channel)) {
+      const terminal = terminals.list().find((t) => t.id === req.terminalId);
+      if (!terminal) throw new Error('Terminal not found');
+      const session = sessionFor(terminal.sessionId);
+      await assertInteractiveWorkspace(session, terminal.cwd);
+    } else if (channel === 'app:openTerminal') {
+      await assertInteractiveWorkspace(undefined, missionTextSchema.parse(req.cwd));
+    } else if (channel === 'app:openInEditor' && deps.missions) {
+      const session = sessionFor(req.sessionId);
+      await assertOrdinaryWorkspace(path.resolve(session.cwd, missionTextSchema.parse(req.path)));
+    }
+  }
+
+  async function createMission(input: unknown): Promise<MissionRecord> {
+    const request = missionCreateSchema.parse(input);
+    if (!path.isAbsolute(request.projectRoot)) throw new Error('Choose an absolute project folder.');
+    if (request.originSessionId) {
+      const source = sessionFor(request.originSessionId);
+      const mission = missionFor(source);
+      if (mission) requireLead(source, mission);
+      else await assertOrdinaryWorkspace(source.cwd);
+      if (await realResource(request.projectRoot) !== await realResource(source.config.projectRoot)) throw new Error('Source session belongs to a different project.');
+      // Never let renderer fields choose the source cwd, its model or an elevated permission mode.
+      request.projectRoot = source.config.projectRoot;
+      request.permissionMode = mission?.requestedPermissionMode ?? source.config.permissionMode;
+    } else {
+      if (!knownFolder(request.projectRoot)) throw new Error('Choose a known project folder or pick one in New Session.');
+      await assertOrdinaryWorkspace(request.projectRoot);
+    }
+    const stat = await fs.stat(request.projectRoot).catch(() => null);
+    if (!stat?.isDirectory()) throw new Error('Project folder does not exist.');
+    if (!(await gitRoot(request.projectRoot))) throw new Error('Mission requires a Git project. Initialize the project explicitly before launching.');
+    return missionService().create(request);
+  }
+  async function controlMission(input: unknown): Promise<MissionRecord> {
+    const request = missionControlSchema.parse(input);
+    const mission = missionService().get(request.missionId);
+    if (!mission) throw new Error('Mission not found.');
+    if (request.expectedRevision !== mission.revision) throw new Error('Stale Mission revision. Refresh before applying this control.');
+    if (request.control.action === 'execute') {
+      const proposal = mission.pendingProposal;
+      if (!proposal || proposal.id !== request.control.proposalId || proposal.specificationRevision !== request.control.specificationRevision ||
+          proposal.specificationRevision !== mission.specificationRevision || proposal.planRevision !== mission.planRevision) throw new Error('No current ready plan proposal matches this approval. Refresh the Mission.');
+    }
+    return missionService().control(request);
+  }
+  handle('missions:list', (req) => {
+    if (req != null) throw new Error('missions:list takes no arguments.');
+    return deps.missions?.list() ?? [];
+  });
+  handle('missions:get', (req) => {
+    const { missionId } = z.strictObject({ missionId: missionIdSchema }).parse(req);
+    return deps.missions?.get(missionId) ?? null;
+  });
+  handle('missions:exportPlan', (req) => {
+    const { missionId } = z.strictObject({ missionId: missionIdSchema }).parse(req);
+    const record = missionService().get(missionId);
+    if (!record) throw new Error('Mission not found.');
+    return { markdown: missionPlanMarkdown(record), suggestedName: 'plan.md' };
+  });
+  handle('missions:create', createMission);
+  handle('missions:control', controlMission);
+  handle('missions:command', async (input) => {
+    const req = missionCommandSchema.parse(input);
+    const command = parseMissionCommand(req.text);
+    if (!command) throw new Error('Use the exact /mission command. /missionary is not a Mission command.');
+    if (command.kind === 'error') throw new Error(command.message);
+    if (req.images?.length && command.kind !== 'launch') throw new Error('Mission controls and the creation dialog cannot take images. Add an objective to /mission to send the images as context, or remove them before using a control.');
+    const source = sessionFor(req.sessionId);
+    let mission = missionFor(source);
+    if (mission) requireLead(source, mission);
+    else await assertOrdinaryWorkspace(source.cwd);
+    if (command.kind === 'show' || command.kind === 'control' && command.action === 'status') {
+      return { kind: command.kind === 'show' ? 'show' : 'status', ...(mission ? { mission, sessionId: mission.leadSessionId } : {}) };
+    }
+    if (command.kind === 'launch' && (!mission || command.explicit)) {
+      const created = await createMission({ idempotencyKey: req.idempotencyKey, projectRoot: source.config.projectRoot, originSessionId: source.id,
+        objective: command.objective, mode: command.mode, permissionMode: mission?.requestedPermissionMode ?? source.config.permissionMode, submittedCommand: req.text, ...(req.images?.length ? { images: req.images } : {}) });
+      return { kind: 'created', mission: created, sessionId: created.leadSessionId };
+    }
+    if (!mission) throw new Error('Open a Mission first, or use /mission <objective> to create one.');
+    const apply = async (control: MissionUserControl, suffix = '') => {
+      mission = await controlMission({ missionId: mission!.id, expectedRevision: mission!.revision, idempotencyKey: `${req.idempotencyKey}${suffix}`, control, submittedCommand: req.text });
+    };
+    if (command.kind === 'control') {
+      if (command.action === 'execute') {
+        if (!mission.pendingProposal) throw new Error('No ready plan proposal is awaiting execution approval.');
+        await apply({ action: 'execute', proposalId: mission.pendingProposal.id, specificationRevision: mission.pendingProposal.specificationRevision });
+      } else if (command.action !== 'status') await apply({ action: command.action });
+    } else {
+      if (['completed', 'stopped', 'failed'].includes(mission.status)) throw new Error('This Mission is terminal. Use /mission start -- <objective> for a linked follow-up.');
+      if (command.mode === 'interactive_plan') {
+        if (mission.phase !== 'planning' && mission.status !== 'paused') await apply({ action: 'pause' }, ':pause');
+        await apply({ action: 'continue_planning' }, ':planning');
+      }
+      // Retain the actual command and attachments through the same host user-input path as
+      // chat. It restores the original received revision on a lost-reply retry; rebinding a
+      // control to today's revision would either duplicate the input or reject an exact retry.
+      await missionService().sendUser(source.id, { text: req.text, ...(req.images?.length ? { images: req.images } : {}) }, `${req.idempotencyKey}:steer`);
+      mission = missionService().get(mission.id);
+      if (!mission) throw new Error('Mission state is unavailable after retaining the command. Retry the same input.');
+    }
+    return { kind: 'updated', mission, sessionId: mission!.leadSessionId };
+  });
 
   handle('app:info', () => ({ version: deps.desktop.appVersion(), platform: process.platform, userData: deps.desktop.userDataPath(), isPackaged: deps.desktop.isPackaged() }));
   const idleUpdate: UpdateState = { status: 'idle' };
@@ -504,7 +800,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
   handle('mcp:import', async ({ servers, to, sessionId }) => {
     const incoming = normalizeMcpServers(servers);
-    if (!incoming.length) return { ok: false, error: 'Nothing to import' };
+    // Sentence punctuation also avoids electron-vite's ESM shim mistaking this literal for an import.
+    if (!incoming.length) return { ok: false, error: 'No MCP servers to import.' };
     if (to === 'global') {
       await settings.update({ mcpServers: mergeById(settings.get().mcpServers ?? [], incoming) });
       return { ok: true };
@@ -654,6 +951,21 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:rename', ({ id, title }) => sessions.patch(id, { title }));
   handle('sessions:label', ({ id, label }) => sessions.patch(id, { statusLabel: label?.trim() || undefined }));
   handle('sessions:archive', async ({ id, archived, removeWorktree, forceWorktree }) => {
+    z.boolean().parse(archived);
+    const session = sessionFor(id);
+    const mission = missionFor(session);
+    if (mission) {
+      const service = missionService();
+      if (!service.archive) throw new Error('Mission archive is unavailable; stop the Mission and retain its workspaces.');
+      if (archived) {
+        const owned = new Set([mission.leadSessionId, ...mission.attempts.map((a) => a.sessionId), ...mission.workspaces.flatMap((w) => w.ownerSessionId ? [w.ownerSessionId] : []),
+          ...sessions.list().filter((s) => s.mission?.missionId === mission.id).map((s) => s.id)]);
+        for (const ownedId of owned) await terminals.closeForSession(ownedId);
+      }
+      // The service stops/reconciles the whole group. Never forward ordinary removal flags.
+      await service.archive(mission.id, archived);
+      return sessionFor(id);
+    }
     // Archiving parks the session, so its shells go with it — and a shell holding the worktree's
     // directory open (Windows) must be gone before the worktree is removed.
     if (archived) await terminals.closeForSession(id);
@@ -661,7 +973,16 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
   handle('sessions:pin', ({ id, pinned }) => sessions.setPinned(id, pinned));
   handle('sessions:pinOrder', ({ ids }) => sessions.setPinOrder(ids));
-  handle('sessions:send', ({ id, input }) => sessions.send(id, input));
+  handle('sessions:send', async ({ id, input, idempotencyKey }) => {
+    const session = sessionFor(id);
+    if (missionFor(session)) {
+      const checked = missionInputSchema.parse(input);
+      if (/^\/goal(?:\s|$)/i.test(checked.text.trim())) throw new Error('Mission already owns execution. Use /mission pause, resume, stop, or steer the principal engineer.');
+      await missionService().sendUser(id, checked, idempotencyKey === undefined ? undefined : missionKeySchema.parse(idempotencyKey));
+      return;
+    }
+    await sessions.send(id, input);
+  });
   handle('sessions:editAndResend', ({ id, userItemId, input }) => sessions.editAndResend(id, userItemId, input));
   handle('sessions:interrupt', ({ id }) => sessions.interrupt(id));
   handle('sessions:stop', ({ id }) => sessions.stop(id));
@@ -670,6 +991,20 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:setPermissionMode', ({ id, mode }) => sessions.setPermissionMode(id, mode));
   handle('sessions:compact', ({ id }) => sessions.compact(id));
   handle('sessions:clearTranscript', ({ id }) => sessions.clearTranscript(id));
+  handle('app:fileSaveAs', async (input) => {
+    const { content, suggestedName } = z.strictObject({
+      content: z.string().max(TEXT_EXPORT_MAX_BYTES).refine((text) => Buffer.byteLength(text, 'utf8') <= TEXT_EXPORT_MAX_BYTES, 'Text export exceeds the 1 MiB limit.'),
+      suggestedName: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}\.md$/, 'Choose a Markdown filename, not a path.')
+    }).parse(input);
+    const res = await deps.desktop.showSaveDialog({ defaultPath: path.join(deps.desktop.documentsPath(), suggestedName), filters: [{ name: 'Markdown', extensions: ['md'] }] });
+    if (res.canceled || !res.filePath) return { path: null };
+    if (!path.isAbsolute(res.filePath)) throw new Error('Save As did not return an absolute destination.');
+    // Recheck after the chooser: neither this read-only export nor a selected alias grants
+    // permission to overwrite retained/uncertain Mission workspaces or orphaned owned sessions.
+    await assertOrdinaryWorkspace(res.filePath);
+    await fs.writeFile(res.filePath, content, 'utf8');
+    return { path: res.filePath };
+  });
   handle('sessions:export', async ({ id }) => {
     const md = await sessions.exportMarkdown(id);
     const meta = sessions.get(id);
@@ -699,7 +1034,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     listSessions: () => sessions.list(),
     getSession: (id) => sessions.get(id),
     getSecret: (providerId) => secrets.get(providerId),
-    invoke: invokeChannel,
+    invoke: (channel, req) => invokeChannel(channel, req, 'agent'),
     push: (state) => deps.push(PUSH_CHANNELS.agentState, state),
     log: deps.log,
     // Vesta runs on pi (docs/VESTA.md); it is absent until pi is installed, which the panel says.
@@ -814,6 +1149,46 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!m) throw new Error('Session not found');
     return m.cwd;
   };
+  async function missionReadScope(sessionId: string, workspaceId?: string) {
+    const session = sessionFor(sessionId);
+    const mission = missionFor(session);
+    if (workspaceId !== undefined) {
+      missionIdSchema.parse(workspaceId);
+      if (!mission || !isLead(session, mission)) throw new Error('Only the owning Mission lead can select a Mission workspace.');
+    }
+    if (!mission || !isLead(session, mission)) return { cwd: session.cwd };
+    const workspace = workspaceId === undefined ? mission.workspaces.find((w) => w.role === 'integration' && w.cleanedAt === undefined) : mission.workspaces.find((w) => w.id === workspaceId && w.cleanedAt === undefined);
+    if (!workspace) throw new Error('Mission workspace is unavailable or cleaned. No integration result is ready yet.');
+    const cwd = await fs.realpath(workspace.path);
+    // Provisioning records canonical roots. A replaced root/junction cannot redirect inspection.
+    if (pathKey(cwd) !== pathKey(workspace.path) || !(await fs.stat(cwd)).isDirectory()) throw new Error('Mission workspace path changed; reconcile before inspecting it.');
+    return { cwd, mission, workspace };
+  }
+  async function missionDiff(sessionId: string, workspaceId?: string, file?: string, staged?: boolean): Promise<{ diff: string; error?: string }> {
+    const scope = await missionReadScope(sessionId, workspaceId);
+    if (!scope.mission) return gitDiff(scope.cwd, file, staged);
+    let relative: string | undefined;
+    if (file !== undefined) {
+      missionTextSchema.parse(file);
+      const target = path.resolve(scope.cwd, file);
+      if (!containsPath(scope.cwd, target) || !containsPath(pathKey(scope.cwd), await realResource(target))) throw new Error('Path outside Mission workspace.');
+      relative = path.relative(scope.cwd, target).split(path.sep).join('/');
+    }
+    if (scope.workspace.role !== 'integration') return gitDiff(scope.cwd, relative, staged);
+    const baseline = scope.mission.baseline?.contentHash;
+    const accepted = scope.mission.acceptedRevision?.contentHash;
+    if (!baseline || !accepted) return { diff: '', error: 'No accepted Mission result is available yet.' };
+    if (![baseline, accepted].every((sha) => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('Invalid Mission Git object identity.');
+    if (pathKey(await gitRoot(scope.cwd) ?? '') !== pathKey(scope.cwd)) throw new Error('Mission integration workspace is not a valid Git root.');
+    // Literal pathspecs plus an argv separator prevent flags/pathspec magic. Disable external
+    // diff/textconv hooks and inherited Git routing so a read cannot execute project programs.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')));
+    const result = await runCapture(which('git') ?? 'git', ['--literal-pathspecs', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-textconv', baseline, accepted, '--', ...(relative ? [relative] : [])], {
+      cwd: scope.cwd, env: { ...env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' }, timeoutMs: 60_000
+    });
+    if (result.timedOut || result.truncated || result.code !== 0) return { diff: '', error: result.timedOut ? 'Mission diff timed out.' : result.truncated ? 'Mission diff was truncated; select a smaller file.' : `Mission diff failed: ${result.stderr.trim()}` };
+    return { diff: result.stdout };
+  }
   // Neither probe takes a session id, so both gate on a folder the app already knows about (or one
   // the local user just picked): a paired browser must not be able to walk the host's disk.
   const knownFolder = (projectRoot: string) =>
@@ -823,7 +1198,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   // `git worktree add` there fails the whole session creation.
   handle('git:folderIsRepo', async ({ projectRoot }) => ({ isRepo: knownFolder(projectRoot) ? !!(await gitRoot(projectRoot)) : false }));
   handle('git:summary', ({ sessionId }) => gitSummary(cwdOf(sessionId)));
-  handle('git:diff', async ({ sessionId, path: p, staged }) => gitDiff(cwdOf(sessionId), p, staged));
+  handle('git:diff', ({ sessionId, path: p, staged, missionWorkspaceId }) => missionDiff(sessionId, missionWorkspaceId, p, staged));
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
   handle('git:stageAll', ({ sessionId }) => gitStageAll(cwdOf(sessionId)));
   handle('git:commit', async ({ sessionId, message }) => {
@@ -873,6 +1248,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return r;
   });
   handle('git:merge', async ({ sessionId, base, head }) => {
+    // While Missions own branches, never let transcript/repo-wide PR fallback choose their
+    // delivery implicitly (including a PR mentioned by an ordinary-session alias).
+    if ((await assertOrdinaryBranch(sessionFor(sessionId), [head, base])).size) {
+      head = head?.trim() || (await gitFolderBranch(cwdOf(sessionId))).branch;
+      if (!head || /^\d+$/.test(head) || head.includes('://')) throw new Error('Choose an explicit ordinary branch to merge while Mission workspaces are retained.');
+      await assertOrdinaryBranch(sessionFor(sessionId), [head, base]);
+    }
     // An explicit head branch pins the PR (Branches panel); otherwise the session's own is resolved.
     const r = await gitMergePr(cwdOf(sessionId), base, head, head ? {} : await prQueryOf(sessionId));
     sessions.note(sessionId, r.ok ? `Merged${head ? ` ${head}` : ''}: ${r.url ?? 'PR merged'}` : r.output ?? 'Failed to merge the PR', r.ok ? 'info' : 'error');
@@ -929,9 +1311,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:issueComments', ({ sessionId, number }) => gitIssueComments(cwdOf(sessionId), number));
   handle('git:prComments', ({ sessionId, number }) => gitPullRequestComments(cwdOf(sessionId), number));
 
-  handle('fs:list', ({ sessionId, relPath }) => listWorkspaceFiles(cwdOf(sessionId), relPath));
-  handle('fs:search', async ({ sessionId, query, limit }) => {
-    const root = cwdOf(sessionId);
+  handle('fs:list', async ({ sessionId, relPath, missionWorkspaceId }) => listWorkspaceFiles((await missionReadScope(sessionId, missionWorkspaceId)).cwd, relPath));
+  handle('fs:search', async ({ sessionId, query, limit, missionWorkspaceId }) => {
+    const root = (await missionReadScope(sessionId, missionWorkspaceId)).cwd;
     const q = query.toLowerCase();
     const max = limit ?? 30;
     const out: string[] = [];
@@ -955,7 +1337,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     await walk(root, '', 0);
     return out;
   });
-  handle('fs:read', ({ sessionId, path: p, maxBytes }) => readWorkspaceFile(cwdOf(sessionId), p, maxBytes));
+  handle('fs:read', async ({ sessionId, path: p, maxBytes, missionWorkspaceId }) => readWorkspaceFile((await missionReadScope(sessionId, missionWorkspaceId)).cwd, p, maxBytes));
 
   // Layer 2 project knowledge. Every channel resolves its scope from the session, never from a
   // renderer-supplied path, so a client cannot read or write another project's wiki.

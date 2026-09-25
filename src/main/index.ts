@@ -24,6 +24,7 @@ import { RuntimeResolver, which } from './runtime';
 import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
+import { MissionRuntime } from './mission/runtime';
 import { SettingsStore } from './settings';
 import { SessionStore } from './store';
 import { TerminalManager } from './terminal';
@@ -72,6 +73,7 @@ if (!app.isPackaged || process.env.VOCS_CODE_USER_DATA) app.setPath('userData', 
 
 let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
+let missions: MissionRuntime | null = null;
 let terminals: TerminalManager | null = null;
 let webServer: WebServer | null = null;
 let remoteHost: RemoteHost | null = null;
@@ -248,6 +250,7 @@ async function main(): Promise<void> {
     gitnexusProxyPath: runtime.resource('mcp', 'gitnexus-scope.mjs'),
     memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
     memoryUserData: userData,
+    withWorkspaceDispatch: (meta, dispatch) => missions ? missions.admission.dispatch(meta.cwd, dispatch) : dispatch(),
     knowledgeDigest: (scope) => {
       // Opening a session on a project with no wiki is the passive trigger for the first scan.
       void knowledge.ensureSeeded(scope);
@@ -327,10 +330,21 @@ async function main(): Promise<void> {
     settings: () => settings.get().terminal,
     version: app.getVersion(),
     cwdOf: (id) => sessionsRef.get(id)?.cwd,
+    beforeSpawn: (cwd) => missions?.admission.assertAvailableSync(cwd),
+    isManaged: (id) => !!sessionsRef.get(id)?.mission,
+    onActivity: (id) => { const missionId = sessionsRef.get(id)?.mission?.missionId; if (missionId) missions?.service.ownedActivityChanged(missionId); },
+    windowsJobHelper: path.join(app.isPackaged ? process.resourcesPath : path.join(appRoot, 'resources'), 'mission', 'windows-check-job.ps1'),
     push: pushAll,
     log
   });
   await terminals.load();
+  missions = new MissionRuntime({
+    userData, sessions: sessionsRef, settings, terminals,
+    windowsJobHelper: path.join(app.isPackaged ? process.resourcesPath : path.join(appRoot, 'resources'), 'mission', 'windows-check-job.ps1'),
+    changed: (view) => pushAll(PUSH_CHANNELS.missionsChanged, view.record), log: logTo,
+  });
+  // Recovery restores blocked/paused coordination state; it never launches a model on boot.
+  await missions.load();
 
   // Remote access (docs/REMOTE-ACCESS.md): the host needs the registry lazily, since
   // registerIpc itself consumes the host to bind the remote:* channels.
@@ -364,6 +378,7 @@ async function main(): Promise<void> {
     settings,
     secrets,
     sessions,
+    missions: missions.service,
     terminals,
     runtime,
     analytics,
@@ -465,9 +480,11 @@ async function main(): Promise<void> {
         log('warn', `${label} during shutdown failed: ${describeError(error)}`);
       }
     };
-    const drainSessions = sessions
-      ? sessions.stopAll().then(() => sessions?.flushPendingPersists()).then(() => analytics.flush())
-      : Promise.resolve();
+    const drainSessions = safe('mission shutdown', missions?.close()).then(async () => {
+      await sessions?.stopAll();
+      await sessions?.flushPendingPersists();
+      await analytics.flush();
+    });
     const shutdown = Promise.all([
       safe('session drain', drainSessions),
       safe('terminal shutdown', terminals?.shutdown(deadline)),

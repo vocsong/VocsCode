@@ -4,6 +4,7 @@ import type { AgentState } from '../../shared/agent';
 import { EMPTY_AGENT_STATE } from '../../shared/agent';
 import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
+import type { MissionRecord } from '../../shared/mission';
 import { resolveNewSessionDefaults } from '../../shared/session-defaults';
 import { invoke, on } from './api';
 import { recencyAt, sortSessionRows } from './sessionOrder';
@@ -51,6 +52,12 @@ interface State {
   bootError: string | null;
   settings: AppSettings | null;
   sessions: SessionMeta[];
+  /** Coordination snapshots, never renderer-owned scheduling state. */
+  missions: Record<string, MissionRecord>;
+  missionErrors: Record<string, string>;
+  missionInspector: { missionId: string; sessionId: string; itemId?: string } | null;
+  newSessionKind: 'normal' | 'mission';
+  newMissionSourceId: string | null;
   activeId: string | null;
   transcripts: Record<string, TranscriptItem[]>;
   loaded: Record<string, boolean>;
@@ -131,6 +138,10 @@ interface State {
   applyEvent(env: SessionEventEnvelope): void;
   setSettings(s: AppSettings): void;
   setSessions(list: SessionMeta[]): void;
+  setMission(record: MissionRecord): void;
+  loadMission(missionId: string): Promise<void>;
+  inspectMissionSession(missionId: string, sessionId: string, itemId?: string): Promise<void>;
+  openMissionLaunch(root: string, sourceId?: string): void;
   setView(v: View): void;
   setAnalyticsView(patch: { tab?: AnalyticsTab; range?: AnalyticsRange }): void;
   navBack(): Promise<void>;
@@ -228,9 +239,9 @@ function bootErrorMessage(error: unknown): string {
  * only a list with no active session at all leaves nothing to select.
  */
 function replacementFor(previous: SessionMeta[], next: SessionMeta[], activeId: string): SessionMeta | undefined {
-  const visible = next.filter((x) => !x.archived);
+  const visible = next.filter((x) => !x.archived && x.mission?.role !== 'worker');
   const root = previous.find((x) => x.id === activeId)?.config.projectRoot;
-  const rows = sortSessionRows(previous.filter((x) => !x.archived && x.config.projectRoot === root));
+  const rows = sortSessionRows(previous.filter((x) => !x.archived && x.mission?.role !== 'worker' && x.config.projectRoot === root));
   const at = rows.findIndex((x) => x.id === activeId);
   const neighbour = at === -1 ? undefined : rows[at + 1] ?? rows[at - 1];
   const picked = neighbour && visible.find((x) => x.id === neighbour.id);
@@ -282,6 +293,11 @@ export const useStore = create<State>((set, get) => ({
   bootError: null,
   settings: null,
   sessions: [],
+  missions: {},
+  missionErrors: {},
+  missionInspector: null,
+  newSessionKind: 'normal',
+  newMissionSourceId: null,
   activeId: null,
   transcripts: {},
   loaded: {},
@@ -337,6 +353,7 @@ export const useStore = create<State>((set, get) => ({
           subscribed = true;
           on('push:sessionsChanged', (list) => get().setSessions(list));
           on('push:settingsChanged', (s) => get().setSettings(s));
+          on('push:missionsChanged', (record) => get().setMission(record));
           on('push:sessionEvent', (env) => get().applyEvent(env));
           on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId).catch(toastError));
           on('push:terminalsChanged', (list) => get().setTerminals(list));
@@ -345,7 +362,8 @@ export const useStore = create<State>((set, get) => ({
         }
         void invoke('update:state', undefined).then((s) => set({ updateState: s })).catch(() => undefined);
         void invoke('agent:state', undefined).then((s) => get().setAgentState(s)).catch(() => undefined);
-        const first = sessions.find((s) => !s.archived);
+        void invoke('missions:list', undefined).then((records) => records.forEach((record) => get().setMission(record))).catch(() => undefined);
+        const first = sessions.find((s) => !s.archived && s.mission?.role !== 'worker');
         if (first) await get().setActive(first.id);
         // Availability probes spawn one subprocess per harness; kicking them off right as the
         // window opens competes with the first git calls and stalls startup under antivirus.
@@ -365,6 +383,12 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async setActive(id) {
+    const target = id ? get().sessions.find((session) => session.id === id) : undefined;
+    if (target?.mission?.role === 'worker') {
+      await get().inspectMissionSession(target.mission.missionId, target.id);
+      return;
+    }
+    if (target?.mission) void get().loadMission(target.mission.missionId);
     set({ activeId: id, view: 'chat' });
     pushHistory(set, get, { view: 'chat', sessionId: id });
     if (id) await get().loadTranscript(id);
@@ -558,7 +582,7 @@ export const useStore = create<State>((set, get) => ({
       // The active session left the visible list: deleted outright, or archived by this same push.
       // Only the transition counts — clicking an archived row in the Archived view selects an
       // already-archived session, and the next unrelated push must not throw that selection away.
-      const activeRemoved = !!activeId && (!after || (!before?.archived && !!after.archived));
+      const activeRemoved = !!activeId && (!after || after.mission?.role === 'worker' || (!before?.archived && !!after.archived));
       if (activeRemoved && activeId) {
         departedTitle = before?.title ?? activeId;
         departedArchived = !!after?.archived;
@@ -605,6 +629,35 @@ export const useStore = create<State>((set, get) => ({
       }
     }
   },
+  setMission(record) {
+    set((s) => {
+      const previous = s.missions[record.id];
+      if (previous && (previous.revision > record.revision || previous.revision === record.revision && previous.lastEventSequence > record.lastEventSequence)) return {};
+      const missionErrors = { ...s.missionErrors };
+      delete missionErrors[record.id];
+      return { missions: { ...s.missions, [record.id]: record }, missionErrors, changesVersion: s.changesVersion + 1 };
+    });
+  },
+  async loadMission(missionId) {
+    try {
+      const record = await invoke('missions:get', { missionId });
+      if (!record) throw new Error('Mission not found. Its workspaces have not been changed.');
+      get().setMission(record);
+    } catch (error) {
+      set((s) => ({ missionErrors: { ...s.missionErrors, [missionId]: error instanceof Error ? error.message : String(error) } }));
+    }
+  },
+  async inspectMissionSession(missionId, sessionId, itemId) {
+    if (!get().missions[missionId]) await get().loadMission(missionId);
+    const record = get().missions[missionId];
+    if (!record) { get().toast(get().missionErrors[missionId] ?? 'Mission unavailable', 'error'); return; }
+    set({ missionInspector: { missionId, sessionId, itemId }, panelOpen: true, panelTab: 'goal' });
+    await get().setActive(record.leadSessionId);
+    await get().loadTranscript(sessionId);
+  },
+  openMissionLaunch(root, sourceId) {
+    set({ newSessionOpen: true, newSessionRoot: root, newSessionKind: 'mission', newMissionSourceId: sourceId ?? null });
+  },
   setView(view) {
     set({ view });
     pushHistory(set, get, { view, sessionId: get().activeId });
@@ -650,7 +703,7 @@ export const useStore = create<State>((set, get) => ({
       if (!r.path) return;
       root = r.path;
     }
-    set({ newSessionOpen: true, newSessionRoot: root });
+    set({ newSessionOpen: true, newSessionRoot: root, newSessionKind: 'normal', newMissionSourceId: null });
   },
   openQuickSession(quickSessionOpen, quickSessionPrefill) {
     set(quickSessionOpen ? { quickSessionOpen, quickSessionPrefill } : { quickSessionOpen, quickSessionPrefill: undefined });
@@ -689,7 +742,17 @@ export const useStore = create<State>((set, get) => ({
   },
   jumpToSearchMatch(sessionId, itemId) {
     set((s) => ({ searchOpen: false, searchJump: itemId ? { sessionId, itemId, n: (s.searchJump?.n ?? 0) + 1 } : null }));
-    void get().setActive(sessionId).catch(toastError);
+    const worker = get().sessions.find((s) => s.id === sessionId);
+    if (worker?.mission?.role === 'worker') {
+      void get().inspectMissionSession(worker.mission.missionId, sessionId, itemId).catch(toastError);
+    } else {
+      // Search can include an archived child absent from the current list. Resolve its ownership first.
+      void (async () => {
+        const session = worker ?? await invoke('sessions:get', { id: sessionId });
+        if (session?.mission?.role === 'worker') await get().inspectMissionSession(session.mission.missionId, sessionId, itemId);
+        else await get().setActive(sessionId);
+      })().catch(toastError);
+    }
   },
   toggleThinking() {
     set((s) => ({ showThinking: !s.showThinking }));

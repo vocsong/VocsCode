@@ -6,7 +6,7 @@
  * Snapshots are written to disk on quit and come back as lazy tabs on the next launch.
  */
 import { spawn as spawnProcess } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { promises as fs, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { IPty } from '@lydell/node-pty';
@@ -17,6 +17,8 @@ import { FLOW_HIGH_WATER, FLOW_LOW_WATER, baseName, cleanTitle, parseOscCwd, typ
 import { which } from './runtime';
 import { errorMessage, shortId } from './util/async';
 import { ensureDir, readJson, writeJson } from './util/fs';
+import { spawnOwnedTerminal, type OwnedTerminalProcess, type OwnedTerminalSpawn } from './terminal-process';
+import { createProcessOwnershipIntent, ownershipNonce, processOwnershipIntents, processOwnershipQuiescent, recordUnlaunchedProcessIntent, type ProcessOwnershipIntent } from './mission/process-ownership';
 
 // These packages ship CommonJS only; loading them through require keeps the ESM main bundle honest
 // about it (a static named import of the xterm bundles fails at runtime).
@@ -140,9 +142,10 @@ export function terminalEnv(base: NodeJS.ProcessEnv, version: string): Record<st
   return env;
 }
 
-/** Kills the shell and everything it started (a hung `npm run dev`, a stuck pager). */
+/** Legacy best-effort termination. Neither taskkill nor PTY exit is process-tree proof. */
 function killProcessTree(p: IPty): void {
   try {
+    if (!Number.isSafeInteger(p.pid) || p.pid <= 0) throw new Error('Shell PID is not yet available');
     if (isWin) spawnProcess('taskkill', ['/pid', String(p.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => undefined);
     else process.kill(-p.pid, 'SIGKILL'); // node-pty makes the shell a group leader
   } catch {
@@ -162,10 +165,53 @@ export interface TerminalManagerDeps {
   version: string;
   /** A terminal belongs to a session and starts in its working directory; undefined = no such session. */
   cwdOf: (sessionId: string) => string | undefined;
+  /** Main-process resource leases may refuse a new shell before any process is spawned. */
+  beforeSpawn?: (cwd: string) => void;
+  /** Main owns Mission identity/authorization; a managed shell may never use the legacy spawn. */
+  isManaged?: (sessionId: string) => boolean;
+  /** Trusted bundled resource, not a project path. Also contains ordinary Windows shells so
+   * their retired descendants cannot block a later Mission baseline forever. */
+  windowsJobHelper?: string;
+  /** Process activity can outlive its tab; wake host coordinators on real ownership changes. */
+  onActivity?: (sessionId: string) => void;
+  /** Bounded wait is a failure, never evidence that children stopped. */
+  managedCloseTimeoutMs?: number;
+  /** Test seam for an owned process supervisor; quiescent must prove the entire owned tree. */
+  spawnOwned?: OwnedTerminalSpawn;
+  /** Test seam: avoids sending OS signals to fake PIDs. */
+  killTree?: (pty: IPty) => void;
   push: (channel: 'push:terminalData' | 'push:terminalsChanged', payload: unknown) => void;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Test seam: replaces node-pty's spawn. */
   spawn?: PtySpawn;
+}
+
+export interface TerminalActivity {
+  terminalId: string;
+  sessionId: string;
+  /** Spawn cwd is retained even if OSC output later advertises a different directory. */
+  cwd: string;
+  reportedCwd: string;
+  pid?: number;
+  managed: boolean;
+  state: 'live' | 'closing' | 'uncertain';
+  reason?: string;
+  /** Exact retained bounded owner, independent of the disposable tab/screen. */
+  ownershipNonce?: string;
+}
+
+interface TerminalResource {
+  activity: TerminalActivity;
+  pty?: IPty;
+  /** Written before spawn; a crash cannot erase unresolved process ownership. */
+  receiptFile: string;
+  owner?: OwnedTerminalProcess;
+  intent?: ProcessOwnershipIntent;
+  rootExited: boolean;
+  treeQuiet: boolean;
+  done: Promise<void>;
+  finish(): void;
+  closing?: Promise<void>;
 }
 
 interface Persisted {
@@ -178,6 +224,7 @@ interface Persisted {
 interface Term {
   info: TerminalInfo;
   pty: IPty | null;
+  resource?: TerminalResource;
   /** Executable of the running shell, so its self-announced title can be told from a program's. */
   shellFile: string;
   /** Generation of the current PTY; handlers of a killed predecessor must not touch the record. */
@@ -198,6 +245,9 @@ interface Term {
 
 export class TerminalManager {
   private terms = new Map<string, Term>();
+  /** Tabs are disposable UI; process generations outlive close/restart until positively settled. */
+  private resources = new Set<TerminalResource>();
+  private managedDrains = new Map<string, Promise<void>>();
   /** Renderer reloads can request overlapping attaches; serialize each terminal's snapshot drain. */
   private attachChains = new Map<string, Promise<{ snapshot: string; seq: number; info: TerminalInfo }>>();
   private listTimer: NodeJS.Timeout | null = null;
@@ -206,6 +256,13 @@ export class TerminalManager {
 
   list(): TerminalInfo[] {
     return [...this.terms.values()].map((t) => ({ ...t.info }));
+  }
+
+  /** Positive activity, including closed tabs and superseded shells. Empty means proven quiet. */
+  activity(sessionId?: string): TerminalActivity[] {
+    return [...this.resources]
+      .filter((r) => sessionId === undefined || r.activity.sessionId === sessionId)
+      .map((r) => ({ ...r.activity, pid: r.pty?.pid || r.activity.pid }));
   }
 
   shells(): ShellOption[] {
@@ -222,7 +279,9 @@ export class TerminalManager {
     try {
       this.spawnInto(t, shell);
     } catch (e) {
-      // The tab was never inserted into the map: dispose its screen and addons before propagating.
+      // A post-spawn setup failure still owns the process, even though no tab was inserted.
+      t.gen++;
+      for (const r of this.resources) if (r.activity.terminalId === id) void this.stopResource(r).catch(() => undefined);
       for (const d of t.disposables) d.dispose();
       t.screen.dispose();
       throw e;
@@ -310,6 +369,7 @@ export class TerminalManager {
   input(id: string, data: string): void {
     const t = this.terms.get(id);
     if (!t) return; // the tab closed; a late renderer call must not reject
+    if (t.resource?.activity.managed && t.resource.activity.state !== 'live') return;
     if (t.pty) t.pty.write(data);
     else if (t.info.restored) t.pendingInput.push(data); // no shell yet: it starts on first attach
   }
@@ -340,23 +400,27 @@ export class TerminalManager {
     }
   }
 
-  /** Force-kills the shell and its children; the tab stays so the output can still be read. */
+  /** Requests shell/tree termination; the tab stays readable and activity stays until proven quiet. */
   kill(id: string): void {
     const t = this.must(id);
     if (!t.pty) return;
     this.deps.log('info', `terminal ${id} (${t.info.shellName}, pid ${t.info.pid ?? '?'}): killing the shell and its process tree`);
-    killProcessTree(t.pty);
+    if (t.resource) void this.stopResource(t.resource).catch(() => undefined);
   }
 
-  /** Starts a fresh shell in the same tab, in the directory the old one reported last. */
-  restart(id: string): TerminalInfo {
+  /** Managed restart cannot admit a replacement while any predecessor may still write. */
+  async restart(id: string): Promise<TerminalInfo> {
     const t = this.must(id);
     this.deps.log('info', `terminal ${id} (${t.info.shellName}): restart requested`);
-    if (t.pty) {
-      const old = t.pty;
-      t.gen++; // the old exit handler must not close or annotate the tab
-      t.pty = null;
-      killProcessTree(old);
+    const managed = this.deps.isManaged?.(t.info.sessionId) || t.resource?.activity.managed;
+    const generation = ++t.gen; // the old exit handler must not close or annotate the tab
+    t.pty = null;
+    const previous = [...this.resources].filter((r) => r.activity.terminalId === id);
+    if (managed) {
+      await Promise.all(previous.map((r) => this.stopResource(r)));
+      if (this.terms.get(id) !== t || t.gen !== generation) throw new Error('Terminal changed while restarting');
+    } else {
+      for (const r of previous) void this.stopResource(r).catch(() => undefined);
     }
     this.feed(t, '\r\n\x1b[2m─── restarted ───\x1b[0m\r\n');
     try {
@@ -377,7 +441,7 @@ export class TerminalManager {
     this.attachChains.delete(id);
     t.attached = false;
     t.gen++;
-    if (t.pty) killProcessTree(t.pty);
+    for (const r of this.resources) if (r.activity.terminalId === id) void this.stopResource(r).catch(() => undefined);
     for (const d of t.disposables) d.dispose();
     t.screen.dispose();
     this.pushList();
@@ -398,8 +462,9 @@ export class TerminalManager {
     return { ...t.info };
   }
 
-  /** Closes a session's terminals and waits briefly for the shells to exit, so a worktree can be removed afterwards. */
+  /** Legacy bounded UI close. Only the managed branch proves quiescence for workspace cleanup. */
   async closeForSession(sessionId: string): Promise<void> {
+    if (this.deps.isManaged?.(sessionId) || this.activity(sessionId).some((r) => r.managed)) return this.closeManagedSession(sessionId);
     const mine = [...this.terms.values()].filter((t) => t.info.sessionId === sessionId);
     if (!mine.length) return;
     const exits = mine.map(
@@ -414,6 +479,23 @@ export class TerminalManager {
     );
     await Promise.all(mine.map((t) => this.close(t.info.id)));
     await Promise.race([Promise.all(exits), new Promise((r) => setTimeout(r, 1500))]);
+  }
+
+  /** Mission pause/cleanup/delivery must await this, never the legacy best-effort timeout. */
+  closeManagedSession(sessionId: string): Promise<void> {
+    const existing = this.managedDrains.get(sessionId);
+    if (existing) return existing;
+    const run = Promise.resolve().then(async () => {
+      const mine = [...this.terms.values()].filter((t) => t.info.sessionId === sessionId);
+      await Promise.all([
+        ...mine.map((t) => this.close(t.info.id)),
+        ...[...this.resources].filter((r) => r.activity.sessionId === sessionId).map((r) => this.stopResource(r))
+      ]);
+      if (this.activity(sessionId).length) throw new Error('Terminal process teardown remains uncertain');
+    });
+    this.managedDrains.set(sessionId, run);
+    void run.finally(() => { if (this.managedDrains.get(sessionId) === run) this.managedDrains.delete(sessionId); }).catch(() => undefined);
+    return run;
   }
 
   async closeAll(): Promise<void> {
@@ -449,16 +531,20 @@ export class TerminalManager {
   async load(): Promise<void> {
     let files: string[] = [];
     try {
-      files = (await fs.readdir(this.deps.dir)).filter((f) => f.endsWith('.json'));
+      files = await fs.readdir(this.deps.dir);
     } catch (e) {
       // No directory yet on a fresh profile; anything else means the snapshots are unreachable.
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') this.deps.log('warn', `could not read persisted terminals from ${this.deps.dir}: ${errorMessage(e)}`);
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.deps.log('warn', `could not read persisted terminals from ${this.deps.dir}: ${errorMessage(e)}`);
+        throw new Error(`Cannot reconcile terminal process ownership: ${errorMessage(e)}`);
+      }
       return;
     }
+    await this.reconcileOwnership();
     const restore = this.deps.settings().restoreOnStartup;
     let restored = 0;
     let dropped = 0;
-    for (const f of files) {
+    for (const f of files.filter((f) => f.endsWith('.json'))) {
       const full = path.join(this.deps.dir, f);
       const data = await readJson<Persisted | undefined>(full, undefined, { log: this.deps.log });
       if (!restore || !data?.info?.id || !this.deps.cwdOf(data.info.sessionId)) {
@@ -477,14 +563,74 @@ export class TerminalManager {
     }
   }
 
+  /** Read-only process reconciliation, including lost tabs and intents whose .owner write never
+   * finished. Recovery must hold workspace admission before treating the result as a boundary. */
+  async reconcileOwnership(sessionIds?: ReadonlySet<string>): Promise<void> {
+    const files = await fs.readdir(this.deps.dir).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return []; throw error; });
+    for (const file of files.filter((name) => name.endsWith('.owner'))) {
+      const receiptFile = path.join(this.deps.dir, file);
+      if ([...this.resources].some((resource) => resource.receiptFile === receiptFile)) continue;
+      // No corrupt-file quarantine: an unreadable record must remain a blocker on every boot.
+      const stat = await fs.lstat(receiptFile);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16_384) throw new Error(`Cannot reconcile terminal process ownership: ${receiptFile}`);
+      let activity: TerminalActivity;
+      try { activity = JSON.parse(await fs.readFile(receiptFile, 'utf8')) as TerminalActivity; }
+      catch (error) { throw new Error(`Cannot read terminal process ownership ${receiptFile}: ${errorMessage(error)}`); }
+      if (!activity || typeof activity.sessionId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(activity.sessionId) || typeof activity.terminalId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(activity.terminalId)
+        || typeof activity.cwd !== 'string' || !path.isAbsolute(activity.cwd) || activity.ownershipNonce !== undefined && !ownershipNonce(activity.ownershipNonce)) throw new Error(`Cannot reconcile terminal process ownership: ${receiptFile}`);
+      this.retainRecovered(activity, receiptFile);
+    }
+    const root = path.join(this.deps.dir, 'process-ownership');
+    const rootStat = await fs.lstat(root).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
+    if (rootStat && (!rootStat.isDirectory() || rootStat.isSymbolicLink())) throw new Error('Invalid terminal ownership directory');
+    for (const sessionId of rootStat ? await fs.readdir(root) : []) {
+      if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) throw new Error('Invalid terminal ownership identity');
+      for (const intent of await processOwnershipIntents(path.join(root, sessionId))) {
+        const record = intent.record;
+        if (record.kind !== 'terminal' || record.sessionId !== sessionId) throw new Error('Terminal process intent identity changed');
+        const receiptFile = path.join(this.deps.dir, `${record.terminalId}.${record.nonce}.owner`);
+        let resource = [...this.resources].find((entry) => entry.receiptFile === receiptFile);
+        if (resource && (resource.activity.sessionId !== sessionId || resource.activity.terminalId !== record.terminalId || resource.activity.cwd !== record.cwd || resource.activity.ownershipNonce !== record.nonce)) throw new Error('Terminal owner differs from its launch intent');
+        if (!resource) {
+          if (await processOwnershipQuiescent(intent)) continue;
+          resource = this.retainRecovered({ sessionId, terminalId: record.terminalId, cwd: record.cwd, reportedCwd: record.cwd, managed: this.deps.isManaged?.(sessionId) ?? false, state: 'uncertain', ownershipNonce: record.nonce }, receiptFile);
+        }
+        resource.intent = intent;
+      }
+    }
+    for (const resource of [...this.resources]) {
+      if (sessionIds && !sessionIds.has(resource.activity.sessionId)) continue;
+      if (!resource.intent || !await processOwnershipQuiescent(resource.intent)) continue;
+      // This old Job has positively emptied; no numeric PID is observed or signaled. In the
+      // current process the independently retained PTY callback must still confirm its close.
+      resource.treeQuiet = true;
+      if (!resource.pty) resource.rootExited = true;
+      this.settleResource(resource);
+    }
+  }
+
+  private retainRecovered(activity: TerminalActivity, receiptFile: string): TerminalResource {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    const resource: TerminalResource = { activity: { ...activity, state: 'uncertain', reason: 'Previous app run did not confirm terminal process-tree teardown' }, receiptFile, rootExited: false, treeQuiet: false, done, finish };
+    this.resources.add(resource);
+    return resource;
+  }
+
   /** App quit: persist, then take the shells down with us. */
   async shutdown(deadline?: number): Promise<void> {
     await this.persist(deadline);
     for (const t of this.terms.values()) {
       t.attached = false;
       t.gen++;
-      if (t.pty) killProcessTree(t.pty);
     }
+    const managed: Promise<void>[] = [];
+    for (const r of this.resources) {
+      const stopping = this.stopResource(r);
+      if (r.activity.managed) managed.push(stopping);
+      else void stopping.catch(() => undefined);
+    }
+    await Promise.all(managed);
   }
 
   private newTerm(info: TerminalInfo, cols: number, rows: number): Term {
@@ -510,6 +656,7 @@ export class TerminalManager {
     if (!cwd) return false;
     if (cwd !== t.info.cwd) {
       t.info.cwd = cwd;
+      if (t.resource) t.resource.activity.reportedCwd = cwd;
       this.pushListSoon();
     }
     return true;
@@ -525,13 +672,50 @@ export class TerminalManager {
       throw e;
     }
     let proc: IPty;
+    let owner: OwnedTerminalProcess | undefined;
+    let intent: ProcessOwnershipIntent | undefined;
+    let launched: IPty | undefined;
+    let receiptFile = path.join(this.deps.dir, `${t.info.id}.${shortId('p_')}.owner`);
+    const managed = this.deps.isManaged?.(t.info.sessionId) ?? false;
     try {
-      proc = spawn(shell.file, shell.args, { name: 'xterm-256color', cols: t.cols, rows: t.rows, cwd: t.info.cwd, env: terminalEnv(process.env, this.deps.version) });
+      if (this.managedDrains.has(t.info.sessionId)) throw new Error('Terminal session is closing');
+      if (managed && (shell.kind === 'wsl' || /^wsl(?:\.exe)?$/i.test(baseName(shell.file)))) throw new Error('Managed terminals cannot contain WSL guest processes');
+      if (managed && this.activity(t.info.sessionId).some((r) => r.state !== 'live')) throw new Error('A previous terminal process teardown remains uncertain');
+      const guardedSpawn: PtySpawn = (file, args, options) => {
+        mkdirSync(this.deps.dir, { recursive: true });
+        writeFileSync(receiptFile, JSON.stringify({ terminalId: t.info.id, sessionId: t.info.sessionId, cwd: t.info.cwd, reportedCwd: t.info.cwd, managed, state: 'uncertain', ownershipNonce: intent?.record.nonce } satisfies TerminalActivity), { flag: 'wx', flush: true });
+        try {
+          this.deps.beforeSpawn?.(t.info.cwd);
+          launched = spawn(file, args, options);
+          return launched;
+        } catch (error) {
+          // No returned PTY means the backend did not launch. Never delete a live generation.
+          try { unlinkSync(receiptFile); } catch { /* a retained record safely blocks recovery */ }
+          throw error;
+        }
+      };
+      const options = { name: 'xterm-256color', cols: t.cols, rows: t.rows, cwd: t.info.cwd, env: terminalEnv(process.env, this.deps.version) };
+      const nativeWindowsShell = process.platform === 'win32' && shell.kind !== 'wsl' && !/^wsl(?:\.exe)?$/i.test(baseName(shell.file));
+      if (managed || nativeWindowsShell && this.deps.windowsJobHelper) {
+        if (!this.deps.spawnOwned) {
+          if (!/^[A-Za-z0-9_-]+$/.test(t.info.sessionId)) throw new Error('Invalid terminal owner session');
+          intent = createProcessOwnershipIntent(path.join(this.deps.dir, 'process-ownership', t.info.sessionId), { kind: 'terminal', terminalId: t.info.id, sessionId: t.info.sessionId, cwd: t.info.cwd });
+          receiptFile = path.join(this.deps.dir, `${t.info.id}.${intent.record.nonce}.owner`);
+        }
+        owner = this.deps.spawnOwned
+          ? this.deps.spawnOwned(shell.file, shell.args, options, guardedSpawn)
+          : spawnOwnedTerminal(shell.file, shell.args, options, guardedSpawn, this.deps.windowsJobHelper, intent);
+        proc = owner.pty;
+      } else proc = guardedSpawn(shell.file, shell.args, options);
     } catch (e) {
+      if (launched) this.trackResource(t, launched, managed, receiptFile, owner, intent);
+      else if (intent) { try { recordUnlaunchedProcessIntent(intent); } catch { /* An incomplete receipt blocks recovery. */ } }
       const message = `Could not start ${shell.name} (${shell.file}) in ${t.info.cwd}: ${errorMessage(e)}`;
       this.deps.log('warn', `terminal ${t.info.id}: ${message}`);
       throw new Error(message);
     }
+    const resource = this.trackResource(t, proc, managed, receiptFile, owner, intent);
+    t.resource = resource;
     this.deps.log('debug', `terminal ${t.info.id}: started ${shell.name} (${shell.file}) pid ${proc.pid || '?'} in ${t.info.cwd}`);
     const gen = ++t.gen;
     t.pty = proc;
@@ -551,19 +735,25 @@ export class TerminalManager {
       }
       this.feed(t, data);
     });
-    proc.onExit(({ exitCode, signal }) => {
+    const showExit = (exitCode: number, signal?: number) => {
       if (t.gen !== gen) return;
       t.pty = null;
       t.info.pid = undefined;
       t.info.exit = { code: exitCode, signal: signal || undefined };
       if (exitCode === 0 && !signal) {
         // A typed `exit` closes the tab, as in any terminal app; failures stay readable.
-        void this.close(t.info.id);
+        void this.close(t.info.id).catch((error) => this.deps.log('warn', `terminal ${t.info.id}: ${errorMessage(error)}`));
         return;
       }
       this.deps.log('info', `terminal ${t.info.id} (${shell.name}) exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}`);
       this.feed(t, `\r\n\x1b[2m[process exited with code ${exitCode}${signal ? `, signal ${signal}` : ''}]\x1b[0m\r\n`);
       this.pushList();
+    };
+    proc.onExit(({ exitCode, signal }) => {
+      // A PowerShell supervisor may exit zero even when its target failed. Use the separately
+      // authenticated receipt, which may be delivered just after the PTY's exit callback.
+      if (owner) void owner.quiescent.then(() => showExit(owner.exitCode ?? exitCode, signal), () => showExit(-1, signal));
+      else showExit(exitCode, signal);
     });
     // Type-ahead: input meant for a restored tab is written as soon as its shell exists.
     if (t.pendingInput.length) {
@@ -571,6 +761,75 @@ export class TerminalManager {
       t.pendingInput.length = 0;
       proc.write(queued);
     }
+  }
+
+  private trackResource(t: Term, pty: IPty, managed: boolean, receiptFile: string, owner?: OwnedTerminalProcess, intent?: ProcessOwnershipIntent): TerminalResource {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    const r: TerminalResource = {
+      activity: { terminalId: t.info.id, sessionId: t.info.sessionId, cwd: t.info.cwd, reportedCwd: t.info.cwd, pid: pty.pid || undefined, managed, state: 'live', ...(intent ? { ownershipNonce: intent.record.nonce } : {}) },
+      pty, receiptFile, owner, intent, rootExited: false, treeQuiet: false, done, finish
+    };
+    this.resources.add(r);
+    // This listener is independent of t.gen and survives tab disposal/restart.
+    const exit = pty.onExit(() => {
+      r.rootExited = true;
+      if (!owner) this.markUncertain(r, 'Shell exited without owned process-tree confirmation');
+      else if (r.activity.state === 'live') r.activity.state = 'closing';
+      this.settleResource(r);
+      exit.dispose();
+    });
+    if (owner) void owner.quiescent.then(() => { r.treeQuiet = true; this.settleResource(r); }, (error) => this.markUncertain(r, errorMessage(error)));
+    this.deps.onActivity?.(r.activity.sessionId);
+    return r;
+  }
+
+  private settleResource(r: TerminalResource): void {
+    if (!r.rootExited || !r.treeQuiet) return;
+    try { unlinkSync(r.receiptFile); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.markUncertain(r, `Could not retire terminal ownership record: ${errorMessage(error)}`); return; }
+    }
+    this.resources.delete(r);
+    r.finish();
+    this.deps.onActivity?.(r.activity.sessionId);
+  }
+
+  private markUncertain(r: TerminalResource, reason: string): void {
+    if (!this.resources.has(r)) return;
+    r.activity.state = 'uncertain';
+    r.activity.reason = reason;
+    this.deps.onActivity?.(r.activity.sessionId);
+    this.deps.log('warn', `terminal ${r.activity.terminalId}: ${reason}`);
+  }
+
+  private stopResource(r: TerminalResource): Promise<void> {
+    this.settleResource(r);
+    if (!this.resources.has(r)) return Promise.resolve();
+    if (r.closing) return r.closing;
+    r.activity.state = 'closing';
+    const run = Promise.resolve().then(async () => {
+      if (!this.resources.has(r)) return;
+      if (!r.owner) {
+        // Never target a PID after observing its exit: it could already belong to another app.
+        if (!r.rootExited && r.pty) (this.deps.killTree ?? killProcessTree)(r.pty);
+        throw new Error('Terminal was started without process-tree containment; teardown cannot be confirmed');
+      }
+      r.owner.close();
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          r.done,
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Terminal process teardown timed out; owned activity remains uncertain')), this.deps.managedCloseTimeoutMs ?? 15_000); })
+        ]);
+      } finally { clearTimeout(timer); }
+    }).catch((error: unknown) => {
+      this.markUncertain(r, errorMessage(error));
+      throw error;
+    });
+    r.closing = run;
+    void run.finally(() => { if (r.closing === run) r.closing = undefined; }).catch(() => undefined);
+    return run;
   }
 
   private feed(t: Term, data: string): void {

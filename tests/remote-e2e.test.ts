@@ -224,7 +224,7 @@ describe('remote host end-to-end (fake relay, real core)', () => {
     await host.broadcastPush('push:sessionEvent', { sessionId: 's1', event: { type: 'status', status: 'idle' } });
     const allowed = await openFrame<{ type: string; channel: string; payload: unknown }>(session.key, ((await firstAfter) as { payload: never }).payload);
     expect(allowed).toEqual({ type: 'push', channel: 'push:sessionEvent', payload: { sessionId: 's1', event: { type: 'status', status: 'idle' } } });
-    expect([...REMOTE_PUSH_CHANNELS].sort()).toEqual(['push:remotePolicy', 'push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged']);
+    expect([...REMOTE_PUSH_CHANNELS].sort()).toEqual(['push:missionsChanged', 'push:remotePolicy', 'push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged']);
 
     ws.close();
     await host.disable();

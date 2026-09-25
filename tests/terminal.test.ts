@@ -125,7 +125,8 @@ function manager(fakes: Fake[] | null, dir: string, settings: TerminalSettings =
     cwdOf: (id) => (id === 's1' ? os.tmpdir() : undefined),
     push: (ch, payload) => void pushes.push({ ch, payload }),
     log: () => undefined,
-    spawn: fakes ? (() => (fakes.shift() ?? fakePty()) as unknown as IPty) : undefined
+    spawn: fakes ? (() => (fakes.shift() ?? fakePty()) as unknown as IPty) : undefined,
+    killTree: fakes ? (pty) => pty.kill() : undefined
   });
   managers.push(m);
   const data = () => pushes.filter((p) => p.ch === 'push:terminalData').map((p) => p.payload as { terminalId: string; seq: number; data: string });
@@ -233,7 +234,7 @@ describe('TerminalManager (fake pty)', () => {
     const t = m.create('s1');
     a.exit(2);
     expect(m.list()[0].exit?.code).toBe(2);
-    const restarted = m.restart(t.id);
+    const restarted = await m.restart(t.id);
     expect(restarted.id).toBe(t.id);
     expect(restarted.exit).toBeUndefined();
     expect(restarted.pid).toBe(4242);

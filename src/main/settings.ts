@@ -6,11 +6,13 @@ import type { KnowledgeSettings } from '../shared/knowledge';
 import { isAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESSES, PERMISSION_MODE_LABELS, isEffortLevel } from '../shared/harness-meta';
 import { pruneModelOverrides } from '../shared/model-overrides';
+import { applyMissionProjectOverride, createDefaultMissionConfig, MissionConfigError, validateMissionConfig, validateMissionProjectOverride, type MissionCapabilityResolver, type MissionProjectOverride } from '../shared/mission-config';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
 import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
+import { CODEX_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from './models/static-models';
 import { readJson, writeJson } from './util/fs';
 
 export const BUILTIN_ACP_AGENTS: AcpAgentPreset[] = [
@@ -200,6 +202,8 @@ export const BUILTIN_PROVIDERS: ProviderConfig[] = [
 export function defaultSettings(): AppSettings {
   return {
     version: 1,
+    mission: createDefaultMissionConfig(),
+    missionProjects: {},
     theme: 'system',
     defaultHarness: 'pi',
     defaultPermissionMode: 'ask',
@@ -403,6 +407,41 @@ export function normalizeCuaSettings(stored: unknown): CuaSettings {
   return { enabled: raw.enabled !== false, mode, ...(manifest ? { manifestPath: manifest } : {}) };
 }
 
+/** Validate the complete pair: project pools reference this library and may only tighten ceilings. */
+function validateMissionSettings(stored: Partial<AppSettings>, capabilities?: MissionCapabilityResolver) {
+  const mission = stored.mission === undefined ? createDefaultMissionConfig() : validateMissionConfig(stored.mission, capabilities);
+  const raw = stored.missionProjects;
+  const missionProjects: Record<string, MissionProjectOverride> = {};
+  if (raw !== undefined) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+      || (Object.getPrototypeOf(raw) !== Object.prototype && Object.getPrototypeOf(raw) !== null)
+      || Reflect.ownKeys(raw).length > 1_000) {
+      throw new MissionConfigError('missionProjects', 'Expected a project override map with at most 1000 entries.');
+    }
+    for (const root of Reflect.ownKeys(raw)) {
+      if (typeof root !== 'string' || !root.trim() || ['__proto__', 'constructor', 'prototype'].includes(root)) {
+        throw new MissionConfigError('missionProjects', 'Expected project folder paths.');
+      }
+      const project = validateMissionProjectOverride(raw[root]);
+      applyMissionProjectOverride(mission, project);
+      missionProjects[root] = project;
+    }
+  }
+  return { mission, missionProjects };
+}
+
+/** Only cached catalog facts: no credential reads, network probes, or runtime activation on save. */
+function missionCatalog(settings: AppSettings): MissionCapabilityResolver {
+  return (preset) => {
+    const provider = settings.providers.find((p) => p.id === preset.model.provider);
+    const fallback = (preset.harnessId === 'codex' || preset.harnessId === 'codex-exec') && preset.model.provider === 'openai'
+      ? CODEX_STATIC_MODELS : STATIC_MODELS_BY_PROVIDER[preset.model.provider] ?? [];
+    const models = Array.isArray(provider?.models) && provider.models.length ? provider.models : fallback;
+    const model = models.find((m) => m.id === preset.model.model);
+    return { source: 'catalog', ...(model ? { modelInfo: { ...model, provider: preset.model.provider } } : {}) };
+  };
+}
+
 /** Merge stored settings over defaults, keeping builtin providers/agents present. */
 export function normalizeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
   const d = defaultSettings();
@@ -465,6 +504,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     merged.acpAgents.push(s ? { ...ba, ...s, builtin: true } : { ...ba });
   }
   for (const s of storedAgents) if (!BUILTIN_ACP_AGENTS.some((ba) => ba.id === s.id)) merged.acpAgents.push({ ...s, builtin: false });
+  Object.assign(merged, validateMissionSettings(stored));
   return merged;
 }
 
@@ -473,6 +513,9 @@ export class SettingsStore {
   private readonly file: string;
   private listeners = new Set<(s: AppSettings) => void>();
   private readonly log: Logger;
+  private writes: Promise<unknown> = Promise.resolve();
+  /** Preserve unsupported data on disk during unrelated settings saves; never expose it as executable. */
+  private blockedMission: Pick<Partial<AppSettings>, 'mission' | 'missionProjects'> | undefined;
 
   constructor(userData: string, log: Logger = () => undefined) {
     this.file = path.join(userData, 'settings.json');
@@ -481,7 +524,15 @@ export class SettingsStore {
 
   async load(): Promise<AppSettings> {
     const stored = await readJson<Partial<AppSettings> | undefined>(this.file, undefined, { log: this.log });
-    this.settings = normalizeSettings(stored);
+    this.blockedMission = undefined;
+    try {
+      this.settings = normalizeSettings(stored);
+    } catch (error) {
+      if (!(error instanceof MissionConfigError)) throw error;
+      this.blockedMission = { mission: stored?.mission, missionProjects: stored?.missionProjects };
+      this.log('error', `Mission settings disabled: ${error.message} Repair settings.json or explicitly replace both Mission configuration and project overrides in Settings.`);
+      this.settings = normalizeSettings({ ...stored, mission: undefined, missionProjects: undefined });
+    }
     if (stored === undefined) this.log('info', 'no settings.json yet; using defaults');
     else this.log('info', `settings loaded: harness=${this.settings.defaultHarness} permissions=${this.settings.defaultPermissionMode} theme=${this.settings.theme}`);
     return this.settings;
@@ -492,17 +543,38 @@ export class SettingsStore {
   }
 
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
-    this.settings = normalizeSettings({ ...this.settings, ...patch });
-    await writeJson(this.file, this.settings);
-    for (const l of this.listeners) {
-      // One listener throwing must not starve the rest, and the caller already has its new settings.
-      try {
-        l(this.settings);
-      } catch (e) {
-        this.log('warn', `settings listener failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+    // Capture now, merge when admitted. A queued caller cannot mutate this write's payload, and a
+    // rejected write must not leak into another caller's patch or become visible before commit.
+    const input = structuredClone(patch);
+    const run = this.writes.then(async () => {
+      const missionChanged = Object.hasOwn(input, 'mission') || Object.hasOwn(input, 'missionProjects');
+      if (this.blockedMission && missionChanged && !(Object.hasOwn(input, 'mission') && Object.hasOwn(input, 'missionProjects'))) {
+        throw new MissionConfigError('mission', 'Stored Mission settings are invalid. Replace both the configuration and project overrides explicitly.');
       }
-    }
-    return this.settings;
+      const next = normalizeSettings({ ...this.settings, ...input });
+      if (missionChanged) {
+        Object.assign(next, validateMissionSettings(next, missionCatalog(next)));
+        for (const [root, project] of Object.entries(next.missionProjects!)) {
+          if (!next.folders.includes(root) && JSON.stringify(project) !== JSON.stringify(this.settings.missionProjects?.[root])) {
+            throw new MissionConfigError('missionProjects', 'Select a configured project folder.');
+          }
+        }
+      }
+      await writeJson(this.file, this.blockedMission && !missionChanged ? { ...next, ...this.blockedMission } : next);
+      this.settings = next;
+      if (missionChanged) this.blockedMission = undefined;
+      for (const l of this.listeners) {
+        // One listener throwing must not starve the rest, and the caller already has its new settings.
+        try {
+          l(next);
+        } catch (e) {
+          this.log('warn', `settings listener failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+        }
+      }
+      return next;
+    });
+    this.writes = run.catch(() => undefined);
+    return run;
   }
 
   onChange(l: (s: AppSettings) => void): () => void {

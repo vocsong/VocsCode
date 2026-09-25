@@ -11,8 +11,23 @@ import { setSessionEffort } from '../sessionActions';
 import { NO_COMPOSER_HISTORY, useStore } from '../store';
 import * as host from '../terminal/host';
 import { Button, Icon, Kbd } from './ui';
+import { parseMissionCommand } from '../../../shared/mission-command';
+import { missionQuestionUsage } from '../../../shared/mission';
+import { commandMission, MISSION_MANAGED_REASON, pauseMissionSession, sendMissionUser } from '../missions';
 
 export function Composer({ session }: { session: SessionMeta }) {
+  const archived = useStore((s) => session.mission && s.missions[session.mission.missionId]?.archived);
+  if (session.mission && (session.archived || archived)) return <div className="pad muted">Archived Mission — read-only. Restore the Mission before messaging the principal engineer.</div>;
+  if (session.mission?.role === 'worker') return <div className="pad muted">Managed specialist — read-only. Ask the principal engineer in the Mission conversation.</div>;
+  return <SessionComposer session={session} />;
+}
+
+function SessionComposer({ session }: { session: SessionMeta }) {
+  const missionPending = useRef(false);
+  const [missionSending, setMissionSending] = useState(false);
+  const mission = useStore((s) => session.mission && s.missions[session.mission.missionId]);
+  const completed = mission && mission.status === 'completed';
+  const questions = completed ? missionQuestionUsage(mission) : undefined;
   const setDraft = useStore((s) => s.setDraft);
   // Seed from the per-session draft kept in the store, so switching away and back preserves the text.
   const [text, setText] = useState(() => useStore.getState().drafts[session.id] ?? '');
@@ -105,7 +120,10 @@ export function Composer({ session }: { session: SessionMeta }) {
     const query = mention.query;
     let cancelled = false;
     const timer = setTimeout(() => {
-      invoke('fs:search', { sessionId: session.id, query, limit: 12 })
+      const mission = session.mission && useStore.getState().missions[session.mission.missionId];
+      const workspace = mission && mission.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === session.id);
+      if (session.mission && !workspace) { setMentionError('Lead tool workspace is not available yet.'); return; }
+      invoke('fs:search', { sessionId: session.id, query, limit: 12, ...(workspace ? { missionWorkspaceId: workspace.id } : {}) })
         .then((results) => {
           if (!cancelled) setMention((m) => (m && m.query === query ? { ...m, results, index: 0 } : m));
         })
@@ -140,6 +158,38 @@ export function Composer({ session }: { session: SessionMeta }) {
       setHistIdx(-1);
     };
     const typedCommand = t.startsWith('/') ? t.slice(1).split(/\s+/)[0] : '';
+    // Mission owns its exact token before native /goal or harness command forwarding.
+    const missionCommand = parseMissionCommand(text);
+    if (missionCommand) {
+      if (missionCommand.kind === 'error') { toast(missionCommand.message, 'error'); return; }
+      if (missionPending.current) return;
+      missionPending.current = true;
+      setMissionSending(true);
+      try {
+        await commandMission(session, text, images);
+        pushHistory(session.id, t);
+        if ((ref.current?.value ?? useStore.getState().drafts[session.id]) === text) {
+          clearDraft();
+          // Opening the lead can unmount this composer before its draft-mirroring effect runs.
+          setDraft(session.id, '');
+        }
+        setImages((current) => current.filter((image) => !images.includes(image)));
+      } catch (e) {
+        toast(String((e as Error).message ?? e), 'error');
+      } finally { missionPending.current = false; setMissionSending(false); }
+      return;
+    }
+    if (session.mission && typedCommand === 'goal') {
+      toast('Mission already owns execution. Use /mission pause, /mission resume, /mission stop, or Proceed on the current plan.', 'info');
+      useStore.getState().setPanelTab('goal');
+      return;
+    }
+    if (session.mission && ['model', 'effort', 'mode', 'clear', 'pr', 'merge', 'stop'].includes(typedCommand)) {
+      toast(typedCommand === 'model' || typedCommand === 'effort' ? 'The lead uses a pinned T5 preset. Use Lead handover in the Mission header.' : `${MISSION_MANAGED_REASON} Use Mission controls in the header.`, 'info');
+      return;
+    }
+    if (completed && questions?.pending) { toast('Wait for the read-only answer, or Cancel answer before asking another question.', 'info'); return; }
+    if (completed && t.startsWith('!')) { toast('Completed Mission Q&A cannot run shell commands. Start a linked Mission for new implementation.', 'info'); return; }
     // A command the harness owns itself is prompt text, not an app command: `/goal` on a session whose
     // harness has its own goal goes to the harness verbatim (see shared/goal-driver.ts). The rest of
     // the send path is unchanged, so history and draft handling stay correct for free.
@@ -165,7 +215,9 @@ export function Composer({ session }: { session: SessionMeta }) {
     clearDraft();
     setImages([]);
     try {
-      await invoke('sessions:send', { id: session.id, input: { text: t, images: images.length ? images : undefined, mode: busy ? mode : 'now' } });
+      const input = { text: t, images: images.length ? images : undefined, mode: session.mission ? 'now' as const : busy ? mode : 'now' as const };
+      if (session.mission) await sendMissionUser(session.id, input);
+      else await invoke('sessions:send', { id: session.id, input });
     } catch (e) {
       toast(String((e as Error).message ?? e), 'error');
       setText(t);
@@ -365,7 +417,7 @@ export function Composer({ session }: { session: SessionMeta }) {
       return;
     }
     if (e.key === 'Escape') {
-      if (busy && !text) void invoke('sessions:interrupt', { id: session.id });
+      if ((busy || questions?.pending) && !text) pauseMissionSession(session);
       return;
     }
     // Input history: ArrowUp walks back through earlier prompts, ArrowDown returns toward the draft.
@@ -422,6 +474,11 @@ export function Composer({ session }: { session: SessionMeta }) {
 
   return (
     <div className="composer">
+      {completed && <div className="composer-hint muted small" data-testid="mission-question-scope">
+        Read-only questions about this completed Mission. New implementation requires an explicit linked <code>/mission start -- &lt;objective&gt;</code>.
+        <br />One answer turn, up to 2 minutes, 32 observed tool calls and 16k observed tokens. Aggregate Mission limits still apply; delayed/in-flight usage may overshoot.
+        {questions && questions.questions > 0 && <span data-testid="mission-question-usage"><br />Q&amp;A only: {fmtTokens(questions.tokens)} observed tokens · {fmtCost(questions.costUsd)} observed/API-equivalent cost{questions.unknown ? ' · partial/unknown telemetry' : ''}. Not a billing total; completed execution facts are unchanged.</span>}
+      </div>}
       {mention && (mention.results.length > 0 || mentionError) && (
         <div className="popover">
           {mentionError ? (
@@ -475,7 +532,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… (/ commands, @ files, ! shell, paste images)'}
+          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste images)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… (/ commands, @ files, ! shell, paste images)'}
           rows={1}
           spellCheck
         />
@@ -484,10 +541,15 @@ export function Composer({ session }: { session: SessionMeta }) {
             <Icon name="image" size={16} />
             <input type="file" accept="image/*" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
           </label>
-          {shellDraft ? (
+          {shellDraft && !completed ? (
             <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
               Run
             </Button>
+          ) : session.mission || missionSending ? (
+            <>
+              <Button size="sm" variant="primary" icon="send" disabled={missionSending || !!questions?.pending || (!text.trim() && !images.length)} onClick={() => void send()}>{missionSending ? 'Opening Mission…' : completed ? 'Ask lead' : 'Send to lead'}</Button>
+              {questions?.pending && <Button size="sm" variant="danger" icon="stop" onClick={() => pauseMissionSession(session)}>Cancel answer</Button>}
+            </>
           ) : busy ? (
             <>
               {caps.queue && (
@@ -498,7 +560,7 @@ export function Composer({ session }: { session: SessionMeta }) {
               <Button size="sm" variant="primary" icon={caps.steer ? 'arrowUp' : 'clock'} onClick={() => void send(caps.steer ? 'steer' : 'queue')} title={caps.steer ? 'Steer now' : 'Queue'}>
                 {caps.steer ? 'Steer' : 'Queue'}
               </Button>
-              <Button size="sm" variant="danger" icon="stop" className="btn-icon" onClick={() => void invoke('sessions:interrupt', { id: session.id })} title="Interrupt (Esc)" />
+              <Button size="sm" variant="danger" icon="stop" className="btn-icon" onClick={() => pauseMissionSession(session)} title="Interrupt (Esc)" />
             </>
           ) : (
             <Button size="sm" variant="primary" icon="send" onClick={() => void send()} disabled={!text.trim() && !images.length}>
@@ -508,7 +570,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         </div>
       </div>
       <div className="composer-hint muted small">
-        <Kbd>Enter</Kbd> send · <Kbd>Shift+Enter</Kbd> newline · <Kbd>Esc</Kbd> stop · <Kbd>@</Kbd> files · <Kbd>/</Kbd> commands · <Kbd>!</Kbd> shell
+        <Kbd>Enter</Kbd> {completed ? 'ask' : 'send'} · <Kbd>Shift+Enter</Kbd> newline · <Kbd>Esc</Kbd> {completed ? 'cancel answer' : session.mission ? 'pause Mission' : 'stop'} · <Kbd>@</Kbd> files · <Kbd>/</Kbd> commands{!completed && <> · <Kbd>!</Kbd> shell</>}
         {(session.queued ?? 0) > 0 && <span className="queued-hint"> · {session.queued} queued</span>}
       </div>
     </div>

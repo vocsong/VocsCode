@@ -15,6 +15,7 @@ src/main
     pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
     acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
+  mission/        durable Mission coordination, scoped tools, scheduling, workspaces and delivery
   models/         provider clients and model discovery, with offline catalogs and pricing
   util/           fs and async helpers shared by the adapters (no Electron imports)
   session-manager.ts  sessions, transcripts, approvals, goals, worktrees
@@ -123,6 +124,39 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.
 - Sessions must resume after restart for every harness; keep that path working when touching persistence.
 - A session's usage counts only the money it spent itself. Turn rows are the itemized ledger and `SessionMeta.usage` is the counter over it; a fork carries the conversation, never the ledger.
+
+## Mission ownership
+
+[Mission guide](MISSIONS.md) · [acceptance/certification ledger](MISSION-IMPLEMENTATION.md)
+
+`mission/runtime.ts` composes the privileged coordinator at desktop startup. `MissionService`
+owns versioned plans, generated profiles, task/attempt admission, mailbox, integration and delivery;
+`SessionManager` still owns every harness, normalized event, transcript, approval and usage ledger.
+Renderer state only reconstructs views and sends genuine user actions. There is one active lead
+and no second app/native goal loop on a managed participant.
+
+The journal is committed/fsynced before external effects. Stable operation identities and
+immutable receipts reconcile acknowledgment loss; checksummed snapshots are caches, not an
+alternative authority. Restart never automatically resumes pending Mission execution. Unknown
+schema versions, corrupt journals and uncertain process effects stay blocked rather than inferred
+from a newly empty process/session map.
+
+T5 and worker presets are immutable attempt snapshots. Live disablement/restrictions still
+apply at dispatch. Runtime readiness comes from the exact initialized adapter's model/effort,
+connection and coordination observations, not a merged catalog. The scoped loopback Mission
+broker binds role/session/generation/attempt authority in an ephemeral bearer capability; model
+payloads cannot select those identities or invoke user-only authorization/configuration controls.
+
+Workspace leases hold application writer admission across capture/integration and across the
+async runtime-start/dispatch gap. Verification owns isolated processes/resources until descendant
+quiescence is proven. Git worktrees, permission gates and process ownership are not an OS
+sandbox. Unexpected edits and uncertain cleanup remain retained. Actual test counts, exact content
+identity, independent review, settled operations and real delivery receipts gate completion.
+
+Generic IPC and remote mutations also check managed workspace ownership, including ordinary
+session aliases. The main diff is the accepted result versus baseline, not whichever participant
+is currently selected for inspection. Specialists remain owned sessions internally but are not
+independent sidebar chats or separately charged Mission rollups.
 
 ## Adding a harness
 
