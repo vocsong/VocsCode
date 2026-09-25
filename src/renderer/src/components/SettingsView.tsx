@@ -1053,19 +1053,24 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   const [audit, setAudit] = useState<RemoteAuditEntry[]>([]);
   const [relay, setRelay] = useState(DEFAULT_REMOTE_ORIGIN);
   // A registered computer has its own relay credential: the enrollment secret is a first-time step.
-  const [registered, setRegistered] = useState(false);
+  const [storedRegistered, setRegistered] = useState(false);
+  // The relay's origin has a GitHub sign-in (the landing's login gate): add this computer from the
+  // browser instead of typing the enrollment secret, which stays available as a fallback.
+  const [signInAvailable, setSignInAvailable] = useState(false);
+  const [useSecret, setUseSecret] = useState(false);
   const [enroll, setEnroll] = useState('');
   const [pairing, setPairing] = useState<{ code: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
-  const applyResult = (r: { state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string; registered: boolean }) => {
+  const applyResult = (r: { state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string; registered: boolean; signInAvailable: boolean }) => {
     setState(r.state);
     setDevices(r.devices);
     setPairing(r.state.pairing ?? null);
     setAudit(r.audit ?? []);
     setRelay(r.relayUrl);
     setRegistered(r.registered === true);
+    setSignInAvailable(r.signInAvailable === true);
   };
 
   /** Connect, then put a pairing QR code on screen straight away when no browser is paired yet:
@@ -1123,6 +1128,11 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
     }
   };
   const statusLine = state ? `${state.status}${state.detail ? ` — ${state.detail}` : ''}` : 'unknown';
+  // Live from the host once it runs (a sign-in that just finished shows at once), stored otherwise.
+  const registered = storedRegistered || state?.registered === true;
+  // An unregistered computer on a relay with GitHub sign-in: that is the way in, not the secret.
+  const offerSignIn = !registered && signInAvailable && !useSecret;
+  const signingIn = state?.signIn;
 
   return (
     <div className="settings-body">
@@ -1136,31 +1146,59 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
         Sessions, keys and terminals stay on this machine; the traffic is end-to-end encrypted and the relay sees
         metadata only.
       </p>
-      {!config.enabled && (
+      {!config.enabled && (offerSignIn ? (
+        <ol className="muted small" data-testid="remote-steps">
+          <li>Connect with GitHub: your browser opens; sign in and click Add this computer.</li>
+          <li>That browser then asks to pair; click Allow here.</li>
+          <li>On your phone, open {webHost}/app, sign in the same way and tap this computer.</li>
+        </ol>
+      ) : (
         <ol className="muted small" data-testid="remote-steps">
           <li>Connect this computer{registered ? '' : ' (the first time, with the enrollment secret)'}.</li>
           <li>Scan the QR code that appears with your phone, or open {webHost}/app and enter the code.</li>
           <li>Press Pair in the browser, then Allow here.</li>
         </ol>
+      ))}
+      {signingIn && (
+        <div className="small" data-testid="remote-sign-in-waiting">
+          <p>
+            Finish in your browser: sign in with GitHub, check that the page shows <strong data-testid="remote-sign-in-code">{signingIn.checkCode}</strong>,
+            and click Add this computer.{' '}
+            <button type="button" className="link-btn" onClick={() => void invoke('app:openExternal', { url: signingIn.link })}>
+              Open the page again
+            </button>
+          </p>
+        </div>
       )}
-      {!registered && (
+      {!registered && !offerSignIn && !signingIn && (
         <Field label="Enrollment secret" hint="Needed only the first time this computer connects: the relay's ENROLL_TOKEN, kept outside the app (for example ~/.vocs-code/relay-enroll-token.txt). Stored in the OS keychain.">
           <input data-testid="remote-enroll" type="password" value={enroll} placeholder="Paste the secret" onChange={(e) => setEnroll(e.target.value)} />
         </Field>
       )}
       <div className="settings-actions">
-        <Button
-          size="sm"
-          variant="primary"
-          data-testid="remote-connect"
-          disabled={busy || (!registered && !enroll.trim())}
-          onClick={() => void connect()}
-        >
-          {busy ? 'Connecting…' : 'Connect'}
-        </Button>
-        {config.enabled && (
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(() => invoke('remote:disable', undefined))}>
-            Disconnect
+        {offerSignIn && !signingIn ? (
+          <>
+            <Button size="sm" variant="primary" data-testid="remote-sign-in" disabled={busy} onClick={() => void act(() => invoke('remote:signIn', undefined))}>
+              {busy ? 'Opening your browser…' : 'Connect with GitHub'}
+            </Button>
+            <button type="button" className="link-btn small" data-testid="remote-use-secret" onClick={() => setUseSecret(true)}>
+              Use the enrollment secret instead
+            </button>
+          </>
+        ) : !signingIn ? (
+          <Button
+            size="sm"
+            variant="primary"
+            data-testid="remote-connect"
+            disabled={busy || (!registered && !enroll.trim())}
+            onClick={() => void connect()}
+          >
+            {busy ? 'Connecting…' : 'Connect'}
+          </Button>
+        ) : null}
+        {(config.enabled || signingIn) && (
+          <Button size="sm" variant="ghost" disabled={busy} data-testid="remote-disconnect" onClick={() => void act(() => invoke('remote:disable', undefined))}>
+            {signingIn ? 'Cancel' : 'Disconnect'}
           </Button>
         )}
       </div>

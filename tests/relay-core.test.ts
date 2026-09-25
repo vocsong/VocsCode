@@ -1,8 +1,8 @@
 /** Unit tests for the relay core (relay/src/core.ts): pairing lifecycle, tokens, revocation.
  *  Runs in plain Node against an in-memory store — the DO is a thin binding over this. */
 import { beforeAll, describe, expect, it } from 'vitest';
-import { generateIdentity, openSealedToKey, pairingDecisionPayload, pairingTokenContext, publicOf, sign, tokenProofPayload, type Identity } from '../src/shared/crypto';
-import { ACCESS_TTL_MS, CHALLENGE_TTL_MS, claimPairing, consumeSocketTicket, deleteMirrorSession, deviceInfos, hashToken, issueAccessToken, issueChallenge, issueSocketTicket, listDevices, listMirrorSessions, MAX_HOST_DEVICES, MAX_WEB_DEVICES, MIRROR_MAX_BLOB_CHARS, MirrorError, PAIRING_TTL_MS, revokeAllExcept, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyAccessToken, verifyRefreshToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
+import { enrollTokenContext, generateIdentity, openSealedToKey, pairingDecisionPayload, pairingTokenContext, publicOf, sign, tokenProofPayload, type Identity } from '../src/shared/crypto';
+import { ACCESS_TTL_MS, CHALLENGE_TTL_MS, claimPairing, ENROLL_GRANT_TTL_MS, enrollmentStatus, grantEnrollment, redeemEnrollment, requestPairing, consumeSocketTicket, deleteMirrorSession, deviceInfos, hashToken, issueAccessToken, issueChallenge, issueSocketTicket, listDevices, listMirrorSessions, MAX_HOST_DEVICES, MAX_WEB_DEVICES, MIRROR_MAX_BLOB_CHARS, MirrorError, PAIRING_TTL_MS, revokeAllExcept, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, SOCKET_TICKET_TTL_MS, startPairing, verifyAccessToken, verifyRefreshToken, PairError, type RelayStorage, type RelayStore } from '../relay/src/core';
 import { accessFor, testDevice } from './support/relay-auth';
 import type { PublicIdentity } from '../src/shared/crypto';
 
@@ -686,5 +686,88 @@ describe('relay offline mirror (opaque sealed blobs)', () => {
     await clearMirror(store, 'a', 'h_1');
     expect(await listMirrorSessions(store, 'a', 'h_1', T0)).toEqual([]);
     expect(await getMirrorIndex(store, 'a', 'h_1', T0)).toBeUndefined();
+  });
+});
+
+describe('owner actions: Connect with GitHub and pairing from a signed-in browser', () => {
+  const newNonce = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
+
+  it('registers a desktop only after the owner grants its hash, sealing the credential to its key, once', async () => {
+    const store = memStore();
+    const nonce = newNonce();
+    const nonceHash = await hashToken(nonce);
+    const redeem = (at: number, hostPub = HOST_PUB) => redeemEnrollment(store, { accountId: 'a', nonce, hostPub, name: 'Work PC', platform: 'win32' }, at);
+    // Before the grant the public endpoint says nothing but "pending", and mints nothing.
+    expect(await redeem(T0)).toEqual({ status: 'pending' });
+    expect(await listDevices(store, 'a')).toEqual([]);
+    expect(await enrollmentStatus(store, { accountId: 'a', nonceHash }, T0)).toEqual({ status: 'missing' });
+
+    await grantEnrollment(store, { accountId: 'a', nonceHash }, T0);
+    expect(await enrollmentStatus(store, { accountId: 'a', nonceHash }, T0)).toEqual({ status: 'granted' });
+    const registered = await redeem(T0 + 1);
+    if (registered.status !== 'registered') throw new Error('expected a registration');
+    const token = await openSealedToKey(hostIdentity.enc, registered.sealedToken, enrollTokenContext(nonceHash, registered.hostDeviceId));
+    await expect(verifyRefreshToken(store, { accountId: 'a', deviceId: registered.hostDeviceId, token })).resolves.toMatchObject({ kind: 'host', name: 'Work PC' });
+    // The sealed credential is bound to this grant and device: no other context opens it.
+    await expect(openSealedToKey(hostIdentity.enc, registered.sealedToken, enrollTokenContext(nonceHash, 'h_other'))).rejects.toThrow();
+
+    // A desktop whose response was lost redeems again and gets the same ciphertext; nothing new is minted.
+    expect(await redeem(T0 + 2)).toEqual(registered);
+    await expect(redeem(T0 + 3, publicOf(await generateIdentity()))).rejects.toMatchObject({ code: 'forbidden' });
+    expect((await listDevices(store, 'a')).filter((d) => d.kind === 'host')).toHaveLength(1);
+    // The page that granted it learns which computer to pair with; a spent grant cannot be granted again.
+    expect(await enrollmentStatus(store, { accountId: 'a', nonceHash }, T0 + 4)).toEqual({ status: 'redeemed', hostDeviceId: registered.hostDeviceId, hostName: 'Work PC' });
+    await expect(grantEnrollment(store, { accountId: 'a', nonceHash }, T0 + 5)).rejects.toMatchObject({ code: 'used' });
+    expect(await enrollmentStatus(store, { accountId: 'a', nonceHash }, T0 + ENROLL_GRANT_TTL_MS + 1)).toEqual({ status: 'missing' });
+  });
+
+  it('keeps a known desktop host id, rotating only its credential, and respects the computer cap', async () => {
+    const store = memStore();
+    const known = await registerHostDevice(store, { accountId: 'a', name: 'Work PC', platform: '', pub: HOST_PUB }, T0);
+    const nonce = newNonce();
+    await grantEnrollment(store, { accountId: 'a', nonceHash: await hashToken(nonce) }, T0);
+    const again = await redeemEnrollment(store, { accountId: 'a', nonce, hostPub: HOST_PUB, name: 'renamed', platform: '' }, T0 + 1);
+    expect(again).toMatchObject({ status: 'registered', hostDeviceId: known.deviceId });
+    await expect(verifyRefreshToken(store, { accountId: 'a', deviceId: known.deviceId, token: known.hostToken })).rejects.toMatchObject({ code: 'invalid' });
+    expect(await enrollmentStatus(store, { accountId: 'a', nonceHash: await hashToken(nonce) }, T0 + 2)).toMatchObject({ hostName: 'Work PC' });
+
+    for (let i = 1; i < MAX_HOST_DEVICES; i++) await registerHostDevice(store, { accountId: 'a', name: `PC ${i}`, platform: '', pub: publicOf(await generateIdentity()) }, T0);
+    const late = newNonce();
+    await grantEnrollment(store, { accountId: 'a', nonceHash: await hashToken(late) }, T0);
+    await expect(redeemEnrollment(store, { accountId: 'a', nonce: late, hostPub: publicOf(await generateIdentity()), name: 'one too many', platform: '' }, T0 + 1)).rejects.toMatchObject({ code: 'limit' });
+    expect((await listDevices(store, 'a')).filter((d) => d.kind === 'host')).toHaveLength(MAX_HOST_DEVICES);
+  });
+
+  it('refuses malformed nonces and hashes, and grants in another account', async () => {
+    const store = memStore();
+    for (const nonceHash of ['', 'ABC', 'g'.repeat(64), 'a'.repeat(63)]) {
+      await expect(grantEnrollment(store, { accountId: 'a', nonceHash }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    }
+    for (const nonce of ['', 'short', 'x'.repeat(44), `${'x'.repeat(42)}!`]) {
+      await expect(redeemEnrollment(store, { accountId: 'a', nonce, hostPub: HOST_PUB, name: 'PC', platform: '' }, T0)).rejects.toMatchObject({ code: 'invalid' });
+    }
+    const nonce = newNonce();
+    await grantEnrollment(store, { accountId: 'b', nonceHash: await hashToken(nonce) }, T0);
+    expect(await redeemEnrollment(store, { accountId: 'a', nonce, hostPub: HOST_PUB, name: 'PC', platform: '' }, T0 + 1)).toEqual({ status: 'pending' });
+  });
+
+  it('lets a signed-in owner ask a registered desktop to pair a browser, still decided by the desktop key', async () => {
+    const store = memStore();
+    const host = await registerHostDevice(store, { accountId: 'a', name: 'Work PC', platform: 'win32', pub: HOST_PUB }, T0);
+    await expect(requestPairing(store, { accountId: 'a', hostDeviceId: 'h_missing', webName: 'Phone', webPlatform: '', webPub: WEB_PUB }, T0)).rejects.toMatchObject({ code: 'not-found' });
+    const request = await requestPairing(store, { accountId: 'a', hostDeviceId: host.deviceId, webName: 'Phone', webPlatform: 'web', webPub: WEB_PUB }, T0);
+    expect(request).toMatchObject({ hostName: 'Work PC', hostPub: HOST_PUB });
+    expect(await pollPairing(store, request.code, request.pollToken, T0 + 1)).toEqual({ status: 'claimed' });
+    // Only the desktop's own key decides.
+    const stranger = await generateIdentity();
+    const forged = await sign(stranger, pairingDecisionPayload(request.code, 'approve', WEB_PUB));
+    await expect(resolvePairing(store, { code: request.code, decision: 'approve', signature: forged }, T0 + 1)).rejects.toMatchObject({ code: 'forbidden' });
+    const resolved = await resolvePairing(store, await approval(request.code, 'approve'), T0 + 2);
+    if ('denied' in resolved) throw new Error('expected approval');
+    expect(resolved.hostDeviceId).toBe(host.deviceId);
+    // The desktop keeps its credential: it asked nothing of the relay.
+    expect(resolved.hostToken).toBeUndefined();
+    expect(await pollPairing(store, request.code, request.pollToken, T0 + 3)).toMatchObject({ status: 'approved', hostDeviceId: host.deviceId, hostName: 'Work PC' });
+    expect((await listDevices(store, 'a')).map((d) => d.kind).sort()).toEqual(['host', 'web']);
   });
 });

@@ -17,12 +17,16 @@ import { isolatedEnv, seedSettings } from './e2e-ui';
 import { ENROLL, FakeRelay } from './fake-relay';
 import { generateIdentity, publicOf } from '../src/shared/crypto';
 import { decodeQrPath } from './support/qr-decode';
+import { startTestLanding, TEST_SESSION_COOKIE } from './support/test-landing';
+import { memoryVault, RelayClient } from '../relay/src/web-client';
+import { connectCheckCode } from '../src/shared/pairing';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
 const require = createRequire(import.meta.url);
 let app: ElectronApplication | null = null;
 let relay: FakeRelay | null = null;
+let signInApp: ElectronApplication | null = null;
 
 afterAll(async () => {
   await app?.close().catch(() => undefined);
@@ -137,4 +141,67 @@ describe.runIf(enabled)('remote access settings', () => {
     // Registered now: the enrollment secret is not asked for again.
     expect(await again.getByTestId('remote-enroll').count()).toBe(0);
   });
+
+  it('connects with GitHub from Settings: the browser adds this computer, then pairs on Allow, with no secret typed', async () => {
+    const fake = new FakeRelay();
+    const port = await fake.start();
+    const gate = await startTestLanding(`http://127.0.0.1:${port}`, ENROLL);
+    try {
+      const tmp = path.join(os.tmpdir(), `vocs-code-remote-signin-${Date.now()}`);
+      const userData = path.join(tmp, 'userData');
+      const project = path.join(tmp, 'project');
+      await fs.mkdir(userData, { recursive: true });
+      await fs.mkdir(project, { recursive: true });
+      await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+      signInApp = await electron.launch({
+        executablePath: require('electron') as string,
+        args: [path.join(root, 'out', 'main', 'index.js')],
+        // The desktop reaches the relay through the landing, as it does at code.vocs.io.
+        env: isolatedEnv(userData, { VOCS_CODE_RELAY_URL: gate.origin }),
+        timeout: 60_000
+      });
+      // Record the page the app opens instead of launching a real browser.
+      await signInApp.evaluate(({ shell }) => {
+        const opened: string[] = [];
+        (globalThis as unknown as { __opened: string[] }).__opened = opened;
+        shell.openExternal = async (url: string) => void opened.push(url);
+      });
+      const win = await signInApp.firstWindow();
+      await win.waitForSelector('.brand', { timeout: 60_000 });
+      await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
+      await win.locator('.settings-link:has-text("Remote access")').click({ timeout: 20_000 });
+
+      // The landing's gate answers this signed-out desktop with 401: sign-in is the way in.
+      const signIn = win.getByTestId('remote-sign-in');
+      await signIn.waitFor({ timeout: 30_000 });
+      expect(await win.getByTestId('remote-enroll').count()).toBe(0);
+      await signIn.click();
+      const opened = () => signInApp!.evaluate(() => (globalThis as unknown as { __opened: string[] }).__opened);
+      await expect.poll(async () => (await opened()).length, { timeout: 20_000 }).toBe(1);
+      const link = (await opened())[0];
+      const nonceHash = new URL(link).searchParams.get('connect')!;
+      expect(link).toBe(`${gate.origin}/app?connect=${nonceHash}`);
+      await expect.poll(() => win.getByTestId('remote-sign-in-code').textContent(), { timeout: 20_000 }).toBe(connectCheckCode(nonceHash));
+
+      // The signed-in browser adds this computer: it comes online, registered, with nothing typed.
+      const signedIn: typeof fetch = (input, init = {}) => fetch(input, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), cookie: TEST_SESSION_COOKIE } });
+      const browser = new RelayClient({ vault: memoryVault(), fetchImpl: signedIn });
+      await browser.addComputer(gate.origin, nonceHash);
+      await expect.poll(async () => win.getByTestId('remote-status').innerText(), { timeout: 30_000 }).toMatch(/online/);
+      expect(await win.getByTestId('remote-sign-in').count()).toBe(0);
+      expect(await win.getByTestId('remote-enroll').count()).toBe(0);
+
+      // It asks to pair; the request shows here and waits for Allow.
+      const added = await browser.addedComputer(gate.origin, nonceHash);
+      const pairing = browser.pairWithHost({ relayBase: gate.origin, hostDeviceId: added.hostDeviceId!, deviceName: 'Signed-in phone' });
+      await expect.poll(async () => win.getByText('“Signed-in phone”', { exact: false }).count(), { timeout: 20_000 }).toBe(1);
+      await win.getByRole('button', { name: 'Allow' }).click();
+      expect((await pairing).hostDeviceId).toBe(added.hostDeviceId);
+      await expect.poll(async () => win.getByText(/Browser: Signed-in phone/).count(), { timeout: 20_000 }).toBe(1);
+    } finally {
+      await signInApp?.close().catch(() => undefined);
+      await gate.stop();
+      await fake.stop();
+    }
+  }, 180_000);
 });

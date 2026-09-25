@@ -12,7 +12,7 @@
 
 export type Json = Record<string, unknown>;
 
-import { pairingDecisionPayload, pairingTokenContext, sealToKey, stable, tokenProofPayload, verify, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
+import { enrollTokenContext, pairingDecisionPayload, pairingTokenContext, sealToKey, stable, tokenProofPayload, verify, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
 
 /** Implemented by Durable Object storage (worker) and in-memory maps (tests). */
 export interface RelayStorage {
@@ -410,9 +410,9 @@ export async function registerWebDevice(
 }
 
 /** Mints the host's device record + refresh credential after the human approves. */
-export async function registerHostDevice(store: RelayStorage, input: { accountId: string; name: string; platform: string; pub: PublicIdentity }, now: number): Promise<{ hostToken: string; deviceId: string }> {
-  const hostToken = randomToken();
-  const id = newDeviceId('h');
+export async function registerHostDevice(store: RelayStorage, input: { accountId: string; name: string; platform: string; pub: PublicIdentity; deviceId?: string; token?: string }, now: number): Promise<{ hostToken: string; deviceId: string }> {
+  const hostToken = input.token ?? randomToken();
+  const id = input.deviceId ?? newDeviceId('h');
   const device: DeviceRecord = {
     deviceId: id,
     kind: 'host',
@@ -425,6 +425,130 @@ export async function registerHostDevice(store: RelayStorage, input: { accountId
   };
   await store.put(deviceKey(input.accountId, id), device);
   return { hostToken, deviceId: id };
+}
+
+// --- Owner actions: "Connect with GitHub" enrollment and browser-initiated pairing ---
+//
+// The owner is whoever holds the enrollment secret: in production the landing Worker, acting for
+// a GitHub session on its allowlist. A desktop that clicked Connect with GitHub holds a one-time
+// secret (the nonce) and opens the web client with only its SHA-256; the owner grants that hash,
+// and the desktop redeems the nonce for its credential, sealed to its own key.
+
+/** How long an owner's grant waits for the desktop to redeem it. */
+export const ENROLL_GRANT_TTL_MS = 10 * 60_000;
+const NONCE_HASH = /^[0-9a-f]{64}$/;
+const NONCE = /^[A-Za-z0-9_-]{43}$/;
+
+interface EnrollGrantRecord {
+  nonceHash: string;
+  status: 'granted' | 'redeemed';
+  /** Filled at redemption; the sealed credential stays so a desktop whose response was lost can
+   *  redeem again, until the grant expires. */
+  hostDeviceId?: string;
+  hostName?: string;
+  sealedToken?: SealedToKey;
+  expiresAt: number;
+}
+
+const enrollKey = (accountId: string, nonceHash: string) => `enroll:${accountId}:${nonceHash}`;
+
+/** The owner approves the desktop that holds the nonce behind `nonceHash`. */
+export async function grantEnrollment(store: RelayStore, input: { accountId: string; nonceHash: string }, now: number): Promise<{ expiresAt: number }> {
+  if (typeof input.nonceHash !== 'string' || !NONCE_HASH.test(input.nonceHash)) throw new PairError('invalid');
+  const key = enrollKey(input.accountId, input.nonceHash);
+  const existing = await store.get<EnrollGrantRecord>(key);
+  if (existing?.status === 'redeemed' && now < existing.expiresAt) throw new PairError('used');
+  const record: EnrollGrantRecord = { nonceHash: input.nonceHash, status: 'granted', expiresAt: now + ENROLL_GRANT_TTL_MS };
+  await store.put(key, record);
+  for (const [stale, grant] of await store.list<EnrollGrantRecord>(`enroll:${input.accountId}:`)) {
+    if (now >= grant.expiresAt) await store.delete(stale);
+  }
+  return { expiresAt: record.expiresAt };
+}
+
+/** Where an owner's grant stands, so the page that granted it can pair with the new computer. */
+export async function enrollmentStatus(store: RelayStore, input: { accountId: string; nonceHash: string }, now: number): Promise<{ status: 'missing' | 'granted' | 'redeemed'; hostDeviceId?: string; hostName?: string }> {
+  if (typeof input.nonceHash !== 'string' || !NONCE_HASH.test(input.nonceHash)) throw new PairError('invalid');
+  const record = await store.get<EnrollGrantRecord>(enrollKey(input.accountId, input.nonceHash));
+  if (!record || now >= record.expiresAt) return { status: 'missing' };
+  return record.status === 'redeemed' ? { status: 'redeemed', hostDeviceId: record.hostDeviceId, hostName: record.hostName } : { status: 'granted' };
+}
+
+export type Redemption = { status: 'pending' } | { status: 'registered'; hostDeviceId: string; sealedToken: SealedToKey };
+
+/** The desktop proves it holds the granted nonce and receives its refresh credential, sealed to the
+ *  encryption key it registers. Before the owner grants it the answer is `pending`, which is also
+ *  what an unknown or expired nonce gets: the endpoint is public and reveals nothing. A desktop key
+ *  the relay already knows keeps its host id (every browser paired with it greets that id); only
+ *  its credential is rotated. */
+export async function redeemEnrollment(
+  store: RelayStore,
+  input: { accountId: string; nonce: string; hostPub: PublicIdentity; name: string; platform: string },
+  now: number
+): Promise<Redemption> {
+  if (typeof input.nonce !== 'string' || !NONCE.test(input.nonce)) throw new PairError('invalid');
+  const nonceHash = await hashToken(input.nonce);
+  const key = enrollKey(input.accountId, nonceHash);
+  return withPairCode(store, key, async () => {
+    const record = await store.get<EnrollGrantRecord>(key);
+    if (!record || now >= record.expiresAt) return { status: 'pending' };
+    if (record.status === 'redeemed') {
+      if (!record.sealedToken || !record.hostDeviceId) return { status: 'pending' };
+      // Same nonce, same sealed credential: only the key that registered can open it.
+      const device = await store.get<DeviceRecord>(deviceKey(input.accountId, record.hostDeviceId));
+      if (!device || stable(device.pub) !== stable(input.hostPub)) throw new PairError('forbidden');
+      return { status: 'registered', hostDeviceId: record.hostDeviceId, sealedToken: record.sealedToken };
+    }
+    const hostKey = stable(input.hostPub);
+    const known = (await listDevices(store, input.accountId)).find((d) => d.kind === 'host' && stable(d.pub) === hostKey);
+    const hostDeviceId = known?.deviceId ?? newDeviceId('h');
+    const hostToken = randomToken();
+    // Sealed before the transaction, like a browser's credential: the plaintext never reaches storage.
+    const sealedToken = await sealToKey(input.hostPub.enc, hostToken, enrollTokenContext(nonceHash, hostDeviceId));
+    await store.transaction(async (tx) => {
+      const devices = (await tx.list<DeviceRecord>(`device:${input.accountId}:`)).map(([, d]) => d);
+      const existing = devices.find((d) => d.deviceId === hostDeviceId);
+      if (existing) {
+        await tx.put(deviceKey(input.accountId, hostDeviceId), { ...withoutGrants(existing), tokenHash: await hashToken(hostToken), lastSeen: now });
+      } else {
+        if (devices.filter((d) => d.kind === 'host').length >= MAX_HOST_DEVICES) throw new PairError('limit');
+        await registerHostDevice(tx, { accountId: input.accountId, name: input.name, platform: input.platform, pub: input.hostPub, deviceId: hostDeviceId, token: hostToken }, now);
+      }
+      await tx.put(key, { ...record, status: 'redeemed', hostDeviceId, hostName: existing?.name ?? input.name, sealedToken } satisfies EnrollGrantRecord);
+    });
+    return { status: 'registered', hostDeviceId, sealedToken };
+  });
+}
+
+/** A signed-in owner asks a registered desktop to pair this browser: the claim step of a code
+ *  pairing, started from the browser. The desktop still shows the request and signs Allow or Deny;
+ *  the browser then polls with its capability exactly as after a claim. */
+export async function requestPairing(
+  store: RelayStore,
+  input: { accountId: string; hostDeviceId: string; webName: string; webPlatform: string; webPub: PublicIdentity },
+  now: number
+): Promise<{ code: string; pollToken: string; hostPub: PublicIdentity; hostName: string }> {
+  const host = await store.get<DeviceRecord>(deviceKey(input.accountId, input.hostDeviceId));
+  if (!host || host.kind !== 'host') throw new PairError('not-found');
+  if ((await listDevices(store, input.accountId)).filter((d) => d.kind === 'web').length >= MAX_WEB_DEVICES) throw new PairError('limit');
+  const pollToken = randomToken();
+  const record: PairingRecord = {
+    code: randomCode(),
+    accountId: input.accountId,
+    hostName: host.name,
+    hostPlatform: host.platform,
+    hostPub: host.pub,
+    hostDeviceId: host.deviceId,
+    status: 'claimed',
+    webName: input.webName,
+    webPlatform: input.webPlatform,
+    webPub: input.webPub,
+    pollTokenHash: await hashToken(pollToken),
+    expiresAt: now + PAIRING_TTL_MS
+  };
+  await store.put(codeKey(record.code), record);
+  await sweepExpired(store, now);
+  return { code: record.code, pollToken, hostPub: host.pub, hostName: host.name };
 }
 
 /** Checks a refresh credential. It is accepted only by the token endpoints, never by an API

@@ -2,8 +2,11 @@
  *  relay that lets paired web clients drive a filtered subset of the local handler
  *  registry over an e2e-encrypted session. Off by default; device credentials and the
  *  identity keys live in the secret store, never in settings or logs. */
+import { createHash, randomBytes } from 'node:crypto';
+import os from 'node:os';
 import { WebSocket } from 'ws';
-import { generateIdentity, hostAccept, openFrame, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob } from '../../shared/crypto';
+import { enrollTokenContext, generateIdentity, hostAccept, openFrame, openSealedToKey, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob, type SealedToKey } from '../../shared/crypto';
+import { connectCheckCode, connectLink } from '../../shared/pairing';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
@@ -132,6 +135,10 @@ interface HostCredentials {
 /** Refresh the access token this long before it expires. */
 const ACCESS_REFRESH_MARGIN_MS = 60_000;
 const RECONNECT_MS = 3000;
+/** Connect with GitHub: how often to ask whether the owner added this computer, and for how long
+ *  (the relay keeps an owner's grant ten minutes). */
+const SIGN_IN_POLL_MS = 2000;
+const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
 
 interface Session {
   key: CryptoKey;
@@ -156,6 +163,8 @@ interface WsMessage {
   webToken?: string;
   webDeviceId?: string;
   webPub?: PublicIdentity;
+  /** A signed-in browser asked this computer by id, rather than claiming a code it minted. */
+  requested?: boolean;
   hostPub?: PublicIdentity;
   from?: string;
   to?: string;
@@ -171,6 +180,8 @@ export class RemoteHost {
   private detail: string | undefined;
   private pairing: { code: string; expiresAt: number } | undefined;
   private pendingRequest: { code: string; name: string; platform: string; webPub: PublicIdentity } | undefined;
+  /** Connect with GitHub, while the owner has not added this computer yet. */
+  private signingIn: { link: string; checkCode: string } | undefined;
   private readonly sessions = new Map<string, Session>();
   /** Serialize handshake and ciphertext delivery per peer, not across unrelated clients. */
   private readonly incoming = new Map<string, Promise<void>>();
@@ -204,7 +215,9 @@ export class RemoteHost {
       pairing: this.pairing,
       pendingRequest: this.pendingRequest,
       onlineClients: [...this.sessions.keys()],
-      viewOnly: this.deps.viewOnly?.() ?? false
+      viewOnly: this.deps.viewOnly?.() ?? false,
+      registered: this.enrolled(),
+      ...(this.signingIn ? { signIn: this.signingIn } : {})
     };
   }
 
@@ -230,20 +243,32 @@ export class RemoteHost {
   }
 
   async enable(relayUrl: string, enrollToken: string): Promise<void> {
-    this.generation++;
-    await this.disable();
-    const stored = await this.loadCreds();
-    this.creds = stored ?? { identity: await generateIdentity(), relayUrl, enrollToken, clients: {} };
-    this.creds.relayUrl = relayUrl;
-    if (enrollToken) this.creds.enrollToken = enrollToken;
-    // One mirror key per host, handed to each browser at connect; generated once and kept so an
-    // existing mirror stays readable across restarts.
-    if (!this.creds.mirrorKey) this.creds.mirrorKey = randomKeyB64();
-    await this.saveCreds();
-    // The relay URL is configuration; tokens and keys stay out of the log.
-    this.deps.log('info', `remote: enabled for ${relayUrl} (${stored ? `${Object.keys(stored.clients).length} paired device(s)` : 'new identity'}${this.creds.deviceId ? ', enrolled' : ', not yet enrolled'})`);
-    this.deps.audit?.record('enable', { detail: relayUrl });
+    await this.prepare(relayUrl, enrollToken);
     await this.connect();
+  }
+
+  /** Connect with GitHub: register this computer through a signed-in browser instead of the
+   *  enrollment secret. A one-time secret stays here; only its SHA-256 goes into the page `open`
+   *  shows, where the owner signs in and adds this computer. Meanwhile this desktop polls the
+   *  relay with the secret, and receives its credential sealed to its own key. An already
+   *  registered computer just connects. */
+  async signIn(relayUrl: string, open: (url: string) => Promise<void>, hostName = os.hostname() || 'desktop'): Promise<void> {
+    await this.prepare(relayUrl, '');
+    if (this.enrolled()) {
+      await this.connect();
+      return;
+    }
+    const gen = this.generation;
+    const nonce = randomBytes(32).toString('base64url');
+    const nonceHash = createHash('sha256').update(nonce).digest('hex');
+    this.signingIn = { link: connectLink(relayUrl, nonceHash), checkCode: connectCheckCode(nonceHash) };
+    this.status = 'connecting';
+    this.detail = 'finish in your browser: sign in with GitHub and add this computer';
+    this.deps.log('info', 'remote: waiting for this computer to be added in the browser (Connect with GitHub)');
+    this.deps.audit?.record('sign-in-start');
+    this.push();
+    await open(this.signingIn.link);
+    void this.awaitSignIn(nonce, nonceHash, gen, hostName);
   }
 
   async disable(): Promise<void> {
@@ -260,6 +285,65 @@ export class RemoteHost {
     this.detail = undefined;
     this.pendingRequest = undefined;
     this.pairing = undefined;
+    this.signingIn = undefined;
+    this.push();
+  }
+
+  /** Loads or creates this computer's identity for `relayUrl`, without connecting. */
+  private async prepare(relayUrl: string, enrollToken: string): Promise<void> {
+    this.generation++;
+    await this.disable();
+    const stored = await this.loadCreds();
+    this.creds = stored ?? { identity: await generateIdentity(), relayUrl, enrollToken, clients: {} };
+    this.creds.relayUrl = relayUrl;
+    if (enrollToken) this.creds.enrollToken = enrollToken;
+    // One mirror key per host, handed to each browser at connect; generated once and kept so an
+    // existing mirror stays readable across restarts.
+    if (!this.creds.mirrorKey) this.creds.mirrorKey = randomKeyB64();
+    await this.saveCreds();
+    // The relay URL is configuration; tokens and keys stay out of the log.
+    this.deps.log('info', `remote: enabled for ${relayUrl} (${stored ? `${Object.keys(stored.clients).length} paired device(s)` : 'new identity'}${this.creds.deviceId ? ', enrolled' : ', not yet enrolled'})`);
+    this.deps.audit?.record('enable', { detail: relayUrl });
+  }
+
+  /** Polls the relay until the owner adds this computer, the page's grant expires, or remote
+   *  access is disabled (which bumps the generation). */
+  private async awaitSignIn(nonce: string, nonceHash: string, gen: number, hostName: string): Promise<void> {
+    const deadline = Date.now() + SIGN_IN_TIMEOUT_MS;
+    while (gen === this.generation && Date.now() < deadline) {
+      const creds = this.creds;
+      if (!creds) return;
+      try {
+        const res = await fetch(`${this.base()}/v1/enroll/redeem`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ nonce, hostPub: publicOf(creds.identity), name: hostName, platform: `${process.platform} ${process.arch}` })
+        });
+        const body = res.ok ? ((await res.json()) as { status?: string; hostDeviceId?: unknown; sealedToken?: SealedToKey }) : null;
+        if (gen !== this.generation || this.creds !== creds) return;
+        if (body?.status === 'registered' && typeof body.hostDeviceId === 'string' && body.sealedToken) {
+          const token = await openSealedToKey(creds.identity.enc, body.sealedToken, enrollTokenContext(nonceHash, body.hostDeviceId));
+          if (gen !== this.generation || this.creds !== creds) return;
+          creds.deviceId = body.hostDeviceId;
+          creds.deviceToken = token;
+          await this.saveCreds();
+          this.signingIn = undefined;
+          this.detail = undefined;
+          this.deps.log('info', `remote: this computer was added in the browser (device ${body.hostDeviceId})`);
+          this.deps.audit?.record('sign-in-registered', { device: body.hostDeviceId });
+          await this.connect();
+          return;
+        }
+      } catch (e) {
+        // A network blip or a relay restart: keep waiting for the owner.
+        this.deps.log('debug', `remote: sign-in poll failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, SIGN_IN_POLL_MS));
+    }
+    if (gen !== this.generation) return;
+    this.signingIn = undefined;
+    this.status = 'error';
+    this.detail = 'the sign-in page expired before this computer was added; connect again';
     this.push();
   }
 
@@ -627,7 +711,11 @@ export class RemoteHost {
     }
     switch (msg.t) {
       case 'pair.request': {
-        if (!this.creds || !this.pairing || msg.code !== this.pairing.code ||
+        // Either a code this desktop minted was claimed, or a signed-in owner's browser asked this
+        // registered computer by id. Both need the user's Allow here, signed with this key.
+        const minted = !!this.pairing && msg.code === this.pairing.code;
+        const requested = msg.requested === true && this.enrolled();
+        if (!this.creds || typeof msg.code !== 'string' || !(minted || requested) ||
             !msg.hostPub || !msg.webPub || stable(msg.hostPub) !== stable(publicOf(this.creds.identity))) return;
         this.pendingRequest = { code: msg.code, name: String(msg.name ?? ''), platform: String(msg.platform ?? ''), webPub: msg.webPub };
         this.deps.log('info', `remote: pairing request from "${this.pendingRequest.name}" (${this.pendingRequest.platform}); awaiting the user's decision`);

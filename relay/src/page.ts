@@ -2,7 +2,7 @@
  *  transcripts and approval prompts. DOM layer over RelayClient. A browser can pair with several
  *  computers; the switcher in the top bar picks the one to drive and shows which are online. */
 import { PairingRevokedError, RelayClient, relayBaseFor, type PairingVault, type VaultState } from './web-client';
-import { PAIRING_CODE_PATTERN } from '../../src/shared/pairing';
+import { CONNECT_HASH_PATTERN, connectCheckCode, PAIRING_CODE_PATTERN } from '../../src/shared/pairing';
 import type { TerminalInfo } from '../../src/shared/terminal';
 import type { RemoteDeviceInfo, TranscriptItem } from '../../src/shared/types';
 
@@ -67,6 +67,9 @@ let presenceTimer: ReturnType<typeof setInterval> | null = null;
 let connecting = false;
 /** Which paired computers have a relay connection right now (from the device list). */
 let online = new Map<string, boolean>();
+/** Signed in with GitHub on the landing (its login gate): the account's computers can be listed,
+ *  added and paired without a code. Settled once, at boot. */
+let accountReady: Promise<boolean> = Promise.resolve(false);
 
 /** The transcript window: newest items first, older pages on request (docs §8.5). */
 const PAGE = 150;
@@ -110,6 +113,15 @@ function notice(text: string): void {
 
 async function boot(): Promise<void> {
   const params = new URLSearchParams(window.location.search);
+  // Connect with GitHub: the desktop that opened this page is known only by this hash.
+  let connectHash: string | null = null;
+  if (params.has('connect')) {
+    const hashes = params.getAll('connect');
+    if (hashes.length === 1 && CONNECT_HASH_PATTERN.test(hashes[0] ?? '')) connectHash = hashes[0]!;
+    params.delete('connect');
+    const search = params.toString();
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`);
+  }
   if (params.has('code')) {
     const codes = params.getAll('code');
     const code = codes[0]?.trim().toUpperCase() ?? '';
@@ -153,9 +165,10 @@ async function boot(): Promise<void> {
       void sendComposer();
     }
   });
+  el('connect-cancel').addEventListener('click', () => (client.hasCredentials() ? void enter() : openPairScreen()));
   client.onPush((channel, payload) => void onPush(channel, payload));
   client.onPairingsChanged(() => renderHosts());
-  void loadAccount();
+  accountReady = loadAccount();
   let restored = false;
   try {
     restored = await client.restore();
@@ -167,25 +180,142 @@ async function boot(): Promise<void> {
     show('screen-pair');
     return;
   }
+  if (connectHash) {
+    if (await accountReady) {
+      openConnectScreen(connectHash);
+      return;
+    }
+    el('pair-error').textContent = 'This page was opened to add a computer, but signing in is not available here. Use a pairing code instead.';
+  }
   if (restored) void enter();
   else openPairScreen();
 }
 
+/** Connect with GitHub, in the browser the desktop opened: add that computer to the account,
+ *  then pair this browser with it. The desktop still asks for Allow before this browser gets in. */
+function openConnectScreen(connectHash: string): void {
+  el('connect-code').textContent = connectCheckCode(connectHash);
+  el('connect-status').textContent = '';
+  el('connect-error').textContent = '';
+  const add = el('connect-add') as HTMLButtonElement;
+  add.disabled = false;
+  add.onclick = () => void addThisComputer(connectHash);
+  show('screen-connect');
+}
+
+async function addThisComputer(connectHash: string): Promise<void> {
+  const add = el('connect-add') as HTMLButtonElement;
+  const status = el('connect-status');
+  add.disabled = true;
+  el('connect-error').textContent = '';
+  const base = relayBaseFor(window.location.origin, relayOverride());
+  try {
+    status.textContent = 'Adding the computer…';
+    await client.addComputer(base, connectHash);
+    status.textContent = 'Waiting for the computer to finish connecting…';
+    let added: { status: string; hostDeviceId?: string } = { status: 'granted' };
+    for (let i = 0; i < 90 && added.status !== 'redeemed'; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      added = await client.addedComputer(base, connectHash);
+      if (added.status === 'missing') throw new Error('the request expired; click Connect with GitHub in Vocs Code again');
+    }
+    if (added.status !== 'redeemed' || !added.hostDeviceId) throw new Error('the computer did not finish connecting; is Vocs Code still open on it?');
+    // It has its credential but may still be opening its connection, and a pairing request only
+    // reaches a computer that is online: wait for it rather than race it.
+    status.textContent = 'Added. Waiting for the computer to come online…';
+    for (let i = 0; i < 30; i++) {
+      const hosts = await client.ownerHosts(base).catch(() => []);
+      if (hosts.some((host) => host.deviceId === added.hostDeviceId && host.online)) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    status.textContent = 'Now click Allow in Vocs Code on the computer to pair this browser.';
+    const name = (el('connect-device-name') as HTMLInputElement).value.trim() || 'Browser';
+    await pairThroughAccount(added.hostDeviceId, name);
+  } catch (e) {
+    el('connect-error').textContent = e instanceof Error ? e.message : String(e);
+    add.disabled = false;
+    status.textContent = '';
+  }
+}
+
+/** Signed in: ask one of the account's computers to pair this browser; no code to carry. */
+async function pairThroughAccount(hostDeviceId: string, name: string): Promise<void> {
+  show('screen-pairing');
+  try {
+    await client.pairWithHost({ relayBase: relayBaseFor(window.location.origin, relayOverride()), hostDeviceId, deviceName: name });
+    notice('');
+    resetView();
+    await enter();
+  } catch (e) {
+    el('pair-error').textContent = e instanceof Error ? e.message : String(e);
+    openPairScreen();
+  }
+}
+
+/** Signed in: the account's computers on the pair screen, each paired with one click. */
+async function renderOwnerHosts(): Promise<void> {
+  const box = el('owner-hosts');
+  if (!(await accountReady)) return;
+  let hosts: Awaited<ReturnType<typeof client.ownerHosts>>;
+  try {
+    hosts = await client.ownerHosts(relayBaseFor(window.location.origin, relayOverride()));
+  } catch {
+    // Signed in but owner actions are not set up on this relay: the code form still works.
+    box.hidden = true;
+    return;
+  }
+  const paired = new Set(client.pairings().map((p) => p.hostDeviceId));
+  const list = el('owner-host-list');
+  list.replaceChildren(
+    ...hosts.map((host) => {
+      const item = document.createElement('li');
+      const label = document.createElement('span');
+      label.textContent = host.name;
+      const state = document.createElement('span');
+      state.className = 'muted';
+      state.textContent = paired.has(host.deviceId) ? ' · paired' : host.online ? ' · online' : ' · offline';
+      label.append(state);
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'ghost';
+      button.dataset.host = host.deviceId;
+      button.textContent = paired.has(host.deviceId) ? 'Open' : 'Pair';
+      button.disabled = !paired.has(host.deviceId) && !host.online;
+      button.title = button.disabled ? 'Open Vocs Code on that computer first' : '';
+      button.addEventListener('click', () => {
+        if (paired.has(host.deviceId)) {
+          void (async () => {
+            await client.select(host.deviceId);
+            resetView();
+            await enter();
+          })();
+        } else void pairThroughAccount(host.deviceId, (el('device-name') as HTMLInputElement).value.trim() || 'Browser');
+      });
+      item.append(label, button);
+      return item;
+    })
+  );
+  el('owner-hosts-empty').hidden = hosts.length > 0;
+  box.hidden = false;
+}
+
 /** The login gate is on the landing origin. A local/ungated preview has no /v1/me, so keep
  *  account sign-out hidden there; unpairing this browser remains a separate device action. */
-async function loadAccount(): Promise<void> {
+async function loadAccount(): Promise<boolean> {
   try {
     const res = await fetch('/v1/me', { credentials: 'same-origin', cache: 'no-store' });
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const body = (await res.json()) as { login?: unknown };
-    if (typeof body.login !== 'string' || !body.login) return;
+    if (typeof body.login !== 'string' || !body.login) return false;
     for (const form of document.querySelectorAll<HTMLFormElement>('.account-signout')) {
       const label = form.querySelector('.account-name');
       if (label) label.textContent = `@${body.login}`;
       form.hidden = false;
     }
+    return true;
   } catch {
     // Pre-gate deployments do not have /v1/me. Never expose an account control without it.
+    return false;
   }
 }
 
@@ -194,6 +324,7 @@ function openPairScreen(): void {
   el('pair-cancel').toggleAttribute('hidden', !client.hasCredentials());
   el('pair-title').textContent = client.hasCredentials() ? 'Add a computer' : 'Vocs Code';
   show('screen-pair');
+  void renderOwnerHosts();
 }
 
 async function sendComposer(): Promise<void> {

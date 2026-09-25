@@ -205,3 +205,62 @@ describe('remote access settings (P4)', () => {
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:setMirror', { mirror: true }));
   });
 });
+
+describe('Connect with GitHub in remote access settings', () => {
+  const offline = (over: Record<string, unknown> = {}) => ({
+    config: { enabled: false },
+    state: { status: 'off', onlineClients: [], viewOnly: false },
+    devices: [],
+    audit: [],
+    relayUrl: 'https://code.vocs.io',
+    registered: false,
+    signInAvailable: true,
+    ...over
+  });
+
+  it('offers Connect with GitHub instead of the secret, with the secret one click away', async () => {
+    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'remote:get' ? offline() : { status: 'connecting' }));
+    useStore.setState({ settings: { ...baseSettings, remote: { enabled: false } } as AppSettings });
+    render(<SettingsView />);
+    fireEvent.click(screen.getByText('Remote access'));
+    const signIn = await screen.findByTestId('remote-sign-in');
+    expect(screen.queryByTestId('remote-enroll')).toBeNull();
+    expect(screen.getByTestId('remote-steps').textContent).toContain('Connect with GitHub: your browser opens; sign in and click Add this computer.');
+    fireEvent.click(signIn);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:signIn', undefined));
+
+    fireEvent.click(screen.getByTestId('remote-use-secret'));
+    expect(screen.getByTestId('remote-enroll')).toBeTruthy();
+    expect(screen.queryByTestId('remote-sign-in')).toBeNull();
+  });
+
+  it('shows the check code while the browser finishes, reopens the page, and cancels', async () => {
+    const waiting = offline({
+      config: { enabled: true },
+      state: { status: 'connecting', onlineClients: [], viewOnly: false, detail: 'finish in your browser', signIn: { link: 'https://code.vocs.io/app?connect=' + 'ab'.repeat(32), checkCode: 'K7M2-XQ9P' } }
+    });
+    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'remote:get' ? waiting : {}));
+    useStore.setState({ settings: { ...baseSettings, remote: { enabled: true } } as AppSettings });
+    render(<SettingsView />);
+    fireEvent.click(screen.getByText('Remote access'));
+    expect((await screen.findByTestId('remote-sign-in-code')).textContent).toBe('K7M2-XQ9P');
+    // Neither the secret nor a second sign-in is offered while one is in flight.
+    expect(screen.queryByTestId('remote-enroll')).toBeNull();
+    expect(screen.queryByTestId('remote-sign-in')).toBeNull();
+    fireEvent.click(screen.getByText('Open the page again'));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('app:openExternal', { url: 'https://code.vocs.io/app?connect=' + 'ab'.repeat(32) }));
+    const cancel = screen.getByTestId('remote-disconnect');
+    expect(cancel.textContent).toBe('Cancel');
+    fireEvent.click(cancel);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:disable', undefined));
+  });
+
+  it('keeps the secret flow where the relay has no sign-in', async () => {
+    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'remote:get' ? offline({ signInAvailable: false }) : {}));
+    useStore.setState({ settings: { ...baseSettings, remote: { enabled: false } } as AppSettings });
+    render(<SettingsView />);
+    fireEvent.click(screen.getByText('Remote access'));
+    await screen.findByTestId('remote-enroll');
+    expect(screen.queryByTestId('remote-sign-in')).toBeNull();
+  });
+});
