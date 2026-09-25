@@ -26,6 +26,26 @@ agreements stay there.
   committed under the committing person's own git identity (`git config user.name`/`user.email`),
   never a fixed name or an identity override.
 
+## GitHub text
+
+GitHub turns `#` followed by digits into a link to that issue or PR wherever it renders text. That
+covers PR titles and descriptions, issue and PR comments, review bodies, inline review comments and
+commit messages. It also adds a "mentioned" event to that issue's timeline, and editing the text
+afterwards does not remove it. So a review point written as `#3` links to, and leaves a backlink on,
+whatever issue or PR 3 happens to be.
+
+- Write `#N` only to reference issue or PR N on purpose (`follow-up to #392`). A closing keyword in
+  front of it (`fixes #3`, `closes #3`) also closes that issue once the text lands on `develop`, the
+  default branch.
+- Refer to numbered points in words: "review item 3", "point 3", "item 3 of the first review". A
+  markdown ordered list (`1.`) is fine, because it renders as a list, not a link.
+- To show the literal text in a comment, description or review, put it in a code span: `#3` inside
+  backticks is not linked. Commit messages are plain text rather than markdown, so leave a hash
+  followed by digits out of them entirely unless it is a real reference.
+- Before posting, run `grep -n '#[0-9]'` over the body and confirm every hit is an intended reference.
+  To see what GitHub actually rendered, read the item's HTML and look for `issue-link` anchors:
+  `gh api -H "Accept: application/vnd.github.full+json" <api path> --jq .body_html`.
+
 ## What never gets committed
 
 - Build output (`out/`, `dist/`), `node_modules/`, and `tests/artifacts/`.
