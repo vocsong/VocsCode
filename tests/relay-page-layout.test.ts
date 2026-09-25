@@ -252,8 +252,10 @@ describe('web app signed in with GitHub (owner actions through the landing)', ()
       'GET /v1/owner/enroll-grant': () => ({ status: 'redeemed', hostDeviceId: 'h_new', hostName: 'New PC' }),
       'POST /v1/owner/pair-request': () => ({ code: 'ABCD2345', pollToken: 'poll-capability' }),
       'GET /v1/pair/poll': () => ({ status: 'claimed' }),
-      'GET /v1/owner/hosts': () => []
+      // Registered but still connecting on the first look, as a real desktop is for a moment.
+      'GET /v1/owner/hosts': () => [{ deviceId: 'h_new', name: 'New PC', platform: 'win32', lastSeen: 1, online: ++hostChecks > 1 }]
     });
+    let hostChecks = 0;
     const dom = await page(`https://code.vocs.io/app/?connect=${hash}`, fetchMock);
     try {
       const doc = dom.window.document;
@@ -265,8 +267,13 @@ describe('web app signed in with GitHub (owner actions through the landing)', ()
       expect(calls.some((c) => c.method === 'POST')).toBe(false);
       doc.querySelector<HTMLButtonElement>('#connect-add')!.click();
       await vi.waitFor(() => expect(calls.find((c) => c.method === 'POST' && c.url === '/v1/owner/enroll-grant')?.body).toBe(JSON.stringify({ nonceHash: hash })));
-      await vi.waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/owner/pair-request')).toBe(true), { timeout: 5000 });
+      await vi.waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/v1/owner/pair-request')).toBe(true), { timeout: 8000 });
       expect(JSON.parse(calls.find((c) => c.url === '/v1/owner/pair-request')!.body!)).toMatchObject({ hostDeviceId: 'h_new' });
+      // The request waited for the computer to be online: an offline one would refuse it (409).
+      const asked = calls.findIndex((c) => c.url === '/v1/owner/pair-request');
+      const online = calls.map((c, i) => (c.url === '/v1/owner/hosts' ? i : -1)).filter((i) => i >= 0)[1];
+      expect(online).toBeDefined();
+      expect(asked).toBeGreaterThan(online!);
       expect(doc.querySelector('#screen-pairing')?.hasAttribute('hidden')).toBe(false);
     } finally {
       dom.window.close();

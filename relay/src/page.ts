@@ -220,7 +220,15 @@ async function addThisComputer(connectHash: string): Promise<void> {
       if (added.status === 'missing') throw new Error('the request expired; click Connect with GitHub in Vocs Code again');
     }
     if (added.status !== 'redeemed' || !added.hostDeviceId) throw new Error('the computer did not finish connecting; is Vocs Code still open on it?');
-    status.textContent = 'Added. Now click Allow in Vocs Code on the computer to pair this browser.';
+    // It has its credential but may still be opening its connection, and a pairing request only
+    // reaches a computer that is online: wait for it rather than race it.
+    status.textContent = 'Added. Waiting for the computer to come online…';
+    for (let i = 0; i < 30; i++) {
+      const hosts = await client.ownerHosts(base).catch(() => []);
+      if (hosts.some((host) => host.deviceId === added.hostDeviceId && host.online)) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    status.textContent = 'Now click Allow in Vocs Code on the computer to pair this browser.';
     const name = (el('connect-device-name') as HTMLInputElement).value.trim() || 'Browser';
     await pairThroughAccount(added.hostDeviceId, name);
   } catch (e) {
