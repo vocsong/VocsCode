@@ -549,13 +549,14 @@ describe('remote handlers', () => {
 
   /** The registered remote:* handlers with the privileged pieces mocked: the host records what it
    *  was asked to connect to, the secret store what it was asked to keep. */
-  function remoteRig() {
+  function remoteRig(registered = false) {
     const enabled: [string, string][] = [];
     const saved = new Map<string, string>();
     const remote = {
       state: () => ({ status: 'off' }),
       listDevices: async () => [],
       auditEntries: () => [],
+      isRegistered: async () => registered,
       enable: async (url: string, token: string) => void enabled.push([url, token]),
       disable: async () => undefined
     } as unknown as RemoteHost;
@@ -579,6 +580,18 @@ describe('remote handlers', () => {
     expect(saved.get('remote-enroll')).toBe('enroll-secret');
     // The view-only policy survives; the typed-in relay of an older build does not.
     expect(deps.settings.get().remote).toEqual({ enabled: true, viewOnly: true });
+  });
+
+  it('connects a registered computer without asking for the secret again', async () => {
+    vi.stubEnv('VOCS_CODE_RELAY_URL', undefined);
+    const { registry, enabled, saved } = remoteRig(true);
+    saved.set('remote-enroll', 'first-time-secret');
+    expect(((await registry.invoke('remote:get', undefined)) as { registered: boolean }).registered).toBe(true);
+    // An empty field neither overwrites the stored secret nor blocks the connection.
+    await registry.invoke('remote:enable', {});
+    await registry.invoke('remote:enable', { enrollToken: '   ' });
+    expect(enabled).toEqual([['https://code.vocs.io', 'first-time-secret'], ['https://code.vocs.io', 'first-time-secret']]);
+    expect(saved.get('remote-enroll')).toBe('first-time-secret');
   });
 
   it('points a development build at another relay through VOCS_CODE_RELAY_URL', async () => {

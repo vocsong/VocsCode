@@ -12,7 +12,12 @@
     <section id="screen-pair" data-screen hidden>
       <div class="card">
         <h1 id="pair-title">Vocs Code</h1>
-        <p class="muted">Pair this browser with your desktop app. Enter the code shown under Settings → Remote access, or scan its QR code. A pairing link fills the code; press Pair to request desktop approval.</p>
+        <p class="muted">Pair this browser with a computer running Vocs Code:</p>
+        <ol class="muted steps" id="pair-steps">
+          <li>On the computer, open Vocs Code → Settings → Remote access and click Connect.</li>
+          <li>Scan the QR code it shows with this device, or type its code below.</li>
+          <li>Press Pair, then click Allow on the computer.</li>
+        </ol>
         <form method="post" action="/logout" class="account-signout" hidden><span class="account-name"></span><button type="submit" class="ghost">Sign out of GitHub</button></form>
         <form id="pair-form">
           <label>Pairing code<input id="code" maxlength="9" placeholder="ABCD2345" autocomplete="off" required /></label>
@@ -28,7 +33,7 @@
     <section id="screen-pairing" data-screen hidden>
       <div class="card">
         <h1>Waiting for approval…</h1>
-        <p class="muted">Confirm the request on your desktop (Settings → Remote access). This expires in five minutes.</p>
+        <p class="muted">Click Allow in Vocs Code on your computer (Settings → Remote access). The request expires in five minutes.</p>
       </div>
     </section>
 
