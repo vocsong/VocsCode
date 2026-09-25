@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.0](https://github.com/vocsong/VocsCode/compare/v0.5.0...v0.6.0) (2026-09-25)
+
+
+### Features
+
+* **remote:** ask for the enrollment secret once, show the QR code on connect, and spell out the steps ([#414](https://github.com/vocsong/VocsCode/issues/414)) ([21aeb50](https://github.com/vocsong/VocsCode/commit/21aeb502cb0ee3576195d94f6ca0b24dcd067ebc))
+* **remote:** Connect with GitHub, to add a computer and pair browsers without a secret or code ([#415](https://github.com/vocsong/VocsCode/issues/415)) ([50040e3](https://github.com/vocsong/VocsCode/commit/50040e388c37de76b106a08706e81577128643a2))
+* **remote:** proof-of-possession relay tokens, QR pairing and multi-computer web access ([#407](https://github.com/vocsong/VocsCode/issues/407)) ([e37818e](https://github.com/vocsong/VocsCode/commit/e37818e131fcdf7b11db33048c4750b89b0a9716))
+
+
+### Bug Fixes
+
+* **claude:** stop a finished turn's Working header from spinning forever ([#391](https://github.com/vocsong/VocsCode/issues/391)) ([4d89459](https://github.com/vocsong/VocsCode/commit/4d89459d6026d92fa28a76df5df49030ce60800e))
+* Fan pairing requests out with a tag that actually matches ([a76c3e5](https://github.com/vocsong/VocsCode/commit/a76c3e568d96de9a29c1efe3890bbc61293d38aa))
+* **goal:** deliver mid-turn goals after the current turn ([845a225](https://github.com/vocsong/VocsCode/commit/845a225315604652ff459567b51c6b240f70d74c))
+* **remote:** always connect to code.vocs.io instead of asking for a relay URL ([#412](https://github.com/vocsong/VocsCode/issues/412)) ([96d8698](https://github.com/vocsong/VocsCode/commit/96d8698f86f61a62745d0820616889c721806434))
+* **sessions:** stop session names from sticking as a cut-off prompt ([#387](https://github.com/vocsong/VocsCode/issues/387)) ([b6d9dae](https://github.com/vocsong/VocsCode/commit/b6d9daecc8e145f8bca667327c46293208d0195f))
+* **transcript:** checkpoint in-flight assistant text so a crash or stop keeps it ([#408](https://github.com/vocsong/VocsCode/issues/408)) ([09e1d50](https://github.com/vocsong/VocsCode/commit/09e1d50dd0c26a604e6b201f2b8561b6afcd42c6)), closes [#406](https://github.com/vocsong/VocsCode/issues/406)
+
 ## [0.5.0](https://github.com/vocsong/VocsCode/compare/v0.4.0...v0.5.0) (2026-09-20)
 
 
