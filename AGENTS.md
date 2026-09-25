@@ -18,6 +18,7 @@ This file is loaded by pi and other agents at startup, so it stays short: behavi
 - **No AI attribution in commits.** Never append `Co-Authored-By` or "Generated with …" trailers. Every commit is authored and committed under the git identity of the person running the session, exactly as their `git config` resolves it; never substitute another name with `-c user.*`, `--author` or `GIT_AUTHOR_*`/`GIT_COMMITTER_*`. `.claude/settings.json` pins `includeCoAuthoredBy: false`, and `CLAUDE.md` imports this file — keep both if the harness list changes.
 - **Git history.** Work on your own agent branch (`<agent>/<slug>`, e.g. `pi/<slug>`). Rebase or force-push your own agent branch freely. Never rewrite `develop` or `master` history, and never force-push a branch you did not create (the permission gate still prompts for force-push below Full access).
 - **PR titles feed releases.** A one-commit PR must carry the Conventional Commits title on the commit itself, because the squash takes the commit subject; a multi-commit PR only needs it on the PR title. The `develop` → `master` ship PR is rebase-merged. Rules, prefix effects and why: [docs/RELEASING.md](docs/RELEASING.md#conventions-that-feed-the-bot).
+- **Issue numbers in GitHub text.** GitHub turns every `#` followed by digits into a link to that issue or PR, and leaves a backlink on it. This applies to PR titles and descriptions, comments, reviews and commit messages alike. Write one only when you mean to reference that issue or PR; refer to numbered points in words ("review item 3"). Why and how to check: [docs/CONVENTIONS.md](docs/CONVENTIONS.md#github-text).
 - **Report tight.** The final write-up — and the PR description — is a short structured report, same shape every time, bullets only, no process narration:
   - **Task** — one-line recap of the original task as it was asked, so the report stands alone.
   - **Done** — what was delivered in outcome terms: decisions taken and why, anything done beyond the literal ask. Tight bullets; no process narration and no file-by-file recap (that is **Files**).
@@ -98,7 +99,7 @@ for strings, comments, config and docs, and for anything newer than the index.
 | [docs/TESTING.md](docs/TESTING.md) | Dev commands, offline/opt-in/live suites, the change → suite table, coverage rules, packaging gotchas |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Source layout, layering and invariants, harness matrix, adding a harness, permission mapping |
 | [docs/MEMORY.md](docs/MEMORY.md) | Layer 2 memory: the project wiki, its provenance and review rules, the MCP tools, and the L1–L4 boundary |
-| [docs/CONVENTIONS.md](docs/CONVENTIONS.md) | Language and formatting, file layout, commit messages, what never gets committed |
+| [docs/CONVENTIONS.md](docs/CONVENTIONS.md) | Language and formatting, file layout, commit messages, GitHub text, what never gets committed |
 | [docs/RELEASING.md](docs/RELEASING.md) | Branch model, PR titles and squash rules, release-please, CI build |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Logs and environment variables |
 | [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md), [docs/REMOTE-ACCESS-ROADMAP.md](docs/REMOTE-ACCESS-ROADMAP.md) | Remote-access design and decisions of record; the working backlog — what is live, what is not, what is next |
