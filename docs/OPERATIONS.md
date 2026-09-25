@@ -61,7 +61,10 @@ code, but keep their pairings. Desktop log lines worth grepping: `remote: this c
 longer registered with the relay` (its credential was rejected — revoked, or a different relay; it
 falls back to enrolling and keeps its identity), `remote: forgot N browser pairing(s)` (reconciled
 against the relay's registry; the offline mirror was re-keyed), `remote: pairing refused by the relay`
-and `…maximum number of paired devices` (the per-account cap: ten browsers, five computers).
+and `…maximum number of paired devices` (the per-account cap: ten browsers, five computers),
+`remote: waiting for this computer to be added in the browser (Connect with GitHub)` and
+`remote: this computer was added in the browser (device …)` (the signed-in path; it gives up after
+ten minutes with `the sign-in page expired`).
 
 ## Environment variables
 

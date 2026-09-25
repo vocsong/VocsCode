@@ -34,9 +34,9 @@ the deployed smoke.
 
 | Roadmap item | Delivered | Still needs (owner) |
 | --- | --- | --- |
-| §2.1 Login gate | Landing gate staged disabled in vocs.io #27; the web app shows the account and a separate sign-out | GitHub OAuth app, landing secrets, review/merge #27, enable, live allow/deny/logout check (**user**) |
+| §2.1 Login gate | Built, off until configured: the landing gate plus owner routes (vocs.io #28, superseding #27 and #26); Connect with GitHub on the desktop, the signed-in computer list and pairing without a code (Vocs-Code, §6.3.1 of the design) | review/merge both PRs, GitHub OAuth app, landing secrets (incl. `RELAY_ENROLL_TOKEN`), enable, release the relay, live allow/deny/logout check (**user**) |
 | §2.2 CI flakes | Timer attribution, analytics recovery, subagent cap race; post-merge CI on `develop` green | — |
-| §2.3 Deploy loop | Protected `deploy-relay` workflow, run from release tags with approval; first deploy done; rollback runbook | merge vocs.io #26; `workers_dev: false` after the gate is live (desktops always use `code.vocs.io`) |
+| §2.3 Deploy loop | Protected `deploy-relay` workflow, run from release tags with approval; first deploy done; rollback runbook | merge vocs.io #28 (it carries the #26 cleanup); `workers_dev: false` after the gate is live (desktops always use `code.vocs.io`) |
 | §2.4 Live path testable | Deployed smoke passing against production; the same flow against local workerd in `npm test`; real-browser e2e; 14 workerd DO tests. These found three runtime bugs no fake could (§2.4) | — |
 | §2.5.1 PoP / short-lived tokens | Refresh credential + signed challenge → 1 h access token everywhere; sealed pairing delivery (no plaintext bearer at rest); non-extractable browser keys in IndexedDB with one-way migration | — |
 | §2.5.2 CSP | Restrictive `_headers` policy, no-store bundle; zero violations in a real browser; served on the deployed origin | recheck with a login cookie once the gate is on |
@@ -60,8 +60,16 @@ actions only the user can take.
 **Goal.** `code.vocs.io` → login → `/app`, as decided. Today `/app` serves only the pairing
 screen (every real call needs a device credential or the enrollment secret), but nothing gates it.
 
-**Blocked on.** A GitHub OAuth app (client id + secret). Everything else is buildable and
-mergeable now, dormant until the env vars exist.
+**Blocked on.** A GitHub OAuth app (client id + secret). Everything else is built and tested,
+dormant until the env vars exist: vocs.io #28 (the gate and the owner routes) and the Vocs-Code
+Connect with GitHub change (desktop, relay routes, web app).
+
+**What login buys (§6.3.1 of the design).** With the gate on, nobody types the enrollment secret or
+carries a code: the desktop's **Connect with GitHub** opens the browser, the signed-in owner clicks
+**Add this computer** (after checking the code both screens show), and the browser pairs on the
+desktop's Allow. A phone signs in at `code.vocs.io/app` and picks a computer from the list. The
+landing presents the relay's enrollment secret (`RELAY_ENROLL_TOKEN`) for owner routes only for an
+allowlisted session; the relay's rules are unchanged.
 
 **Design.**
 
@@ -208,8 +216,10 @@ unvalidated names and keys.
 3. ~~Verify live~~ — Appendix A and `npm run test:remote-live` passed against `code.vocs.io`.
 4. **Clean up production:** revoke orphaned host devices and smoke leftovers (Settings → Remote
    access; Revoke all if in doubt), after updating each desktop to the new code.
-5. **Login gate:** create the OAuth app, review/merge vocs.io #26 and #27, enable, verify live, then
-   flip `remote.status`.
+5. **Login gate:** review/merge vocs.io #28 and the Vocs-Code Connect with GitHub PR; create the
+   OAuth app; set the landing secrets (with `RELAY_ENROLL_TOKEN`); enable; deploy the landing and
+   release the relay (its owner routes ship with the release tag); verify live, then flip
+   `remote.status`.
 6. **`workers_dev: false`** once the login gate is live (desktops now always use `code.vocs.io`).
 7. **P3.5 read/write terminal.**
 8. **2.7**.
@@ -256,6 +266,7 @@ curl -s -o /dev/null -w '%{http_code}\n' "$B/v1/devices"             # 401 witho
 curl -s -o /dev/null -w '%{http_code}\n' -X POST "$B/v1/pair/start" \
   -H 'content-type: application/json' -d '{"hostPub":{}}'            # 403 without the enroll secret
 curl -s -o /dev/null -w '%{http_code}\n' -X POST "$B/v1/ws/ticket"   # 401 (404 means a pre-#394 relay)
+curl -s -o /dev/null -w '%{http_code}\n' "$B/v1/owner/hosts"        # 401 signed out once the gate is on (503 while off)
 curl -s -o /dev/null -w '%{http_code}\n' -X POST "$B/v1/token/challenge?device=w_x" \
   -H 'authorization: Bearer nope'                                    # 401
 curl -sI "$B/app/" | grep -iE '^(x-frame|referrer|x-content|cross-origin|permissions|content-security-policy|cache-control)'

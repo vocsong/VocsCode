@@ -340,6 +340,36 @@ Web (browser)                Relay                      Desktop (host)
 | Tokens bound to signing keys | An access token is issued only for a signature by the device key; the refresh credential alone authorizes nothing |
 | E2E under the relay | Established session payloads are opaque; a compromised relay can still deny service, misroute and manipulate pairing metadata |
 
+#### 6.3.1 Connect with GitHub: no secret, no code
+
+Once the landing's login gate is on, the relay's origin answers `/v1/me` with 401 for a signed-out
+caller, and the desktop offers **Connect with GitHub** instead of the enrollment secret (which stays
+one click away). The relay's rules do not change; who presents the secret does.
+
+- **Owner routes.** `/v1/owner/*` on the relay (add a computer, list computers, ask one to pair)
+  need the enrollment secret, like `pair/start`. The landing Worker keeps its own copy
+  (`RELAY_ENROLL_TOKEN`) and presents it only for a signed-in, allowlisted GitHub session, in place
+  of any Authorization the browser sent; it drops the session cookie and refuses writes whose
+  `Origin` is not `https://code.vocs.io`.
+- **Adding a computer.** Connect with GitHub makes the desktop generate a one-time secret (32 random
+  bytes) and open `code.vocs.io/app?connect=<its SHA-256>`; the secret itself never leaves the
+  desktop. After sign-in (the link survives the OAuth redirect in signed state), the page shows a
+  check code derived from the hash, which the desktop shows too, and asks before it grants anything.
+  **Add this computer** grants the hash (`POST /v1/owner/enroll-grant`, ten-minute TTL). The desktop
+  has been polling the public `/v1/enroll/redeem` with the secret; it now receives its refresh
+  credential sealed to its own key (`enrollTokenContext`), and the relay keeps only the hash. A key
+  the relay already knows keeps its host id, and the computer cap applies. Unknown, expired and
+  not-yet-granted secrets all answer `pending`.
+- **Pairing without a code.** A signed-in browser lists the account's computers
+  (`GET /v1/owner/hosts`) and asks an online one to pair (`POST /v1/owner/pair-request`). That is the
+  claim step started from the browser: the relay sends the request to that computer alone, the
+  desktop shows it and signs Allow or Deny as for a code, and the browser completes by polling with
+  its capability. The page that added a computer does this at once, so the first pairing is Add, then
+  Allow.
+
+The desktop's approval of each browser stays mandatory: login proves the account, the desktop's Allow
+proves the device.
+
 ### 6.4 What the relay stores
 
 - Accounts, devices (id, name, platform, public keys, token hashes, last seen, status)
@@ -445,6 +475,12 @@ security bar must go up, not sideways:
   does not revoke tokens or delete a stored mirror.
 - **Transport.** TLS + e2e payload encryption; replayed ciphertext is rejected, and API access
   needs short-lived proof-of-possession tokens.
+- **A Connect with GitHub link someone else sent (§6.3.1).** Signing in and clicking **Add this
+  computer** on it would register the sender's desktop into the account. Mitigations: the page asks
+  first and names the risk ("continue only if you just clicked Connect with GitHub"), it shows a check
+  code the real desktop displays next to the button that opened it, owner writes are same-origin
+  only, and a browser still reaches a computer only after that computer's Allow. Registered
+  computers are listed in Settings and can be revoked (or all at once).
 
 ## 8. The honest list of hard problems
 

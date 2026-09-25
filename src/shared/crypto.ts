@@ -91,6 +91,12 @@ export function pairingTokenContext(code: string, webDeviceId: string): unknown[
   return ['relay.pair-token', code, webDeviceId];
 }
 
+/** Authenticated context of a desktop's sealed credential from a signed-in owner's approval
+ *  ("Connect with GitHub"): it opens only for this one-time secret's hash and the device it minted. */
+export function enrollTokenContext(nonceHash: string, hostDeviceId: string): unknown[] {
+  return ['relay.enroll-token', nonceHash, hostDeviceId];
+}
+
 export async function sign(identity: AnyIdentity, data: unknown): Promise<string> {
   const key = await signingKey(identity.sig.priv);
   const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, canonical(data) as BufferSource);

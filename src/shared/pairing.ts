@@ -27,3 +27,21 @@ export function remoteOrigin(relayUrl: string | undefined): string {
 export function pairingLink(relayUrl: string | undefined, code: string): string {
   return `${remoteOrigin(relayUrl)}/app?code=${encodeURIComponent(code)}`;
 }
+
+/** SHA-256 hex of a desktop's one-time "Connect with GitHub" secret: the only part of it that
+ *  leaves the desktop before the owner grants it. */
+export const CONNECT_HASH_PATTERN = /^[0-9a-f]{64}$/;
+
+/** The page a desktop opens for "Connect with GitHub": sign in, then add this computer. */
+export function connectLink(relayUrl: string | undefined, nonceHash: string): string {
+  return `${remoteOrigin(relayUrl)}/app?connect=${nonceHash}`;
+}
+
+/** A short code derived from the connect hash, shown by both the desktop and the page, so the
+ *  person adding a computer can see it is the one in front of them and not a link someone sent. */
+export function connectCheckCode(nonceHash: string): string {
+  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 8; i++) code += alphabet[parseInt(nonceHash.slice(i * 2, i * 2 + 2), 16) % alphabet.length];
+  return `${code.slice(0, 4)}-${code.slice(4)}`;
+}

@@ -19,6 +19,13 @@
           <li>Press Pair, then click Allow on the computer.</li>
         </ol>
         <form method="post" action="/logout" class="account-signout" hidden><span class="account-name"></span><button type="submit" class="ghost">Sign out of GitHub</button></form>
+        <!-- Signed in with GitHub: the account's computers, paired without a code. -->
+        <div id="owner-hosts" class="owner-hosts" hidden>
+          <h2>Your computers</h2>
+          <ul id="owner-host-list"></ul>
+          <p class="muted small" id="owner-hosts-empty" hidden>No computers yet. In Vocs Code, open Settings → Remote access and click Connect with GitHub.</p>
+          <p class="muted small">Or enter a pairing code:</p>
+        </div>
         <form id="pair-form">
           <label>Pairing code<input id="code" maxlength="9" placeholder="ABCD2345" autocomplete="off" required /></label>
           <label>Browser name<input id="device-name" placeholder="My laptop" /></label>
@@ -26,6 +33,20 @@
           <button type="button" id="pair-cancel" class="ghost" hidden>Cancel</button>
           <p id="pair-error" class="error"></p>
         </form>
+      </div>
+    </section>
+
+    <!-- Connect with GitHub: a desktop opened this page to be added to the signed-in account. -->
+    <section id="screen-connect" data-screen hidden>
+      <div class="card">
+        <h1>Add this computer?</h1>
+        <p class="muted">A computer running Vocs Code asked to join your account. Continue only if you just clicked <strong>Connect with GitHub</strong> on it and it shows this code:</p>
+        <p id="connect-code" class="check-code"></p>
+        <label>Name this browser<input id="connect-device-name" placeholder="My laptop" /></label>
+        <button type="button" id="connect-add" class="primary">Add this computer</button>
+        <button type="button" id="connect-cancel" class="ghost">Cancel</button>
+        <p id="connect-status" class="muted" role="status"></p>
+        <p id="connect-error" class="error"></p>
       </div>
     </section>
 

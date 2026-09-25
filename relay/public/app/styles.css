@@ -147,3 +147,11 @@ button.ghost { background: transparent; }
 /* Numbered pairing steps on the pair screen. */
 .steps { margin: 0 0 16px; padding-left: 20px; line-height: 1.5; }
 .steps li + li { margin-top: 4px; }
+
+/* Signed in with GitHub: the account's computers, and the check code of "Add this computer". */
+.owner-hosts { margin: 0 0 12px; }
+.owner-hosts h2 { font-size: 15px; margin: 0 0 8px; }
+.owner-hosts ul { list-style: none; margin: 0 0 8px; padding: 0; }
+.owner-hosts li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border, #2a2f36); }
+.owner-hosts li .muted { font-size: 12px; }
+.check-code { font-size: 26px; letter-spacing: 4px; font-weight: 600; margin: 8px 0 16px; }

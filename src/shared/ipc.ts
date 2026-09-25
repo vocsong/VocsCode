@@ -269,7 +269,9 @@ export interface IpcContract {
   /** Remote access (docs/REMOTE-ACCESS.md). Enrollment + device tokens live in the secret store. */
   /** `relayUrl` is the relay this desktop uses (code.vocs.io unless VOCS_CODE_RELAY_URL is set);
    *  `registered` means this computer already has its own relay credential and needs no secret. */
-  'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string; registered: boolean }];
+  'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string; registered: boolean; signInAvailable: boolean }];
+  /** Connect with GitHub: opens the relay's page in the browser to add this computer; no secret. */
+  'remote:signIn': [void, RemoteState];
   /** `enrollToken` is needed only for this computer's first registration; the stored one is reused. */
   'remote:enable': [{ enrollToken?: string }, RemoteState];
   'remote:disable': [void, RemoteState];
