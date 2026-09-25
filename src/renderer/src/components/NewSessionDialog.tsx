@@ -1,10 +1,10 @@
 /** New session dialog: project directory, harness, model, permission mode and worktree isolation. */
 import React, { useEffect, useRef, useState } from 'react';
-import type { EffortLevel, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
-import { EFFORT_LEVELS, HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
+import type { AppSettings, EffortLevel, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
+import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
 import { invoke } from '../api';
-import { rememberEffort } from '../sessionActions';
+import { rememberEffort, rememberWithoutEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
@@ -117,13 +117,15 @@ export function NewSessionDialog() {
   }, [harness, acpAgent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedModel = models.find((m) => model && m.id === model.model && m.provider === model.provider);
-  const supportedEfforts = selectedModel?.supportedEfforts;
-  const effortOptions = supportedEfforts?.length ? supportedEfforts : [...EFFORT_LEVELS];
+  const effortOptions = effortOptionsFor(descriptor, selectedModel);
+  // A model that takes no effort disables the control and submits none; the remembered effort is
+  // kept for the next model that has one.
+  const noEffort = effortOptions.length === 0;
   // Keep the remembered choice when possible; an incompatible model uses its own default instead
   // of submitting a hidden, unsupported value.
   let selectedEffort: EffortLevel | '' = effort;
-  if (effort && supportedEfforts?.length && !supportedEfforts.includes(effort)) {
-    selectedEffort = selectedModel?.defaultEffort && supportedEfforts.includes(selectedModel.defaultEffort) ? selectedModel.defaultEffort : '';
+  if (effort && !effortOptions.includes(effort)) {
+    selectedEffort = selectedModel?.defaultEffort && effortOptions.includes(selectedModel.defaultEffort) ? selectedModel.defaultEffort : '';
   }
 
   // The toggle state stays the user's preference (it is what gets remembered); a folder without a
@@ -144,7 +146,8 @@ export function NewSessionDialog() {
         harness,
         projectRoot,
         model,
-        effort: selectedEffort || undefined,
+        // undefined inherits the app preference in the main process; null explicitly omits it.
+        effort: noEffort ? null : selectedEffort || undefined,
         permissionMode: mode,
         useWorktree: isolate,
         acpAgent: harness === 'acp' ? acpAgent : undefined,
@@ -155,20 +158,22 @@ export function NewSessionDialog() {
       // harness default instead of inheriting the previously remembered effort. The folder's own
       // record is what the next dialog on this project opens on; the app-wide values are kept as
       // they were (effort is shared with live session switches, model with cross-harness forks).
-      await rememberEffort(selectedEffort || undefined, {
+      // A model that takes no effort leaves both remembered efforts as they were.
+      const remembered: Partial<AppSettings> = {
         defaultHarness: harness,
         defaultPermissionMode: mode,
         defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model },
         folderSessionDefaults: withFolderSessionDefaults(settings, projectRoot, {
           harness,
           modelByHarness: { ...(settings.folderSessionDefaults?.[projectRoot]?.modelByHarness ?? {}), [harness]: model },
-          effort: selectedEffort || undefined,
+          ...(noEffort ? {} : { effort: selectedEffort || undefined }),
           permissionMode: mode,
           useWorktree,
           // Only an ACP session records an agent; another harness must not erase the folder's pick.
           ...(harness === 'acp' ? { acpAgent } : {})
         })
-      });
+      };
+      await (noEffort ? rememberWithoutEffort(remembered) : rememberEffort(selectedEffort || undefined, remembered));
       const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, initialImages: images.length ? images : undefined, goal: goal.trim() || undefined });
       close();
       await setActive(meta.id);
@@ -294,8 +299,8 @@ export function NewSessionDialog() {
           </Field>
           <div className="row gap12">
             <Field label="Reasoning effort">
-              <select value={selectedEffort} onChange={(e) => setEffort(e.target.value as EffortLevel | '')} disabled={!descriptor.capabilities.effort}>
-                <option value="">Default</option>
+              <select value={selectedEffort} onChange={(e) => setEffort(e.target.value as EffortLevel | '')} disabled={!descriptor.capabilities.effort || noEffort} title={noEffort ? `${selectedModel?.displayName ?? 'This model'} does not support reasoning effort` : undefined}>
+                <option value="">{noEffort ? 'Not supported' : 'Default'}</option>
                 {effortOptions.map((l) => (
                   <option key={l} value={l}>
                     {l}

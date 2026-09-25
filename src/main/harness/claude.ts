@@ -12,11 +12,14 @@ import {
   type Query,
   type SDKMessage,
   type SDKUserMessage,
+  type SettingSource,
   type SlashCommand
 } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { hasClaudeAgentPins } from '../claude-agents';
 import { toClaude } from '../mcp/effective';
+import { claudeSdkCatalog } from '../models/claude-catalog';
+import { resolveProviderApiKey } from '../models/providers';
 import { estimateCostUsd, findContextWindow, findPricing, modelsForProvider } from '../models/static-models';
 import { subagentDir } from '../subagents';
 import { subagentSupport, type AgentTypeInfo } from '../../shared/subagents';
@@ -287,11 +290,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     const provider = claudeProviderFor(s, this.ctx.session().config.model ?? this.ctx.session().activeModel);
     if (provider) this.providerId = provider.id;
     this.gateway = isClaudeGatewayProvider(provider);
-    const stored = provider ? await this.ctx.getApiKey(provider.id) : undefined;
-    // A provider whose key lives in its env var has to be handed over explicitly: the child inherits
-    // the process env, but the gateway reads a header this app has to set (see claudeProviderEnv).
-    const key = stored ?? (provider?.envKey ? process.env[provider.envKey] : undefined);
-    const overlay = claudeProviderEnv(s, provider, key);
+    const overlay = await resolveClaudeProviderEnv(s, provider, (id) => this.ctx.getApiKey(id));
     let auth = 'login';
     if (Object.keys(overlay).length) {
       options.env = { ...(options.env ?? {}), ...overlay };
@@ -586,7 +585,7 @@ export class ClaudeAdapter implements HarnessAdapter {
           if (!this.modelsEmitted && !this.gateway) {
             this.modelsEmitted = true;
             q.supportedModels()
-              .then((models) => this.ctx.emit({ type: 'models', models: models.map(claudeModelToInfo) }))
+              .then((models) => this.ctx.emit({ type: 'models', models: claudeSdkCatalog(models) }))
               .catch((e) => {
                 // Retry on the next init so the model picker is not permanently empty.
                 this.modelsEmitted = false;
@@ -932,7 +931,7 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   async listModels(): Promise<ModelInfo[]> {
     if (!this.q) return [];
-    return (await this.q.supportedModels()).map(claudeModelToInfo);
+    return claudeSdkCatalog(await this.q.supportedModels());
   }
 
   /**
@@ -1017,17 +1016,65 @@ export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfi
   return settings.claude.useProviderKey && apiKey ? { ANTHROPIC_API_KEY: apiKey } : {};
 }
 
-export function claudeModelToInfo(m: { value: string; displayName: string; description?: string; resolvedModel?: string }): ModelInfo {
-  return {
-    id: m.value,
-    provider: 'anthropic',
-    displayName: m.displayName || m.value,
-    description: m.description,
-    contextWindow: findContextWindow('anthropic', m.resolvedModel ?? m.value),
-    supportsImages: true,
-    supportsReasoning: true,
-    supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max']
-  };
+/**
+ * claudeProviderEnv with the provider's stored key or, failing that, the key in its env var. That
+ * key still has to be handed over explicitly: the child inherits the process env, but a gateway
+ * reads a header this app has to set. Sessions and the pre-session model probe both resolve their
+ * credentials here, so the probe starts with the endpoint and key of the session it lists models for.
+ */
+export async function resolveClaudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, getApiKey: (id: string) => Promise<string | undefined>): Promise<Record<string, string | undefined>> {
+  const key = provider ? await resolveProviderApiKey(provider, getApiKey) : undefined;
+  return claudeProviderEnv(settings, provider, key);
+}
+
+/**
+ * Discover the models the selected Claude Code runtime offers to its current login. The streaming
+ * input stays open only long enough for the SDK initialization handshake; no user turn is sent.
+ * `settingSources` are the ones sessions load (`settings.claude.settingSources`).
+ */
+export async function listClaudeModels(
+  pathToClaudeCodeExecutable: string,
+  envOverlay: Record<string, string | undefined> = {},
+  settingSources: SettingSource[] = []
+): Promise<ModelInfo[]> {
+  const input = new AsyncQueue<SDKUserMessage>();
+  const abortController = new AbortController();
+  const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
+  // A desktop app launched from a Claude terminal must not look like a nested Claude Code process.
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('CLAUDE_CODE_') && key !== 'CLAUDE_CODE_USE_BEDROCK' && key !== 'CLAUDE_CODE_USE_VERTEX' && key !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[key];
+  }
+  delete env.CLAUDECODE;
+  Object.assign(env, envOverlay);
+
+  const q = query({
+    prompt: input,
+    options: {
+      // Model discovery is global to the runtime/login. Do not let an IPC-provided project path load
+      // project settings, hooks or MCP servers into this short-lived process.
+      cwd: process.cwd(),
+      pathToClaudeCodeExecutable,
+      permissionMode: 'plan',
+      // ~/.claude/settings.json decides what a session runs against: its env (base URL, Bedrock or
+      // Vertex), apiKeyHelper and model. Read it whenever sessions do, or the list describes a
+      // different endpoint. Project and local settings resolve against cwd, which here is this app's
+      // own directory rather than any project, so they stay out.
+      settingSources: settingSources.filter((source) => source === 'user'),
+      // User settings also declare hooks and MCP servers; this process only answers supportedModels().
+      settings: { disableAllHooks: true },
+      strictMcpConfig: true,
+      persistSession: false,
+      env,
+      abortController
+    }
+  });
+  try {
+    return claudeSdkCatalog(await withTimeout(q.supportedModels(), 20_000, 'Claude supportedModels'));
+  } finally {
+    input.close();
+    abortController.abort();
+    q.close();
+  }
 }
 
 function extractText(content: unknown): string {

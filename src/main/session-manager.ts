@@ -408,7 +408,7 @@ export class SessionManager {
       harnessRef: {},
       usage: emptyUsage(),
       activeModel: cfg.model ?? s.defaultModelByHarness[cfg.harness],
-      activeEffort: cfg.effort,
+      activeEffort: cfg.effort ?? undefined,
       queued: 0
     };
     // Layer 2: prime the session with the project's curated knowledge digest. The digest names
@@ -669,7 +669,12 @@ export class SessionManager {
       runtime: this.deps.runtime,
       sessionDir,
       permissionMode: () => (this.get(id) ?? meta).config.permissionMode,
-      effort: () => (this.get(id) ?? meta).activeEffort ?? (this.get(id) ?? meta).config.effort ?? this.settings().defaultEffort,
+      effort: () => {
+        const session = this.get(id) ?? meta;
+        // An explicit omission must not borrow the preference retained for effort-capable models.
+        // A later deliberate effort switch still wins, as it does for an explicit level.
+        return session.activeEffort ?? (session.config.effort === null ? undefined : session.config.effort ?? this.settings().defaultEffort);
+      },
       getApiKey: (providerId) => this.deps.getSecret(providerId),
       mcpServers: () => {
         const m = this.get(id) ?? meta;

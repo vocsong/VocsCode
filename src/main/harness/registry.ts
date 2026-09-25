@@ -4,11 +4,11 @@ import { applyModelOverrides } from '../../shared/model-overrides';
 import { errorMessage } from '../util/async';
 import type { RuntimeResolver } from '../runtime';
 import { CODEX_STATIC_MODELS, CURSOR_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
-import { claudeNativeModels, mergeClaudeCatalog } from '../models/claude-catalog';
+import { claudeNativeModels, mergeClaudeCatalog, withSavedClaudeModels } from '../models/claude-catalog';
 import { mergeCodexCatalog } from '../models/codex-catalog';
 import { mergePiCatalog } from '../models/pi-catalog';
 import { AcpAdapter } from './acp';
-import { ClaudeAdapter } from './claude';
+import { ClaudeAdapter, listClaudeModels, resolveClaudeProviderEnv } from './claude';
 import { CodexAppServerAdapter, listCodexModels } from './codex-app-server';
 import { CursorAdapter, listCursorModels } from './cursor';
 import { CodexExecAdapter } from './codex-exec';
@@ -35,7 +35,7 @@ export function createAdapter(id: HarnessId, ctx: HarnessContext): HarnessAdapte
   }
 }
 
-/** Models offered in the New Session dialog before any process exists. */
+/** Models offered before a session process exists; some harnesses use a short-lived catalog probe. */
 export async function listHarnessModels(opts: {
   harness: HarnessId;
   settings: AppSettings;
@@ -57,8 +57,21 @@ async function listHarnessModelsRaw(opts: {
   const { harness, settings, runtime } = opts;
   try {
     switch (harness) {
-      case 'claude':
-        return { models: mergeClaudeCatalog(claudeNativeModels(settings), settings) };
+      case 'claude': {
+        const fallback = claudeNativeModels(settings);
+        const bin = runtime.resolve('claude');
+        if (!bin) return { models: mergeClaudeCatalog(fallback, settings), error: 'Claude Code runtime not found; showing the saved catalog.' };
+        try {
+          const provider = settings.providers.find((p) => p.id === 'anthropic');
+          // The endpoint, key and user settings a session on this provider starts with; the useProviderKey opt-in is applied inside.
+          const env = await resolveClaudeProviderEnv(settings, provider, opts.getApiKey);
+          const live = await listClaudeModels(bin.path, env, settings.claude.settingSources);
+          if (!live.length) return { models: mergeClaudeCatalog(fallback, settings), error: 'Claude Code reported no models; showing the saved catalog.' };
+          return { models: mergeClaudeCatalog(withSavedClaudeModels(live, fallback), settings) };
+        } catch (e) {
+          return { models: mergeClaudeCatalog(fallback, settings), error: `Claude model discovery failed (${errorMessage(e)}); showing the saved catalog.` };
+        }
+      }
       case 'codex':
       case 'codex-exec': {
         const native = await codexNativeModels(runtime);
@@ -109,7 +122,7 @@ async function codexNativeModels(runtime: RuntimeResolver): Promise<{ models: Mo
   if (!bin) return { models: CODEX_STATIC_MODELS, error: 'Codex CLI not found; showing the built-in catalog.' };
   try {
     const models = await listCodexModels(bin.path);
-    return { models: models.length ? models : CODEX_STATIC_MODELS };
+    return models.length ? { models } : { models: CODEX_STATIC_MODELS, error: 'Codex reported no models; showing the built-in catalog.' };
   } catch (e) {
     return { models: CODEX_STATIC_MODELS, error: `model/list failed (${errorMessage(e)}); showing the built-in catalog.` };
   }

@@ -1,4 +1,4 @@
-import type { EffortLevel, HarnessDescriptor, HarnessId, PermissionMode } from './types';
+import type { EffortLevel, HarnessDescriptor, HarnessId, ModelInfo, PermissionMode } from './types';
 
 export const HARNESSES: HarnessDescriptor[] = [
   {
@@ -47,6 +47,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       interrupt: true,
       liveModelSwitch: true,
       effort: true,
+      // Claude Code's own scale: it has no `minimal`.
+      effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
       images: true,
       dropsUnsupportedImages: false,
       resume: true,
@@ -240,6 +242,15 @@ export const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'
 /** Harnesses advertise levels beyond ours (Codex has `ultra`/`persistent`); only known levels may enter the app's effort state. */
 export function isEffortLevel(value: unknown): value is EffortLevel {
   return typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
+/**
+ * The reasoning efforts to offer for a model: the levels it lists, none when it lists none (`[]`:
+ * the model takes no effort, so the controls are disabled), and, while its support is unknown,
+ * every level its harness takes.
+ */
+export function effortOptionsFor(harness: HarnessDescriptor, model: Pick<ModelInfo, 'supportedEfforts'> | undefined): readonly EffortLevel[] {
+  return model?.supportedEfforts ?? harness.capabilities.effortLevels ?? EFFORT_LEVELS;
 }
 
 export const SLASH_COMMANDS: { name: string; description: string; args?: string }[] = [

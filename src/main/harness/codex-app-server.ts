@@ -706,8 +706,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     }
     if (!this.rpc) return CODEX_STATIC_MODELS;
     try {
-      const res = await withTimeout(this.rpc.request<{ data: CodexModel[] }>('model/list', { limit: 100, includeHidden: false }), 20_000, 'model/list');
-      this.models = res.data.map((m) => codexModelToInfo(m));
+      this.models = await readCodexModelCatalog(this.rpc);
       return this.models.length ? this.models : CODEX_STATIC_MODELS;
     } catch (e) {
       this.ctx.log('warn', `model/list failed: ${errorMessage(e)}`);
@@ -746,6 +745,30 @@ export function codexModelToInfo(m: CodexModel, provider = 'openai'): ModelInfo 
   };
 }
 
+/** Read every visible-model page, within one deadline; never serve a silently truncated catalog. */
+async function readCodexModelCatalog(rpc: JsonRpcStdioClient): Promise<ModelInfo[]> {
+  const deadline = Date.now() + 20_000;
+  const seen = new Set<string>();
+  const models = new Map<string, ModelInfo>();
+  let cursor: string | undefined;
+  do {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error('model/list timed out after 20000ms');
+    const page = await withTimeout(
+      rpc.request<{ data: CodexModel[]; nextCursor?: string | null }>('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) }),
+      remaining,
+      'model/list'
+    );
+    for (const model of page.data) models.set(model.model, codexModelToInfo(model));
+    cursor = page.nextCursor ?? undefined;
+    if (cursor) {
+      if (seen.has(cursor)) throw new Error('model/list repeated a pagination cursor');
+      seen.add(cursor);
+    }
+  } while (cursor);
+  return [...models.values()];
+}
+
 /**
  * One-shot model listing without a session: spawn app-server, initialize, model/list, exit.
  */
@@ -754,8 +777,7 @@ export async function listCodexModels(codexPath: string): Promise<ModelInfo[]> {
   const rpc = new JsonRpcStdioClient(child);
   try {
     await withTimeout(rpc.request('initialize', { clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' }, capabilities: { experimentalApi: false, requestAttestation: false } }), 20_000, 'initialize');
-    const res = await withTimeout(rpc.request<{ data: CodexModel[] }>('model/list', { limit: 100 }), 20_000, 'model/list');
-    return res.data.map((m) => codexModelToInfo(m));
+    return await readCodexModelCatalog(rpc);
   } finally {
     await rpc.close();
   }

@@ -19,7 +19,7 @@ import { SessionManager } from '../src/main/session-manager';
 import { generateSessionTitle, sanitizeLlmTitle, titleFromPrompt } from '../src/main/session-title';
 import type { RuntimeResolver } from '../src/main/runtime';
 import { piHasCredentials } from '../src/main/runtime';
-import { estimateCostUsd, findPricing } from '../src/main/models/static-models';
+import { estimateCostUsd, findContextWindow, findPricing } from '../src/main/models/static-models';
 import { fetchProviderModels } from '../src/main/models/providers';
 import { openaiStep } from '../src/main/harness/native/drivers';
 import { piModelToInfo } from '../src/main/harness/pi';
@@ -445,6 +445,23 @@ describe('pricing', () => {
     expect(p?.input).toBe(5);
     expect(estimateCostUsd(p, { inputTokens: 1_000_000, outputTokens: 0 })).toBeCloseTo(5);
     expect(findPricing('openrouter', 'openai/gpt-5.4')?.input).toBe(2.5);
+  });
+
+  it('prices a runtime id by the model it names, not by a shorter older entry', () => {
+    // The rates Claude Code states in its own rows: Opus 5.5 $4/$20, Sonnet 5 $2/$10, Fable 5.1
+    // $10/$50. Opus 5 is $5/$25, so borrowing its row is a wrong number, not a stale one.
+    expect(findPricing('anthropic', 'claude-opus-5-5[1m]')).toMatchObject({ input: 4, output: 20 });
+    expect(findPricing('anthropic', 'claude-sonnet-5[1m]')).toMatchObject({ input: 2, output: 10 });
+    expect(findPricing('anthropic', 'claude-fable-5-1[1m]')?.cacheRead).toBe(0.25);
+    // A provider row for the same model must not borrow Opus 5's rate either.
+    expect(findPricing('openrouter', 'anthropic/claude-opus-5-5')?.input).toBe(4);
+  });
+
+  it('reads the window a context marker names, and the base model without one', () => {
+    expect(findContextWindow('anthropic', 'claude-opus-5-5[1m]')).toBe(1_000_000);
+    expect(findContextWindow('anthropic', 'claude-sonnet-5[1m]')).toBe(1_000_000);
+    expect(findContextWindow('anthropic', 'claude-fable-5-1[1m]')).toBe(1_000_000);
+    expect(findContextWindow('anthropic', 'claude-opus-5-5')).toBe(1_000_000);
   });
 });
 

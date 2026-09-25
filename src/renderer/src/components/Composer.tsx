@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
 import { formatDoctorReport } from '../../../shared/doctor';
-import { EFFORT_LEVELS, HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
+import { HARNESS_BY_ID, SLASH_COMMANDS, effortOptionsFor } from '../../../shared/harness-meta';
 import { modelName, parseTypedModel } from '../../../shared/model-names';
 import { invoke } from '../api';
 import { fmtCost, fmtTokens } from '../format';
@@ -216,9 +216,11 @@ export function Composer({ session }: { session: SessionMeta }) {
           toast(`${harness.name} does not support reasoning effort.`, 'error');
           return true;
         }
-        const current = session.activeModel ?? session.config.model;
-        const currentInfo = models.find((m) => current && m.provider === current.provider && m.id === current.model);
-        const efforts = currentInfo?.supportedEfforts?.length ? currentInfo.supportedEfforts : EFFORT_LEVELS;
+        const efforts = effortOptionsFor(harness, currentInfo);
+        if (!efforts.length) {
+          toast(`${currentInfo?.displayName ?? 'This model'} does not support reasoning effort.`, 'error');
+          return true;
+        }
         if (!efforts.includes(arg as EffortLevel)) {
           toast(`Efforts: ${efforts.join(', ')}`, 'error');
           return true;

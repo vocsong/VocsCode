@@ -165,6 +165,40 @@ describe('Claude session spend accounting', () => {
     expect(lastUsage(events)?.totals.costUsd).toBeCloseTo(GLM_LIVE_USD, 9);
   });
 
+  it('accounts for an exact gateway context variant at its own rate, not its base rate', async () => {
+    const base = 'anthropic/claude-sonnet-5';
+    const model = `${base}[1m]`;
+    const provider: ProviderConfig = {
+      ...OPENROUTER,
+      models: [
+        { id: base, provider: 'openrouter', displayName: 'Base', pricing: { input: 2, output: 10 } },
+        { id: model, provider: 'openrouter', displayName: 'Variant', pricing: { input: 3, output: 15, cacheRead: 0.4, cacheWrite: 4 } }
+      ]
+    };
+    const events: SessionEvent[] = [];
+    const adapter = await startedAdapter([ANTHROPIC, provider], { provider: provider.id, model }, events);
+    try {
+      feed(adapter, turnStarted);
+      feed(adapter, {
+        type: 'result',
+        subtype: 'success',
+        duration_ms: 1_000,
+        modelUsage: {
+          [model]: { inputTokens: 1_000_000, outputTokens: 200_000, cacheReadInputTokens: 2_000_000, cacheCreationInputTokens: 100_000, costUSD: 11.625, contextWindow: 1_000_000, costBasis: 'unknown' }
+        }
+      });
+
+      // $3 input + $3 output + $0.80 cache read + $0.40 cache write, not the base row's $4.65.
+      const turns = events.filter((e) => e.type === 'item.upsert' && e.item.kind === 'turn');
+      expect(turns).toHaveLength(1);
+      expect(turnItem(events)).toMatchObject({ kind: 'turn', status: 'completed', costUsd: 7.2 });
+      expect(lastUsage(events)?.totals).toMatchObject({ inputTokens: 1_000_000, outputTokens: 200_000, cacheReadTokens: 2_000_000, cacheWriteTokens: 100_000, costUsd: 7.2, turns: 1 });
+      expect(events.filter((e) => e.type === 'error')).toEqual([]);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
   it('keeps the spend the CLI priced itself, on its own list or a managed rate', async () => {
     const events: SessionEvent[] = [];
     const adapter = await startedAdapter([ANTHROPIC, OPENCODE_GO], DEEPSEEK, events);

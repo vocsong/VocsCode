@@ -7,6 +7,7 @@ import { errorMessage, shortId, truncate } from '../util/async';
 import { toCodex } from '../mcp/effective';
 import { TurnUsageTracker } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
+import { listCodexModels } from './codex-app-server';
 import { CODEX_STATIC_MODELS, estimateCostUsd, findPricing, modelsForProvider } from '../models/static-models';
 
 function sandboxFor(mode: PermissionMode): SandboxMode {
@@ -266,7 +267,15 @@ export class CodexExecAdapter implements HarnessAdapter {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    return CODEX_STATIC_MODELS;
+    const bin = this.ctx.runtime.resolve('codex');
+    if (!bin) return CODEX_STATIC_MODELS;
+    try {
+      const models = await listCodexModels(bin.path);
+      return models.length ? models : CODEX_STATIC_MODELS;
+    } catch (e) {
+      this.ctx.log('warn', `model/list failed: ${errorMessage(e)}`);
+      return CODEX_STATIC_MODELS;
+    }
   }
 
   async dispose(): Promise<void> {
