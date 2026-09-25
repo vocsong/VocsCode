@@ -384,8 +384,8 @@ async function main(): Promise<void> {
   // Resume remote access across restarts when it was left enabled; the relay is always relayUrl().
   const remoteConfig = settings.get().remote;
   if (remoteConfig?.enabled) {
-    const enrollToken = await secrets.get('remote-enroll');
-    if (enrollToken) await remoteHost.enable(relayUrl(), enrollToken);
+    // A registered computer reconnects with its own credential; the secret only matters before that.
+    await remoteHost.enable(relayUrl(), (await secrets.get('remote-enroll')) ?? '');
     // The mirror resumes with it, reading the last snapshots back up from the same store.
     if (remoteConfig.mirror) remoteMirror?.sync();
   }

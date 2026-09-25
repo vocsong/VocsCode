@@ -214,4 +214,42 @@ describe('remote host token and trust lifecycle', () => {
     await b.client.connect();
     expect(await b.client.invoke('sessions:list', null)).toEqual([{ id: 's1', title: 'Lifecycle host' }]);
   });
+
+  it("reconnects a registered computer with no enrollment secret anywhere", async () => {
+    const r = await rig();
+    const a = r.browser();
+    await r.pair(a.client, "Phone");
+    // Drop every copy of the secret: this computer now holds only its own credential.
+    const stored = saved(r) as ReturnType<typeof saved> & { enrollToken?: string };
+    delete stored.enrollToken;
+    r.secrets.set("remote-host", JSON.stringify(stored));
+    await r.host.disable();
+    expect(await r.host.isRegistered()).toBe(true);
+    await r.host.enable(r.base, "");
+    await until(() => r.host.state().status === "online", "the desktop to come back online");
+    expect(r.relay.connected()).toContainEqual({ kind: "host", id: stored.deviceId });
+  });
+
+  it("tells an unregistered computer without a secret what is missing instead of retrying", async () => {
+    const r = await rig();
+    const secrets = new Map<string, string>();
+    const fresh = new RemoteHost({
+      registry: () => ({ channels: () => [], invoke: async () => null } as unknown as HandlerRegistry),
+      secrets: { get: async (key) => secrets.get(key), set: async (key, value) => void secrets.set(key, value) },
+      pushState: () => undefined,
+      log: () => undefined,
+      broadcast: () => undefined
+    });
+    expect(await fresh.isRegistered()).toBe(false);
+    await until(() => r.relay.connected().length === 1, "the rig desktop socket");
+    const before = r.relay.connected().length;
+    await fresh.enable(r.base, "");
+    expect(fresh.state()).toMatchObject({ status: "error", detail: expect.stringContaining("enrollment secret") });
+    // Past one reconnect interval: still no socket at the relay, and still the same explanation.
+    await sleep(3500);
+    expect(r.relay.connected()).toHaveLength(before);
+    expect(fresh.state().status).toBe("error");
+    await fresh.disable();
+  });
+
 });

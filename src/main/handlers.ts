@@ -730,13 +730,17 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       state: remote.state(),
       devices: settings.get().remote?.enabled ? await remote.listDevices() : [],
       audit: remote.auditEntries(),
-      relayUrl: relayUrl()
+      relayUrl: relayUrl(),
+      registered: await remote.isRegistered()
     }));
     handle('remote:enable', async ({ enrollToken }) => {
-      await secrets.set('remote-enroll', enrollToken);
+      // The secret registers this computer once; after that it connects with its own credential,
+      // so an empty field reuses whatever secret is stored (possibly none).
+      const secret = typeof enrollToken === 'string' ? enrollToken.trim() : '';
+      if (secret) await secrets.set('remote-enroll', secret);
       // Keep the view-only policy across a reconnect; enable() only replaces relay fields.
       await settings.update({ remote: { ...remoteConfig(), enabled: true } });
-      await remote.enable(relayUrl(), enrollToken);
+      await remote.enable(relayUrl(), secret || ((await secrets.get('remote-enroll')) ?? ''));
       // The renderer's copy of settings drives the toggle/Disconnect UI, so push it like settings:update.
       deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
       return remote.state();
