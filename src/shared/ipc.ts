@@ -267,9 +267,11 @@ export interface IpcContract {
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 
   /** Remote access (docs/REMOTE-ACCESS.md). Enrollment + device tokens live in the secret store. */
-  /** `relayUrl` is the relay this desktop uses (code.vocs.io unless VOCS_CODE_RELAY_URL is set). */
-  'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string }];
-  'remote:enable': [{ enrollToken: string }, RemoteState];
+  /** `relayUrl` is the relay this desktop uses (code.vocs.io unless VOCS_CODE_RELAY_URL is set);
+   *  `registered` means this computer already has its own relay credential and needs no secret. */
+  'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string; registered: boolean }];
+  /** `enrollToken` is needed only for this computer's first registration; the stored one is reused. */
+  'remote:enable': [{ enrollToken?: string }, RemoteState];
   'remote:disable': [void, RemoteState];
   'remote:pairStart': [{ hostName?: string }, { code: string; expiresAt: number }];
   'remote:pairRespond': [{ decision: 'approve' | 'deny' }, void];

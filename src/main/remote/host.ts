@@ -208,6 +208,13 @@ export class RemoteHost {
     };
   }
 
+  /** Whether this computer is already registered with the relay, so it can connect without the
+   *  enrollment secret. Reads the stored credentials when remote access has not been enabled yet. */
+  async isRegistered(): Promise<boolean> {
+    const creds = this.creds ?? (await this.loadCreds());
+    return !!(creds?.deviceId && creds.deviceToken);
+  }
+
   /** The audit trail, newest first (P4); empty when no audit sink was supplied. */
   auditEntries(): RemoteAuditEntry[] {
     return this.deps.audit?.list() ?? [];
@@ -558,6 +565,14 @@ export class RemoteHost {
     }
     if (gen !== this.generation || this.creds !== creds) return;
     const enrolled = this.enrolled();
+    if (!enrolled && !auth) {
+      // Not registered and nothing to register with: the relay would refuse every attempt, so say
+      // what is missing instead of retrying forever.
+      this.status = 'error';
+      this.detail = 'this computer is not registered with the relay yet: enter the enrollment secret and connect';
+      this.push();
+      return;
+    }
     const device = enrolled ? creds.deviceId! : 'enrolling';
     const ws = new WebSocket(`${this.base()}/v1/ws/host?device=${encodeURIComponent(device)}`, { headers: { authorization: `Bearer ${auth}` } });
     this.ws = ws;

@@ -37,6 +37,16 @@ describe('web app layout (/app on the landing origin)', () => {
     expect(headers).not.toMatch(/unsafe-inline|unsafe-eval/);
   });
 
+  it('tells a visitor to start on the computer before entering a code', async () => {
+    const html = await read('relay/public/app/index.html');
+    const dom = new JSDOM(html, { url: 'https://code.vocs.io/app/', runScripts: 'outside-only' });
+    const steps = [...dom.window.document.querySelectorAll('#screen-pair #pair-steps li')].map((li) => li.textContent);
+    // The code only exists once the computer has connected, so that has to be step one.
+    expect(steps).toHaveLength(3);
+    expect(steps[0]).toMatch(/On the computer, open Vocs Code → Settings → Remote access and click Connect/);
+    expect(steps[2]).toMatch(/click Allow on the computer/);
+  });
+
   it('never asks the visitor for a relay URL', async () => {
     const html = await read('relay/public/app/index.html');
     expect(html).not.toContain('id="relay"');

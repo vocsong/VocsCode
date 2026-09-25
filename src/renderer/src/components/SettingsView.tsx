@@ -1052,18 +1052,31 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   const [devices, setDevices] = useState<RemoteDeviceInfo[]>([]);
   const [audit, setAudit] = useState<RemoteAuditEntry[]>([]);
   const [relay, setRelay] = useState(DEFAULT_REMOTE_ORIGIN);
+  // A registered computer has its own relay credential: the enrollment secret is a first-time step.
+  const [registered, setRegistered] = useState(false);
   const [enroll, setEnroll] = useState('');
   const [pairing, setPairing] = useState<{ code: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
-  const applyResult = (r: { state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string }) => {
+  const applyResult = (r: { state: RemoteState; devices: RemoteDeviceInfo[]; audit: RemoteAuditEntry[]; relayUrl: string; registered: boolean }) => {
     setState(r.state);
     setDevices(r.devices);
     setPairing(r.state.pairing ?? null);
     setAudit(r.audit ?? []);
     setRelay(r.relayUrl);
+    setRegistered(r.registered === true);
   };
+
+  /** Connect, then put a pairing QR code on screen straight away when no browser is paired yet:
+   *  pairing a phone is the reason to connect in the first place. */
+  const connect = () =>
+    act(async () => {
+      await invoke('remote:enable', { enrollToken: enroll.trim() || undefined });
+      setEnroll('');
+      const after = await invoke('remote:get', undefined);
+      if (!after.registered || !after.devices.some((d) => d.kind === 'web')) await invoke('remote:pairStart', { hostName: undefined });
+    });
 
   useEffect(() => {
     const refresh = () => {
@@ -1123,21 +1136,25 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
         Sessions, keys and terminals stay on this machine; the traffic is end-to-end encrypted and the relay sees
         metadata only.
       </p>
-      <Field label="Enrollment secret" hint="Shared secret from the relay deployment (wrangler secret ENROLL_TOKEN). Stored in the OS keychain.">
-        <input data-testid="remote-enroll" type="password" value={enroll} placeholder="Paste the secret" onChange={(e) => setEnroll(e.target.value)} />
-      </Field>
+      {!config.enabled && (
+        <ol className="muted small" data-testid="remote-steps">
+          <li>Connect this computer{registered ? '' : ' (the first time, with the enrollment secret)'}.</li>
+          <li>Scan the QR code that appears with your phone, or open {webHost}/app and enter the code.</li>
+          <li>Press Pair in the browser, then Allow here.</li>
+        </ol>
+      )}
+      {!registered && (
+        <Field label="Enrollment secret" hint="Needed only the first time this computer connects: the relay's ENROLL_TOKEN, kept outside the app (for example ~/.vocs-code/relay-enroll-token.txt). Stored in the OS keychain.">
+          <input data-testid="remote-enroll" type="password" value={enroll} placeholder="Paste the secret" onChange={(e) => setEnroll(e.target.value)} />
+        </Field>
+      )}
       <div className="settings-actions">
         <Button
           size="sm"
           variant="primary"
           data-testid="remote-connect"
-          disabled={busy || !enroll.trim()}
-          onClick={() =>
-            void act(async () => {
-              await invoke('remote:enable', { enrollToken: enroll.trim() });
-              setEnroll('');
-            })
-          }
+          disabled={busy || (!registered && !enroll.trim())}
+          onClick={() => void connect()}
         >
           {busy ? 'Connecting…' : 'Connect'}
         </Button>
@@ -1181,11 +1198,11 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
           {pairing && pairingLink ? (
             <div>
               <p className="muted small">
-                Open the link below, or enter this code in the web client at{' '}
+                Scan the QR code with your phone, or enter this code at{' '}
                 <button type="button" className="link-btn" data-testid="remote-web-app" title={`Open ${webApp}`} onClick={openWebApp}>
                   {webHost}/app
                 </button>{' '}
-                (expires in {secondsLeft}s):
+                and press Pair; then Allow the request here (expires in {secondsLeft}s):
               </p>
               <p data-testid="remote-pair-code" style={{ fontSize: 28, letterSpacing: 6, fontWeight: 600 }}>{pairing.code}</p>
               <Field label="Pairing link" hint="Open in a browser to fill the code, then press Pair. Approve the request here to finish pairing.">

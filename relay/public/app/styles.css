@@ -144,3 +144,6 @@ button.ghost { background: transparent; }
   .account-signout { width: 100%; justify-content: space-between; }
   .transcript { height: calc(100vh - 320px); }
 }
+/* Numbered pairing steps on the pair screen. */
+.steps { margin: 0 0 16px; padding-left: 20px; line-height: 1.5; }
+.steps li + li { margin-top: 4px; }

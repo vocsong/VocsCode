@@ -304,11 +304,13 @@ Web (browser)                Relay                      Desktop (host)
       │◀═══════ AEAD frames under K, routed by relay ═════▶│  (6)
 ```
 
-1. **Enable (desktop).** Settings → Remote access → paste the enrollment secret → Connect. The relay
-   is not a setting: desktops always use `https://code.vocs.io` (`VOCS_CODE_RELAY_URL` points a
-   development build or a test at another relay). Desktop generates its device keypair, stores the
-   private half in the secrets store, connects outbound WSS to the relay, and requests a pairing
-   code.
+1. **Enable (desktop).** Settings → Remote access → Connect. Only a computer's first connection needs
+   the enrollment secret; once registered it connects (and resumes after a restart) with its own
+   credential, and the field is hidden. The relay is not a setting: desktops always use
+   `https://code.vocs.io` (`VOCS_CODE_RELAY_URL` points a development build or a test at another
+   relay). Desktop generates its device keypair, stores the private half in the secrets store,
+   connects outbound WSS to the relay and, while no browser is paired, requests a pairing code
+   straight away so the QR code is on screen without another click.
 2. **Code.** Relay returns a single-use 8-character code (e.g. `MVBTK7Q2`, ~2^40 space, no
    ambiguous glyphs) with a **5-minute TTL**. The desktop shows it, a copyable link to the web
    client on the relay it is connected to (`<relay>/app?code=…`), and that link as a **QR code**
