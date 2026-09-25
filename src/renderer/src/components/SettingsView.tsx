@@ -1097,6 +1097,9 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   // The browser claims the code against the origin it opened, so the link must be this relay's.
   const pairingLink = pairing && secondsLeft > 0 ? pairingLinkFor(relay, pairing.code) : null;
   const webHost = new URL(remoteOrigin(relay)).host;
+  // Where the web client lives; its name in the text opens it in the default browser.
+  const webApp = `${remoteOrigin(relay)}/app`;
+  const openWebApp = () => void invoke('app:openExternal', { url: webApp });
   const copyPairingLink = async () => {
     if (!pairingLink) return;
     try {
@@ -1112,7 +1115,11 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
     <div className="settings-body">
       <h3>Remote access</h3>
       <p className="muted small">
-        Let a paired browser at <strong data-testid="remote-relay">{webHost}</strong> drive sessions on this computer.
+        Let a paired browser at{' '}
+        <button type="button" className="link-btn" data-testid="remote-relay" title={`Open ${webApp}`} onClick={openWebApp}>
+          {webHost}
+        </button>{' '}
+        drive sessions on this computer.
         Sessions, keys and terminals stay on this machine; the traffic is end-to-end encrypted and the relay sees
         metadata only.
       </p>
@@ -1173,7 +1180,13 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
           <h3>Pair a browser</h3>
           {pairing && pairingLink ? (
             <div>
-              <p className="muted small">Open the link below, or enter this code in the web client at {webHost}/app (expires in {secondsLeft}s):</p>
+              <p className="muted small">
+                Open the link below, or enter this code in the web client at{' '}
+                <button type="button" className="link-btn" data-testid="remote-web-app" title={`Open ${webApp}`} onClick={openWebApp}>
+                  {webHost}/app
+                </button>{' '}
+                (expires in {secondsLeft}s):
+              </p>
               <p data-testid="remote-pair-code" style={{ fontSize: 28, letterSpacing: 6, fontWeight: 600 }}>{pairing.code}</p>
               <Field label="Pairing link" hint="Open in a browser to fill the code, then press Pair. Approve the request here to finish pairing.">
                 <div className="row gap8">

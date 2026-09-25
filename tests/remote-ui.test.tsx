@@ -132,6 +132,19 @@ describe('remote access settings (P4)', () => {
     expect(decodeQrPath(qr.querySelector('path')!.getAttribute('d')!, extent)).toBe(link.value);
   });
 
+  it('opens the web client in the default browser from the relay name and the pairing hint', async () => {
+    renderRemote([], false, { pairing: { code: 'ABCD2345', expiresAt: Date.now() + 120_000 } });
+    const opened = () => invokeMock.mock.calls.filter(([channel]) => channel === 'app:openExternal');
+    const relay = await screen.findByTestId('remote-relay');
+    // The name follows the relay main reports, and so does where it leads.
+    await vi.waitFor(() => expect(relay.textContent).toBe('relay.example'));
+    fireEvent.click(relay);
+    await vi.waitFor(() => expect(opened()).toEqual([['app:openExternal', { url: 'https://relay.example/app' }]]));
+    fireEvent.click(await screen.findByTestId('remote-web-app'));
+    await vi.waitFor(() => expect(opened()).toHaveLength(2));
+    expect(opened()[1]).toEqual(['app:openExternal', { url: 'https://relay.example/app' }]);
+  });
+
   it('pulls the kill switch only after the confirmation dialog', async () => {
     invokeMock.mockImplementation((channel: string) => (channel === 'remote:get' ? Promise.resolve(remoteResult(false)) : Promise.resolve({})));
     useStore.setState({ settings: { ...baseSettings } as AppSettings });
