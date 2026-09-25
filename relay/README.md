@@ -55,10 +55,14 @@ advertise it publicly.
 
 ## Enrollment secret
 
-`ENROLL_TOKEN` authorizes one thing: a desktop's **first** pairing, before it has a device of its
-own. An enrolled desktop starts every later pairing with its own device credential, so rotating the
-secret leaves every paired desktop and browser working. Rotation does not revoke devices; to cut off
-a lost or compromised device use Revoke (or Settings → Remote access → Revoke all, the kill switch).
+`ENROLL_TOKEN` authorizes the owner: a desktop's **first** pairing, before it has a device of its
+own, and the owner routes (`/v1/owner/*`: add a computer that clicked Connect with GitHub, list
+computers, ask one to pair a browser). The landing Worker holds a copy as `RELAY_ENROLL_TOKEN` and
+presents it only for a signed-in, allowlisted GitHub session (vocs.io `code/worker`), which is what
+lets Connect with GitHub work with no secret on the desktop. An enrolled desktop starts every later
+pairing with its own device credential, so rotating the secret leaves every paired desktop and
+browser working. Rotation does not revoke devices; to cut off a lost or compromised device use
+Revoke (or Settings → Remote access → Revoke all, the kill switch).
 
 To rotate:
 
@@ -67,10 +71,14 @@ To rotate:
 2. From `relay/`, run `npx wrangler secret put ENROLL_TOKEN` and enter the value at its interactive
    prompt. Do not terminate Wrangler mid-write. An unauthenticated `/v1/pair/start` must still
    answer 403.
-3. Only desktops that have **never** paired need it: enter it in Settings → Remote access → Connect.
+3. In the vocs.io repo, run `npx wrangler secret put RELAY_ENROLL_TOKEN -c code/wrangler.jsonc` with
+   the same value, or Connect with GitHub and the signed-in computer list stop working (they answer
+   403 through the landing).
+4. Only desktops that have **never** paired need it, and only where signing in is unavailable: enter
+   it in Settings → Remote access → Connect.
    A desktop the relay no longer recognizes (revoked, or pointed at a different relay) falls back to
    enrolling and needs the current value too.
-4. Start one pairing from a desktop that enrolled with the new value, then let the code expire or
+5. Start one pairing from a desktop that enrolled with the new value, then let the code expire or
    deny it, and confirm no temporary device remains in the device list.
 
 If a rollout goes wrong, re-enter the new value on the affected desktop; do not roll back to a value

@@ -16,6 +16,7 @@ import type { SecretStore } from '../src/main/secrets';
 import type { SessionManager } from '../src/main/session-manager';
 import type { RemoteConfig, SessionMeta } from '../src/shared/types';
 import type { RemoteHost } from '../src/main/remote/host';
+import { signInProbe } from '../src/main/remote/relay-url';
 import { SettingsStore } from '../src/main/settings';
 import { PiConfigStore } from '../src/main/pi-config';
 import type { SearchIndex } from '../src/main/search';
@@ -600,5 +601,49 @@ describe('remote handlers', () => {
     expect(((await registry.invoke('remote:get', undefined)) as { relayUrl: string }).relayUrl).toBe('http://127.0.0.1:8787');
     await registry.invoke('remote:enable', { enrollToken: 'enroll-secret' });
     expect(enabled).toEqual([['http://127.0.0.1:8787', 'enroll-secret']]);
+  });
+});
+
+describe('remote sign-in handlers', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it('opens the relay page through the desktop bridge and marks remote access enabled', async () => {
+    vi.stubEnv('VOCS_CODE_RELAY_URL', undefined);
+    const signedIn: string[] = [];
+    const remote = {
+      state: () => ({ status: 'connecting', onlineClients: [], viewOnly: false }),
+      listDevices: async () => [],
+      auditEntries: () => [],
+      isRegistered: async () => false,
+      signIn: async (url: string, open: (link: string) => Promise<void>) => {
+        signedIn.push(url);
+        await open(`${url}/app?connect=${'ab'.repeat(32)}`);
+      },
+      disable: async () => undefined
+    } as unknown as RemoteHost;
+    const { registry, deps, calls, pushes } = stubDeps({ remote });
+    await registry.invoke('remote:signIn', undefined);
+    expect(signedIn).toEqual(['https://code.vocs.io']);
+    expect(calls).toContain(`openExternal:https://code.vocs.io/app?connect=${'ab'.repeat(32)}`);
+    expect(deps.settings.get().remote?.enabled).toBe(true);
+    expect(pushes.some(([channel]) => channel === PUSH_CHANNELS.settingsChanged)).toBe(true);
+  });
+
+  it('offers sign-in only where the relay origin answers /v1/me like a login gate, without blocking', async () => {
+    const answers: Record<string, number> = { 'http://127.0.0.1:9911': 401, 'http://127.0.0.1:9912': 404, 'http://127.0.0.1:9913': 503 };
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ status: answers[new URL(url).origin] ?? 500 })));
+    const remote = { state: () => ({ status: 'off', onlineClients: [], viewOnly: false }), listDevices: async () => [], auditEntries: () => [], isRegistered: async () => false } as unknown as RemoteHost;
+    const { registry } = stubDeps({ remote });
+    for (const [relay, expected] of [['http://127.0.0.1:9911', true], ['http://127.0.0.1:9912', false], ['http://127.0.0.1:9913', false]] as const) {
+      vi.stubEnv('VOCS_CODE_RELAY_URL', relay);
+      // The first answer never waits for the network: until the probe lands it is false.
+      expect(((await registry.invoke('remote:get', undefined)) as { signInAvailable: boolean }).signInAvailable).toBe(false);
+      await signInProbe(relay);
+      expect(((await registry.invoke('remote:get', undefined)) as { signInAvailable: boolean }).signInAvailable).toBe(expected);
+    }
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual(['http://127.0.0.1:9911/v1/me', 'http://127.0.0.1:9912/v1/me', 'http://127.0.0.1:9913/v1/me']);
   });
 });

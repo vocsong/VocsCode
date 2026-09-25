@@ -3,10 +3,10 @@
  *  Node against an in-memory store — no Cloudflare runtime involved, which is the point of the
  *  extraction: the layer that makes auth decisions is the layer that gets tested. */
 import { describe, expect, it } from 'vitest';
-import { MAX_WEB_DEVICES, registerWebDevice, startPairing, verifyRefreshToken } from '../relay/src/core';
+import { hashToken, MAX_WEB_DEVICES, registerHostDevice, registerWebDevice, startPairing, verifyRefreshToken } from '../relay/src/core';
 import { FixedWindowLimiter } from '../relay/src/rate';
 import { authorizeSocket, BROADCAST_TAG, handleHttp, ROUTES, type RouteContext, type SocketLike } from '../relay/src/routes';
-import { generateIdentity, publicOf, sign, tokenProofPayload, type PublicIdentity } from '../src/shared/crypto';
+import { enrollTokenContext, generateIdentity, openSealedToKey, publicOf, sign, tokenProofPayload, type PublicIdentity, type SealedToKey } from '../src/shared/crypto';
 import { memStore } from './fake-relay';
 import { testDevice } from './support/relay-auth';
 
@@ -384,5 +384,76 @@ describe('relay route table', () => {
     expect((await authorizeSocket('client', req('GET', `/ws/client?device=${web.deviceId}&ticket=${ticket}`), ctx())).ok).toBe(false);
     expect((await handleHttp(req('POST', `/ws/ticket?device=${web.deviceId}`, { headers: { authorization: `Bearer ${web.access}` } }), ctx())).status).toBe(401);
     await expect(verifyRefreshToken(store, { accountId: 'a', deviceId: web.deviceId, token: web.refresh })).rejects.toThrow();
+  });
+});
+
+describe('owner routes: Connect with GitHub and pairing from a signed-in browser', () => {
+  const owner = { authorization: 'Bearer enroll-secret', 'content-type': 'application/json' };
+  const nonceHash = 'ab'.repeat(32);
+
+  it('serves owner actions only to the enrollment secret holder, and fails closed without one', async () => {
+    const { ctx } = harness();
+    const calls: Array<[string, string, string?]> = [
+      ['POST', '/owner/enroll-grant', JSON.stringify({ nonceHash })],
+      ['GET', `/owner/enroll-grant?h=${nonceHash}`],
+      ['GET', '/owner/hosts'],
+      ['POST', '/owner/pair-request', JSON.stringify({ hostDeviceId: 'h_x', webPub: WEB_PUB, name: 'Phone' })]
+    ];
+    for (const [method, path, body] of calls) {
+      for (const authorization of [undefined, 'Bearer wrong', 'Bearer ']) {
+        const headers: Record<string, string> = authorization ? { authorization } : {};
+        expect((await handleHttp(req(method, path, { headers, body }), ctx())).status, `${method} ${path} ${authorization}`).toBe(403);
+      }
+      expect((await handleHttp(req(method, path, { headers: owner, body }), ctx({ enrollToken: '' }))).status).toBe(403);
+    }
+    expect((await handleHttp(req('POST', '/owner/enroll-grant', { headers: owner, body: JSON.stringify({ nonceHash }) }), ctx())).status).toBe(200);
+    const status = await handleHttp(req('GET', `/owner/enroll-grant?h=${nonceHash}`, { headers: owner }), ctx());
+    expect(await status.json()).toEqual({ status: 'granted' });
+    expect(await (await handleHttp(req('GET', '/owner/hosts', { headers: owner }), ctx())).json()).toEqual([]);
+  });
+
+  it('lets a desktop redeem an owner grant on the public route, pending until the grant exists', async () => {
+    const { ctx, store } = harness();
+    const desktop = await generateIdentity();
+    const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
+    const redeem = () => handleHttp(req('POST', '/enroll/redeem', { body: JSON.stringify({ nonce, hostPub: publicOf(desktop), name: 'Work PC', platform: 'win32' }) }), ctx());
+    expect(await (await redeem()).json()).toEqual({ status: 'pending' });
+    const hash = await hashToken(nonce);
+    expect((await handleHttp(req('POST', '/owner/enroll-grant', { headers: owner, body: JSON.stringify({ nonceHash: hash }) }), ctx())).status).toBe(200);
+    const registered = (await (await redeem()).json()) as { status: string; hostDeviceId: string; sealedToken: SealedToKey };
+    expect(registered.status).toBe('registered');
+    const token = await openSealedToKey(desktop.enc, registered.sealedToken, enrollTokenContext(hash, registered.hostDeviceId));
+    await expect(verifyRefreshToken(store, { accountId: 'a', deviceId: registered.hostDeviceId, token })).resolves.toMatchObject({ kind: 'host', name: 'Work PC' });
+    // Malformed input is the caller's error, not a server error.
+    expect((await handleHttp(req('POST', '/enroll/redeem', { body: JSON.stringify({ nonce: 'x', hostPub: publicOf(desktop) }) }), ctx())).status).toBe(401);
+    expect((await handleHttp(req('POST', '/enroll/redeem', { body: '{' }), ctx())).status).toBe(400);
+  });
+
+  it('sends a pairing request to the named desktop only, lists it with presence, and refuses an offline one', async () => {
+    const sentToHost: string[] = [];
+    const sentToOthers: string[] = [];
+    const hostSocket: SocketLike = { send: (data) => void sentToHost.push(data), close: () => undefined };
+    const otherDesktop: SocketLike = { send: (data) => void sentToOthers.push(data), close: () => undefined };
+    const { ctx, store } = harness();
+    const host = await registerHostDevice(store, { accountId: 'a', name: 'Work PC', platform: 'win32', pub: HOST_PUB }, T);
+    await registerWebDevice(store, { accountId: 'a', name: 'Old phone', platform: 'web', pub: WEB_PUB, hostDeviceId: host.deviceId }, T);
+    const online = ctx({ sockets: (tag) => (tag === `host:${host.deviceId}` ? [hostSocket] : tag === BROADCAST_TAG.host ? [hostSocket, otherDesktop] : []) });
+
+    const hosts = (await (await handleHttp(req('GET', '/owner/hosts', { headers: owner }), online)).json()) as Array<{ deviceId: string; kind: string; online: boolean }>;
+    expect(hosts).toEqual([expect.objectContaining({ deviceId: host.deviceId, kind: 'host', name: 'Work PC', online: true })]);
+
+    const body = JSON.stringify({ hostDeviceId: host.deviceId, webPub: WEB_PUB, name: 'Phone', platform: 'web' });
+    const response = await handleHttp(req('POST', '/owner/pair-request', { headers: owner, body }), online);
+    expect(response.status).toBe(200);
+    const { code, pollToken, hostName } = (await response.json()) as { code: string; pollToken: string; hostName: string };
+    expect(hostName).toBe('Work PC');
+    expect(sentToOthers).toEqual([]);
+    expect(sentToHost.map((raw) => JSON.parse(raw))).toEqual([{ t: 'pair.request', code, name: 'Phone', platform: 'web', hostPub: HOST_PUB, webPub: WEB_PUB, requested: true }]);
+    const poll = await handleHttp(req('GET', `/pair/poll?code=${code}`, { headers: { authorization: `Bearer ${pollToken}` } }), online);
+    expect(await poll.json()).toEqual({ status: 'claimed' });
+
+    const offline = await handleHttp(req('POST', '/owner/pair-request', { headers: owner, body }), ctx());
+    expect(offline.status).toBe(409);
+    expect(await offline.json()).toEqual({ error: 'host-offline' });
   });
 });

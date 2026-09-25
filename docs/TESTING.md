@@ -35,7 +35,10 @@ sockets: pairing, the sealed credential, proof-of-possession tokens, handshake, 
 revocation. It is what found a refused request's unread body ending a `wrangler dev` session and a
 revocation answering 500, which no fake could. `e2e.remote-web` (in `test:e2e:ci`) loads the web
 app in Electron's Chromium from that local relay: the native WebSocket, IndexedDB keys across a
-reload, the static CSP, the pairing link, the computer switcher, the read-only terminal and unpair.
+reload, the static CSP, the pairing link, the computer switcher, the read-only terminal and unpair;
+and, through `tests/support/test-landing.ts` (a stand-in for the landing's login gate that adds the
+enrollment secret to `/v1/owner/*` for a signed-in cookie), Connect with GitHub and pairing from the
+signed-in computer list. `e2e.remote` drives the desktop side of the same flow in the real app.
 The opt-in **deployed** smoke runs the same flow against a real origin, with an existing enrollment
 secret kept outside the repo:
 

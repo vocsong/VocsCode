@@ -27,6 +27,15 @@ export interface WebCredentials {
   pairedAt?: number;
 }
 
+/** A computer of the account, as a signed-in owner sees it (public metadata and presence). */
+export interface OwnerHost {
+  deviceId: string;
+  name: string;
+  platform: string;
+  lastSeen: number;
+  online?: boolean;
+}
+
 /** Everything a browser persists: its pairings and which one is active. */
 export interface VaultState {
   pairings: WebCredentials[];
@@ -277,6 +286,64 @@ export class RelayClient {
     if (!claim.ok) throw new Error(`claim failed: ${claim.status}`);
     const { pollToken } = (await claim.json()) as { pollToken?: string };
     if (typeof pollToken !== 'string' || !pollToken) throw new Error('claim did not return a poll capability');
+    return this.awaitApproval(base, code, pollToken, identity);
+  }
+
+  // --- Signed-in owner (the landing's GitHub session; the landing adds the relay credential) ---
+
+  /** The computers of this account, with presence. */
+  async ownerHosts(relayBase: string): Promise<OwnerHost[]> {
+    const response = await this.ownerFetch(relayBase, '/v1/owner/hosts');
+    const body: unknown = await response.json();
+    if (!Array.isArray(body)) throw new Error('the relay returned no computer list');
+    // Only well-formed entries reach the page; names are rendered as text there.
+    return body.filter((h): h is OwnerHost => !!h && typeof h === 'object' && typeof (h as OwnerHost).deviceId === 'string' && typeof (h as OwnerHost).name === 'string');
+  }
+
+  /** Adds the computer that clicked Connect with GitHub, known here only by its connect hash. */
+  async addComputer(relayBase: string, nonceHash: string): Promise<void> {
+    await this.ownerFetch(relayBase, '/v1/owner/enroll-grant', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nonceHash }) });
+  }
+
+  /** Whether that computer has collected its credential yet, and its device id once it has. */
+  async addedComputer(relayBase: string, nonceHash: string): Promise<{ status: 'missing' | 'granted' | 'redeemed'; hostDeviceId?: string; hostName?: string }> {
+    const response = await this.ownerFetch(relayBase, `/v1/owner/enroll-grant?h=${encodeURIComponent(nonceHash)}`);
+    return (await response.json()) as { status: 'missing' | 'granted' | 'redeemed'; hostDeviceId?: string; hostName?: string };
+  }
+
+  /** Asks a registered, online computer to pair this browser: no code to carry. The computer still
+   *  shows the request and the user clicks Allow there; then this completes like a code pairing. */
+  async pairWithHost(input: { relayBase: string; hostDeviceId: string; deviceName: string }): Promise<WebCredentials> {
+    const base = input.relayBase.replace(/\/$/, '');
+    const identity = await (this.deps.newIdentity ?? generateKeyIdentity)();
+    const response = await this.ownerFetch(base, '/v1/owner/pair-request', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hostDeviceId: input.hostDeviceId, webPub: publicOf(identity), name: input.deviceName })
+    });
+    const { code, pollToken } = (await response.json()) as { code?: unknown; pollToken?: unknown };
+    if (typeof code !== 'string' || typeof pollToken !== 'string' || !pollToken) throw new Error('pairing request did not return a poll capability');
+    return this.awaitApproval(base, code, pollToken, identity);
+  }
+
+  /** An owner request. It is same-origin, so the browser's default credentials mode already sends
+   *  the landing its session cookie; the landing replaces any Authorization with the relay
+   *  credential, so none is sent from here. */
+  private async ownerFetch(relayBase: string, path: string, init: RequestInit = {}): Promise<Response> {
+    const doFetch = this.deps.fetchImpl ?? fetch;
+    const response = await doFetch(`${relayBase.replace(/\/$/, '')}${path}`, init);
+    if (response.ok) return response;
+    const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+    if (response.status === 401) throw new Error('sign in with GitHub first');
+    if (response.status === 503) throw new Error('signing in is not available on this relay yet; use a pairing code');
+    if (response.status === 409 && body.error === 'host-offline') throw new Error('that computer is offline: open Vocs Code on it, then try again');
+    if (response.status === 409) throw new Error('this account already has the maximum number of paired devices; revoke one first');
+    throw new Error(`request failed: ${response.status}`);
+  }
+
+  /** Polls a claimed pairing until the desktop decides, then stores the new pairing. */
+  private async awaitApproval(base: string, code: string, pollToken: string, identity: AnyIdentity): Promise<WebCredentials> {
+    const doFetch = this.deps.fetchImpl ?? fetch;
     const now = this.deps.now ?? Date.now;
     const deadline = now() + 5 * 60_000;
     for (;;) {

@@ -15,25 +15,35 @@ import { RemoteHost } from '../src/main/remote/host';
 import type { HandlerRegistry } from '../src/main/handlers';
 import { isolatedEnv } from './e2e-ui';
 import { startLocalRelay, type LocalRelay } from './support/local-relay';
+import { startTestLanding, TEST_SESSION_COOKIE, type TestLanding } from './support/test-landing';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const require = createRequire(import.meta.url);
 let app: ElectronApplication | null = null;
 let relay: LocalRelay | null = null;
+let ownerApp: ElectronApplication | null = null;
+let landing: TestLanding | null = null;
 const hosts: RemoteHost[] = [];
 
 afterAll(async () => {
   await app?.close().catch(() => undefined);
+  await ownerApp?.close().catch(() => undefined);
   for (const host of hosts) await host.disable();
+  await landing?.stop();
   await relay?.stop();
 });
 
 /** A plain browser window on the page: no preload, no Node, sandboxed. Parked off every display and
  *  shown inactive like the other suites, unless VOCS_CODE_E2E_VISIBLE=1. */
 const BROWSER_MAIN = `
-const { app, BrowserWindow, screen } = require('electron');
+const { app, BrowserWindow, screen, session } = require('electron');
 if (process.env.VOCS_CODE_E2E_VISIBLE !== '1') app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Signed in with GitHub, as far as the (test) landing is concerned.
+  if (process.env.REMOTE_WEB_COOKIE) {
+    const [name, value] = process.env.REMOTE_WEB_COOKIE.split('=');
+    await session.defaultSession.cookies.set({ url: process.env.REMOTE_WEB_URL, name, value });
+  }
   const win = new BrowserWindow({ width: 1100, height: 800, show: false, webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, backgroundThrottling: false } });
   win.once('ready-to-show', () => {
     if (process.env.VOCS_CODE_E2E_VISIBLE === '1') return win.show();
@@ -52,7 +62,7 @@ interface Desk {
   sent: unknown[];
 }
 
-async function desk(name: string, origin: string, enrollToken: string): Promise<Desk> {
+async function desk(name: string, origin: string, enrollToken: string, enable = true): Promise<Desk> {
   const sent: unknown[] = [];
   const secrets = new Map<string, string>();
   const registry = {
@@ -85,8 +95,14 @@ async function desk(name: string, origin: string, enrollToken: string): Promise<
     broadcast: () => undefined
   });
   hosts.push(host);
-  await host.enable(origin, enrollToken);
+  if (enable) await host.enable(origin, enrollToken);
   return { host, sent };
+}
+
+/** A desktop like desk(), but with no enrollment secret: Connect with GitHub registers it. */
+async function signInDesk(name: string): Promise<Desk> {
+  const created = await desk(name, '', '', false);
+  return created;
 }
 
 async function approve(host: RemoteHost, browserName: string): Promise<void> {
@@ -168,6 +184,70 @@ describe.runIf(enabled)('remote web client in a real browser', () => {
     await expect.poll(async () => (await home.host.listDevices()).filter((d) => d.kind === 'web').length, { timeout: 20_000 }).toBe(1);
     await page.locator('#transcript').getByText('answer from Home').waitFor({ timeout: 30_000 });
 
+    expect(cspViolations).toEqual([]);
+  }, 180_000);
+
+  it('adds a computer with Connect with GitHub, then pairs another from the signed-in list, with no code or secret', async () => {
+    relay ??= await startLocalRelay();
+    landing = await startTestLanding(relay.origin, relay.enrollToken);
+    // Desktops with no enrollment secret: they go through the landing, as they would at code.vocs.io.
+    const office = await signInDesk('Office');
+    let link = '';
+    await office.host.signIn(landing.origin, async (url) => void (link = url), 'Office PC');
+    const checkCode = office.host.state().signIn?.checkCode;
+    expect(checkCode).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-remote-web-owner-'));
+    const main = path.join(tmp, 'main.cjs');
+    await fs.writeFile(main, BROWSER_MAIN);
+    ownerApp = await electron.launch({
+      executablePath: require('electron') as string,
+      args: [main, `--user-data-dir=${path.join(tmp, 'profile')}`],
+      env: isolatedEnv(path.join(tmp, 'userData'), { REMOTE_WEB_URL: link, REMOTE_WEB_COOKIE: TEST_SESSION_COOKIE }),
+      timeout: 60_000
+    });
+    const page: Page = await ownerApp.firstWindow();
+    const cspViolations: string[] = [];
+    page.on('console', (message) => {
+      if (/Content Security Policy|Refused to/i.test(message.text())) cspViolations.push(message.text());
+    });
+
+    // The page the desktop opened asks before adding anything, and shows the desktop's own code.
+    await page.locator('#screen-connect').waitFor({ state: 'visible', timeout: 30_000 });
+    expect(await page.locator('#connect-code').textContent()).toBe(checkCode);
+    expect(new URL(page.url()).searchParams.has('connect')).toBe(false);
+    expect(await office.host.isRegistered()).toBe(false);
+    await page.locator('#connect-device-name').fill('Signed-in Chromium');
+    await page.getByRole('button', { name: 'Add this computer' }).click();
+    // Added, then this browser asks to pair; the desktop still decides.
+    await approve(office.host, 'Signed-in Chromium');
+    await expect.poll(() => page.locator('#conn').textContent(), { timeout: 30_000 }).toBe('connected');
+    await page.locator('#transcript').getByText('answer from Office').waitFor({ timeout: 30_000 });
+    expect(await office.host.isRegistered()).toBe(true);
+
+    // A second computer, added from its own Connect with GitHub, is picked from the list: no code.
+    const lab = await signInDesk('Lab');
+    let labLink = '';
+    await lab.host.signIn(landing.origin, async (url) => void (labLink = url), 'Lab PC');
+    const grant = await fetch(`${landing.origin}/v1/owner/enroll-grant`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: TEST_SESSION_COOKIE },
+      body: JSON.stringify({ nonceHash: new URL(labLink).searchParams.get('connect') })
+    });
+    expect(grant.status).toBe(200);
+    await expect.poll(() => lab.host.state().status, { timeout: 30_000 }).toBe('online');
+    await page.getByRole('button', { name: 'Add a computer' }).click();
+    const row = page.locator('#owner-host-list li', { hasText: 'Lab PC' });
+    await expect.poll(() => row.textContent(), { timeout: 20_000 }).toContain('online');
+    await expect.poll(() => page.locator('#owner-host-list li', { hasText: 'Office PC' }).textContent()).toContain('paired');
+    await page.locator('#device-name').fill('Signed-in Chromium 2');
+    await row.getByRole('button', { name: 'Pair' }).click();
+    await approve(lab.host, 'Signed-in Chromium 2');
+    await page.locator('#transcript').getByText('answer from Lab').waitFor({ timeout: 30_000 });
+    await expect.poll(async () => (await page.locator('#host-select option').allTextContents()).map((t) => t.split(' · ')[0]).sort()).toEqual(['Lab PC', 'Office PC']);
+
+    // Every owner action went through the landing, which is what holds the relay credential.
+    expect(landing.ownerCalls).toEqual(expect.arrayContaining(['POST /v1/owner/enroll-grant', 'GET /v1/owner/enroll-grant', 'POST /v1/owner/pair-request', 'GET /v1/owner/hosts']));
     expect(cspViolations).toEqual([]);
   }, 180_000);
 });
