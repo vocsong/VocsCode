@@ -34,7 +34,7 @@ import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readS
 import { PiConfigStore, runPiCommand } from './pi-config';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
-import { relayUrl } from './remote/relay-url';
+import { relayUrl, signInAvailable } from './remote/relay-url';
 import { transcriptPage } from './remote/transcript-page';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
 import { errorMessage } from './util/async';
@@ -731,8 +731,16 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       devices: settings.get().remote?.enabled ? await remote.listDevices() : [],
       audit: remote.auditEntries(),
       relayUrl: relayUrl(),
-      registered: await remote.isRegistered()
+      registered: await remote.isRegistered(),
+      signInAvailable: signInAvailable(relayUrl())
     }));
+    handle('remote:signIn', async () => {
+      await settings.update({ remote: { ...remoteConfig(), enabled: true } });
+      // The page opens in the default browser; openExternal only ever opens http(s) URLs.
+      await remote.signIn(relayUrl(), (url) => deps.desktop.openExternal(url));
+      deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
+      return remote.state();
+    });
     handle('remote:enable', async ({ enrollToken }) => {
       // The secret registers this computer once; after that it connects with its own credential,
       // so an empty field reuses whatever secret is stored (possibly none).

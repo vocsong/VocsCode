@@ -14,6 +14,7 @@ import type { HandlerRegistry } from '../src/main/handlers';
 import type { DeviceRecord } from '../relay/src/core';
 import { generateIdentity, publicOf } from '../src/shared/crypto';
 import { ACCOUNT, ENROLL, FakeRelay } from './fake-relay';
+import { connectCheckCode } from '../src/shared/pairing';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -252,4 +253,94 @@ describe('remote host token and trust lifecycle', () => {
     await fresh.disable();
   });
 
+});
+
+describe('Connect with GitHub: adding and pairing through a signed-in owner', () => {
+  /** What the landing does for a signed-in, allowlisted session: owner requests reach the relay
+   *  with its enrollment secret in place of whatever Authorization the browser sent. */
+  const asOwner: typeof fetch = (input, init = {}) => {
+    const url = String(input);
+    if (!new URL(url).pathname.startsWith('/v1/owner/')) return fetch(input, init);
+    return fetch(input, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${ENROLL}` } });
+  };
+
+  it('registers this computer from the browser with no secret on the desktop, then pairs that browser on Allow', async () => {
+    const r = await rig();
+    const secrets = new Map<string, string>();
+    const desktop = new RemoteHost({
+      registry: () => ({ channels: () => ['sessions:list'], invoke: async () => [{ id: 's9', title: 'Signed-in host' }] } as unknown as HandlerRegistry),
+      secrets: { get: async (key) => secrets.get(key), set: async (key, value) => void secrets.set(key, value) },
+      pushState: () => undefined,
+      log: () => undefined,
+      broadcast: () => undefined
+    });
+    const opened: string[] = [];
+    await desktop.signIn(r.base, async (url) => void opened.push(url));
+    try {
+      // The desktop opened the page with only a hash of its one-time secret, and shows the same
+      // check code the page will show.
+      expect(opened).toHaveLength(1);
+      const link = new URL(opened[0]);
+      expect(link.origin + link.pathname).toBe(`${r.base}/app`);
+      const nonceHash = link.searchParams.get('connect')!;
+      expect(nonceHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(desktop.state()).toMatchObject({ status: 'connecting', signIn: { link: opened[0], checkCode: connectCheckCode(nonceHash) } });
+      expect(await desktop.isRegistered()).toBe(false);
+      expect(JSON.stringify([...secrets.values()])).not.toContain(ENROLL);
+
+      // The signed-in owner clicks "Add this computer".
+      const browser = new RelayClient({ vault: memoryVault(), wsFactory, fetchImpl: asOwner });
+      await browser.addComputer(r.base, nonceHash);
+      await until(async () => desktop.state().status === 'online' && (await desktop.isRegistered()), 'the desktop to register and come online', 10_000);
+      expect(desktop.state().signIn).toBeUndefined();
+      const added = await browser.addedComputer(r.base, nonceHash);
+      expect(added.status).toBe('redeemed');
+      expect(await browser.ownerHosts(r.base)).toContainEqual(expect.objectContaining({ deviceId: added.hostDeviceId, online: true }));
+
+      // The same browser asks that computer to pair; nothing happens until Allow on the desktop.
+      const pairing = browser.pairWithHost({ relayBase: r.base, hostDeviceId: added.hostDeviceId!, deviceName: 'Signed-in phone' });
+      await until(() => desktop.state().pendingRequest?.name === 'Signed-in phone', 'the pairing request on the desktop');
+      await desktop.respondPairing('approve');
+      const creds = await pairing;
+      expect(creds.hostDeviceId).toBe(added.hostDeviceId);
+      await browser.connect();
+      expect(await browser.invoke('sessions:list', null)).toEqual([{ id: 's9', title: 'Signed-in host' }]);
+      await browser.logout();
+    } finally {
+      await desktop.disable();
+    }
+  });
+
+  it('refuses owner actions without the landing credential and never asks an unregistered desktop', async () => {
+    const r = await rig();
+    const stranger = new RelayClient({ vault: memoryVault(), wsFactory });
+    await expect(stranger.addComputer(r.base, 'ab'.repeat(32))).rejects.toThrow();
+    await expect(stranger.ownerHosts(r.base)).rejects.toThrow();
+    // The rig desktop is still enrolling (no browser approved it yet), so it is no computer of the
+    // account an owner could ask.
+    const owner = new RelayClient({ vault: memoryVault(), wsFactory, fetchImpl: asOwner });
+    expect(await owner.ownerHosts(r.base)).toEqual([]);
+    expect(r.host.state().pendingRequest).toBeUndefined();
+  });
+
+  it('stops waiting when remote access is turned off before the browser adds the computer', async () => {
+    const r = await rig();
+    const secrets = new Map<string, string>();
+    const desktop = new RemoteHost({
+      registry: () => ({ channels: () => [], invoke: async () => null } as unknown as HandlerRegistry),
+      secrets: { get: async (key) => secrets.get(key), set: async (key, value) => void secrets.set(key, value) },
+      pushState: () => undefined,
+      log: () => undefined,
+      broadcast: () => undefined
+    });
+    let nonceHash = '';
+    await desktop.signIn(r.base, async (url) => void (nonceHash = new URL(url).searchParams.get('connect')!));
+    await desktop.disable();
+    expect(desktop.state()).toMatchObject({ status: 'off' });
+    expect(desktop.state().signIn).toBeUndefined();
+    // Granted after the cancel: this desktop no longer polls, so it never registers.
+    await new RelayClient({ vault: memoryVault(), wsFactory, fetchImpl: asOwner }).addComputer(r.base, nonceHash);
+    await sleep(2500);
+    expect(await desktop.isRegistered()).toBe(false);
+  });
 });

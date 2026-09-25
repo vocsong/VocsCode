@@ -292,6 +292,56 @@
       if (!claim.ok) throw new Error(`claim failed: ${claim.status}`);
       const { pollToken } = await claim.json();
       if (typeof pollToken !== "string" || !pollToken) throw new Error("claim did not return a poll capability");
+      return this.awaitApproval(base, code, pollToken, identity);
+    }
+    // --- Signed-in owner (the landing's GitHub session; the landing adds the relay credential) ---
+    /** The computers of this account, with presence. */
+    async ownerHosts(relayBase) {
+      const response = await this.ownerFetch(relayBase, "/v1/owner/hosts");
+      const body = await response.json();
+      if (!Array.isArray(body)) throw new Error("the relay returned no computer list");
+      return body.filter((h) => !!h && typeof h === "object" && typeof h.deviceId === "string" && typeof h.name === "string");
+    }
+    /** Adds the computer that clicked Connect with GitHub, known here only by its connect hash. */
+    async addComputer(relayBase, nonceHash) {
+      await this.ownerFetch(relayBase, "/v1/owner/enroll-grant", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nonceHash }) });
+    }
+    /** Whether that computer has collected its credential yet, and its device id once it has. */
+    async addedComputer(relayBase, nonceHash) {
+      const response = await this.ownerFetch(relayBase, `/v1/owner/enroll-grant?h=${encodeURIComponent(nonceHash)}`);
+      return await response.json();
+    }
+    /** Asks a registered, online computer to pair this browser: no code to carry. The computer still
+     *  shows the request and the user clicks Allow there; then this completes like a code pairing. */
+    async pairWithHost(input) {
+      const base = input.relayBase.replace(/\/$/, "");
+      const identity = await (this.deps.newIdentity ?? generateKeyIdentity)();
+      const response = await this.ownerFetch(base, "/v1/owner/pair-request", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ hostDeviceId: input.hostDeviceId, webPub: publicOf(identity), name: input.deviceName })
+      });
+      const { code, pollToken } = await response.json();
+      if (typeof code !== "string" || typeof pollToken !== "string" || !pollToken) throw new Error("pairing request did not return a poll capability");
+      return this.awaitApproval(base, code, pollToken, identity);
+    }
+    /** An owner request. It is same-origin, so the browser's default credentials mode already sends
+     *  the landing its session cookie; the landing replaces any Authorization with the relay
+     *  credential, so none is sent from here. */
+    async ownerFetch(relayBase, path, init = {}) {
+      const doFetch = this.deps.fetchImpl ?? fetch;
+      const response = await doFetch(`${relayBase.replace(/\/$/, "")}${path}`, init);
+      if (response.ok) return response;
+      const body = await response.json().catch(() => ({}));
+      if (response.status === 401) throw new Error("sign in with GitHub first");
+      if (response.status === 503) throw new Error("signing in is not available on this relay yet; use a pairing code");
+      if (response.status === 409 && body.error === "host-offline") throw new Error("that computer is offline: open Vocs Code on it, then try again");
+      if (response.status === 409) throw new Error("this account already has the maximum number of paired devices; revoke one first");
+      throw new Error(`request failed: ${response.status}`);
+    }
+    /** Polls a claimed pairing until the desktop decides, then stores the new pairing. */
+    async awaitApproval(base, code, pollToken, identity) {
+      const doFetch = this.deps.fetchImpl ?? fetch;
       const now = this.deps.now ?? Date.now;
       const deadline = now() + 5 * 6e4;
       for (; ; ) {
@@ -577,6 +627,13 @@
 
   // src/shared/pairing.ts
   var PAIRING_CODE_PATTERN = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
+  var CONNECT_HASH_PATTERN = /^[0-9a-f]{64}$/;
+  function connectCheckCode(nonceHash) {
+    const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 8; i++) code += alphabet[parseInt(nonceHash.slice(i * 2, i * 2 + 2), 16) % alphabet.length];
+    return `${code.slice(0, 4)}-${code.slice(4)}`;
+  }
 
   // relay/src/page.ts
   function indexedDbVault() {
@@ -632,6 +689,7 @@
   var presenceTimer = null;
   var connecting = false;
   var online = /* @__PURE__ */ new Map();
+  var accountReady = Promise.resolve(false);
   var PAGE = 150;
   var windowStart = 0;
   var windowItems = [];
@@ -665,6 +723,14 @@
   }
   async function boot() {
     const params = new URLSearchParams(window.location.search);
+    let connectHash = null;
+    if (params.has("connect")) {
+      const hashes = params.getAll("connect");
+      if (hashes.length === 1 && CONNECT_HASH_PATTERN.test(hashes[0] ?? "")) connectHash = hashes[0];
+      params.delete("connect");
+      const search = params.toString();
+      window.history.replaceState(window.history.state, "", `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`);
+    }
     if (params.has("code")) {
       const codes = params.getAll("code");
       const code = codes[0]?.trim().toUpperCase() ?? "";
@@ -707,9 +773,10 @@
         void sendComposer();
       }
     });
+    el("connect-cancel").addEventListener("click", () => client.hasCredentials() ? void enter() : openPairScreen());
     client.onPush((channel, payload) => void onPush(channel, payload));
     client.onPairingsChanged(() => renderHosts());
-    void loadAccount();
+    accountReady = loadAccount();
     let restored = false;
     try {
       restored = await client.restore();
@@ -719,27 +786,134 @@
       show("screen-pair");
       return;
     }
+    if (connectHash) {
+      if (await accountReady) {
+        openConnectScreen(connectHash);
+        return;
+      }
+      el("pair-error").textContent = "This page was opened to add a computer, but signing in is not available here. Use a pairing code instead.";
+    }
     if (restored) void enter();
     else openPairScreen();
+  }
+  function openConnectScreen(connectHash) {
+    el("connect-code").textContent = connectCheckCode(connectHash);
+    el("connect-status").textContent = "";
+    el("connect-error").textContent = "";
+    const add = el("connect-add");
+    add.disabled = false;
+    add.onclick = () => void addThisComputer(connectHash);
+    show("screen-connect");
+  }
+  async function addThisComputer(connectHash) {
+    const add = el("connect-add");
+    const status = el("connect-status");
+    add.disabled = true;
+    el("connect-error").textContent = "";
+    const base = relayBaseFor(window.location.origin, relayOverride());
+    try {
+      status.textContent = "Adding the computer\u2026";
+      await client.addComputer(base, connectHash);
+      status.textContent = "Waiting for the computer to finish connecting\u2026";
+      let added = { status: "granted" };
+      for (let i = 0; i < 90 && added.status !== "redeemed"; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 1e3));
+        added = await client.addedComputer(base, connectHash);
+        if (added.status === "missing") throw new Error("the request expired; click Connect with GitHub in Vocs Code again");
+      }
+      if (added.status !== "redeemed" || !added.hostDeviceId) throw new Error("the computer did not finish connecting; is Vocs Code still open on it?");
+      status.textContent = "Added. Waiting for the computer to come online\u2026";
+      for (let i = 0; i < 30; i++) {
+        const hosts = await client.ownerHosts(base).catch(() => []);
+        if (hosts.some((host) => host.deviceId === added.hostDeviceId && host.online)) break;
+        await new Promise((resolve) => setTimeout(resolve, 1e3));
+      }
+      status.textContent = "Now click Allow in Vocs Code on the computer to pair this browser.";
+      const name = el("connect-device-name").value.trim() || "Browser";
+      await pairThroughAccount(added.hostDeviceId, name);
+    } catch (e) {
+      el("connect-error").textContent = e instanceof Error ? e.message : String(e);
+      add.disabled = false;
+      status.textContent = "";
+    }
+  }
+  async function pairThroughAccount(hostDeviceId, name) {
+    show("screen-pairing");
+    try {
+      await client.pairWithHost({ relayBase: relayBaseFor(window.location.origin, relayOverride()), hostDeviceId, deviceName: name });
+      notice("");
+      resetView();
+      await enter();
+    } catch (e) {
+      el("pair-error").textContent = e instanceof Error ? e.message : String(e);
+      openPairScreen();
+    }
+  }
+  async function renderOwnerHosts() {
+    const box = el("owner-hosts");
+    if (!await accountReady) return;
+    let hosts;
+    try {
+      hosts = await client.ownerHosts(relayBaseFor(window.location.origin, relayOverride()));
+    } catch {
+      box.hidden = true;
+      return;
+    }
+    const paired = new Set(client.pairings().map((p) => p.hostDeviceId));
+    const list = el("owner-host-list");
+    list.replaceChildren(
+      ...hosts.map((host) => {
+        const item = document.createElement("li");
+        const label = document.createElement("span");
+        label.textContent = host.name;
+        const state = document.createElement("span");
+        state.className = "muted";
+        state.textContent = paired.has(host.deviceId) ? " \xB7 paired" : host.online ? " \xB7 online" : " \xB7 offline";
+        label.append(state);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ghost";
+        button.dataset.host = host.deviceId;
+        button.textContent = paired.has(host.deviceId) ? "Open" : "Pair";
+        button.disabled = !paired.has(host.deviceId) && !host.online;
+        button.title = button.disabled ? "Open Vocs Code on that computer first" : "";
+        button.addEventListener("click", () => {
+          if (paired.has(host.deviceId)) {
+            void (async () => {
+              await client.select(host.deviceId);
+              resetView();
+              await enter();
+            })();
+          } else void pairThroughAccount(host.deviceId, el("device-name").value.trim() || "Browser");
+        });
+        item.append(label, button);
+        return item;
+      })
+    );
+    el("owner-hosts-empty").hidden = hosts.length > 0;
+    box.hidden = false;
   }
   async function loadAccount() {
     try {
       const res = await fetch("/v1/me", { credentials: "same-origin", cache: "no-store" });
-      if (!res.ok) return;
+      if (!res.ok) return false;
       const body = await res.json();
-      if (typeof body.login !== "string" || !body.login) return;
+      if (typeof body.login !== "string" || !body.login) return false;
       for (const form of document.querySelectorAll(".account-signout")) {
         const label = form.querySelector(".account-name");
         if (label) label.textContent = `@${body.login}`;
         form.hidden = false;
       }
+      return true;
     } catch {
+      return false;
     }
   }
   function openPairScreen() {
     el("pair-cancel").toggleAttribute("hidden", !client.hasCredentials());
     el("pair-title").textContent = client.hasCredentials() ? "Add a computer" : "Vocs Code";
     show("screen-pair");
+    void renderOwnerHosts();
   }
   async function sendComposer() {
     const box = el("composer");

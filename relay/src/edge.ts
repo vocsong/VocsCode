@@ -25,7 +25,12 @@ const EDGE_LIMITS: Record<string, { binding: keyof EdgeLimiters; perDevice?: boo
   '/v1/pair/claim': { binding: 'PAIR_LIMIT' },
   '/v1/pair/poll': { binding: 'POLL_LIMIT' },
   '/v1/token/challenge': { binding: 'TOKEN_LIMIT', perDevice: true },
-  '/v1/token': { binding: 'TOKEN_LIMIT', perDevice: true }
+  '/v1/token': { binding: 'TOKEN_LIMIT', perDevice: true },
+  // Polled while the owner signs in, like /pair/poll.
+  '/v1/enroll/redeem': { binding: 'POLL_LIMIT' },
+  '/v1/owner/enroll-grant': { binding: 'POLL_LIMIT' },
+  '/v1/owner/hosts': { binding: 'POLL_LIMIT' },
+  '/v1/owner/pair-request': { binding: 'PAIR_LIMIT' }
 };
 
 /** A 429 when the edge limit for this endpoint is spent; null to pass the request on. A

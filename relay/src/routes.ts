@@ -12,7 +12,9 @@ import {
   consumeSocketTicket,
   deleteMirrorSession,
   deviceInfos,
+  enrollmentStatus,
   getMirrorIndex,
+  grantEnrollment,
   getMirrorSession,
   issueAccessToken,
   issueChallenge,
@@ -23,6 +25,8 @@ import {
   pollPairing,
   putMirrorIndex,
   putMirrorSession,
+  redeemEnrollment,
+  requestPairing,
   resolvePairing,
   revokeAllExcept,
   revokeDevice,
@@ -112,7 +116,16 @@ export const ROUTES: Route[] = [
   { method: 'DELETE', path: '/mirror', auth: 'host', run: mirrorClear },
   { method: 'GET', path: '/mirror/', prefix: true, auth: 'device', run: mirrorGetSession },
   { method: 'PUT', path: '/mirror/', prefix: true, auth: 'host', run: mirrorPutSession },
-  { method: 'DELETE', path: '/mirror/', prefix: true, auth: 'host', run: mirrorDeleteSession }
+  { method: 'DELETE', path: '/mirror/', prefix: true, auth: 'host', run: mirrorDeleteSession },
+  // Owner actions: add a computer that clicked Connect with GitHub, list computers, ask one to pair
+  // a browser. Only the enrollment secret's holder: in production the landing Worker, acting for a
+  // GitHub session on its allowlist (vocs.io code/worker). The desktop still approves each pairing.
+  { method: 'POST', path: '/owner/enroll-grant', auth: 'enroll', run: ownerEnrollGrant },
+  { method: 'GET', path: '/owner/enroll-grant', auth: 'enroll', run: ownerEnrollStatus },
+  { method: 'GET', path: '/owner/hosts', auth: 'enroll', run: ownerHosts },
+  { method: 'POST', path: '/owner/pair-request', auth: 'enroll', rate: { bucket: 'pair-request', limit: 10, windowMs: 60_000 }, run: ownerPairRequest },
+  // A desktop redeems the owner's grant with its one-time secret, polling while the owner signs in.
+  { method: 'POST', path: '/enroll/redeem', auth: 'public', rate: { bucket: 'enroll-redeem', limit: 120, windowMs: 60_000 }, run: enrollRedeem }
 ];
 
 export async function handleHttp(request: Request, ctx: RouteContext): Promise<Response> {
@@ -316,6 +329,52 @@ function trySend(ws: SocketLike, data: string): void {
   } catch {
     // Closing; its close handler reports the departure.
   }
+}
+
+async function ownerEnrollGrant({ ctx, request }: Call): Promise<Response> {
+  const body = await readJson(request);
+  const granted = await grantEnrollment(ctx.store, { accountId: ctx.accountId, nonceHash: body.nonceHash as string }, ctx.now);
+  return json(granted, 200, { 'cache-control': 'no-store' });
+}
+
+async function ownerEnrollStatus({ ctx, url }: Call): Promise<Response> {
+  const status = await enrollmentStatus(ctx.store, { accountId: ctx.accountId, nonceHash: url.searchParams.get('h') ?? '' }, ctx.now);
+  return json(status, 200, { 'cache-control': 'no-store' });
+}
+
+async function ownerHosts({ ctx }: Call): Promise<Response> {
+  // Public metadata only, as for /devices, with each computer's presence.
+  const infos = await deviceInfos(ctx.store, ctx.accountId, (d) => d.kind === 'host' && ctx.sockets(`host:${d.deviceId}`).length > 0);
+  return json(infos.filter((d) => d.kind === 'host'), 200, { 'cache-control': 'no-store' });
+}
+
+async function ownerPairRequest({ ctx, request }: Call): Promise<Response> {
+  const body = await readJson(request);
+  if (typeof body.hostDeviceId !== 'string' || !body.hostDeviceId) throw new HttpError('invalid', 400);
+  const webPub = publicIdentity(body.webPub);
+  const name = label(body.name, 'browser');
+  const platform = label(body.platform, '');
+  // The desktop must be there to decide; a request it never sees would only strand the browser.
+  const sockets = ctx.sockets(`host:${body.hostDeviceId}`);
+  if (!sockets.length) throw new HttpError('host-offline', 409);
+  const r = await requestPairing(ctx.store, { accountId: ctx.accountId, hostDeviceId: body.hostDeviceId, webName: name, webPlatform: platform, webPub }, ctx.now);
+  // Only that desktop is asked: this request names it, unlike a code any desktop might have minted.
+  const frame = JSON.stringify({ t: 'pair.request', code: r.code, name, platform, hostPub: r.hostPub, webPub, requested: true });
+  for (const ws of sockets) trySend(ws, frame);
+  return json({ code: r.code, pollToken: r.pollToken, hostName: r.hostName }, 200, { 'cache-control': 'no-store' });
+}
+
+async function enrollRedeem({ ctx, request }: Call): Promise<Response> {
+  const body = await readJson(request);
+  const hostPub = publicIdentity(body.hostPub);
+  const redemption = await redeemEnrollment(ctx.store, {
+    accountId: ctx.accountId,
+    nonce: body.nonce as string,
+    hostPub,
+    name: label(body.name, 'desktop'),
+    platform: label(body.platform, '')
+  }, ctx.now);
+  return json(redemption, 200, { 'cache-control': 'no-store' });
 }
 
 async function mirrorList({ ctx, device }: Call): Promise<Response> {
