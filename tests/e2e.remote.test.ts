@@ -87,11 +87,9 @@ describe.runIf(enabled)('remote access settings', () => {
     await mirrorToggle.click();
     await expect.poll(async () => (JSON.parse(await fs.readFile(settingsPath, 'utf8')) as { remote?: { mirror?: boolean } }).remote?.mirror).toBe(true);
 
-    // A link is offered only for a live, unexpired code, and the clipboard carries the full URL.
-    // A new host stays "connecting" until its first browser approves enrollment.
+    // A new host stays "connecting" until its first browser approves enrollment. With no browser
+    // paired yet, Connect puts the code (and its link and QR code) on screen without another click.
     await expect.poll(async () => win.getByTestId('remote-status').innerText(), { timeout: 20_000 }).toMatch(/connecting|online/);
-    expect(await win.getByTestId('remote-pair-link').count()).toBe(0);
-    await win.getByRole('button', { name: 'Show pairing code' }).click();
     const code = win.getByTestId('remote-pair-code');
     await code.waitFor({ timeout: 20_000 });
     const pairingCode = (await code.innerText()).trim();
@@ -136,5 +134,7 @@ describe.runIf(enabled)('remote access settings', () => {
     const again = await launch();
     await expect.poll(hostId, { timeout: 30_000 }).toBe(enrolledAs);
     await expect.poll(async () => again.getByTestId('remote-status').innerText(), { timeout: 20_000 }).toMatch(/online/);
+    // Registered now: the enrollment secret is not asked for again.
+    expect(await again.getByTestId('remote-enroll').count()).toBe(0);
   });
 });
