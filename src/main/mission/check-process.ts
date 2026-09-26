@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import path from 'node:path';
-import { recordUnlaunchedProcessIntent, type ProcessOwnershipIntent } from './process-ownership';
+import { processOwnershipReceipted, retireUnclaimedProcessIntent, type ProcessOwnershipIntent } from './process-ownership';
 import { spawnIndependentWindowsSupervisor } from '../owned-windows-job';
 
 export interface CheckOutcome {
@@ -14,6 +14,8 @@ export interface CheckOutcome {
   canceled: boolean;
   outputLimited: boolean;
   lingering: boolean;
+  /** Proven: the supervisor exited without ever claiming the ownership intent, so no target ran. */
+  notStarted?: boolean;
   error?: string;
 }
 
@@ -132,16 +134,32 @@ function windowsCheck(options: CheckProcessOptions): OwnedCheckProcess {
     // different: its death triggers KILL_ON_JOB_CLOSE but is not proof the kernel finished it.
     if (!child.pid) {
       try {
-        if (options.ownershipIntent) recordUnlaunchedProcessIntent(options.ownershipIntent);
+        if (options.ownershipIntent && !retireUnclaimedProcessIntent(options.ownershipIntent)) throw new Error('Ownership intent is claimed');
         quiet = true; options.quiescent();
       } catch { options.uncertain(); }
     } else options.uncertain();
     settle({ error: `Check supervisor failed: ${error.message}` });
   });
+  // The supervisor claims its single-use intent before it creates any target. With no completion
+  // frame, only its durable empty-Job receipt, or the host winning that same exclusive claim after
+  // the supervisor exited, is positive proof that no descendant remains. Anything else stays owned.
+  const exitProof = async (): Promise<Partial<CheckOutcome> | undefined> => {
+    const intent = options.ownershipIntent;
+    if (!intent) return undefined;
+    if (await processOwnershipReceipted(intent)) return { error: 'The check supervisor exited without its completion frame. Its durable ownership receipt proves no owned process remains, but the check result is unknown.' };
+    if (retireUnclaimedProcessIntent(intent)) return { notStarted: true, error: 'The check supervisor exited before claiming process ownership (for example, PowerShell or Add-Type blocked by AppLocker, WDAC or AMSI), so nothing was started.' };
+    return undefined;
+  };
   child.once('close', () => {
     clearTimeout(watchdog);
-    if (!quiet) uncertain(`Check supervisor exited without a quiescence receipt${helperError ? `: ${helperError.trim()}` : ''}`);
-    else { options.quiescent(); settle(receipt ?? {}); }
+    if (quiet) { options.quiescent(); settle(receipt ?? {}); return; }
+    const detail = helperError ? `: ${helperError.trim()}` : '';
+    void exitProof().catch(() => undefined).then((proof) => {
+      if (quiet) return;
+      if (!proof) { uncertain(`Check supervisor exited without a quiescence receipt${detail}`); return; }
+      quiet = true; options.quiescent();
+      settle({ ...proof, error: `${proof.error}${detail}` });
+    });
   });
   child.stdin.write(`${JSON.stringify({ shell: path.join(system, 'cmd.exe'), command: options.command, cwd: options.cwd, timeoutMs: options.timeoutMs, waitForResume: true })}\n`, () => undefined);
   return { result, cancel };

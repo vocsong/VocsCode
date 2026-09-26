@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { resolveMissionDeliveryPolicy } from '../src/main/mission/policy';
+import { isConventionalMissionCheck, resolveMissionDeliveryPolicy } from '../src/main/mission/policy';
 
 const dirs: string[] = [];
 async function project(files: Record<string, string> = {}) {
@@ -22,6 +22,24 @@ describe('Mission project delivery policy', () => {
     expect(policy.checks.map((c) => c.id)).toEqual(['project-typecheck', 'project-test', 'project-build']);
     expect(policy.checks[1]).toMatchObject({ command: 'npm --silent test -- --reporter=json', testReport: { format: 'vitest-json', minimumTests: 1, maximumSkipped: 0 } });
     expect(runGit).not.toHaveBeenCalled();
+  });
+  it('keeps conventional gate contracts and blocks dependency setups the host cannot reproduce', async () => {
+    const scripts = { typecheck: 'tsc --noEmit', test: 'vitest run', build: 'vite build' };
+    const locked = JSON.stringify({ scripts, devDependencies: { typescript: '^5.0.0' } });
+    const conflicts = async (files: Record<string, string>) => (await resolveMissionDeliveryPolicy(await project(files), { runGit: git() })).conflicts;
+    const npm = await resolveMissionDeliveryPolicy(await project({ 'package.json': locked, 'package-lock.json': '{}' }), { runGit: git() });
+    expect(npm.conflicts).toEqual([]);
+    expect(npm.checks.map((c) => c.command)).toEqual(['npm run typecheck', 'npm --silent test -- --reporter=json', 'npm run build']);
+    expect(npm.checks.every(isConventionalMissionCheck)).toBe(true);
+    expect(isConventionalMissionCheck({ ...npm.checks[0], command: 'npm ci && npm run typecheck' })).toBe(false);
+    expect(isConventionalMissionCheck({ ...npm.checks[1], testReport: { ...npm.checks[1].testReport!, maximumSkipped: 3 } })).toBe(false);
+    expect(await conflicts({ 'package.json': locked, 'pnpm-lock.yaml': '' })).toEqual([expect.stringMatching(/pnpm \(pnpm-lock\.yaml\).*mission-delivery\.json/)]);
+    expect(await conflicts({ 'package.json': locked, 'yarn.lock': '' })).toEqual([expect.stringContaining('Yarn (yarn.lock)')]);
+    expect(await conflicts({ 'package.json': locked })).toEqual([expect.stringContaining('no npm lockfile')]);
+    expect(await conflicts({ 'package.json': JSON.stringify({ scripts, workspaces: ['packages/*'] }) })).toEqual([expect.stringContaining('no npm lockfile')]);
+    // Nothing to install, or no conventional gate that would need it: nothing to block.
+    expect(await conflicts({ 'package.json': JSON.stringify({ scripts }) })).toEqual([]);
+    expect(await conflicts({ 'package.json': JSON.stringify({ dependencies: { left: '1.0.0' } }), 'pnpm-lock.yaml': '' })).toEqual([]);
   });
   it('follows explicit PR/merge instructions without hard-coding a branch or inventing a remote head', async () => {
     const root = await project({ 'AGENTS.md': 'Push the agent branch and open a PR into `integration`. By default, merge the PR yourself once verification passes. See [testing](docs/TESTING.md).', 'docs/TESTING.md': 'Changes are squash-merged after all required checks.' });
