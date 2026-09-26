@@ -192,6 +192,20 @@ export function Transcript({ session }: { session: SessionMeta }) {
     anchor.current = { firstId, fromBottom: el.scrollHeight - el.scrollTop };
   }, [items]);
 
+  // Near the top of a paged transcript, fetch the previous page automatically (the desktop loads
+  // the whole file at once, so this only runs in a web shell with `transcriptStart > 0`).
+  const earlierBusy = useRef(false);
+  const lastAutoLoad = useRef(0);
+  useEffect(() => {
+    if (!loaded || transcriptStart <= 0 || scrollTop > 160 || earlierBusy.current) return;
+    if (Date.now() - lastAutoLoad.current < 500) return;
+    lastAutoLoad.current = Date.now();
+    earlierBusy.current = true;
+    void loadEarlier(session.id).finally(() => {
+      earlierBusy.current = false;
+    });
+  }, [loaded, transcriptStart, scrollTop, loadEarlier, session.id]);
+
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
