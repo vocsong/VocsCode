@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.0](https://github.com/vocsong/VocsCode/compare/v0.6.0...v0.7.0) (2026-09-26)
+
+
+### Features
+
+* **missions:** add durable orchestration and review-held delivery ([73f68a4](https://github.com/vocsong/VocsCode/commit/73f68a47fba475dea22f6afe47c334a6006789c3))
+* **remote:** isolate relay devices by GitHub account ([#427](https://github.com/vocsong/VocsCode/issues/427)) ([65f3bf2](https://github.com/vocsong/VocsCode/commit/65f3bf2b9573731d38e14dd19ca34848fd05acd7))
+* **remote:** sequence session events and keep remote responses under the relay frame limit ([#423](https://github.com/vocsong/VocsCode/issues/423)) ([3c1f20a](https://github.com/vocsong/VocsCode/commit/3c1f20aa58cc57d3bfe9740692d083d4531edb04))
+* **remote:** tell paired browsers which session the desktop is on ([#424](https://github.com/vocsong/VocsCode/issues/424)) ([650c984](https://github.com/vocsong/VocsCode/commit/650c984319aeca4e74d4b75ad16e8e65b47174cc))
+* **renderer:** make the renderer core drivable over the relay ([#426](https://github.com/vocsong/VocsCode/issues/426)) ([7bcf402](https://github.com/vocsong/VocsCode/commit/7bcf4029eb0991fb6355e66939f52875aef49d97))
+* **web:** mobile-first web shell for code.vocs.io/app ([#428](https://github.com/vocsong/VocsCode/issues/428)) ([f3aab6f](https://github.com/vocsong/VocsCode/commit/f3aab6ffbeeffb6a0523bb11d375ee2ad694817b))
+* **web:** sessions home, follow my computer and control sheets ([#429](https://github.com/vocsong/VocsCode/issues/429)) ([67048c2](https://github.com/vocsong/VocsCode/commit/67048c21eb18f313ab4f5912627744763f060b6c))
+
+
+### Bug Fixes
+
+* **fork:** give a worktree fork its own worktree, so archiving the source cannot delete it ([0ac29e2](https://github.com/vocsong/VocsCode/commit/0ac29e29db484d4d35026ae5459a0be39a900c32))
+* **native:** send DeepSeek's max reasoning tier instead of folding it into high ([#422](https://github.com/vocsong/VocsCode/issues/422)) ([01055e8](https://github.com/vocsong/VocsCode/commit/01055e8ddc12970ec00260df5325841aef4cdc7a))
+* **pi:** prevent duplicate assistant text after multiple tool calls ([#425](https://github.com/vocsong/VocsCode/issues/425)) ([bc84cbe](https://github.com/vocsong/VocsCode/commit/bc84cbe8929156a52b1889424d4de22927b47767))
+
 ## [0.6.0](https://github.com/vocsong/VocsCode/compare/v0.5.0...v0.6.0) (2026-09-25)
 
 
