@@ -120,12 +120,14 @@ New pieces:
    landing Worker owns the hostname and forwards `/app` and `/v1` to the relay Worker
    (service binding), so the app, the API and the WebSocket share one origin with no CORS and no
    second DNS record. It is never pointed at a local machine's server; it reaches desktops only
-   through the relay. A distinct web shell around the reused renderer core — different
-   `window.harness` transport, browser-native chrome (desktop titlebar/menu hidden in web
-   builds), slim account/device header, code.vocs.io branding, fully responsive layout (drawer
-   sidebar, touch targets), account/pairing screens, and a few shims. The sidebar
-   lists sessions across all paired hosts, grouped by host; interactive ops target the
-   host that owns the selected session.
+   through the relay. The shell lives in `src/web/` and is built by `vite.config.web.ts` into
+   `relay/public/app/` (base `/app/`, minified, `es2022`/`safari16`): a different `window.harness`
+   transport (`src/web/transport/`), browser-native chrome, hash routes, pairing/connect screens,
+   bottom sheets and a phone-first stylesheet over the renderer's `styles.css`. It reuses the
+   shared store (`configureStore({ pagedTranscripts: true })`), `Transcript`, `ApprovalCard`,
+   `ModelPicker`, `ui.tsx` and the format/order helpers; local capability gates (`Transport.can`,
+   `TranscriptCapabilities`) hide what the host would refuse. The P1 localhost web server
+   (`VOCS_CODE_WEB=1`) remains the dev dogfood, serving the desktop renderer bundle instead.
 
 Key idea: **the web client is the existing renderer with a different transport.** The
 less the renderer knows about how `window.harness` is backed, the more is reused.

@@ -117,6 +117,7 @@ describe('relay web client (browser-side protocol)', () => {
     // A fresh client restores its pairing from the vault.
     const inbound: string[] = [];
     let deliver: ((raw: string) => void) | undefined;
+    let socket: ReturnType<typeof wsFactory> | undefined;
     let holdNext = false;
     let held: string | undefined;
     let socketUrlSafe = false;
@@ -125,7 +126,7 @@ describe('relay web client (browser-side protocol)', () => {
       socketUrlSafe = parsed.pathname === '/v1/ws/client' && parsed.searchParams.has('ticket') &&
         parsed.searchParams.get('ticket') !== creds.webToken && !parsed.searchParams.has('token') && !url.includes(creds.webToken);
       deliver = onMessage;
-      return wsFactory(url, (raw) => {
+      socket = wsFactory(url, (raw) => {
       if ((JSON.parse(raw) as { t: string }).t === 'd') {
         inbound.push(raw);
         if (holdNext) {
@@ -136,6 +137,7 @@ describe('relay web client (browser-side protocol)', () => {
       }
       onMessage(raw);
       }, onClose);
+      return socket;
     } });
     expect(await restored.restore()).toBe(true);
     await sleep(400); // host reconnects under its new device token
@@ -196,6 +198,11 @@ describe('relay web client (browser-side protocol)', () => {
       ['push:settingsChanged', { notifications: true }],
       ['push:settingsChanged', { notifications: false }]
     ]);
+
+    // A dropped socket fails in-flight invokes immediately, instead of each waiting out 30 s.
+    const pending = restored.invoke('sessions:list', null);
+    socket!.close();
+    await expect(pending).rejects.toThrow('connection lost');
 
     await restored.logout();
     expect(vault.peek()).toBeNull();
