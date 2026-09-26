@@ -2,11 +2,26 @@
 
 A Mission is a durable engineering objective with one principal engineer and generated specialists. It uses the normal session transcript, permissions, provider connections and panels; it is not another chat application or an OS sandbox.
 
-**Implementation/certification status:** see [the acceptance ledger](MISSION-IMPLEMENTATION.md). Passing deterministic or scripted-runtime tests does not certify a live provider. Do not infer Mission support from the ordinary harness feature table.
+> **Experimental.** Missions run today only with **Pi presets on Windows**. No live end-to-end Mission (plan → implement → review → verify → deliver) has completed yet, and PR/merge delivery has never run against real GitHub. What was tested, on what, and the open gaps are in [MISSION-STATUS.md](MISSION-STATUS.md). Ordinary sessions do not depend on any of this.
+
+## Before you start
+
+- **Windows** and the **Pi** harness, signed in to the provider you will use. Claude, Codex, Cursor, ACP and native presets cannot run a Mission yet; macOS and Linux cannot run one at all.
+- A **Git repository with a clean baseline**. Planning may read a dirty checkout, but execution waits until you commit or stash your own changes. Mission never stashes, resets or commits your work for you.
+- For PR or merge delivery, the `gh` CLI signed in to the repository's host. Local commit needs nothing extra.
+- Start with a **throwaway repository**. Mission branches (`mission/*`) and worktrees are retained until you clean them up explicitly.
+
+## Quick start
+
+1. **Settings → Mission**: add a preset (Pi, the exact provider/model, and a reasoning effort or the runtime's Default), put it in the **T5** pool and make it the default principal engineer.
+2. Open the repository and choose **New Session → Mission**, or type `/mission plan <objective>` in any session to plan together (`/mission <objective>` runs autonomously).
+3. Answer the principal engineer's questions one at a time, then review the plan and click **Proceed** (or `/mission execute`).
+4. Follow progress in the **Mission panel**: tasks, specialists, evidence, blockers and delivery. Pause, Resume and Stop are in the header.
+5. Unless your repository says otherwise, the result is a **verified local commit** on a `mission/…` branch; your checked-out branch is not moved. Use **Delivery → Keep Mission local** to rule out pushing.
 
 ## Configure and launch
 
-In Settings → Missions, create reusable **execution presets**: harness, exact provider/model connection, and either an explicit supported reasoning effort or the runtime's **Default**. A preset is an execution configuration, not a specialist role. Default does not inherit the application's global effort setting.
+In Settings → Mission, create reusable **execution presets**: harness, exact provider/model connection, and either an explicit supported reasoning effort or the runtime's **Default**. A preset is an execution configuration, not a specialist role. Default does not inherit the application's global effort setting.
 
 Place presets in the five tier pools and select the default principal engineer from **T5**. T1–T4 may be empty. Several T5 alternatives are valid. The same model with a different harness, connection or effort is a different preset. Mission dispatch never silently downgrades a missing T5, substitutes another account, or treats a model-catalog entry as runtime certification.
 
@@ -63,6 +78,8 @@ Each answer has separate observed usage and bounds: one turn, two minutes after 
 ## Project delivery and check policy
 
 Mission reads repository instructions (`AGENTS.md`, `CLAUDE.md`, `.vocs-code/INSTRUCTIONS.md`) and relevant local testing/release links. It retains the policy provenance. No publishing instruction means **local commit**, not permission to push or deploy. Ambiguous targets, conflicting grants or unreadable policy block delivery.
+
+If those instructions say to open or merge PRs, Mission can resolve an open-PR or merge endpoint from them and, after verification and review, push and call `gh` as your permission mode allows. While testing, commit a `.vocs-code/mission-delivery.json` with `"endpoint": "local_commit"` or use **Delivery → Keep Mission local**. Remote delivery also refuses to run when your checkout has commits that are not on the target branch, so Mission never publishes work you have not pushed yourself.
 
 To override publication **downward for this Mission**, use its panel's **Delivery → Keep Mission local** (no push/PR/merge), or **Open PR only** (no merge). Only an existing merge endpoint can become open PR/local commit; an open-PR endpoint can become local commit. These explicit genuine-user controls pause owned work, record immutable user-action provenance and an append-only publication ceiling, and require an explicit Resume after reconciliation. The ceiling survives restart, repository policy rereads and approved-target refresh. It cannot be lifted for this Mission, and cannot change its remote, branch or URL, grant permissions, waive checks or independent review, or clear holds/conflicts. A local-only policy reread still discovers required checks/holds but does not probe the remote target.
 
@@ -127,4 +144,4 @@ Usage comes from owned session cumulative ledgers, with durable high-water check
 
 **Account capacity** is a separate app-wide setting: up to 64 explicit connection IDs, each with 1–128 turn slots. The key is the preset's connection ID, or provider ID when it has no separate connection. Production scheduler startup and settings updates use that map for all Missions, leads and workers; existing leases drain normally when capacity is tightened. A full account queues work without changing the account, model, effort or billing path. Project overrides cannot replace these app-wide account limits. The map is only a concurrency limit, not account provisioning or provider-quota detection.
 
-Current certification evidence and unresolved requirements live in [MISSION-IMPLEMENTATION.md](MISSION-IMPLEMENTATION.md). Claude's prompt-free API cannot yet establish all required effective model/effort/connection observations, so its Mission driver remains unverified. Ordinary Claude sessions are unaffected. Cross-harness, macOS/Linux, and live-provider Mission support must be demonstrated independently, not inferred from the Windows/scripted Pi tests.
+Current verification evidence, the support matrix and unresolved requirements live in [MISSION-STATUS.md](MISSION-STATUS.md). Claude's prompt-free API cannot yet establish all required effective model/effort/connection observations, so its Mission driver remains unverified. Ordinary Claude sessions are unaffected. Cross-harness, macOS/Linux, and live-provider Mission support must be demonstrated independently, not inferred from the Windows/scripted Pi tests.

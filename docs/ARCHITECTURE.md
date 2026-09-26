@@ -5,7 +5,8 @@ Technical reference moved out of the README. For the friendly overview, read the
 ## Source layout
 
 ```
-src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette (no runtime deps)
+src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette (no runtime deps);
+                  mission*.ts hold the Mission record, preset/config and command contracts
 src/main
   harness/        one adapter per harness → normalized SessionEvent stream
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
@@ -15,7 +16,10 @@ src/main
     pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
     acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
-  mission/        durable Mission coordination, scoped tools, scheduling, workspaces and delivery
+  mission/        durable Mission coordination (service/state/store), scoped tools, scheduling,
+                  workspaces, verification, delivery and restart recovery (docs/MISSIONS.md)
+  owned-windows-job.ts + terminal-process.ts   Windows Job Object supervisor that proves a process
+                  tree has ended (resources/mission/windows-check-job.ps1)
   models/         provider clients and model discovery, with offline catalogs and pricing
   util/           fs and async helpers shared by the adapters (no Electron imports)
   session-manager.ts  sessions, transcripts, approvals, goals, worktrees
@@ -32,10 +36,13 @@ src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
     analytics/    the usage dashboard: tabs, view model (model.ts) and the SVG chart primitives (charts.tsx)
+    mission/      Mission settings, launch dialog, panel, workspace inspector and completion report
   terminal/       xterm.js instances kept alive outside React (host.ts)
   theme.ts        injects the data-driven palettes and applies the active theme to <html>
   store.ts        session state; api.ts wraps the preload bridge
-resources/pi      the approvals extension loaded into pi at spawn time
+resources/pi      extensions loaded into pi at spawn time: approvals, tools, subagents, the MCP bridge and,
+                  for Mission-managed sessions only, vocs-code-mission.ts
+resources/mission the Windows Job Object helper (windows-check-job.ps1) shared by Mission checks and owned processes
 tests             unit + format + review-fixes run offline; smoke and e2e are opt-in
 ```
 
@@ -127,7 +134,10 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 
 ## Mission ownership
 
-[Mission guide](MISSIONS.md) · [acceptance/certification ledger](MISSION-IMPLEMENTATION.md)
+[Mission guide](MISSIONS.md) · [status and support matrix](MISSION-STATUS.md) · [specification](MISSION-SPEC-v0.2.md)
+
+Missions are experimental and run only with Pi presets on Windows. The harness matrix above
+describes ordinary sessions and says nothing about Mission support.
 
 `mission/runtime.ts` composes the privileged coordinator at desktop startup. `MissionService`
 owns versioned plans, generated profiles, task/attempt admission, mailbox, integration and delivery;
