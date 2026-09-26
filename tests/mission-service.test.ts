@@ -148,7 +148,9 @@ async function report(r: MissionRecord, attemptId: string, patch: Partial<Missio
 async function crashRestart(release: () => void = () => undefined, staleSessionIndex = false) {
   await sessions.flushPendingPersists();
   const recovered = path.join(root, `restarted-${++sequence}`);
-  await fs.cp(data, recovered, { recursive: true });
+  // A scheduled atomic write can rename its `*.tmp` file away mid-copy; temp files are not
+  // committed state, so they are skipped rather than raced (the copy runs at a crash boundary).
+  await fs.cp(data, recovered, { recursive: true, filter: (source) => !source.endsWith('.tmp') });
   release();
   await service.close(); await sessions.stopAll(); await sessions.flushPendingPersists();
   data = recovered;
