@@ -7,12 +7,13 @@ import os from 'node:os';
 import { WebSocket } from 'ws';
 import { enrollTokenContext, generateIdentity, hostAccept, openFrame, openSealedToKey, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob, type SealedToKey } from '../../shared/crypto';
 import { connectCheckCode, connectLink } from '../../shared/pairing';
-import { isRemoteChannel, isRemotePushChannel, isRemoteReadChannel } from '../../shared/remote-channels';
+import { isRemoteChannel, isRemotePushChannel, isRemoteReadChannel, REMOTE_FRAME_MAX_BYTES } from '../../shared/remote-channels';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
 import type { Logger } from '../log';
 import type { RemoteAudit } from './audit';
+import { projectRemoteValue } from './project';
 
 /** The remote channel manifest (docs/REMOTE-ACCESS.md §5) lives in src/shared/remote-channels.ts
  *  so the web shell imports the same allowlist it is held to. Re-exported because desktop callers
@@ -288,8 +289,11 @@ export class RemoteHost {
    *  remote push surface leaves the machine; the rest is dropped here, before sealing. */
   async broadcastPush(channel: string, payload: unknown): Promise<void> {
     if (!isRemotePushChannel(channel)) return;
+    // Session pushes carry SessionMeta; strip what only the desktop may see before sealing.
+    const body = channel === 'push:sessionsChanged' ? projectRemoteValue(payload) : payload;
     for (const clientId of [...this.sessions.keys()]) {
-      await this.sendTo(clientId, { type: 'push', channel, payload });
+      const outcome = await this.sendTo(clientId, { type: 'push', channel, payload: body });
+      if (outcome === 'oversize') this.deps.log('warn', `remote: dropped a ${channel} push for ${clientId} (over the relay frame limit)`);
     }
   }
 
@@ -766,8 +770,13 @@ export class RemoteHost {
         return;
       }
       try {
-        const value = await this.deps.registry().invoke(inner.channel, inner.request);
-        await this.sendTo(from, { type: 'result', id: inner.id, ok: true, value });
+        const value = projectRemoteValue(await this.deps.registry().invoke(inner.channel, inner.request));
+        const outcome = await this.sendTo(from, { type: 'result', id: inner.id, ok: true, value });
+        if (outcome === 'oversize') {
+          // The relay would drop the frame silently and leave the client waiting out its timeout.
+          this.deps.log('warn', `remote: ${inner.channel} response for ${from} exceeded the relay frame limit`);
+          await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: 'response too large' });
+        }
       } catch (e) {
         await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: e instanceof Error ? e.message : String(e) });
       }
@@ -779,19 +788,27 @@ export class RemoteHost {
     }
   }
 
-  private async sendTo(clientId: string, inner: unknown): Promise<void> {
+  /** One sealed frame's fate: 'oversize' means it was refused unsent because the relay would have
+   *  dropped it, 'skipped' that the client or its socket is already gone. */
+  private async sendTo(clientId: string, inner: unknown): Promise<'sent' | 'oversize' | 'skipped'> {
     const session = this.sessions.get(clientId);
-    if (!session) return;
-    const send = session.outgoing.then(async () => {
+    if (!session) return 'skipped';
+    const send = session.outgoing.then(async (): Promise<'sent' | 'oversize' | 'skipped'> => {
       const socket = this.ws;
-      if (this.sessions.get(clientId) !== session || !socket || socket.readyState !== WebSocket.OPEN) return;
+      if (this.sessions.get(clientId) !== session || !socket || socket.readyState !== WebSocket.OPEN) return 'skipped';
       const sealed = await sealFrame(session.key, session.salt, session.out++, inner);
+      const wire = JSON.stringify({ t: 'd', to: clientId, seq: sealed.seq, payload: sealed });
+      // The relay drops anything over MAX_WS_FRAME_BYTES without telling either side
+      // (relay/src/hub.ts). Refuse it here, where the sender can still say so.
+      if (Buffer.byteLength(wire, 'utf8') > REMOTE_FRAME_MAX_BYTES) return 'oversize';
       if (this.sessions.get(clientId) === session && this.ws === socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ t: 'd', to: clientId, seq: sealed.seq, payload: sealed }));
+        socket.send(wire);
+        return 'sent';
       }
+      return 'skipped';
     });
-    session.outgoing = send.catch(() => undefined);
-    await send;
+    session.outgoing = send.then(() => undefined, () => undefined);
+    return send;
   }
 }
 

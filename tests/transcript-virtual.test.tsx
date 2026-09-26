@@ -62,6 +62,15 @@ describe('user message actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit and rerun message' }));
     expect((screen.getByRole('textbox', { name: 'Edit message' }) as HTMLTextAreaElement).value).toBe('Message to copy');
   });
+
+  it('reports images a remote view left behind instead of silently showing none', () => {
+    const { rerender } = render(<UserMessage item={{ id: 'u1', kind: 'user', ts: 1, text: 'look' }} />);
+    expect(screen.queryByText(/image[s]? not shown/)).toBeNull();
+    rerender(<UserMessage item={{ id: 'u1', kind: 'user', ts: 1, text: 'look', imagesOmitted: 2 }} />);
+    expect(screen.getByText('2 images not shown')).toBeTruthy();
+    rerender(<UserMessage item={{ id: 'u2', kind: 'user', ts: 1, text: 'look', imagesOmitted: 1 }} />);
+    expect(screen.getByText('1 image not shown')).toBeTruthy();
+  });
 });
 
 describe('windowed transcript', () => {

@@ -147,6 +147,8 @@ export class SessionManager {
   private titleAttempts = new Map<string, number>();
   /** Sessions with a title call out right now, so two quick messages cannot fire two of them. */
   private titleInFlight = new Set<string>();
+  /** Event sequence, monotonic for the lifetime of this manager; see `publish`. */
+  private seq = 0;
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
@@ -643,20 +645,37 @@ export class SessionManager {
   }
 
   transcript(id: string): Promise<TranscriptItem[]> {
-    if (!this.get(id)) return Promise.reject(new Error('Session not found'));
-    return this.deps.store.readTranscript(id).then((stored) => {
-      const live = this.active.get(id)?.liveItems;
-      // A persisted answer still marked streaming is a checkpoint from a run that ended before it
-      // finished (a crash, or an older build); only the live copy can still be streaming.
-      const items = stored.map((i) => (i.kind === 'assistant' && i.streaming && !live?.has(i.id) ? { ...i, streaming: false } : i));
-      if (!live) return items;
-      // Overlay in-memory streaming state.
-      const map = new Map(items.map((i) => [i.id, i]));
-      for (const [k, v] of live) map.set(k, v);
-      const persistedIds = new Set(items.map((i) => i.id));
-      const order = [...persistedIds, ...[...live.keys()].filter((k) => !persistedIds.has(k))];
-      return order.map((k) => map.get(k) as TranscriptItem);
-    });
+    return this.transcriptSnapshot(id).then((snapshot) => snapshot.items);
+  }
+
+  /** The transcript plus the event-sequence floor its live overlay reflects. A remote client keeps
+   *  the floor beside the snapshot and applies only later events, so the stream that follows can
+   *  neither double the text the snapshot already has nor lose an event the snapshot missed. */
+  async transcriptSnapshot(id: string): Promise<{ items: TranscriptItem[]; seq: number }> {
+    if (!this.get(id)) throw new Error('Session not found');
+    const beforeActive = this.active.get(id);
+    const beforeSeq = this.seq;
+    const stored = await this.deps.store.readTranscript(id);
+    const active = this.active.get(id);
+    // A persisted answer still marked streaming is a checkpoint from a run that ended before it
+    // finished (a crash, or an older build); only the live copy can still be streaming.
+    const live = active?.liveItems;
+    const items = stored.map((i) => (i.kind === 'assistant' && i.streaming && !live?.has(i.id) ? { ...i, streaming: false } : i));
+    if (!active || active !== beforeActive) {
+      // No live overlay to vouch for the window, or the session was replaced mid-read: fall back
+      // to the counter from before the read, so every event during it is replayed rather than
+      // dropped. Replaying an item the snapshot already holds replaces it in place.
+      return { items, seq: beforeSeq };
+    }
+    // Overlay in-memory streaming state. The live item is copied, not aliased: a snapshot's items
+    // must stay frozen at `seq`, while later deltas keep mutating the live map in place. Copying
+    // it and reading the counter happen in one synchronous block, so everything at or before `seq`
+    // is in `items` and nothing after it is.
+    const map = new Map(items.map((i) => [i.id, i]));
+    for (const [k, v] of live!) map.set(k, { ...v });
+    const persistedIds = new Set(items.map((i) => i.id));
+    const order = [...persistedIds, ...[...live!.keys()].filter((k) => !persistedIds.has(k))];
+    return { items: order.map((k) => map.get(k) as TranscriptItem), seq: this.seq };
   }
 
   private buildContext(meta: SessionMeta, id: string): HarnessContext {
@@ -1417,7 +1436,14 @@ export class SessionManager {
       default:
         break;
     }
-    this.deps.pushEvent({ sessionId, event, ts: Date.now() });
+    this.publish(sessionId, event);
+  }
+
+  /** Stamps a monotonic sequence onto every event this manager pushes. `transcriptSnapshot`
+   *  reports the counter the same events count against, which is what makes a snapshot plus a
+   *  live stream reconcilable for a remote client. */
+  private publish(sessionId: string, event: SessionEvent): void {
+    this.deps.pushEvent({ sessionId, event, ts: Date.now(), seq: ++this.seq });
   }
 
   /** Transcript appends must never reject into the void; log a warning instead. */
@@ -1440,7 +1466,7 @@ export class SessionManager {
       const saved: TranscriptItem = streaming ? { ...item, streaming: false } : item;
       await this.deps.store.appendTranscript(sessionId, saved);
       active.dirty.delete(id);
-      if (streaming) this.deps.pushEvent({ sessionId, event: { type: 'item.upsert', item: saved }, ts: Date.now() });
+      if (streaming) this.publish(sessionId, { type: 'item.upsert', item: saved });
     }
   }
 
