@@ -7,115 +7,17 @@ import os from 'node:os';
 import { WebSocket } from 'ws';
 import { enrollTokenContext, generateIdentity, hostAccept, openFrame, openSealedToKey, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob, type SealedToKey } from '../../shared/crypto';
 import { connectCheckCode, connectLink } from '../../shared/pairing';
+import { isRemoteChannel, isRemotePushChannel, isRemoteReadChannel } from '../../shared/remote-channels';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
 import type { Logger } from '../log';
 import type { RemoteAudit } from './audit';
 
-/** Channels a paired web client may invoke (docs/REMOTE-ACCESS.md §5). Interactive P3:
- *  chat send/interrupt/stop, session lifecycle and per-session model controls are in; the
- *  terminal is read-only (P3.5 step one) and destructive git stays desktop-only. */
-export const REMOTE_CHANNELS = new Set<string>([
-  'app:info',
-  'settings:get',
-  'harness:availability',
-  'harness:models',
-  'sessions:list',
-  'sessions:get',
-  'sessions:transcript',
-  'sessions:transcriptPage',
-  'sessions:search',
-  'sessions:send',
-  'sessions:interrupt',
-  'sessions:stop',
-  'sessions:create',
-  'sessions:rename',
-  'sessions:setModel',
-  'sessions:setEffort',
-  'sessions:setPermissionMode',
-  'approvals:respond',
-  'analytics:summary',
-  'analytics:executions',
-  'skills:list',
-  'skills:read',
-  'git:folderBranch',
-  'git:folderIsRepo',
-  'git:summary',
-  'git:diff',
-  'git:branches',
-  'git:branchesOverview',
-  'git:worktrees',
-  'git:pullRequests',
-  'git:issues',
-  'git:issueComments',
-  'git:prComments',
-  'fs:list',
-  'fs:search',
-  'fs:read',
-  // P3.5, read-only first: list terminals and read a plain-text screen. No input, resize or attach.
-  'terminal:list',
-  'terminal:screen'
-]);
-
-/** View-only mode (P4) admits the read half and refuses the write half. Every channel in
- *  REMOTE_CHANNELS must be classified here or in REMOTE_WRITE_CHANNELS; a test asserts the two
- *  partition the set, so a newly added channel cannot silently become writable when view-only. */
-export const REMOTE_READ_CHANNELS = new Set<string>([
-  'app:info',
-  'settings:get',
-  'harness:availability',
-  'harness:models',
-  'sessions:list',
-  'sessions:get',
-  'sessions:transcript',
-  'sessions:transcriptPage',
-  'sessions:search',
-  'analytics:summary',
-  'analytics:executions',
-  'skills:list',
-  'skills:read',
-  'git:folderBranch',
-  'git:folderIsRepo',
-  'git:summary',
-  'git:diff',
-  'git:branches',
-  'git:branchesOverview',
-  'git:worktrees',
-  'git:pullRequests',
-  'git:issues',
-  'git:issueComments',
-  'git:prComments',
-  'fs:list',
-  'fs:search',
-  'fs:read',
-  // P3.5, read-only first: list terminals and read a plain-text screen. No input, resize or attach.
-  'terminal:list',
-  'terminal:screen'
-]);
-
-export const REMOTE_WRITE_CHANNELS = new Set<string>([
-  'sessions:send',
-  'sessions:interrupt',
-  'sessions:stop',
-  'sessions:create',
-  'sessions:rename',
-  'sessions:setModel',
-  'sessions:setEffort',
-  'sessions:setPermissionMode',
-  'approvals:respond'
-]);
-
-/** Push channels a paired browser receives: the ones the remote surface consumes. Everything else
- *  the desktop pushes stays on this machine — terminal output (not remote until P3.5), the
- *  assistant panel, update prompts, and push:remoteState, which carries the live pairing code
- *  and pending pairing requests. */
-export const REMOTE_PUSH_CHANNELS = new Set<string>([
-  'push:sessionEvent',
-  'push:sessionsChanged',
-  'push:settingsChanged',
-  'push:remotePolicy'
-]);
+/** The remote channel manifest (docs/REMOTE-ACCESS.md §5) lives in src/shared/remote-channels.ts
+ *  so the web shell imports the same allowlist it is held to. Re-exported because desktop callers
+ *  and tests have always imported it from the host. */
+export { REMOTE_CHANNELS, REMOTE_PUSH_CHANNELS, REMOTE_READ_CHANNELS, REMOTE_WRITE_CHANNELS } from '../../shared/remote-channels';
 
 interface HostCredentials {
   identity: Identity;
@@ -385,7 +287,7 @@ export class RemoteHost {
   /** Fan a local push event out to every connected web client, sealed per client. Only the
    *  remote push surface leaves the machine; the rest is dropped here, before sealing. */
   async broadcastPush(channel: string, payload: unknown): Promise<void> {
-    if (!REMOTE_PUSH_CHANNELS.has(channel)) return;
+    if (!isRemotePushChannel(channel)) return;
     for (const clientId of [...this.sessions.keys()]) {
       await this.sendTo(clientId, { type: 'push', channel, payload });
     }
@@ -845,7 +747,7 @@ export class RemoteHost {
     session.inSalt = sealed.salt;
     session.inSeq = seq;
     if (inner.type === 'invoke' && inner.channel) {
-      const allowed = REMOTE_CHANNELS.has(inner.channel);
+      const allowed = isRemoteChannel(inner.channel);
       // Approvals are signed inside the e2e channel (§6.8): only a paired device key resolves.
       const signedOk = inner.channel !== 'approvals:respond' || (!!inner.sig && (await verify(session.identity, inner.request, inner.sig)));
       if (!allowed || !signedOk) {
@@ -857,7 +759,7 @@ export class RemoteHost {
       }
       // View-only mode (P4): the read half is served, the write half is refused before dispatch,
       // so no send, approval, session change or lifecycle action can reach the registry.
-      if (this.deps.viewOnly?.() && !REMOTE_READ_CHANNELS.has(inner.channel)) {
+      if (this.deps.viewOnly?.() && !isRemoteReadChannel(inner.channel)) {
         this.deps.log('info', `remote: refused ${inner.channel} from ${from} (view-only mode)`);
         this.deps.audit?.record('view-only-blocked', { device: from, detail: inner.channel });
         await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: 'remote access is in view-only mode' });

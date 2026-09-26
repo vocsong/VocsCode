@@ -405,6 +405,8 @@ export type PushPayloads = {
   /** Vesta's whole transcript; the list is short, so state is replaced rather than patched. */
   'push:agentState': AgentState;
   'push:remoteState': RemoteState;
+  /** Remote-only: the view-only policy, pushed to paired browsers over the e2e session. */
+  'push:remotePolicy': { viewOnly: boolean };
   'push:updateState': UpdateState;
 };
 

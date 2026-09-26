@@ -1,7 +1,7 @@
-/** Tail-first transcript windows for paired browsers (src/main/remote/transcript-page.ts): the
+/** Tail-first transcript windows for paired browsers (src/shared/transcript-page.ts): the
  *  web client loads the newest items, refreshes from its window's start, and pages back. */
 import { describe, expect, it } from 'vitest';
-import { TRANSCRIPT_PAGE_DEFAULT, TRANSCRIPT_PAGE_MAX, transcriptPage } from '../src/main/remote/transcript-page';
+import { TRANSCRIPT_PAGE_DEFAULT, TRANSCRIPT_PAGE_MAX, transcriptPage } from '../src/shared/transcript-page';
 import type { TranscriptItem } from '../src/shared/types';
 
 const items = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `i${i}`, kind: 'user', ts: i, text: `m${i}` }) as TranscriptItem);
