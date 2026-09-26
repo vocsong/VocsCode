@@ -69,9 +69,20 @@ export interface SessionManagerDeps {
   memoryUserData?: string;
   /** Layer 2 digest for priming a new session's system prompt; absent disables priming. */
   knowledgeDigest?: (scope: { projectRoot: string; cwd: string; branch?: string }) => Promise<string | null>;
-  /** Held Mission leases defer ordinary writers; reserve admission across async guards/startup. */
+  /** Held Mission leases defer ordinary writers; reserve admission across async guards/startup.
+   * Ordinary sessions go through it only while ordinary process ownership is enabled. */
   withWorkspaceDispatch?: (meta: SessionMeta, dispatch: () => Promise<void>) => Promise<void>;
+  /** Ordinary (non-Mission) process ownership: Windows, Missions configured and a working Job
+   * helper. Absent/false keeps ordinary sessions as they always were: no writer claims, no
+   * Mission admission, and disposal never needs a proof. */
+  ordinaryProcessOwnership?: () => boolean;
+  /** Test seam: how long an ordinary Stop waits for its adapter's disposal before releasing the session. */
+  disposeWaitMs?: number;
 }
+
+/** An ordinary Stop gives a disposing adapter this long (above every adapter's own shutdown
+ * deadline) before the session is released anyway; the disposal itself carries on regardless. */
+const ORDINARY_DISPOSE_WAIT_MS = 20_000;
 
 export interface MissionSessionHooks {
   beforeDispatch(meta: SessionMeta, input: UserInput): Promise<void>;
@@ -188,6 +199,11 @@ export class SessionManager {
   private static readonly GIT_STATE_RECHECK_MS = 120_000;
 
   private active = new Map<string, ActiveSession>();
+  /** Last runtime created per session. An ordinary runtime is fenced only once a newer one exists. */
+  private runtimeSeq = new Map<string, number>();
+  /** Ordinary runtimes still disposing after Stop released their session. Mission admission only:
+   * they never block the session itself. */
+  private retiring = new Map<string, Set<ActiveSession>>();
   private missionHooks: MissionSessionHooks | undefined;
   private listeners = new Set<(env: SessionEventEnvelope) => void>();
   /** Includes input waiting for startup, compaction or the Mission's dispatch authorization. */
@@ -248,10 +264,12 @@ export class SessionManager {
 
   activity(id: string): SessionActivity {
     const active = this.active.get(id);
+    // A Stopped ordinary runtime may still be disposing; it can still write, so admission sees it.
+    const retiring = !!this.retiring.get(id)?.size;
     const writers = active?.adapter.workspaceWriterState?.();
     const unprovenClaims = this.get(id)?.workspaceWriterClaims?.some((claim) => claim !== active?.workspaceWriterClaim) ?? false;
     const state = {
-      active: !!active,
+      active: !!active || retiring,
       starting: !!active?.starting && active.startupDispatched,
       turn: !!(active?.turnPending || (active?.adapter.busy && !active.compactionInFlight)),
       tools: active ? [...active.liveItems.values()].filter((item) => item.kind === 'tool' && item.status === 'running').length : 0,
@@ -260,7 +278,7 @@ export class SessionManager {
       approvals: active?.approvals.size ?? 0,
       compacting: !!active?.compactionInFlight,
       queued: (this.get(id)?.queued ?? 0) + (this.managedDispatches.has(id) ? 1 : 0),
-      tearingDown: !!active?.tearingDown,
+      tearingDown: !!active?.tearingDown || retiring,
       uncertain: !!active?.uncertain || writers === 'unknown' || unprovenClaims,
     };
     return { ...state, quiescent: !state.starting && !state.turn && !state.tools && !state.nativeChildren && !state.processes && !state.approvals && !state.compacting && !state.queued && !state.tearingDown && !state.uncertain };
@@ -284,6 +302,16 @@ export class SessionManager {
 
   private settings(): AppSettings {
     return this.deps.settings.get();
+  }
+
+  private ordinaryOwnership(): boolean {
+    return this.deps.ordinaryProcessOwnership?.() ?? false;
+  }
+
+  /** Mission admission reserves managed dispatch always, ordinary dispatch only while ordinary
+   * process ownership is on: otherwise an ordinary send behaves exactly as it always did. */
+  private admits(meta: SessionMeta): boolean {
+    return !!this.deps.withWorkspaceDispatch && (!!meta.mission || this.ordinaryOwnership());
   }
 
   private pushSessions(): void {
@@ -846,8 +874,12 @@ export class SessionManager {
   private buildContext(meta: SessionMeta, id: string, current = () => true): HarnessContext {
     const store = this.deps.store;
     const sessionDir = store.sessionDir(id);
+    const managed = !!meta.mission;
     const snapshot = structuredClone(meta);
-    const session = () => current() ? this.get(id) ?? meta : snapshot;
+    // A retired managed runtime reads its launch snapshot. An ordinary runtime always reads the
+    // live session, as it always did: a permission mode tightened after start must still govern the
+    // approvals it raises while it shuts down.
+    const session = () => managed && !current() ? snapshot : this.get(id) ?? meta;
     return {
       sessionId: id,
       session,
@@ -855,6 +887,7 @@ export class SessionManager {
       runtime: this.deps.runtime,
       sessionDir,
       permissionMode: () => session().config.permissionMode,
+      ordinaryProcessOwnership: () => !managed && this.ordinaryOwnership(),
       effort: () => {
         const m = session();
         // An explicit omission must not borrow the preference retained for effort-capable models.
@@ -945,8 +978,17 @@ export class SessionManager {
       this.schedulePersist(meta);
     }
     const generation = meta.mission?.generation;
+    const managed = !!meta.mission;
+    const seq = (this.runtimeSeq.get(id) ?? 0) + 1;
+    this.runtimeSeq.set(id, seq);
     let active: ActiveSession;
-    const current = () => !!active && this.active.get(id) === active && !active.tearingDown && this.get(id)?.mission?.generation === generation;
+    // A managed runtime is fenced as soon as its teardown starts. An ordinary runtime keeps
+    // recording its own events and writes while it disposes (its interrupted turn, final usage,
+    // history), as it always did, and is fenced only once a newer runtime supersedes it.
+    const current = managed
+      ? () => !!active && this.active.get(id) === active && !active.tearingDown && this.get(id)?.mission?.generation === generation
+      : () => this.runtimeSeq.get(id) === seq && this.get(id)?.mission?.generation === generation;
+    const live = () => current() && !active.tearingDown;
     const ctx = this.buildContext(meta, id, current);
     const adapter = createAdapter(meta.config.harness, ctx);
     active = {
@@ -983,18 +1025,30 @@ export class SessionManager {
     this.deps.log('info', `[${id}] starting ${meta.config.harness} (model=${describeModel(meta.activeModel)} permissions=${meta.config.permissionMode} cwd=${meta.cwd}${resume ? ` resume=${resume}` : ''})`);
     const t0 = Date.now();
     const start = async () => {
-      if (!current()) throw new Error('Session stopped before its runtime could start.');
+      if (!live()) throw new Error('Session stopped before its runtime could start.');
       active.startupDispatched = true;
       if (meta.config.permissionMode !== 'plan') await this.claimWorkspaceWriter(meta, active);
-      if (!current()) throw new Error('Session stopped before its runtime could start.');
+      if (!live()) throw new Error('Session stopped before its runtime could start.');
       await adapter.start();
     };
-    active.starting = (this.deps.withWorkspaceDispatch ? this.deps.withWorkspaceDispatch(meta, start) : start())
+    active.starting = (this.admits(meta) ? this.deps.withWorkspaceDispatch!(meta, start) : start())
       .then(() => {
         active.starting = null;
         this.deps.log('info', `[${id}] ${meta.config.harness} started in ${Date.now() - t0}ms`);
+        // An ordinary Stop does not wait for startup. A start that completed after it must not
+        // leave its process running, so dispose again (managed teardown awaits startup instead).
+        if (!managed && active.tearingDown) {
+          void Promise.resolve().then(() => adapter.dispose()).catch((e) => this.deps.log('warn', `[${id}] dispose after a start that outlived Stop failed: ${errorMessage(e)}`));
+          return;
+        }
+        // An owned launch that fell back to a plain one tracks nothing, so it holds no claim.
+        const claim = active.workspaceWriterClaim;
+        if (claim && adapter.workspaceWriterState?.() === undefined) {
+          active.workspaceWriterClaim = undefined;
+          void this.dropWriterClaim(id, claim).catch((e) => this.deps.log('warn', `[${id}] writer claim bookkeeping failed: ${errorMessage(e)}`));
+        }
         const m = this.get(id);
-        if (current() && m && m.status === 'starting') {
+        if (live() && m && m.status === 'starting') {
           m.status = 'idle';
           m.statusDetail = undefined;
           this.pushSessions();
@@ -1182,7 +1236,7 @@ export class SessionManager {
       }
     };
     const meta = this.get(id);
-    if (meta && this.deps.withWorkspaceDispatch) await this.deps.withWorkspaceDispatch(meta, dispatch);
+    if (meta && this.admits(meta)) await this.deps.withWorkspaceDispatch!(meta, dispatch);
     else await dispatch();
     if (hooks) assertCurrent();
     await this.clearSessionPreamble(id);
@@ -1288,28 +1342,37 @@ export class SessionManager {
     if (active) await this.disposeRuntime(id, active);
   }
 
+  /** Only a runtime that tracks its writers (ordinary Pi while ordinary process ownership is on)
+   * persists a claim; `undefined` from `workspaceWriterState` means untracked, like Claude/Codex. */
   private async claimWorkspaceWriter(meta: SessionMeta, active: ActiveSession): Promise<void> {
-    if (meta.mission || !active.adapter.workspaceWriterState) return;
+    if (meta.mission || active.adapter.workspaceWriterState?.() === undefined) return;
     if (active.workspaceWriterClaim) return active.workspaceWriterClaimPersisted;
     active.workspaceWriterClaim = shortId('writer_');
     meta.workspaceWriterClaims = [...(meta.workspaceWriterClaims ?? []), active.workspaceWriterClaim];
     // A crash after this write is unknown, not an empty runtime map proving settlement. A later
     // launch remains usable but owns only its new claim; it cannot erase an earlier process tree.
-    active.workspaceWriterClaimPersisted = this.deps.store.upsert(meta);
+    // Bookkeeping never fails the ordinary start itself: the claim stays in memory either way.
+    active.workspaceWriterClaimPersisted = Promise.resolve(this.deps.store.upsert(meta)).then(
+      () => undefined,
+      (e) => this.deps.log('warn', `[${meta.id}] workspace writer claim persist failed: ${errorMessage(e)}`),
+    );
     await active.workspaceWriterClaimPersisted;
   }
 
-  /** Keep the process owned until disposal succeeds; a timeout is not evidence of quiescence. */
   private disposeRuntime(id: string, active: ActiveSession, status: 'idle' | 'stopped' | 'error' = 'stopped'): Promise<void> {
+    return this.get(id)?.mission ? this.disposeManaged(id, active, status) : this.retireOrdinary(id, active, status === 'idle');
+  }
+
+  /** Keep the process owned until disposal succeeds; a timeout is not evidence of quiescence. */
+  private disposeManaged(id: string, active: ActiveSession, status: 'idle' | 'stopped' | 'error'): Promise<void> {
     if (active.disposal) return active.disposal;
-    const managed = !!this.get(id)?.mission;
     active.tearingDown = true;
     if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
     if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
     active.pendingGoalKickoff = null;
     const operation = Promise.resolve().then(async () => {
       // Install the disposal promise before notifying observers, which may themselves request stop.
-      this.cancelApprovals(id, active, managed ? 'Mission session stopped' : 'Session stopped');
+      this.cancelApprovals(id, active, 'Mission session stopped');
       // A delayed start must not spawn after we disposed its adapter.
       if (active.starting) await active.starting.catch(() => undefined);
       try {
@@ -1319,27 +1382,20 @@ export class SessionManager {
         await this.flushLive(id, active, true);
         const meta = this.get(id);
         if (meta) {
-          // An ordinary Stop does not change a branch's parked PR/merge state.
-          if (managed || (meta.status !== 'pr' && meta.status !== 'merged')) {
-            meta.status = status;
-            meta.statusDetail = undefined;
-          }
+          meta.status = status;
+          meta.statusDetail = undefined;
           meta.queued = 0;
-          if (active.workspaceWriterClaim) {
-            const retained = meta.workspaceWriterClaims?.filter((claim) => claim !== active.workspaceWriterClaim);
-            meta.workspaceWriterClaims = retained?.length ? retained : undefined;
-          }
           await this.deps.store.upsert(meta);
         }
         if (this.active.get(id) === active) this.active.delete(id);
         this.pushSessions();
-        if (managed) this.publish({ sessionId: id, event: { type: 'status', status }, ts: Date.now() });
+        this.publish({ sessionId: id, event: { type: 'status', status }, ts: Date.now() });
       } catch (e) {
         active.uncertain = true;
         const meta = this.get(id);
         if (meta) {
           meta.status = 'error';
-          meta.lastError = `${managed ? 'Mission runtime' : 'Session runtime'} disposal uncertain: ${errorMessage(e)}`;
+          meta.lastError = `Mission runtime disposal uncertain: ${errorMessage(e)}`;
           meta.statusDetail = meta.lastError;
           this.schedulePersist(meta);
           this.pushSessions();
@@ -1353,6 +1409,102 @@ export class SessionManager {
     return operation;
   }
 
+  /**
+   * Ordinary teardown, as it always was: the session is released at once (a new send starts a new
+   * runtime), live items are saved, disposal errors are logged, and nothing waits unboundedly:
+   * neither a pending startup nor a hung dispose. Ownership bookkeeping never fails it. A writer
+   * claim is dropped only on positive proof; an unproven one stays as Mission admission information.
+   * `explicit` is a user Stop (the status returns to idle); otherwise the harness ended itself and
+   * its own status stays.
+   */
+  private retireOrdinary(id: string, active: ActiveSession, explicit: boolean): Promise<void> {
+    if (active.disposal) return active.disposal;
+    active.tearingDown = true;
+    if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
+    if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
+    active.pendingGoalKickoff = null;
+    if (this.active.get(id) === active) this.active.delete(id);
+    const retiring = this.retiring.get(id) ?? new Set<ActiveSession>();
+    retiring.add(active);
+    this.retiring.set(id, retiring);
+    const operation = Promise.resolve().then(async () => {
+      // Install the disposal promise before notifying observers, which may themselves request stop.
+      this.cancelApprovals(id, active, 'Session stopped');
+      await this.flushLive(id, active, true).catch((e) => this.deps.log('warn', `[${id}] live flush on stop failed: ${errorMessage(e)}`));
+      const settled = Promise.resolve()
+        .then(() => active.adapter.dispose())
+        .then(() => {
+          const writers = active.adapter.workspaceWriterState?.();
+          return writers === undefined || writers === 'quiescent';
+        }, (e) => {
+          this.deps.log('warn', `[${id}] dispose failed: ${errorMessage(e)}`);
+          return false;
+        })
+        .then((proven) => this.settleWriterClaim(id, active, proven))
+        .catch((e) => this.deps.log('warn', `[${id}] writer claim bookkeeping failed: ${errorMessage(e)}`))
+        .finally(() => {
+          retiring.delete(active);
+          if (!retiring.size && this.retiring.get(id) === retiring) this.retiring.delete(id);
+        });
+      let timer: NodeJS.Timeout | undefined;
+      const finished = await Promise.race([
+        settled.then(() => true),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), this.deps.disposeWaitMs ?? ORDINARY_DISPOSE_WAIT_MS); timer.unref?.(); }),
+      ]);
+      clearTimeout(timer);
+      if (!finished) this.deps.log('warn', `[${id}] ${active.adapter.id} is still shutting down after ${this.deps.disposeWaitMs ?? ORDINARY_DISPOSE_WAIT_MS}ms; the session is available again`);
+      const meta = this.get(id);
+      if (meta && explicit) {
+        // Stopping the harness does not change the branch's git state either.
+        if (meta.status !== 'pr' && meta.status !== 'merged') {
+          meta.status = 'idle';
+          meta.statusDetail = undefined;
+        }
+        meta.queued = 0;
+        await Promise.resolve(this.deps.store.upsert(meta)).catch((e) => this.deps.log('warn', `[${id}] meta persist on stop failed: ${errorMessage(e)}`));
+      }
+      this.pushSessions();
+    }).finally(() => {
+      active.disposal = null;
+    });
+    active.disposal = operation;
+    return operation;
+  }
+
+  /** A retired runtime's own claim goes only with positive proof (or when it never tracked writers). */
+  private async settleWriterClaim(id: string, active: ActiveSession, proven: boolean): Promise<void> {
+    const claim = active.workspaceWriterClaim;
+    if (!claim || !this.get(id)?.workspaceWriterClaims?.includes(claim)) return;
+    if (!proven) {
+      this.deps.log('warn', `[${id}] process-tree disposal is unproven; its workspace writer claim is kept for Mission admission only`);
+      return;
+    }
+    await this.dropWriterClaim(id, claim);
+  }
+
+  private async dropWriterClaim(id: string, claim: string): Promise<void> {
+    const meta = this.get(id);
+    if (!meta?.workspaceWriterClaims?.includes(claim)) return;
+    const kept = meta.workspaceWriterClaims.filter((entry) => entry !== claim);
+    meta.workspaceWriterClaims = kept.length ? kept : undefined;
+    await this.deps.store.upsert(meta);
+  }
+
+  /** An explicit user Stop, Archive, Delete or Move is the acknowledgment for writer claims that no
+   * runtime of this process still holds: ones left by an earlier app run (crash, kill, quit timeout)
+   * or by a disposal that could not prove itself. Claims of live or disposing runtimes stay. */
+  private async releaseStaleWriterClaims(id: string): Promise<void> {
+    const meta = this.get(id);
+    if (!meta?.workspaceWriterClaims?.length) return;
+    const held = new Set([this.active.get(id), ...(this.retiring.get(id) ?? [])].flatMap((runtime) => runtime?.workspaceWriterClaim ? [runtime.workspaceWriterClaim] : []));
+    const stale = meta.workspaceWriterClaims.filter((claim) => !held.has(claim));
+    if (!stale.length) return;
+    const kept = meta.workspaceWriterClaims.filter((claim) => held.has(claim));
+    meta.workspaceWriterClaims = kept.length ? kept : undefined;
+    this.deps.log('warn', `[${id}] released ${stale.length} unproven workspace writer claim(s) no runtime of this app run holds, on an explicit stop`);
+    await Promise.resolve(this.deps.store.upsert(meta)).catch((e) => this.deps.log('warn', `[${id}] meta persist on stop failed: ${errorMessage(e)}`));
+  }
+
   async interrupt(id: string): Promise<void> {
     this.assertUnmanaged(id);
     const active = this.active.get(id);
@@ -1362,23 +1514,32 @@ export class SessionManager {
     await active.adapter.interrupt();
   }
 
+  /** User Stop (also Archive, Delete and Move): never fails or wedges an ordinary session. */
   async stop(id: string): Promise<void> {
     this.assertUnmanaged(id);
-    const active = this.active.get(id);
-    if (active) {
-      this.deps.log('info', `[${id}] stopping ${active.adapter.id}${active.adapter.busy ? ' (turn in progress)' : ''}`);
-      await this.disposeRuntime(id, active, 'idle');
-    }
-    if (this.get(id)?.workspaceWriterClaims?.length) throw new Error('An earlier session process tree has no settlement proof. Workspace writer ownership is retained.');
+    await this.releaseStaleWriterClaims(id);
+    await this.stopOrdinary(id);
   }
 
+  private async stopOrdinary(id: string): Promise<void> {
+    const active = this.active.get(id);
+    if (!active) return;
+    this.deps.log('info', `[${id}] stopping ${active.adapter.id}${active.adapter.busy ? ' (turn in progress)' : ''}`);
+    await this.disposeRuntime(id, active, 'idle');
+  }
+
+  /** App quit. Never rejects, so the caller still flushes persistence and analytics afterwards. */
   async stopAll(): Promise<void> {
     const ids = [...new Set([...this.active.keys(), ...this.managedDispatches.keys()])];
     if (ids.length) this.deps.log('info', `stopping ${ids.length} running session(s)`);
-    await Promise.all(ids.map((id) => {
+    const results = await Promise.allSettled(ids.map((id) => {
       const mission = this.get(id)?.mission;
-      return mission ? this.stopManaged(id, mission.generation) : this.stop(id);
+      // Quitting is not a user acknowledgment: unproven claims survive for the next run.
+      return mission ? this.stopManaged(id, mission.generation) : this.stopOrdinary(id);
     }));
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') this.deps.log('warn', `[${ids[index]}] stop during shutdown failed: ${errorMessage(result.reason)}`);
+    });
   }
 
   /**
@@ -1436,7 +1597,7 @@ export class SessionManager {
       if (active) await active.adapter.setPermissionMode(mode);
       await this.deps.store.upsert(meta);
     };
-    if (active?.adapter.workspaceWriterState && mode !== 'plan' && this.deps.withWorkspaceDispatch) await this.deps.withWorkspaceDispatch(meta, apply);
+    if (active?.adapter.workspaceWriterState?.() !== undefined && mode !== 'plan' && this.admits(meta)) await this.deps.withWorkspaceDispatch!(meta, apply);
     else await apply();
     this.pushSessions();
     this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Permission mode set to ${mode}.` } });
@@ -2203,7 +2364,9 @@ export class SessionManager {
       // A fresh fork starts unpinned and active, never in the archive.
       pinned: undefined,
       pinnedAt: undefined,
-      archived: undefined
+      archived: undefined,
+      // Writer claims belong to the source's runtimes; a fork has run nothing yet.
+      workspaceWriterClaims: undefined
     };
     if (cross) {
       // A different harness cannot resume the source's provider session: it starts fresh in the

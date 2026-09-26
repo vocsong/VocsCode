@@ -2,7 +2,7 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
-import { promises as fs, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, promises as fs, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,6 +38,8 @@ let root: string, manager: SessionManager, store: SessionStore;
 let adapters: PiAdapter[], contexts: HarnessContext[], controls: ReturnType<typeof controller>[];
 let commands: Record<string, unknown>[];
 let helperAvailable: boolean;
+/** Ordinary process ownership (Windows + Missions configured + working helper) for ordinary Pi. */
+let ordinaryOwnership: boolean;
 const settings = defaultSettings();
 settings.providers = []; settings.mcpDisabledBuiltins = ['gitnexus', 'vocs-memory', 'cua-driver'];
 settings.autoCompactionThreshold = undefined;
@@ -85,7 +87,7 @@ function controller(child: ChildProcess, intent?: OwnedWindowsJobOptions<ChildPr
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'mission-pi-ownership-'));
   store = new SessionStore(path.join(root, 'data')); await store.load();
-  adapters = []; contexts = []; controls = []; commands = []; helperAvailable = true;
+  adapters = []; contexts = []; controls = []; commands = []; helperAvailable = true; ordinaryOwnership = false;
   processApi.spawn.mockImplementation((_file, _args, options) => scriptedChild(options.env));
   processApi.spawnTool.mockImplementation((_file, _args, options) => scriptedChild(options.env));
   processApi.shutdownChild.mockImplementation(async (child: ChildProcess) => { child.emit('close', 0); });
@@ -98,6 +100,7 @@ beforeEach(async () => {
     runtime: { resolve: () => ({ path: path.join(root, 'pi.exe'), source: 'installed' }), resource: (...parts: string[]) => path.resolve(helperAvailable ? 'resources' : path.join(root, 'missing-resources'), ...parts) } as never,
     analytics: { touchSession: vi.fn(), recordUserMessage: vi.fn(), recordToolCall: vi.fn(), recordTurn: vi.fn(), recordUsage: vi.fn(), recordSubagent: vi.fn() } as never,
     getSecret: async () => undefined, pushEvent: vi.fn(), pushSessions: vi.fn(), notify: vi.fn(), log: vi.fn(),
+    ordinaryProcessOwnership: () => ordinaryOwnership,
   });
   manager.attachMissionHooks({ beforeDispatch: async () => undefined,
     mcpServers: async () => [{ def: { id: 'vocs-mission', transport: 'http', url: 'http://127.0.0.1:1', headers: { Authorization: 'Bearer ownership-test-secret' } }, missing: [], secretEnvKeys: [], secretHeaderKeys: [] }],
@@ -212,7 +215,8 @@ describe.runIf(process.platform === 'win32')('managed Pi ownership evidence', ()
     expect(processApi.owned).not.toHaveBeenCalled();
   });
 
-  it('bounds ordinary Pi when the trusted helper is available and retains writers through mode changes and root idle', async () => {
+  it('bounds ordinary Pi while ordinary ownership is enabled and retains writers through mode changes and root idle', async () => {
+    ordinaryOwnership = true;
     const source = await manager.create({ title: 'Ordinary', config: { harness: 'pi', permissionMode: 'full-auto', projectRoot: root } });
     await manager.send(source.id, { text: 'Background work' });
     expect(processApi.owned).toHaveBeenCalledTimes(1); expect(processApi.spawnTool).not.toHaveBeenCalled();
@@ -232,20 +236,24 @@ describe.runIf(process.platform === 'win32')('managed Pi ownership evidence', ()
     expect(processApi.shutdownChild).not.toHaveBeenCalled();
   });
 
-  it('keeps unsupported ordinary Pi usable but never substitutes shutdownChild or current plan mode for writer proof', async () => {
-    helperAvailable = false;
+  it.each(['synchronous', 'asynchronous'] as const)('falls back to a plain untracked Pi when an owned launch fails %sly before Pi ever ran', async (failure) => {
+    ordinaryOwnership = true;
+    processApi.owned.mockImplementation((options: OwnedWindowsJobOptions<ChildProcess>) => {
+      if (failure === 'synchronous') throw new Error('Job helper blocked by policy');
+      const owned = controller(options.launch('owned-supervisor-fixture', []), options.ownershipIntent); controls.push(owned);
+      const established = Promise.reject(new Error('Job supervisor exited before establishing process ownership'));
+      established.catch(() => undefined);
+      return Object.assign(owned, { established });
+    });
     const source = await manager.create({ title: 'Ordinary', config: { harness: 'pi', permissionMode: 'full-auto', projectRoot: root } });
-    await manager.send(source.id, { text: 'First' });
-    (processApi.spawnTool.mock.results[0].value.stdout as PassThrough).write(JSON.stringify({ type: 'agent_end' }) + '\n');
-    await vi.waitFor(() => expect(manager.activity(source.id).turn).toBe(false));
-    expect(manager.activity(source.id)).toMatchObject({ active: true, uncertain: true, quiescent: false });
-    await manager.send(source.id, { text: 'Ordinary use remains available' });
-    expect(commands.filter((command) => command.type === 'prompt')).toHaveLength(2);
-    await manager.setPermissionMode(source.id, 'plan');
-    const admission = new MissionWorkspaceAdmission({ sessions: () => manager.list(), activity: (id) => manager.activity(id), terminals: () => [] });
-    await expect(manager.stop(source.id)).rejects.toThrow(/unproven/);
-    expect(manager.activity(source.id)).toMatchObject({ active: true, tearingDown: true, uncertain: true, quiescent: false });
-    expect(await admission.acquire(root)).toBeUndefined(); admission.close();
+    await manager.send(source.id, { text: 'Still works' });
+    expect(processApi.owned).toHaveBeenCalledTimes(1);
+    expect(processApi.spawnTool).toHaveBeenCalledTimes(1);
+    expect(commands.filter((command) => command.type === 'prompt')).toHaveLength(1);
+    expect(adapters.at(-1)!.workspaceWriterState()).toBeUndefined();
+    await manager.stop(source.id);
+    expect(manager.get(source.id)?.workspaceWriterClaims).toBeUndefined();
+    expect(manager.activity(source.id)).toMatchObject({ active: false, uncertain: false, quiescent: true });
   });
 
   it('does not require stopping a fixed read-only ordinary Pi source without child work', async () => {
@@ -268,5 +276,37 @@ describe.runIf(process.platform === 'win32')('managed Pi ownership evidence', ()
       expect(processApi.owned).not.toHaveBeenCalled(); expect(processApi.spawnTool).not.toHaveBeenCalled();
       expect(commands.filter((command) => command.type === 'prompt')).toHaveLength(0);
     } finally { Object.defineProperty(process, 'platform', original); }
+  });
+});
+
+// The macOS/Linux regression: ordinary Pi must behave exactly as before wherever ordinary process
+// ownership is off, so this block runs on every platform.
+describe('ordinary Pi without process ownership', () => {
+  it.each([
+    ['ordinary ownership is off', false, true],
+    ['the helper is missing although ownership is on', true, false],
+  ])('runs ordinary Pi untracked when %s: plain spawn, graceful stop, no claim, and the session keeps working', async (_case, enabled, helper) => {
+    ordinaryOwnership = enabled; helperAvailable = helper;
+    processApi.owned.mockImplementation((options: OwnedWindowsJobOptions<ChildProcess>) => {
+      if (!existsSync(options.helperPath)) throw new Error('Process ownership requires the bundled Windows Job Object helper');
+      const owned = controller(options.launch('owned-supervisor-fixture', []), options.ownershipIntent); controls.push(owned); return owned;
+    });
+    const source = await manager.create({ title: 'Ordinary', config: { harness: 'pi', permissionMode: 'full-auto', projectRoot: root } });
+    await manager.send(source.id, { text: 'First' });
+    expect(processApi.spawnTool).toHaveBeenCalledTimes(1);
+    expect(controls).toHaveLength(0);
+    expect(adapters.at(-1)!.workspaceWriterState()).toBeUndefined();
+    expect(manager.get(source.id)?.workspaceWriterClaims).toBeUndefined();
+    (processApi.spawnTool.mock.results[0].value.stdout as PassThrough).write(JSON.stringify({ type: 'agent_end' }) + '\n');
+    await vi.waitFor(() => expect(manager.activity(source.id).turn).toBe(false));
+    expect(manager.activity(source.id)).toMatchObject({ active: true, processes: false, uncertain: false, quiescent: true });
+    await manager.stop(source.id);
+    expect(processApi.shutdownChild).toHaveBeenCalledTimes(1); // Stdin EOF first, exactly as before.
+    await manager.send(source.id, { text: 'A new runtime after stop' });
+    expect(commands.filter((command) => command.type === 'prompt')).toHaveLength(2);
+    await manager.setArchived(source.id, true);
+    await manager.delete(source.id);
+    expect(manager.get(source.id)).toBeUndefined();
+    expect(processApi.shutdownChild).toHaveBeenCalledTimes(2);
   });
 });

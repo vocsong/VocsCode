@@ -220,18 +220,25 @@ export class PiAdapter implements HarnessAdapter {
   /** Sticky across root idle, native-child completion, and a later switch to plan mode. */
   private ordinaryWritersUnproven = false;
   private ordinaryStopping = false;
+  /** Ordinary Pi runs in the bundled Job only while ordinary process ownership is on. Pinned when
+   * the runtime is created (SessionManager persists a writer claim from it before start) and
+   * cleared if the owned launch falls back to a plain one. Untracked Pi is like Claude or Codex. */
+  private ordinaryTracked: boolean;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
     this.usageReporter = new UsageReporter((event) => this.ctx.emit(event));
+    this.ordinaryTracked = !ctx.session().mission && process.platform === 'win32' && ctx.ordinaryProcessOwnership?.() === true;
   }
 
   get busy(): boolean {
     return this._busy;
   }
 
-  workspaceWriterState(): 'active' | 'unknown' | 'quiescent' {
-    if (this.ctx.session().mission || !this.ordinaryWritersUnproven) return 'quiescent';
+  workspaceWriterState(): 'active' | 'unknown' | 'quiescent' | undefined {
+    if (this.ctx.session().mission) return 'quiescent';
+    if (!this.ordinaryTracked) return undefined;
+    if (!this.ordinaryWritersUnproven) return 'quiescent';
     return this.ordinaryProcess && this.ordinaryProcess.state !== 'uncertain' ? 'active' : 'unknown';
   }
 
@@ -387,27 +394,11 @@ export class PiAdapter implements HarnessAdapter {
         throw error;
       }
     } else {
-      const helper = this.ctx.runtime.resource('mission', 'windows-check-job.ps1');
-      const available = process.platform === 'win32' && path.isAbsolute(helper) && await fs.stat(helper).then((stat) => stat.isFile(), () => false);
       if (this.ordinaryStopping) throw new Error('Pi startup was canceled before launch.');
-      if (available) {
-        const executable = path.isAbsolute(bin.path) ? bin.path : /[\\/]/.test(bin.path) ? path.resolve(meta.cwd, bin.path) : which(bin.path);
-        if (!executable) throw new Error('Pi executable was not found.');
-        const shim = usesWindowsCommandShim(executable);
-        const shell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
-        const owned = launchOwnedWindowsJob({
-          executable: shim ? shell : executable,
-          args: shim ? [] : args,
-          ...(shim ? { commandLine: `${windowsJobCommandLine(shell, ['/d', '/s', '/c'])} "${[quoteWin(executable), ...args.map(quoteWin)].join(' ')}"` } : {}),
-          cwd: meta.cwd, helperPath: helper,
-          launch: (file, argv) => spawnIndependentWindowsSupervisor(file, argv, { cwd: meta.cwd, env }),
-          observeExit: (process, exited) => { process.once('close', exited); process.once('error', exited); },
-        });
-        this.ordinaryProcess = owned;
-        child = owned.process;
-      } else child = spawnTool(bin.path, args, { cwd: meta.cwd, env });
-      // Unsupported ownership does not disable ordinary chat. It cannot grant a writer baseline.
-      this.ordinaryWritersUnproven ||= this.ctx.permissionMode() !== 'plan';
+      const owned = this.ordinaryTracked ? await this.launchOrdinaryOwned(bin.path, args, meta.cwd, env) : null;
+      child = owned ? owned.process : spawnTool(bin.path, args, { cwd: meta.cwd, env });
+      // Tracked writers stay unproven until the Job's positive teardown, across root idle and plan.
+      if (this.ordinaryTracked) this.ordinaryWritersUnproven ||= this.ctx.permissionMode() !== 'plan';
     }
     this.child = child;
     const splitter = new LineSplitter((line) => { if (this.child === child) this.handleLine(line); });
@@ -447,6 +438,41 @@ export class PiAdapter implements HarnessAdapter {
     if (mission && (this.missionStopping || this.exited)) throw new Error('Managed Pi startup was canceled.');
     this.ctx.emit({ type: 'status', status: 'idle' });
     void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
+  }
+
+  /**
+   * Ordinary Pi in the bundled Job (ordinary process ownership on). Pi starts only once the
+   * supervisor assigned it to the Job; when that never happens Pi never ran, so this falls back once
+   * to a plain launch and the runtime stays untracked (null). Throws only if disposal canceled it.
+   */
+  private async launchOrdinaryOwned(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<OwnedWindowsJob<ChildProcess> | null> {
+    let owned: OwnedWindowsJob<ChildProcess> | undefined;
+    try {
+      const executable = path.isAbsolute(bin) ? bin : /[\\/]/.test(bin) ? path.resolve(cwd, bin) : which(bin);
+      if (!executable) throw new Error('Pi executable was not found.');
+      const shim = usesWindowsCommandShim(executable);
+      const shell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
+      owned = launchOwnedWindowsJob({
+        executable: shim ? shell : executable,
+        args: shim ? [] : args,
+        ...(shim ? { commandLine: `${windowsJobCommandLine(shell, ['/d', '/s', '/c'])} "${[quoteWin(executable), ...args.map(quoteWin)].join(' ')}"` } : {}),
+        cwd, helperPath: this.ctx.runtime.resource('mission', 'windows-check-job.ps1'), startupTimeoutMs: 15_000,
+        launch: (file, argv) => spawnIndependentWindowsSupervisor(file, argv, { cwd, env }),
+        observeExit: (process, exited) => { process.once('close', exited); process.once('error', exited); },
+      });
+      // Disposal can cancel a launch that is still being established.
+      this.ordinaryProcess = owned;
+      await owned.established;
+    } catch (error) {
+      if (this.ordinaryStopping) throw new Error('Pi startup was canceled before launch.');
+      if (owned && this.ordinaryProcess === owned) this.ordinaryProcess = null;
+      try { owned?.cancel(); } catch { /* a failed supervisor is already settling */ }
+      this.ordinaryTracked = false;
+      this.ctx.log('warn', `Pi process ownership could not be established (${errorMessage(error)}); starting Pi without it`);
+      return null;
+    }
+    if (this.ordinaryStopping) throw new Error('Pi startup was canceled before launch.');
+    return owned;
   }
 
   private assertExtensionsReady(): void {
@@ -1309,15 +1335,20 @@ export class PiAdapter implements HarnessAdapter {
     if (this.ordinaryDisposal) return this.ordinaryDisposal;
     const owned = this.ordinaryProcess;
     const operation = Promise.resolve().then(async () => {
-      if (owned) {
+      if (owned && child !== owned.process) {
+        // The launch is still being established or never was: Pi has not run, so nothing is owed.
+        // Canceling before the supervisor's resume keeps the suspended target from ever running.
+        try { owned.cancel(); } catch { /* a failed launch never started Pi */ }
+        if (this.ordinaryProcess === owned) this.ordinaryProcess = null;
+      } else if (owned) {
         owned.cancel();
         await withTimeout(owned.quiescent, 15_000, 'Pi process-tree teardown');
         if (this.ordinaryProcess !== owned || this.child !== child) throw new Error('Pi process ownership changed during teardown.');
         this.ordinaryProcess = null;
         this.ordinaryWritersUnproven = false;
       } else if (child) {
-        // Best-effort ordinary cleanup is still useful on unsupported platforms, but does not
-        // prove all writers ended. SessionManager retains the unknown ownership after this returns.
+        // Untracked Pi (ordinary process ownership off, or its launch fell back): the graceful
+        // stdin-EOF shutdown every ordinary Pi always had. It proves nothing and claims nothing.
         await shutdownChild(child, 1500);
       }
       this.child = null;

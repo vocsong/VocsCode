@@ -56,6 +56,21 @@ describe('Mission held workspace admission', () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(await admission.acquire(managed)).toBeDefined();
   });
+  it('dispatches into a folder that was removed under a live runtime instead of failing with ENOENT', async () => {
+    const removed = path.join(managed, 'removed-worktree');
+    await fs.mkdir(removed);
+    await fs.rm(removed, { recursive: true });
+    const send = vi.fn(async () => undefined);
+    await admission.dispatch(removed, send);
+    expect(send).toHaveBeenCalledTimes(1);
+    // Its canonical ancestor still collides with a lease on the parent workspace.
+    const lease = await admission.acquire(managed);
+    const pending = admission.dispatch(removed, send);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(send).toHaveBeenCalledTimes(1);
+    await lease!.release(); await pending;
+    expect(send).toHaveBeenCalledTimes(2);
+  });
   it('defers the actual dispatch callback until capture releases its lease', async () => {
     const lease = await admission.acquire(managed), send = vi.fn(async () => undefined);
     const pending = admission.dispatch(managed, send);

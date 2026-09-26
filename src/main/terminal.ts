@@ -6,7 +6,7 @@
  * Snapshots are written to disk on quit and come back as lazy tabs on the next launch.
  */
 import { spawn as spawnProcess } from 'node:child_process';
-import { promises as fs, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { promises as fs, mkdirSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { IPty } from '@lydell/node-pty';
@@ -158,6 +158,32 @@ function killProcessTree(p: IPty): void {
   }
 }
 
+/** A validated write-ahead `.owner` record; throws for anything unreadable or malformed. */
+async function readOwnerRecord(file: string): Promise<TerminalActivity> {
+  const stat = await fs.lstat(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16_384) throw new Error('Invalid terminal ownership record');
+  const activity = JSON.parse(await fs.readFile(file, 'utf8')) as TerminalActivity;
+  if (!activity || typeof activity.sessionId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(activity.sessionId) || typeof activity.terminalId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(activity.terminalId)
+    || typeof activity.cwd !== 'string' || !path.isAbsolute(activity.cwd) || activity.ownershipNonce !== undefined && !ownershipNonce(activity.ownershipNonce)) throw new Error('Invalid terminal ownership record');
+  return activity;
+}
+
+const INTERRUPTED_RECEIPT = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.receipt\.json(?:\.claimed|\.guardian|\.tmp-.+)?$/;
+
+/** Every intent is written before any receipt for it can exist, and cleanup removes the intent
+ * first. Receipt files without their intent are therefore the leftovers of an interrupted cleanup
+ * of a settled generation, not unresolved ownership. */
+async function removeInterruptedCleanup(dir: string): Promise<void> {
+  const stat = await fs.lstat(dir).catch(() => undefined);
+  if (!stat?.isDirectory() || stat.isSymbolicLink()) return;
+  const names = await fs.readdir(dir);
+  const intents = new Set(names.filter((name) => name.endsWith('.intent.json')).map((name) => name.slice(0, -'.intent.json'.length)));
+  for (const name of names) {
+    const nonce = INTERRUPTED_RECEIPT.exec(name)?.[1];
+    if (nonce && !intents.has(nonce)) await fs.rm(path.join(dir, name), { force: true });
+  }
+}
+
 export interface TerminalManagerDeps {
   /** Directory for persisted screens (userData/terminals). */
   dir: string;
@@ -169,8 +195,12 @@ export interface TerminalManagerDeps {
   beforeSpawn?: (cwd: string) => void;
   /** Main owns Mission identity/authorization; a managed shell may never use the legacy spawn. */
   isManaged?: (sessionId: string) => boolean;
-  /** Trusted bundled resource, not a project path. Also contains ordinary Windows shells so
-   * their retired descendants cannot block a later Mission baseline forever. */
+  /** Ordinary (non-Mission) shells take part in process ownership only while this is true:
+   * Windows, Missions configured and a Job helper that works here. Absent/false keeps the plain
+   * spawn of a terminal app: no Job, no admission gate, no ownership records. */
+  ordinaryProcessOwnership?: () => boolean;
+  /** Trusted bundled resource, not a project path. Contains managed shells, and ordinary Windows
+   * shells while ordinary process ownership is enabled. */
   windowsJobHelper?: string;
   /** Process activity can outlive its tab; wake host coordinators on real ownership changes. */
   onActivity?: (sessionId: string) => void;
@@ -203,12 +233,15 @@ export interface TerminalActivity {
 interface TerminalResource {
   activity: TerminalActivity;
   pty?: IPty;
-  /** Written before spawn; a crash cannot erase unresolved process ownership. */
-  receiptFile: string;
+  /** Written before an owned spawn; a crash cannot erase unresolved process ownership. An
+   * untracked ordinary shell (no owner) has none and leaves `activity()` when it exits. */
+  receiptFile?: string;
   owner?: OwnedTerminalProcess;
   intent?: ProcessOwnershipIntent;
   rootExited: boolean;
   treeQuiet: boolean;
+  /** Close/kill/restart asked for it, so a canceled Job launch is not a reason to fall back. */
+  stopRequested?: boolean;
   done: Promise<void>;
   finish(): void;
   closing?: Promise<void>;
@@ -534,13 +567,12 @@ export class TerminalManager {
       files = await fs.readdir(this.deps.dir);
     } catch (e) {
       // No directory yet on a fresh profile; anything else means the snapshots are unreachable.
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-        this.deps.log('warn', `could not read persisted terminals from ${this.deps.dir}: ${errorMessage(e)}`);
-        throw new Error(`Cannot reconcile terminal process ownership: ${errorMessage(e)}`);
-      }
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') this.deps.log('warn', `could not read persisted terminals from ${this.deps.dir}: ${errorMessage(e)}`);
       return;
     }
-    await this.reconcileOwnership();
+    // Ownership records never stop the app from starting: problems are logged and kept only as
+    // Mission admission uncertainty (see reconcileOwnership).
+    await this.reconcileOwnership().catch((e) => this.deps.log('warn', `terminal process ownership could not be reconciled: ${errorMessage(e)}`));
     const restore = this.deps.settings().restoreOnStartup;
     let restored = 0;
     let dropped = 0;
@@ -564,40 +596,69 @@ export class TerminalManager {
   }
 
   /** Read-only process reconciliation, including lost tabs and intents whose .owner write never
-   * finished. Recovery must hold workspace admission before treating the result as a boundary. */
+   * finished. Recovery must hold workspace admission before treating the result as a boundary.
+   * An unreadable record is never quarantined into a quiet state, and never fails the caller at
+   * boot either: it is logged, and one that can be tied to a session (through its launch intent or
+   * its session directory) stays as that session's uncertainty. A Mission-scoped call (with
+   * `sessionIds`) still rejects on a record it cannot attribute, so Mission recovery fails closed. */
   async reconcileOwnership(sessionIds?: ReadonlySet<string>): Promise<void> {
-    const files = await fs.readdir(this.deps.dir).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return []; throw error; });
+    const unattributed: string[] = [];
+    const warn = (subject: string, reason: string) => this.deps.log('warn', `terminal process ownership: cannot reconcile ${subject}: ${reason}`);
+    // Unreadable .owner records wait here until a launch intent claims their generation.
+    const unreadable = new Map<string, string>();
+    const files = await fs.readdir(this.deps.dir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') { warn(this.deps.dir, errorMessage(error)); unattributed.push(this.deps.dir); }
+      return [] as string[];
+    });
     for (const file of files.filter((name) => name.endsWith('.owner'))) {
       const receiptFile = path.join(this.deps.dir, file);
       if ([...this.resources].some((resource) => resource.receiptFile === receiptFile)) continue;
-      // No corrupt-file quarantine: an unreadable record must remain a blocker on every boot.
-      const stat = await fs.lstat(receiptFile);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16_384) throw new Error(`Cannot reconcile terminal process ownership: ${receiptFile}`);
       let activity: TerminalActivity;
-      try { activity = JSON.parse(await fs.readFile(receiptFile, 'utf8')) as TerminalActivity; }
-      catch (error) { throw new Error(`Cannot read terminal process ownership ${receiptFile}: ${errorMessage(error)}`); }
-      if (!activity || typeof activity.sessionId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(activity.sessionId) || typeof activity.terminalId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(activity.terminalId)
-        || typeof activity.cwd !== 'string' || !path.isAbsolute(activity.cwd) || activity.ownershipNonce !== undefined && !ownershipNonce(activity.ownershipNonce)) throw new Error(`Cannot reconcile terminal process ownership: ${receiptFile}`);
+      try { activity = await readOwnerRecord(receiptFile); }
+      catch (error) { unreadable.set(receiptFile, errorMessage(error)); continue; }
+      if (!activity.managed && activity.ownershipNonce === undefined) {
+        // An earlier build recorded ordinary shells it never contained. No receipt can ever settle
+        // such a record, and a plain ordinary shell is not owned: retire it rather than block forever.
+        await fs.rm(receiptFile, { force: true }).catch(() => undefined);
+        this.deps.log('info', `terminal process ownership: retired the record of an uncontained ordinary shell (${file})`);
+        continue;
+      }
       this.retainRecovered(activity, receiptFile);
     }
     const root = path.join(this.deps.dir, 'process-ownership');
-    const rootStat = await fs.lstat(root).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
-    if (rootStat && (!rootStat.isDirectory() || rootStat.isSymbolicLink())) throw new Error('Invalid terminal ownership directory');
-    for (const sessionId of rootStat ? await fs.readdir(root) : []) {
-      if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) throw new Error('Invalid terminal ownership identity');
-      for (const intent of await processOwnershipIntents(path.join(root, sessionId))) {
-        const record = intent.record;
-        if (record.kind !== 'terminal' || record.sessionId !== sessionId) throw new Error('Terminal process intent identity changed');
-        const receiptFile = path.join(this.deps.dir, `${record.terminalId}.${record.nonce}.owner`);
-        let resource = [...this.resources].find((entry) => entry.receiptFile === receiptFile);
-        if (resource && (resource.activity.sessionId !== sessionId || resource.activity.terminalId !== record.terminalId || resource.activity.cwd !== record.cwd || resource.activity.ownershipNonce !== record.nonce)) throw new Error('Terminal owner differs from its launch intent');
-        if (!resource) {
-          if (await processOwnershipQuiescent(intent)) continue;
-          resource = this.retainRecovered({ sessionId, terminalId: record.terminalId, cwd: record.cwd, reportedCwd: record.cwd, managed: this.deps.isManaged?.(sessionId) ?? false, state: 'uncertain', ownershipNonce: record.nonce }, receiptFile);
+    let owners: string[] = [];
+    try {
+      const rootStat = await fs.lstat(root).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
+      if (rootStat && (!rootStat.isDirectory() || rootStat.isSymbolicLink())) throw new Error('Invalid terminal ownership directory');
+      if (rootStat) owners = await fs.readdir(root);
+    } catch (error) { warn(root, errorMessage(error)); unattributed.push(root); }
+    for (const sessionId of owners) {
+      const dir = path.join(root, sessionId);
+      try {
+        if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) throw new Error('Invalid terminal ownership identity');
+        await removeInterruptedCleanup(dir);
+        for (const intent of await processOwnershipIntents(dir)) {
+          const record = intent.record;
+          if (record.kind !== 'terminal' || record.sessionId !== sessionId) throw new Error('Terminal process intent identity changed');
+          const receiptFile = path.join(this.deps.dir, `${record.terminalId}.${record.nonce}.owner`);
+          unreadable.delete(receiptFile); // The intent owns this generation, however broken its .owner is.
+          let resource = [...this.resources].find((entry) => entry.receiptFile === receiptFile);
+          if (resource && (resource.activity.sessionId !== sessionId || resource.activity.terminalId !== record.terminalId || resource.activity.cwd !== record.cwd || resource.activity.ownershipNonce !== record.nonce)) throw new Error('Terminal owner differs from its launch intent');
+          if (!resource) {
+            // A positively emptied Job with no generation left in this run: drop its leftovers.
+            if (await processOwnershipQuiescent(intent)) { this.removeOwnershipFiles(receiptFile, intent); continue; }
+            resource = this.retainRecovered({ sessionId, terminalId: record.terminalId, cwd: record.cwd, reportedCwd: record.cwd, managed: this.deps.isManaged?.(sessionId) ?? false, state: 'uncertain', ownershipNonce: record.nonce }, receiptFile);
+          }
+          resource.intent = intent;
         }
-        resource.intent = intent;
+      } catch (error) {
+        warn(dir, errorMessage(error));
+        const cwd = /^[A-Za-z0-9_-]+$/.test(sessionId) ? this.deps.cwdOf(sessionId) : undefined;
+        if (cwd && path.isAbsolute(cwd)) this.retainUnreconciled(sessionId, cwd, dir);
+        else unattributed.push(dir);
       }
     }
+    for (const [receiptFile, reason] of unreadable) { warn(receiptFile, reason); unattributed.push(receiptFile); }
     for (const resource of [...this.resources]) {
       if (sessionIds && !sessionIds.has(resource.activity.sessionId)) continue;
       if (!resource.intent || !await processOwnershipQuiescent(resource.intent)) continue;
@@ -607,14 +668,23 @@ export class TerminalManager {
       if (!resource.pty) resource.rootExited = true;
       this.settleResource(resource);
     }
+    if (sessionIds && unattributed.length) throw new Error(`Cannot reconcile terminal process ownership: ${unattributed[0]}`);
   }
 
-  private retainRecovered(activity: TerminalActivity, receiptFile: string): TerminalResource {
+  private retainRecovered(activity: TerminalActivity, receiptFile: string, reason = 'Previous app run did not confirm terminal process-tree teardown'): TerminalResource {
     let finish!: () => void;
     const done = new Promise<void>((resolve) => { finish = resolve; });
-    const resource: TerminalResource = { activity: { ...activity, state: 'uncertain', reason: 'Previous app run did not confirm terminal process-tree teardown' }, receiptFile, rootExited: false, treeQuiet: false, done, finish };
+    const resource: TerminalResource = { activity: { ...activity, state: 'uncertain', reason }, receiptFile, rootExited: false, treeQuiet: false, done, finish };
     this.resources.add(resource);
     return resource;
+  }
+
+  /** A session's ownership directory that cannot be read: its workspace stays uncertain for Mission
+   * admission, keyed by a path that is never a real record so nothing is ever deleted for it. */
+  private retainUnreconciled(sessionId: string, cwd: string, dir: string): void {
+    const key = path.join(dir, '.unreconciled');
+    if ([...this.resources].some((resource) => resource.receiptFile === key)) return;
+    this.retainRecovered({ terminalId: 'unreconciled', sessionId, cwd, reportedCwd: cwd, managed: this.deps.isManaged?.(sessionId) ?? false, state: 'uncertain' }, key, 'Terminal process ownership records could not be read');
   }
 
   /** App quit: persist, then take the shells down with us. */
@@ -626,6 +696,7 @@ export class TerminalManager {
     }
     const managed: Promise<void>[] = [];
     for (const r of this.resources) {
+      if (!r.pty && !r.owner) continue; // A recovered record has no process of this run to stop.
       const stopping = this.stopResource(r);
       if (r.activity.managed) managed.push(stopping);
       else void stopping.catch(() => undefined);
@@ -662,7 +733,8 @@ export class TerminalManager {
     return true;
   }
 
-  private spawnInto(t: Term, shell: ResolvedShell): void {
+  /** `untracked` starts a plain shell: an ordinary tab falling back after a failed Job launch. */
+  private spawnInto(t: Term, shell: ResolvedShell, untracked = false): void {
     let spawn: PtySpawn;
     try {
       spawn = this.deps.spawn ?? loadPty().spawn;
@@ -671,42 +743,60 @@ export class TerminalManager {
       this.deps.log('error', errorMessage(e));
       throw e;
     }
+    const managed = this.deps.isManaged?.(t.info.sessionId) ?? false;
+    // An ordinary shell takes part in process ownership only while that is enabled on this machine;
+    // otherwise it starts like any terminal app's shell: no Job, no admission gate, no records.
+    const ordinaryOwnership = !managed && !untracked && (this.deps.ordinaryProcessOwnership?.() ?? false);
+    const wsl = shell.kind === 'wsl' || /^wsl(?:\.exe)?$/i.test(baseName(shell.file));
+    const options = { name: 'xterm-256color', cols: t.cols, rows: t.rows, cwd: t.info.cwd, env: terminalEnv(process.env, this.deps.version) };
+    const admit = () => { if (managed || ordinaryOwnership) this.deps.beforeSpawn?.(t.info.cwd); };
     let proc: IPty;
     let owner: OwnedTerminalProcess | undefined;
     let intent: ProcessOwnershipIntent | undefined;
     let launched: IPty | undefined;
-    let receiptFile = path.join(this.deps.dir, `${t.info.id}.${shortId('p_')}.owner`);
-    const managed = this.deps.isManaged?.(t.info.sessionId) ?? false;
+    let receiptFile: string | undefined;
     try {
       if (this.managedDrains.has(t.info.sessionId)) throw new Error('Terminal session is closing');
-      if (managed && (shell.kind === 'wsl' || /^wsl(?:\.exe)?$/i.test(baseName(shell.file)))) throw new Error('Managed terminals cannot contain WSL guest processes');
+      if (managed && wsl) throw new Error('Managed terminals cannot contain WSL guest processes');
       if (managed && this.activity(t.info.sessionId).some((r) => r.state !== 'live')) throw new Error('A previous terminal process teardown remains uncertain');
-      const guardedSpawn: PtySpawn = (file, args, options) => {
-        mkdirSync(this.deps.dir, { recursive: true });
-        writeFileSync(receiptFile, JSON.stringify({ terminalId: t.info.id, sessionId: t.info.sessionId, cwd: t.info.cwd, reportedCwd: t.info.cwd, managed, state: 'uncertain', ownershipNonce: intent?.record.nonce } satisfies TerminalActivity), { flag: 'wx', flush: true });
+      if (managed || (ordinaryOwnership && process.platform === 'win32' && !wsl)) {
         try {
-          this.deps.beforeSpawn?.(t.info.cwd);
-          launched = spawn(file, args, options);
-          return launched;
+          receiptFile = path.join(this.deps.dir, `${t.info.id}.${shortId('p_')}.owner`);
+          const guardedSpawn: PtySpawn = (file, args, spawnOptions) => {
+            const record = receiptFile!;
+            this.writeOwnerRecord(record, { terminalId: t.info.id, sessionId: t.info.sessionId, cwd: t.info.cwd, reportedCwd: t.info.cwd, managed, state: 'uncertain', ownershipNonce: intent?.record.nonce });
+            try {
+              admit();
+              launched = spawn(file, args, spawnOptions);
+              return launched;
+            } catch (error) {
+              // No returned PTY means the backend did not launch. Never delete a live generation.
+              try { unlinkSync(record); } catch { /* a retained record safely blocks recovery */ }
+              throw error;
+            }
+          };
+          if (!this.deps.spawnOwned) {
+            if (!/^[A-Za-z0-9_-]+$/.test(t.info.sessionId)) throw new Error('Invalid terminal owner session');
+            intent = createProcessOwnershipIntent(path.join(this.deps.dir, 'process-ownership', t.info.sessionId), { kind: 'terminal', terminalId: t.info.id, sessionId: t.info.sessionId, cwd: t.info.cwd });
+            receiptFile = path.join(this.deps.dir, `${t.info.id}.${intent.record.nonce}.owner`);
+          }
+          owner = this.deps.spawnOwned
+            ? this.deps.spawnOwned(shell.file, shell.args, options, guardedSpawn)
+            : spawnOwnedTerminal(shell.file, shell.args, options, guardedSpawn, this.deps.windowsJobHelper, intent);
         } catch (error) {
-          // No returned PTY means the backend did not launch. Never delete a live generation.
-          try { unlinkSync(receiptFile); } catch { /* a retained record safely blocks recovery */ }
-          throw error;
+          // A managed shell fails closed, and a launched supervisor stays owned (outer catch).
+          if (managed || launched) throw error;
+          // Nothing ran: retire what this attempt recorded and start the ordinary shell plainly.
+          this.deps.log('warn', `terminal ${t.info.id}: process ownership is unavailable (${errorMessage(error)}); starting ${shell.name} without it`);
+          this.retireUnstarted(intent, receiptFile);
+          owner = undefined; intent = undefined; receiptFile = undefined;
         }
-      };
-      const options = { name: 'xterm-256color', cols: t.cols, rows: t.rows, cwd: t.info.cwd, env: terminalEnv(process.env, this.deps.version) };
-      const nativeWindowsShell = process.platform === 'win32' && shell.kind !== 'wsl' && !/^wsl(?:\.exe)?$/i.test(baseName(shell.file));
-      if (managed || nativeWindowsShell && this.deps.windowsJobHelper) {
-        if (!this.deps.spawnOwned) {
-          if (!/^[A-Za-z0-9_-]+$/.test(t.info.sessionId)) throw new Error('Invalid terminal owner session');
-          intent = createProcessOwnershipIntent(path.join(this.deps.dir, 'process-ownership', t.info.sessionId), { kind: 'terminal', terminalId: t.info.id, sessionId: t.info.sessionId, cwd: t.info.cwd });
-          receiptFile = path.join(this.deps.dir, `${t.info.id}.${intent.record.nonce}.owner`);
-        }
-        owner = this.deps.spawnOwned
-          ? this.deps.spawnOwned(shell.file, shell.args, options, guardedSpawn)
-          : spawnOwnedTerminal(shell.file, shell.args, options, guardedSpawn, this.deps.windowsJobHelper, intent);
-        proc = owner.pty;
-      } else proc = guardedSpawn(shell.file, shell.args, options);
+      }
+      if (owner) proc = owner.pty;
+      else {
+        admit();
+        proc = launched = spawn(shell.file, shell.args, options);
+      }
     } catch (e) {
       if (launched) this.trackResource(t, launched, managed, receiptFile, owner, intent);
       else if (intent) { try { recordUnlaunchedProcessIntent(intent); } catch { /* An incomplete receipt blocks recovery. */ } }
@@ -716,7 +806,7 @@ export class TerminalManager {
     }
     const resource = this.trackResource(t, proc, managed, receiptFile, owner, intent);
     t.resource = resource;
-    this.deps.log('debug', `terminal ${t.info.id}: started ${shell.name} (${shell.file}) pid ${proc.pid || '?'} in ${t.info.cwd}`);
+    this.deps.log('debug', `terminal ${t.info.id}: started ${shell.name} (${shell.file}) pid ${proc.pid || '?'} in ${t.info.cwd}${owner ? ' (Job-owned)' : ''}`);
     const gen = ++t.gen;
     t.pty = proc;
     t.shellFile = shell.file;
@@ -755,6 +845,14 @@ export class TerminalManager {
       if (owner) void owner.quiescent.then(() => showExit(owner.exitCode ?? exitCode, signal), () => showExit(-1, signal));
       else showExit(exitCode, signal);
     });
+    // A Job launch that never ran its shell leaves an ordinary tab with a plain shell, not a dead
+    // one. `established` always settles before `quiescent`, so this runs before any exit display.
+    if (owner?.established && !managed) {
+      owner.established.catch((error: unknown) => {
+        if (resource.stopRequested || this.terms.get(t.info.id) !== t || t.gen !== gen) return;
+        this.fallBackToPlainShell(t, shell, resource, error);
+      });
+    }
     // Type-ahead: input meant for a restored tab is written as soon as its shell exists.
     if (t.pendingInput.length) {
       const queued = t.pendingInput.join('');
@@ -763,7 +861,62 @@ export class TerminalManager {
     }
   }
 
-  private trackResource(t: Term, pty: IPty, managed: boolean, receiptFile: string, owner?: OwnedTerminalProcess, intent?: ProcessOwnershipIntent): TerminalResource {
+  /** The Job supervisor never started this ordinary shell, so none of it ran and no proof is owed:
+   * retire that launch and start the shell in the same tab without ownership, as develop did. */
+  private fallBackToPlainShell(t: Term, shell: ResolvedShell, failed: TerminalResource, error: unknown): void {
+    this.deps.log('warn', `terminal ${t.info.id}: process ownership could not be established (${errorMessage(error)}); starting ${shell.name} without it`);
+    // Only the trusted supervisor is running here, never the shell. Never signal an exited PID.
+    if (!failed.rootExited && failed.pty) (this.deps.killTree ?? killProcessTree)(failed.pty);
+    if (failed.intent) { try { recordUnlaunchedProcessIntent(failed.intent); } catch { /* the supervisor already wrote its receipt */ } }
+    failed.rootExited = true;
+    failed.treeQuiet = true;
+    this.settleResource(failed);
+    t.gen++;
+    t.pty = null;
+    this.feed(t, '\r\n\x1b[2m─── process ownership unavailable; started without it ───\x1b[0m\r\n');
+    try {
+      this.spawnInto(t, shell, true);
+    } catch (e) {
+      t.info.exit = { code: -1 };
+      this.feed(t, `\x1b[31m${errorMessage(e)}\x1b[0m\r\n`);
+    }
+    this.pushList();
+  }
+
+  /** Write-ahead owner record. Nothing was launched yet, so a partial record (disk full, a crash
+   * mid-write) must not outlive the attempt and later read as unresolved ownership. */
+  private writeOwnerRecord(file: string, activity: TerminalActivity): void {
+    mkdirSync(this.deps.dir, { recursive: true });
+    try {
+      writeFileSync(file, JSON.stringify(activity), { flag: 'wx', flush: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') { try { unlinkSync(file); } catch { /* never created */ } }
+      throw error;
+    }
+  }
+
+  /** A contained launch that never started its shell: record that, then keep no files for it. */
+  private retireUnstarted(intent: ProcessOwnershipIntent | undefined, receiptFile: string | undefined): void {
+    if (intent) { try { recordUnlaunchedProcessIntent(intent); } catch { /* the supervisor already wrote its receipt */ } }
+    this.removeOwnershipFiles(receiptFile, intent);
+  }
+
+  /** Drops the records of a positively settled generation. The intent goes before its receipt
+   * files, so an interrupted cleanup leaves only receipts without an intent, which reconciliation
+   * recognizes as settled leftovers; never an intent that lost its receipt. */
+  private removeOwnershipFiles(receiptFile: string | undefined, intent: ProcessOwnershipIntent | undefined): void {
+    const unlink = (file: string) => { try { unlinkSync(file); } catch { /* already gone */ } };
+    if (receiptFile) unlink(receiptFile);
+    if (!intent) return;
+    unlink(intent.path);
+    const dir = path.dirname(intent.receiptPath), receipt = path.basename(intent.receiptPath);
+    let names: string[] = [];
+    try { names = readdirSync(dir); } catch { return; }
+    for (const name of names) if (name === receipt || name.startsWith(`${receipt}.`)) unlink(path.join(dir, name));
+    try { rmdirSync(dir); } catch { /* another generation of this session still has records */ }
+  }
+
+  private trackResource(t: Term, pty: IPty, managed: boolean, receiptFile: string | undefined, owner?: OwnedTerminalProcess, intent?: ProcessOwnershipIntent): TerminalResource {
     let finish!: () => void;
     const done = new Promise<void>((resolve) => { finish = resolve; });
     const r: TerminalResource = {
@@ -774,7 +927,10 @@ export class TerminalManager {
     // This listener is independent of t.gen and survives tab disposal/restart.
     const exit = pty.onExit(() => {
       r.rootExited = true;
-      if (!owner) this.markUncertain(r, 'Shell exited without owned process-tree confirmation');
+      // A plain ordinary shell owes nothing beyond its own exit, as in any terminal app. A
+      // contained launch that lost its owner has no proof for its descendants.
+      if (!owner && !receiptFile) r.treeQuiet = true;
+      else if (!owner) this.markUncertain(r, 'Shell exited without owned process-tree confirmation');
       else if (r.activity.state === 'live') r.activity.state = 'closing';
       this.settleResource(r);
       exit.dispose();
@@ -785,11 +941,15 @@ export class TerminalManager {
   }
 
   private settleResource(r: TerminalResource): void {
-    if (!r.rootExited || !r.treeQuiet) return;
-    try { unlinkSync(r.receiptFile); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.markUncertain(r, `Could not retire terminal ownership record: ${errorMessage(error)}`); return; }
+    if (!this.resources.has(r) || !r.rootExited || !r.treeQuiet) return;
+    if (r.receiptFile) {
+      try { unlinkSync(r.receiptFile); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.markUncertain(r, `Could not retire terminal ownership record: ${errorMessage(error)}`); return; }
+      }
     }
+    // A positively settled generation keeps no intent, receipt, claim or guardian file either.
+    this.removeOwnershipFiles(undefined, r.intent);
     this.resources.delete(r);
     r.finish();
     this.deps.onActivity?.(r.activity.sessionId);
@@ -806,6 +966,16 @@ export class TerminalManager {
   private stopResource(r: TerminalResource): Promise<void> {
     this.settleResource(r);
     if (!this.resources.has(r)) return Promise.resolve();
+    r.stopRequested = true;
+    if (!r.owner && !r.receiptFile && r.pty) {
+      // A plain ordinary shell: the terminal app's best-effort tree kill, with nothing to prove. It
+      // leaves activity() when it exits. Never signal a PID after observing its exit.
+      if (!r.rootExited) {
+        r.activity.state = 'closing';
+        (this.deps.killTree ?? killProcessTree)(r.pty);
+      }
+      return Promise.resolve();
+    }
     if (r.closing) return r.closing;
     r.activity.state = 'closing';
     const run = Promise.resolve().then(async () => {
