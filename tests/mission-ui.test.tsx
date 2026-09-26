@@ -1,15 +1,17 @@
 /** @vitest-environment jsdom */
 /** UI contracts only; the real coordinator/driver suites own execution and authorization claims. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const { invokeMock, subscriptions, apiMode } = vi.hoisted(() => ({ invokeMock: vi.fn(), subscriptions: new Map<string, (value: unknown) => void>(), apiMode: { web: false } }));
-vi.mock('../src/renderer/src/api', () => ({ invoke: invokeMock, on: (channel: string, fn: (value: unknown) => void) => { subscriptions.set(channel, fn); return () => subscriptions.delete(channel); }, isMac: false, get isWeb() { return apiMode.web; }, platform: 'win32', modKey: 'Ctrl' }));
+const { invokeMock, subscriptions, apiMode } = vi.hoisted(() => ({ invokeMock: vi.fn(), subscriptions: new Map<string, (value: unknown) => void>(), apiMode: { web: false, platform: 'win32' } }));
+vi.mock('../src/renderer/src/api', () => ({ invoke: invokeMock, on: (channel: string, fn: (value: unknown) => void) => { subscriptions.set(channel, fn); return () => subscriptions.delete(channel); }, isMac: false, get isWeb() { return apiMode.web; }, get platform() { return apiMode.platform; }, modKey: 'Ctrl' }));
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { AppSettings, SessionMeta, TranscriptItem } from '../src/shared/types';
 import type { MissionAttempt, MissionRecord } from '../src/shared/mission';
 import { createDefaultMissionConfig } from '../src/shared/mission-config';
+import { missionRevisionConflictMessage } from '../src/shared/mission-errors';
 import { Composer } from '../src/renderer/src/components/Composer';
 import { Header } from '../src/renderer/src/components/Header';
 import { NewSessionDialog } from '../src/renderer/src/components/NewSessionDialog';
+import { SettingsView } from '../src/renderer/src/components/SettingsView';
 import { MissionPanel, MissionHeaderControls, MissionUsage } from '../src/renderer/src/components/mission/MissionPanel';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { Sidebar, sidebarNavModel } from '../src/renderer/src/components/Sidebar';
@@ -42,6 +44,7 @@ let settings: AppSettings;
 
 beforeEach(() => {
   apiMode.web = false;
+  apiMode.platform = 'win32';
   record = missionFixture({ originSessionId: 'source', planRevision: 2, specificationRevision: 3, status: 'awaiting_execution_approval', pendingProposal: { id: 'proposal-three', specificationRevision: 3, planRevision: 2, assistantMessageId: 'proposal-message', requestedAt: 1 } });
   settings = { folders: ['/project'], recentProjects: ['/project'], folderStyles: {}, collapsedFolders: [], defaultHarness: 'native', defaultPermissionMode: 'ask', defaultModelByHarness: {}, acpAgents: [], providers: [], mission: record.config, goalDefaults: {}, sidebarWidth: 250, panelWidth: 450 } as unknown as AppSettings;
   useStore.setState({ settings, sessions: [ordinary(), owned('lead'), owned('worker')], missions: { mission: record }, missionErrors: {}, missionInspector: null, activeId: 'source', transcripts: {}, loaded: {}, transcriptErrors: {}, drafts: {}, composerHistory: {}, composerInsert: null, modelCatalog: { native: { models: [], loading: false } }, models: {}, panelTab: 'goal', panelBottomTab: 'mcp', panelBottomOpened: [], newSessionKind: 'normal', newSessionRoot: '/project', newMissionSourceId: null, toasts: [], archiving: {}, history: [], historyIndex: -1 });
@@ -248,6 +251,16 @@ describe('Mission composer boundary', () => {
     expect(screen.getByText(/read-only/)).toBeTruthy();
   });
 
+  it('says no Mission is linked when /mission status runs in a session without one', async () => {
+    invokeMock.mockResolvedValue({ kind: 'status' });
+    render(<Composer session={ordinary()} />);
+    submit('/mission status');
+    await waitFor(() => expect(useStore.getState().toasts.at(-1)?.text).toBe('No Mission is linked to this session.'));
+    expect(useStore.getState().newSessionKind).toBe('normal');
+    expect(useStore.getState().activeId).toBe('source');
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+  });
+
   it('opens bare Mission creation without changing the discussion configuration', async () => {
     invokeMock.mockResolvedValue({ kind: 'show' });
     render(<Composer session={ordinary()} />);
@@ -325,14 +338,36 @@ describe('Mission launch and controls', () => {
     expect(useStore.getState().newSessionOpen).toBe(false);
   });
 
-  it('never invents a lead for an unconfigured launch and links to settings', () => {
+  it('never invents a lead for an unconfigured launch and links to the Mission settings tab', () => {
     useStore.setState({ settings: { ...settings, mission: createDefaultMissionConfig() }, newSessionKind: 'mission' });
-    render(<NewSessionDialog />);
+    const ui = render(<NewSessionDialog />);
     expect(screen.getByRole('alert').textContent).toContain('No lower-tier fallback');
     expect((screen.getByRole('button', { name: 'Start Mission' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Configure Mission' }));
     expect(useStore.getState().view).toBe('settings');
+    ui.unmount();
+    render(<SettingsView />);
+    expect(screen.getByRole('heading', { name: 'Mission', level: 2 })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'New preset' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Mission' }).className).toContain('active');
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('states the Mission support boundary and flags a principal engineer that cannot run one', () => {
+    useStore.setState({ newSessionKind: 'mission' });
+    const ui = render(<NewSessionDialog />);
+    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi presets on Windows.');
+    expect(screen.getByRole('option', { name: 'Project default · Principal engineer · not supported for Missions yet' })).toBeTruthy();
+    expect(screen.getByText(/Native loop presets are not supported for Missions yet\. A Mission that uses one stops at a blocker before any work; choose a Pi preset\./)).toBeTruthy();
+    ui.unmount();
+    const pi = { ...record.leadPreset, harnessId: 'pi' as const };
+    settings.mission = { ...record.config, presets: [pi] };
+    useStore.setState({ settings: { ...settings } });
+    apiMode.platform = 'darwin';
+    render(<NewSessionDialog />);
+    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi presets on Windows. Missions cannot run on this platform yet.');
+    expect(screen.getByRole('option', { name: 'Project default · Principal engineer' })).toBeTruthy();
+    expect(screen.queryByText(/not supported for Missions yet/)).toBeNull();
   });
 
   it('binds Proceed to the pending proposal/revision and renders plan questions, not a competing Goal', async () => {
@@ -379,6 +414,51 @@ describe('Mission launch and controls', () => {
       expect(second.expectedRevision).toBe(record.revision); expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
     } else expect(second).toEqual(first);
     await waitFor(() => expect(useStore.getState().missions[record.id]?.status).toBe('paused'));
+  });
+
+  it('binds the next Pause to the current record after the host refuses a stale revision, without a reload', async () => {
+    const host = { ...record, status: 'running' as const, pendingProposal: undefined, revision: 2 };
+    record = { ...host, revision: 1 }; // another client advanced the Mission; this window missed the push
+    useStore.setState({ missions: { mission: record } });
+    const original = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (channel: string, input: { expectedRevision?: number }) => {
+      if (channel === 'missions:get') return host;
+      if (channel !== 'missions:control') return original(channel, input);
+      if (input.expectedRevision !== host.revision) throw new Error(`Error invoking remote method 'missions:control': Error: ${missionRevisionConflictMessage(input.expectedRevision!, host.revision)}`);
+      return { ...host, revision: host.revision + 1, status: 'paused' };
+    });
+    function LiveHeader() {
+      const current = useStore((s) => s.missions.mission);
+      return <MissionHeaderControls record={current} />;
+    }
+    render(<LiveHeader />);
+    fireEvent.click(screen.getByRole('button', { name: 'Pause Mission' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('The Mission changed before this action was applied, so nothing was done.');
+    expect(useStore.getState().missions.mission.revision).toBe(2);
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Pause Mission' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Pause Mission' }));
+    await waitFor(() => expect(useStore.getState().missions.mission.status).toBe('paused'));
+    const controls = invokeMock.mock.calls.filter(([channel]) => channel === 'missions:control').map(([, input]) => input);
+    expect(controls.map((input) => input.expectedRevision)).toEqual([1, 2]);
+    expect(controls[1].idempotencyKey).not.toBe(controls[0].idempotencyKey);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('shows a failure classification as its category and message, not an object dump', () => {
+    // The host's missionFailureNotice format: typed JSON for the lead, then the recovery guidance.
+    const failure = { kind: 'protocol', code: 'runtime_protocol', source: 'dispatch', confidence: 'heuristic', recovery: 'lead_diagnosis', message: 'Heuristic diagnosis, not a proven root cause. This adapter has not certified the Mission control protocol.' };
+    record = { ...record, status: 'blocked', pendingProposal: undefined, blockers: [
+      { id: 'lead_dispatch_1', kind: 'protocol', message: `The principal engineer failed. Failure classification: ${JSON.stringify(failure)}\nThe lead must diagnose retained facts and choose a concrete bounded approach before requesting another attempt. No preset, account, permission or retry policy was changed. Pause/reconcile and explicitly resume.` },
+      { id: 'workspace', kind: 'environment', message: 'The managed workspace could not be provisioned.' }
+    ] };
+    useStore.setState({ missions: { mission: record } });
+    render(<MissionPanel session={owned('lead')} />);
+    const blockers = screen.getAllByText(/./, { selector: '.callout.warn' }).map((node) => node.textContent);
+    expect(blockers).toEqual([
+      'The principal engineer failed. Runtime protocol failure: Heuristic diagnosis, not a proven root cause. This adapter has not certified the Mission control protocol.\nThe lead must diagnose retained facts and choose a concrete bounded approach before requesting another attempt. No preset, account, permission or retry policy was changed. Pause/reconcile and explicitly resume.',
+      'Environment: The managed workspace could not be provisioned.'
+    ]);
+    expect(screen.getByTestId('mission-panel').textContent).not.toMatch(/Failure classification|\{"kind"/);
   });
 
   it('keeps Resume disabled until paused and waits for the planning turn to settle before Proceed', () => {

@@ -7,8 +7,12 @@ import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHandlerRegistry, type HandlerDeps, type SaveDialogOptions } from '../src/main/handlers';
 import type { CreateMissionRequest, MissionControlRequest, MissionRecord } from '../src/shared/mission';
+import { MISSION_NOT_LINKED_MESSAGE } from '../src/shared/mission-command';
+import { isMissionRevisionConflict, missionRevisionConflictMessage } from '../src/shared/mission-errors';
 import type { SessionMeta, UserInput } from '../src/shared/types';
 import { SettingsStore } from '../src/main/settings';
+import { missionDeliveryBranch } from '../src/main/mission/delivery';
+import type { TargetObservation } from '../src/main/mission/workspaces';
 import { missionFixture } from './support/mission-fixture';
 import * as git from '../src/main/git';
 import { RemoteHost, REMOTE_CHANNELS, REMOTE_READ_CHANNELS, REMOTE_WRITE_CHANNELS } from '../src/main/remote/host';
@@ -83,7 +87,11 @@ async function rig() {
     clearTranscript: vi.fn(), fork: vi.fn(), moveTo: vi.fn(), goal: vi.fn(), subagentCommand: vi.fn(),
     respondApproval: vi.fn()
   };
-  const terminals = { list: vi.fn(() => [] as Array<{ id: string; sessionId: string; cwd: string }>), closeForSession: vi.fn(async (_id: string) => undefined), create: vi.fn(), input: vi.fn(), attach: vi.fn(), restart: vi.fn() };
+  const terminals = {
+    list: vi.fn(() => [] as Array<{ id: string; sessionId: string; cwd: string }>), closeForSession: vi.fn(async (_id: string) => undefined),
+    create: vi.fn((sessionId: string) => ({ id: `t-${sessionId}`, sessionId, cwd: live.find((s) => s.id === sessionId)!.cwd })),
+    input: vi.fn(), resize: vi.fn(), attach: vi.fn(), restart: vi.fn()
+  };
   const desktop = {
     userDataPath: () => dir, documentsPath: () => dir,
     showOpenDialog: vi.fn(async () => ({ canceled: false, filePaths: [root] })),
@@ -249,6 +257,36 @@ describe('Mission user IPC', () => {
     expect(r.missions.sendUser).toHaveBeenCalledExactlyOnceWith('lead', { text: '/mission Add CSV export' }, 'command-1:steer');
     expect(r.missions.create).not.toHaveBeenCalled();
     expect(r.sessions.send).not.toHaveBeenCalled();
+  });
+
+  it('answers /mission status in a session without a Mission with a visible message, not silence', async () => {
+    const r = await rig();
+    expect(await r.registry.invoke('missions:command', command('source', '/mission status'))).toEqual({ kind: 'status', message: MISSION_NOT_LINKED_MESSAGE });
+    expect(await r.registry.invoke('missions:command', command('lead', '/mission status'))).toEqual({ kind: 'status', mission: r.record(), sessionId: 'lead' });
+    expect(r.missions.create).not.toHaveBeenCalled(); expect(r.missions.control).not.toHaveBeenCalled(); expect(r.missions.sendUser).not.toHaveBeenCalled();
+  });
+
+  it('refuses a stale control with the recognised revision conflict, so the UI can bind the newer record', async () => {
+    const r = await rig();
+    r.patch({ status: 'running' });
+    const stale = r.registry.invoke('missions:control', { missionId: 'mission', expectedRevision: 0, idempotencyKey: 'stale-pause', control: { action: 'pause' } });
+    await expect(stale).rejects.toThrow(missionRevisionConflictMessage(0, 1));
+    expect(isMissionRevisionConflict(await stale.catch((error: unknown) => error))).toBe(true);
+    expect(r.missions.control).not.toHaveBeenCalled();
+    // A fresh request bound to the current revision goes through.
+    await r.registry.invoke('missions:control', { missionId: 'mission', expectedRevision: 1, idempotencyKey: 'fresh-pause', control: { action: 'pause' } });
+    expect(r.missions.control).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ expectedRevision: 1, idempotencyKey: 'fresh-pause' }));
+  });
+
+  it('keeps the launch dialog permission choice for a linked launch; a typed /mission keeps the source mode', async () => {
+    const r = await rig();
+    r.source.config = { ...r.source.config, permissionMode: 'full-auto' };
+    await r.registry.invoke('missions:create', { idempotencyKey: 'dialog', projectRoot: r.root, originSessionId: 'source', objective: 'Ship it', mode: 'autonomous', permissionMode: 'plan' });
+    expect(r.missions.create).toHaveBeenLastCalledWith(expect.objectContaining({ originSessionId: 'source', projectRoot: r.root, permissionMode: 'plan' }));
+    await r.registry.invoke('missions:command', command('source', '/mission Ship it', 'typed'));
+    expect(r.missions.create).toHaveBeenLastCalledWith(expect.objectContaining({ originSessionId: 'source', permissionMode: 'full-auto', submittedCommand: '/mission Ship it' }));
+    expect(r.missions.create).toHaveBeenCalledTimes(2);
+    expect(r.source.config.permissionMode).toBe('full-auto');
   });
 
   it('pauses before returning to planning, then steers, while explicit start creates a sibling', async () => {
@@ -420,6 +458,33 @@ describe('Mission resource ownership at generic handlers', () => {
     expect(r.terminals.create.mock.calls).toHaveLength(2);
   });
 
+  it('protects the exact delivery branch execution pushes after an approved-target integration', async () => {
+    const r = await rig();
+    const deleteBranch = vi.spyOn(git, 'gitDeleteBranch').mockResolvedValue({ ok: true });
+    const checkout = vi.spyOn(git, 'gitCheckout').mockResolvedValue({ ok: true });
+    const observation: TargetObservation = { id: 'o_target', missionId: 'mission', operationId: 'refresh-target', remote: 'origin', targetBranch: 'develop', remoteUrl: 'https://github.com/owner/repo.git',
+      commitSha: 'c'.repeat(40), contentHash: 'd'.repeat(40), createdAt: '2026-09-25T00:00:00.000Z', hostHash: 'host' };
+    const earlier = { baseCommitSha: 'a'.repeat(40), contentHash: 'e'.repeat(40) };
+    r.patch({
+      acceptedRevision: { baseCommitSha: 'a'.repeat(40), contentHash: 'b'.repeat(40) },
+      operations: [
+        { id: 'refresh-target', idempotencyKey: 'refresh-target', kind: 'integrate', actor: 'host', expectedRevision: 1, state: 'succeeded', payload: { target: 'approved', observationId: observation.id, targetObservation: observation } },
+        { id: 'deliver-earlier', idempotencyKey: 'deliver-earlier', kind: 'deliver', actor: 'lead:lead:1', expectedRevision: 2, state: 'failed', error: 'held', payload: { expectedAccepted: earlier } }
+      ]
+    });
+    const pushed = missionDeliveryBranch(r.record(), observation);
+    const earlierPush = missionDeliveryBranch({ ...r.record(), acceptedRevision: earlier }, observation);
+    expect(pushed).toMatch(/^mission\/mission-delivery-[0-9a-f]{16}$/);
+    expect(earlierPush).not.toBe(pushed);
+    for (const branch of [pushed, `refs/heads/${pushed}`, earlierPush, 'mission/mission-delivery']) {
+      await expect(r.registry.invoke('git:deleteBranch', { sessionId: 'source', branch }), branch).rejects.toThrow(/Mission/);
+    }
+    await expect(r.registry.invoke('git:checkout', { sessionId: 'source', branch: pushed })).rejects.toThrow(/Mission/);
+    expect(deleteBranch).not.toHaveBeenCalled(); expect(checkout).not.toHaveBeenCalled();
+    await r.registry.invoke('git:deleteBranch', { sessionId: 'source', branch: 'feature/ordinary' });
+    expect(deleteBranch).toHaveBeenCalledOnce();
+  });
+
   it('selects only the owning lead’s retained workspaces and defaults Files to integration', async () => {
     const r = await rig();
     await fs.writeFile(path.join(r.integrationPath, 'result.txt'), 'integrated');
@@ -465,6 +530,88 @@ describe('Mission resource ownership at generic handlers', () => {
     await expect(r.registry.invoke('git:diff', { sessionId: 'lead', path: 'escape/worker.txt' })).rejects.toThrow(/outside/);
     r.patch({ acceptedRevision: { baseCommitSha: 'a'.repeat(40), contentHash: '--output=unsafe' } });
     await expect(r.registry.invoke('git:diff', { sessionId: 'lead' })).rejects.toThrow(/identity/);
+  });
+});
+
+const eperm = () => Object.assign(new Error('EPERM: operation not permitted, realpath'), { code: 'EPERM' });
+
+describe('Mission guard cost for ordinary use', () => {
+  it('runs no resource check, not even a realpath, while no Mission or Mission-owned session exists', async () => {
+    const r = await rig();
+    r.missions.list.mockReturnValue([]);
+    r.live.splice(0, r.live.length, r.source);
+    const terminal = { id: 't-source', sessionId: 'source', cwd: r.root };
+    r.terminals.list.mockReturnValue([terminal]);
+    // A path the OS refuses to resolve (EPERM on a network share) must not matter to ordinary work.
+    const realpath = vi.spyOn(fs, 'realpath').mockRejectedValue(eperm());
+    await r.registry.invoke('sessions:send', { id: 'source', input: { text: 'hello' } });
+    await r.registry.invoke('sessions:create', { config: { ...r.source.config } });
+    await r.registry.invoke('sessions:interrupt', { id: 'source' });
+    await r.registry.invoke('terminal:create', { sessionId: 'source' });
+    await r.registry.invoke('terminal:attach', { terminalId: terminal.id, cols: 80, rows: 24 });
+    await r.registry.invoke('terminal:input', { terminalId: terminal.id, data: 'ls\r' });
+    await r.registry.invoke('terminal:resize', { terminalId: terminal.id, cols: 120, rows: 30 });
+    await r.registry.invoke('sessions:archive', { id: 'source', archived: true });
+    expect(realpath).not.toHaveBeenCalled();
+    expect(r.sessions.send).toHaveBeenCalledExactlyOnceWith('source', { text: 'hello' });
+    expect(r.sessions.create).toHaveBeenCalledOnce(); expect(r.sessions.interrupt).toHaveBeenCalledOnce();
+    expect(r.terminals.input).toHaveBeenCalledExactlyOnceWith(terminal.id, 'ls\r');
+    expect(r.terminals.resize).toHaveBeenCalledExactlyOnceWith(terminal.id, 120, 30);
+    expect(r.sessions.setArchived).toHaveBeenCalledExactlyOnceWith('source', true, undefined, undefined);
+    // Host-only ownership fields stay refused even then.
+    await expect(r.registry.invoke('sessions:create', { config: { ...r.source.config, mission: { missionId: 'forged' } } })).rejects.toThrow(/host-only/);
+  });
+
+  it('writes keystrokes and resizes synchronously and in order while Missions exist, never awaiting the filesystem', async () => {
+    const r = await rig();
+    const terminal = { id: 't-source', sessionId: 'source', cwd: r.root };
+    r.terminals.list.mockReturnValue([terminal]);
+    await r.registry.invoke('terminal:create', { sessionId: 'source' });
+    // Every realpath from here on stalls, like a loaded or unreachable filesystem.
+    const realpath = vi.spyOn(fs, 'realpath').mockImplementation(() => new Promise<never>(() => undefined));
+    const keystrokes = ['g', 'i', 't', '\r'].map((data) => r.registry.invoke('terminal:input', { terminalId: terminal.id, data }));
+    // Each write reached the PTY inside its own invoke call, before anything was awaited.
+    expect(r.terminals.input.mock.calls).toEqual([[terminal.id, 'g'], [terminal.id, 'i'], [terminal.id, 't'], [terminal.id, '\r']]);
+    await Promise.all(keystrokes);
+    await r.registry.invoke('terminal:resize', { terminalId: terminal.id, cols: 100, rows: 40 });
+    expect(r.terminals.resize).toHaveBeenCalledExactlyOnceWith(terminal.id, 100, 40);
+    expect(realpath).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a paused Mission lead shell per keystroke, without a filesystem round-trip', async () => {
+    const r = await rig();
+    const shell = { id: 't-lead', sessionId: 'lead', cwd: r.leadPath };
+    r.terminals.list.mockReturnValue([shell]);
+    await r.registry.invoke('terminal:create', { sessionId: 'lead' });
+    await r.registry.invoke('terminal:input', { terminalId: shell.id, data: 'npm test\r' });
+    expect(r.terminals.input).toHaveBeenCalledExactlyOnceWith(shell.id, 'npm test\r');
+    const realpath = vi.spyOn(fs, 'realpath');
+    r.patch({ status: 'paused' });
+    await expect(r.registry.invoke('terminal:input', { terminalId: shell.id, data: 'rm -rf src\r' })).rejects.toThrow(/interactive shells/);
+    await expect(r.registry.invoke('terminal:resize', { terminalId: shell.id, cols: 90, rows: 20 })).rejects.toThrow(/interactive shells/);
+    expect(realpath).not.toHaveBeenCalled();
+    // A refused recheck revokes the shell's verdict until a later full check passes again.
+    await expect(r.registry.invoke('terminal:attach', { terminalId: shell.id, cols: 80, rows: 24 })).rejects.toThrow(/interactive shells/);
+    r.patch({ status: 'running' });
+    await expect(r.registry.invoke('terminal:input', { terminalId: shell.id, data: 'rm -rf src\r' })).rejects.toThrow(/Mission/);
+    await r.registry.invoke('terminal:attach', { terminalId: shell.id, cols: 80, rows: 24 });
+    await r.registry.invoke('terminal:input', { terminalId: shell.id, data: 'git status\r' });
+    expect(r.terminals.input.mock.calls).toEqual([[shell.id, 'npm test\r'], [shell.id, 'git status\r']]);
+    expect(r.terminals.resize).not.toHaveBeenCalled();
+  });
+
+  it('does not fail an ordinary request on an unexpected realpath error, while a Mission root still refuses', async () => {
+    const r = await rig();
+    vi.spyOn(fs, 'realpath').mockRejectedValue(eperm());
+    await r.registry.invoke('sessions:send', { id: 'source', input: { text: 'still ordinary' } });
+    await r.registry.invoke('sessions:interrupt', { id: 'source' });
+    await r.registry.invoke('sessions:create', { config: { ...r.source.config } });
+    expect(r.sessions.send).toHaveBeenCalledExactlyOnceWith('source', { text: 'still ordinary' });
+    expect(r.sessions.interrupt).toHaveBeenCalledOnce(); expect(r.sessions.create).toHaveBeenCalledOnce();
+    await expect(r.registry.invoke('app:openTerminal', { cwd: r.integrationPath })).rejects.toThrow(/Mission/);
+    await expect(r.registry.invoke('sessions:moveTo', { id: 'source', cwd: path.join(r.workerPath, 'nested') })).rejects.toThrow(/Mission/);
+    await expect(r.registry.invoke('sessions:create', { config: { ...r.source.config, projectRoot: r.verificationPath } })).rejects.toThrow(/Mission/);
+    expect(r.sessions.moveTo).not.toHaveBeenCalled(); expect(r.sessions.create).toHaveBeenCalledOnce();
   });
 });
 

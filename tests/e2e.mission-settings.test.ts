@@ -34,7 +34,7 @@ async function launch(userData: string): Promise<Page> {
 }
 
 describe.runIf(enabled)('Mission settings UI', () => {
-  it('saves exact library choices, empty pools, project tightening and survives an Electron restart without enabling launch', async () => {
+  it('saves exact library choices, empty pools, project tightening and survives an Electron restart, with no launch control in Settings', async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-mission-settings-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -47,9 +47,17 @@ describe.runIf(enabled)('Mission settings UI', () => {
     }));
     const readSettings = async (): Promise<AppSettings> => JSON.parse(await fs.readFile(settingsPath, 'utf8'));
     let win = await launch(userData);
+    // Honest support boundary for testers, and no stale "launch is not enabled" claim.
+    await win.getByTestId('mission-support').getByText('Missions are experimental. Supported today: Pi presets on Windows.', { exact: true }).waitFor();
+    expect(await win.getByText(/not enabled in this phase/).count()).toBe(0);
     expect(await win.getByText('Unavailable pool — no presets. No fallback.', { exact: true }).count()).toBe(5);
     expect(await win.getByRole('button', { name: /start mission|launch mission/i }).count()).toBe(0);
     await win.getByRole('button', { name: 'New preset', exact: true }).click();
+    const harness = win.getByLabel('Harness', { exact: true });
+    expect(await harness.inputValue()).toBe('pi');
+    expect(await harness.locator('option[value="native"]').textContent()).toBe('Native loop — not supported for Missions yet');
+    // The fixture catalog lives on the native harness: an explicit, labelled choice that is kept.
+    await harness.selectOption('native');
     await win.getByLabel('Preset name', { exact: true }).fill('Engineer');
     await win.getByLabel('Provider / billing path', { exact: true }).selectOption('fixture-one');
     await win.locator('.mp-select:has(.mp-name[title="fixture-one/engine"])').click();
@@ -57,6 +65,7 @@ describe.runIf(enabled)('Mission settings UI', () => {
     await win.getByLabel('Reasoning', { exact: true }).selectOption('high');
     await win.getByRole('button', { name: 'Apply preset', exact: true }).click();
     await win.getByRole('region', { name: 'Preset Engineer', exact: true }).getByText('Unverified', { exact: true }).waitFor();
+    await win.getByRole('region', { name: 'Preset Engineer', exact: true }).getByText('Not supported for Missions yet', { exact: true }).waitFor();
     expect(await win.getByText('Available', { exact: true }).count()).toBe(0);
     await win.getByLabel('T5: Engineer', { exact: true }).check();
     await win.getByLabel('T3: Engineer', { exact: true }).check();
@@ -100,6 +109,7 @@ describe.runIf(enabled)('Mission settings UI', () => {
     // A real process restart, not a renderer reload, proves persistence.
     await app!.close(); app = null;
     win = await launch(userData);
+    await win.getByRole('region', { name: 'Preset Engineer', exact: true }).getByText('Not supported for Missions yet', { exact: true }).waitFor();
     expect(await win.getByLabel('T1 label', { exact: true }).inputValue()).toBe('Evidence');
     expect(await win.getByLabel('Observed Mission cost threshold (USD)', { exact: true }).inputValue()).toBe('2.5');
     expect(await win.getByLabel('Observed Mission token threshold', { exact: true }).inputValue()).toBe('10000');

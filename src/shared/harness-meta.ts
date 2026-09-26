@@ -253,9 +253,27 @@ export function effortOptionsFor(harness: HarnessDescriptor, model: Pick<ModelIn
   return model?.supportedEfforts ?? harness.capabilities.effortLevels ?? EFFORT_LEVELS;
 }
 
+/**
+ * Mission execution support today. Only managed Pi passes Mission readiness, and only on Windows,
+ * where its process-tree ownership is proven. Claude reports its control bridge unverified and the
+ * other adapters have no Mission readiness, so a Mission that uses them stops at a blocker. The UI
+ * says so up front; saved presets for other harnesses are kept, never rewritten.
+ */
+export const MISSION_SUPPORTED_HARNESSES: readonly HarnessId[] = ['pi'];
+export const MISSION_SUPPORTED_PLATFORMS: readonly string[] = ['win32'];
+export const MISSION_SUPPORT_SUMMARY = 'Missions are experimental. Supported today: Pi presets on Windows.';
+export const MISSION_UNSUPPORTED_PLATFORM = 'Missions cannot run on this platform yet.';
+export const MISSION_HARNESS_UNSUPPORTED_LABEL = 'not supported for Missions yet';
+export function isMissionHarnessSupported(id: HarnessId): boolean {
+  return MISSION_SUPPORTED_HARNESSES.includes(id);
+}
+
+/**
+ * Autocomplete keeps array order and Tab takes the first prefix match, so a new command goes after
+ * every existing command it shares a prefix with: `/m` + Tab must stay `/model`.
+ */
 export const SLASH_COMMANDS: { name: string; description: string; args?: string }[] = [
   { name: 'help', description: 'Show available commands and shortcuts' },
-  { name: 'mission', description: 'Start or control a Mission led by your configured T5 principal engineer', args: '[plan <objective>|execute|pause|resume|stop|status|start -- <objective>]' },
   { name: 'doctor', description: 'Check harness runtimes, sign-in state and provider keys' },
   { name: 'model', description: 'Switch model for this session', args: '<provider/model>' },
   { name: 'mode', description: 'Change permission mode', args: 'ask|accept-edits|plan|auto|full-auto' },
@@ -276,5 +294,6 @@ export const SLASH_COMMANDS: { name: string; description: string; args?: string 
   { name: 'worktree', description: 'Show worktree information for this session' },
   { name: 'pr', description: 'Push this branch and open a GitHub PR into a base branch (needs gh)', args: '<branch>' },
   { name: 'merge', description: 'Merge the open PR for this branch (needs gh)', args: '<branch>' },
+  { name: 'mission', description: 'Start or control a Mission led by your configured T5 principal engineer', args: '[plan <objective>|execute|pause|resume|stop|status|start -- <objective>]' },
   { name: 'stop', description: 'Interrupt the current turn' }
 ];

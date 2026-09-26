@@ -1,7 +1,7 @@
 /** Mission foundations: edit approved choices, never start agents or infer runtime availability. */
 import React, { useEffect, useState } from 'react';
 import type { AppSettings, EffortLevel, HarnessId, ModelInfo } from '../../../../shared/types';
-import { HARNESS_BY_ID, HARNESSES } from '../../../../shared/harness-meta';
+import { HARNESS_BY_ID, HARNESSES, isMissionHarnessSupported, MISSION_HARNESS_UNSUPPORTED_LABEL, MISSION_SUPPORTED_HARNESSES } from '../../../../shared/harness-meta';
 import {
   applyMissionProjectOverride, createDefaultMissionConfig, MISSION_ACCOUNT_LIMIT_MAX_ENTRIES, MISSION_ACCOUNT_LIMIT_MAX_TURNS, MISSION_LIMIT_MAXIMUMS, MISSION_PRESET_STATUS_LABELS,
   validateMissionConfig, validateMissionProjectOverride, validatePresetEligibility,
@@ -11,6 +11,7 @@ import { invoke } from '../../api';
 import { useStore } from '../../store';
 import { ModelPicker } from '../ModelPicker';
 import { Badge, Button, Field, Toggle } from '../ui';
+import { missionHarnessWarning, MissionSupportNotice } from './MissionSupport';
 import './MissionSettings.css';
 
 type Projects = Record<string, MissionProjectOverride>;
@@ -113,10 +114,10 @@ function PresetEditor({ initial, settings, onApply, onCancel }: {
   return <section className="mission-card" aria-label="Preset editor">
     <h3>{initial.name ? 'Edit preset' : 'New preset'}</h3>
     <Field label="Preset name"><input aria-label="Preset name" value={draft.name} maxLength={200} onChange={(e) => update({ name: e.target.value })} /></Field>
-    <Field label="Harness"><select aria-label="Harness" value={draft.harnessId} onChange={(e) => {
+    <Field label="Harness" hint={missionHarnessWarning(draft.harnessId) ?? 'Pi is the harness Missions support today (on Windows).'}><select aria-label="Harness" value={draft.harnessId} onChange={(e) => {
       update({ harnessId: e.target.value as HarnessId, model: { provider: '', model: '' }, reasoning: { kind: 'default' }, runtimeVariantId: undefined });
       setPicking(true);
-    }}>{HARNESSES.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></Field>
+    }}>{HARNESSES.map((h) => <option key={h.id} value={h.id}>{isMissionHarnessSupported(h.id) ? h.name : `${h.name} — ${MISSION_HARNESS_UNSUPPORTED_LABEL}`}</option>)}</select></Field>
     {draft.harnessId === 'acp' && <Field label="ACP runtime"><select aria-label="ACP runtime" value={draft.runtimeVariantId ?? ''} onChange={(e) => update({ runtimeVariantId: e.target.value || undefined })}>
       <option value="">Select configured ACP agent</option>
       {settings.acpAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
@@ -265,18 +266,20 @@ export function MissionSettings({ settings }: { settings: AppSettings }) {
   };
   return <div className="settings-section mission-settings">
     <h2>Mission</h2>
-    <p>Configure execution presets and five tier pools. These settings do not start a Mission; launch is not enabled in this phase.</p>
+    <MissionSupportNotice />
+    <p>Configure execution presets and five tier pools. Saving never starts a Mission: start one from New Session → Mission, or type /mission in a session. It uses the default T5 principal engineer below.</p>
     <p className="field-hint">A preset pins its harness, model, provider/connection and reasoning as one choice. Catalog entries do not prove runtime availability or lead capability. No automatic model, effort or billing-path fallback.</p>
     {draft.error && <div role="alert"><p>{draft.error}</p><Button onClick={() => { change(createDefaultMissionConfig(), {}); }}>Replace invalid Mission settings</Button></div>}
     <fieldset disabled={busy || !!draft.error} className="mission-form">
-      <div className="mission-toolbar"><h3>Preset library</h3><Button disabled={!!editor} onClick={() => setEditor({ id: `preset-${crypto.randomUUID()}`, revision: 1, name: '', harnessId: settings.defaultHarness, model: { provider: '', model: '' }, reasoning: { kind: 'default' }, enabled: true })}>New preset</Button></div>
+      <div className="mission-toolbar"><h3>Preset library</h3><Button disabled={!!editor} onClick={() => setEditor({ id: `preset-${crypto.randomUUID()}`, revision: 1, name: '', harnessId: isMissionHarnessSupported(settings.defaultHarness) ? settings.defaultHarness : MISSION_SUPPORTED_HARNESSES[0], model: { provider: '', model: '' }, reasoning: { kind: 'default' }, enabled: true })}>New preset</Button></div>
       {!mission.presets.length && <p>No presets configured. Add an exact execution choice to begin.</p>}
       {mission.presets.map((preset) => {
         const eligibility = validatePresetEligibility(preset, { capabilities: catalog[preset.harnessId] ? capabilities : undefined });
         const pools = mission.tiers.filter((t) => t.presetIds.includes(preset.id));
         return <section key={preset.id} className="mission-card" aria-label={`Preset ${preset.name}`}>
-          <div className="mission-toolbar"><strong>{preset.name}</strong><Badge>{MISSION_PRESET_STATUS_LABELS[eligibility.status]}</Badge></div>
+          <div className="mission-toolbar"><strong>{preset.name}</strong><span className="row gap6"><Badge>{MISSION_PRESET_STATUS_LABELS[eligibility.status]}</Badge>{!isMissionHarnessSupported(preset.harnessId) && <Badge tone="amber">Not supported for Missions yet</Badge>}</span></div>
           <p>{HARNESS_BY_ID[preset.harnessId].name} · {preset.model.provider}/{preset.model.model} · Connection: {preset.model.connectionId ?? preset.model.provider} · Reasoning: {preset.reasoning.kind === 'default' ? 'Default' : preset.reasoning.value}</p>
+          {missionHarnessWarning(preset.harnessId) && <p className="field-hint">{missionHarnessWarning(preset.harnessId)} Saved presets are kept as they are.</p>}
           {preset.runtimeVariantId && <p>Runtime: {preset.runtimeVariantId}</p>}
           <p className="field-hint">{eligibility.reasons.join(' ')}</p>
           {pools.length > 1 && <p role="note">Overlapping membership ({pools.map((t) => `T${t.id}`).join(', ')}) does not create a capability difference.</p>}
