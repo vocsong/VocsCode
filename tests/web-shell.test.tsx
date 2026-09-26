@@ -23,6 +23,7 @@ const { holder } = vi.hoisted(() => {
 });
 
 import { RelayClient, type OwnerHost } from '../relay/src/web-client';
+import type { AccountState } from '../src/web/shell/account';
 import { RelayTransport } from '../src/web/transport/relay-transport';
 import type { MirrorIndex } from '../src/shared/mirror';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
@@ -140,9 +141,12 @@ function shell(initial: Partial<{ creds: Pairing | null; connected: boolean; con
 
 const host = (deviceId: string, name: string, online = true): OwnerHost => ({ deviceId, name, platform: 'linux', lastSeen: 0, online });
 
-function mount(parts: { client: unknown; transport: RelayTransport; initialCode?: string; connectHash?: string }) {
+const ANONYMOUS: AccountState = { status: 'anonymous' };
+const SIGNED_IN: AccountState = { status: 'signed-in', account: { login: 'vocs', accountId: 'vocs-v1' } };
+
+function mount(parts: { client: unknown; transport: RelayTransport; account?: AccountState; initialCode?: string; connectHash?: string }) {
   holder.transport = parts.transport as never;
-  return rtl.render(<WebApp client={parts.client as never} transport={parts.transport} initialCode={parts.initialCode} connectHash={parts.connectHash} />);
+  return rtl.render(<WebApp client={parts.client as never} transport={parts.transport} account={parts.account ?? ANONYMOUS} initialCode={parts.initialCode} connectHash={parts.connectHash} />);
 }
 
 beforeEach(async () => {
@@ -169,8 +173,8 @@ describe('pairing from a link', () => {
 
     await rtl.waitFor(() => expect(rtl.screen.getByTestId('pair-screen')).toBeTruthy());
     expect((rtl.screen.getByTestId('pair-code') as HTMLInputElement).value).toBe('ABCD2345');
-    // Account probing is the only request the page makes before a human submits.
-    expect((fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(([url]) => url)).toEqual(['/v1/me']);
+    // The account was resolved before the shell mounted; the shell itself fetches nothing.
+    expect((fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls).toEqual([]);
     expect(view.container.querySelector('form.account-signout')).toBeNull();
 
     rtl.fireEvent.change(rtl.screen.getByTestId('pair-name'), { target: { value: 'Test Phone' } });
@@ -195,10 +199,9 @@ describe('pairing from a link', () => {
 
 describe('signed-in owner', () => {
   it('shows sign-out only when the landing gate identifies a login', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ login: 'vocs' }) })));
     const { client } = shell({ creds: { hostDeviceId: 'h1', hostName: 'Work PC', webDeviceId: 'w1', relayBase: 'http://localhost' }, sessions: [] });
     const transport = new RelayTransport(client as unknown as RelayClient);
-    mount({ client, transport });
+    mount({ client, transport, account: SIGNED_IN });
     await rtl.waitFor(() => expect(rtl.screen.getByTestId('computers')).toBeTruthy());
     rtl.fireEvent.click(rtl.screen.getByRole('button', { name: 'Menu' }));
     await rtl.waitFor(() => expect(rtl.screen.getByText('@vocs')).toBeTruthy());
@@ -206,11 +209,10 @@ describe('signed-in owner', () => {
   });
 
   it('pairs a listed computer with no code, and renders a hostile name as text', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ login: 'vocs' }) })));
     const hostile = '<img src=x onerror=alert(1)> PC';
     const { client, calls, state } = shell({ hosts: [host('h2', hostile)] });
     const transport = new RelayTransport(client as unknown as RelayClient);
-    const view = mount({ client, transport });
+    const view = mount({ client, transport, account: SIGNED_IN });
     await rtl.waitFor(() => expect(rtl.screen.getByText(hostile)).toBeTruthy());
     // A host name is rendered as text: no element is ever created from it.
     expect(view.container.querySelector('img')).toBeNull();
@@ -222,10 +224,9 @@ describe('signed-in owner', () => {
   });
 
   it('adds a computer, waits for it, then asks it to pair — in that order', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ login: 'vocs' }) })));
     const { client, calls, state } = shell({ hosts: [host('h2', 'Lab PC')] });
     const transport = new RelayTransport(client as unknown as RelayClient);
-    mount({ client, transport, connectHash: 'a'.repeat(64) });
+    mount({ client, transport, account: SIGNED_IN, connectHash: 'a'.repeat(64) });
     await rtl.waitFor(() => expect(rtl.screen.getByTestId('connect-screen')).toBeTruthy());
     expect(rtl.screen.getByTestId('connect-code').textContent).toBeTruthy();
     rtl.fireEvent.click(rtl.screen.getByTestId('connect-add'));

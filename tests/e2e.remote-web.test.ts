@@ -58,7 +58,7 @@ app.whenReady().then(async () => {
   // Signed in with GitHub, as far as the (test) landing is concerned.
   if (process.env.REMOTE_WEB_COOKIE) {
     const [name, value] = process.env.REMOTE_WEB_COOKIE.split('=');
-    await session.defaultSession.cookies.set({ url: process.env.REMOTE_WEB_URL, name, value });
+    await session.defaultSession.cookies.set({ url: new URL(process.env.REMOTE_WEB_URL).origin, name, value });
   }
   const win = new BrowserWindow({ width: 1100, height: 800, show: false, webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, backgroundThrottling: false } });
   win.once('ready-to-show', () => {
@@ -172,9 +172,10 @@ function watchCsp(page: Page): string[] {
 describe.runIf(enabled)('remote web shell in a real browser', () => {
   it('pairs, streams, answers an approval, sends, switches computers, reconnects and unpairs', async () => {
     relay = await startLocalRelay();
+    landing = await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
     const work = await desk('Work', relay.origin, relay.enrollToken);
     const { code } = await work.host.startPairing('Work PC');
-    const page = await launchBrowser(`${relay.origin}/app/?code=${code}`);
+    const page = await launchBrowser(`${landing.origin}/app/?code=${code}`, TEST_SESSION_COOKIE);
     const cspViolations = watchCsp(page);
 
     // The link fills the code; pairing still needs a human on each side.
@@ -272,7 +273,7 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
 
   it('adds a computer with Connect with GitHub, then pairs another from the signed-in list, with no code or secret', async () => {
     relay ??= await startLocalRelay();
-    landing = await startTestLanding(relay.origin, relay.enrollToken);
+    landing = await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
     // Desktops with no enrollment secret: they go through the landing, as they would at code.vocs.io.
     const office = await desk('Office', '', '', { enable: false });
     let link = '';
@@ -303,7 +304,7 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     await lab.host.signIn(landing.origin, async (url) => void (labLink = url), 'Lab PC');
     const grant = await fetch(`${landing.origin}/v1/owner/enroll-grant`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: TEST_SESSION_COOKIE },
+      headers: { 'content-type': 'application/json', cookie: TEST_SESSION_COOKIE, origin: landing.origin },
       body: JSON.stringify({ nonceHash: new URL(labLink).searchParams.get('connect') })
     });
     expect(grant.status).toBe(200);
@@ -332,7 +333,8 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     ];
     const phone = await desk('Phone', relay.origin, relay.enrollToken, { items, focus: 'Phone-s1' });
     const { code } = await phone.host.startPairing('Phone PC');
-    const page = await launchBrowser(`${relay.origin}/app/?code=${code}`);
+    landing ??= await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
+    const page = await launchBrowser(`${landing.origin}/app/?code=${code}`, TEST_SESSION_COOKIE);
     await expect.poll(() => page.locator('[data-testid="pair-code"]').inputValue(), { timeout: 30_000 }).toBe(code);
     await page.locator('[data-testid="pair-submit"]').click();
     await approve(phone.host, 'Browser');
@@ -406,5 +408,71 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
         .filter((entry) => entry.size < 16)
     );
     expect(smallText).toEqual([]);
+  }, 240_000);
+
+  it('keeps each signed-in account in its own browser vault and host list', async () => {
+    relay ??= await startLocalRelay();
+    landing ??= await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
+    const accountA = 'github:710003';
+    const accountB = 'github:710004';
+    const cookieA = landing.sessionFor(accountA, 'account-a');
+    const cookieB = landing.sessionFor(accountB, 'account-b');
+    const desktopA = await desk('Account A', '', '', { enable: false });
+    const desktopB = await desk('Account B', '', '', { enable: false });
+    const addComputer = async (desktop: Desk, cookie: string, name: string) => {
+      let link = '';
+      await desktop.host.signIn(landing!.origin, async (url) => void (link = url), `${name} PC`);
+      const nonceHash = new URL(link).searchParams.get('connect')!;
+      const grant = await fetch(`${landing!.origin}/v1/owner/enroll-grant`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie, origin: landing!.origin },
+        body: JSON.stringify({ nonceHash })
+      });
+      expect(grant.status).toBe(200);
+      await expect.poll(() => desktop.host.state().status, { timeout: 30_000 }).toBe('online');
+    };
+    await addComputer(desktopA, cookieA, 'Account A');
+    await addComputer(desktopB, cookieB, 'Account B');
+
+    const page = await launchBrowser(`${landing.origin}/app/`, cookieA);
+    const accountApp = app;
+    try {
+      // Account A lists and pairs only its own computer.
+      const aRow = page.locator('.w-list-row', { hasText: 'Account A PC' });
+      await expect.poll(() => aRow.textContent(), { timeout: 30_000 }).toContain('Account A PC');
+      await expect.poll(async () => (await page.locator('.w-list-row').allTextContents()).join('|')).not.toContain('Account B PC');
+      await page.locator('[data-testid="pair-name"]').fill('Account A browser');
+      await aRow.locator('[data-testid="owner-pair"]').click();
+      await approve(desktopA.host, 'Account A browser');
+      await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
+      await page.locator('.w-session-name').getByText('Account A session').waitFor({ timeout: 20_000 });
+
+      // Switching identities at the same origin and in the same IndexedDB must not load A's
+      // pairing, its computer list, or its vault bucket.
+      const [nameB, valueB] = cookieB.split('=');
+      await page.context().addCookies([{ url: landing!.origin, name: nameB!, value: valueB! }]);
+      await page.reload();
+      const bRow = page.locator('.w-list-row', { hasText: 'Account B PC' });
+      await expect.poll(() => bRow.textContent(), { timeout: 30_000 }).toContain('Account B PC');
+      await expect.poll(async () => (await page.locator('.w-list-row').allTextContents()).join('|')).not.toContain('Account A PC');
+      await page.locator('[data-testid="pair-name"]').fill('Account B browser');
+      await bRow.locator('[data-testid="owner-pair"]').click();
+      await approve(desktopB.host, 'Account B browser');
+      await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
+      await page.locator('.w-session-name').getByText('Account B session').waitFor({ timeout: 20_000 });
+
+      // Back to A: its own bucket restores its own pairing.
+      const [nameA, valueA] = cookieA.split('=');
+      await page.context().addCookies([{ url: landing!.origin, name: nameA!, value: valueA! }]);
+      await page.reload();
+      await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
+      await page.locator('.w-session-name').getByText('Account A session').waitFor({ timeout: 20_000 });
+      await page.locator('[data-testid="computers"]').click();
+      await expect.poll(async () => (await page.locator('.w-list-row').allTextContents()).join('|')).toContain('Account A PC');
+    } finally {
+      await accountApp?.close();
+      await desktopA.host.disable();
+      await desktopB.host.disable();
+    }
   }, 240_000);
 });

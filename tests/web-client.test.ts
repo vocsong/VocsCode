@@ -405,6 +405,23 @@ describe('relay web client (browser-side protocol)', () => {
     }
   });
 
+  it('does not import or delete the incumbent browser pairing in another account vault', async () => {
+    const identity = await generateIdentity();
+    const storage = new Map<string, string>([[LEGACY_CREDENTIALS_KEY, JSON.stringify({
+      relayBase: 'https://relay.test', webToken: 'incumbent-only', webDeviceId: 'w_owner',
+      hostDeviceId: 'h_owner', hostPub: publicOf(identity), identity
+    })]]);
+    const client = new RelayClient({
+      vault: memoryVault(),
+      allowLegacyMigration: false,
+      legacy: { get: (key) => storage.get(key) ?? null, set: (key, value) => void storage.set(key, value), remove: (key) => void storage.delete(key) }
+    });
+    expect(await client.restore()).toBe(false);
+    expect(client.pairings()).toEqual([]);
+    await client.logout();
+    expect(storage.get(LEGACY_CREDENTIALS_KEY)).toContain('incumbent-only');
+  });
+
   it('never sends a handshake on a socket closed while the hello is being prepared', async () => {
     const identity = await generateIdentity();
     const storage = new Map<string, string>([[LEGACY_CREDENTIALS_KEY, JSON.stringify({

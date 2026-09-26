@@ -6,6 +6,7 @@
 import { expect } from 'vitest';
 import { WebSocket } from 'ws';
 import { memoryVault, RelayClient, type SimpleSocket, type WebCredentials } from '../../relay/src/web-client';
+import { ACCOUNT_ASSERTION_HEADER, createAccountAssertion, LEGACY_ACCOUNT_ID } from '../../relay/src/account';
 import { RemoteHost } from '../../src/main/remote/host';
 import { generateIdentity, importAesKey, sealBlob, sign, tokenProofPayload, type AnyIdentity, type Identity } from '../../src/shared/crypto';
 import type { HandlerRegistry } from '../../src/main/handlers';
@@ -35,8 +36,8 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T> {
 }
 
 /** Node's ws does not buffer sends during CONNECTING like a browser WebSocket does. */
-function wsFactory(url: string, onMessage: (raw: string) => void, onClose: () => void): SimpleSocket {
-  const ws = new WebSocket(url);
+function wsFactory(url: string, onMessage: (raw: string) => void, onClose: () => void, headers?: Record<string, string>): SimpleSocket {
+  const ws = new WebSocket(url, { headers });
   const queued: string[] = [];
   ws.on('open', () => {
     for (const raw of queued.splice(0)) ws.send(raw);
@@ -99,12 +100,38 @@ async function revokeRemaining(origin: string, target: string, targetAuth: Auth 
   throw new Error('no live device can revoke a created device');
 }
 
-export async function remoteSmoke(options: { origin: string; enrollToken: string; revealErrors?: boolean }): Promise<void> {
+export async function remoteSmoke(options: {
+  origin: string;
+  enrollToken: string;
+  revealErrors?: boolean;
+  /** Local Worker tests sign as the incumbent account; deployed smoke uses its signed-in cookie. */
+  accountId?: string;
+  accountAssertionSecret?: string;
+  sessionCookie?: string;
+}): Promise<void> {
   const { origin, enrollToken } = options;
   const originalFetch = globalThis.fetch;
+  const fetchWithTimeout: typeof fetch = (input, init) => originalFetch(input, { ...init, signal: AbortSignal.timeout(8_000) });
   // RemoteHost uses global fetch; bound every REST call (including cleanup) so Vitest never
   // times out the test before finally has a chance to revoke both devices.
-  globalThis.fetch = (input, init) => originalFetch(input, { ...init, signal: AbortSignal.timeout(8_000) });
+  globalThis.fetch = fetchWithTimeout;
+  const accountId = options.accountId ?? LEGACY_ACCOUNT_ID;
+  const browserWsHeaders: Record<string, string> | undefined = options.sessionCookie
+    ? { cookie: options.sessionCookie }
+    : options.accountAssertionSecret
+      ? { [ACCOUNT_ASSERTION_HEADER]: await createAccountAssertion(accountId, 'GET', '/v1/ws/client', options.accountAssertionSecret) }
+      : undefined;
+  const browserFetch: typeof fetch = async (input, init = {}) => {
+    const url = new URL(String(input));
+    const headers = new Headers(init.headers);
+    if (url.pathname.startsWith('/v1/')) {
+      if (options.sessionCookie) headers.set('cookie', options.sessionCookie);
+      else if (options.accountAssertionSecret) {
+        headers.set(ACCOUNT_ASSERTION_HEADER, await createAccountAssertion(accountId, init.method ?? 'GET', url.pathname, options.accountAssertionSecret));
+      }
+    }
+    return fetchWithTimeout(input, { ...init, headers });
+  };
 
   const hostSecrets = new Map<string, string>();
   const calls: string[] = [];
@@ -137,10 +164,10 @@ export async function remoteSmoke(options: { origin: string; enrollToken: string
       const parsed = new URL(url);
       socketUrlSafe = parsed.pathname === '/v1/ws/client' && /^[A-Za-z0-9_-]{43}$/.test(parsed.searchParams.get('ticket') ?? '') &&
         !parsed.searchParams.has('token') && !url.includes(client.credentials()?.webToken ?? 'never-a-token');
-      return wsFactory(url, onMessage, onClose);
+      return wsFactory(url, onMessage, onClose, browserWsHeaders);
     },
     fetchImpl: async (input, init) => {
-      const response = await fetch(input, init);
+      const response = await browserFetch(input, init);
       if (new URL(String(input)).pathname === '/v1/ws/ticket') {
         // Bought with a short-lived access token in the header, never the refresh credential.
         const authorization = new Headers(init?.headers).get('authorization') ?? '';
@@ -253,7 +280,7 @@ export async function remoteSmoke(options: { origin: string; enrollToken: string
       // browser credential; a code-only poll would expose a bearer to anyone seeing the code.
       let recovered: { webToken: string; webDeviceId: string; hostDeviceId: string } | null = null;
       if (approvalSent && code && claimToken && browserIdentity && !credentials) {
-        try { recovered = await recoverApprovedClaim(origin, code, claimToken, browserIdentity); }
+        try { recovered = await recoverApprovedClaim(origin, code, claimToken, browserIdentity, browserFetch); }
         catch { cleanupFailures.push('private claim recovery failed'); }
       }
       const hostId = saved.deviceId ?? credentials?.hostDeviceId ?? recovered?.hostDeviceId;

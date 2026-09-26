@@ -72,7 +72,7 @@ export class FakeRelay {
   }
 
   private context(): RouteContext {
-    return { store: this.store, accountId: ACCOUNT, enrollToken: ENROLL, now: Date.now(), ip: '127.0.0.1', rate: this.rate, sockets: (tag) => this.registry.byTag(tag) };
+    return { store: this.store, accountId: ACCOUNT, enrollToken: ENROLL, accountAuthenticated: true, now: Date.now(), ip: '127.0.0.1', rate: this.rate, sockets: (tag) => this.registry.byTag(tag) };
   }
 
   async start(): Promise<number> {

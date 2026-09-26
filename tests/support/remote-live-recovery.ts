@@ -7,9 +7,10 @@ export async function recoverApprovedClaim(
   origin: string,
   code: string,
   pollToken: string,
-  identity: AnyIdentity
+  identity: AnyIdentity,
+  fetchImpl: typeof fetch = fetch
 ): Promise<{ webToken: string; webDeviceId: string; hostDeviceId: string } | null> {
-  const response = await fetch(`${origin}/v1/pair/poll?code=${encodeURIComponent(code)}`, {
+  const response = await fetchImpl(`${origin}/v1/pair/poll?code=${encodeURIComponent(code)}`, {
     headers: { authorization: `Bearer ${pollToken}` }
   });
   if (!response.ok) return null;

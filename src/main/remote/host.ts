@@ -250,8 +250,8 @@ export class RemoteHost {
     this.push();
   }
 
-  /** Requests a pairing code. An enrolled desktop authenticates as its own device; only the first
-   *  enrollment needs the account's enrollment secret, so rotating it never strands this host. */
+  /** Requests a pairing code. An enrolled desktop authenticates as itself; the shared enrollment
+   *  secret remains only for legacy `vocs-v1` manual enrollment. New accounts use Connect with GitHub. */
   async startPairing(hostName: string): Promise<{ code: string; expiresAt: number }> {
     const creds = this.creds;
     if (!creds) throw new Error('remote access is not enabled');

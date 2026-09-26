@@ -30,7 +30,7 @@ async function mountFollowing() {
   const shells = createShellClient({ creds: pairing, sessions: [session('s1', 'First'), session('s2', 'Second')] });
   const transport = new RelayTransportClass(shells.client);
   setTransport(transport);
-  rtl.render(<WebApp client={shells.client as never} transport={transport} />);
+  rtl.render(<WebApp client={shells.client as never} transport={transport} account={{ status: 'anonymous' }} />);
   await rtl.waitFor(() => expect(rtl.screen.getByTestId('session-list')).toBeTruthy());
   // Let the boot settle so the focus snapshot is the one the default route opened.
   await rtl.waitFor(() => expect(useStore.getState().booted).toBe(true));

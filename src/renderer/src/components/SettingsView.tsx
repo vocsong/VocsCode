@@ -1054,10 +1054,9 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   const [relay, setRelay] = useState(DEFAULT_REMOTE_ORIGIN);
   // A registered computer has its own relay credential: the enrollment secret is a first-time step.
   const [storedRegistered, setRegistered] = useState(false);
-  // The relay's origin has a GitHub sign-in (the landing's login gate): add this computer from the
-  // browser instead of typing the enrollment secret, which stays available as a fallback.
+  // The relay's origin has a GitHub sign-in (the landing's login gate): each computer must be
+  // enrolled through its signed-in account, never the incumbent account's shared legacy secret.
   const [signInAvailable, setSignInAvailable] = useState(false);
-  const [useSecret, setUseSecret] = useState(false);
   const [enroll, setEnroll] = useState('');
   const [pairing, setPairing] = useState<{ code: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1131,7 +1130,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   // Live from the host once it runs (a sign-in that just finished shows at once), stored otherwise.
   const registered = storedRegistered || state?.registered === true;
   // An unregistered computer on a relay with GitHub sign-in: that is the way in, not the secret.
-  const offerSignIn = !registered && signInAvailable && !useSecret;
+  const offerSignIn = !registered && signInAvailable;
   const signingIn = state?.signIn;
 
   return (
@@ -1171,7 +1170,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
         </div>
       )}
       {!registered && !offerSignIn && !signingIn && (
-        <Field label="Enrollment secret" hint="Needed only the first time this computer connects: the relay's ENROLL_TOKEN, kept outside the app (for example ~/.vocs-code/relay-enroll-token.txt). Stored in the OS keychain.">
+        <Field label="Enrollment secret" hint="Legacy/manual enrollment for the original v1 account only. New GitHub accounts must use Connect with GitHub so their computers stay in their own account. Stored in the OS keychain.">
           <input data-testid="remote-enroll" type="password" value={enroll} placeholder="Paste the secret" onChange={(e) => setEnroll(e.target.value)} />
         </Field>
       )}
@@ -1181,9 +1180,6 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
             <Button size="sm" variant="primary" data-testid="remote-sign-in" disabled={busy} onClick={() => void act(() => invoke('remote:signIn', undefined))}>
               {busy ? 'Opening your browser…' : 'Connect with GitHub'}
             </Button>
-            <button type="button" className="link-btn small" data-testid="remote-use-secret" onClick={() => setUseSecret(true)}>
-              Use the enrollment secret instead
-            </button>
           </>
         ) : !signingIn ? (
           <Button

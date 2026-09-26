@@ -4,9 +4,15 @@
   "main": "src/worker.ts",
   "compatibility_date": "2026-01-15",
   "assets": { "directory": "public" },
-  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }, { "name": "ENROLLMENTS", "class_name": "EnrollmentDirectory" }] },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Hub"] },
+    { "tag": "v2", "new_sqlite_classes": ["EnrollmentDirectory"] }
+  ],
   "vars": { "RELAY_ACCOUNT": "vocs-v1" },
+  // The landing Worker must carry the same session-assertion secret. Disable the direct workers.dev
+  // entry so browser pairing always passes through the GitHub gate at code.vocs.io.
+  "workers_dev": false,
   // Edge rate limits (Workers Rate Limiting), checked in the Worker before a request wakes the
   // Hub; the Hub keeps its own in-memory limits too. Counters are per Cloudflare location and
   // eventually consistent. Each namespace_id must be unique within the Cloudflare account.
@@ -15,5 +21,5 @@
     { "name": "POLL_LIMIT", "namespace_id": "4102", "simple": { "limit": 120, "period": 60 } },
     { "name": "TOKEN_LIMIT", "namespace_id": "4103", "simple": { "limit": 30, "period": 60 } }
   ]
-  // Secrets (wrangler secret put): ENROLL_TOKEN
+  // Secrets: ENROLL_TOKEN, ACCOUNT_ASSERTION_SECRET (shared with landing), DEVICE_ROUTE_SECRET (stable relay-only key)
 }

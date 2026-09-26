@@ -228,7 +228,7 @@ root of trust.)
 
 | Party | Identity | Key material | Storage |
 | --- | --- | --- | --- |
-| Account | Single configured account id (`RELAY_ACCOUNT`); GitHub identity will gate `/app`, not isolate registry rows | passwordless gate planned | DO storage (Workers) |
+| Account | Stable GitHub numeric subject (`github:<id>`); the incumbent subject maps to `vocs-v1` | signed 60-second landing assertion; allowlist remains the invitation gate | one Hub DO and registry per account |
 | Desktop host | device id + human name ("Work PC") | P-256 ECDSA + ECDH | private JWK via `secrets.ts` (safeStorage) |
 | Web device | device id + human name ("Chrome on Windows"), one per paired computer | P-256 ECDSA + ECDH | non-extractable CryptoKeys in IndexedDB |
 | Relay | routing registry | public keys, refresh- and access-token hashes; an approved poll record holds the browser's credential sealed to its key, never in plaintext | DO storage (Workers) |
@@ -249,9 +249,11 @@ device id), so what the relay holds until the claimant polls is ciphertext only 
 open. Pairings made under the previous long-lived bearer keep working: that token is their
 refresh credential now.
 
-v1 account model: **accounts-lite** — a single provisioned account, no signup or
-billing flow. The device registry and routing are account-keyed from day one, so
-productizing later means adding signup + billing, not rework.
+Account model: **accounts-lite** — one isolated account per allowlisted GitHub user, with no signup
+or billing flow. The incumbent GitHub subject maps to `vocs-v1`, preserving its existing Hub,
+devices and mirrors; every other numeric GitHub subject maps to `github:<id>`. Enrollment, device
+ids, storage and browser vaults are scoped to that account. Signup and billing remain a separate
+productization track.
 
 **Status:** P0–P3 implemented. P0 transport extraction; P1 localhost web client + shims +
 responsive shell; P2 relay + desktop host + e2e crypto + Settings UI + relay web client
@@ -271,46 +273,49 @@ the desktop, which seals an index plus per-session snapshots with a shared mirro
 30-day-TTL blobs; the web client opens them locally and renders a read-only sidebar and
 transcript while the desktop is unreachable. The relay's HTTP surface is now a
 **deny-by-default route table** (`relay/src/routes.ts`): every route declares the auth it needs
-(`public`/`enroll`/`device`/`web`/`host`), the dispatcher authorizes before the handler runs, and the
-whole surface is unit-tested in plain Node (`tests/relay-routes.test.ts`) instead of relying on
-review. The public pairing endpoints also carry in-memory fixed-window rate limits.
-**Deployed.** The relay runs at `https://vocs-relay.vocs.workers.dev` (Worker + one Hub Durable
-Object + the `ENROLL_TOKEN` secret), and the landing Worker at `code.vocs.io` forwards `/app`
-and `/v1` — REST plus the WebSocket endpoints under `/v1/ws/*` — to it through a service binding — one origin, no CORS, no second DNS record
-(vocs.io PR #18). Verified live: `/app/` serves the web client, `/v1/devices` is 401 without a
-device token, `/v1/pair/start` is 403 without the enrollment secret and mints a code with it, and
-an enrolling-host WebSocket opens while a bad token is refused.
+(`public`/`account`/`owner`/`enroll`/`device`/`web`/`host`), the dispatcher authorizes before the
+handler runs, and the whole surface is unit-tested in plain Node (`tests/relay-routes.test.ts`) instead
+of relying on review. The public pairing endpoints also carry in-memory fixed-window rate limits.
+**Deployed.** The relay and landing Worker share the `code.vocs.io` origin through a service
+binding (vocs.io PR #18); the landing forwards `/app` and `/v1` including REST and `/v1/ws/*`
+WebSockets, with no CORS hop or second DNS record. The GitHub login gate is live on the landing:
+`/app` redirects signed-out visitors to GitHub OAuth, and the landing's allowlist controls who may
+sign in. The production relay still has the incumbent `vocs-v1` registry until the per-account
+relay release is deployed. This change adds account assertions, one Hub per account, account-bound
+enrollment and pairing, and disables the relay's direct `workers.dev` endpoint so browser traffic
+must pass through the gate. Do not enable another login until the matching relay release and landing
+assertion secret are deployed together.
 
-A login gate is **not yet live**: `/app` is currently public. `remote.status` stays
-`in-development` so landing CTAs remain inert until GitHub OAuth is provisioned, the
-landing Worker gate is enabled and verified, and the direct Worker bypass is resolved.
+The desktop's signed Allow/Deny remains mandatory. Login authenticates an account; device credentials
+and signatures continue to authorize device operations.
 
 Relay deploys run from **release tags**: `.github/workflows/deploy-relay.yml` publishes from the
 `vX.Y.Z` tag the installers are built from, after approval in the protected `relay-production`
 environment, so the production relay speaks the released desktop's protocol. `develop` merges
 are not live until a release ships them.
 
-**Live since 2026-09-25** (#407, deployed through that workflow; the live checklist and the
-deployed smoke passed against `code.vocs.io`): the token model above; non-extractable browser
-keys; a per-account device cap; the kill switch; mirror re-keying on revocation; QR pairing; the
-multi-computer web client; tail-first transcripts; a read-only terminal view (P3.5, step one);
-edge rate limits. Remaining: activate the login gate (needs a GitHub OAuth app for
-`code.vocs.io`), then interactive terminal (P3.5 read/write). The login code lives in the
-**landing Worker**, not the relay's `/v1` route table: the latter receives only paths stripped of
-`/v1`. The gate is an access screen for the single account, not per-account isolation or a
-replacement for paired-device authorization.
+**Live since 2026-09-25** (#407, deployed through that workflow; the live checklist and deployed
+smoke passed against `code.vocs.io`): the proof-of-possession token model; non-extractable browser
+keys; per-account device caps; the kill switch; mirror re-keying on revocation; QR pairing; the
+multi-computer web client; tail-first transcripts; a read-only terminal view (P3.5, step one); edge
+rate limits; and the landing's GitHub login gate. This change extends that gate into per-account
+isolation. The relay verifies a short-lived HMAC assertion from the landing; it never accepts an
+unsigned account id from a request. The login gate and account assertion do not replace paired-device
+authorization or the desktop's signed approval.
 
 Implementation notes: crypto primitives are P-256 ECDSA + ECDH, HKDF-SHA-256 and
-AES-256-GCM — all via WebCrypto so the identical module runs in Node and browsers with
-zero new dependencies (the X25519/Ed25519/XChaCha choice in §6.2 needed a library; the
-WebCrypto-universal set has the same trust properties and was adopted instead). A browser's
-private keys are non-extractable CryptoKeys in IndexedDB; its refresh credential and the mirror
-key sit beside them and are readable by page script, which is why the refresh credential alone
-authorizes nothing. Pausing remote closes the outbound desktop socket but does not revoke relay
-device tokens (the kill switch does). Revoking a browser re-keys the mirror (§6.5). v1 adds an
-**enrollment secret** (`ENROLL_TOKEN`): a desktop presents it for its **first** pairing only, so
-random parties cannot spam desktops with pairing prompts. An enrolled desktop pairs again as its
-own device, so rotating the secret never strands it.
+AES-256-GCM — all via WebCrypto with zero new dependencies. A browser's private keys are
+non-extractable CryptoKeys in IndexedDB; refresh and mirror credentials stay in the account's
+browser vault and remain useless without the private key. Pausing remote closes the outbound desktop
+socket but does not revoke relay device tokens (the kill switch does). Revoking a browser re-keys the
+mirror (§6.5).
+
+The `ENROLL_TOKEN` remains a legacy/manual capability for the incumbent `vocs-v1` account and a
+service credential the landing Worker uses for owner actions. New accounts are enrolled through the
+signed-in **Connect with GitHub** grant, which binds the one-time desktop nonce to the account; the
+nonce-only desktop poll resolves through a short-lived enrollment directory. The shared secret is
+never used as an account selector. Once enrolled, a desktop uses its own device credential, so
+rotating the legacy secret never strands it.
 
 ### 6.3 Pairing flow
 
@@ -341,10 +346,11 @@ Web (browser)                Relay                      Desktop (host)
    client on the relay it is connected to (`<relay>/app?code=…`), and that link as a **QR code**
    (an in-house encoder, no runtime dependency). The link prefills the browser without claiming.
 3. **Claim (web).** The browser enters/prefills the code, generates a non-extractable keypair,
-   and posts `{code, web_public_key, device_name}`. `/v1/pair/claim` is public even when the
-   landing login gate is enabled; knowing the code alone cannot approve pairing, but login is
-   not checked here. Claims and polls are rate-limited at the Cloudflare edge before they reach
-   the Hub, and again per address inside it; a full account (the device cap) is refused here.
+   and posts `{code, web_public_key, device_name}` with the landing's account assertion.
+   `/v1/pair/claim` and `/v1/pair/poll` require that verified session; the code is looked up only
+   inside the account Hub. A logged-in account cannot claim another account's code. Claims and polls
+   are rate-limited at the Cloudflare edge before they reach the Hub, and again per address inside
+   it; a full account (the device cap) is refused here.
 4. **Confirm (desktop).** Relay pushes a pairing request to the desktop: account,
    device name, browser/OS. Desktop shows a confirm dialog — **Allow / Deny**. Deny or
    timeout expires the code; nothing is recorded. This is the deliberate redundancy: the
@@ -367,38 +373,49 @@ Web (browser)                Relay                      Desktop (host)
 
 #### 6.3.1 Connect with GitHub: no secret, no code
 
-Once the landing's login gate is on, the relay's origin answers `/v1/me` with 401 for a signed-out
-caller, and the desktop offers **Connect with GitHub** instead of the enrollment secret (which stays
-one click away). The relay's rules do not change; who presents the secret does.
+The landing's GitHub gate maps the stable numeric GitHub subject to an account. The incumbent subject
+maps to `vocs-v1`; all other allowlisted subjects map to `github:<id>`. `/v1/me` returns that account
+id to the web client, which partitions its IndexedDB vault by account. Pre-account session cookies
+lack a subject and are rejected once; the user signs in again. The desktop offers
+**Connect with GitHub** for new-account enrollment.
 
-- **Owner routes.** `/v1/owner/*` on the relay (add a computer, list computers, ask one to pair)
-  need the enrollment secret, like `pair/start`. The landing Worker keeps its own copy
-  (`RELAY_ENROLL_TOKEN`) and presents it only for a signed-in, allowlisted GitHub session, in place
-  of any Authorization the browser sent; it drops the session cookie and refuses writes whose
-  `Origin` is not `https://code.vocs.io`.
+- **Account assertion.** For each signed-in `/v1/*` request, including browser API calls and WebSocket
+  upgrades, the landing strips caller-supplied identity headers and signs
+  `accountId + expiry + method + pathname` with `ACCOUNT_ASSERTION_SECRET`. The assertion lasts one
+  minute. The relay verifies it before routing account-scoped browser requests. The same secret must
+  be provisioned on both Workers; cookies never cross the service binding. Device ids include a
+  relay-MACed routing hint using relay-only `DEVICE_ROUTE_SECRET`, but the hint authorizes nothing
+  by itself: the selected Hub still checks device-token proof of possession. Old untagged device ids
+  route only to `vocs-v1`.
+- **Owner routes.** `/v1/owner/*` still require the landing's `RELAY_ENROLL_TOKEN` plus the verified
+  account assertion. The Worker replaces any browser Authorization, strips its session cookie, and
+  refuses writes whose `Origin` is not `https://code.vocs.io`.
 - **Adding a computer.** Connect with GitHub makes the desktop generate a one-time secret (32 random
   bytes) and open `code.vocs.io/app?connect=<its SHA-256>`; the secret itself never leaves the
   desktop. After sign-in (the link survives the OAuth redirect in signed state), the page shows a
   check code derived from the hash, which the desktop shows too, and asks before it grants anything.
-  **Add this computer** grants the hash (`POST /v1/owner/enroll-grant`, ten-minute TTL). The desktop
-  has been polling the public `/v1/enroll/redeem` with the secret; it now receives its refresh
-  credential sealed to its own key (`enrollTokenContext`), and the relay keeps only the hash. A key
-  the relay already knows keeps its host id, and the computer cap applies. Unknown, expired and
-  not-yet-granted secrets all answer `pending`.
-- **Pairing without a code.** A signed-in browser lists the account's computers
-  (`GET /v1/owner/hosts`) and asks an online one to pair (`POST /v1/owner/pair-request`). That is the
-  claim step started from the browser: the relay sends the request to that computer alone, the
-  desktop shows it and signs Allow or Deny as for a code, and the browser completes by polling with
-  its capability. The page that added a computer does this at once, so the first pairing is Add, then
-  Allow.
+  **Add this computer** binds the nonce hash to that account for ten minutes. A short-lived directory
+  stores only `nonce hash → account id`; the tenant Hub stores the actual grant. The desktop redeems
+  its nonce through the directory and receives its refresh credential sealed to its own key
+  (`enrollTokenContext`). Re-granting the same live hash to a different account is refused. A key
+  already registered to that account keeps its host id, and the computer cap applies. Unknown,
+  expired and not-yet-granted secrets all answer `pending`.
+- **Pairing.** A signed-in browser lists only that account's computers (`GET /v1/owner/hosts`) and
+  may ask one to pair (`POST /v1/owner/pair-request`). Code-based claims and their polls also require
+  the same account assertion; a code never transfers a desktop between accounts. The relay sends a
+  request to the named online computer, the desktop signs Allow or Deny, and the browser receives a
+  credential only after that decision.
 
 The desktop's approval of each browser stays mandatory: login proves the account, the desktop's Allow
 proves the device.
 
 ### 6.4 What the relay stores
 
-- Accounts, devices (id, name, platform, public keys, token hashes, last seen, status)
-  — held in Durable Object storage on the existing vocs.io Cloudflare account.
+- Each account's devices (id, name, platform, public keys, token hashes, last seen, status),
+  pairing records, queues, revocation state and mirror are isolated in that account's Hub DO. The
+  incumbent `vocs-v1` Hub is preserved in place; other GitHub subjects get distinct DO names.
+- A separate, short-lived EnrollmentDirectory holds only one-time nonce-hash-to-account pointers
+  so a desktop's account-free redemption poll can find the correct tenant Hub.
 - Routing state: which desktop is online for which account; short-lived queues of
   *encrypted* payloads pending delivery. One hashed, expiring, single-use
   WebSocket upgrade ticket per paired browser is also stored until consumed or replaced.
@@ -456,13 +473,13 @@ proves the device.
 
 ### 6.7 UI touchpoints
 
-- **Desktop Settings → Remote access:** the relay it uses (named, not editable), the enrollment
-  secret, Connect/Disconnect, pairing code, link and QR code
+- **Desktop Settings → Remote access:** the relay it uses (named, not editable), Connect/Disconnect,
+  the legacy enrollment secret only when GitHub sign-in is unavailable, pairing code, link and QR code
   with countdown, paired-device list (name, platform, last seen) with per-device revoke,
   **Revoke all** kill switch, recent activity feed.
 - **Confirm dialog:** account, device name, browser/OS, Allow / Deny — mirrors the
   existing approval-prompt styling (§5 of the approval flow, same pattern).
-- **Web:** login will precede `/app`; today code entry, waiting-for-approval, a computer switcher
+- **Web:** the landing's GitHub login precedes `/app`; today code entry, waiting-for-approval, a computer switcher
   with online state, Add a computer, device management and a read-only terminal view are in the
   web client.
 
@@ -486,10 +503,11 @@ runtime-dependency decision (§11).
 This turns a local app into an internet-facing control plane for code execution — the
 security bar must go up, not sideways:
 
-- **Compromised web client → code exec on the user's machine.** Mitigations: device
-  pairing with explicit desktop-side confirmation, per-device revocable tokens, approval
-  parity (dangerous commands always prompt, even remotely — the existing invariant),
-  timeout = default-deny on approvals, optional "view-only" remote mode, audit log.
+- **Compromised web client → code exec on the user's machine.** Mitigations: account-scoped
+  registries, browser vaults partitioned by GitHub subject, device pairing with explicit desktop-side
+  confirmation, per-device revocable tokens, approval parity (dangerous commands always prompt,
+  even remotely — the existing invariant), timeout = default-deny on approvals, optional view-only
+  mode, and an audit log.
 - **Compromised/malicious relay → can it drive sessions?** Established e2e session
   frames and approval decisions are encrypted and signed by paired devices; the relay
   holds no session keys. It can still deny service, replay/misroute unauthenticated
@@ -551,7 +569,7 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 | --- | --- | --- |
 | **P0 — Transport extraction** | `src/shared/transport.ts`; extract handler registry from `src/main/ipc.ts`; renderer `window.harness` rides on Transport; zero user-visible change; handler registry unit-tested in plain Node | ~1 wk |
 | **P1 — Web client shell** | Build renderer as a plain SPA inside a distinct web shell: browser-native chrome (desktop titlebar/menu hidden), slim account/device header, code.vocs.io branding, responsive layout (drawer sidebar, touch targets); shims for paste/notify/openExternal/pickFolder; serve it from a localhost Node server wrapping the handler registry. Dogfood: run Vocs Code in a browser tab on the same machine | 3 wk |
-| **P2 — Pairing + relay, read-only** | Relay service (accounts, devices, multi-host routing keyed by `(account, host)` — accounts-lite: single provisioned v1 account, account-keyed registry from day one); desktop remote host (opt-in, e2e encrypted); web login + pairing (§6); web bundle deployed to code.vocs.io; browse folders, sessions, transcripts across paired hosts | 2–3 wk |
+| **P2 — Pairing + relay, read-only** | Relay service (one Hub per allowlisted GitHub account, multi-host routing keyed by `(account, host)`); desktop remote host (opt-in, e2e encrypted); landing login + account assertions; web pairing (§6); browse folders, sessions, transcripts across paired hosts | 2–3 wk |
 | **P3 — Interactive** | Send prompts, remote approvals (presence, timeouts, audit), session lifecycle (create/stop/rename). No terminal in v1 (§11) | 2–4 wk |
 | **P3.5 — Terminal over WAN** (post-launch) | Read-only first, then read/write; PTY streaming + flow-control tuning (coalescing, ack windows, reconnect mid-PTY) | 1–2 wk |
 | **P4 — Hardening** | Multi-device management + revocation UI, offline encrypted transcript mirror (read-only), audit log surface, view-only mode | 2–4 wk |
@@ -559,12 +577,11 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 **Relay MVP → beta: roughly 8–11 weeks (chat-first; terminal lands in P3.5 after).**
 Cloud workspaces: separate track afterward.
 
-**Status:** P0 implemented — transport extraction (`src/shared/transport.ts`,
-`src/main/handlers.ts`, registry tests). P1 implemented — localhost web server +
-WebSocket transport (`VOCS_CODE_WEB=1`, per-boot token), browser shims (openExternal,
-notify, pickFolder, clipboard paste), web badge, and the responsive layer (drawer
-sidebar with backdrop, touch targets under 900px). Remaining before P2: packaged-app
-static-path check; the relay-side account/pairing header is P2 scope.
+**Status:** P0–P4 and P3.5 read-only are implemented. This change completes the P2 account
+routing boundary: allowlisted GitHub subjects get separate Hub DOs, enrollment grants resolve to
+the signed-in account, browser claims/polls require that account, and the web vault is partitioned.
+Production still needs the relay release and coordinated landing deployment before other logins are
+added. Read/write terminal remains the next remote-access feature.
 
 ## 11. Decisions and open questions
 
@@ -574,10 +591,9 @@ static-path check; the relay-side account/pairing header is P2 scope.
   committed later track (§9).
 - **Is "desktop must be online for chat" acceptable for v1?** Yes — implied by starting
   with Model A; always-on arrives with cloud workspaces later.
-- **Personal first, product later.** The relay and protocol are multi-tenant-capable
-  structurally account-keyed, but the deployed Hub uses one `RELAY_ACCOUNT` and one
-  provisioned account without per-account isolation or billing. Full auth + billing becomes the P4 → cloud-track on-ramp,
-  not P2 scope.
+- **Personal first, product later.** GitHub login now gives each allowlisted subject its own relay
+  account and Hub; the incumbent subject remains `vocs-v1`. Signup, billing and account recovery stay
+  on the productization track and are not implied by an allowlist entry.
 
 - **Chat-first launch.** v1 remote is chat + transcript + approvals — no terminal in
   the web client. Terminal over WAN is deferred to P3.5 (read-only first, then
@@ -627,17 +643,18 @@ Pairing-level questions from §6.9:
 **Open (resolve one at a time, before P2):**
 
 - **Relay on Cloudflare Workers + Durable Objects** (vocs.io already runs on
-  Cloudflare). One Hub DO per account, WebSocket-native with hibernation for idle
-  sockets; a multi-account tenancy migration remains §2.7 of the roadmap.
+  Cloudflare). Resolved: one Hub DO per GitHub account, WebSocket-native with hibernation for idle
+  sockets; the incumbent `vocs-v1` Hub and storage are preserved during rollout.
 
 - **GitHub-only auth in v1.** Passwordless, no email infrastructure, and the audience
-  is coders — a GitHub account is a given. v1 allowlists the provisioned account at the
-  provider. The auth provider is a swappable module (the registry is account-keyed);
-  email magic-link arrives with signup + billing at productization.
+  is coders — a GitHub account is a given. `ALLOWED_LOGINS` is the invitation gate; each allowed
+  numeric GitHub subject gets an isolated account. Email magic-link arrives with signup + billing
+  at productization.
 
-**Open today:** live OAuth setup and gate verification, the production deploy and deployed smoke,
-interactive terminal, and the checks listed in [the roadmap](./REMOTE-ACCESS-ROADMAP.md). The
-original P0 sketch (§12) is historical.
+**Open today:** the coordinated production rollout of this per-account relay release and landing
+assertion secret, the multi-account deployed smoke, and interactive terminal read/write. The OAuth
+gate itself is live. See [the roadmap](./REMOTE-ACCESS-ROADMAP.md) for release order; the original
+P0 sketch (§12) is historical.
 
 ## 12. The first PR (P0 sketch)
 
