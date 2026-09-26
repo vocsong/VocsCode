@@ -25,7 +25,7 @@ beforeEach(async () => {
 });
 afterEach(async () => { await fs.rm(root, { recursive: true, force: true }); });
 
-function fixture(overrides: { blockers?: string[]; quiescent?: boolean; run?: (file: string, args: string[], cwd: string) => Promise<CaptureResult> } = {}) {
+function fixture(overrides: { blockers?: string[]; quiescent?: boolean; run?: (file: string, args: string[], cwd: string) => Promise<CaptureResult>; receipts?: string } = {}) {
   const revision = { baseCommitSha: base, contentHash: tree };
   const request: MissionDeliveryRequest = {
     mission: missionFixture({ phase: 'delivering', acceptedRevision: revision, baseline: { baseCommitSha: base, contentHash: '' }, workspaces: [{ id: 'integration', role: 'integration', path: workspace, branch: 'mission/integration', base: revision }] }),
@@ -33,7 +33,7 @@ function fixture(overrides: { blockers?: string[]; quiescent?: boolean; run?: (f
   };
   const authorize = vi.fn(async (_request: MissionDeliveryRequest, _action: string) => undefined);
   const service = new MissionDeliveryService({
-    root: path.join(root, 'receipts'), authorize,
+    root: overrides.receipts ?? path.join(root, 'receipts'), authorize,
     isQuiescent: async () => overrides.quiescent ?? true,
     implementationBlockers: () => overrides.blockers ?? [],
     contentIdentity: async (cwd) => ({ baseCommitSha: base, contentHash: await git(['write-tree'], cwd) }), run: overrides.run,
@@ -108,6 +108,71 @@ describe('Mission delivery owner', () => {
 
   it('does not infer push/merge/deploy authorization from an objective', () => {
     expect(localMissionDeliveryPolicy()).toMatchObject({ endpoint: 'local_commit', allowPush: false, allowMerge: false, fallback: true, requireIndependentReview: true });
+  });
+
+  it('keeps receipts under the canonical root when the configured path traverses a junction, refusing relocation and links below it', async () => {
+    // A profile reached through a junction/8.3 alias is ordinary on Windows; it is not an attack.
+    const link = process.platform === 'win32' ? 'junction' : 'dir';
+    const real = path.join(root, 'real profile'), alias = path.join(root, 'profile alias'), receipts = path.join(alias, 'receipts');
+    await fs.mkdir(real); await fs.symlink(real, alias, link);
+    const { service, request } = fixture({ receipts });
+    const delivered = await service.deliver(request);
+    expect(delivered).toMatchObject({ status: 'delivered', commitSha: expect.stringMatching(/^[a-f0-9]{40}$/) });
+    const canonical = path.join(await fs.realpath(real), 'receipts');
+    expect(JSON.parse(await fs.readFile(path.join(canonical, 'mission', 'delivery-one.json'), 'utf8'))).toMatchObject({ stage: 'delivered', commitSha: delivered.commitSha });
+    expect((await service.deliver(request)).commitSha).toBe(delivered.commitSha);
+    expect(await fixture({ receipts }).service.inspect(request)).toMatchObject({ status: 'delivered', commitSha: delivered.commitSha });
+    expect(await git(['rev-list', '--all', '--count'])).toBe('2');
+    // Retargeting the alias mid-process would start a second, empty receipt history: refuse it.
+    const moved = path.join(root, 'moved profile');
+    await fs.mkdir(moved); await fs.unlink(alias); await fs.symlink(moved, alias, link);
+    await expect(service.deliver(request)).rejects.toThrow('location changed');
+    await fs.unlink(alias); await fs.symlink(real, alias, link);
+    // Components below the canonical root are still never followed.
+    const planted = path.join(root, 'planted receipts');
+    await fs.rename(path.join(canonical, 'mission'), planted); await fs.symlink(planted, path.join(canonical, 'mission'), link);
+    const fresh = fixture({ receipts });
+    await expect(fresh.service.deliver(request)).rejects.toThrow('Unsafe delivery storage path');
+    await expect(fresh.service.inspect(request)).rejects.toThrow('Unsafe delivery storage path');
+    expect(fresh.authorize).not.toHaveBeenCalled();
+    expect(await git(['rev-list', '--all', '--count'])).toBe('2');
+  });
+
+  it('reuses the content-identical commit an earlier operation of this Mission left on its delivery branch', async () => {
+    const earlier = await git(['commit-tree', tree, '-p', base, '-m', 'feat: Earlier delivery attempt\n\nMission-Operation: delivery-zero']);
+    await git(['update-ref', 'refs/heads/mission/mission-delivery', earlier, '0'.repeat(40)]);
+    const { service, request } = fixture();
+    const delivered = await service.deliver(request);
+    expect(delivered).toMatchObject({ status: 'delivered', commitSha: earlier });
+    expect(JSON.parse(await fs.readFile(path.join(root, 'receipts', 'mission', 'delivery-one.json'), 'utf8'))).toMatchObject({ commitSha: earlier, commitOperationId: 'delivery-zero', stage: 'delivered' });
+    expect(await service.inspect(request)).toMatchObject({ status: 'delivered', commitSha: earlier });
+    expect(await git(['rev-parse', 'refs/heads/mission/mission-delivery'])).toBe(earlier);
+  });
+
+  it.each(['a different parent', 'a different tree', 'no final operation marker', 'a marker only inside its message'] as const)('never adopts an existing delivery branch commit with %s', async (kind) => {
+    const parent = kind === 'a different parent' ? await git(['commit-tree', `${base}^{tree}`, '-m', 'Unrelated parent']) : base;
+    const content = kind === 'a different tree' ? `${base}^{tree}` : tree;
+    const message = kind === 'no final operation marker' ? 'Manual commit with the verified tree'
+      : kind === 'a marker only inside its message' ? 'Manual commit\n\nMission-Operation: delivery-zero\n\nEdited by hand afterwards.' : 'feat: Other\n\nMission-Operation: delivery-zero';
+    const foreign = await git(['commit-tree', content, '-p', parent, '-m', message]);
+    await git(['update-ref', 'refs/heads/mission/mission-delivery', foreign, '0'.repeat(40)]);
+    const { service, request } = fixture();
+    await expect(service.deliver(request)).rejects.toThrow('unrelated content');
+    expect(await git(['rev-parse', 'refs/heads/mission/mission-delivery'])).toBe(foreign);
+  });
+
+  it('refuses a delivery branch another local branch blocks before creating any commit, then delivers once it is renamed', async () => {
+    await git(['branch', 'mission/mission-delivery/stale', base]);
+    let commits = 0;
+    const { service, request } = fixture({ run: async (file, args, cwd) => {
+      if (args[0] === 'commit-tree') commits++;
+      return runCapture(which(file) ?? file, args, { cwd, timeoutMs: 20_000 });
+    } });
+    await expect(service.deliver(request)).rejects.toThrow(/"mission\/mission-delivery\/stale".*Rename it/);
+    expect(commits).toBe(0);
+    await git(['branch', '-m', 'mission/mission-delivery/stale', 'renamed-stale']);
+    expect(await service.deliver(request)).toMatchObject({ status: 'delivered' });
+    expect(commits).toBe(1);
   });
 });
 
@@ -193,6 +258,24 @@ describe('recorded remote endpoints (mocked git-host process boundary, not live 
     await expect(service.deliver(request)).rejects.toThrow('actual combined content differs');
     await expect(service.deliver(request)).rejects.toThrow('actual combined content differs');
     expect(remote.calls.filter((args) => args[0] === 'gh' && args[2] === 'merge')).toHaveLength(1);
+  });
+
+  it('passes a PR body beyond the Windows command-line limit through an owned temporary file, never argv', async () => {
+    const remote = remoteBoundary(); let bodyFile = '', body = '';
+    const { service, request } = fixture({ run: async (file, args, cwd) => {
+      if (file === 'gh' && args[1] === 'create') { bodyFile = args[args.indexOf('--body-file') + 1]; body = await fs.readFile(bodyFile, 'utf8'); }
+      return remote.run(file, args, cwd);
+    } });
+    request.report = `# Verified report\n\n${'A verified line with enough detail to matter for review.\n'.repeat(800)}`;
+    expect(request.report.length).toBeGreaterThan(32_767);
+    request.mission.deliveryPolicy = { ...localMissionDeliveryPolicy(), endpoint: 'open_pr', fallback: false, allowPush: true, remote: 'origin', targetBranch: 'integration-target', targetHead: base };
+    expect(await service.deliver(request)).toMatchObject({ status: 'delivered', pullRequestUrl: 'https://github.com/example/fixture/pull/17' });
+    const create = remote.calls.find((args) => args[0] === 'gh' && args[2] === 'create')!;
+    expect(create).not.toContain('--body');
+    expect(create.join(' ').length).toBeLessThan(2_000);
+    expect(body).toBe(request.report);
+    expect(path.dirname(bodyFile)).toBe(path.join(await fs.realpath(path.join(root, 'receipts')), '.scratch'));
+    await expect(fs.stat(bodyFile)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('blocks an advanced target before any push or PR mutation', async () => {

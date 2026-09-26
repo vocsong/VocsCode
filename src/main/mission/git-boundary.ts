@@ -23,7 +23,10 @@ export function missionGitHubEnvironment(): NodeJS.ProcessEnv {
 
 export function missionGitArgs(args: string[]): string[] {
   return ['-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false', '-c', 'submodule.recurse=false',
-    '-c', 'core.askPass=', '-c', 'credential.interactive=false', ...args];
+    '-c', 'core.askPass=', '-c', 'credential.interactive=false',
+    // Owned worktrees sit deep under %APPDATA% (~140 of MAX_PATH's 260 characters before the
+    // first repository path), so ordinary project trees would otherwise fail to materialize.
+    ...(process.platform === 'win32' ? ['-c', 'core.longpaths=true'] : []), ...args];
 }
 
 export class MissionGitFilterError extends Error {
