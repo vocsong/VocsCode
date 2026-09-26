@@ -218,7 +218,7 @@ describe('Connect with GitHub in remote access settings', () => {
     ...over
   });
 
-  it('offers Connect with GitHub instead of the secret, with the secret one click away', async () => {
+  it('uses Connect with GitHub when an account gate is available and hides the shared legacy secret', async () => {
     invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'remote:get' ? offline() : { status: 'connecting' }));
     useStore.setState({ settings: { ...baseSettings, remote: { enabled: false } } as AppSettings });
     render(<SettingsView />);
@@ -229,9 +229,8 @@ describe('Connect with GitHub in remote access settings', () => {
     fireEvent.click(signIn);
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:signIn', undefined));
 
-    fireEvent.click(screen.getByTestId('remote-use-secret'));
-    expect(screen.getByTestId('remote-enroll')).toBeTruthy();
-    expect(screen.queryByTestId('remote-sign-in')).toBeNull();
+    expect(screen.queryByTestId('remote-use-secret')).toBeNull();
+    expect(screen.queryByTestId('remote-enroll')).toBeNull();
   });
 
   it('shows the check code while the browser finishes, reopens the page, and cancels', async () => {

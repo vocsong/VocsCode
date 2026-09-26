@@ -13,6 +13,7 @@
 export type Json = Record<string, unknown>;
 
 import { enrollTokenContext, pairingDecisionPayload, pairingTokenContext, sealToKey, stable, tokenProofPayload, verify, type PublicIdentity, type SealedToKey } from '../../src/shared/crypto';
+import { createDeviceId } from './account';
 
 /** Implemented by Durable Object storage (worker) and in-memory maps (tests). */
 export interface RelayStorage {
@@ -306,15 +307,17 @@ export type PairingApproval = {
 export async function resolvePairing(
   store: RelayStore,
   input: { code: string; decision: 'approve' | 'deny'; signature: string },
-  now: number
+  now: number,
+  deviceRouteSecret?: string
 ): Promise<{ denied: true } | PairingApproval> {
-  return withPairCode(store, input.code, () => resolvePairingUnlocked(store, input, now));
+  return withPairCode(store, input.code, () => resolvePairingUnlocked(store, input, now, deviceRouteSecret));
 }
 
 async function resolvePairingUnlocked(
   store: RelayStore,
   input: { code: string; decision: 'approve' | 'deny'; signature: string },
-  now: number
+  now: number,
+  deviceRouteSecret?: string
 ): Promise<{ denied: true } | PairingApproval> {
   const key = codeKey(input.code);
   const record = await store.get<PairingRecord>(key);
@@ -339,7 +342,7 @@ async function resolvePairingUnlocked(
   }
   // Mint and seal the browser credential before the transaction: its plaintext never reaches
   // storage, only the hash and the ciphertext the claimant alone can open.
-  const webDeviceId = newDeviceId('w');
+  const webDeviceId = await newDeviceId('w', record.accountId, deviceRouteSecret);
   const webToken = randomToken();
   const sealedToken = await sealToKey(record.webPub.enc, webToken, pairingTokenContext(record.code, webDeviceId));
   return store.transaction(async (tx) => {
@@ -365,18 +368,21 @@ async function resolvePairingUnlocked(
       hostToken = randomToken();
       await tx.put(deviceKey(record.accountId, existing.deviceId), { ...withoutGrants(existing), tokenHash: await hashToken(hostToken), lastSeen: now });
     } else {
-      const minted = await registerHostDevice(tx, { accountId: record.accountId, name: record.hostName, platform: record.hostPlatform, pub: record.hostPub }, now);
+      const minted = await registerHostDevice(tx, { accountId: record.accountId, name: record.hostName, platform: record.hostPlatform, pub: record.hostPub, deviceRouteSecret }, now);
       hostDeviceId = minted.deviceId;
       hostToken = minted.hostToken;
     }
-    await registerWebDevice(tx, { accountId: record.accountId, name: record.webName ?? 'web', platform: record.webPlatform ?? 'web', pub: record.webPub!, hostDeviceId, deviceId: webDeviceId, token: webToken }, now);
+    await registerWebDevice(tx, { accountId: record.accountId, name: record.webName ?? 'web', platform: record.webPlatform ?? 'web', pub: record.webPub!, hostDeviceId, deviceId: webDeviceId, token: webToken, deviceRouteSecret }, now);
     await tx.put(codeKey(`${record.code}:done`), { code: record.code, status: 'approved', sealedToken, webDeviceId, hostPub: record.hostPub, hostDeviceId, hostName: record.hostName, pollTokenHash: record.pollTokenHash!, expiresAt: now + PAIRING_TTL_MS } satisfies ApprovedRecord);
     await tx.delete(key);
     return { ...(hostToken ? { hostToken } : {}), hostDeviceId, webToken, webDeviceId, webPub: record.webPub!, hostPub: record.hostPub };
   });
 }
 
-function newDeviceId(prefix: 'h' | 'w'): string {
+async function newDeviceId(prefix: 'h' | 'w', accountId: string, deviceRouteSecret?: string): Promise<string> {
+  // Production routes pass the relay-only secret so account ids are MACed before they become
+  // routing hints. Pure core tests without a Worker keep the historical opaque format.
+  if (deviceRouteSecret) return createDeviceId(prefix, accountId, deviceRouteSecret);
   return `${prefix}_${toBase64Url(crypto.getRandomValues(new Uint8Array(8)))}`;
 }
 
@@ -389,11 +395,11 @@ function withoutGrants(device: DeviceRecord): DeviceRecord {
 /** Registers a web device and its refresh credential (pairing approval, and tests). */
 export async function registerWebDevice(
   store: RelayStorage,
-  input: { accountId: string; name: string; platform: string; pub: PublicIdentity; hostDeviceId?: string; deviceId?: string; token?: string },
+  input: { accountId: string; name: string; platform: string; pub: PublicIdentity; hostDeviceId?: string; deviceId?: string; token?: string; deviceRouteSecret?: string },
   now: number
 ): Promise<{ webToken: string; deviceId: string }> {
   const webToken = input.token ?? randomToken();
-  const id = input.deviceId ?? newDeviceId('w');
+  const id = input.deviceId ?? await newDeviceId('w', input.accountId, input.deviceRouteSecret);
   const device: DeviceRecord = {
     deviceId: id,
     kind: 'web',
@@ -410,9 +416,9 @@ export async function registerWebDevice(
 }
 
 /** Mints the host's device record + refresh credential after the human approves. */
-export async function registerHostDevice(store: RelayStorage, input: { accountId: string; name: string; platform: string; pub: PublicIdentity; deviceId?: string; token?: string }, now: number): Promise<{ hostToken: string; deviceId: string }> {
+export async function registerHostDevice(store: RelayStorage, input: { accountId: string; name: string; platform: string; pub: PublicIdentity; deviceId?: string; token?: string; deviceRouteSecret?: string }, now: number): Promise<{ hostToken: string; deviceId: string }> {
   const hostToken = input.token ?? randomToken();
-  const id = input.deviceId ?? newDeviceId('h');
+  const id = input.deviceId ?? await newDeviceId('h', input.accountId, input.deviceRouteSecret);
   const device: DeviceRecord = {
     deviceId: id,
     kind: 'host',
@@ -483,7 +489,7 @@ export type Redemption = { status: 'pending' } | { status: 'registered'; hostDev
  *  its credential is rotated. */
 export async function redeemEnrollment(
   store: RelayStore,
-  input: { accountId: string; nonce: string; hostPub: PublicIdentity; name: string; platform: string },
+  input: { accountId: string; nonce: string; hostPub: PublicIdentity; name: string; platform: string; deviceRouteSecret?: string },
   now: number
 ): Promise<Redemption> {
   if (typeof input.nonce !== 'string' || !NONCE.test(input.nonce)) throw new PairError('invalid');
@@ -501,7 +507,7 @@ export async function redeemEnrollment(
     }
     const hostKey = stable(input.hostPub);
     const known = (await listDevices(store, input.accountId)).find((d) => d.kind === 'host' && stable(d.pub) === hostKey);
-    const hostDeviceId = known?.deviceId ?? newDeviceId('h');
+    const hostDeviceId = known?.deviceId ?? await newDeviceId('h', input.accountId, input.deviceRouteSecret);
     const hostToken = randomToken();
     // Sealed before the transaction, like a browser's credential: the plaintext never reaches storage.
     const sealedToken = await sealToKey(input.hostPub.enc, hostToken, enrollTokenContext(nonceHash, hostDeviceId));
@@ -512,7 +518,7 @@ export async function redeemEnrollment(
         await tx.put(deviceKey(input.accountId, hostDeviceId), { ...withoutGrants(existing), tokenHash: await hashToken(hostToken), lastSeen: now });
       } else {
         if (devices.filter((d) => d.kind === 'host').length >= MAX_HOST_DEVICES) throw new PairError('limit');
-        await registerHostDevice(tx, { accountId: input.accountId, name: input.name, platform: input.platform, pub: input.hostPub, deviceId: hostDeviceId, token: hostToken }, now);
+        await registerHostDevice(tx, { accountId: input.accountId, name: input.name, platform: input.platform, pub: input.hostPub, deviceId: hostDeviceId, token: hostToken, deviceRouteSecret: input.deviceRouteSecret }, now);
       }
       await tx.put(key, { ...record, status: 'redeemed', hostDeviceId, hostName: existing?.name ?? input.name, sealedToken } satisfies EnrollGrantRecord);
     });

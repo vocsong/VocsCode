@@ -12,6 +12,7 @@ import {
   consumeSocketTicket,
   deleteMirrorSession,
   deviceInfos,
+  ENROLL_GRANT_TTL_MS,
   enrollmentStatus,
   getMirrorIndex,
   grantEnrollment,
@@ -54,6 +55,12 @@ export interface RouteContext {
   store: RelayStore;
   accountId: string;
   enrollToken: string;
+  /** True only when the Worker verified the landing's short-lived GitHub account assertion. */
+  accountAuthenticated?: boolean;
+  /** Relay-only key for MACed device routing hints; independent from the landing assertion key. */
+  deviceRouteSecret?: string;
+  /** Directory pointer used to route a desktop's nonce-only enrollment redemption. */
+  bindEnrollment?: (input: { nonceHash: string; accountId: string; expiresAt: number }) => Promise<void>;
   now: number;
   /** Caller address for rate limiting; null when the edge sends none. */
   ip: string | null;
@@ -63,10 +70,10 @@ export interface RouteContext {
 }
 
 /** What a route requires before its handler runs. `refresh` is a device's refresh credential
- *  (token endpoints only). `enroll-or-host` accepts the enrollment secret (a desktop enrolling for
- *  the first time) or an enrolled desktop's access token, so rotating the secret never strands an
- *  already-paired computer. */
-export type RouteAuth = 'public' | 'enroll' | 'enroll-or-host' | 'refresh' | 'device' | 'web' | 'host';
+ *  (token endpoints only). `account` and `owner` require a verified landing assertion; `owner` also
+ *  requires the landing service credential. `enroll-or-host` retains the legacy enrollment secret
+ *  path for `vocs-v1` or an enrolled desktop's access token. */
+export type RouteAuth = 'public' | 'account' | 'owner' | 'enroll' | 'enroll-or-host' | 'refresh' | 'device' | 'web' | 'host';
 
 interface RateRule {
   bucket: string;
@@ -97,9 +104,10 @@ export interface Route {
 /** The whole HTTP surface. Anything not listed here is a 404 — that is the point. */
 export const ROUTES: Route[] = [
   { method: 'POST', path: '/pair/start', auth: 'enroll-or-host', rate: { bucket: 'pair-start', limit: 10, windowMs: 60_000 }, run: pairStart },
-  { method: 'POST', path: '/pair/claim', auth: 'public', rate: { bucket: 'pair-claim', limit: 10, windowMs: 60_000 }, run: pairClaim },
+  // The landing binds these browser claims and polls to the signed-in GitHub account.
+  { method: 'POST', path: '/pair/claim', auth: 'account', rate: { bucket: 'pair-claim', limit: 10, windowMs: 60_000 }, run: pairClaim },
   // Polling runs ~50 times a minute for five minutes, so the budget only catches abuse.
-  { method: 'GET', path: '/pair/poll', auth: 'public', rate: { bucket: 'pair-poll', limit: 120, windowMs: 60_000 }, run: pairPoll },
+  { method: 'GET', path: '/pair/poll', auth: 'account', rate: { bucket: 'pair-poll', limit: 120, windowMs: 60_000 }, run: pairPoll },
   // Access tokens: a refresh credential buys a challenge; signing it with the device key buys an
   // hour-long access token. Rate limited per caller so neither can be hammered.
   { method: 'POST', path: '/token/challenge', auth: 'refresh', rate: { bucket: 'token', limit: 30, windowMs: 60_000 }, run: tokenChallenge },
@@ -117,13 +125,13 @@ export const ROUTES: Route[] = [
   { method: 'GET', path: '/mirror/', prefix: true, auth: 'device', run: mirrorGetSession },
   { method: 'PUT', path: '/mirror/', prefix: true, auth: 'host', run: mirrorPutSession },
   { method: 'DELETE', path: '/mirror/', prefix: true, auth: 'host', run: mirrorDeleteSession },
-  // Owner actions: add a computer that clicked Connect with GitHub, list computers, ask one to pair
-  // a browser. Only the enrollment secret's holder: in production the landing Worker, acting for a
-  // GitHub session on its allowlist (vocs.io code/worker). The desktop still approves each pairing.
-  { method: 'POST', path: '/owner/enroll-grant', auth: 'enroll', run: ownerEnrollGrant },
-  { method: 'GET', path: '/owner/enroll-grant', auth: 'enroll', run: ownerEnrollStatus },
-  { method: 'GET', path: '/owner/hosts', auth: 'enroll', run: ownerHosts },
-  { method: 'POST', path: '/owner/pair-request', auth: 'enroll', rate: { bucket: 'pair-request', limit: 10, windowMs: 60_000 }, run: ownerPairRequest },
+  // Owner actions: add a computer that clicked Connect with GitHub, list this account's computers,
+  // and ask one to pair a browser. Both the verified account assertion and landing service credential
+  // are required. The desktop still approves each pairing.
+  { method: 'POST', path: '/owner/enroll-grant', auth: 'owner', rate: { bucket: 'enroll-grant', limit: 10, windowMs: 60_000 }, run: ownerEnrollGrant },
+  { method: 'GET', path: '/owner/enroll-grant', auth: 'owner', run: ownerEnrollStatus },
+  { method: 'GET', path: '/owner/hosts', auth: 'owner', run: ownerHosts },
+  { method: 'POST', path: '/owner/pair-request', auth: 'owner', rate: { bucket: 'pair-request', limit: 10, windowMs: 60_000 }, run: ownerPairRequest },
   // A desktop redeems the owner's grant with its one-time secret, polling while the owner signs in.
   { method: 'POST', path: '/enroll/redeem', auth: 'public', rate: { bucket: 'enroll-redeem', limit: 120, windowMs: 60_000 }, run: enrollRedeem }
 ];
@@ -192,6 +200,14 @@ function matchRoute(method: string, pathname: string): Match {
 
 async function authorize(auth: RouteAuth, request: Request, url: URL, ctx: RouteContext): Promise<DeviceRecord | null> {
   if (auth === 'public') return null;
+  if (auth === 'account') {
+    if (!ctx.accountAuthenticated) throw new HttpError('not authenticated', 401);
+    return null;
+  }
+  if (auth === 'owner') {
+    if (!ctx.accountAuthenticated || !ctx.enrollToken || bearer(request) !== ctx.enrollToken) throw new HttpError('forbidden', 403);
+    return null;
+  }
   if (auth === 'enroll' || (auth === 'enroll-or-host' && !url.searchParams.has('device'))) {
     if (!ctx.enrollToken || bearer(request) !== ctx.enrollToken) throw new HttpError('forbidden', 403);
     return null;
@@ -333,7 +349,12 @@ function trySend(ws: SocketLike, data: string): void {
 
 async function ownerEnrollGrant({ ctx, request }: Call): Promise<Response> {
   const body = await readJson(request);
-  const granted = await grantEnrollment(ctx.store, { accountId: ctx.accountId, nonceHash: body.nonceHash as string }, ctx.now);
+  const nonceHash = body.nonceHash as string;
+  const expiresAt = ctx.now + ENROLL_GRANT_TTL_MS;
+  // Reserve the nonce globally before writing the tenant grant. If a later write fails, a retry
+  // by this same account is idempotent; another account can never adopt the same connect link.
+  await ctx.bindEnrollment?.({ nonceHash, accountId: ctx.accountId, expiresAt });
+  const granted = await grantEnrollment(ctx.store, { accountId: ctx.accountId, nonceHash }, ctx.now);
   return json(granted, 200, { 'cache-control': 'no-store' });
 }
 
@@ -372,7 +393,8 @@ async function enrollRedeem({ ctx, request }: Call): Promise<Response> {
     nonce: body.nonce as string,
     hostPub,
     name: label(body.name, 'desktop'),
-    platform: label(body.platform, '')
+    platform: label(body.platform, ''),
+    deviceRouteSecret: ctx.deviceRouteSecret
   }, ctx.now);
   return json(redemption, 200, { 'cache-control': 'no-store' });
 }

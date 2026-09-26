@@ -27,6 +27,7 @@ function harness(startAt = T) {
     now,
     ip: '203.0.113.7',
     rate,
+    accountAuthenticated: true,
     sockets: () => [],
     ...over
   });
@@ -40,7 +41,7 @@ describe('relay route table', () => {
   it('classifies every route with an explicit auth requirement and a unique method+path', () => {
     expect(ROUTES.length).toBeGreaterThan(0);
     for (const route of ROUTES) {
-      expect(['public', 'enroll', 'enroll-or-host', 'refresh', 'device', 'web', 'host']).toContain(route.auth);
+      expect(['public', 'account', 'owner', 'enroll', 'enroll-or-host', 'refresh', 'device', 'web', 'host']).toContain(route.auth);
       expect(route.path.startsWith('/')).toBe(true);
       // Nothing user-provided may be interpolated into a route path.
       expect(route.path).not.toContain(':');
@@ -87,6 +88,16 @@ describe('relay route table', () => {
     expect(pollToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect((await handleHttp(req('GET', `/pair/poll?code=${code}`), ctx())).status).toBe(401);
     expect((await handleHttp(req('GET', `/pair/poll?code=${code}`, { headers: { authorization: `Bearer ${pollToken}` } }), ctx())).status).toBe(200);
+  });
+
+  it('requires a verified account assertion for browser claims and owner actions', async () => {
+    const { ctx, store } = harness();
+    const { code } = await startPairing(store, { accountId: 'a', hostName: 'PC', hostPlatform: '', hostPub: HOST_PUB }, T);
+    const unauthenticated = ctx({ accountAuthenticated: false });
+    expect((await handleHttp(req('POST', '/pair/claim', { body: JSON.stringify({ code, webPub: WEB_PUB }) }), unauthenticated)).status).toBe(401);
+    expect((await handleHttp(req('GET', '/pair/poll?code=ABCD2345', { headers: { authorization: 'Bearer a-token' } }), unauthenticated)).status).toBe(401);
+    expect((await handleHttp(req('GET', '/owner/hosts', { headers: { authorization: 'Bearer enroll-secret' } }), unauthenticated)).status).toBe(403);
+    expect(await store.get(`pair:${code}`)).toMatchObject({ status: 'pending' });
   });
 
   it('requires the enrollment secret to start pairing', async () => {

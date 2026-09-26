@@ -14,15 +14,23 @@ const root = path.resolve(import.meta.dirname, '..', '..');
 export interface LocalRelay {
   origin: string;
   enrollToken: string;
+  accountAssertionSecret: string;
+  deviceRouteSecret: string;
   stop(): Promise<void>;
 }
 
 export async function startLocalRelay(): Promise<LocalRelay> {
   const enrollToken = randomBytes(32).toString('base64url');
+  const accountAssertionSecret = randomBytes(32).toString('base64url');
+  const deviceRouteSecret = randomBytes(32).toString('base64url');
   const persist = await mkdtemp(path.join(os.tmpdir(), 'vocs-relay-state-'));
   const worker = await unstable_startWorker({
     config: path.join(root, 'relay', 'wrangler.jsonc'),
-    bindings: { ENROLL_TOKEN: { type: 'plain_text', value: enrollToken } },
+    bindings: {
+      ENROLL_TOKEN: { type: 'plain_text', value: enrollToken },
+      ACCOUNT_ASSERTION_SECRET: { type: 'plain_text', value: accountAssertionSecret },
+      DEVICE_ROUTE_SECRET: { type: 'plain_text', value: deviceRouteSecret }
+    },
     dev: { server: { hostname: '127.0.0.1', port: 0 }, persist, inspector: false, watch: false, logLevel: 'error' }
   });
   await worker.ready;
@@ -30,6 +38,8 @@ export async function startLocalRelay(): Promise<LocalRelay> {
   return {
     origin: url.origin,
     enrollToken,
+    accountAssertionSecret,
+    deviceRouteSecret,
     stop: async () => {
       await worker.dispose();
       await rm(persist, { recursive: true, force: true }).catch(() => undefined);
