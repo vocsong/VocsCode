@@ -45,6 +45,9 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
   const hostDeviceId = credentials?.hostDeviceId ?? null;
   const [online, setOnline] = useState<Map<string, boolean>>(() => new Map());
   const [, forceRender] = useState(0);
+  /** Every transport state change nudges this; batching 'connecting' and 'online' into one render
+   *  must not hide a host switch from the boot effect. */
+  const [connVersion, setConnVersion] = useState(0);
   const connection = useConnection(transport);
   const keyboard = useKeyboardInset();
   const sessions = useStore((s) => s.sessions);
@@ -63,6 +66,8 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
   useEffect(() => {
     transport.start();
   }, [transport]);
+
+  useEffect(() => transport.onState(() => setConnVersion((v) => v + 1)), [transport]);
 
   // Load the vault before deciding which screen to show: a pairing must survive a reload, and a
   // browser that cannot keep its keys (no IndexedDB) must say so instead of pairing uselessly.
@@ -167,7 +172,7 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
     } else {
       void useStore.getState().resync().then(() => setDataHost(current)).catch(() => undefined);
     }
-  }, [connection, client, transport]);
+  }, [connection, client, transport, connVersion]);
 
   // Default route: a deep link wins; otherwise open the session the desktop is on; otherwise home.
   // Only once, so Back to home is not immediately bounced into the focused session. While the focus
