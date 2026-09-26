@@ -274,105 +274,113 @@ export class PiAdapter implements HarnessAdapter {
     // A POSIX process group does not contain detached/setsid descendants. Refuse managed startup
     // until an equivalent ownership proof exists; ordinary Pi remains available everywhere.
     if (mission && process.platform !== 'win32') throw new Error('Managed Pi process-tree ownership is unverified on this platform.');
-    const extraArgs = s.pi.extraArgs ?? [];
-    // Positive list: unknown flags, positional prompts and aliases cannot override the preset,
-    // mode, session, tool set or shipped extension ownership.
-    if (mission && extraArgs.some((arg) => !['--offline', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-approve', '--verbose'].includes(arg))) {
-      throw new Error('Pi extraArgs are incompatible with managed Mission settings. Remove model, mode, tool, extension, session and prompt overrides.');
-    }
-    const intendedEffort = mission?.reasoningDefault ? undefined : this.ctx.effort();
-    const bin = this.ctx.runtime.resolve('pi');
-    if (!bin) throw new Error('pi is not installed. Run `npm install -g @earendil-works/pi-coding-agent` or set the path in Settings.');
-    const ext = this.ctx.runtime.resource('pi', 'vocs-code-approvals.ts');
-    const toolsExt = this.ctx.runtime.resource('pi', 'vocs-code-tools.ts');
-    const mcpExt = this.ctx.runtime.resource('pi', 'vocs-code-mcp.ts');
-    const subagentsExt = this.ctx.runtime.resource('pi', 'vocs-code-subagents.ts');
-    const sessionDir = path.join(this.ctx.sessionDir, 'pi');
-    await fs.mkdir(sessionDir, { recursive: true });
-
-    // Subagents inherit the session model: override pi-subagents' pinned Explore agent in pi's
-    // global agent dir, without clobbering a user's file there. The same pass drops a legacy
-    // project copy and turns on usage reporting so subagent spend reaches the session totals and
-    // analytics.
-    if (!mission) await installPiAgentOverrides({
-      cwd: meta.cwd,
-      log: (level, message) => this.ctx.log(level, `[pi] ${message}`)
-    });
-
-    // The MCP bridge extension reads this file and registers each server's tools with pi.
-    const mcpServers = await this.ctx.mcpServers();
-    const missionServers = mcpServers.filter((server) => server.def.id === MISSION_SERVER_ID);
-    if (mission && (missionServers.length !== 1 || missionServers[0].def.transport !== 'http' || !missionServers[0].def.headers?.Authorization)) {
-      throw new Error('Managed Mission requires its authenticated MCP bridge.');
-    }
-    if (!mission && missionServers.length) throw new Error('Mission MCP bridge requires a managed session.');
-    this.missionSecrets = missionServers.flatMap((server) => Object.values(server.def.headers ?? {}).flatMap((value) => [value, value.replace(/^Bearer /, '')]));
-    const args = ['--mode', 'rpc',
-      ...(mission ? ['--no-extensions', '--no-approve', '-e', this.ctx.runtime.resource('pi', 'vocs-code-mission.ts')] : []),
-      '-e', ext, '-e', toolsExt, ...(!mission ? ['-e', subagentsExt] : []), '--session-dir', sessionDir];
-    let mcpConfigFile: string | null = null;
-    if (mcpServers.length) {
-      args.push('-e', mcpExt);
-      const persisted = mcpServers.filter((server) => server.def.id !== MISSION_SERVER_ID);
-      const file = path.join(sessionDir, 'mcp.json');
-      if (persisted.length) {
-        mcpConfigFile = file;
-        await fs.writeFile(file, JSON.stringify({ servers: persisted.map((r) => r.def) }, null, 2) + '\n', 'utf8');
-      } else if (mission) await fs.rm(file, { force: true });
-    }
-    if (meta.harnessRef.piSessionFile) args.push('--session', meta.harnessRef.piSessionFile);
-    if (meta.config.model) {
-      if (meta.config.model.provider) args.push('--provider', meta.config.model.provider);
-      args.push('--model', meta.config.model.model);
-    }
-    const level = piThinkingLevel(intendedEffort);
-    if (level) args.push('--thinking', level);
-    const append = sessionAppendPrompt(meta);
-    if (append) {
-      await appendSystemPrompt(args, append, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
-    }
-    await appendSystemPrompt(args, PI_TOOL_PROMPT, bin.path, path.join(sessionDir, 'tool-system-prompt.txt'));
-    args.push(...extraArgs);
-
-    this.modeFile = path.join(sessionDir, 'permission-mode.txt');
-    const permissionMode = mission?.sourceAccess === 'read_only' ? 'plan' : this.ctx.permissionMode();
-    await fs.writeFile(this.modeFile, permissionMode, 'utf8');
-    this.effortFile = path.join(sessionDir, 'reasoning-effort.json');
-    // Managed presets use Pi's actual thinking selection, never a catalog-driven payload override.
-    await this.writeEffortConfig(mission ? undefined : intendedEffort, meta.config.model);
-    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE_SUBAGENT_DIR: path.join(sessionDir, 'subagents'), VOCS_CODE_PROJECT_ROOT: meta.config.projectRoot, VOCS_CODE: '1' };
-    // Never inherit another session's broker capability, mode or MCP config.
-    delete env.VOCS_CODE_MISSION_POLICY;
-    delete env.VOCS_CODE_MCP_EPHEMERAL;
-    delete env.VOCS_CODE_MCP_CONFIG;
-    if (mission) {
-      delete env.VOCS_CODE_SUBAGENT_DIR;
-      env.VOCS_CODE_PERMISSION_MODE = permissionMode;
-      env.VOCS_CODE_MISSION_POLICY = JSON.stringify({ role: mission.role, sourceAccess: mission.sourceAccess, requestedTools: mission.requestedTools, questionId: mission.questionId });
-      env.VOCS_CODE_MCP_EPHEMERAL = JSON.stringify({ servers: missionServers.map((server) => server.def) });
-    }
-    if (mcpConfigFile) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
-    for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
-      if (!env[envKey]) {
-        const key = await this.ctx.getApiKey(pid);
-        if (key) env[envKey] = key;
-      }
-    }
-
-    if (mission && this.missionStopping) throw new Error('Managed Pi startup was canceled before launch.');
-    // Which binary answered is the first question when pi misbehaves; the args carry no secrets (env does).
-    this.ctx.log('info', `spawning pi: ${bin.path} (${bin.source} runtime) in ${meta.cwd}`);
-    let child: ChildProcess;
-    if (mission) {
-      const executable = path.isAbsolute(bin.path) ? bin.path : /[\\/]/.test(bin.path) ? path.resolve(meta.cwd, bin.path) : which(bin.path);
-      if (!executable) throw new Error('Managed Pi executable was not found.');
-      const shim = usesWindowsCommandShim(executable);
-      const shell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
-      const owner = { sessionId: this.ctx.sessionId, missionId: mission.missionId, generation: mission.generation };
+    // A managed dispatch commits its launch identity before start() is called (the service binds
+    // the nonce). Write the durable intent before any launch-time check can fail, so a missing
+    // runtime or a rejected setting still leaves the exact not-started receipt that restart
+    // recovery needs, instead of an intentless nonce that reads as unknown ownership forever.
+    const owner = mission ? { sessionId: this.ctx.sessionId, missionId: mission.missionId, generation: mission.generation } : undefined;
+    let managedIntent: ManagedPiOwnershipIntent | undefined;
+    if (owner) {
       const previous = await inspectManagedPiOwnership(this.ctx.sessionDir, { sessionId: owner.sessionId, missionId: owner.missionId });
       if (previous.state === 'unknown') throw new Error(`Previous managed Pi process ownership is unverified. ${previous.detail}`);
-      const intent = await createManagedPiOwnershipIntent(this.ctx.sessionDir, owner);
-      try {
+      managedIntent = await createManagedPiOwnershipIntent(this.ctx.sessionDir, owner);
+    }
+    let child: ChildProcess;
+    const intendedEffort = mission?.reasoningDefault ? undefined : this.ctx.effort();
+    try {
+      const extraArgs = s.pi.extraArgs ?? [];
+      // Positive list: unknown flags, positional prompts and aliases cannot override the preset,
+      // mode, session, tool set or shipped extension ownership.
+      if (mission && extraArgs.some((arg) => !['--offline', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-approve', '--verbose'].includes(arg))) {
+        throw new Error('Pi extraArgs are incompatible with managed Mission settings. Remove model, mode, tool, extension, session and prompt overrides.');
+      }
+      const bin = this.ctx.runtime.resolve('pi');
+      if (!bin) throw new Error('pi is not installed. Run `npm install -g @earendil-works/pi-coding-agent` or set the path in Settings.');
+      const ext = this.ctx.runtime.resource('pi', 'vocs-code-approvals.ts');
+      const toolsExt = this.ctx.runtime.resource('pi', 'vocs-code-tools.ts');
+      const mcpExt = this.ctx.runtime.resource('pi', 'vocs-code-mcp.ts');
+      const subagentsExt = this.ctx.runtime.resource('pi', 'vocs-code-subagents.ts');
+      const sessionDir = path.join(this.ctx.sessionDir, 'pi');
+      await fs.mkdir(sessionDir, { recursive: true });
+
+      // Subagents inherit the session model: override pi-subagents' pinned Explore agent in pi's
+      // global agent dir, without clobbering a user's file there. The same pass drops a legacy
+      // project copy and turns on usage reporting so subagent spend reaches the session totals and
+      // analytics.
+      if (!mission) await installPiAgentOverrides({
+        cwd: meta.cwd,
+        log: (level, message) => this.ctx.log(level, `[pi] ${message}`)
+      });
+
+      // The MCP bridge extension reads this file and registers each server's tools with pi.
+      const mcpServers = await this.ctx.mcpServers();
+      const missionServers = mcpServers.filter((server) => server.def.id === MISSION_SERVER_ID);
+      if (mission && (missionServers.length !== 1 || missionServers[0].def.transport !== 'http' || !missionServers[0].def.headers?.Authorization)) {
+        throw new Error('Managed Mission requires its authenticated MCP bridge.');
+      }
+      if (!mission && missionServers.length) throw new Error('Mission MCP bridge requires a managed session.');
+      this.missionSecrets = missionServers.flatMap((server) => Object.values(server.def.headers ?? {}).flatMap((value) => [value, value.replace(/^Bearer /, '')]));
+      const args = ['--mode', 'rpc',
+        ...(mission ? ['--no-extensions', '--no-approve', '-e', this.ctx.runtime.resource('pi', 'vocs-code-mission.ts')] : []),
+        '-e', ext, '-e', toolsExt, ...(!mission ? ['-e', subagentsExt] : []), '--session-dir', sessionDir];
+      let mcpConfigFile: string | null = null;
+      if (mcpServers.length) {
+        args.push('-e', mcpExt);
+        const persisted = mcpServers.filter((server) => server.def.id !== MISSION_SERVER_ID);
+        const file = path.join(sessionDir, 'mcp.json');
+        if (persisted.length) {
+          mcpConfigFile = file;
+          await fs.writeFile(file, JSON.stringify({ servers: persisted.map((r) => r.def) }, null, 2) + '\n', 'utf8');
+        } else if (mission) await fs.rm(file, { force: true });
+      }
+      if (meta.harnessRef.piSessionFile) args.push('--session', meta.harnessRef.piSessionFile);
+      if (meta.config.model) {
+        if (meta.config.model.provider) args.push('--provider', meta.config.model.provider);
+        args.push('--model', meta.config.model.model);
+      }
+      const level = piThinkingLevel(intendedEffort);
+      if (level) args.push('--thinking', level);
+      const append = sessionAppendPrompt(meta);
+      if (append) {
+        await appendSystemPrompt(args, append, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
+      }
+      await appendSystemPrompt(args, PI_TOOL_PROMPT, bin.path, path.join(sessionDir, 'tool-system-prompt.txt'));
+      args.push(...extraArgs);
+
+      this.modeFile = path.join(sessionDir, 'permission-mode.txt');
+      const permissionMode = mission?.sourceAccess === 'read_only' ? 'plan' : this.ctx.permissionMode();
+      await fs.writeFile(this.modeFile, permissionMode, 'utf8');
+      this.effortFile = path.join(sessionDir, 'reasoning-effort.json');
+      // Managed presets use Pi's actual thinking selection, never a catalog-driven payload override.
+      await this.writeEffortConfig(mission ? undefined : intendedEffort, meta.config.model);
+      const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE_SUBAGENT_DIR: path.join(sessionDir, 'subagents'), VOCS_CODE_PROJECT_ROOT: meta.config.projectRoot, VOCS_CODE: '1' };
+      // Never inherit another session's broker capability, mode or MCP config.
+      delete env.VOCS_CODE_MISSION_POLICY;
+      delete env.VOCS_CODE_MCP_EPHEMERAL;
+      delete env.VOCS_CODE_MCP_CONFIG;
+      if (mission) {
+        delete env.VOCS_CODE_SUBAGENT_DIR;
+        env.VOCS_CODE_PERMISSION_MODE = permissionMode;
+        env.VOCS_CODE_MISSION_POLICY = JSON.stringify({ role: mission.role, sourceAccess: mission.sourceAccess, requestedTools: mission.requestedTools, questionId: mission.questionId });
+        env.VOCS_CODE_MCP_EPHEMERAL = JSON.stringify({ servers: missionServers.map((server) => server.def) });
+      }
+      if (mcpConfigFile) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
+      for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
+        if (!env[envKey]) {
+          const key = await this.ctx.getApiKey(pid);
+          if (key) env[envKey] = key;
+        }
+      }
+
+      if (mission && this.missionStopping) throw new Error('Managed Pi startup was canceled before launch.');
+      // Which binary answered is the first question when pi misbehaves; the args carry no secrets (env does).
+      this.ctx.log('info', `spawning pi: ${bin.path} (${bin.source} runtime) in ${meta.cwd}`);
+      if (mission) {
+        const intent = managedIntent!;
+        const executable = path.isAbsolute(bin.path) ? bin.path : /[\\/]/.test(bin.path) ? path.resolve(meta.cwd, bin.path) : which(bin.path);
+        if (!executable) throw new Error('Managed Pi executable was not found.');
+        const shim = usesWindowsCommandShim(executable);
+        const shell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
         if (this.missionStopping) throw new Error('Managed Pi startup was canceled before launch.');
         const owned = launchOwnedWindowsJob({
           executable: shim ? shell : executable,
@@ -387,18 +395,18 @@ export class PiAdapter implements HarnessAdapter {
         this.missionIntent = intent;
         this.missionProcess = owned;
         child = owned.process;
-      } catch (error) {
-        // launchOwnedWindowsJob retains/returns every handle once launch has succeeded. A throw
-        // here proves no helper was launched; record that fact without pretending it was a Job.
-        await recordUnlaunchedManagedPiIntent(intent);
-        throw error;
+      } else {
+        if (this.ordinaryStopping) throw new Error('Pi startup was canceled before launch.');
+        const owned = this.ordinaryTracked ? await this.launchOrdinaryOwned(bin.path, args, meta.cwd, env) : null;
+        child = owned ? owned.process : spawnTool(bin.path, args, { cwd: meta.cwd, env });
+        // Tracked writers stay unproven until the Job's positive teardown, across root idle and plan.
+        if (this.ordinaryTracked) this.ordinaryWritersUnproven ||= this.ctx.permissionMode() !== 'plan';
       }
-    } else {
-      if (this.ordinaryStopping) throw new Error('Pi startup was canceled before launch.');
-      const owned = this.ordinaryTracked ? await this.launchOrdinaryOwned(bin.path, args, meta.cwd, env) : null;
-      child = owned ? owned.process : spawnTool(bin.path, args, { cwd: meta.cwd, env });
-      // Tracked writers stay unproven until the Job's positive teardown, across root idle and plan.
-      if (this.ordinaryTracked) this.ordinaryWritersUnproven ||= this.ctx.permissionMode() !== 'plan';
+    } catch (error) {
+      // A throw before launchOwnedWindowsJob returned proves no helper (and no target) ran;
+      // record the exact not-started fact without pretending it was a Job.
+      if (managedIntent && !this.missionIntent) await recordUnlaunchedManagedPiIntent(managedIntent).catch(() => undefined);
+      throw error;
     }
     this.child = child;
     const splitter = new LineSplitter((line) => { if (this.child === child) this.handleLine(line); });

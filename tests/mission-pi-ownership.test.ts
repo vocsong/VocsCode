@@ -9,11 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PiAdapter } from '../src/main/harness/pi';
 import type { HarnessContext } from '../src/main/harness/types';
 import { createAdapter } from '../src/main/harness/registry';
-import { SessionManager } from '../src/main/session-manager';
+import { SessionManager, type SessionManagerDeps } from '../src/main/session-manager';
 import { SessionStore } from '../src/main/store';
 import { defaultSettings, type SettingsStore } from '../src/main/settings';
 import { MissionWorkspaceAdmission } from '../src/main/mission/admission';
 import type { OwnedWindowsJob, OwnedWindowsJobOptions } from '../src/main/owned-windows-job';
+import { inspectManagedPiOwnership } from '../src/main/harness/pi-ownership';
 import { deferred } from '../src/main/util/async';
 
 const processApi = vi.hoisted(() => ({ spawn: vi.fn(), spawnTool: vi.fn(), shutdownChild: vi.fn(), owned: vi.fn() }));
@@ -35,6 +36,7 @@ vi.mock('../src/main/harness/registry', () => ({ createAdapter: vi.fn() }));
 vi.mock('../src/main/pi-agents', () => ({ installPiAgentOverrides: vi.fn() }));
 
 let root: string, manager: SessionManager, store: SessionStore;
+let deps: SessionManagerDeps;
 let adapters: PiAdapter[], contexts: HarnessContext[], controls: ReturnType<typeof controller>[];
 let commands: Record<string, unknown>[];
 let helperAvailable: boolean;
@@ -95,13 +97,14 @@ beforeEach(async () => {
     const owned = controller(options.launch('owned-supervisor-fixture', []), options.ownershipIntent); controls.push(owned); return owned;
   });
   vi.mocked(createAdapter).mockImplementation((_id, ctx) => { contexts.push(ctx); const adapter = new PiAdapter(ctx); adapters.push(adapter); return adapter; });
-  manager = new SessionManager({
+  deps = {
     store, settings: { get: () => settings, update: async () => settings } as unknown as SettingsStore,
     runtime: { resolve: () => ({ path: path.join(root, 'pi.exe'), source: 'installed' }), resource: (...parts: string[]) => path.resolve(helperAvailable ? 'resources' : path.join(root, 'missing-resources'), ...parts) } as never,
     analytics: { touchSession: vi.fn(), recordUserMessage: vi.fn(), recordToolCall: vi.fn(), recordTurn: vi.fn(), recordUsage: vi.fn(), recordSubagent: vi.fn() } as never,
     getSecret: async () => undefined, pushEvent: vi.fn(), pushSessions: vi.fn(), notify: vi.fn(), log: vi.fn(),
     ordinaryProcessOwnership: () => ordinaryOwnership,
-  });
+  };
+  manager = new SessionManager(deps);
   manager.attachMissionHooks({ beforeDispatch: async () => undefined,
     mcpServers: async () => [{ def: { id: 'vocs-mission', transport: 'http', url: 'http://127.0.0.1:1', headers: { Authorization: 'Bearer ownership-test-secret' } }, missing: [], secretEnvKeys: [], secretHeaderKeys: [] }],
   });
@@ -128,6 +131,24 @@ const prepare = async () => {
 };
 
 describe.runIf(process.platform === 'win32')('managed Pi ownership evidence', () => {
+  it('leaves an exact not-started receipt when a managed launch cannot resolve Pi', async () => {
+    // The service normally records the launch nonce and binds it before start; here the missing
+    // executable is the point: the write-ahead intent must exist anyway, with a positive
+    // not-started receipt, so restart recovery does not read the dispatch as unknown ownership.
+    const runtime = deps.runtime as { resource: (...parts: string[]) => string };
+    manager = new SessionManager({ ...deps, runtime: { resolve: () => null, resource: runtime.resource } as never });
+    manager.attachMissionHooks({ beforeDispatch: async () => undefined,
+      mcpServers: async () => [{ def: { id: 'vocs-mission', transport: 'http', url: 'http://127.0.0.1:1', headers: { Authorization: 'Bearer ownership-test-secret' } }, missing: [], secretEnvKeys: [], secretHeaderKeys: [] }],
+    });
+    await expect(manager.prepareManaged('managed', 1)).rejects.toThrow(/pi is not installed/);
+    expect(processApi.owned).not.toHaveBeenCalled();
+    const dir = path.join(store.sessionDir('managed'), 'pi', 'process-ownership');
+    const intents = (await fs.readdir(dir)).filter((name) => name.endsWith('.intent.json'));
+    expect(intents).toHaveLength(1);
+    const nonce = intents[0].slice(0, -'.intent.json'.length);
+    await expect(inspectManagedPiOwnership(store.sessionDir('managed'), { sessionId: 'managed', missionId: 'mission', generation: 1, nonce })).resolves.toMatchObject({ state: 'quiescent', quiescent: true, intents: 1 });
+  });
+
   it('keeps root exit unavailable until a positive Job receipt, not generic shutdownChild', async () => {
     await prepare(); const completed = vi.fn();
     const stopping = manager.stopManaged('managed', 1).then(completed);
