@@ -75,7 +75,7 @@ beforeEach(async () => {
   git(source, ['config', 'commit.gpgsign', 'false']);
   git(source, ['config', 'core.autocrlf', 'false']);
   await write(source, 'a.txt', 'base\n');
-  await write(source, '.gitignore', 'ignored/\n');
+  await write(source, '.gitignore', 'ignored/\nnode_modules/\n');
   git(source, ['add', '.']);
   git(source, ['commit', '-m', 'Fixture baseline']);
   held = new Set();
@@ -556,6 +556,31 @@ describe('interrupted refresh and removal reconciliation', () => {
 });
 
 describe('exact revision verification workspaces', () => {
+  it('retires a host-installed ignored node_modules from a verification workspace before reuse and cleanup', async () => {
+    await worker();
+    const verify = () => service.provisionVerification({ missionId: 'm01', revision: baseline.revision, operationId: 'review_deps' });
+    const scratch = await verify();
+    // Conventional verification installs locked dependencies in the isolated tree.
+    await fs.mkdir(path.join(scratch.cwd, 'node_modules'));
+    await write(scratch.cwd, 'node_modules/.package-lock.json', '{}\n');
+    service = restart();
+    const reused = await verify();
+    expect(reused.cwd).toBe(scratch.cwd);
+    expect(await fs.lstat(path.join(scratch.cwd, 'node_modules')).catch(() => undefined)).toBeUndefined();
+    expect(await service.cleanup(reused.id)).toEqual({ removed: true });
+    expect(await fs.lstat(scratch.cwd).catch(() => undefined)).toBeUndefined();
+  }, 90_000);
+
+  it('never follows a linked node_modules out of the verification workspace', async () => {
+    await worker();
+    const scratch = await service.provisionVerification({ missionId: 'm01', revision: baseline.revision, operationId: 'review_link' });
+    const outside = path.join(root, 'outside-deps');
+    await fs.mkdir(outside);
+    await fs.symlink(outside, path.join(scratch.cwd, 'node_modules'), 'junction');
+    expect(await service.cleanup(scratch.id)).toMatchObject({ removed: false });
+    expect((await fs.lstat(outside)).isDirectory()).toBe(true);
+  }, 90_000);
+
   it('materializes only this Mission\'s host-captured/accepted trees and makes operation retries stable', async () => {
     const before = await preserved();
     const first = await worker();

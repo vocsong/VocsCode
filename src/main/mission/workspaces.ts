@@ -625,6 +625,7 @@ export class MissionWorkspaces {
       }
       return this.quiet(record.cwd, async (lease) => {
         await this.owned(record, mission);
+        await this.retireHostDependencies(record);
         const snapshot = await this.snapshot(record, lease);
         if (snapshot.contentHash !== input.revision.contentHash || snapshot.indexContentHash !== input.revision.contentHash || snapshot.fingerprint !== record.fingerprint || await this.ignored(record.cwd)) throw new MissionWorkspaceError('drift', 'Verification workspace changed; retained instead of restoring over uncertain work.');
         return publicWorkspace(record);
@@ -1062,6 +1063,7 @@ export class MissionWorkspaces {
           // Finish an interrupted refresh/removal of our own before deciding what can be removed.
           if (record.state === 'refreshing' || record.state === 'removing') record = await this.settle(record, mission, lease);
           await this.owned(record, mission);
+          await this.retireHostDependencies(record);
           const ignored = (await git(record.cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])).stdout;
           if (ignored) return { removed: false, reason: 'uncaptured', message: 'Ignored files are not captured; move or remove them explicitly before cleanup.' };
           const current = await this.snapshot(record, lease);
@@ -1345,6 +1347,24 @@ export class MissionWorkspaces {
 
   private async ignored(cwd: string): Promise<boolean> {
     return !!(await git(cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])).stdout;
+  }
+
+  /** Conventional verification runs `npm ci` inside the isolated tree, leaving an ignored
+   * top-level node_modules. That is host-owned scratch, not captured content, so verification and
+   * integration-attempt workspaces retire it before an ignored-content check; every other role
+   * keeps refusing. A link/junction, tracked content or a non-ignored path stays untouched. */
+  private async retireHostDependencies(record: Pick<WorkspaceRecord, 'cwd' | 'role'>): Promise<void> {
+    if (record.role !== 'verification' && record.role !== 'integration-attempt') return;
+    const modules = path.join(record.cwd, 'node_modules');
+    const stat = await fs.lstat(modules).catch(() => undefined);
+    if (!stat) return;
+    const probe = await git(record.cwd, ['check-ignore', '-q', '--', 'node_modules/.package-lock.json'], { allowFailure: true });
+    if (probe.code !== 0) return;
+    if (stat.isSymbolicLink()) throw new MissionWorkspaceError('unsafe', 'A linked node_modules cannot be retired; remove the link before cleaning this workspace.');
+    if (!stat.isDirectory()) return;
+    if ((await git(record.cwd, ['ls-files', '-z', '--', 'node_modules'])).stdout) return;
+    await noLinks(record.cwd, modules);
+    await fs.rm(modules, { recursive: true, force: true });
   }
 
   private async recover(record: WorkspaceRecord, mission: MissionRecord): Promise<WorkspaceRecord> {
