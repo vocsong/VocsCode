@@ -181,6 +181,16 @@ describe('Mission Git baseline and workspace ownership', () => {
     expect(await preserved()).toEqual(before);
   });
 
+  it('treats a differently cased "Mission" branch as owning the namespace, as loose refs do on case-insensitive filesystems', async () => {
+    git(source, ['branch', 'Mission']);
+    const before = await preserved();
+    const worker = await workspace('a1');
+    expect(worker.branch).toMatch(/^mission-/);
+    expect(git(worker.cwd, ['symbolic-ref', 'HEAD'])).toBe(`refs/heads/${worker.branch}`);
+    expect(git(source, ['rev-parse', 'refs/heads/Mission'])).toBe(baseline.revision.baseCommitSha);
+    expect(await preserved()).toEqual(before);
+  });
+
   it('rejects storage inside source and never adopts a tampered ownership record or source checkout', async () => {
     const before = await preserved();
     const unsafe = new MissionWorkspaces({ root: path.join(source, '.mission'), quiescence: quiescence() });

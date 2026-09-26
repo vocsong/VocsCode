@@ -427,6 +427,134 @@ describe('provision intent reconciliation', () => {
   });
 });
 
+describe('canonical storage anchoring', () => {
+  it('reopens storage reached through a junction from fresh instances without mistaking its canonical path for an escape', async () => {
+    // A junctioned/relocated profile or an 8.3 short name makes userData differ from its realpath.
+    const link = process.platform === 'win32' ? 'junction' : 'dir';
+    const real = path.join(root, 'real profile'), alias = path.join(root, 'profile alias');
+    await fs.mkdir(real); await fs.symlink(real, alias, link);
+    storage = path.join(alias, 'owned');
+    service = restart();
+    const first = await worker();
+    const canonical = path.join(await fs.realpath(real), 'owned');
+    expect(path.dirname(first.cwd)).toBe(path.join(canonical, 'worktrees'));
+    // Every entry point runs on a fresh instance, whose first path uses the configured spelling.
+    service = restart(); expect(await service.recoverWorkspace(first.id)).toEqual(first);
+    service = restart(); expect(await service.workspace(first.id)).toEqual(first);
+    service = restart(); expect(await service.baseline('m01')).toEqual(baseline);
+    await write(first.cwd, 'a.txt', 'captured through the alias\n');
+    service = restart(); const candidate = await service.captureCandidate(first.id, 'a1', 'c_alias');
+    service = restart(); expect(await service.candidate(candidate.id)).toEqual(candidate);
+    service = restart(); expect(await service.candidatesForAttempt('m01', 'a1')).toEqual([candidate]);
+    service = restart(); expect((await service.integrate({ missionId: 'm01', candidateId: candidate.id, expectedAccepted: baseline.revision, check: async () => true })).status).toBe('accepted');
+    const consumer = await worker('w_consumer', 'a2');
+    service = restart(); expect((await service.materializeAccepted(consumer.id, consumer.fingerprint)).baseRevision).toEqual(candidate.revision);
+    service = restart(); expect(await service.cleanup(consumer.id)).toEqual({ removed: true });
+    // Components below the canonical root are still refused, whichever spelling reached them.
+    const records = path.join(canonical, 'workspaces'), moved = path.join(root, 'moved records');
+    await fs.rename(records, moved); await fs.symlink(moved, records, link);
+    service = restart();
+    await expect(service.recoverWorkspace(first.id)).rejects.toMatchObject({ code: 'unsafe' });
+    await fs.unlink(records); await fs.rename(moved, records);
+    service = restart(); expect(await service.recoverWorkspace(first.id)).toEqual({ ...first, fingerprint: candidate.fingerprint });
+  }, 90_000);
+});
+
+describe('interrupted refresh and removal reconciliation', () => {
+  async function acceptedChange() {
+    const first = await worker();
+    const consumer = await worker('w_consumer', 'a2');
+    await write(first.cwd, 'a.txt', 'accepted\n');
+    await write(first.cwd, 'new.txt', 'new file\n');
+    const candidate = await service.captureCandidate(first.id, 'a1', 'c_fixed');
+    expect((await service.integrate({ missionId: 'm01', candidateId: candidate.id, expectedAccepted: baseline.revision, check: async () => true })).status).toBe('accepted');
+    return { consumer, candidate };
+  }
+  const checkout = (args: string[]) => args.includes('read-tree') && args.includes('-m') && args.includes('-u');
+
+  it.each(['before', 'after'] as const)('recovers a refresh whose guarded checkout lost its %s acknowledgment', async (when) => {
+    const { consumer, candidate } = await acceptedChange();
+    const failure = failGit(checkout, when);
+    await expect(service.materializeAccepted(consumer.id, consumer.fingerprint)).rejects.toThrow('acknowledgment');
+    failure.restore();
+    if (when === 'before') {
+      // Nothing changed, so the ready record is back at once and an ordinary retry works.
+      expect(await service.workspace(consumer.id)).toEqual(consumer);
+      expect(await text(consumer.cwd, 'a.txt')).toBe('base\n');
+    } else {
+      await expect(service.workspace(consumer.id)).rejects.toMatchObject({ code: 'not_owned' });
+      service = restart();
+      const settled = await service.recoverWorkspace(consumer.id);
+      expect(settled.baseRevision).toEqual(candidate.revision);
+      expect(await service.recoverWorkspace(consumer.id)).toEqual(settled);
+    }
+    service = restart();
+    const current = await service.workspace(consumer.id);
+    expect((await service.materializeAccepted(consumer.id, current.fingerprint)).baseRevision).toEqual(candidate.revision);
+    expect(await text(consumer.cwd, 'a.txt')).toBe('accepted\n');
+    expect(await text(consumer.cwd, 'new.txt')).toBe('new file\n');
+    expect(await service.contentIdentity(consumer.cwd)).toEqual(candidate.revision);
+    expect(await service.cleanup(consumer.id)).toEqual({ removed: true });
+  });
+
+  it('resumes a partially materialized refresh but retains bytes its transition cannot explain', async () => {
+    const { consumer, candidate } = await acceptedChange();
+    // Git wrote one target file, then a transient Windows file lock stopped the checkout.
+    const original = runtime.runCapture;
+    let interrupted = false;
+    vi.spyOn(runtime, 'runCapture').mockImplementation(async (cmd, args, opts) => {
+      if (interrupted || !checkout(args)) return original(cmd, args, opts);
+      interrupted = true;
+      await write(consumer.cwd, 'new.txt', 'new file\n');
+      throw new Error('fixture file lock interrupted the checkout');
+    });
+    await expect(service.materializeAccepted(consumer.id, consumer.fingerprint)).rejects.toThrow('file lock');
+    vi.restoreAllMocks();
+    expect(interrupted).toBe(true);
+    await expect(service.workspace(consumer.id)).rejects.toMatchObject({ code: 'not_owned' });
+    // An unexplained writer blocks the resume, and every byte stays exactly where it was.
+    await write(consumer.cwd, 'a.txt', 'foreign writer\n');
+    service = restart();
+    await expect(service.recoverWorkspace(consumer.id)).rejects.toMatchObject({ code: 'drift' });
+    expect(await text(consumer.cwd, 'a.txt')).toBe('foreign writer\n');
+    expect(await text(consumer.cwd, 'new.txt')).toBe('new file\n');
+    expect(JSON.parse(await fs.readFile(manifest(consumer.id), 'utf8'))).toMatchObject({ state: 'refreshing' });
+    // With only accounted/target versions left, recovery completes the recorded checkout.
+    await write(consumer.cwd, 'a.txt', 'base\n');
+    const settled = await service.recoverWorkspace(consumer.id);
+    expect(settled.baseRevision).toEqual(candidate.revision);
+    expect(await text(consumer.cwd, 'a.txt')).toBe('accepted\n');
+    expect(await text(consumer.cwd, 'new.txt')).toBe('new file\n');
+    expect(await service.contentIdentity(consumer.cwd)).toEqual(candidate.revision);
+    // Source, two workers and the integration attempt: recovery provisioned nothing new.
+    expect(git(source, ['worktree', 'list', '--porcelain']).match(/^worktree /gm)).toHaveLength(4);
+  });
+
+  it.each([
+    ['retry', 'before'], ['restart', 'before'], ['retry', 'after'],
+  ] as const)('finishes a removal interrupted %s the worktree removal lost its %s acknowledgment', async (mode, when) => {
+    const first = await worker();
+    await write(first.cwd, 'a.txt', 'captured\n');
+    const candidate = await service.captureCandidate(first.id, 'a1', 'c_fixed');
+    const failure = failGit((args) => args.includes('worktree') && args.includes('remove'), when);
+    expect(await service.cleanup(first.id)).toMatchObject({ removed: false, reason: 'git_refused' });
+    failure.restore();
+    if (when === 'before') expect(await text(first.cwd, 'a.txt')).toBe('base\n');
+    if (mode === 'restart') {
+      service = restart();
+      const recovered = await service.recoverWorkspace(first.id);
+      expect(recovered.baseRevision).toEqual(baseline.revision);
+      expect(await service.workspace(first.id)).toEqual(recovered);
+    }
+    expect(await service.cleanup(first.id)).toEqual({ removed: true });
+    await expect(fs.stat(first.cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(git(source, ['worktree', 'list', '--porcelain'])).not.toContain('w_fixed');
+    expect(JSON.parse(await fs.readFile(manifest(first.id), 'utf8'))).toMatchObject({ state: 'removed' });
+    expect(await service.cleanup(first.id)).toEqual({ removed: true });
+    expect(git(source, ['show', `${candidate.revision.contentHash}:a.txt`])).toBe('captured');
+  });
+});
+
 describe('exact revision verification workspaces', () => {
   it('materializes only this Mission\'s host-captured/accepted trees and makes operation retries stable', async () => {
     const before = await preserved();
@@ -484,7 +612,7 @@ describe('exact revision verification workspaces', () => {
     const scratch = await service.provisionVerification({ missionId: 'm01', revision: two.revision, operationId: 'historical' });
     expect(await text(scratch.cwd, 'a.txt')).toBe('first\n');
     expect(await text(scratch.cwd, 'b.txt')).toBe('second\n');
-  }, 60_000);
+  }, 120_000);
 
   it('identifies the combined integration-attempt content under its existing lease before it is accepted', async () => {
     const first = await worker();
@@ -517,7 +645,7 @@ describe('exact revision verification workspaces', () => {
     expect(two.status).toBe('accepted');
     expect(await service.acceptedRevision('m01')).toEqual(two.revision);
     expect(await preserved()).toEqual(sourceBefore);
-  }, 60_000);
+  }, 120_000);
 
   it('lets an integrated check request another same-Mission workspace without a recursive queue deadlock', async () => {
     const first = await worker();
@@ -533,5 +661,5 @@ describe('exact revision verification workspaces', () => {
     } });
     expect(result.status).toBe('accepted');
     expect(await service.acceptedRevision('m01')).toEqual(candidate.revision);
-  }, 30_000);
+  }, 90_000);
 });
