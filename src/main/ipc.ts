@@ -10,6 +10,7 @@ import type { SessionManager } from './session-manager';
 import type { SettingsStore } from './settings';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
+import type { DesktopFocusTracker } from './desktop-focus';
 import type { UpdateService } from './updater';
 import type { GitnexusIndexer } from './mcp';
 
@@ -27,6 +28,8 @@ export interface IpcDeps {
   gitnexusIndexer?: GitnexusIndexer;
   /** Remote access host (docs/REMOTE-ACCESS.md), wired in index.ts. */
   remote?: RemoteHost;
+  /** Where the desktop window is looking, mirrored to paired browsers; wired in index.ts. */
+  desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
   remoteMirror?: { sync(): void; disable(): void };
   /** In-app auto-update (issue #198); present only in packaged builds. */
@@ -115,6 +118,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     knowledge: deps.knowledge,
     gitnexusIndexer: deps.gitnexusIndexer,
     remote: deps.remote,
+    desktopFocus: deps.desktopFocus,
     remoteMirror: deps.remoteMirror,
     updater: deps.updater,
     log: deps.log,
