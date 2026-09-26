@@ -13,12 +13,13 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
+import { WebSocket as WsClient } from 'ws';
 import { isolatedEnv, seedSettings } from './e2e-ui';
 import { ENROLL, FakeRelay } from './fake-relay';
 import { generateIdentity, publicOf } from '../src/shared/crypto';
 import { decodeQrPath } from './support/qr-decode';
 import { startTestLanding, TEST_SESSION_COOKIE } from './support/test-landing';
-import { memoryVault, RelayClient } from '../relay/src/web-client';
+import { memoryVault, RelayClient, type SimpleSocket } from '../relay/src/web-client';
 import { connectCheckCode } from '../src/shared/pairing';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -184,8 +185,26 @@ describe.runIf(enabled)('remote access settings', () => {
       await expect.poll(() => win.getByTestId('remote-sign-in-code').textContent(), { timeout: 20_000 }).toBe(connectCheckCode(nonceHash));
 
       // The signed-in browser adds this computer: it comes online, registered, with nothing typed.
-      const signedIn: typeof fetch = (input, init = {}) => fetch(input, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), cookie: TEST_SESSION_COOKIE } });
-      const browser = new RelayClient({ vault: memoryVault(), fetchImpl: signedIn });
+      const signedIn: typeof fetch = (input, init = {}) => fetch(input, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), cookie: TEST_SESSION_COOKIE, origin: gate.origin } });
+      // A real browser sends its session cookie on the WebSocket handshake too, which is what lets
+      // the landing assert the account on the upgrade; a Node ws client must say so explicitly.
+      const cookieSocket = (url: string, onMessage: (raw: string) => void, onClose: () => void): SimpleSocket => {
+        const socket = new WsClient(url, { headers: { cookie: TEST_SESSION_COOKIE } });
+        const queued: string[] = [];
+        socket.on('open', () => {
+          for (const raw of queued.splice(0)) socket.send(raw);
+        });
+        socket.on('message', (data) => onMessage(String(data)));
+        socket.on('close', () => onClose());
+        return {
+          send: (raw: string) => {
+            if (socket.readyState === WsClient.OPEN) socket.send(raw);
+            else queued.push(raw);
+          },
+          close: () => socket.close()
+        };
+      };
+      const browser = new RelayClient({ vault: memoryVault(), fetchImpl: signedIn, wsFactory: cookieSocket });
       await browser.addComputer(gate.origin, nonceHash);
       await expect.poll(async () => win.getByTestId('remote-status').innerText(), { timeout: 30_000 }).toMatch(/online/);
       expect(await win.getByTestId('remote-sign-in').count()).toBe(0);

@@ -19,7 +19,7 @@ import { ConnectionBanner } from '../components/ConnectionBanner';
 import { useConnection } from './useConnection';
 import { useFollow } from './useFollow';
 import { useKeyboardInset } from './useViewport';
-import { loadAccount, type AccountState } from './account';
+import type { AccountState } from './account';
 import type { RelayTransport } from '../transport/relay-transport';
 
 /** The desktop-only affordances a browser must not offer. */
@@ -27,14 +27,15 @@ const WEB_CAPABILITIES = { contextMenu: false, editAndResend: false, openFile: f
 
 type Sheet = 'none' | 'computers' | 'devices' | 'menu' | 'new';
 
-export function WebApp({ client, transport, initialCode, connectHash }: {
+export function WebApp({ client, transport, account, initialCode, connectHash }: {
   client: RelayClient;
   transport: RelayTransport;
+  /** Resolved before the client exists: the account id partitions the browser vault. */
+  account: AccountState;
   initialCode?: string | null;
   connectHash?: string | null;
 }) {
   const [route, setRoute] = useState<Route>(() => (connectHash ? { name: 'connect', nonceHash: connectHash } : readRoute()));
-  const [account, setAccount] = useState<AccountState>({ status: 'loading' });
   const [sheet, setSheet] = useState<Sheet>('none');
   const [restoring, setRestoring] = useState(true);
   const [storageError, setStorageError] = useState('');
@@ -89,10 +90,6 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
       alive = false;
     };
   }, [client, transport]);
-
-  useEffect(() => {
-    void loadAccount().then(setAccount);
-  }, []);
 
   useEffect(() => {
     const onHash = () => setRoute(readRoute());

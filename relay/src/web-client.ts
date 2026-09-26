@@ -156,6 +156,8 @@ export class RelayClient {
       now?: () => number;
       /** Creates the identity a new pairing claims with: non-extractable keys by default. */
       newIdentity?: () => Promise<AnyIdentity>;
+      /** Legacy localStorage is owned by the incumbent account; never migrate it into another user's vault. */
+      allowLegacyMigration?: boolean;
     }
   ) {}
 
@@ -182,7 +184,7 @@ export class RelayClient {
   /** Loads the vault, migrating a pairing left in legacy storage. True when any pairing exists. */
   async restore(): Promise<boolean> {
     let state = await this.deps.vault.load();
-    if (!state?.pairings.length) state = (await this.migrateLegacy()) ?? state;
+    if (!state?.pairings.length && this.deps.allowLegacyMigration !== false) state = (await this.migrateLegacy()) ?? state;
     this.list = state?.pairings ?? [];
     this.creds = this.list.find((p) => p.hostDeviceId === state?.active) ?? this.list[0] ?? null;
     return !!this.creds;
@@ -254,7 +256,7 @@ export class RelayClient {
     this.list = [];
     this.creds = null;
     this.access.clear();
-    this.deps.legacy?.remove(LEGACY_CREDENTIALS_KEY);
+    if (this.deps.allowLegacyMigration !== false) this.deps.legacy?.remove(LEGACY_CREDENTIALS_KEY);
     await this.deps.vault.clear();
     for (const listener of [...this.changeListeners]) listener();
   }

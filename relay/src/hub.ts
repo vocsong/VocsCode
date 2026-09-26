@@ -42,6 +42,7 @@ export class HubRouter<S extends HubSocket> {
     private readonly deps: {
       store: RelayStore;
       accountId: string;
+      deviceRouteSecret?: string;
       sockets: SocketRegistry<S>;
       now: () => number;
     }
@@ -123,7 +124,7 @@ export class HubRouter<S extends HubSocket> {
   private async fromHost(ws: S, hostId: string, msg: HostIn): Promise<void> {
     if (msg.t === 'pair.respond') {
       try {
-        const result = await resolvePairing(this.deps.store, { code: msg.code, decision: msg.decision, signature: msg.signature }, this.deps.now());
+        const result = await resolvePairing(this.deps.store, { code: msg.code, decision: msg.decision, signature: msg.signature }, this.deps.now(), this.deps.deviceRouteSecret);
         if ('denied' in result) {
           this.trySend(ws, JSON.stringify({ t: 'pair.result', code: msg.code, decision: msg.decision }));
           return;
