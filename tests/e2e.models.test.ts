@@ -305,4 +305,27 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(saved[0].config.effort).toBeNull();
     await win.screenshot({ path: path.join(shots, 'models-04-claude-no-effort.png') });
   }, 180_000);
+
+  it('offers a DeepSeek model the three tiers its API serves, including max', async () => {
+    const tmp = path.join(os.tmpdir(), `vocs-code-deepseek-effort-${Date.now()}`);
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(project, 'README.md'), '# deepseek effort e2e\n');
+    await fs.mkdir(shots, { recursive: true });
+    const deepseek: ProviderConfig = { id: 'deepseek', kind: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', hasApiKey: false, models: [], enabled: true };
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { providers: [deepseek], defaultEffort: 'high' }), 'utf8');
+
+    const win = await launch(userData);
+    await openNewSession(win);
+    await pickHarness(win, /^Native loop$/);
+    const effort = win.locator('.ns-col-model .field', { has: win.locator('.field-label', { hasText: /^Reasoning effort$/ }) }).locator('select');
+    await pickModel(win, 'deepseek/deepseek-flash');
+    // low/high/max are DeepSeek's scalar efforts 50/75/100; minimal and medium/xhigh are only
+    // aliases onto them, so listing the aliases both hid `max` and made one tier look like three.
+    await expect.poll(() => effort.isEnabled(), { timeout: 10_000 }).toBe(true);
+    expect(await effort.locator('option').evaluateAll((els) => els.map((el) => (el as HTMLOptionElement).value))).toEqual(['', 'low', 'high', 'max']);
+    await win.screenshot({ path: path.join(shots, 'models-05-deepseek-effort.png') });
+  }, 180_000);
 });
