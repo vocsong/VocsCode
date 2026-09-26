@@ -4,16 +4,19 @@ import { constants, promises as fs, type BigIntStats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import type { MissionCheck, MissionCodeRevision, MissionEvidence } from '../../shared/mission';
+import type { MissionCheck, MissionCodeRevision, MissionEvidence, MissionFailure } from '../../shared/mission';
 import { runCapture, which } from '../runtime';
 import type { CapacityLease, MissionScheduler } from './scheduler';
-import { startOwnedCheck } from './check-process';
+import { startOwnedCheck, type CheckOutcome, type OwnedCheckProcess } from './check-process';
 import { allocateCheckPort, type CheckPortLease } from './check-resources';
-import { checkOwnershipDirectory, createProcessOwnershipIntent, recordUnlaunchedProcessIntent, type ProcessOwnershipIntent } from './process-ownership';
+import { checkOwnershipDirectory, createProcessOwnershipIntent, retireUnclaimedProcessIntent, type ProcessOwnershipIntent } from './process-ownership';
 import { verificationOutcomeHash } from './progress';
 
 /** Only the real permission boundary may report a user denial, never command output. */
 export class VerificationApprovalDenied extends Error {}
+
+const supervisorUnavailable = (message: string) => ({ kind: 'environment', code: 'check_supervisor_unavailable', confidence: 'observed', recovery: 'user_action', message } satisfies MissionFailure);
+const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export interface VerificationRequest {
   missionId: string;
@@ -96,8 +99,9 @@ export class MissionVerification {
     job.lease?.release(true);
     await job.port?.release();
     // Only our isolated scratch, never the retained verification worktree. Teardown of the
-    // supervisor precedes this cleanup, so no child can recreate it after removal.
-    if (job.scratch) await fs.rm(job.scratch, { recursive: true, force: true });
+    // supervisor precedes this cleanup, so no child can recreate it after removal. A briefly
+    // held temp file (e.g. antivirus) must not turn a finished check into a lost result.
+    if (job.scratch) await fs.rm(job.scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined);
   }
 
   private async runReserved(request: VerificationRequest, job: VerificationJob): Promise<MissionEvidence> {
@@ -110,10 +114,18 @@ export class MissionVerification {
       environmentRef: `${process.platform}/${process.arch}; host-node=${process.version}; isolated-profile`, provenance: 'host_executed',
       result: 'not_run', artifactIds: [], startedAt,
     };
-    let intent: ProcessOwnershipIntent | undefined, launched = false;
     const outputs: string[] = [];
+    const ownership = this.deps.ownershipRoot ? checkOwnershipDirectory(this.deps.ownershipRoot, request.missionId) : undefined;
+    // One single-use intent per owned launch. On Windows each
+    // declares that the Job supervisor must claim it before starting anything, so an intent that
+    // was never claimed is provably unstarted and can be retired rather than block recovery.
+    const newIntent = () => ownership ? createProcessOwnershipIntent(ownership, { kind: 'mission-check', missionId: request.missionId, operationId: request.operationId }, { claimRequired: process.platform === 'win32' }) : undefined;
+    let pending: ProcessOwnershipIntent | undefined;
+    const takeIntent = () => { const intent = pending ?? newIntent(); pending = undefined; return intent; };
     try {
-      if (this.deps.ownershipRoot) intent = createProcessOwnershipIntent(checkOwnershipDirectory(this.deps.ownershipRoot, request.missionId), { kind: 'mission-check', missionId: request.missionId, operationId: request.operationId });
+      // Written before any wait: restart recovery needs a durable record for every in-flight host
+      // check, and a host death during approval or the slot wait leaves this intent unclaimed.
+      pending = newIntent();
       await this.deps.authorize(structuredClone(request));
       // The job remains owned through tools/teardown even when it does not need a heavy slot.
       if (request.check.heavy) job.lease = await this.deps.scheduler.acquire({ missionId: request.missionId, ownerId: request.operationId, kind: 'heavy_check', signal: job.controller.signal });
@@ -124,39 +136,28 @@ export class MissionVerification {
       job.port = await allocateCheckPort();
       const env = isolatedCheckEnvironment(job.scratch, environment, job.port.port);
       evidence.environmentRef += `; env-sha256=${createHash('sha256').update(JSON.stringify(Object.entries(env).sort(([a], [b]) => a.localeCompare(b)))).digest('hex')}`;
-      for (const dir of [env.HOME!, env.APPDATA!, env.LOCALAPPDATA!, env.VOCS_CODE_USER_DATA!, env.XDG_CONFIG_HOME!, env.XDG_DATA_HOME!, env.XDG_CACHE_HOME!]) await fs.mkdir(dir, { recursive: true });
+      for (const dir of profileDirectories(env)) await fs.mkdir(dir, { recursive: true });
       const report = request.check.testReport?.path;
       const reportTarget = report ? await freshReport(request.cwd, report) : undefined;
       // No await between this last authorization/cancellation check and synchronous ownership
       // transfer to the process supervisor. Setup cannot leave a stale approval waiting to spawn.
       await this.deps.authorize(structuredClone(request));
       if (job.controller.signal.aborted) throw new Error('Verification canceled before dispatch');
-      const owned = startOwnedCheck({
-        command: request.check.command, cwd: request.cwd, env, timeoutMs: request.check.timeoutMs, ownershipIntent: intent,
-        outputLimitBytes: this.deps.outputLimitBytes ?? 32 * 1024 * 1024, windowsJobHelper: this.deps.windowsJobHelper,
+      const outcome = await this.launch(request, job, {
+        command: request.check.command, cwd: request.cwd, env, timeoutMs: request.check.timeoutMs, ownershipIntent: takeIntent(),
         beforeResume: async () => {
           await job.port!.prepareForSpawn();
           // Authorization/setup may have yielded since the first absence check. The owned root
           // is still suspended here: never run over a report that appeared in that interval.
           if (report && await freshReport(request.cwd, report) !== reportTarget) throw new Error('Verification report path changed before dispatch');
         },
-        uncertain: () => { job.uncertain = true; },
-        quiescent: () => {
-          job.quiescent = true;
-          job.uncertain = false;
-          // A late kernel receipt can reconcile a watchdog failure; it cannot rewrite its evidence.
-          if (job.finished) void this.release(request, job).catch(() => undefined);
-        },
       });
-      launched = true;
-      job.quiescent = false;
-      job.stop = owned.cancel;
-      const outcome = await owned.result;
       evidence.exitCode = outcome.code ?? undefined;
       outputs.push(outcome.stdout.toString('utf8'), outcome.stderr.toString('utf8'));
       evidence.artifactIds.push(await this.deps.saveArtifact(request.missionId, outcome.stdout), await this.deps.saveArtifact(request.missionId, outcome.stderr));
       if (outcome.error || outcome.canceled || outcome.timedOut || outcome.outputLimited || outcome.lingering || job.controller.signal.aborted || !job.quiescent) {
         evidence.result = 'blocked';
+        if (outcome.notStarted && outcome.error) evidence.failure = supervisorUnavailable(outcome.error);
         evidence.artifactIds.push(await this.deps.saveArtifact(request.missionId, Buffer.from(outcome.error || (outcome.outputLimited ? 'Output exceeded the capture limit; the check was interrupted and is not verified.' : outcome.timedOut ? 'Check timed out and was interrupted.' : outcome.lingering ? 'The command left running descendants; the owned process tree was terminated and the check is not verified.' : 'Check canceled.'))));
       } else if (request.check.kind === 'test' || request.check.testReport) {
         if (!request.check.testReport) throw new Error('A test check requires a count-bearing test report');
@@ -190,11 +191,10 @@ export class MissionVerification {
         capturedArtifactIds: [...evidence.artifactIds],
       }))));
     } catch (error) {
-      if (intent && !launched) {
-        try { recordUnlaunchedProcessIntent(intent); } catch { job.quiescent = false; job.uncertain = true; }
-      }
+      // An intent that was never handed to a launcher cannot have started anything.
+      if (pending) this.retire(job, pending);
       evidence.result = 'blocked';
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = errorText(error);
       outputs.push(detail);
       if (error instanceof VerificationApprovalDenied) evidence.failure = { kind: 'permission', code: 'approval_denied', source: 'approval', confidence: 'observed', recovery: 'user_action', message: detail };
       evidence.artifactIds.push(await this.deps.saveArtifact(request.missionId, Buffer.from(detail)));
@@ -209,7 +209,38 @@ export class MissionVerification {
     }
     return evidence;
   }
+
+  /** Transfers ownership synchronously to one supervisor. The job stays owned until that tree is
+   * proven empty; an intent that no launcher received is retired as not started. */
+  private launch(request: VerificationRequest, job: VerificationJob, options: { command: string; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; ownershipIntent?: ProcessOwnershipIntent; beforeResume?(): Promise<void> }): Promise<CheckOutcome> {
+    let owned: OwnedCheckProcess;
+    try {
+      owned = startOwnedCheck({
+        ...options, outputLimitBytes: this.deps.outputLimitBytes ?? 32 * 1024 * 1024, windowsJobHelper: this.deps.windowsJobHelper,
+        uncertain: () => { job.uncertain = true; },
+        quiescent: () => {
+          job.quiescent = true;
+          job.uncertain = false;
+          // A late kernel receipt can reconcile a watchdog failure; it cannot rewrite its evidence.
+          if (job.finished) void this.release(request, job).catch(() => undefined);
+        },
+      });
+    } catch (error) {
+      if (options.ownershipIntent) this.retire(job, options.ownershipIntent);
+      throw error;
+    }
+    job.quiescent = false;
+    job.stop = owned.cancel;
+    return owned.result;
+  }
+
+  private retire(job: VerificationJob, intent: ProcessOwnershipIntent): void {
+    try { if (!retireUnclaimedProcessIntent(intent)) throw new Error('Ownership intent is claimed'); }
+    catch { job.quiescent = false; job.uncertain = true; }
+  }
 }
+
+const profileDirectories = (env: NodeJS.ProcessEnv) => [env.HOME!, env.APPDATA!, env.LOCALAPPDATA!, env.VOCS_CODE_USER_DATA!, env.XDG_CONFIG_HOME!, env.XDG_DATA_HOME!, env.XDG_CACHE_HOME!];
 
 function validateCheck(check: MissionCheck): void {
   if (!check.id || typeof check.command !== 'string' || !check.command.trim() || check.command.length > 16_384 || check.command.includes('\0')) throw new Error('Invalid verification command');
