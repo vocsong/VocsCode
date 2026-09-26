@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it as platformTest, vi } from 'vitest';
 import * as commands from '../src/main/runtime';
 import { MissionRuntime } from '../src/main/mission/runtime';
 import { MissionStore, MissionStoreError } from '../src/main/mission/store';
@@ -27,6 +27,9 @@ import { missionFixture } from './support/mission-fixture';
 import { fixtureGitHubRemote, fixtureGitHubRepo, fixtureGitHubTransport, fixturePr } from './support/mission-github-fixture';
 
 vi.mock('../src/main/harness/registry', () => ({ createAdapter: vi.fn() }));
+// Every case recovers from the durable Windows Job receipts of real host checks. POSIX has no such
+// bounded-owner proof and honestly stays uncertain after restart, so these run on Windows only.
+const it = platformTest.runIf(process.platform === 'win32');
 let root: string, project: string, data: string, crash: string;
 let runtime: MissionRuntime, sessions: SessionManager, settings: ReturnType<typeof defaultSettings>;
 let contexts: Map<string, HarnessContext>, sends: number, sequence: number;
