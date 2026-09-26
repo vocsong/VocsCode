@@ -4,7 +4,9 @@
  *
  * Deliberately runs with every provider key stripped from the environment and a fresh userData
  * directory, so no request ever leaves the machine: the native harness emits its model list during
- * start() and only needs a key once a turn actually runs.
+ * start() and only needs a key once a turn actually runs. The one exception is the harness update
+ * check the Providers section drives below, which asks the npm registry what each installed CLI's
+ * package publishes — that is the flow under test, and it settles either way when offline.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -107,6 +109,22 @@ describe.runIf(enabled)('vision capability UI', () => {
     await row.waitFor({ state: 'detached', timeout: 10_000 });
     const after = JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8')) as { modelOverrides: Record<string, unknown> };
     expect(after.modelOverrides).toEqual({});
+
+    // The Harness logins card carries the CLI update check. Drive it and require it to settle into
+    // one of its own outcomes — an offered update, something newer held back with a reason, the
+    // all-clear, or the registry reported as unreachable — instead of leaving the card spinning.
+    const card = '.provider-card:has-text("Harness logins")';
+    await win.locator(card).locator('button', { hasText: 'Check for updates' }).click();
+    await win.waitForSelector(
+      [
+        `${card} button:has-text("Update to")`,
+        `${card} .badge:has-text("available")`,
+        `${card} p:has-text("is newer, but")`,
+        `${card} p:has-text("harness CLIs are up to date")`,
+        `${card} p:has-text("Could not reach npm")`
+      ].join(', '),
+      { timeout: 30_000 }
+    );
   }, 180_000);
 });
 

@@ -1062,6 +1062,9 @@ export interface SubagentCompletion {
   usage?: Partial<UsageTotals>;
 }
 
+/** Where a harness CLI was resolved from: an explicit path, PATH, the app's runtime dir, or bundled. */
+export type HarnessBinarySource = 'settings' | 'system' | 'app-runtime' | 'bundled';
+
 export interface HarnessAvailability {
   available: boolean;
   version?: string;
@@ -1070,6 +1073,30 @@ export interface HarnessAvailability {
   /** Whether the harness appears to be authenticated / has credentials. */
   authenticated?: boolean | 'unknown';
   installHint?: string;
+  /** Set when a binary resolved; `bundled` and `settings` are the sources an app install cannot replace. */
+  source?: HarnessBinarySource;
+}
+
+/** One harness CLI's installed-vs-published state, from an on-demand npm registry check. */
+export interface HarnessUpdate {
+  /** npm package the check compared against. */
+  package: string;
+  /** Version the resolved binary reports; absent when it reported nothing readable. */
+  current?: string;
+  /** Newest version the package publishes; absent when the check failed. */
+  latest?: string;
+  /** True when `latest` is strictly newer than `current`. */
+  newer: boolean;
+  /**
+   * True when installing `latest` into the app runtime dir changes what the harness runs. False for
+   * a runtime Vocs Code bundles and for a path the user pinned: both win over the runtime dir, so
+   * the card explains instead of offering a button that would do nothing.
+   */
+  updatable: boolean;
+  /** Why the update is not offered here, when `newer` and not `updatable`. */
+  reason?: string;
+  /** Why the check could not run (offline, registry error). */
+  error?: string;
 }
 
 export interface HarnessCapabilities {
