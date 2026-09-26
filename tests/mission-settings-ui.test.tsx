@@ -8,7 +8,7 @@ import { createDefaultMissionConfig, validateMissionConfig } from '../src/shared
 import type { AppSettings, ModelInfo } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', platform: 'win32', on: () => () => undefined }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke, isMac: false, modKey: 'Ctrl', platform: 'win32', on: () => () => undefined }));
 const models: ModelInfo[] = [
   { provider: 'account-one', id: 'engine', displayName: 'First endpoint', supportsReasoning: true, supportedEfforts: ['low', 'high'] },
   { provider: 'account-two', id: 'engine', displayName: 'Second endpoint', supportsReasoning: false }

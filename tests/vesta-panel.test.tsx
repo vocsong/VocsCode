@@ -14,7 +14,7 @@ import type { AgentItem, AgentState } from '../src/shared/agent';
 import type { AppSettings } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, on: () => () => undefined, isMac: false, modKey: 'Ctrl', platform: 'win32', isWeb: false }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke, on: () => () => undefined, isMac: false, modKey: 'Ctrl', platform: 'win32', isWeb: false }));
 
 function setup(items: AgentItem[], agentState: Partial<AgentState> = {}, agentSettings: AppSettings['agent'] = { enabled: true, collapsed: false }) {
   useStore.setState({

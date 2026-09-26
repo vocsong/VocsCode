@@ -3,7 +3,7 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke: invokeMock, on: () => () => undefined, isMac: false, isWeb: false, platform: 'win32', modKey: 'Ctrl' }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke: invokeMock, on: () => () => undefined, isMac: false, isWeb: false, platform: 'win32', modKey: 'Ctrl' }));
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { MissionRecord } from '../src/shared/mission';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';

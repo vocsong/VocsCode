@@ -10,7 +10,7 @@ import { useStore } from '../src/renderer/src/store';
 import type { CuaPreviewResult, CuaStatus, SessionMeta } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl' }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke, isMac: false, modKey: 'Ctrl' }));
 
 const session = (): SessionMeta =>
   ({

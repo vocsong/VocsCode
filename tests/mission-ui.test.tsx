@@ -2,7 +2,7 @@
 /** UI contracts only; the real coordinator/driver suites own execution and authorization claims. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const { invokeMock, subscriptions, apiMode } = vi.hoisted(() => ({ invokeMock: vi.fn(), subscriptions: new Map<string, (value: unknown) => void>(), apiMode: { web: false, platform: 'win32' } }));
-vi.mock('../src/renderer/src/api', () => ({ invoke: invokeMock, on: (channel: string, fn: (value: unknown) => void) => { subscriptions.set(channel, fn); return () => subscriptions.delete(channel); }, isMac: false, get isWeb() { return apiMode.web; }, get platform() { return apiMode.platform; }, modKey: 'Ctrl' }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke: invokeMock, on: (channel: string, fn: (value: unknown) => void) => { subscriptions.set(channel, fn); return () => subscriptions.delete(channel); }, isMac: false, get isWeb() { return apiMode.web; }, get platform() { return apiMode.platform; }, modKey: 'Ctrl' }));
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { AppSettings, SessionMeta, TranscriptItem } from '../src/shared/types';
 import type { MissionAttempt, MissionRecord } from '../src/shared/mission';

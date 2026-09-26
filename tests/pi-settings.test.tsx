@@ -10,7 +10,7 @@ import { PiSection } from '../src/renderer/src/components/PiSettings';
 import type { PiSetup } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl' }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke, isMac: false, modKey: 'Ctrl' }));
 
 function setup(over: Partial<PiSetup> = {}): PiSetup {
   return {
