@@ -30,7 +30,7 @@ import { createAdapter } from './harness/registry';
 import { renderForkContext } from './fork-context';
 import { builtinServerIds, resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
-import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
+import { branchGitState, createForkWorktree, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
 import { isValidRunId, listSubagentRuns, readSubagentRun } from './subagents';
 import { subagentSupport, type AgentTypeInfo, type SubagentRun, type SubagentRunSummary } from '../shared/subagents';
@@ -1733,10 +1733,16 @@ export class SessionManager {
     const nid = shortId('s_');
     const cross = !!harness && harness !== src.config.harness;
     const target = cross ? harness! : src.config.harness;
+    const title = cross ? `${src.title} (fork → ${HARNESS_BY_ID[target].name})` : `${src.title} (fork)`;
+    // A fork of a worktree session gets a worktree — and a branch — of its own. Sharing the source's
+    // directory used to be the whole fork: archiving the source with its worktree removed deleted the
+    // folder the fork was running in. The new branch starts at the source checkout's HEAD, so
+    // committed work carries over; uncommitted changes stay in the source worktree.
+    const own = await this.forkWorktree(src, title);
     const meta: SessionMeta = {
       ...structuredClone(src),
       id: nid,
-      title: cross ? `${src.title} (fork → ${HARNESS_BY_ID[target].name})` : `${src.title} (fork)`,
+      title,
       // The fork suffix names which session this came from; a title model would drop that.
       titleIsPlaceholder: undefined,
       createdAt: Date.now(),
@@ -1757,11 +1763,15 @@ export class SessionManager {
       // A fresh fork starts unpinned and active, never in the archive.
       pinned: undefined,
       pinnedAt: undefined,
-      archived: undefined
+      archived: undefined,
+      cwd: own?.path ?? src.cwd,
+      // Only a worktree this fork created is the fork's to remove. When it shares the source's
+      // directory it owns no worktree: claiming the source's would make archiving the fork delete it.
+      worktreeBranch: own?.branch
     };
     if (cross) {
       // A different harness cannot resume the source's provider session: it starts fresh in the
-      // same directory/worktree. The copied transcript is carried over for reference only.
+      // fork's own worktree. The copied transcript is carried over for reference only.
       const s = this.settings();
       meta.config = {
         ...src.config,
@@ -1769,31 +1779,31 @@ export class SessionManager {
         model: s.defaultModelByHarness[target],
         acpAgent: undefined,
         codexModelProvider: undefined,
-        // Already living in the source's directory; no new worktree for the fork.
-        useWorktree: false
+        useWorktree: !!own
       };
       meta.activeModel = meta.config.model;
       meta.activeEffort = undefined;
-      // The fork keeps the same worktree/branch as the session it was forked from.
-      meta.worktreeBranch = src.worktreeBranch;
     } else {
-      // The fork shares the directory but does not own the original's worktree (deleting it must not remove that).
-      meta.worktreeBranch = undefined;
-      // Carry harness state where the harness supports it.
-      if (src.config.harness === 'claude' && src.harnessRef.claudeSessionId) meta.harnessRef = { claudeSessionId: src.harnessRef.claudeSessionId, forkOnResume: true } as HarnessRef;
+      // A provider session id belongs to the directory it ran in, so a fork that moved to its own
+      // worktree cannot resume the source's session. Same-harness forks that stayed in the source
+      // directory keep the provider state.
+      if (!own && src.config.harness === 'claude' && src.harnessRef.claudeSessionId) meta.harnessRef = { claudeSessionId: src.harnessRef.claudeSessionId, forkOnResume: true } as HarnessRef;
       if (src.config.harness === 'native') {
         const hist = await this.deps.store.readNativeHistory(id);
         if (hist) await this.deps.store.writeNativeHistory(nid, hist);
         meta.harnessRef = { nativeHistory: true };
       }
     }
-    // The fork keeps the project's digest (same project, same directory) but hands it over the way
+    // The fork keeps the project's digest (same project) but hands it over the way
     // its own harness can: in the system prompt, or on the first message.
     if (meta.knowledgeDigest && !HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
     const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision)).map(carriedItem);
-    if (cross) {
-      // The target cannot resume the source's provider session, so hand it the prior conversation
-      // as plain text: the first message in the fork carries it and then the flag is cleared.
+    // A same-harness fork that lost the source directory also lost the provider session it would
+    // have resumed; both it and a fork into another harness start from the conversation as text.
+    const lostResume = !cross && !!own && src.config.harness === 'claude' && !!src.harnessRef.claudeSessionId;
+    if (cross || lostResume) {
+      // Hand the prior conversation over as plain text: the first message in the fork carries it
+      // and then the flag is cleared.
       await this.deps.store.writeBlob(nid, FORK_CONTEXT_FILE, renderForkContext(keep, src.config.harness, target));
       meta.pendingForkContext = true;
       keep.push({
@@ -1801,14 +1811,29 @@ export class SessionManager {
         kind: 'info',
         ts: Date.now(),
         level: 'info',
-        text: `Forked from ${HARNESS_BY_ID[src.config.harness].name} into ${HARNESS_BY_ID[target].name} in the same directory${meta.worktreeBranch ? ` (branch ${meta.worktreeBranch})` : ''}. The conversation above is handed to the new harness as context on your next message.`
+        text: forkNote(src, target, own, cross)
       });
     }
     await this.deps.store.upsert(meta);
     await this.deps.store.rewriteTranscript(nid, keep);
-    this.deps.log('info', `[${nid}] forked from ${id}${cross ? ` (${src.config.harness} → ${target})` : ''}; ${keep.length} transcript item(s) carried over`);
+    this.deps.log('info', `[${nid}] forked from ${id}${cross ? ` (${src.config.harness} → ${target})` : ''}; ${keep.length} transcript item(s) carried over${own ? `; worktree ${own.branch} at ${own.path}` : '; sharing the source directory'}`);
     this.pushSessions();
     return meta;
+  }
+
+  /**
+   * The worktree a fork runs in, when its source had one. Returns null for a source that was never
+   * isolated, and for one whose new worktree could not be created — a fork that runs in the
+   * source's directory is better than no fork, and the archive risk is only the old one.
+   */
+  private async forkWorktree(src: SessionMeta, title: string): Promise<{ path: string; branch: string } | null> {
+    if (!src.worktreeBranch) return null;
+    try {
+      return await createForkWorktree(src.config.projectRoot, slugify(title), { cwd: src.cwd, branch: src.worktreeBranch });
+    } catch (e) {
+      this.deps.log('warn', `fork: could not create a worktree from ${src.cwd}: ${errorMessage(e)} — the fork shares the source directory`);
+      return null;
+    }
   }
 
   async exportMarkdown(id: string): Promise<string> {
@@ -1848,6 +1873,20 @@ export class SessionManager {
   async projectRootFor(cwd: string): Promise<string | null> {
     return gitRoot(cwd);
   }
+}
+
+/**
+ * The transcript row that says where a fork landed and why the conversation above is being trusted:
+ * a fork with its own worktree gets its own branch, one that stayed behind shares the source's
+ * directory and claims no worktree of its own.
+ */
+function forkNote(src: SessionMeta, target: HarnessId, own: { path: string; branch: string } | null, cross: boolean): string {
+  const from = HARNESS_BY_ID[src.config.harness].name;
+  const intro = cross ? `Forked from ${from} into ${HARNESS_BY_ID[target].name}` : 'Forked';
+  const where = own
+    ? `onto a new worktree (branch ${own.branch}, from ${src.worktreeBranch})`
+    : `in the same directory${src.worktreeBranch ? ` (branch ${src.worktreeBranch})` : ''}`;
+  return `${intro} ${where}. The conversation above is handed over as context on your next message.`;
 }
 
 /**
