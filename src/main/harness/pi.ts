@@ -389,11 +389,15 @@ export class PiAdapter implements HarnessAdapter {
         this.reportPiUsage(ev.usage);
         const ame = ev.assistantMessageEvent as { type: string; delta?: string; toolCall?: { id: string; name: string; arguments: Record<string, unknown> } } | undefined;
         if (!ame) return;
-        const a = this.ensureAssistant();
+        // Tool-call start/delta events can arrive after startTool has closed the text bubble. Only
+        // text/thinking deltas may create a bubble; an empty one would be filled with the whole
+        // message by message_end and repeat text already shown before the tool call.
         if (ame.type === 'text_delta' && ame.delta) {
+          const a = this.ensureAssistant();
           a.text += ame.delta;
           this.ctx.emit({ type: 'item.delta', id: a.id, textDelta: ame.delta });
         } else if (ame.type === 'thinking_delta' && ame.delta) {
+          const a = this.ensureAssistant();
           a.thinking = (a.thinking ?? '') + ame.delta;
           this.ctx.emit({ type: 'item.delta', id: a.id, thinkingDelta: ame.delta });
         } else if (ame.type === 'toolcall_end' && ame.toolCall) {
