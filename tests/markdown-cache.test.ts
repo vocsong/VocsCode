@@ -91,4 +91,19 @@ describe('production markdown cache', () => {
     expect(renderMarkdown('keep this completed message')).toBe(warm);
     expectCalls(3);
   });
+
+  it('drops images and hardens links in web mode, cached apart from desktop output', async () => {
+    const { renderMarkdown, expectCalls } = await setup();
+    const text = '![shot](https://example.com/a.png) and [docs](https://example.com).';
+    const desktop = renderMarkdown(text);
+    expect(desktop).toContain('<img');
+    expect(desktop).toContain('rel="noreferrer"');
+    const web = renderMarkdown(text, { web: true });
+    expect(web).not.toContain('<img');
+    expect(web).toContain('rel="noopener noreferrer"');
+    // The two modes cache separately: a web render must not serve the desktop HTML or vice versa.
+    expect(renderMarkdown(text, { web: true })).toBe(web);
+    expect(renderMarkdown(text)).toBe(desktop);
+    expectCalls(2);
+  });
 });

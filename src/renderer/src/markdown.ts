@@ -2,6 +2,7 @@
 import DOMPurify from 'dompurify';
 import { Marked, type RendererObject } from 'marked';
 import { parseFileRef, type FileRef } from './file-refs';
+import { isWeb } from './api';
 
 const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -14,12 +15,14 @@ export interface MarkdownOptions {
   fileLinks?: boolean;
   /** Reuse and retain rendered HTML (default true). Set false for intermediate streaming renders. */
   cache?: boolean;
+  /** Override the platform's default: a web page drops images and opens links `noopener`. */
+  web?: boolean;
 }
 
 /** Extra attributes on a file reference: the line number, when the mention carried one. */
 const fileAttrs = (ref: FileRef): string => (ref.line ? ` data-line="${ref.line}"` : '');
 
-function buildRenderer(fileLinks: boolean): RendererObject {
+function buildRenderer(fileLinks: boolean, web: boolean): RendererObject {
   return {
     code({ text, lang }) {
       const language = (lang ?? '').split(/\s+/)[0];
@@ -32,7 +35,8 @@ function buildRenderer(fileLinks: boolean): RendererObject {
           return `<a class="file-ref" role="link" tabindex="0" data-file="${escapeHtml(ref.path)}"${fileAttrs(ref)} title="Show ${escapeHtml(ref.path)} in the Files panel">${text}</a>`;
         }
       }
-      return `<a href="${escapeHtml(href)}" title="${escapeHtml(title ?? '')}" target="_blank" rel="noreferrer">${text}</a>`;
+      // `noopener` on the web: the page that opens is a different origin and must not reach back.
+      return `<a href="${escapeHtml(href)}" title="${escapeHtml(title ?? '')}" target="_blank" rel="${web ? 'noopener noreferrer' : 'noreferrer'}">${text}</a>`;
     },
     codespan({ text }) {
       if (fileLinks) {
@@ -42,14 +46,26 @@ function buildRenderer(fileLinks: boolean): RendererObject {
         }
       }
       return `<code>${escapeHtml(text)}</code>`;
+    },
+    image({ href, title, text }) {
+      // A remote page must not fetch images from arbitrary hosts; drop them entirely.
+      if (web) return '';
+      return `<img src="${escapeHtml(href ?? '')}" alt="${escapeHtml(text)}"${title ? ` title="${escapeHtml(title)}"` : ''}>`;
     }
   };
 }
 
-const plain = new Marked({ gfm: true, breaks: false });
-plain.use({ renderer: buildRenderer(false) });
-const linked = new Marked({ gfm: true, breaks: false });
-linked.use({ renderer: buildRenderer(true) });
+const instances = new Map<string, Marked>();
+function renderer(fileLinks: boolean, web: boolean): Marked {
+  const key = `${fileLinks ? 'L' : 'P'}${web ? 'W' : ''}`;
+  let instance = instances.get(key);
+  if (!instance) {
+    instance = new Marked({ gfm: true, breaks: false });
+    instance.use({ renderer: buildRenderer(fileLinks, web) });
+    instances.set(key, instance);
+  }
+  return instance;
+}
 
 // Budget retained source keys + sanitized HTML as UTF-16 (2 bytes/code unit). The entry cap
 // also bounds Map/object overhead; oversized replies render normally without displacing hits.
@@ -61,7 +77,8 @@ let cacheBytes = 0;
 export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
   if (!md) return '';
   const fileLinks = !!opts.fileLinks;
-  const key = opts.cache === false ? undefined : `${fileLinks ? 'L' : 'P'}:${md}`;
+  const web = opts.web ?? isWeb;
+  const key = opts.cache === false ? undefined : `${fileLinks ? 'L' : 'P'}${web ? 'W' : ''}:${md}`;
   if (key !== undefined) {
     const hit = cache.get(key);
     if (hit !== undefined) {
@@ -72,7 +89,7 @@ export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
   }
   let html: string;
   try {
-    html = (fileLinks ? linked : plain).parse(md, { async: false });
+    html = renderer(fileLinks, web).parse(md, { async: false });
   } catch {
     html = `<pre>${escapeHtml(md)}</pre>`;
   }
@@ -80,9 +97,10 @@ export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
   // stripped, matching the main-process app:openExternal handler which only opens http(s).
   // `data-file` is the separate, workspace-scoped channel the Files panel opens.
   const clean = DOMPurify.sanitize(html, {
-    ADD_ATTR: ['target', 'data-copy', 'data-file', 'data-line', 'role', 'tabindex'],
-    // `tabindex="0"` is not a URI, and the narrowed ALLOWED_URI_REGEXP would otherwise drop it.
-    ADD_URI_SAFE_ATTR: ['tabindex'],
+    ADD_ATTR: ['target', 'rel', 'data-copy', 'data-file', 'data-line', 'role', 'tabindex'],
+    // Attributes the narrowed ALLOWED_URI_REGEXP would otherwise treat as URI-valued and drop:
+    // none of the three is a URI, so they need the URI check waived by name.
+    ADD_URI_SAFE_ATTR: ['tabindex', 'target', 'rel'],
     FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'input'],
     ALLOWED_URI_REGEXP: /^https?:\/\//i
   });

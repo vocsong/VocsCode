@@ -183,6 +183,16 @@ being dropped into a client timeout. Session metadata is projected for the remot
 `knowledgeDigest`, `harnessCommands` and the pending fork/knowledge priming flags never leave the
 desktop.
 
+**Client gate.** A remote transport exposes `can(channel)`; the shared renderer core consults it
+(`canInvoke`, `useCanInvoke`, `TranscriptCapabilities`) and stops asking for what it cannot have:
+a view-only client loses the write controls, a browser never edits and reruns a message, shows
+the row context menu, or stars a favorite, and an approval it cannot answer says "Decide on your
+computer" instead of offering buttons. This is UX only — the host refuses the channel and audits
+the refusal either way, and the store skips refused boot calls (`terminal:list`, `update:state`,
+`agent:state`) rather than logging a refusal on every load. A paged store loads tail-first, holds
+the events that race a page and replays them past its floor, and resyncs (list, settings, focus,
+active window) after a reconnect or a computer switch.
+
 ## 6. Auth, pairing, trust — detailed plan
 
 The desktop user is the root of trust. The web login proves *who you are* to the relay;

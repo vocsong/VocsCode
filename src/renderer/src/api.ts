@@ -19,6 +19,13 @@ export function invoke<K extends IpcChannel>(channel: K, request: IpcRequest<K>)
   return window.harness.invoke(channel, request);
 }
 
+/** Whether the bound transport can serve a channel. Desktop IPC has no gate, so everything is
+ *  allowed; a remote shell binds `can` to its allowlist and view-only policy. Callers use this to
+ *  hide a control that would be refused, never as a security boundary — the host still decides. */
+export function canInvoke<K extends IpcChannel>(channel: K): boolean {
+  return window.harness?.can?.(channel) ?? true;
+}
+
 /** Serves the desktop affordances a browser must handle itself.
  *  Returns `undefined` to pass the invoke through to the host, `null` when handled
  *  with no result, or the shimmed result object. Exported for tests. */

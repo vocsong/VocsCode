@@ -10,7 +10,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import type { AppSettings, SessionMeta } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(), isMac: false, isWeb: false, platform: 'win32', modKey: 'Ctrl' }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(), isMac: false, isWeb: false, platform: 'win32', modKey: 'Ctrl', canInvoke: () => true }));
 
 import { resolveNewSessionDefaults } from '../src/shared/session-defaults';
 import { NewSessionDialog } from '../src/renderer/src/components/NewSessionDialog';
