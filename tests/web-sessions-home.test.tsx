@@ -37,7 +37,7 @@ async function mountHome() {
   });
   const transport = new RelayTransportClass(shells.client);
   setTransport(transport);
-  rtl.render(<WebApp client={shells.client as never} transport={transport} />);
+  rtl.render(<WebApp client={shells.client as never} transport={transport} account={{ status: 'anonymous' }} />);
   await rtl.waitFor(() => expect(rtl.screen.getByTestId('on-your-computer')).toBeTruthy());
   return shells;
 }
