@@ -70,10 +70,18 @@ export type MissionHostMutation =
   | { kind: 'host.mailbox.append'; item: MissionMailboxItem }
   | { kind: 'host.recover' }
   | { kind: 'host.quiesce'; quiescent: boolean }
+  /** A genuine user Stop after restart when no bounded-owner proof exists. Terminal, never
+   * quiescence: the retained blocker records the uncertainty and cleanup stays refused. */
+  | { kind: 'host.stop.unproven'; blocker: Omit<MissionRecord['blockers'][number], 'resolvedAt'>; at: number }
   | { kind: 'host.complete'; quiescent: boolean };
 
 export class MissionStateError extends Error {
   constructor(message: string) { super(message); this.name = 'MissionStateError'; }
+}
+/** Closed admission is an expected boundary (pause, stop, a question or a blocker), not a
+ * coordinator failure. Callers can tell it apart from genuine faults without message matching. */
+export class MissionAdmissionError extends MissionStateError {
+  constructor(message = 'Mission is not admitting new operations.') { super(message); this.name = 'MissionAdmissionError'; }
 }
 function requireState(condition: unknown, message: string): asserts condition {
   if (!condition) throw new MissionStateError(message);
@@ -225,7 +233,8 @@ const mutationSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('host.operation.transition'), operationId: id, expectedState: operationState, state: operationState, resultRef: id.optional(), error: text.optional() }),
   z.strictObject({ kind: z.literal('host.delivery.record'), delivery: deliverySchema }), z.strictObject({ kind: z.literal('host.blocker.add'), blocker: blockerSchema.omit({ resolvedAt: true }) }),
   z.strictObject({ kind: z.literal('host.blocker.resolve'), blockerId: id, at: time }), z.strictObject({ kind: z.literal('host.mailbox.append'), item: mailboxSchema }),
-  z.strictObject({ kind: z.literal('host.recover') }), z.strictObject({ kind: z.literal('host.quiesce'), quiescent: z.boolean() }), z.strictObject({ kind: z.literal('host.complete'), quiescent: z.boolean() })
+  z.strictObject({ kind: z.literal('host.recover') }), z.strictObject({ kind: z.literal('host.quiesce'), quiescent: z.boolean() }),
+  z.strictObject({ kind: z.literal('host.stop.unproven'), blocker: blockerSchema.omit({ resolvedAt: true }), at: time }), z.strictObject({ kind: z.literal('host.complete'), quiescent: z.boolean() })
 ]) satisfies z.ZodType<MissionMutation>;
 
 /** Model tool documentation comes from the actual host validator; the transport assigns kind. */
@@ -268,6 +277,102 @@ function assertSchema<T>(schema: z.ZodType<T>, value: unknown): asserts value is
 export function assertMissionMutation(value: unknown): asserts value is MissionMutation { assertSchema(mutationSchema, value); }
 export function assertMissionResult(value: unknown): asserts value is MissionResult { assertSchema(resultSchema, value); }
 export function assertMissionPlan(value: unknown): asserts value is MissionPlan { assertSchema(planSchema, value); }
+
+/** Git subcommands that publish, reach a remote, or mutate state shared with the user's checkout
+ * (verification worktrees share refs, config, stash and the object store) or move a branch. */
+const GIT_MUTATIONS = new Set(['push', 'remote', 'config', 'stash', 'update-ref', 'symbolic-ref', 'replace', 'fetch', 'pull', 'worktree', 'gc', 'prune', 'repack', 'pack-refs', 'maintenance',
+  'filter-branch', 'filter-repo', 'fast-import', 'commit', 'merge', 'rebase', 'cherry-pick', 'revert', 'am', 'reset', 'send-email', 'http-push', 'credential', 'credential-store', 'credential-cache']);
+const GIT_VALUE_OPTIONS = new Set(['-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--attr-source', '--list-cmds']);
+const GIT_LISTING = new Set(['-l', '--list', '-a', '--all', '-r', '--remotes', '-v', '-vv', '--verbose', '--verify', '-n', '--show-current', '--contains', '--no-contains', '--merged', '--no-merged',
+  '--points-at', '--sort', '--format', '--color', '--no-color', '--column', '--no-column', '-i', '--ignore-case', '--abbrev', '--no-abbrev', '-q', '--quiet']);
+const GH_READS: Record<string, readonly string[]> = { pr: ['list', 'view', 'status', 'checks', 'diff'], issue: ['list', 'view', 'status'], repo: ['view', 'list'], release: ['list', 'view', 'download'],
+  run: ['list', 'view', 'watch', 'download'], workflow: ['list', 'view'], auth: ['status'], search: ['code', 'commits', 'issues', 'prs', 'repos'] };
+const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
+const REGISTRY_WRITES = new Set(['publish', 'unpublish', 'deprecate', 'undeprecate', 'dist-tag', 'dist-tags', 'tag', 'owner', 'access', 'version', 'token', 'login', 'adduser', 'add-user', 'logout', 'team', 'org', 'hook', 'star', 'unstar']);
+const PACKAGE_VALUE_OPTIONS = new Set(['--prefix', '--dir', '--cwd', '-c', '-w', '--workspace', '--filter', '--registry', '--userconfig']);
+/** Release tools that publish whenever they run, and tools whose named action publishes. */
+const RELEASE_TOOLS = new Set(['semantic-release', 'release-it', 'standard-version', 'clean-publish']);
+const PUBLISH_ACTIONS: Record<string, readonly string[]> = { lerna: ['publish', 'version'], changeset: ['publish', 'tag'], changesets: ['publish', 'tag'], vsce: ['publish', 'unpublish'], ovsx: ['publish'],
+  cargo: ['publish', 'yank', 'owner', 'login'], twine: ['upload', 'register'], gem: ['push', 'yank', 'owner', 'signin'], docker: ['push'], podman: ['push'], buildah: ['push'], nerdctl: ['push'],
+  nuget: ['push', 'delete'], poetry: ['publish'], flit: ['publish'], hatch: ['publish'], uv: ['publish'], helm: ['push'], mvn: ['deploy', 'release:perform', 'release:prepare'], mvnw: ['deploy', 'release:perform', 'release:prepare'] };
+
+function checkTokens(command: string): string[] {
+  // Nested shells (sh -c "...", node -e "execSync('...')") still run their quoted text; scan it.
+  // Separators become boundary tokens; quotes and array punctuation only delimit words.
+  return command.toLowerCase().replace(/\$\(|[;&|\n\r(){}<>`]/g, ' ; ').replace(/["']/g, '').replace(/[,[\]]/g, ' ').split(/\s+/).filter(Boolean);
+}
+/** Executable identity only: `/usr/bin/git`, `C:\...\git.exe` and `./gradlew` name their tool. */
+const executable = (token: string) => token.replace(/^.*[\\/]/, '').replace(/\.(?:exe|cmd|bat|ps1)$/, '');
+function gitIssue(args: string[]): string | undefined {
+  let index = 0;
+  for (; index < args.length && args[index].startsWith('-'); index++) {
+    const option = args[index];
+    if (option === '-c' && args[index + 1]?.startsWith('alias.') || option.startsWith('--config-env')) return 'define a Git alias that can run any command';
+    if (GIT_VALUE_OPTIONS.has(option)) index++;
+  }
+  const command = args[index], rest = args.slice(index + 1), flags = new Set(rest.filter((arg) => arg.startsWith('-')));
+  const positional = rest.some((arg) => !arg.startsWith('-'));
+  if (!command) return undefined;
+  if (GIT_MUTATIONS.has(command)) return `run \`git ${command}\``;
+  const any = (...names: string[]) => names.some((name) => flags.has(name) || rest.some((arg) => arg.startsWith(`${name}=`)));
+  const listing = [...flags].some((flag) => GIT_LISTING.has(flag.replace(/=.*$/, '')));
+  if (command === 'branch' && (any('-d', '--delete', '-f', '--force', '-m', '--move', '-c', '--copy', '-u', '--set-upstream-to', '--unset-upstream', '--edit-description', '-t', '--track', '--no-track', '--create-reflog') || positional && !listing)) return 'create, move or delete a Git branch';
+  if (command === 'tag' && (any('-d', '--delete', '-a', '--annotate', '-s', '--sign', '-u', '--local-user', '-f', '--force', '-m', '--message', '--file', '-e', '--edit') || positional && !listing)) return 'create or delete a Git tag';
+  if (command === 'notes' && rest[0] && !['list', 'show', 'get-ref'].includes(rest[0])) return `run \`git notes ${rest[0]}\``;
+  if (command === 'reflog' && ['expire', 'delete', 'drop'].includes(rest[0])) return `run \`git reflog ${rest[0]}\``;
+  if (command === 'submodule' && rest.some((arg) => !arg.startsWith('-')) && !['status', 'summary'].includes(rest.find((arg) => !arg.startsWith('-'))!)) return 'update Git submodules';
+  if (command === 'lfs' && rest.some((arg) => ['push', 'lock', 'unlock', 'migrate', 'install', 'uninstall', 'update', 'prune'].includes(arg))) return 'change Git LFS remote or repository state';
+  if (command === 'checkout' && any('-b', '--orphan', '-t', '--track')) return 'create a Git branch';
+  if (command === 'switch' && any('-c', '--create', '--force-create', '--orphan', '-t', '--track')) return 'create a Git branch';
+  return undefined;
+}
+function ghIssue(args: string[]): string | undefined {
+  const words: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    if (['-r', '--repo', '--hostname', '-q', '--jq', '-t', '--template', '--json'].includes(args[index])) { index++; continue; }
+    if (!args[index].startsWith('-')) words.push(args[index]);
+  }
+  const [group, action] = words;
+  if (!group || ['version', 'help', 'status'].includes(group) && !action || args.includes('--version')) return undefined;
+  if (group === 'api') {
+    const method = args.find((arg, index) => ['-x', '--method'].includes(args[index - 1]) || arg.startsWith('--method='))?.replace(/^--method=/, '');
+    if (method && !['get', 'head'].includes(method) || args.some((arg) => ['-f', '--field', '--raw-field', '--input'].includes(arg) || /^--(?:raw-)?field=|^--input=/.test(arg))) return 'send a write request with `gh api`';
+    return undefined;
+  }
+  return GH_READS[group]?.includes(action) ? undefined : `run \`gh ${[group, action].filter(Boolean).join(' ')}\``;
+}
+function packageIssue(manager: string, args: string[]): string | undefined {
+  const words: string[] = [];
+  for (let index = 0; index < args.length && words.length < 2; index++) {
+    if (PACKAGE_VALUE_OPTIONS.has(args[index])) { index++; continue; }
+    if (!args[index].startsWith('-')) words.push(args[index]);
+  }
+  const action = manager === 'yarn' && words[0] === 'npm' ? words[1] : words[0];
+  return action && REGISTRY_WRITES.has(action) ? `run \`${manager}${manager === 'yarn' && words[0] === 'npm' ? ' npm' : ''} ${action}\`` : undefined;
+}
+/** Checks verify content. They never publish, reach a remote, or mutate repository state shared
+ * with the user's checkout, whatever the permission mode (full-auto would otherwise run a
+ * model-authored `git push` past the delivery ceiling). This lexical guard runs when a check is
+ * added and again before every execution; it is defense in depth, not a sandbox for scripts
+ * that shell out indirectly. Returns the refusal reason, or undefined for an admissible check. */
+export function missionCheckCommandIssue(command: string): string | undefined {
+  const tokens = checkTokens(command);
+  for (let index = 0; index < tokens.length; index++) {
+    if (tokens[index] === ';') continue;
+    const token = executable(tokens[index]);
+    const end = tokens.indexOf(';', index + 1);
+    const args = tokens.slice(index + 1, end < 0 ? undefined : end);
+    const issue = token === 'git' ? gitIssue(args)
+      : token === 'gh' ? ghIssue(args)
+        : PACKAGE_MANAGERS.has(token) ? packageIssue(token, args)
+          : RELEASE_TOOLS.has(token) ? `run \`${token}\``
+            : PUBLISH_ACTIONS[token] && args.some((arg) => PUBLISH_ACTIONS[token].includes(arg)) ? `run \`${token} ${args.find((arg) => PUBLISH_ACTIONS[token].includes(arg))}\``
+              : ['gradle', 'gradlew'].includes(token) && args.some((arg) => /^:?(?:[\w-]+:)*publish/.test(arg)) ? 'run a Gradle publish task'
+                : undefined;
+    if (issue) return `Check commands only verify content; this one would ${issue}. Publishing, remote access and shared repository changes belong to Mission integration and delivery, in every permission mode.`;
+  }
+  return undefined;
+}
 
 function unique<T>(values: T[], key: (v: T) => string, label: string): void {
   requireState(new Set(values.map(key)).size === values.length, `Duplicate ${label}.`);
@@ -666,7 +771,12 @@ function assignedAttempt(record: MissionRecord, actor: MissionActor, attemptId: 
 function settled(record: MissionRecord, quiescent: boolean): void {
   requireState(quiescent && !record.attempts.some(active) && !record.operations.some(pending), 'Owned activity/operations must first be reconciled and quiescent.');
 }
-function admit(record: MissionRecord): void { requireState(record.status === 'running' && !record.blockers.some((b) => b.resolvedAt === undefined), 'Mission is not admitting new operations.'); }
+function admit(record: MissionRecord): void { if (record.status !== 'running' || record.blockers.some((b) => b.resolvedAt === undefined)) throw new MissionAdmissionError(); }
+/** Capturing an already-submitted terminal attempt retains produced work; it never starts a writer,
+ * check or dispatch, so closed admission (pause, stop, a question, a blocker) cannot refuse it. */
+function retainsSubmitted(record: MissionRecord, operation: MissionOperation): boolean {
+  return operation.kind === 'capture' && record.attempts.some((a) => a.id === operation.payload.attemptId && a.workspaceId === operation.payload.workspaceId && a.status === 'terminal' && a.outcome === 'submitted');
+}
 function contract(task: MissionTask): MissionTaskContract {
   const { status: _status, currentAttemptId: _attempt, reason: _reason, diagnosis: _diagnosis, ...value } = task; return value;
 }
@@ -709,7 +819,10 @@ export function reduceMission(record: MissionRecord, actor: MissionActor, mutati
       const addedChecks = (m.checks ?? []).filter((check) => {
         const prior = r.deliveryPolicy.checks.find((old) => old.id === check.id);
         if (prior) requireState(isDeepStrictEqual(prior, check), 'Existing checks are immutable; discovery cannot weaken or relabel a gate.');
-        else requireState(check.required && check.criterionIds.length > 0 && (check.kind !== 'test' || !!check.testReport), 'A discovered check must be required, map a criterion, and declare real test counts for tests.');
+        else {
+          requireState(check.required && check.criterionIds.length > 0 && (check.kind !== 'test' || !!check.testReport), 'A discovered check must be required, map a criterion, and declare real test counts for tests.');
+          const issue = missionCheckCommandIssue(check.command); requireState(!issue, issue!);
+        }
         return !prior;
       });
       const preserveProposal = !m.material && !substantive && !addedChecks.length && !(m.tasks ?? []).some((t) => !r.tasks.some((prior) => isDeepStrictEqual(contract(prior), t)));
@@ -928,11 +1041,7 @@ export function reduceMission(record: MissionRecord, actor: MissionActor, mutati
         requireState(['paused', 'stopped', 'completed'].includes(r.status), 'Cleanup requires a paused or terminal Mission.'); settled(r, true);
         assertSchema(cleanupPayloadSchema, m.operation.payload);
         requireState(m.operation.payload.workspaceIds.every((workspaceId) => lookup(r.workspaces, workspaceId, 'cleanup workspace').cleanedAt === undefined), 'Cleanup cannot remove an already cleaned workspace.');
-      } else if (m.operation.kind === 'capture' && ['waiting_for_user', 'awaiting_execution_approval'].includes(r.status)) {
-        // Retain already-produced work while human input closes new dispatch admission. This is
-        // an observed terminal attempt's capture, never permission to start another writer/check.
-        requireState(r.attempts.some((a) => a.id === m.operation.payload.attemptId && a.workspaceId === m.operation.payload.workspaceId && a.status === 'terminal' && a.outcome === 'submitted'), 'Waiting-state capture must retain an owned submitted attempt.');
-      } else if (m.operation.kind !== 'interrupt') admit(r);
+      } else if (!retainsSubmitted(r, m.operation) && m.operation.kind !== 'interrupt') admit(r);
       requireState(m.operation.state === 'intent_recorded' && m.operation.expectedRevision === r.revision && !m.operation.resultRef && !m.operation.error, 'Operation intent must precede side effects at the current revision.');
       requireState(!r.operations.some((o) => o.id !== m.operation.id && o.idempotencyKey === m.operation.idempotencyKey), 'Operation idempotency key already exists.');
       if (['integrate', 'deliver'].includes(m.operation.kind)) requireState(r.executionAuthorization && r.baseline && r.phase !== 'planning', 'Mutating operation is not authorized.');
@@ -949,11 +1058,27 @@ export function reduceMission(record: MissionRecord, actor: MissionActor, mutati
     case 'host.blocker.add': appendImmutable(r.blockers, m.blocker, 'blocker'); break;
     case 'host.blocker.resolve': { const b = lookup(r.blockers, m.blockerId, 'blocker'); requireState(b.resolvedAt === undefined, 'Blocker already resolved.'); b.resolvedAt = m.at; break; }
     case 'host.mailbox.append': appendImmutable(r.mailbox, m.item, 'mailbox item'); break;
-    case 'host.recover':
-      r.leadGeneration++; r.status = 'recovering'; for (const op of r.operations) if (pending(op)) op.state = 'reconciling';
-      if (!r.attempts.some(active) && !r.operations.some(pending)) r.status = 'paused'; break;
+    case 'host.recover': {
+      // A user Stop survives restart: recovery reconciles toward stopped, never back to paused.
+      const stopping = r.status === 'stopping';
+      r.leadGeneration++; r.status = stopping ? 'stopping' : 'recovering'; for (const op of r.operations) if (pending(op)) op.state = 'reconciling';
+      if (!stopping && !r.attempts.some(active) && !r.operations.some(pending)) r.status = 'paused'; break;
+    }
     case 'host.quiesce':
       requireState(['pausing', 'stopping', 'recovering'].includes(r.status), 'No pause/stop/recovery is being reconciled.'); settled(r, m.quiescent); r.status = r.status === 'stopping' ? 'stopped' : 'paused'; break;
+    case 'host.stop.unproven': {
+      requireState(r.status === 'stopping', 'Only a user Stop can finish without proof of owned-activity teardown.');
+      appendImmutable(r.blockers, m.blocker, 'blocker');
+      requireState(r.blockers.some((b) => b.id === m.blocker.id && b.resolvedAt === undefined), 'Unproven stop must retain its unresolved ownership blocker.');
+      const unknown = `Stopped without proof that owned activity ended; the outcome is unknown and was never replayed. ${m.blocker.message}`;
+      for (const op of r.operations) if (pending(op) && op.kind !== 'cleanup') { op.state = 'failed'; op.error = unknown; }
+      for (const a of r.attempts.filter(active)) {
+        a.status = 'terminal'; a.outcome = 'canceled'; a.endedAt = Math.max(m.at, a.requestedAt);
+        a.failure = { kind: 'stale_state', code: 'ownership_unproven', source: 'status', confidence: 'unknown', recovery: 'user_action', message: 'Stopped by the user without proof that this attempt\'s runtime ended. Its workspace is retained; do not reuse or clean it until ownership is reconciled.' };
+        const task = lookup(r.tasks, a.taskId, 'task'); if (currentResult(task, a)) task.status = 'changes_requested';
+      }
+      r.status = 'stopped'; break;
+    }
     case 'host.complete': {
       requireState(r.status === 'running' && r.phase === 'delivering', 'Completion requires the delivery phase.');
       const blockers = completionBlockers(r, { quiescent: m.quiescent }); requireState(!blockers.length, blockers.join(' '));

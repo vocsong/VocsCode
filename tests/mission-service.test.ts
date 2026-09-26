@@ -157,7 +157,9 @@ async function crashRestart(release: () => void = () => undefined, staleSessionI
   store = new MissionStore<MissionRecord>(data, { validate: assertMissionRecord, validateObservation: assertMissionUsageObservation }); service = makeService(); await service.load();
 }
 
-async function reviewedCode(integrationTimeout = 15_000) {
+/** The integration runs real Git plus an owned check (a PowerShell Job supervisor on Windows); in a
+ * loaded full run it legitimately stays in_flight well past 15 s while still progressing. */
+async function reviewedCode(integrationTimeout = 60_000) {
   policy.checks = [{ id: 'behavior', name: 'Changed behavior', kind: 'behavior', command: 'node -e "require(\'node:assert\').strictEqual(require(\'node:fs\').readFileSync(\'feature.txt\',\'utf8\').trim(),\'implemented\')"', criterionIds: ['outcome'], required: true, heavy: true, timeoutMs: 10_000 }];
   const r = await start();
   await plan(r, [task('direct', { assignment: { kind: 'lead' }, requiredTools: ['write'] })]);
@@ -684,7 +686,12 @@ describe('Mission coordinator', () => {
     expect(sessions.get(r.leadSessionId)?.mission?.sourceAccess).toBe('read_only');
     initial.finish('claim-boundary');
     await wait(() => expect(service.get(r.id)?.attempts.find((a) => a.id === claim.attemptId)?.status).toBe('running'));
+    // The durable running transition precedes the replacement runtime's startup. The retired
+    // planning runtime already has one send, so waiting on that count alone can pass early and
+    // emit the implementation turn into a runtime the manager no longer observes.
+    await wait(() => expect(runtimes.get(r.leadSessionId)).not.toBe(initial));
     await wait(() => expect(runtimes.get(r.leadSessionId)?.adapter.send).toHaveBeenCalledTimes(1));
+    await wait(() => expect(sessions.activity(r.leadSessionId).turn).toBe(true));
     expect(sessions.list().filter((s) => s.mission?.role === 'lead')).toHaveLength(1);
     expect(sessions.get(r.leadSessionId)?.mission).toMatchObject({ attemptId: claim.attemptId, sourceAccess: 'assigned_workspace' });
     expect(sessions.get(r.leadSessionId)?.config.permissionMode).toBe('auto');
@@ -1180,5 +1187,197 @@ describe('Mission coordinator', () => {
     expect(git(project, 'branch', '--list', `mission/${r.id}-delivery`)).toBe('');
     const persisted = new MissionStore<MissionRecord>(data, { validate: assertMissionRecord, validateObservation: assertMissionUsageObservation }); await persisted.load();
     expect(persisted.get(r.id)?.deliveryPolicy).toEqual(service.get(r.id)?.deliveryPolicy);
+  });
+});
+
+describe('Mission lifecycle dead-ends', () => {
+  const control = (r: MissionRecord, action: 'pause' | 'resume' | 'stop', idempotencyKey: string) => service.control({ missionId: r.id, expectedRevision: service.get(r.id)!.revision, idempotencyKey, control: { action } });
+  const open = (r: MissionRecord) => service.get(r.id)!.blockers.filter((blocker) => blocker.resolvedAt === undefined);
+
+  it('captures a submitted candidate and records no blocker when Pause lands while its terminal turn settles', async () => {
+    const r = await start(); await plan(r); const worker = await delegate(r);
+    await report(r, worker.attemptId);
+    const transact = store.transact.bind(store);
+    let paused: Promise<MissionRecord> | undefined;
+    const race = vi.spyOn(store, 'transact').mockImplementation(async (id, metadata, mutate) => {
+      const committed = await transact(id, metadata, mutate);
+      if (!paused && metadata.kind.startsWith('turn_')) {
+        // The attempt is recorded terminal; the user pauses before its candidate capture.
+        paused = service.control({ missionId: r.id, expectedRevision: committed.revision, idempotencyKey: 'pause-during-settle', control: { action: 'pause' } });
+        await vi.waitFor(() => expect(service.get(r.id)?.status).toBe('pausing'), { timeout: 15_000, interval: 10 });
+      }
+      return committed;
+    });
+    runtimes.get(worker.sessionId)!.finish();
+    await wait(() => expect(paused).toBeDefined());
+    await paused; race.mockRestore();
+    const settled = service.get(r.id)!;
+    expect(settled.status).toBe('paused');
+    expect(settled.attempts[0]).toMatchObject({ status: 'terminal', outcome: 'submitted' });
+    expect(settled.candidates).toEqual([expect.objectContaining({ attemptId: worker.attemptId })]);
+    expect(open(r)).toEqual([]);
+    await control(r, 'resume', 'resume-after-settle');
+    expect(service.get(r.id)?.status).toBe('running');
+  });
+
+  it('retains a submitted candidate when a budget fence closes admission before its terminal turn arrives', async () => {
+    config.limits.maxTokens = 1_000;
+    const r = await start(); await plan(r); const worker = await delegate(r); const runtime = runtimes.get(worker.sessionId)!;
+    await report(r, worker.attemptId);
+    runtime.usage({ inputTokens: 1_000, costUsd: 1 }); // Fences synchronously, before the turn card.
+    runtime.finish();
+    await wait(() => expect(service.get(r.id)?.status).toBe('paused'));
+    const paused = service.get(r.id)!;
+    expect(paused.attempts[0]).toMatchObject({ status: 'terminal', outcome: 'submitted' });
+    expect(paused.candidates).toEqual([expect.objectContaining({ attemptId: worker.attemptId })]);
+    expect(open(r).map((blocker) => blocker.id)).toEqual([expect.stringMatching(/^budget_/)]);
+    expect(runtime.adapter.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves its own did-not-stop blocker once a later reconciliation proves quiescence, so Resume works', async () => {
+    const r = await start(); const lead = runtimes.get(r.leadSessionId)!;
+    lead.adapter.dispose.mockRejectedValueOnce(new Error('Owned process is uncertain'));
+    await control(r, 'pause', 'uncertain-pause');
+    expect(service.get(r.id)?.status).toBe('pausing');
+    expect(open(r)).toEqual([expect.objectContaining({ id: expect.stringMatching(/^quiesce_/), message: expect.stringContaining('did not stop') })]);
+    service.ownedActivityChanged(r.id);
+    await wait(() => expect(service.get(r.id)?.status).toBe('paused'));
+    expect(open(r)).toEqual([]);
+    expect(service.get(r.id)!.blockers).toEqual([expect.objectContaining({ message: expect.stringContaining('did not stop'), resolvedAt: expect.any(Number) })]);
+    await control(r, 'resume', 'resume-after-proof');
+    await wait(() => expect(runtimes.get(r.leadSessionId)).not.toBe(lead));
+    await wait(() => expect(runtimes.get(r.leadSessionId)?.adapter.send).toHaveBeenCalledTimes(1));
+  });
+
+  it('turns an unexpected coordinator failure into a blocker that Pause and Resume clear', async () => {
+    const r = await start(); await plan(r); const worker = await delegate(r);
+    await report(r, worker.attemptId);
+    const transact = store.transact.bind(store);
+    let injected = false;
+    const fault = vi.spyOn(store, 'transact').mockImplementation((id, metadata, mutate) => {
+      if (!injected && metadata.kind.startsWith('mail_') && metadata.kind.endsWith('-mail')) { injected = true; return Promise.reject(new Error('Injected coordinator fault')); }
+      return transact(id, metadata, mutate);
+    });
+    runtimes.get(worker.sessionId)!.finish();
+    await wait(() => expect(open(r)).toEqual([expect.objectContaining({ id: expect.stringMatching(/^pump_/), message: expect.stringContaining('Injected coordinator fault') })]));
+    fault.mockRestore();
+    expect(service.get(r.id)?.candidates).toHaveLength(1);
+    await control(r, 'pause', 'pause-after-fault');
+    expect(service.get(r.id)?.status).toBe('paused');
+    await control(r, 'resume', 'resume-after-fault');
+    expect(service.get(r.id)?.status).toBe('running'); expect(open(r)).toEqual([]);
+    await wait(() => expect(runtimes.get(r.leadSessionId)?.adapter.send.mock.calls.at(-1)?.[0].text).toContain('User resume'));
+  });
+
+  it('re-probes a dirty baseline on Resume with an actionable blocker instead of refusing forever', async () => {
+    await fs.writeFile(path.join(project, 'feature.txt'), 'user edits\n');
+    const r = await start();
+    const blocked = service.get(r.id)!;
+    expect(blocked.baseline).toBeUndefined();
+    expect(open(r)).toEqual([expect.objectContaining({ id: expect.stringMatching(/^baseline_/), message: expect.stringMatching(/feature\.txt.*Resume/) })]);
+    await control(r, 'pause', 'pause-dirty');
+    git(project, 'checkout', '--', 'feature.txt');
+    await control(r, 'resume', 'resume-clean');
+    const resumed = service.get(r.id)!;
+    expect(resumed.status).toBe('running');
+    expect(resumed.baseline).toMatchObject({ baseCommitSha: git(project, 'rev-parse', 'HEAD') });
+    expect(open(r)).toEqual([]);
+    expect(resumed.blockers.filter((blocker) => blocker.id.startsWith('baseline_')).every((blocker) => blocker.resolvedAt !== undefined)).toBe(true);
+    expect(resumed.mailbox.some((item) => item.text.includes('Clean source baseline established'))).toBe(true);
+    await wait(() => expect(runtimes.get(r.leadSessionId)?.adapter.send.mock.calls.at(-1)?.[0].text).toContain('Clean source baseline established'));
+    expect(git(project, 'status', '--porcelain')).toBe('');
+  });
+
+  it('re-probes a still-blocked baseline at the lead turn boundary once execution is authorized', async () => {
+    await fs.writeFile(path.join(project, 'feature.txt'), 'user edits\n');
+    const r = await start(); const lead = runtimes.get(r.leadSessionId)!;
+    const probe = vi.spyOn(workspaces, 'probeBaseline');
+    lead.finish('dirty-boundary');
+    await wait(() => expect(lead.adapter.send).toHaveBeenCalledTimes(2));
+    expect(probe).toHaveBeenCalledTimes(1); expect(service.get(r.id)?.baseline).toBeUndefined();
+    expect(open(r).filter((blocker) => blocker.id.startsWith('baseline_'))).toHaveLength(1);
+    git(project, 'checkout', '--', 'feature.txt');
+    lead.finish('clean-boundary');
+    await wait(() => expect(service.get(r.id)?.baseline).toBeDefined());
+    expect(open(r)).toEqual([]);
+    await wait(() => expect(runtimes.get(r.leadSessionId)?.adapter.send.mock.calls.at(-1)?.[0].text).toContain('Clean source baseline established'));
+  });
+
+  it('wakes the claimed task of the principal engineer on the result of its own verification request', async () => {
+    policy.checks = [{ id: 'behavior', name: 'Behavior check', kind: 'behavior', command: 'node -e "process.exit(0)"', criterionIds: ['outcome'], required: true, heavy: true, timeoutMs: 10_000 }];
+    const r = await start();
+    await plan(r, [task('direct', { assignment: { kind: 'lead' }, requiredTools: ['write'] })]);
+    const planning = runtimes.get(r.leadSessionId)!;
+    const claim = await tool(r, 'mission_task_claim', { taskId: 'direct' }) as { attemptId: string };
+    planning.finish('claim-boundary');
+    await wait(() => expect(runtimes.get(r.leadSessionId)).not.toBe(planning));
+    await wait(() => expect(sessions.activity(r.leadSessionId).turn).toBe(true));
+    const claimed = runtimes.get(r.leadSessionId)!;
+    const verify = await tool(r, 'mission_verification_request', { checkId: 'behavior' }) as { operationId: string };
+    await tool(r, 'mission_yield', { events: ['verification'] });
+    claimed.finish('await-verification');
+    await wait(() => expect(service.get(r.id)?.operations.find((op) => op.id === verify.operationId)?.state).toBe('succeeded'));
+    await wait(() => expect(claimed.adapter.send).toHaveBeenCalledTimes(2));
+    expect(claimed.adapter.send.mock.calls[1][0].text).toMatch(/Events for your claimed task direct[\s\S]*Check behavior: passed/);
+    expect(service.get(r.id)?.attempts.find((a) => a.id === claim.attemptId)).toMatchObject({ status: 'running', repairTurns: 0 });
+    expect(service.get(r.id)?.mailbox.filter((item) => item.deliveredAt === undefined)).toEqual([]);
+  });
+
+  it('asks a worker for its result and tells the lead when it yields with nothing that could wake it', async () => {
+    const r = await start(); await plan(r); const worker = await delegate(r); const runtime = runtimes.get(worker.sessionId)!;
+    await tool(r, 'mission_yield', { events: ['decision'] }, worker.sessionId);
+    runtime.finish('idle-yield');
+    await wait(() => expect(runtime.adapter.send).toHaveBeenCalledTimes(2));
+    expect(runtime.adapter.send.mock.calls[1][0].text).toMatch(/nothing you requested is pending/);
+    expect(service.get(r.id)?.attempts[0]).toMatchObject({ status: 'running', repairTurns: 1 });
+    expect(service.get(r.id)?.mailbox).toContainEqual(expect.objectContaining({ kind: 'decision', sessionId: worker.sessionId, text: expect.stringContaining('yielded for ["decision"]') }));
+  });
+
+  it('accepts the same Steer key at the fresh revision after a concurrent host write rejected its CAS', async () => {
+    const r = await start();
+    const transact = store.transact.bind(store);
+    let raced = false;
+    const race = vi.spyOn(store, 'transact').mockImplementation(async (id, metadata, mutate) => {
+      if (!raced && metadata.kind === 'user.steer') {
+        raced = true;
+        await transact(id, { idempotencyKey: 'concurrent-host-write', actor: 'host', kind: 'test.host-write', expectedRevision: service.get(id)!.revision, request: { key: 'concurrent' } }, (state) => state);
+      }
+      return transact(id, metadata, mutate);
+    });
+    const steer = () => service.control({ missionId: r.id, expectedRevision: service.get(r.id)!.revision, idempotencyKey: 'steer-after-race', control: { action: 'steer', text: 'Also cover the empty input edge case' } });
+    await expect(steer()).rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+    race.mockRestore();
+    await steer();
+    expect(service.get(r.id)!.mailbox.filter((item) => item.userAction)).toEqual([expect.objectContaining({ text: 'Also cover the empty input edge case' })]);
+  });
+
+  it('refuses a publishing repository check at request time even in full-auto, without running it', async () => {
+    const marker = path.join(root, 'published.txt');
+    policy.checks = [{ id: 'release', name: 'Release', kind: 'behavior', command: `node -e "require('node:fs').writeFileSync(${JSON.stringify(marker)},'ran')" && git push origin HEAD`, criterionIds: ['outcome'], required: true, heavy: true, timeoutMs: 10_000 }];
+    const r = await start({ permissionMode: 'full-auto' }); await plan(r); const worker = await delegate(r);
+    await report(r, worker.attemptId); runtimes.get(worker.sessionId)!.finish();
+    await wait(() => expect(service.get(r.id)?.candidates).toHaveLength(1));
+    const candidate = service.get(r.id)!.candidates[0];
+    await expect(tool(r, 'mission_verification_request', { checkId: 'release', candidateId: candidate.id })).rejects.toThrow(/only verify content.*git push/);
+    expect(service.get(r.id)?.operations.filter((op) => op.kind === 'verify')).toEqual([]);
+    expect(await fs.stat(marker).catch(() => null)).toBeNull();
+  });
+
+  it('finishes an interrupted lead handover from its retained intent on Resume', async () => {
+    const alternative = { ...config.presets[0], id: 'alternative', name: 'Alternative principal' };
+    config.presets.push(alternative); config.tiers[4].presetIds.push(alternative.id);
+    const r = await start();
+    await control(r, 'pause', 'handover-pause');
+    const startup = vi.spyOn(sessions, 'createManaged').mockRejectedValueOnce(new Error('Injected replacement startup failure'));
+    const changed = await service.control({ missionId: r.id, expectedRevision: service.get(r.id)!.revision, idempotencyKey: 'failed-handover', control: { action: 'replace_lead', presetId: alternative.id } });
+    startup.mockRestore();
+    expect(changed.status).toBe('paused');
+    expect(open(r)).toEqual([expect.objectContaining({ id: expect.stringMatching(/^handover_/), message: expect.stringContaining('Injected replacement startup failure') })]);
+    expect(runtimes.has(changed.leadSessionId)).toBe(false);
+    await control(r, 'resume', 'resume-handover');
+    expect(open(r)).toEqual([]);
+    await wait(() => expect(runtimes.get(changed.leadSessionId)?.adapter.send).toHaveBeenCalledTimes(1));
+    expect(runtimes.get(changed.leadSessionId)!.adapter.send.mock.calls[0][0].text).toContain('Explicit T5 handover');
+    expect(sessions.get(changed.leadSessionId)?.cwd).toBe(service.get(r.id)!.workspaces.find((w) => w.role === 'lead' && w.ownerSessionId === changed.leadSessionId)?.path);
   });
 });

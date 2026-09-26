@@ -334,3 +334,35 @@ describe('real decision-resolution progress checkpoints', () => {
     expect(current(r).blockers.filter((blocker) => /no new candidate.*resolved decision/.test(blocker.message))).toHaveLength(1);
   });
 });
+describe('no-progress checkpoint diagnosis', () => {
+  it('gives the lead one diagnosis turn per Resume without resetting the bound; only recorded progress clears it', async () => {
+    config.limits.progressCheckpointEveryTurns = 1; config.limits.maxNoProgressCheckpoints = 2;
+    const r = await start('autonomous'); const lead = runtimes.get(r.leadSessionId)!;
+    const noProgress = () => current(r).blockers.filter((blocker) => /no new candidate.*resolved decision/.test(blocker.message));
+    const resume = async (key: string, previous: ReturnType<typeof scripted>) => {
+      await service.control({ missionId: r.id, expectedRevision: current(r).revision, idempotencyKey: key, control: { action: 'resume' } });
+      // host.recover retired the old lead generation; the diagnosis turn runs in a fresh runtime.
+      await wait(() => expect(runtimes.get(r.leadSessionId)).not.toBe(previous));
+      await wait(() => expect(runtimes.get(r.leadSessionId)?.adapter.send).toHaveBeenCalledTimes(1));
+      await wait(() => expect(sessions.activity(r.leadSessionId).turn).toBe(true));
+      return runtimes.get(r.leadSessionId)!;
+    };
+    lead.finish('quiet-one'); await wait(() => expect(lead.adapter.send).toHaveBeenCalledTimes(2));
+    lead.finish('quiet-two'); await wait(() => expect(current(r).status).toBe('paused'));
+    expect(noProgress()).toEqual([expect.objectContaining({ id: expect.stringMatching(/^progress_/) })]);
+    expect(current(r).progress.checkpointsWithoutProgress).toBe(2);
+    const diagnosis = await resume('diagnose-once', lead);
+    expect(diagnosis.adapter.send.mock.calls[0][0].text).toMatch(/diagnosis turn/);
+    expect(current(r).progress.checkpointsWithoutProgress).toBe(2); // Resume never resets the bound.
+    diagnosis.finish('no-diagnosis');
+    await wait(() => expect(current(r).status).toBe('paused'));
+    expect(noProgress().map((blocker) => blocker.resolvedAt === undefined)).toEqual([false, true]);
+    const next = await resume('diagnose-again', diagnosis);
+    await tool(r, 'mission_decision_request', { decision: { id: 'no-progress-diagnosis', question: 'Why did repeated turns make no progress?', evidenceIds: [], affectedTaskIds: [] } });
+    await tool(r, 'mission_decision_resolve', { decisionId: 'no-progress-diagnosis', resolution: 'Verify the boundary before delegating more work', rationale: 'The retained turns repeated the same unverified plan', evidenceIds: [], affectedTaskIds: [] });
+    next.finish('diagnosed');
+    await wait(() => expect(next.adapter.send).toHaveBeenCalledTimes(2));
+    expect(current(r)).toMatchObject({ status: 'running', progress: { checkpointsWithoutProgress: 0 } });
+    expect(current(r).blockers.filter((blocker) => blocker.resolvedAt === undefined)).toEqual([]);
+  });
+});

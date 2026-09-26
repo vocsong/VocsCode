@@ -10,8 +10,11 @@ import { SessionStore } from '../src/main/store';
 import { defaultSettings, type SettingsStore } from '../src/main/settings';
 import { createAdapter } from '../src/main/harness/registry';
 import type { HarnessAdapter, HarnessContext, MissionReadiness } from '../src/main/harness/types';
-import type { TerminalManager } from '../src/main/terminal';
+import type { TerminalActivity, TerminalManager } from '../src/main/terminal';
 import type { MissionRecord, MissionView } from '../src/shared/mission';
+import { missionDeliveryBranch, type MissionDeliveryRequest } from '../src/main/mission/delivery';
+import type { VerificationRequest } from '../src/main/mission/verification';
+import type { TargetObservation } from '../src/main/mission/workspaces';
 import { createManagedPiOwnershipIntent, recordUnlaunchedManagedPiIntent, type ManagedPiOwnershipIntent } from '../src/main/harness/pi-ownership';
 import type { UserInput } from '../src/shared/types';
 import { missionFixture } from './support/mission-fixture';
@@ -25,6 +28,7 @@ let settingsChanged: () => void;
 let readiness: MissionReadiness;
 let contexts: HarnessContext[], clients: Client[];
 let sent: ReturnType<typeof vi.fn<(input: UserInput) => void>>, changes: ReturnType<typeof vi.fn<(view: MissionView) => void>>;
+let terminalActivity: TerminalActivity[];
 
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'mission-runtime-')); project = path.join(root, 'project'); await fs.mkdir(project);
@@ -32,7 +36,7 @@ beforeEach(async () => {
   const store = new SessionStore(userData); await store.load();
   settings = defaultSettings(); settings.mcpDisabledBuiltins = ['gitnexus', 'vocs-memory', 'cua-driver']; settings.providers = [];
   settings.mission = missionFixture().config;
-  contexts = []; clients = []; sent = vi.fn(); changes = vi.fn();
+  contexts = []; clients = []; sent = vi.fn(); changes = vi.fn(); terminalActivity = [];
   readiness = { ready: true, tools: ['read'], model: { provider: 'fixture', model: 'frontier' }, modelAvailable: true, connectionAvailable: true };
   vi.mocked(createAdapter).mockImplementation((_id, ctx): HarnessAdapter => {
     contexts.push(ctx);
@@ -60,7 +64,7 @@ beforeEach(async () => {
     getSecret: async () => undefined, pushEvent: vi.fn(), pushSessions: vi.fn(), notify: vi.fn(), log: vi.fn(),
     withWorkspaceDispatch: (meta, dispatch) => runtime.admission.dispatch(meta.cwd, dispatch),
   });
-  runtime = new MissionRuntime({ userData, sessions, windowsJobHelper: path.resolve('resources/mission/windows-check-job.ps1'), settings: { get: () => settings, onChange: (listener) => { settingsChanged = () => listener(settings); return () => undefined; } }, terminals: { activity: () => [], closeManagedSession: async () => undefined, reconcileOwnership: async () => undefined } as unknown as TerminalManager, changed: changes, log: vi.fn() });
+  runtime = new MissionRuntime({ userData, sessions, windowsJobHelper: path.resolve('resources/mission/windows-check-job.ps1'), settings: { get: () => settings, onChange: (listener) => { settingsChanged = () => listener(settings); return () => undefined; } }, terminals: { activity: () => terminalActivity, closeManagedSession: async () => undefined, reconcileOwnership: async () => undefined } as unknown as TerminalManager, changed: changes, log: vi.fn() });
   await runtime.load();
 });
 afterEach(async () => {
@@ -227,9 +231,17 @@ describe('Production Mission runtime boundary', () => {
       terminals: { activity: () => [], closeManagedSession: async () => undefined, reconcileOwnership: async () => undefined } as unknown as TerminalManager, changed: changes, log: vi.fn() });
     await runtime.load();
     const restored = runtime.service.get(mission.id)!;
-    expect(restored.status, JSON.stringify(restored.blockers)).toBe('paused');
+    // A denial has a durable not-started receipt everywhere. An executed check has a durable
+    // bounded-owner receipt only from the Windows Job supervisor; POSIX restart must keep that
+    // uncertainty (and refuse Resume) rather than pretend the proof exists.
+    const unproven = optionId === 'allow' && process.platform !== 'win32';
+    expect(restored.status, JSON.stringify(restored.blockers)).toBe(unproven ? 'recovering' : 'paused');
     expect(restored.evidence).toHaveLength(1); expect(restored.operations.filter((operation) => operation.kind === 'verify')).toHaveLength(2);
-    expect(restored.blockers.filter((blocker) => !blocker.resolvedAt)).toEqual([]);
+    const open = restored.blockers.filter((blocker) => !blocker.resolvedAt);
+    if (unproven) {
+      expect(open).toEqual([expect.objectContaining({ id: expect.stringMatching(/^external_/), kind: 'environment', message: expect.stringContaining('no exact empty-Job receipt') })]);
+      await expect(runtime.service.control({ missionId: mission.id, expectedRevision: restored.revision, idempotencyKey: 'refuse-unproven-resume', control: { action: 'resume' } })).rejects.toThrow(/still recovering|ownership/i);
+    } else expect(open).toEqual([]);
     expect(sent).toHaveBeenCalledTimes(optionId === 'allow' ? 2 : 1);
   }, 60_000);
 
@@ -288,5 +300,54 @@ describe('Production Mission runtime boundary', () => {
     const mission = await start();
     await wait(() => expect(runtime.service.get(mission.id)?.status).toBe('blocked'));
     expect(sent).not.toHaveBeenCalled();
+  });
+
+  it('names the app terminal holding the checkout in the baseline blocker and captures the baseline on Resume after it closes', async () => {
+    await gitProject();
+    // An ordinary user shell in the checkout (its owning session index is not needed to block).
+    terminalActivity = [{ terminalId: 'terminal-1', sessionId: 'source-shell-session', cwd: project, reportedCwd: project, managed: false, state: 'live' }];
+    const mission = await runtime.service.create({ idempotencyKey: 'terminal-baseline', projectRoot: project, objective: 'Implement once the shell is closed', mode: 'autonomous', permissionMode: 'auto' });
+    await wait(() => expect(sent).toHaveBeenCalledTimes(1));
+    const open = () => runtime.service.get(mission.id)!.blockers.filter((blocker) => blocker.resolvedAt === undefined);
+    expect(runtime.service.get(mission.id)!.baseline).toBeUndefined();
+    expect(open()).toEqual([expect.objectContaining({ id: expect.stringMatching(/^baseline_/), message: expect.stringMatching(/open terminal terminal-1 of session "source-shell-session"[\s\S]*Close[\s\S]*Resume/) })]);
+    await runtime.service.control({ missionId: mission.id, expectedRevision: runtime.service.get(mission.id)!.revision, idempotencyKey: 'pause-for-shell', control: { action: 'pause' } });
+    expect(runtime.service.get(mission.id)!.status).toBe('paused');
+    terminalActivity = [];
+    await runtime.service.control({ missionId: mission.id, expectedRevision: runtime.service.get(mission.id)!.revision, idempotencyKey: 'resume-after-shell', control: { action: 'resume' } });
+    const resumed = runtime.service.get(mission.id)!;
+    expect(resumed.status).toBe('running'); expect(resumed.baseline).toBeDefined(); expect(open()).toEqual([]);
+    expect(resumed.workspaces.map((workspace) => workspace.role).sort()).toEqual(['integration', 'lead']);
+  });
+
+  it('refuses a publishing check at execution time before any approval card or process, whatever the permission mode', async () => {
+    const approval = vi.spyOn(sessions, 'requestManagedApproval');
+    const authorize = (request: VerificationRequest) => (runtime as unknown as { authorizeCheck(request: VerificationRequest): Promise<void> }).authorizeCheck(request);
+    const revision = { baseCommitSha: 'a'.repeat(40), contentHash: 'b'.repeat(40) };
+    for (const command of ['git push origin HEAD:main', 'gh pr merge 7 --merge', 'npm publish', 'npm test && git push --force']) {
+      await expect(authorize({ missionId: 'any-mission', operationId: 'any-operation', specificationRevision: 1, revision, cwd: project,
+        check: { id: 'publish', name: 'Publish', kind: 'build', command, criterionIds: ['check'], required: true, heavy: false, timeoutMs: 1_000 } })).rejects.toThrow(/only verify content/);
+    }
+    expect(approval).not.toHaveBeenCalled();
+  });
+
+  it('names the exact observed-target delivery branch in push and PR approvals', async () => {
+    const accepted = { baseCommitSha: 'a'.repeat(40), contentHash: 'b'.repeat(40) };
+    const fixture = missionFixture({ projectRoot: project, sourceCwd: project, entryMode: 'autonomous', phase: 'delivering', requestedPermissionMode: 'ask',
+      executionAuthorization: { kind: 'autonomous_launch', sourceUserActionId: 'user-launch', specificationRevision: 1, recordedAt: 1 }, baseline: accepted, acceptedRevision: accepted,
+      workspaces: [{ id: 'w-integration', role: 'integration', path: project, branch: 'mission/integration', base: accepted }],
+      operations: [{ id: 'deliver-op', idempotencyKey: 'deliver-op', kind: 'deliver', actor: 'lead:lead:1', expectedRevision: 1, state: 'in_flight', payload: {} }] });
+    fixture.deliveryPolicy = { ...fixture.deliveryPolicy, endpoint: 'open_pr', remote: 'origin', targetBranch: 'main', targetHead: 'c'.repeat(40), allowPush: true, fallback: false };
+    await runtime.store.create(fixture, { idempotencyKey: 'seed', actor: 'host', expectedRevision: 0, kind: 'fixture.seed' });
+    const observation = { id: 'observation-1' } as TargetObservation;
+    vi.spyOn(runtime.workspaces, 'integratedTargetObservation').mockResolvedValue(observation);
+    const approvals: string[] = [];
+    vi.spyOn(sessions, 'requestManagedApproval').mockImplementation(async (_id, _generation, draft) => { approvals.push(JSON.stringify(draft)); return { optionId: 'deny' }; });
+    const authorize = (action: 'push' | 'create_pr') => (runtime as unknown as { authorizeDelivery(request: MissionDeliveryRequest, action: string): Promise<void> }).authorizeDelivery({ mission: runtime.service.get(fixture.id)!, operationId: 'deliver-op' }, action);
+    for (const action of ['push', 'create_pr'] as const) await expect(authorize(action)).rejects.toThrow(/not approved/);
+    const branch = missionDeliveryBranch(runtime.service.get(fixture.id)!, observation);
+    expect(branch).not.toBe(`mission/${fixture.id}-delivery`);
+    expect(approvals).toHaveLength(2);
+    for (const draft of approvals) expect(draft).toContain(branch);
   });
 });
