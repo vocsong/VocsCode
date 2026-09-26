@@ -8,7 +8,7 @@ import { McpView } from '../src/renderer/src/components/McpView';
 import { useStore } from '../src/renderer/src/store';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl' }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke, isMac: false, modKey: 'Ctrl' }));
 
 const gitnexusEntry = { id: 'gitnexus', transport: 'stdio' as const, command: 'cmd', args: ['/c', 'npx', '-y', 'gitnexus@latest', 'mcp'] };
 const otherEntry = { id: 'github', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gh-mcp'] };

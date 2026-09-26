@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createVocsCodeSubagents, type SubagentDeps } from '../resources/pi/vocs-code-subagents';
 import { GRANT_EVENT, PLAN_REASON } from '../resources/pi/subagent-gate';
 import { parseRunFile } from '../src/shared/subagents';
+import { deferred } from '../src/main/util/async';
 
 const tempDirs: string[] = [];
 const envKeys = ['VOCS_CODE_MODE_FILE', 'VOCS_CODE_PERMISSION_MODE', 'VOCS_CODE_SUBAGENT_DIR', 'VOCS_CODE_SUBAGENT_COMPLETION_MS', 'VOCS_CODE_PI_NONCE', 'VOCS_CODE_PROJECT_ROOT', 'PI_CODING_AGENT_DIR'] as const;
@@ -457,6 +458,60 @@ describe('background runs and lifecycle', () => {
     await h.commands.get('vocs-subagent-stop')!.handler(String(started.details.runId));
     await vi.waitFor(() => expect(h.children[0]!.aborted).toBe(true));
     await vi.waitFor(() => expect(eventsOf(h).some((e) => e.kind === 'end' && e.status === 'stopped')).toBe(true));
+  });
+
+  it('does not publish child completion or a follow-up before asynchronous disposal settles', async () => {
+    const work = deferred<void>(), disposed = deferred<void>();
+    const h = harness({ childDriver: () => work.promise });
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    await h.tools.get('subagent')!.execute('call_1', { ...subagentCall, background: true }, undefined, undefined, h.parentCtx);
+    h.children[0].dispose = () => disposed.promise;
+    work.resolve(); await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(eventsOf(h).filter((event) => event.kind === 'end')).toHaveLength(0);
+    expect(h.sent).toHaveLength(0);
+    disposed.resolve(); await vi.waitFor(() => expect(eventsOf(h).filter((event) => event.kind === 'end')).toHaveLength(1));
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+  });
+
+  it('awaits the actual child execution on shutdown, rather than abort acceptance, and never wakes the retired parent', async () => {
+    const work = deferred<void>();
+    const h = harness({ childDriver: () => work.promise });
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    await h.tools.get('subagent')!.execute('call_1', { ...subagentCall, background: true }, undefined, undefined, h.parentCtx);
+    const finished = vi.fn(); const shutdown = h.fire('session_shutdown', { reason: 'quit' }).then(finished);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(h.children[0].aborted).toBe(true); expect(finished).not.toHaveBeenCalled();
+    expect(h.children[0].disposed).toBe(false); expect(eventsOf(h).filter((event) => event.kind === 'end')).toHaveLength(0);
+    work.resolve(); await shutdown;
+    expect(eventsOf(h).filter((event) => event.kind === 'end')).toMatchObject([{ status: 'interrupted' }]);
+    await new Promise((resolve) => setTimeout(resolve, 20)); expect(h.sent).toHaveLength(0);
+  });
+
+  it('retains a running child on rejected disposal instead of fabricating a terminal notification', async () => {
+    const work = deferred<void>(); const h = harness({ childDriver: () => work.promise });
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const started = await h.tools.get('subagent')!.execute('call_1', { ...subagentCall, background: true }, undefined, undefined, h.parentCtx);
+    h.children[0].dispose = () => { throw new Error('child disposal failed'); };
+    work.resolve(); await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(eventsOf(h).filter((event) => event.kind === 'end')).toHaveLength(0);
+    const result = await h.tools.get('subagent_result')!.execute('result', { runId: started.details.runId });
+    expect(result.details.status).toBe('running'); expect(h.sent).toHaveLength(0);
+    await expect(h.fire('session_shutdown', { reason: 'quit' })).rejects.toThrow('child disposal failed');
+  });
+
+  it('waits for a child being created during shutdown and never starts its prompt afterward', async () => {
+    const created = deferred<void>(); const h = harness();
+    const create = h.deps.createAgentSession;
+    h.deps.createAgentSession = async (options) => { await created.promise; return create(options); };
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const starting = h.tools.get('subagent')!.execute('call_1', { ...subagentCall, background: true }, undefined, undefined, h.parentCtx);
+    await vi.waitFor(() => expect(eventsOf(h).filter((event) => event.kind === 'start')).toHaveLength(1));
+    const finished = vi.fn(); const shutdown = h.fire('session_shutdown', { reason: 'quit' }).then(finished);
+    await new Promise((resolve) => setTimeout(resolve, 20)); expect(finished).not.toHaveBeenCalled();
+    created.resolve(); await starting; await shutdown;
+    expect(h.children[0].prompts).toEqual([]); expect(h.children[0].disposed).toBe(true);
+    expect(eventsOf(h).filter((event) => event.kind === 'end')).toMatchObject([{ status: 'interrupted' }]);
+    expect(h.sent).toHaveLength(0);
   });
 
   it('settles unfinished runs as interrupted on session shutdown', async () => {

@@ -6,6 +6,7 @@ import { modelRefName } from '../../../shared/model-names';
 import { invoke } from '../api';
 import { basename, fmtCost, harnessShort, harnessTone, relTime } from '../format';
 import { archiveSession, removeFolder } from '../sessionActions';
+import { isTopLevelSession } from '../missions';
 import { sortSessionRows } from '../sessionOrder';
 import { useStore, toastError } from '../store';
 import { Resizer } from './Resizer';
@@ -51,7 +52,7 @@ export interface SidebarNavFolder {
  * default view: non-archived sessions, no search filter.
  */
 export function sidebarNavModel(sessions: SessionMeta[], settings: AppSettings | null): SidebarNavFolder[] {
-  const visible = sessions.filter((s) => !s.archived);
+  const visible = sessions.filter((s) => !s.archived && isTopLevelSession(s));
   const byProject = new Map<string, SessionMeta[]>();
   for (const s of visible) byProject.set(s.config.projectRoot, [...(byProject.get(s.config.projectRoot) ?? []), s]);
   const model = [...byProject.entries()].map(([root, list]) => ({
@@ -115,7 +116,7 @@ export function Sidebar() {
   const [drag, setDrag] = useState<{ root: string; over: string | null; after: boolean } | null>(null);
 
   const groups = useMemo(() => {
-    const visible = sessions.filter((s) => (showArchived ? s.archived : !s.archived));
+    const visible = sessions.filter((s) => isTopLevelSession(s) && (showArchived ? s.archived : !s.archived));
     const byProject = new Map<string, SessionMeta[]>();
     for (const s of visible) {
       const key = s.config.projectRoot;
@@ -236,7 +237,7 @@ export function Sidebar() {
     const dragged = dragId ? sessions.find((x) => x.id === dragId) : null;
     const target = sessions.find((x) => x.id === id);
     if (dragged && target && target.pinned && target.id !== dragId && target.config.projectRoot === dragged.config.projectRoot) {
-      const section = sortSessionRows(sessions.filter((x) => x.config.projectRoot === target.config.projectRoot && !x.archived))
+      const section = sortSessionRows(sessions.filter((x) => x.config.projectRoot === target.config.projectRoot && !x.archived && isTopLevelSession(x)))
         .filter((x) => x.pinned)
         .map((x) => x.id);
       const rest = section.filter((sid) => sid !== dragId);
@@ -251,8 +252,8 @@ export function Sidebar() {
   };
   const dndHandlers = { start: onDragStartRow, end: onDragEndRow, over: onDragOverRow, leave: onDragLeaveRow, drop: onDropRow };
 
-  const awaiting = sessions.filter((s) => s.status === 'awaiting').length;
-  const running = sessions.filter((s) => s.status === 'running').length;
+  const awaiting = sessions.filter((s) => isTopLevelSession(s) && s.status === 'awaiting').length;
+  const running = sessions.filter((s) => isTopLevelSession(s) && s.status === 'running').length;
 
   return (
     <aside className="sidebar">
@@ -434,6 +435,7 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
     }
   };
   const deleteRow = async () => {
+    if (s.mission) { toast('Archive the Mission to retain its artifacts. Use explicit managed cleanup after execution settles.', 'info'); return; }
     const ok = await askConfirm({
       title: `Delete session "${s.title}"?`,
       body: s.worktreeBranch ? `Its worktree and the branch ${s.worktreeBranch} are removed with it.` : 'Its transcript is removed. This cannot be undone.',
@@ -462,8 +464,8 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
     { separator: true },
     s.archived
       ? { label: 'Restore session', icon: 'restore', onSelect: () => void invoke('sessions:archive', { id: s.id, archived: false }) }
-      : { label: s.worktreeBranch ? 'Archive & remove worktree' : 'Archive', icon: 'archive', onSelect: () => void archiveSession(s, toast) },
-    { label: 'Delete session', icon: 'trash', danger: true, onSelect: () => void deleteRow() }
+      : { label: s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive', icon: 'archive', onSelect: () => void archiveSession(s, toast) },
+    { label: s.mission ? 'Mission deletion unavailable — archive retains work' : 'Delete session', icon: 'trash', danger: true, disabled: !!s.mission, onSelect: () => !s.mission && void deleteRow() }
   ];
 
   // Only pinned rows can be dragged, and only while they are not being renamed.
@@ -538,6 +540,7 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
           </div>
         )}
         <div className="session-meta">
+          {s.mission && <Badge tone="purple">Mission</Badge>}
           <Badge tone={harnessTone(s.config.harness)} title={h?.name}>
             {harnessShort(s.config.harness)}
           </Badge>
@@ -573,14 +576,14 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
             <button type="button" className="row-act-btn" title="Restore session" aria-label="Restore session" onClick={() => void invoke('sessions:archive', { id: s.id, archived: false })}>
               <Icon name="restore" size={15} />
             </button>
-            <button type="button" className="row-act-btn danger" title="Delete session" aria-label="Delete session" onClick={() => void deleteRow()}>
+            <button type="button" className="row-act-btn danger" disabled={!!s.mission} title={s.mission ? 'Mission deletion unavailable; archive retains artifacts' : 'Delete session'} aria-label="Delete session" onClick={() => void deleteRow()}>
               <Icon name="trash" size={15} />
             </button>
           </>
         ) : (
           <>
             <ForkIntoDropdown session={s} />
-            <button type="button" className="row-act-btn" title={s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={() => void archiveSession(s, toast)}>
+            <button type="button" className="row-act-btn" title={s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={() => void archiveSession(s, toast)}>
               <Icon name="archive" size={15} />
             </button>
           </>

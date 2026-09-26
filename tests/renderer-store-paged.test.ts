@@ -164,7 +164,9 @@ describe('resync and reset', () => {
       return Promise.reject(new Error(`refused channel invoked: ${channel}`));
     });
     await useStore.getState().boot();
-    expect(invoke.mock.calls.map(([channel]) => channel).sort()).toEqual(['sessions:list', 'settings:get']);
+    // `missions:list` is a read channel the host allows here; the refused set above is what must
+    // never be invoked, so boot's call list is exactly the channels it can serve.
+    expect(invoke.mock.calls.map(([channel]) => channel).sort()).toEqual(['missions:list', 'sessions:list', 'settings:get']);
     expect(useStore.getState().terminals).toEqual([]);
   });
 });

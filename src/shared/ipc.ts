@@ -62,6 +62,18 @@ import type { AgentFileFields, ParsedAgentFile } from './agent-files';
 import type { ProjectAgentInfo } from './agent-info';
 import type { ClaudeAgentFileInfo } from './claude-agent-files';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
+import type { CreateMissionRequest, MissionControlRequest, MissionRecord } from './mission';
+import type { MissionCommandRequest } from './mission-command';
+
+/** Readable text exports fail explicitly rather than silently truncating a saved artifact. */
+export const TEXT_EXPORT_MAX_BYTES = 1024 * 1024;
+
+export interface MissionCommandResponse {
+  kind: 'created' | 'updated' | 'status' | 'show';
+  mission?: MissionRecord;
+  sessionId?: string;
+  message?: string;
+}
 
 /**
  * What the Claude subagent rows are built from: the types the engine names, the project's own
@@ -91,6 +103,8 @@ export interface IpcContract {
   'app:openInEditor': [{ path: string; sessionId: string; line?: number }, { ok: boolean; error?: string }];
   'app:openTerminal': [{ cwd: string }, { ok: boolean; error?: string }];
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];
+  /** Desktop user chooser only: no caller-selected path, model tool, or remote writer. */
+  'app:fileSaveAs': [{ content: string; suggestedName: string }, { path: string | null }];
   'app:notify': [{ title: string; body: string }, void];
   /** In-app auto-update (issue #198). Present only in packaged builds; other builds stay idle. */
   'update:state': [void, UpdateState];
@@ -201,6 +215,16 @@ export interface IpcContract {
   /** Runs Cua Driver's official installer after an explicit confirmation. */
   'cua:install': [void, CuaInstallResult];
 
+  /** Mission control is user-only; model tools have a separate authenticated transport. */
+  'missions:list': [void, MissionRecord[]];
+  'missions:get': [{ missionId: string }, MissionRecord | null];
+  /** Read-only snapshot of the latest authoritative plan; Markdown is never an import API. */
+  'missions:exportPlan': [{ missionId: string }, { markdown: string; suggestedName: 'plan.md' }];
+  'missions:create': [CreateMissionRequest, MissionRecord];
+  'missions:control': [MissionControlRequest, MissionRecord];
+  /** Mixed read/write command routing is always a mutation for remote authorization. */
+  'missions:command': [MissionCommandRequest, MissionCommandResponse];
+
   'sessions:list': [void, SessionMeta[]];
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
@@ -240,7 +264,7 @@ export interface IpcContract {
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
   /** Persists a pinned-section drag reorder: ids in their new display order. */
   'sessions:pinOrder': [{ ids: string[] }, void];
-  'sessions:send': [{ id: string; input: UserInput }, void];
+  'sessions:send': [{ id: string; input: UserInput; idempotencyKey?: string }, void];
   /** Replaces a sent message, discards its later transcript items, and runs it again. */
   'sessions:editAndResend': [{ id: string; userItemId: string; input: UserInput }, TranscriptItem[]];
   'sessions:interrupt': [{ id: string }, void];
@@ -297,7 +321,8 @@ export interface IpcContract {
   /** Pre-session probe for a folder the dialog is configuring: worktree isolation needs a git repository. */
   'git:folderIsRepo': [{ projectRoot: string }, { isRepo: boolean }];
   'git:summary': [{ sessionId: string }, GitSummary];
-  'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string; error?: string }];
+  /** A lead defaults to the accepted Mission result; a workspace selector is read-only inspection. */
+  'git:diff': [{ sessionId: string; path?: string; staged?: boolean; missionWorkspaceId?: string }, { diff: string; error?: string }];
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
   'git:stageAll': [{ sessionId: string }, { ok: boolean; error?: string }];
   'git:commit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];
@@ -340,9 +365,10 @@ export interface IpcContract {
   /** Pulls one pull request's conversation comments through gh, for the Git panel's PR preview. */
   'git:prComments': [{ sessionId: string; number: number }, GitCommentList];
 
-  'fs:list': [{ sessionId: string; relPath?: string }, FsEntry[]];
-  'fs:search': [{ sessionId: string; query: string; limit?: number }, string[]];
-  'fs:read': [{ sessionId: string; path: string; maxBytes?: number }, { content: string; truncated: boolean }];
+  /** Mission leads default to integration; tool-file reveals select the explicit lead workspace. */
+  'fs:list': [{ sessionId: string; relPath?: string; missionWorkspaceId?: string }, FsEntry[]];
+  'fs:search': [{ sessionId: string; query: string; limit?: number; missionWorkspaceId?: string }, string[]];
+  'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean }];
 
   /** Layer 2 project knowledge for one session's project: pages, proposals and review state. */
   'knowledge:view': [{ sessionId: string }, KnowledgeView];
@@ -392,6 +418,7 @@ export type IpcResponse<K extends IpcChannel> = IpcContract[K][1];
 export const PUSH_CHANNELS = {
   sessionEvent: 'push:sessionEvent',
   sessionsChanged: 'push:sessionsChanged',
+  missionsChanged: 'push:missionsChanged',
   settingsChanged: 'push:settingsChanged',
   focusSession: 'push:focusSession',
   terminalData: 'push:terminalData',
@@ -405,6 +432,8 @@ export const PUSH_CHANNELS = {
 export type PushPayloads = {
   'push:sessionEvent': SessionEventEnvelope;
   'push:sessionsChanged': SessionMeta[];
+  /** Public record only: no service handles, tool credentials, or resolved provider secrets. */
+  'push:missionsChanged': MissionRecord;
   'push:settingsChanged': AppSettings;
   'push:focusSession': { sessionId: string };
   /** Raw PTY output for one terminal; `seq` orders it against an attach snapshot. */

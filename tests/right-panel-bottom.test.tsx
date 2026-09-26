@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock('../src/renderer/src/api', () => ({
+  canInvoke: () => true,
   invoke: invokeMock,
   on: vi.fn().mockReturnValue(() => undefined),
   isMac: false,

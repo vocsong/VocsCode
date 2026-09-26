@@ -62,7 +62,7 @@ credentials or deployment are available, report the live tier as unverified.
 ## Opt-in Electron suites (no provider key)
 
 ```bash
-npm run build && npm run test:e2e:ci       # all fifteen below; fails if any reports skipped
+npm run build && npm run test:e2e:ci       # all seventeen below; fails if any reports skipped
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:themes
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:models
@@ -77,6 +77,7 @@ npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.goal.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.doctor.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.context-menu.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.transcript.test.ts
+npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.mission-settings.test.ts tests/e2e.mission.test.ts
 npm run build && HARNESS_E2E=1 npm run test:e2e:terminal
 # Vesta on the real pi runtime, offline scripted model (installed Pi 0.85.1; HARNESS_E2E_EXE for the packaged app).
 npm run build && VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/e2e.vesta.test.ts
@@ -87,7 +88,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.subagents.test.ts
 ```
 
-`npm run test:e2e:ci` runs the fifteen suites and fails if any of them reports *skipped*.
+`npm run test:e2e:ci` runs the seventeen suites and fails if any of them reports *skipped*.
 
 Any run with `VOCS_CODE_E2E_UI=1` or `HARNESS_E2E=1` parks its window outside every display and never
 takes focus, so suites can run while you work. `VOCS_CODE_E2E_VISIBLE=1` brings the window back on
@@ -110,6 +111,7 @@ suites alive** below):
 | Themes, `styles.css`, terminal colours | `e2e.themes` |
 | Terminal panel, PTY, `terminal/host.ts` | `e2e.terminal` |
 | Approval cards, `harness/permissions.ts` | `e2e.approval` (live) |
+| Mission configuration, orchestration, controls or managed workspaces | `tests/mission-*.test.ts` + `e2e.mission-settings`, `e2e.mission`; managed or ordinary Pi process ownership also needs `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/mission-pi.integration.test.ts tests/mission-ordinary-pi.integration.test.ts`. Suites that need Windows Job Objects (`mission-check-job`, `mission-terminal-windows`, `mission-receipt-recovery`, `mission-ordinary-pi`, the app-death part of `mission-restart-recovery`) skip on macOS/Linux, so the ubuntu CI gate does not cover them. Live demonstrations: see below and `docs/MISSION-STATUS.md`. |
 | Vesta panel, `agents/` pi bridge, `resources/pi/vocs-code-vesta.ts` | `tests/vesta.test.ts` + `e2e.vesta` (opt-in, real pi) |
 | Updater, `main/updater*.ts`, update pill, About updates panel | `tests/updater.test.ts`, `tests/update-ui.test.tsx` + `e2e.update` (opt-in, packaged + mock feed) |
 | pi harness (`harness/pi.ts`), `resources/pi/**` | `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-tool-compatibility.integration.test.ts tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts` + live `HARNESS_SMOKE_ONLY=pi` |
@@ -156,6 +158,20 @@ require an exact successful response, one completed turn, a final idle status, a
 outcome; requested but unavailable harnesses fail loudly instead of reporting a green skipped run.
 The live suites need the corresponding runtime installed and logged in, and they spend real API
 credit. If the runtime is unavailable, leave the PR open and explain why verification is incomplete.
+
+The Mission demonstrations (spec §22.5) have their own live driver. It runs a real Pi runtime with
+no mocks, retains its artifacts outside the checkout, and never retries automatically:
+
+```bash
+# Metadata only: lists the real Pi models, sends no prompt.
+VOCS_CODE_MISSION_METADATA=1 npx vitest run tests/mission-live.integration.test.ts -t metadata
+# One paid demonstration at a time (A, B or C); bounds are optional overrides.
+VOCS_CODE_MISSION_LIVE=1 VOCS_CODE_MISSION_LIVE_PROVIDER=<provider> VOCS_CODE_MISSION_LIVE_MODEL=<model> \
+  VOCS_CODE_MISSION_LIVE_ONLY=A VOCS_CODE_MISSION_LIVE_MAX_BUDGET_USD=20 npx vitest run tests/mission-live.integration.test.ts
+```
+
+Paid runs need the user's explicit go-ahead each time. Record every outcome, including failures, in
+`docs/MISSION-STATUS.md`.
 
 ## Packaged-app checks
 

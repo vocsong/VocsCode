@@ -12,10 +12,12 @@ import { useStore } from '../store';
 import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
 import { ForkIntoDropdown } from './ForkInto';
 import { ModelPicker } from './ModelPicker';
-
-
+import { MissionHeaderControls, useMission } from './mission/MissionPanel';
+import { openMission } from '../missions';
 
 export function Header({ session }: { session: SessionMeta }) {
+  const { record: mission, error: missionError } = useMission(session);
+  const missions = useStore((s) => s.missions);
   const { models, loading: modelsLoading, error: modelsError } = useSessionModels(session);
   const panelOpen = useStore((s) => s.panelOpen);
   const togglePanel = useStore((s) => s.togglePanel);
@@ -66,7 +68,7 @@ export function Header({ session }: { session: SessionMeta }) {
       </div>
 
       <div className="header-controls">
-        <div className="header-pills">
+        {session.mission ? (mission ? <MissionHeaderControls record={mission} /> : <span role="status">Mission · {missionError ?? 'Loading coordination state…'}</span>) : <div className="header-pills">
         <Badge tone={harnessTone(session.config.harness)} title={h.name}>
           {harnessShort(session.config.harness)}
           {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
@@ -137,7 +139,7 @@ export function Header({ session }: { session: SessionMeta }) {
           )}
         </button>
 
-        </div>
+        </div>}
 
         <div className="header-actions">
           <Button variant="ghost" size="sm" icon={showThinking ? 'eye' : 'eyeOff'} onClick={toggleThinking} title={showThinking ? 'Hide thinking' : 'Show thinking'} aria-label={showThinking ? 'Hide thinking' : 'Show thinking'} />
@@ -150,12 +152,14 @@ export function Header({ session }: { session: SessionMeta }) {
             variant="ghost"
             size="sm"
             icon="archive"
-            title={session.worktreeBranch ? 'Archive & remove worktree' : 'Archive'}
+            title={session.mission ? 'Archive Mission (retain worktrees)' : session.worktreeBranch ? 'Archive & remove worktree' : 'Archive'}
             aria-label="Archive session"
+            disabled={!!session.archived}
             onClick={() => void archiveSession(session, toast)}
           />
         </div>
       </div>
+      {!session.mission && Object.values(missions).some((m) => m.originSessionId === session.id) && <div className="mission-links row gap8 wrap">{Object.values(missions).filter((m) => m.originSessionId === session.id).map((m) => <Button size="sm" variant="ghost" key={m.id} onClick={() => void openMission(m).catch((e) => toast(String(e.message ?? e), 'error'))}>Mission: {m.title}</Button>)}</div>}
     </header>
   );
 }

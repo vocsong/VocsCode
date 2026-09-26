@@ -249,7 +249,7 @@ describe('remote host end-to-end (fake relay, real core)', () => {
     const focusPush = waitFrame(ws, (m) => m.t === 'd');
     await host.broadcastPush('push:desktopFocus', { sessionId: 's1', at: 9, windowFocused: true });
     expect(await openFrame(session.key, (await focusPush).payload as never)).toEqual({ type: 'push', channel: 'push:desktopFocus', payload: { sessionId: 's1', at: 9, windowFocused: true } });
-    expect([...REMOTE_PUSH_CHANNELS].sort()).toEqual(['push:desktopFocus', 'push:remotePolicy', 'push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged']);
+    expect([...REMOTE_PUSH_CHANNELS].sort()).toEqual(['push:desktopFocus', 'push:missionsChanged', 'push:remotePolicy', 'push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged']);
 
     ws.close();
     await host.disable();

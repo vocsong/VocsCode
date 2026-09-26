@@ -11,7 +11,7 @@ import type { CuaStatus } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 const { askConfirmMock } = vi.hoisted(() => ({ askConfirmMock: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', platform: 'win32' }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke, isMac: false, modKey: 'Ctrl', platform: 'win32' }));
 vi.mock('../src/renderer/src/components/ui', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/renderer/src/components/ui')>();
   return { ...actual, askConfirm: askConfirmMock };

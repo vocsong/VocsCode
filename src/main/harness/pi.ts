@@ -6,10 +6,14 @@ import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, Suba
 import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { modelName } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
-import { shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
+import { quoteWin, shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
+import { launchOwnedWindowsJob, spawnIndependentWindowsSupervisor, windowsJobCommandLine, type OwnedWindowsJob } from '../owned-windows-job';
+import { which } from '../runtime';
+import { createManagedPiOwnershipIntent, inspectManagedPiOwnership, recordUnlaunchedManagedPiIntent, type ManagedPiOwnershipIntent } from './pi-ownership';
 import { sessionAppendPrompt } from './system-prompt';
-import type { HarnessAdapter, HarnessContext } from './types';
+import type { HarnessAdapter, HarnessContext, MissionReadiness } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
+import { MISSION_SERVER_ID } from '../../../resources/pi/vocs-code-mission';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { installPiAgentOverrides } from '../pi-agents';
@@ -200,19 +204,64 @@ export class PiAdapter implements HarnessAdapter {
   private extensionCapabilities = new Set<string>();
   private extensionFailure: string | null = null;
   private effortFile: string | null = null;
+  private missionSecrets: string[] = [];
+  /** Only the nonce-bound gate can report the active managed surface. Never the configured list. */
+  private missionTools: string[] = [];
+  private missionSettling = false;
+  private missionInterrupted = false;
+  /** Survives root exit and failed stop attempts until the Job's positive teardown receipt. */
+  private missionProcess: OwnedWindowsJob<ChildProcess> | null = null;
+  private missionIntent: ManagedPiOwnershipIntent | null = null;
+  private missionStopping = false;
+  private missionStarting = false;
+  private missionDisposal: Promise<void> | null = null;
+  private ordinaryProcess: OwnedWindowsJob<ChildProcess> | null = null;
+  private ordinaryDisposal: Promise<void> | null = null;
+  /** Sticky across root idle, native-child completion, and a later switch to plan mode. */
+  private ordinaryWritersUnproven = false;
+  private ordinaryStopping = false;
+  /** Ordinary Pi runs in the bundled Job only while ordinary process ownership is on. Pinned when
+   * the runtime is created (SessionManager persists a writer claim from it before start) and
+   * cleared if the owned launch falls back to a plain one. Untracked Pi is like Claude or Codex. */
+  private ordinaryTracked: boolean;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
     this.usageReporter = new UsageReporter((event) => this.ctx.emit(event));
+    this.ordinaryTracked = !ctx.session().mission && process.platform === 'win32' && ctx.ordinaryProcessOwnership?.() === true;
   }
 
   get busy(): boolean {
     return this._busy;
   }
 
+  workspaceWriterState(): 'active' | 'unknown' | 'quiescent' | undefined {
+    if (this.ctx.session().mission) return 'quiescent';
+    if (!this.ordinaryTracked) return undefined;
+    if (!this.ordinaryWritersUnproven) return 'quiescent';
+    return this.ordinaryProcess && this.ordinaryProcess.state !== 'uncertain' ? 'active' : 'unknown';
+  }
+
   async start(): Promise<void> {
+    if (!this.ctx.session().mission) {
+      if (this.child || this.ordinaryProcess || this.ordinaryDisposal) throw new Error('Pi process ownership must be released before restart.');
+      this.ordinaryStopping = false;
+      return this.startRuntime();
+    }
+    if (this.child || this.missionProcess || this.missionStarting || this.missionDisposal) throw new Error('Managed Pi process ownership must be released before restart.');
+    this.missionStopping = false;
+    this.missionStarting = true;
+    try {
+      await this.startRuntime();
+    } finally {
+      this.missionStarting = false;
+    }
+  }
+
+  private async startRuntime(): Promise<void> {
     this.extensionNonce = randomUUID();
     this.extensionCapabilities.clear();
+    this.missionTools = [];
     this.extensionFailure = null;
     this.exited = false;
     this.subagentModelNames.clear();
@@ -221,70 +270,152 @@ export class PiAdapter implements HarnessAdapter {
     this.subagentRuns.clear();
     const meta = this.ctx.session();
     const s = this.ctx.settings();
-    const intendedEffort = this.ctx.effort();
-    const bin = this.ctx.runtime.resolve('pi');
-    if (!bin) throw new Error('pi is not installed. Run `npm install -g @earendil-works/pi-coding-agent` or set the path in Settings.');
-    const ext = this.ctx.runtime.resource('pi', 'vocs-code-approvals.ts');
-    const toolsExt = this.ctx.runtime.resource('pi', 'vocs-code-tools.ts');
-    const mcpExt = this.ctx.runtime.resource('pi', 'vocs-code-mcp.ts');
-    const subagentsExt = this.ctx.runtime.resource('pi', 'vocs-code-subagents.ts');
-    const sessionDir = path.join(this.ctx.sessionDir, 'pi');
-    await fs.mkdir(sessionDir, { recursive: true });
-
-    // Subagents inherit the session model: override pi-subagents' pinned Explore agent in pi's
-    // global agent dir, without clobbering a user's file there. The same pass drops a legacy
-    // project copy and turns on usage reporting so subagent spend reaches the session totals and
-    // analytics.
-    await installPiAgentOverrides({
-      cwd: meta.cwd,
-      log: (level, message) => this.ctx.log(level, `[pi] ${message}`)
-    });
-
-    // The MCP bridge extension reads this file and registers each server's tools with pi.
-    const mcpServers = await this.ctx.mcpServers();
-    const args = ['--mode', 'rpc', '-e', ext, '-e', toolsExt, '-e', subagentsExt, '--session-dir', sessionDir];
-    let mcpConfigFile: string | null = null;
-    if (mcpServers.length) {
-      args.push('-e', mcpExt);
-      mcpConfigFile = path.join(sessionDir, 'mcp.json');
-      await fs.writeFile(mcpConfigFile, JSON.stringify({ servers: mcpServers.map((r) => r.def) }, null, 2) + '\n', 'utf8');
+    const mission = meta.mission;
+    // A POSIX process group does not contain detached/setsid descendants. Refuse managed startup
+    // until an equivalent ownership proof exists; ordinary Pi remains available everywhere.
+    if (mission && process.platform !== 'win32') throw new Error('Managed Pi process-tree ownership is unverified on this platform.');
+    // A managed dispatch commits its launch identity before start() is called (the service binds
+    // the nonce). Write the durable intent before any launch-time check can fail, so a missing
+    // runtime or a rejected setting still leaves the exact not-started receipt that restart
+    // recovery needs, instead of an intentless nonce that reads as unknown ownership forever.
+    const owner = mission ? { sessionId: this.ctx.sessionId, missionId: mission.missionId, generation: mission.generation } : undefined;
+    let managedIntent: ManagedPiOwnershipIntent | undefined;
+    if (owner) {
+      const previous = await inspectManagedPiOwnership(this.ctx.sessionDir, { sessionId: owner.sessionId, missionId: owner.missionId });
+      if (previous.state === 'unknown') throw new Error(`Previous managed Pi process ownership is unverified. ${previous.detail}`);
+      managedIntent = await createManagedPiOwnershipIntent(this.ctx.sessionDir, owner);
     }
-    if (meta.harnessRef.piSessionFile) args.push('--session', meta.harnessRef.piSessionFile);
-    if (meta.config.model) {
-      if (meta.config.model.provider) args.push('--provider', meta.config.model.provider);
-      args.push('--model', meta.config.model.model);
-    }
-    const level = piThinkingLevel(intendedEffort);
-    if (level) args.push('--thinking', level);
-    const append = sessionAppendPrompt(meta);
-    if (append) {
-      await appendSystemPrompt(args, append, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
-    }
-    await appendSystemPrompt(args, PI_TOOL_PROMPT, bin.path, path.join(sessionDir, 'tool-system-prompt.txt'));
-    args.push(...(s.pi.extraArgs ?? []));
-
-    this.modeFile = path.join(sessionDir, 'permission-mode.txt');
-    await fs.writeFile(this.modeFile, this.ctx.permissionMode(), 'utf8');
-    this.effortFile = path.join(sessionDir, 'reasoning-effort.json');
-    await this.writeEffortConfig(intendedEffort, meta.config.model);
-    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE_SUBAGENT_DIR: path.join(sessionDir, 'subagents'), VOCS_CODE_PROJECT_ROOT: meta.config.projectRoot, VOCS_CODE: '1' };
-    if (mcpConfigFile) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
-    for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
-      if (!env[envKey]) {
-        const key = await this.ctx.getApiKey(pid);
-        if (key) env[envKey] = key;
+    let child: ChildProcess;
+    const intendedEffort = mission?.reasoningDefault ? undefined : this.ctx.effort();
+    try {
+      const extraArgs = s.pi.extraArgs ?? [];
+      // Positive list: unknown flags, positional prompts and aliases cannot override the preset,
+      // mode, session, tool set or shipped extension ownership.
+      if (mission && extraArgs.some((arg) => !['--offline', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-approve', '--verbose'].includes(arg))) {
+        throw new Error('Pi extraArgs are incompatible with managed Mission settings. Remove model, mode, tool, extension, session and prompt overrides.');
       }
-    }
+      const bin = this.ctx.runtime.resolve('pi');
+      if (!bin) throw new Error('pi is not installed. Run `npm install -g @earendil-works/pi-coding-agent` or set the path in Settings.');
+      const ext = this.ctx.runtime.resource('pi', 'vocs-code-approvals.ts');
+      const toolsExt = this.ctx.runtime.resource('pi', 'vocs-code-tools.ts');
+      const mcpExt = this.ctx.runtime.resource('pi', 'vocs-code-mcp.ts');
+      const subagentsExt = this.ctx.runtime.resource('pi', 'vocs-code-subagents.ts');
+      const sessionDir = path.join(this.ctx.sessionDir, 'pi');
+      await fs.mkdir(sessionDir, { recursive: true });
 
-    // Which binary answered is the first question when pi misbehaves; the args carry no secrets (env does).
-    this.ctx.log('info', `spawning pi: ${bin.path} (${bin.source} runtime) in ${meta.cwd}`);
-    const child = spawnTool(bin.path, args, { cwd: meta.cwd, env });
+      // Subagents inherit the session model: override pi-subagents' pinned Explore agent in pi's
+      // global agent dir, without clobbering a user's file there. The same pass drops a legacy
+      // project copy and turns on usage reporting so subagent spend reaches the session totals and
+      // analytics.
+      if (!mission) await installPiAgentOverrides({
+        cwd: meta.cwd,
+        log: (level, message) => this.ctx.log(level, `[pi] ${message}`)
+      });
+
+      // The MCP bridge extension reads this file and registers each server's tools with pi.
+      const mcpServers = await this.ctx.mcpServers();
+      const missionServers = mcpServers.filter((server) => server.def.id === MISSION_SERVER_ID);
+      if (mission && (missionServers.length !== 1 || missionServers[0].def.transport !== 'http' || !missionServers[0].def.headers?.Authorization)) {
+        throw new Error('Managed Mission requires its authenticated MCP bridge.');
+      }
+      if (!mission && missionServers.length) throw new Error('Mission MCP bridge requires a managed session.');
+      this.missionSecrets = missionServers.flatMap((server) => Object.values(server.def.headers ?? {}).flatMap((value) => [value, value.replace(/^Bearer /, '')]));
+      const args = ['--mode', 'rpc',
+        ...(mission ? ['--no-extensions', '--no-approve', '-e', this.ctx.runtime.resource('pi', 'vocs-code-mission.ts')] : []),
+        '-e', ext, '-e', toolsExt, ...(!mission ? ['-e', subagentsExt] : []), '--session-dir', sessionDir];
+      let mcpConfigFile: string | null = null;
+      if (mcpServers.length) {
+        args.push('-e', mcpExt);
+        const persisted = mcpServers.filter((server) => server.def.id !== MISSION_SERVER_ID);
+        const file = path.join(sessionDir, 'mcp.json');
+        if (persisted.length) {
+          mcpConfigFile = file;
+          await fs.writeFile(file, JSON.stringify({ servers: persisted.map((r) => r.def) }, null, 2) + '\n', 'utf8');
+        } else if (mission) await fs.rm(file, { force: true });
+      }
+      if (meta.harnessRef.piSessionFile) args.push('--session', meta.harnessRef.piSessionFile);
+      if (meta.config.model) {
+        if (meta.config.model.provider) args.push('--provider', meta.config.model.provider);
+        args.push('--model', meta.config.model.model);
+      }
+      const level = piThinkingLevel(intendedEffort);
+      if (level) args.push('--thinking', level);
+      const append = sessionAppendPrompt(meta);
+      if (append) {
+        await appendSystemPrompt(args, append, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
+      }
+      await appendSystemPrompt(args, PI_TOOL_PROMPT, bin.path, path.join(sessionDir, 'tool-system-prompt.txt'));
+      args.push(...extraArgs);
+
+      this.modeFile = path.join(sessionDir, 'permission-mode.txt');
+      const permissionMode = mission?.sourceAccess === 'read_only' ? 'plan' : this.ctx.permissionMode();
+      await fs.writeFile(this.modeFile, permissionMode, 'utf8');
+      this.effortFile = path.join(sessionDir, 'reasoning-effort.json');
+      // Managed presets use Pi's actual thinking selection, never a catalog-driven payload override.
+      await this.writeEffortConfig(mission ? undefined : intendedEffort, meta.config.model);
+      const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE_SUBAGENT_DIR: path.join(sessionDir, 'subagents'), VOCS_CODE_PROJECT_ROOT: meta.config.projectRoot, VOCS_CODE: '1' };
+      // Never inherit another session's broker capability, mode or MCP config.
+      delete env.VOCS_CODE_MISSION_POLICY;
+      delete env.VOCS_CODE_MCP_EPHEMERAL;
+      delete env.VOCS_CODE_MCP_CONFIG;
+      if (mission) {
+        delete env.VOCS_CODE_SUBAGENT_DIR;
+        env.VOCS_CODE_PERMISSION_MODE = permissionMode;
+        env.VOCS_CODE_MISSION_POLICY = JSON.stringify({ role: mission.role, sourceAccess: mission.sourceAccess, requestedTools: mission.requestedTools, questionId: mission.questionId });
+        env.VOCS_CODE_MCP_EPHEMERAL = JSON.stringify({ servers: missionServers.map((server) => server.def) });
+      }
+      if (mcpConfigFile) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
+      for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
+        if (!env[envKey]) {
+          const key = await this.ctx.getApiKey(pid);
+          if (key) env[envKey] = key;
+        }
+      }
+
+      if (mission && this.missionStopping) throw new Error('Managed Pi startup was canceled before launch.');
+      // Which binary answered is the first question when pi misbehaves; the args carry no secrets (env does).
+      this.ctx.log('info', `spawning pi: ${bin.path} (${bin.source} runtime) in ${meta.cwd}`);
+      if (mission) {
+        const intent = managedIntent!;
+        const executable = path.isAbsolute(bin.path) ? bin.path : /[\\/]/.test(bin.path) ? path.resolve(meta.cwd, bin.path) : which(bin.path);
+        if (!executable) throw new Error('Managed Pi executable was not found.');
+        const shim = usesWindowsCommandShim(executable);
+        const shell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
+        if (this.missionStopping) throw new Error('Managed Pi startup was canceled before launch.');
+        const owned = launchOwnedWindowsJob({
+          executable: shim ? shell : executable,
+          args: shim ? [] : args,
+          ...(shim ? { commandLine: `${windowsJobCommandLine(shell, ['/d', '/s', '/c'])} "${[quoteWin(executable), ...args.map(quoteWin)].join(' ')}"` } : {}),
+          cwd: meta.cwd,
+          helperPath: this.ctx.runtime.resource('mission', 'windows-check-job.ps1'),
+          ownershipIntent: intent,
+          launch: (file, argv) => spawnIndependentWindowsSupervisor(file, argv, { cwd: meta.cwd, env }),
+          observeExit: (process, exited) => { process.once('close', exited); process.once('error', exited); },
+        });
+        this.missionIntent = intent;
+        this.missionProcess = owned;
+        child = owned.process;
+      } else {
+        if (this.ordinaryStopping) throw new Error('Pi startup was canceled before launch.');
+        const owned = this.ordinaryTracked ? await this.launchOrdinaryOwned(bin.path, args, meta.cwd, env) : null;
+        child = owned ? owned.process : spawnTool(bin.path, args, { cwd: meta.cwd, env });
+        // Tracked writers stay unproven until the Job's positive teardown, across root idle and plan.
+        if (this.ordinaryTracked) this.ordinaryWritersUnproven ||= this.ctx.permissionMode() !== 'plan';
+      }
+    } catch (error) {
+      // A throw before launchOwnedWindowsJob returned proves no helper (and no target) ran;
+      // record the exact not-started fact without pretending it was a Job.
+      if (managedIntent && !this.missionIntent) await recordUnlaunchedManagedPiIntent(managedIntent).catch(() => undefined);
+      throw error;
+    }
     this.child = child;
-    const splitter = new LineSplitter((line) => this.handleLine(line));
+    const splitter = new LineSplitter((line) => { if (this.child === child) this.handleLine(line); });
     child.stdout?.on('data', (d: Buffer) => splitter.push(d));
-    const err = new LineSplitter((line) => this.ctx.log('debug', `[pi] ${line}`));
+    const err = new LineSplitter((line) => this.ctx.log('debug', `[pi] ${this.redactMissionSecrets(line)}`));
     child.stderr?.on('data', (d: Buffer) => err.push(d));
     child.on('close', (code) => {
+      if (this.child !== child) return;
+      code = (mission ? this.missionProcess : this.ordinaryProcess)?.exitCode ?? code;
       this.exited = true;
       this.extensionCapabilities.clear();
       this._busy = false;
@@ -292,30 +423,109 @@ export class PiAdapter implements HarnessAdapter {
       this.pending.clear();
       this.ctx.emit({ type: 'status', status: 'stopped', detail: `pi exited (${code})` });
     });
-    child.on('error', (e) => this.ctx.emit({ type: 'error', message: `pi failed to start: ${errorMessage(e)}`, fatal: true }));
+    child.on('error', (e) => { if (this.child === child) this.ctx.emit({ type: 'error', message: `pi failed to start: ${errorMessage(e)}`, fatal: true }); });
 
     let state: { model?: PiModel; thinkingLevel?: string; sessionFile?: string; sessionId?: string };
     try {
       state = await withTimeout(this.request<typeof state>('get_state'), 60_000, 'pi get_state');
       // session_start notifications are emitted before get_state is handled in RPC mode.
       this.assertExtensionsReady();
+      if (mission) {
+        const readiness = await this.missionReadiness();
+        if (!readiness.ready) throw new Error(readiness.reason ?? 'Managed Mission runtime is unverified.');
+      }
     } catch (error) {
       await this.dispose();
       throw error;
     }
     if (state.sessionFile) this.ctx.updateRef({ piSessionFile: state.sessionFile });
-    if (state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: isEffortLevel(state.thinkingLevel) ? state.thinkingLevel : undefined });
+    if (!mission && state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: isEffortLevel(state.thinkingLevel) ? state.thinkingLevel : undefined });
     // A resumed session can report a different model than the one on the session config; keep the
     // effort file pointed at whatever pi actually loaded.
-    await this.writeEffortConfig(intendedEffort, state.model ? { provider: state.model.provider, model: state.model.id } : meta.config.model);
+    await this.writeEffortConfig(mission ? undefined : intendedEffort, state.model ? { provider: state.model.provider, model: state.model.id } : meta.config.model);
+    if (mission && (this.missionStopping || this.exited)) throw new Error('Managed Pi startup was canceled.');
     this.ctx.emit({ type: 'status', status: 'idle' });
     void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
   }
 
+  /**
+   * Ordinary Pi in the bundled Job (ordinary process ownership on). Pi starts only once the
+   * supervisor assigned it to the Job; when that never happens Pi never ran, so this falls back once
+   * to a plain launch and the runtime stays untracked (null). Throws only if disposal canceled it.
+   */
+  private async launchOrdinaryOwned(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<OwnedWindowsJob<ChildProcess> | null> {
+    let owned: OwnedWindowsJob<ChildProcess> | undefined;
+    try {
+      const executable = path.isAbsolute(bin) ? bin : /[\\/]/.test(bin) ? path.resolve(cwd, bin) : which(bin);
+      if (!executable) throw new Error('Pi executable was not found.');
+      const shim = usesWindowsCommandShim(executable);
+      const shell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
+      owned = launchOwnedWindowsJob({
+        executable: shim ? shell : executable,
+        args: shim ? [] : args,
+        ...(shim ? { commandLine: `${windowsJobCommandLine(shell, ['/d', '/s', '/c'])} "${[quoteWin(executable), ...args.map(quoteWin)].join(' ')}"` } : {}),
+        cwd, helperPath: this.ctx.runtime.resource('mission', 'windows-check-job.ps1'), startupTimeoutMs: 15_000,
+        launch: (file, argv) => spawnIndependentWindowsSupervisor(file, argv, { cwd, env }),
+        observeExit: (process, exited) => { process.once('close', exited); process.once('error', exited); },
+      });
+      // Disposal can cancel a launch that is still being established.
+      this.ordinaryProcess = owned;
+      await owned.established;
+    } catch (error) {
+      if (this.ordinaryStopping) throw new Error('Pi startup was canceled before launch.');
+      if (owned && this.ordinaryProcess === owned) this.ordinaryProcess = null;
+      try { owned?.cancel(); } catch { /* a failed supervisor is already settling */ }
+      this.ordinaryTracked = false;
+      this.ctx.log('warn', `Pi process ownership could not be established (${errorMessage(error)}); starting Pi without it`);
+      return null;
+    }
+    if (this.ordinaryStopping) throw new Error('Pi startup was canceled before launch.');
+    return owned;
+  }
+
   private assertExtensionsReady(): void {
-    const missing = ['approvals', 'tools', 'subagents'].filter((capability) => !this.extensionCapabilities.has(capability));
+    const required = this.ctx.session().mission ? ['approvals', 'tools', 'mcp', 'mission'] : ['approvals', 'tools', 'subagents'];
+    const missing = required.filter((capability) => !this.extensionCapabilities.has(capability));
     if (this.extensionFailure || missing.length) {
       throw new Error(`Incompatible Pi runtime: Vocs Code requires working approvals and tool compatibility extensions (Pi 0.85.1 APIs). ${this.extensionFailure ?? `Missing readiness: ${missing.join(', ')}.`} Update Pi or disable conflicting extensions; no prompt was sent.`);
+    }
+  }
+
+  async missionReadiness(): Promise<MissionReadiness> {
+    const mission = this.ctx.session().mission;
+    const child = this.child;
+    if (mission && process.platform !== 'win32') return { ready: false, tools: [], reason: 'Managed Pi process-tree ownership is unverified on this platform.' };
+    if (!mission || !child || this.exited) return { ready: false, tools: [], reason: 'Managed Pi process is not running.' };
+    if (this.missionStopping || this.missionProcess?.state !== 'live') return { ready: false, tools: [], reason: 'Managed Pi process ownership is stopping or uncertain.' };
+    try {
+      this.assertExtensionsReady();
+      const state = await withTimeout(this.request<{ model?: PiModel; thinkingLevel?: string }>('get_state'), 20_000, 'Mission Pi state');
+      // Do not use listModels(): mergePiCatalog intentionally expands the UI picker. Only Pi's
+      // raw, provider-auth-filtered snapshot can establish this runtime's model availability.
+      const available = await withTimeout(this.request<{ models: PiModel[] }>('get_available_models'), 20_000, 'Mission Pi models');
+      if (this.child !== child || this.exited || this.missionStopping || this.missionProcess?.state !== 'live') throw new Error('Managed Pi readiness became stale.');
+      this.assertExtensionsReady();
+      const model = typeof state?.model?.provider === 'string' && state.model.provider && typeof state.model.id === 'string' && state.model.id
+        ? { provider: state.model.provider, model: state.model.id } : undefined;
+      const effort = isEffortLevel(state?.thinkingLevel) ? state.thinkingLevel : undefined;
+      this.ctx.updateMeta({ activeModel: model, activeEffort: effort });
+      if (!Array.isArray(available?.models)) throw new Error('Pi did not report runtime model availability.');
+      const requested = this.ctx.session().config.model;
+      const modelAvailable = !!model && available.models.some((entry) => entry?.provider === model.provider && entry.id === model.model);
+      const connectionAvailable = !!model && available.models.some((entry) => entry?.provider === model.provider);
+      const reason = !this.missionTools.includes('mission_read') || !this.missionTools.includes(mission.questionId ? 'mission_context_read' : 'mission_report')
+        || !!mission.questionId && this.missionTools.some((name) => name !== 'mission_read' && name !== 'mission_context_read')
+        ? 'Mission gate did not report its active tool inventory.'
+        : !model ? 'Pi effective model was not observed.'
+        : !connectionAvailable ? 'Pi selected provider connection is unavailable.'
+        : !modelAvailable ? 'Pi selected model is unavailable in the runtime.'
+        : !requested || model.provider !== requested.provider || model.model !== requested.model ? 'Pi effective model differs from the fixed Mission preset.'
+        : !effort && state.thinkingLevel !== 'off' ? 'Pi effective reasoning state is unverified.'
+        : !mission.reasoningDefault && effort !== this.ctx.effort() ? 'Pi effective reasoning effort differs from the fixed Mission preset.'
+        : undefined;
+      return { ready: !reason, tools: [...this.missionTools], ...(model ? { model } : {}), ...(effort ? { effort } : {}), modelAvailable, connectionAvailable, ...(reason ? { reason } : {}) };
+    } catch (error) {
+      return { ready: false, tools: [], reason: this.redactMissionSecrets(errorMessage(error)) };
     }
   }
 
@@ -337,7 +547,13 @@ export class PiAdapter implements HarnessAdapter {
     return d.promise as Promise<T>;
   }
 
+  private redactMissionSecrets(text: string): string {
+    for (const secret of this.missionSecrets) if (secret) text = text.split(secret).join('[redacted]');
+    return text;
+  }
+
   private handleLine(line: string): void {
+    line = this.redactMissionSecrets(line);
     let ev: Record<string, unknown>;
     try {
       ev = JSON.parse(line) as Record<string, unknown>;
@@ -356,6 +572,7 @@ export class PiAdapter implements HarnessAdapter {
       } else if (ev.success === false) this.ctx.log('warn', `[pi] ${ev.command}: ${ev.error}`);
       return;
     }
+    if (this.ctx.session().mission ? this.missionStopping : this.ordinaryStopping) return;
     switch (type) {
       case 'agent_start':
         this._busy = true;
@@ -366,10 +583,17 @@ export class PiAdapter implements HarnessAdapter {
       case 'agent_end': {
         // A retry (or compaction) follows this run; wait for the final agent_end so the
         // turn item reflects the whole prompt, not the failed attempt.
-        if ((ev as { willRetry?: boolean }).willRetry) return;
+        if (this.ctx.session().mission || (ev as { willRetry?: boolean }).willRetry) return;
         void this.finishTurn();
         return;
       }
+      case 'agent_settled':
+        // Mission must not release its attempt on agent_end: Pi may still have scheduler,
+        // retry, compaction or queued follow-up work. The installed RPC drain boundary is settled.
+        if (!this.ctx.session().mission || !this.turnStartedAt || this.missionSettling) return;
+        this.missionSettling = true;
+        void this.finishTurn();
+        return;
       case 'turn_start':
       case 'turn_end':
         return;
@@ -498,7 +722,7 @@ export class PiAdapter implements HarnessAdapter {
       }
       case 'extension_error': {
         const e = ev as { extensionPath?: string; error?: string };
-        if (!e.extensionPath || /vocs-code-(?:tools|approvals|subagents)\.[cm]?[jt]s$/.test(e.extensionPath)) {
+        if (!e.extensionPath || /vocs-code-(?:tools|approvals|subagents|mission|mcp)\.[cm]?[jt]s$/.test(e.extensionPath)) {
           this.extensionFailure = e.error ?? 'Required Pi extension failed.';
           this.extensionCapabilities.clear();
         }
@@ -547,12 +771,14 @@ export class PiAdapter implements HarnessAdapter {
       this.ctx.log('warn', 'pi: malformed subagent notification');
       return;
     }
+    if (this.extensionNonce && (payload.version !== 1 || payload.nonce !== this.extensionNonce)) return;
     const runId = typeof payload.runId === 'string' ? payload.runId : '';
     if (!runId) return;
     const kind = payload.kind;
     const number = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
     const text = (value: unknown): string | undefined => (typeof value === 'string' && value ? value : undefined);
     if (kind === 'start') {
+      if (this.subagentRuns.has(runId) || this.recordedSubagents.has(runId)) return;
       const run = {
         agent: text(payload.agent) ?? 'general-purpose',
         description: text(payload.description) ?? '',
@@ -585,9 +811,14 @@ export class PiAdapter implements HarnessAdapter {
       }
       return;
     }
-    if (kind !== 'end') return;
+    if (kind === 'uncertain' && run) {
+      this.info(`Subagent ${runId} has not settled: ${text(payload.error) ?? 'child disposal is unproven'}`, 'warn');
+      return;
+    }
+    if (kind !== 'end' || !run || !['completed', 'error', 'stopped', 'interrupted'].includes(String(payload.status))) return;
+    this.recordedSubagents.add(runId);
     const totals = (payload.totals ?? {}) as Record<string, unknown>;
-    const status = text(payload.status) ?? 'error';
+    const status = String(payload.status);
     const endedAt = number(payload.endedAt) || Date.now();
     const model = run?.provider && run.model ? { provider: run.provider, model: run.model } : undefined;
     const tokens = number(totals.inputTokens) + number(totals.outputTokens) + number(totals.cacheReadTokens) + number(totals.cacheWriteTokens);
@@ -649,8 +880,14 @@ export class PiAdapter implements HarnessAdapter {
     const agentId = d.agentId ?? d.id;
     if (!agentId) return;
     if (d.modelName) this.subagentModelNames.set(agentId, d.modelName);
-    // Foreground runs return their full stats here; a background spawn's result is zeros.
+    // Foreground runs return their full stats here; a background spawn's result is zeros, not
+    // settlement. Track that known child in the same normalized stream as our shipped extension.
     if (isTerminalSubagentStatus(d.status)) this.recordSubagent(d, agentId);
+    else if (!this.recordedSubagents.has(agentId) && !this.subagentRuns.has(agentId)) {
+      const run = { agent: 'Agent', description: d.description ?? '', mode: 'background' as const, startedAt: Date.now(), costUsd: 0, turns: 0, toolUses: 0 };
+      this.subagentRuns.set(agentId, run);
+      this.ctx.emit({ type: 'subagent.run', run: { ...run, runId: agentId, status: 'running' } });
+    }
   }
 
   /** Handles a background completion, including a group notification's `others`. */
@@ -690,6 +927,11 @@ export class PiAdapter implements HarnessAdapter {
       error: d.error
     };
     this.ctx.emit({ type: 'subagent', completion });
+    const run = this.subagentRuns.get(agentId);
+    if (run) {
+      this.ctx.emit({ type: 'subagent.run', run: { ...run, runId: agentId, status: d.status === 'completed' ? 'completed' : d.status === 'error' ? 'error' : 'stopped', endedAt: Date.now() } });
+      this.subagentRuns.delete(agentId);
+    }
     const bits: string[] = [completion.status === 'error' ? 'failed' : 'finished'];
     if (model) bits.push(`${model.provider}/${model.model}`);
     if (completion.toolUses) bits.push(`${completion.toolUses} tool ${completion.toolUses === 1 ? 'use' : 'uses'}`);
@@ -732,6 +974,13 @@ export class PiAdapter implements HarnessAdapter {
         /* process gone */
       }
     };
+    // Mission questions go through the broker to the lead. Keep only the shipped permission
+    // gate's cards; a worker extension must never create another user conversation channel.
+    if (this.ctx.session().mission && ['select', 'confirm', 'input', 'editor'].includes(req.method) &&
+      !(req.method === 'select' && req.title?.startsWith(PI_APPROVAL_MARKER))) {
+      respond({ cancelled: true });
+      return;
+    }
     switch (req.method) {
       case 'select': {
         const title = req.title ?? '';
@@ -831,9 +1080,13 @@ export class PiAdapter implements HarnessAdapter {
     try {
       const payload = JSON.parse(message.slice(marker.length)) as Record<string, unknown>;
       if (!payload || payload.version !== 1 || !this.extensionNonce || payload.nonce !== this.extensionNonce) return true;
-      if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents')) {
+      if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents' || payload.capability === 'mission' || payload.capability === 'mcp')) {
         if (payload.ready === false) this.extensionCapabilities.delete(payload.capability);
         else this.extensionCapabilities.add(payload.capability);
+        if (payload.capability === 'mission') {
+          this.missionTools = payload.ready === true && Array.isArray(payload.tools) && payload.tools.every((name) => typeof name === 'string')
+            ? [...new Set(payload.tools as string[])] : [];
+        }
       } else if (marker === PI_EXTENSION_ERROR_MARKER) {
         this.extensionFailure = typeof payload.message === 'string' ? payload.message : 'Required Pi extension failed.';
         this.extensionCapabilities.clear();
@@ -863,8 +1116,9 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   private async finishTurn(): Promise<void> {
+    const child = this.child;
     this.declinedTools.clear();
-    this._busy = false;
+    if (!this.ctx.session().mission) this._busy = false;
     // The turn ends now, but the stats round-trip below is app bookkeeping rather than model work:
     // measuring the wall time after it would fold a stalled request (up to the 10s timeout) into the
     // turn's duration and depress the speed the panel derives from it. A turn that ends after
@@ -901,6 +1155,8 @@ export class PiAdapter implements HarnessAdapter {
       // cumulative snapshot still reconciles them rather than counting them twice.
       this.ctx.log('debug', `get_session_stats failed: ${errorMessage(e)}`);
     }
+    // A delayed stats response/close must not publish a completed turn while ownership is stopping.
+    if (this.child !== child || (this.ctx.session().mission ? this.missionStopping : this.ordinaryStopping)) return;
     const completed = this.usage.finishTurn();
     // Subagent spend accrued since the last report, so analytics can put it on the model that ran it.
     const subagentCostByModel = this.pendingSubagentCost.size ? [...this.pendingSubagentCost.values()] : undefined;
@@ -913,12 +1169,13 @@ export class PiAdapter implements HarnessAdapter {
     // has no measured usage at all, so the row stays unknown instead of claiming a measured zero.
     const turnUsage = completed.usage && Object.values(completed.usage).some((value) => (value ?? 0) > 0) ? completed.usage : undefined;
     // pi ends a failed turn with an assistant message (stopReason 'error'), not an error event.
-    const stopReason = this.lastStopReason;
+    const stopReason = this.ctx.session().mission && this.missionInterrupted ? 'aborted' : this.lastStopReason;
     const errorMsg = this.lastErrorMessage;
     this.lastStopReason = null;
     this.lastErrorMessage = null;
     const failed = stopReason === 'error' && errorMsg;
     if (failed) this.info(`Turn failed: ${errorMsg}`, 'error');
+    if (this.ctx.session().mission) this._busy = false;
     this.ctx.emit({
       type: 'item.upsert',
       item: {
@@ -941,8 +1198,14 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   async send(input: UserInput): Promise<void> {
+    if (this.ctx.session().mission && /^\s*\/(?:goal|subagents?|agents?|reload|model|thinking|effort)(?::|\s|$)/i.test(input.text)) throw new Error('Mission owns continuation, delegation and presets; use Mission controls.');
     if (!this.child) await this.start();
     this.assertExtensionsReady();
+    if (this.ctx.session().mission) {
+      const readiness = await this.missionReadiness();
+      if (!readiness.ready) throw new Error(readiness.reason ?? 'Managed Mission runtime is unverified.');
+    }
+    if (!this.ctx.session().mission && this.ctx.permissionMode() !== 'plan') this.ordinaryWritersUnproven = true;
     const images = (input.images ?? []).map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }));
     if (this._busy) {
       const type = input.mode === 'queue' ? 'follow_up' : 'steer';
@@ -950,6 +1213,8 @@ export class PiAdapter implements HarnessAdapter {
       return;
     }
     this._busy = true;
+    this.missionSettling = false;
+    this.missionInterrupted = false;
     this.turnStartedAt = Date.now();
     // Arm the turn here: send() sets turnStartedAt before pi emits agent_start, so the guard in
     // agent_start never fires for a normal prompt and the turn would never be counted.
@@ -966,16 +1231,24 @@ export class PiAdapter implements HarnessAdapter {
 
   async interrupt(): Promise<void> {
     if (!this.child) return;
+    if (this.ctx.session().mission) {
+      if (this._busy) this.missionInterrupted = true;
+      await this.request('clear_queue');
+      await this.request('abort');
+      return;
+    }
     await this.request('abort').catch((e) => this.ctx.log('warn', `abort failed: ${errorMessage(e)}`));
   }
 
   async setModel(model: ModelRef): Promise<void> {
+    if (this.ctx.session().mission) throw new Error('Mission presets are fixed for the attempt.');
     await this.request('set_model', { provider: model.provider, modelId: model.model });
     this.ctx.updateMeta({ activeModel: model });
     await this.writeEffortConfig(this.ctx.effort(), model);
   }
 
   async setEffort(effort: EffortLevel): Promise<void> {
+    if (this.ctx.session().mission) throw new Error('Mission presets are fixed for the attempt.');
     await this.request('set_thinking_level', { level: piThinkingLevel(effort) });
     this.ctx.updateMeta({ activeEffort: effort });
     await this.writeEffortConfig(effort, this.ctx.session().activeModel);
@@ -1001,10 +1274,12 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
+    // A tighter root mode cannot revoke a child/tool already admitted under writable permission.
+    if (!this.ctx.session().mission && this.child && mode !== 'plan') this.ordinaryWritersUnproven = true;
     // The approvals extension re-reads this file before every tool call.
     if (!this.modeFile) return;
     try {
-      await fs.writeFile(this.modeFile, mode, 'utf8');
+      await fs.writeFile(this.modeFile, this.ctx.session().mission?.sourceAccess === 'read_only' ? 'plan' : mode, 'utf8');
     } catch (e) {
       // Surface the failure: silently keeping the old mode active would grant or withhold
       // permissions behind the user's back.
@@ -1031,11 +1306,69 @@ export class PiAdapter implements HarnessAdapter {
   async dispose(): Promise<void> {
     this.usageReporter.close();
     this.extensionCapabilities.clear();
+    this.missionTools = [];
     this.declinedTools.clear();
     const child = this.child;
-    this.child = null;
-    if (!child) return;
-    await shutdownChild(child, 1500);
+    if (this.ctx.session().mission) {
+      this.missionStopping = true;
+      if (this.missionDisposal) return this.missionDisposal;
+      const owned = this.missionProcess;
+      if (child && !owned) throw new Error('Managed Pi process ownership is unverified; teardown cannot be confirmed.');
+      if (!owned) return;
+      const operation = Promise.resolve().then(async () => {
+        // Never close/kill the supervisor first, nor replace a lost receipt with root exit or a
+        // deadline. Retain both handles on rejection so SessionManager stays unavailable and retries.
+        try {
+          owned.cancel();
+          await withTimeout(owned.quiescent, 15_000, 'Managed Pi process-tree teardown');
+        } catch (error) {
+          // Pipe loss is recoverable only from the exact durable empty-Job receipt AND this
+          // positively owned supervisor's close event. A previous generation/PID is not proof.
+          const intent = this.missionIntent;
+          const proof = this.exited && intent ? await inspectManagedPiOwnership(this.ctx.sessionDir, intent.record) : undefined;
+          if (!proof?.quiescent) throw error;
+        }
+        if (this.missionProcess !== owned || this.child !== child) throw new Error('Managed Pi process ownership changed during teardown.');
+        this.missionProcess = null;
+        this.missionIntent = null;
+        this.child = null;
+        this.exited = true;
+        this._busy = false;
+      });
+      this.missionDisposal = operation;
+      try {
+        await operation;
+      } finally {
+        this.missionDisposal = null;
+      }
+      return;
+    }
+    this.ordinaryStopping = true;
+    if (this.ordinaryDisposal) return this.ordinaryDisposal;
+    const owned = this.ordinaryProcess;
+    const operation = Promise.resolve().then(async () => {
+      if (owned && child !== owned.process) {
+        // The launch is still being established or never was: Pi has not run, so nothing is owed.
+        // Canceling before the supervisor's resume keeps the suspended target from ever running.
+        try { owned.cancel(); } catch { /* a failed launch never started Pi */ }
+        if (this.ordinaryProcess === owned) this.ordinaryProcess = null;
+      } else if (owned) {
+        owned.cancel();
+        await withTimeout(owned.quiescent, 15_000, 'Pi process-tree teardown');
+        if (this.ordinaryProcess !== owned || this.child !== child) throw new Error('Pi process ownership changed during teardown.');
+        this.ordinaryProcess = null;
+        this.ordinaryWritersUnproven = false;
+      } else if (child) {
+        // Untracked Pi (ordinary process ownership off, or its launch fell back): the graceful
+        // stdin-EOF shutdown every ordinary Pi always had. It proves nothing and claims nothing.
+        await shutdownChild(child, 1500);
+      }
+      this.child = null;
+      this.exited = true;
+      this._busy = false;
+    });
+    this.ordinaryDisposal = operation;
+    try { await operation; } finally { this.ordinaryDisposal = null; }
   }
 }
 
