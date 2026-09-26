@@ -534,7 +534,9 @@ export const useStore = create<State>((set, get) => ({
     const generation = storeGeneration;
     const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
     if (generation !== storeGeneration) return;
-    set({ settings, sessions, remoteAccess: { viewOnly: settings.remote?.viewOnly === true } });
+    // The remote policy is live (`push:remotePolicy`) and boot owns its initial value; a resync
+    // must not overwrite a newer push with a settings read that raced it.
+    set({ settings, sessions });
     if (canInvoke('desktop:focus')) {
       void invoke('desktop:focus', undefined).then((focus) => {
         if (generation === storeGeneration) set({ desktopFocus: focus });

@@ -346,13 +346,65 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     const overflow = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth }));
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.innerWidth + 1);
 
+    // The control chips are reachable under the header.
+    await expect.poll(async () => page.locator('[data-testid="session-controls"] button').count(), { timeout: 20_000 }).toBeGreaterThan(2);
+
+    // The sessions home groups by what the user has to do.
+    await page.getByRole('button', { name: 'Back to sessions' }).click();
+    await page.getByTestId('on-your-computer').waitFor({ timeout: 20_000 });
+
+    // Follow my computer: switching it on makes the shell follow the desktop focus push.
+    await page.getByRole('button', { name: 'Menu' }).click();
+    // The toggle input is visually hidden; the label track is the real touch target.
+    const followToggle = page.locator('.w-field-row', { hasText: 'Follow my computer' }).locator('.toggle');
+    await followToggle.click();
+    await expect.poll(() => page.locator('.w-field-row', { hasText: 'Follow my computer' }).locator('input[type="checkbox"]').isChecked()).toBe(true);
+    await page.locator('.w-sheet-backdrop').click({ position: { x: 8, y: 8 } });
+    await pushEvent(phone.host, 'Phone-s2', 6, { type: 'item.delta', id: 'never', textDelta: 'ignored' });
+    await phone.host.broadcastPush('push:desktopFocus', { sessionId: 'Phone-s2', at: 5, windowFocused: true });
+    await page.locator('.w-session-name').getByText('Phone second').waitFor({ timeout: 20_000 });
+
+    // An approval shows a banner that takes the reader to the card.
+    const approval: TranscriptItem = {
+      id: 'ap1', kind: 'approval', ts: 9,
+      request: {
+        id: 'ap1', sessionId: 'Phone-s2', harness: 'acp', kind: 'permission', title: 'Run a command',
+        command: 'rm -rf build', cwd: '/repo',
+        options: [{ id: 'acp-allow-once', label: 'Allow once', kind: 'allow' }, { id: 'acp-deny', label: 'Deny', kind: 'deny' }],
+        createdAt: 1
+      }
+    };
+    await pushEvent(phone.host, 'Phone-s2', 8, { type: 'item.upsert', item: approval });
+    const banner = page.getByTestId('approval-banner');
+    await banner.waitFor({ timeout: 20_000 });
+    await banner.click();
+    await expect.poll(async () => {
+      const box = await page.getByRole('button', { name: 'Allow once' }).boundingBox();
+      const viewport = page.viewportSize() ?? { width: 390, height: 844 };
+      return !!box && box.y >= 0 && box.y + box.height <= viewport.height + 1;
+    }, { timeout: 10_000 }).toBe(true);
+
+    // Every shell control is a 44px touch target.
+    const short = await page.evaluate(() => {
+      const scope = '.w-topbar, .w-controls, .w-composer, .w-home-head, .w-sheet';
+      return [...document.querySelectorAll(`${scope} button, ${scope} .btn`)].filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.height < 44;
+      }).map((el) => (el.textContent ?? '').trim());
+    });
+    expect(short).toEqual([]);
+
     // The composer is on screen even after a long transcript, and fields do not trigger iOS zoom.
     await page.locator('textarea[aria-label="Message"]').fill('a phone message');
     const composer = await page.locator('.w-composer').boundingBox();
     const viewport = page.viewportSize() ?? { width: 390, height: 844 };
     expect(composer).toBeTruthy();
     expect(composer!.y + composer!.height).toBeLessThanOrEqual(viewport.height + 1);
-    const fontSizes = await page.evaluate(() => [...document.querySelectorAll('input, textarea, select')].map((el) => Number.parseFloat(getComputedStyle(el).fontSize)));
-    expect(Math.min(...fontSizes)).toBeGreaterThanOrEqual(16);
+    const smallText = await page.evaluate(() =>
+      [...document.querySelectorAll('input:not([type="checkbox"]):not([type="radio"]), textarea, select')]
+        .map((el) => ({ tag: el.tagName, cls: el.className, size: Number.parseFloat(getComputedStyle(el).fontSize) }))
+        .filter((entry) => entry.size < 16)
+    );
+    expect(smallText).toEqual([]);
   }, 240_000);
 });

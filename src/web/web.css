@@ -21,7 +21,13 @@ textarea,
 select,
 button {
   font-family: inherit;
-  /* 16px keeps iOS from zooming a field on focus. */
+}
+
+/* 16px keeps iOS from zooming a field on focus; the .w-app scope outranks the reused
+   transcript/approval styles, which set smaller mono sizes. */
+.w-app input,
+.w-app textarea,
+.w-app select {
   font-size: 16px;
 }
 
@@ -294,6 +300,170 @@ button {
 
 .w-status {
   flex: none;
+}
+
+/* Touch targets: every control the shell itself renders is at least 44px tall, so a phone does not
+   need a steady thumb. (The reused transcript keeps its own compact controls.) */
+.w-app .btn,
+.w-app .w-chip,
+.w-app .w-icon-btn,
+.w-app .w-computer,
+.w-app input,
+.w-app textarea,
+.w-app select {
+  min-height: 44px;
+}
+
+/* --- Two panes (wide screens) ------------------------------------------------------ */
+
+.w-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+@media (max-width: 899px) {
+  .w-main[data-has-session] .w-home {
+    display: none;
+  }
+
+  .w-main:not([data-has-session]) .w-session {
+    display: none;
+  }
+}
+
+@media (min-width: 900px) {
+  .w-home {
+    max-width: 340px;
+    border-right: 1px solid var(--border);
+    flex: none;
+    width: 340px;
+    box-sizing: border-box;
+  }
+}
+
+/* --- Sessions home sections ------------------------------------------------------- */
+
+.w-section {
+  margin: 14px 0;
+}
+
+.w-section h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--fg-muted);
+  margin: 0 0 6px;
+}
+
+.w-section details summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+.w-continue-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 12px;
+}
+
+.w-continue-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.w-continue-title {
+  font-weight: 600;
+}
+
+.w-continue-meta {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.w-row-detail {
+  color: var(--amber);
+  font-size: 12px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Session controls, approval banner, follow snackbar ---------------------------- */
+
+.w-controls {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.w-chip {
+  min-height: 44px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.w-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.w-approval-banner {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  border-bottom: 1px solid var(--amber);
+  background: var(--amber-soft);
+  color: var(--fg);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.w-snackbar {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+  font-size: 14px;
+}
+
+.w-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
 }
 
 /* --- One session ----------------------------------------------------------------- */
