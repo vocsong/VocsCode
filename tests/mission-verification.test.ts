@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { createConnection } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MissionVerification, isolatedCheckEnvironment, parseTestReport, type VerificationDeps, type VerificationRequest } from '../src/main/mission/verification';
+import { MissionVerification, dependencySetupEnvironment, isolatedCheckEnvironment, parseTestReport, type VerificationDeps, type VerificationRequest } from '../src/main/mission/verification';
 import { MissionScheduler } from '../src/main/mission/scheduler';
 
 let root: string;
@@ -491,5 +491,16 @@ describe('check reports and isolated environment', () => {
       expect(env.LOCALAPPDATA).toBe(path.join(root, 'localappdata'));
       expect(isolatedCheckEnvironment(root, { home: 'real-profile', temp: 'real-temp' }).home).toBeUndefined();
     } finally { if (previous === undefined) delete process.env.MISSION_TEST_SECRET; else process.env.MISSION_TEST_SECRET = previous; }
+  });
+  it('gives dependency setup the shared download cache but never a user npmrc or its credentials', () => {
+    const cache = path.join(root, 'user-npm-cache');
+    const env = dependencySetupEnvironment(root, { NPM_CONFIG_USERCONFIG: 'real-user.npmrc', npm_config_cache: 'elsewhere', EXPLICIT_TEST_SETTING: 'approved' }, cache);
+    expect(env).toMatchObject({
+      npm_config_cache: cache, npm_config_userconfig: path.join(root, 'npm', 'user.npmrc'), npm_config_globalconfig: path.join(root, 'npm', 'global.npmrc'),
+      npm_config_logs_dir: path.join(root, 'npm', 'logs'), npm_config_audit: 'false', npm_config_fund: 'false', npm_config_update_notifier: 'false',
+      EXPLICIT_TEST_SETTING: 'approved', HOME: path.join(root, 'home'), TEMP: root,
+    });
+    expect(env.NPM_CONFIG_USERCONFIG).toBeUndefined();
+    expect(env.PORT).toBeUndefined();
   });
 });

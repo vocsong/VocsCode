@@ -9,14 +9,25 @@ import { runCapture, which } from '../runtime';
 import type { CapacityLease, MissionScheduler } from './scheduler';
 import { startOwnedCheck, type CheckOutcome, type OwnedCheckProcess } from './check-process';
 import { allocateCheckPort, type CheckPortLease } from './check-resources';
+import { runMissionGit } from './git-boundary';
+import { inspectMissionProjectDependencies, isConventionalMissionCheck, missionDependencySetupIssue } from './policy';
 import { checkOwnershipDirectory, createProcessOwnershipIntent, retireUnclaimedProcessIntent, type ProcessOwnershipIntent } from './process-ownership';
 import { verificationOutcomeHash } from './progress';
 
 /** Only the real permission boundary may report a user denial, never command output. */
 export class VerificationApprovalDenied extends Error {}
 
+/** A typed host observation that blocks the check without implicating the project's own code. */
+class VerificationBlocked extends Error {
+  constructor(readonly failure: MissionFailure) { super(failure.message); }
+}
+const blocked = (code: string, message: string, recovery: NonNullable<MissionFailure['recovery']>) => new VerificationBlocked({ kind: 'environment', code, confidence: 'observed', recovery, message });
 const supervisorUnavailable = (message: string) => ({ kind: 'environment', code: 'check_supervisor_unavailable', confidence: 'observed', recovery: 'user_action', message } satisfies MissionFailure);
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+/** Exactly the approved text of the host's dependency step; its flags come from host npm config. */
+const NPM_SETUP = 'npm ci';
+const SETUP_TIMEOUT_MS = 20 * 60_000;
 
 export interface VerificationRequest {
   missionId: string;
@@ -44,6 +55,8 @@ export interface VerificationDeps {
   windowsJobHelper?: string;
   /** Host-owned durable launch journal, separate from check scratch and retained worktrees. */
   ownershipRoot?: string;
+  /** Trusted npm download cache for conventional dependency setup; defaults to the user's own. */
+  npmCache?: string;
 }
 
 interface VerificationJob {
@@ -63,6 +76,8 @@ export class MissionVerification {
   /** Includes failed/completed receipts: retrying an operation is not permission to execute again.
    * Durable dedupe across restart belongs to the persisted verify intent in MissionService. */
   private readonly operations = new Map<string, { request: VerificationRequest; result: Promise<MissionEvidence> }>();
+  /** Worktree + exact content whose locked npm dependencies this host has installed. */
+  private readonly prepared = new Set<string>();
 
   constructor(private readonly deps: VerificationDeps) {}
 
@@ -116,12 +131,13 @@ export class MissionVerification {
     };
     const outputs: string[] = [];
     const ownership = this.deps.ownershipRoot ? checkOwnershipDirectory(this.deps.ownershipRoot, request.missionId) : undefined;
-    // One single-use intent per owned launch. On Windows each
+    // One single-use intent per owned launch (dependency setup, then the check). On Windows each
     // declares that the Job supervisor must claim it before starting anything, so an intent that
     // was never claimed is provably unstarted and can be retired rather than block recovery.
     const newIntent = () => ownership ? createProcessOwnershipIntent(ownership, { kind: 'mission-check', missionId: request.missionId, operationId: request.operationId }, { claimRequired: process.platform === 'win32' }) : undefined;
     let pending: ProcessOwnershipIntent | undefined;
     const takeIntent = () => { const intent = pending ?? newIntent(); pending = undefined; return intent; };
+    let dependencies: Record<string, unknown> | undefined;
     try {
       // Written before any wait: restart recovery needs a durable record for every in-flight host
       // check, and a host death during approval or the slot wait leaves this intent unclaimed.
@@ -133,6 +149,10 @@ export class MissionVerification {
       const before = await this.deps.contentIdentity(request.cwd);
       if (before.contentHash !== request.revision.contentHash || before.baseCommitSha !== request.revision.baseCommitSha) throw new Error('Verification source revision is stale');
       job.scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-mission-check-'));
+      if (isConventionalMissionCheck(request.check)) {
+        dependencies = await this.prepareDependencies(request, job, environment, evidence, takeIntent);
+        evidence.environmentRef += `; dependencies=${dependencies.manager}:${dependencies.status}`;
+      }
       job.port = await allocateCheckPort();
       const env = isolatedCheckEnvironment(job.scratch, environment, job.port.port);
       evidence.environmentRef += `; env-sha256=${createHash('sha256').update(JSON.stringify(Object.entries(env).sort(([a], [b]) => a.localeCompare(b)))).digest('hex')}`;
@@ -185,6 +205,7 @@ export class MissionVerification {
         cwd: request.cwd, environmentRef: evidence.environmentRef, environmentKeys: Object.keys(env).sort(),
         processOwnership: process.platform === 'win32' ? 'windows-job-object' : 'posix-process-group',
         resources: { port: job.port.port, host: '127.0.0.1', cooperativeOnly: true },
+        ...(dependencies ? { dependencySetup: dependencies } : {}),
         quiescent: job.quiescent, result: evidence.result, exitCode: evidence.exitCode,
         executedTests: evidence.executedTests, skippedTests: evidence.skippedTests,
         // The raw report/logs remain separate immutable artifacts; prose is never test evidence.
@@ -197,6 +218,7 @@ export class MissionVerification {
       const detail = errorText(error);
       outputs.push(detail);
       if (error instanceof VerificationApprovalDenied) evidence.failure = { kind: 'permission', code: 'approval_denied', source: 'approval', confidence: 'observed', recovery: 'user_action', message: detail };
+      else if (error instanceof VerificationBlocked) evidence.failure = error.failure;
       evidence.artifactIds.push(await this.deps.saveArtifact(request.missionId, Buffer.from(detail)));
     } finally {
       evidence.outcomeHash = verificationOutcomeHash(outputs, [request.cwd, job.scratch ?? ''], request.check.testReport?.format);
@@ -238,9 +260,83 @@ export class MissionVerification {
     try { if (!retireUnclaimedProcessIntent(intent)) throw new Error('Ownership intent is claimed'); }
     catch { job.quiescent = false; job.uncertain = true; }
   }
+
+  /** Conventional npm gates run against the project's own locked dependencies, but a fresh
+   * verification worktree holds committed files only. Install them with `npm ci` once per worktree
+   * and content, as a separately owned process under the check's approval, slot and scratch profile.
+   * Anything that prevents this is an environment blocker; the project check does not run. */
+  private async prepareDependencies(request: VerificationRequest, job: VerificationJob, environment: Record<string, string>, evidence: MissionEvidence, takeIntent: () => ProcessOwnershipIntent | undefined): Promise<Record<string, unknown>> {
+    let manifest: Awaited<ReturnType<typeof inspectMissionProjectDependencies>>;
+    try { manifest = await inspectMissionProjectDependencies(request.cwd); }
+    catch (error) { throw blocked('dependency_setup_unavailable', `Cannot read the verified package.json to prepare dependencies, so the check did not run: ${errorText(error)}`, 'lead_diagnosis'); }
+    const issue = missionDependencySetupIssue(manifest);
+    if (issue) throw blocked('dependency_setup_unsupported', `${issue} The check did not run.`, 'user_action');
+    if (!manifest.npmLockfile) return { manager: 'none', status: 'not_required' };
+    if (!await dependenciesIgnored(request.cwd)) throw blocked('dependency_setup_unsupported', "node_modules is not ignored by this project's Git ignore rules, so installing dependencies would change the verified content. Ignore node_modules, or add .vocs-code/mission-delivery.json with explicit setup and check commands. The check did not run.", 'user_action');
+    const receipt = { manager: 'npm', command: NPM_SETUP, lockfile: manifest.npmLockfile };
+    const key = JSON.stringify([path.resolve(request.cwd), request.revision.baseCommitSha, request.revision.contentHash]);
+    if (this.prepared.has(key) && await regularFile(path.join(request.cwd, 'node_modules', '.package-lock.json'))) return { ...receipt, status: 'reused' };
+    this.prepared.delete(key);
+    const env = dependencySetupEnvironment(job.scratch!, environment, this.deps.npmCache ?? await userNpmCache());
+    for (const dir of profileDirectories(env)) await fs.mkdir(dir, { recursive: true });
+    await this.deps.authorize(structuredClone(request));
+    if (job.controller.signal.aborted) throw new Error('Verification canceled before dependency setup');
+    const outcome = await this.launch(request, job, { command: NPM_SETUP, cwd: request.cwd, env, timeoutMs: SETUP_TIMEOUT_MS, ownershipIntent: takeIntent() });
+    evidence.artifactIds.push(await this.deps.saveArtifact(request.missionId, outcome.stdout), await this.deps.saveArtifact(request.missionId, outcome.stderr));
+    if (outcome.canceled || job.controller.signal.aborted) throw new Error('Verification canceled during dependency setup');
+    if (!job.quiescent) throw new Error(`Dependency setup did not confirm process-tree quiescence: ${outcome.error ?? 'ownership is uncertain'}`);
+    if (outcome.notStarted) throw new VerificationBlocked(supervisorUnavailable(outcome.error ?? 'The dependency setup supervisor never started.'));
+    if (outcome.error || outcome.timedOut || outcome.outputLimited || outcome.lingering || outcome.code !== 0) {
+      const reason = outcome.timedOut ? 'timed out' : outcome.outputLimited ? 'exceeded the output capture limit' : outcome.lingering ? 'left running processes behind'
+        : outcome.error ? `failed: ${outcome.error}` : `exited with code ${outcome.code}`;
+      throw blocked('dependency_setup_failed', `Dependency setup (${NPM_SETUP}) ${reason} in the verification worktree, so the check did not run. Its logs are retained. Typical causes are a ${manifest.npmLockfile} out of sync with package.json, an unreachable registry, or a private registry: Mission never passes your npm credentials (~/.npmrc) to project code, so private-registry projects need .vocs-code/mission-delivery.json with explicit setup commands.`, 'lead_diagnosis');
+    }
+    const after = await this.deps.contentIdentity(request.cwd);
+    if (after.contentHash !== request.revision.contentHash || after.baseCommitSha !== request.revision.baseCommitSha) throw blocked('dependency_setup_changed_content', `Dependency setup (${NPM_SETUP}, including package lifecycle scripts) changed tracked or unignored files, so the verified content no longer matches and the check did not run.`, 'lead_diagnosis');
+    this.prepared.add(key);
+    return { ...receipt, status: 'installed' };
+  }
 }
 
 const profileDirectories = (env: NodeJS.ProcessEnv) => [env.HOME!, env.APPDATA!, env.LOCALAPPDATA!, env.VOCS_CODE_USER_DATA!, env.XDG_CONFIG_HOME!, env.XDG_DATA_HOME!, env.XDG_CACHE_HOME!];
+const regularFile = (file: string) => fs.lstat(file).then((stat) => stat.isFile() && !stat.isSymbolicLink(), () => false);
+
+/** Probes a path inside node_modules so a directory-only rule ("node_modules/") applies before the
+ * directory exists. Tracked content is never ignored, so a committed node_modules is refused. */
+async function dependenciesIgnored(cwd: string): Promise<boolean> {
+  const result = await runMissionGit(cwd, ['check-ignore', '-q', '--', 'node_modules/.package-lock.json'], { timeoutMs: 30_000 });
+  if (result.timedOut || (result.code !== 0 && result.code !== 1)) throw blocked('dependency_setup_unavailable', 'Cannot establish whether node_modules is ignored in the verification worktree, so the check did not run.', 'lead_diagnosis');
+  return result.code === 0;
+}
+
+let npmCache: Promise<string | undefined> | undefined;
+/** The user's real npm download cache, never the scratch profile. It is read with their own npm
+ * configuration from the home directory (never a project .npmrc); only the path is used. */
+function userNpmCache(): Promise<string | undefined> {
+  return npmCache ??= (async () => {
+    try {
+      const result = await runCapture(which('npm') ?? 'npm', ['config', 'get', 'cache'], { cwd: os.homedir(), timeoutMs: 15_000 });
+      const value = result.code === 0 && !result.timedOut && !result.truncated ? result.stdout.trim().split(/\r?\n/).at(-1)?.trim() : undefined;
+      if (value && path.isAbsolute(value)) return value;
+    } catch { /* npm's documented default below */ }
+    if (process.platform !== 'win32') return path.join(os.homedir(), '.npm');
+    return process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'npm-cache') : undefined;
+  })();
+}
+
+const NPM_CONFIG_KEYS = ['npm_config_cache', 'npm_config_userconfig', 'npm_config_globalconfig', 'npm_config_logs_dir', 'npm_config_audit', 'npm_config_fund', 'npm_config_update_notifier', 'npm_config_prefer_offline'];
+/** The dependency step's profile: the check's isolation plus host npm settings. The download cache
+ * is shared (MISSION-SPEC §14.6); no user or global npmrc is read, so registry credentials never
+ * reach project or dependency lifecycle scripts. Logs stay in scratch, not the user's cache. */
+export function dependencySetupEnvironment(scratch: string, approved: Record<string, string> = {}, cache?: string): NodeJS.ProcessEnv {
+  const env = isolatedCheckEnvironment(scratch, Object.fromEntries(Object.entries(approved).filter(([key]) => !NPM_CONFIG_KEYS.includes(key.toLowerCase()))));
+  const npm = path.join(scratch, 'npm');
+  return {
+    ...env, ...(cache ? { npm_config_cache: cache } : {}),
+    npm_config_userconfig: path.join(npm, 'user.npmrc'), npm_config_globalconfig: path.join(npm, 'global.npmrc'), npm_config_logs_dir: path.join(npm, 'logs'),
+    npm_config_audit: 'false', npm_config_fund: 'false', npm_config_update_notifier: 'false', npm_config_prefer_offline: 'true',
+  };
+}
 
 function validateCheck(check: MissionCheck): void {
   if (!check.id || typeof check.command !== 'string' || !check.command.trim() || check.command.length > 16_384 || check.command.includes('\0')) throw new Error('Invalid verification command');

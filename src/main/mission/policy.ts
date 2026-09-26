@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { MissionCheck, MissionDeliveryPolicy } from '../../shared/mission';
 import { readMissionRemoteEndpoint, runMissionGit } from './git-boundary';
@@ -50,19 +51,70 @@ async function readOwned(root: string, name: string): Promise<string | undefined
   if (Buffer.byteLength(text) > MAX_INSTRUCTION_BYTES) throw new Error(`Project policy file grew beyond its limit: ${name}`);
   return text;
 }
+const projectBuild = (name: 'typecheck' | 'build'): MissionCheck => ({ id: `project-${name}`, name: `Project ${name}`, kind: 'build', command: `npm run ${name}`, criterionIds: [`project-${name}`], required: true, heavy: true, timeoutMs: 30 * 60_000 });
+const projectTest = (command: string, format: 'vitest-json' | 'node-tap'): MissionCheck => ({ id: 'project-test', name: 'Project tests', kind: 'test', command, criterionIds: ['project-test'], required: true, heavy: true, testReport: { format, minimumTests: 1, maximumSkipped: 0 }, timeoutMs: 30 * 60_000 });
+const CONVENTIONAL = { typecheck: projectBuild('typecheck'), vitest: projectTest('npm --silent test -- --reporter=json', 'vitest-json'), nodeTest: projectTest('npm --silent test -- --test-reporter=tap', 'node-tap'), build: projectBuild('build') };
 function conventionalChecks(scripts: Record<string, unknown>): MissionCheck[] {
   const checks: MissionCheck[] = [];
-  for (const name of ['typecheck', 'test', 'build']) {
+  for (const name of ['typecheck', 'test', 'build'] as const) {
     if (typeof scripts[name] !== 'string' || !(scripts[name] as string).trim()) continue;
     const script = scripts[name] as string;
     if (name === 'test') {
-      if (/\bvitest\b/.test(script)) checks.push({ id: 'project-test', name: 'Project tests', kind: 'test', command: 'npm --silent test -- --reporter=json', criterionIds: ['project-test'], required: true, heavy: true, testReport: { format: 'vitest-json', minimumTests: 1, maximumSkipped: 0 }, timeoutMs: 30 * 60_000 });
-      else if (/\bnode\b.*(?:^|\s)--test(?:\s|$)/.test(script)) checks.push({ id: 'project-test', name: 'Project tests', kind: 'test', command: 'npm --silent test -- --test-reporter=tap', criterionIds: ['project-test'], required: true, heavy: true, testReport: { format: 'node-tap', minimumTests: 1, maximumSkipped: 0 }, timeoutMs: 30 * 60_000 });
+      if (/\bvitest\b/.test(script)) checks.push(structuredClone(CONVENTIONAL.vitest));
+      else if (/\bnode\b.*(?:^|\s)--test(?:\s|$)/.test(script)) checks.push(structuredClone(CONVENTIONAL.nodeTest));
       continue;
     }
-    checks.push({ id: `project-${name}`, name: `Project ${name}`, kind: 'build', command: `npm run ${name}`, criterionIds: [`project-${name}`], required: true, heavy: true, timeoutMs: 30 * 60_000 });
+    checks.push(structuredClone(CONVENTIONAL[name]));
   }
   return checks;
+}
+
+/** A conventional npm gate needs the project's locked dependencies installed in its fresh
+ * verification worktree; verification prepares them itself. Manifest checks arrange their own
+ * setup, so only an exact conventional gate qualifies. */
+export function isConventionalMissionCheck(check: MissionCheck): boolean {
+  return Object.values(CONVENTIONAL).some((template) => isDeepStrictEqual(template, check));
+}
+
+/** Committed dependency inputs a fresh checkout needs before its npm scripts can run. Only files
+ * in the inspected tree count; the original checkout's ignored node_modules never does. */
+export interface MissionProjectDependencies {
+  /** A committed npm lockfile, which `npm ci` reproduces exactly. */
+  npmLockfile?: string;
+  /** Another package manager's lockfile when no npm lockfile exists. */
+  foreignLockfile?: { file: string; manager: string };
+  /** package.json declares packages (or workspaces) that must be installed first. */
+  declared: boolean;
+}
+const NPM_LOCKFILES = ['npm-shrinkwrap.json', 'package-lock.json'];
+const FOREIGN_LOCKFILES: ReadonlyArray<readonly [string, string]> = [['pnpm-lock.yaml', 'pnpm'], ['yarn.lock', 'Yarn'], ['bun.lock', 'Bun'], ['bun.lockb', 'Bun']];
+async function projectDependencies(root: string, manifest: unknown): Promise<MissionProjectDependencies> {
+  const regular = async (name: string) => {
+    try { const stat = await fs.lstat(path.join(root, name)); return stat.isFile() && !stat.isSymbolicLink(); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e; }
+  };
+  let npmLockfile: string | undefined, foreignLockfile: MissionProjectDependencies['foreignLockfile'];
+  for (const name of NPM_LOCKFILES) if (!npmLockfile && await regular(name)) npmLockfile = name;
+  if (!npmLockfile) for (const [file, manager] of FOREIGN_LOCKFILES) if (!foreignLockfile && await regular(file)) foreignLockfile = { file, manager };
+  const value = manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest as Record<string, unknown> : {};
+  const listed = (entry: unknown) => !!entry && typeof entry === 'object' && Object.keys(entry).length > 0;
+  const packages = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'].some((key) => listed(value[key]));
+  const workspaces = Array.isArray(value.workspaces) ? value.workspaces.length > 0 : listed(value.workspaces);
+  return { ...(npmLockfile ? { npmLockfile } : {}), ...(foreignLockfile ? { foreignLockfile } : {}), declared: packages || workspaces };
+}
+/** Reads the tree's own package.json and lockfiles (for verification, the isolated worktree). */
+export async function inspectMissionProjectDependencies(root: string): Promise<MissionProjectDependencies> {
+  const real = await fs.realpath(root);
+  const text = await readOwned(real, 'package.json');
+  return projectDependencies(real, text === undefined ? undefined : JSON.parse(text));
+}
+/** Why conventional npm gates cannot get their dependencies, as an actionable blocker. */
+export function missionDependencySetupIssue(dependencies: MissionProjectDependencies): string | undefined {
+  if (dependencies.npmLockfile || !dependencies.declared) return undefined;
+  const manifest = 'add .vocs-code/mission-delivery.json with explicit setup and check commands';
+  return dependencies.foreignLockfile
+    ? `Project dependencies are locked by ${dependencies.foreignLockfile.manager} (${dependencies.foreignLockfile.file}). Mission prepares only a committed npm lockfile for its conventional checks; ${manifest}.`
+    : `package.json declares dependencies but no npm lockfile (package-lock.json or npm-shrinkwrap.json) is committed, so the conventional checks cannot reproduce them in a fresh verification worktree. Commit a lockfile, or ${manifest}.`;
 }
 /** The optional manifest is a repository instruction, not an application-wide credential or grant.
  * Its command entries still pass the Mission execution/permission boundary before being run. */
@@ -125,15 +177,19 @@ export async function resolveMissionDeliveryPolicy(projectRoot: string, options:
       policy.endpoint = policy.allowMerge ? 'merge_pr' : 'open_pr';
       if (/\bsquash[- ]merge/i.test(allInstructions)) policy.mergeMethod = 'squash';
     }
-    let scripts: Record<string, unknown> = {};
+    let scripts: Record<string, unknown> = {}, packageValue: unknown;
     const packageText = await readOwned(root, 'package.json');
     if (packageText !== undefined) {
-      try { const value = JSON.parse(packageText); if (value && typeof value.scripts === 'object' && value.scripts !== null && !Array.isArray(value.scripts)) scripts = value.scripts; }
+      try { const value = JSON.parse(packageText); packageValue = value; if (value && typeof value.scripts === 'object' && value.scripts !== null && !Array.isArray(value.scripts)) scripts = value.scripts; }
       catch { policy.conflicts.push('Project package.json cannot be read to resolve required checks.'); }
     }
     policy.checks = conventionalChecks(scripts);
     if (typeof scripts.test === 'string' && !policy.checks.some((c) => c.kind === 'test')) policy.conflicts.push('The project test runner needs an explicit execution-count parser in .vocs-code/mission-delivery.json; an exit code alone is not test execution evidence.');
-    policy.provenance.push({ source: 'Mission local convention', text: 'Present npm typecheck, test and build scripts are baseline gates. No publishing rule means local commit only; the plan must add behavior-specific verification and substantive review.' });
+    // Verification worktrees hold committed files only. The host installs a committed npm lockfile
+    // for these gates; any other dependency setup is the project's to declare in a manifest.
+    const setupIssue = policy.checks.length ? missionDependencySetupIssue(await projectDependencies(root, packageValue)) : undefined;
+    if (setupIssue) policy.conflicts.push(setupIssue);
+    policy.provenance.push({ source: 'Mission local convention', text: 'Present npm typecheck, test and build scripts are baseline gates. Before them, the host installs a committed npm lockfile with npm ci in each fresh verification worktree. No publishing rule means local commit only; the plan must add behavior-specific verification and substantive review.' });
   }
   // Conditional project holds are evaluated on captured paths, not the model's assertion that
   // a change is harmless. Conservatively require review for host/control-plane code where a
