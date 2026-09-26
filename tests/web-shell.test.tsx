@@ -253,8 +253,9 @@ describe('connection states', () => {
     // Wait for the boot that installs the store's push subscriptions before pushing the policy.
     await rtl.waitFor(() => expect(useStore.getState().booted).toBe(true));
     for (const listener of pushes) listener('push:remotePolicy', { viewOnly: true });
-    await rtl.waitFor(() => expect(rtl.screen.getByText('View-only on this computer')).toBeTruthy());
-    expect(transport.can('sessions:send')).toBe(false);
+    // The gate follows the push asynchronously through React; poll rather than sample once.
+    await rtl.waitFor(() => expect(transport.can('sessions:send')).toBe(false));
+    expect(rtl.screen.getByText('View-only on this computer')).toBeTruthy();
   });
 
   it('browses the sealed mirror while the computer is offline', async () => {

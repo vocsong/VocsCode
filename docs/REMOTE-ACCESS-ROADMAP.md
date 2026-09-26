@@ -62,8 +62,9 @@ transport: sequenced session events with a transcript-page floor, bounded remote
 `desktop:focus` read and push, paged transcripts with Load earlier, offline mirror browsing (via
 `MirrorIndex.focus`), and a phone layout with sheets and a sticky composer. Landed so far: the
 shared channel manifest (PR 1), sequencing and the frame budget (PR 2), desktop focus (PR 3,
-held), the renderer capability core (PR 4, held), this shell (PR 5, held). The deploy workflow
-builds the bundle and checks `relay/public/app/index.html` before the dry-run and the deploy.
+held), the renderer capability core (PR 4, held), the shell (PR 5, held) and the sessions home /
+follow-my-computer / approval banner / control sheets (PR 6). The deploy workflow builds the
+bundle and checks `relay/public/app/index.html` before the dry-run and the deploy.
 
 ## 2. Workstreams
 
