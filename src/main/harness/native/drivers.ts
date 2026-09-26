@@ -211,8 +211,10 @@ export async function openaiStep(p: StepParams): Promise<StepResult> {
   // takes (often max/high/low), so forward the level untouched instead of clamping max down to high.
   const routerEfforts = p.provider.kind === 'openrouter' ? p.provider.models.find((m) => m.id === p.model)?.supportedEfforts : undefined;
   if (p.effort && routerEfforts?.includes(p.effort)) body.reasoning_effort = p.effort;
-  // DeepSeek's own endpoints (and copies of them) use a narrower scale; clamp the app's wider list.
-  if (isDeepSeek && p.provider.kind !== 'openrouter' && p.effort) body.reasoning_effort = p.effort === 'xhigh' || p.effort === 'max' ? 'high' : p.effort === 'minimal' ? 'low' : p.effort;
+  // DeepSeek's own endpoints (and copies of them) take three real tiers — low/high/max, the scalar
+  // efforts 50/75/100 — so `minimal` folds to `low` and `xhigh` folds to `high`. `max` is a tier of
+  // its own: folding it into `high` (75) silently drops the top tier the user asked for.
+  if (isDeepSeek && p.provider.kind !== 'openrouter' && p.effort) body.reasoning_effort = p.effort === 'xhigh' ? 'high' : p.effort === 'minimal' ? 'low' : p.effort;
   if (p.provider.kind === 'openrouter') body.usage = { include: true };
 
   const stream = await client.chat.completions.create(body, { signal: p.signal });

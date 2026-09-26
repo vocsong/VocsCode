@@ -1,4 +1,4 @@
-import type { ModelInfo, ProviderConfig, UsageTotals } from '../../shared/types';
+import type { EffortLevel, ModelInfo, ProviderConfig, UsageTotals } from '../../shared/types';
 
 /** Offline fallbacks with pricing (USD per 1M tokens). Live lists override these when available. */
 
@@ -126,6 +126,18 @@ export const STATIC_MODELS_BY_PROVIDER: Record<string, ModelInfo[]> = {
   'opencode-go': OPENCODE_GO_STATIC_MODELS
 };
 
+/**
+ * The reasoning levels a bundled catalog entry offers. DeepSeek takes three real tiers — low, high
+ * and max, the scalar efforts 50/75/100 — and every other app level is only an alias onto them
+ * (minimal→low, medium/xhigh→high). Offering the aliases makes one tier look like three and hides
+ * `max`, so the catalog lists the tiers themselves.
+ */
+function staticEffortLevels(provider: string): EffortLevel[] {
+  if (provider === 'anthropic') return ['low', 'medium', 'high', 'xhigh', 'max'];
+  if (provider === 'deepseek') return ['low', 'high', 'max'];
+  return ['minimal', 'low', 'medium', 'high', 'xhigh'];
+}
+
 function m(provider: string, id: string, displayName: string, contextWindow: number, pricing: ModelInfo['pricing'], isDefault = false): ModelInfo {
   return {
     id,
@@ -136,7 +148,7 @@ function m(provider: string, id: string, displayName: string, contextWindow: num
     isDefault,
     supportsImages: provider !== 'deepseek',
     supportsReasoning: true,
-    supportedEfforts: provider === 'anthropic' ? ['low', 'medium', 'high', 'xhigh', 'max'] : ['minimal', 'low', 'medium', 'high', 'xhigh'],
+    supportedEfforts: staticEffortLevels(provider),
     maxOutputTokens: provider === 'anthropic' ? 128_000 : undefined
   };
 }
