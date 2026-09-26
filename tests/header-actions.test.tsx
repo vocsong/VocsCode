@@ -42,6 +42,7 @@ function setup(patch: Partial<SessionMeta> = {}, withConfirm = false) {
     panelOpen: true,
     showThinking: true,
     toasts: [],
+    models: {},
     modelCatalog: { native: { models: [], loading: false } }
   });
   return render(
@@ -134,6 +135,25 @@ describe('header actions', () => {
     expect(archive).toBeTruthy();
     fireEvent.click(archive);
     expect(invokeMock).toHaveBeenCalledWith('sessions:archive', { id: 's_h', archived: true });
+  });
+
+  it('disables the effort pill for a model that takes no effort', () => {
+    const haiku = { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' };
+    const { container } = setup({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask', model: haiku } as SessionMeta['config'] });
+    act(() => useStore.setState({ models: { s_h: [{ id: haiku.model, provider: haiku.provider, displayName: 'Haiku 4.5', supportedEfforts: [] }] } }));
+
+    const pill = container.querySelector('.pill[aria-label="Reasoning effort"]') as HTMLButtonElement;
+    expect(pill.disabled).toBe(true);
+    expect(pill.title).toBe('Haiku 4.5 does not support reasoning effort');
+    // The menu trigger is gone, so nothing can open a list of levels.
+    expect(container.querySelector('[title="Reasoning effort"]')).toBeNull();
+  });
+
+  it('offers Claude its own effort levels while the model does not say which it takes', () => {
+    const { container } = setup({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    fireEvent.click(container.querySelector('[title="Reasoning effort"]') as HTMLElement);
+    const levels = [...document.querySelectorAll('.dropdown-menu .menu-item')].map((item) => item.textContent?.trim());
+    expect(levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
   });
 
   it('remembers a successful reasoning effort switch for the next session', async () => {

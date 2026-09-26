@@ -11,18 +11,32 @@ type Toast = (text: string, kind?: 'info' | 'success' | 'error') => void;
 let latestEffortSelection = 0;
 let effortPreferenceQueue: Promise<void> = Promise.resolve();
 
+/** Runs a settings write after every earlier one in the effort queue, so remembered choices land in order. */
+function enqueue(write: () => Promise<void>): Promise<void> {
+  const update = effortPreferenceQueue.then(write);
+  effortPreferenceQueue = update.catch(() => undefined);
+  return update;
+}
+
 function persistEffort(selection: number, effort: EffortLevel | undefined, patch: Partial<AppSettings> = {}): Promise<void> {
-  const update = effortPreferenceQueue.then(async () => {
+  return enqueue(async () => {
     if (selection !== latestEffortSelection) return;
     await invoke('settings:update', { ...patch, defaultEffort: effort });
   });
-  effortPreferenceQueue = update.catch(() => undefined);
-  return update;
 }
 
 /** Remembers a new-session or Settings choice in the same order as live effort changes. */
 export function rememberEffort(effort: EffortLevel | undefined, patch: Partial<AppSettings> = {}): Promise<void> {
   return persistEffort(++latestEffortSelection, effort, patch);
+}
+
+/** Remembers new-session choices for a model that takes no effort. There is no effort choice to
+ *  record, so the remembered one stays for the next model that has effort, and a newer live
+ *  switch still being saved is not superseded. */
+export function rememberWithoutEffort(patch: Partial<AppSettings>): Promise<void> {
+  return enqueue(async () => {
+    await invoke('settings:update', patch);
+  });
 }
 
 /** Applies an effort to a session, then remembers it unless the user made a newer choice. */

@@ -9,15 +9,17 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CodexAppServerAdapter } from '../src/main/harness/codex-app-server';
+import { CodexExecAdapter } from '../src/main/harness/codex-exec';
 import { listHarnessModels } from '../src/main/harness/registry';
 import { defaultSettings } from '../src/main/settings';
 import type { HarnessContext } from '../src/main/harness/types';
 import type { AppSettings, HarnessRef, ModelRef, ProviderConfig, SessionEvent, SessionMeta } from '../src/shared/types';
-import { emptyUsage } from '../src/main/models/static-models';
+import { CODEX_STATIC_MODELS, emptyUsage } from '../src/main/models/static-models';
 
 type AnyRecord = Record<string, any>;
 
 const mocks = vi.hoisted(() => ({
+  shutdown: vi.fn(),
   spawnChildren: [] as AnyRecord[],
   spawnCalls: [] as { file: string; args: string[]; opts: AnyRecord }[]
 }));
@@ -29,7 +31,7 @@ vi.mock('../src/main/harness/spawn', () => ({
     if (!child) throw new Error('no scripted child process');
     return child;
   },
-  shutdownChild: async () => undefined,
+  shutdownChild: async (child: unknown) => mocks.shutdown(child),
   killTree: async () => undefined,
   quoteWin: (arg: string) => arg,
   usesWindowsCommandShim: () => false
@@ -165,6 +167,7 @@ function scriptServer(child: AnyRecord): FakeJsonRpcServer {
 }
 
 beforeEach(() => {
+  mocks.shutdown.mockClear();
   mocks.spawnChildren.length = 0;
   mocks.spawnCalls.length = 0;
   // The adapter inherits process.env; clear the provider key so only its own injection can supply one.
@@ -172,6 +175,139 @@ beforeEach(() => {
 });
 
 describe('codex provider catalog', () => {
+  const row = (model: string) => ({ id: model, model, displayName: model, inputModalities: ['text', 'image'], supportedReasoningEfforts: [{ reasoningEffort: 'high' }], isDefault: false });
+  const runtime = { resolve: () => ({ path: '/fake/codex', source: 'system' }) } as never;
+
+  it.each(['codex', 'codex-exec'] as const)('discovers newly released models on every page for %s before creating a session', async (harness) => {
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    const server = scriptServer(child).on('model/list', (params) => params.cursor
+      ? { data: [row('gpt-future-codex')], nextCursor: null }
+      : { data: [row('gpt-first-page')], nextCursor: 'page-2' });
+    const result = await listHarnessModels({ harness, settings: settingsWithOpenRouter(), runtime, getApiKey: async () => undefined });
+
+    expect(result.error).toBeUndefined();
+    expect(result.models.filter((m) => m.provider === 'openai').map((m) => m.id)).toEqual(['gpt-first-page', 'gpt-future-codex']);
+    expect(result.models.find((m) => m.id === 'gpt-future-codex')).toMatchObject({ supportsImages: true, supportedEfforts: ['high'] });
+    expect(result.models.some((m) => m.provider === 'openrouter')).toBe(harness === 'codex');
+    expect(server.requests.filter((r) => r.method === 'model/list').map((r) => r.params)).toEqual([
+      { limit: 100, includeHidden: false }, { limit: 100, includeHidden: false, cursor: 'page-2' }
+    ]);
+    expect(server.requests.some((r) => r.method.startsWith('thread/') || r.method.startsWith('turn/'))).toBe(false);
+    expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith(child);
+  });
+
+  it('publishes every live model page from a started app-server session', async () => {
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    const server = scriptServer(child)
+      .on('thread/start', () => ({ thread: { id: 'thread-1' }, model: 'gpt-first-page', modelProvider: 'openai' }))
+      .on('model/list', (params) => params.cursor
+        ? { data: [row('gpt-future-codex')], nextCursor: null }
+        : { data: [row('gpt-first-page')], nextCursor: 'page-2' });
+    const { ctx, events } = makeCtx(makeMeta(), defaultSettings());
+    const adapter = new CodexAppServerAdapter(ctx);
+    try {
+      await adapter.start();
+      await vi.waitFor(() => expect(events.filter((e) => e.type === 'models')).toHaveLength(1));
+      expect(events.filter((e) => e.type === 'models').flatMap((e) => e.models.map((m) => m.id))).toEqual(['gpt-first-page', 'gpt-future-codex']);
+      expect(events.some((e) => e.type === 'error')).toBe(false);
+    } finally {
+      await adapter.dispose();
+    }
+    expect(server.requests.filter((r) => r.method === 'model/list')).toHaveLength(2);
+    expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith(child);
+  });
+
+  it('refreshes the catalog on a new discovery request rather than caching a previous release', async () => {
+    for (const id of ['gpt-previous', 'gpt-new-release']) {
+      const child = makeFakeChild();
+      mocks.spawnChildren.push(child);
+      scriptServer(child).on('model/list', () => ({ data: [row(id)], nextCursor: null }));
+      const result = await listHarnessModels({ harness: 'codex', settings: defaultSettings(), runtime, getApiKey: async () => undefined });
+      expect(result.error).toBeUndefined();
+      expect(result.models.filter((m) => m.provider === 'openai').map((m) => m.id)).toEqual([id]);
+    }
+    expect(mocks.shutdown).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops a repeating cursor and closes the probe rather than looping indefinitely', async () => {
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    const server = scriptServer(child).on('model/list', () => ({ data: [row('gpt-partial')], nextCursor: 'repeat' }));
+    const result = await listHarnessModels({ harness: 'codex', settings: defaultSettings(), runtime, getApiKey: async () => undefined });
+    expect(result.error).toContain('repeated a pagination cursor');
+    expect(server.requests.filter((r) => r.method === 'model/list')).toHaveLength(2);
+    expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith(child);
+  });
+
+  it('uses the live catalog rather than a static list for the exec adapter', async () => {
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    scriptServer(child).on('model/list', () => ({ data: [row('gpt-future-codex')], nextCursor: null }));
+    const { ctx } = makeCtx(makeMeta(), defaultSettings());
+    const models = await new CodexExecAdapter(ctx).listModels();
+    expect(models.map((m) => m.id)).toEqual(['gpt-future-codex']);
+    expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith(child);
+  });
+
+  it('bounds the whole paginated probe and closes it when a page stalls', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = makeFakeChild();
+      mocks.spawnChildren.push(child);
+      const server = scriptServer(child).on('model/list', (params) => params.cursor
+        ? new Promise(() => undefined)
+        : { data: [row('gpt-partial')], nextCursor: 'page-2' });
+      const pending = listHarnessModels({ harness: 'codex', settings: defaultSettings(), runtime, getApiKey: async () => undefined });
+      await vi.advanceTimersByTimeAsync(20_001);
+      const result = await pending;
+      expect(result.error).toContain('timed out');
+      expect(result.models.some((m) => m.id === 'gpt-partial')).toBe(false);
+      expect(server.requests.filter((r) => r.method === 'model/list')).toHaveLength(2);
+      expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith(child);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['empty', 'failure'] as const)('retains the exec fallback on an %s response and tears down its probe', async (mode) => {
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    scriptServer(child).on('model/list', () => {
+      if (mode === 'failure') throw new Error('unavailable');
+      return { data: [], nextCursor: null };
+    });
+    const { ctx } = makeCtx(makeMeta(), defaultSettings());
+    const models = await new CodexExecAdapter(ctx).listModels();
+    expect(models).toEqual(CODEX_STATIC_MODELS);
+    expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith(child);
+  });
+
+  it('labels an empty live catalog as fallback instead of claiming it is up to date', async () => {
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    scriptServer(child);
+    const result = await listHarnessModels({ harness: 'codex-exec', settings: defaultSettings(), runtime, getApiKey: async () => undefined });
+    expect(result.models).toEqual(CODEX_STATIC_MODELS);
+    expect(result.error).toContain('Codex reported no models');
+    expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith(child);
+  });
+
+  it('reports a failed later page and keeps fallback models instead of returning a partial catalog', async () => {
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    scriptServer(child).on('model/list', (params) => {
+      if (params.cursor) throw new Error('catalog unavailable');
+      return { data: [row('gpt-partial')], nextCursor: 'page-2' };
+    });
+    const result = await listHarnessModels({ harness: 'codex', settings: defaultSettings(), runtime, getApiKey: async () => undefined });
+    expect(result.error).toContain('catalog unavailable');
+    expect(result.models.some((m) => m.id === 'gpt-partial')).toBe(false);
+    expect(result.models.length).toBeGreaterThan(0);
+    expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith(child);
+  });
+
   it('offers configured OpenAI-wire provider models for the codex harness', async () => {
     const { models } = await listHarnessModels({
       harness: 'codex',

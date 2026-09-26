@@ -422,6 +422,19 @@ describe('claude resume seam', () => {
     await adapter.dispose();
   });
 
+  it('resumes on the model version the session saved, whatever the last process reported', async () => {
+    const h = makeAdapterCtx({ harness: 'claude', ref: { claudeSessionId: 'claude-abc' } });
+    // The New Session dialog saves Claude's recommendation as the concrete id it resolved to.
+    h.meta.config.model = { provider: 'anthropic', model: 'claude-opus-5-5[1m]' };
+    h.meta.activeModel = { provider: 'anthropic', model: 'claude-opus-6' };
+    (globalThis as AnyRecord).__nextClaudeQuery = () => makeFakeClaudeQuery();
+    const adapter = new ClaudeAdapter(h.ctx);
+    await adapter.start();
+    expect(mocks.queryCalls).toHaveLength(1);
+    expect(mocks.queryCalls[0].options).toMatchObject({ resume: 'claude-abc', model: 'claude-opus-5-5[1m]' });
+    await adapter.dispose();
+  });
+
   it('honors forkOnResume by forking once and clearing the flag', async () => {
     const h = makeAdapterCtx({ harness: 'claude', ref: { claudeSessionId: 'claude-abc', forkOnResume: true } });
     (globalThis as AnyRecord).__nextClaudeQuery = () => makeFakeClaudeQuery();

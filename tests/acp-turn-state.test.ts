@@ -353,6 +353,30 @@ describe('acp adapter', () => {
     expect(modelsEvents.at(-1)!.models[1]).toMatchObject({ id: 'deepseek-v4-pro', isDefault: true });
   });
 
+  it('leaves effort unknown when the agent offers no level the app models', async () => {
+    const h = makeHarness();
+    h.agent.on('initialize', () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }));
+    h.agent.on('session/new', () => ({
+      sessionId: 'sess-auto',
+      configOptions: [
+        { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'm1', options: [{ value: 'm1', name: 'Model 1' }] },
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          category: 'thought_level',
+          type: 'select',
+          currentValue: 'auto',
+          options: [{ value: 'auto', name: 'Auto' }, { value: 'none', name: 'None' }]
+        }
+      ]
+    }));
+    await h.adapter.start();
+
+    // `[]` would claim the model takes no effort, and the app would disable its effort controls.
+    const modelsEvent = h.events.find((e) => e.type === 'models') as AnyRecord;
+    expect(modelsEvent.models).toEqual([expect.objectContaining({ id: 'm1', supportedEfforts: undefined })]);
+  });
+
   it('keeps plain string model values untouched for agents that do not use tuples', async () => {
     const h = makeHarness();
     h.agent.on('initialize', () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }));

@@ -1,4 +1,4 @@
-import type { EffortLevel, HarnessDescriptor, HarnessId, PermissionMode } from './types';
+import type { EffortLevel, HarnessDescriptor, HarnessId, ModelInfo, PermissionMode } from './types';
 
 export const HARNESSES: HarnessDescriptor[] = [
   {
@@ -47,6 +47,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       interrupt: true,
       liveModelSwitch: true,
       effort: true,
+      // Claude Code's own scale: it has no `minimal`.
+      effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
       images: true,
       dropsUnsupportedImages: false,
       resume: true,

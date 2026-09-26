@@ -142,7 +142,7 @@ function makeCtx(overrides: Partial<SessionMeta> = {}): { ctx: HarnessContext; m
     runtime: null as unknown as HarnessContext['runtime'],
     sessionDir: '/tmp/s1',
     permissionMode: () => meta.config.permissionMode,
-    effort: () => meta.config.effort,
+    effort: () => meta.config.effort ?? undefined,
     getApiKey: async (id) => (id === 'cursor' ? 'key-123' : undefined),
     mcpServers: async () => [],
     ownedMcpIds: () => [],
