@@ -52,6 +52,12 @@ describe('DeepSeek DeepSeek V4.1 Flash', () => {
     expect(cost).toBeCloseTo(0.753, 6);
   });
 
+  it('offers the three tiers DeepSeek serves, so max is reachable and its aliases do not hide it', () => {
+    // low/high/max are the scalar efforts 50/75/100. minimal and medium/xhigh are only aliases onto
+    // them, so listing the aliases both hid `max` and made one tier look like three.
+    for (const entry of DEEPSEEK_STATIC_MODELS) expect(entry.supportedEfforts).toEqual(['low', 'high', 'max']);
+  });
+
   it('is offered on the DeepSeek provider by the harnesses that list bundled catalogs', async () => {
     const { models } = await listHarnessModels({
       harness: 'native',
@@ -61,7 +67,8 @@ describe('DeepSeek DeepSeek V4.1 Flash', () => {
     });
     expect(models.find((m) => m.provider === 'deepseek' && m.id === 'deepseek-flash')).toMatchObject({
       contextWindow: 1_000_000,
-      supportsImages: true
+      supportsImages: true,
+      supportedEfforts: ['low', 'high', 'max']
     });
   });
 });
