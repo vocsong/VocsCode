@@ -11,7 +11,7 @@ import { SubagentAgents } from '../src/renderer/src/components/SubagentAgents';
 import type { SessionMeta } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(() => () => undefined), isMac: false, modKey: 'Ctrl', platform: 'win32', isWeb: false, webShim: vi.fn() }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke, on: vi.fn(() => () => undefined), isMac: false, modKey: 'Ctrl', platform: 'win32', isWeb: false, webShim: vi.fn() }));
 
 const session = (): SessionMeta =>
   ({

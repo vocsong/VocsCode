@@ -1,6 +1,9 @@
 /** Owns sessions: transcripts, approvals, goals, worktrees, and resuming a session after a restart. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import type { MissionOwnership } from '../shared/mission';
+import type { ResolvedServer } from './mcp/effective';
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -66,10 +69,71 @@ export interface SessionManagerDeps {
   memoryUserData?: string;
   /** Layer 2 digest for priming a new session's system prompt; absent disables priming. */
   knowledgeDigest?: (scope: { projectRoot: string; cwd: string; branch?: string }) => Promise<string | null>;
+  /** Held Mission leases defer ordinary writers; reserve admission across async guards/startup.
+   * Ordinary sessions go through it only while ordinary process ownership is enabled. */
+  withWorkspaceDispatch?: (meta: SessionMeta, dispatch: () => Promise<void>) => Promise<void>;
+  /** Ordinary (non-Mission) process ownership: Windows, Missions configured and a working Job
+   * helper. Absent/false keeps ordinary sessions as they always were: no writer claims, no
+   * Mission admission, and disposal never needs a proof. */
+  ordinaryProcessOwnership?: () => boolean;
+  /** Test seam: how long an ordinary Stop waits for its adapter's disposal before releasing the session. */
+  disposeWaitMs?: number;
+}
+
+/** An ordinary Stop gives a disposing adapter this long (above every adapter's own shutdown
+ * deadline) before the session is released anyway; the disposal itself carries on regardless. */
+const ORDINARY_DISPOSE_WAIT_MS = 20_000;
+
+export interface MissionSessionHooks {
+  beforeDispatch(meta: SessionMeta, input: UserInput): Promise<void>;
+  mcpServers(meta: SessionMeta, existing: ResolvedServer[]): Promise<ResolvedServer[]>;
+  onEvent?(env: SessionEventEnvelope): void;
+}
+
+export interface ManagedSessionDescriptor {
+  id: string;
+  cwd: string;
+  worktreeBranch?: string;
+  ownership: MissionOwnership;
+}
+
+export interface ManagedSessionUpdate {
+  config?: Partial<SessionMeta['config']>;
+  mission?: Partial<MissionOwnership>;
+  cwd?: string;
+  worktreeBranch?: string;
+}
+
+export interface SessionActivity {
+  /** An owned runtime still exists, including during disposal or an uncertain stop. */
+  active: boolean;
+  starting: boolean;
+  turn: boolean;
+  tools: number;
+  /** Native children outlive the root turn and its delegation tool result. */
+  nativeChildren?: number;
+  /** An ordinary runtime still owns possible process writers/autonomous follow-ups. */
+  processes?: boolean;
+  approvals: number;
+  compacting: boolean;
+  queued: number;
+  tearingDown: boolean;
+  uncertain: boolean;
+  quiescent: boolean;
 }
 
 interface ActiveSession {
   adapter: HarnessAdapter;
+  /** Input acceptance is not a terminal turn observation (including ordinary source writers). */
+  turnPending: boolean;
+  startupDispatched: boolean;
+  tearingDown: boolean;
+  uncertain: boolean;
+  disposal: Promise<void> | null;
+  nativeChildren: Map<string, { startedAt: number; running: boolean }>;
+  /** Persisted ordinary writer claim owned by this exact runtime, not earlier launches. */
+  workspaceWriterClaim?: string;
+  workspaceWriterClaimPersisted?: Promise<void>;
   approvals: Map<string, Deferred<ApprovalDecision>>;
   liveItems: Map<string, TranscriptItem>;
   /** Model active when each running tool call began, retained until its terminal upsert. */
@@ -135,6 +199,15 @@ export class SessionManager {
   private static readonly GIT_STATE_RECHECK_MS = 120_000;
 
   private active = new Map<string, ActiveSession>();
+  /** Last runtime created per session. An ordinary runtime is fenced only once a newer one exists. */
+  private runtimeSeq = new Map<string, number>();
+  /** Ordinary runtimes still disposing after Stop released their session. Mission admission only:
+   * they never block the session itself. */
+  private retiring = new Map<string, Set<ActiveSession>>();
+  private missionHooks: MissionSessionHooks | undefined;
+  private listeners = new Set<(env: SessionEventEnvelope) => void>();
+  /** Includes input waiting for startup, compaction or the Mission's dispatch authorization. */
+  private managedDispatches = new Map<string, { canceled: boolean }>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
   private gitStateTimers = new Map<string, NodeJS.Timeout>();
   /** Sessions whose restored git state was re-checked once after boot. */
@@ -173,8 +246,74 @@ export class SessionManager {
     return this.deps.store.get(id);
   }
 
+  /** One host owns Mission dispatch. Detaching it fails closed, including already-waiting sends. */
+  attachMissionHooks(hooks: MissionSessionHooks): () => void {
+    if (this.missionHooks) throw new Error('Mission hooks are already attached');
+    const attachment: MissionSessionHooks = {
+      beforeDispatch: hooks.beforeDispatch.bind(hooks),
+      mcpServers: hooks.mcpServers.bind(hooks),
+      onEvent: hooks.onEvent?.bind(hooks),
+    };
+    this.missionHooks = attachment;
+    return () => { if (this.missionHooks === attachment) this.missionHooks = undefined; };
+  }
+
+  /** Observers see normalized events only after the manager has updated its own bookkeeping. */
+  subscribe(listener: (env: SessionEventEnvelope) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  activity(id: string): SessionActivity {
+    const active = this.active.get(id);
+    // A Stopped ordinary runtime may still be disposing; it can still write, so admission sees it.
+    const retiring = !!this.retiring.get(id)?.size;
+    const writers = active?.adapter.workspaceWriterState?.();
+    const unprovenClaims = this.get(id)?.workspaceWriterClaims?.some((claim) => claim !== active?.workspaceWriterClaim) ?? false;
+    const state = {
+      active: !!active || retiring,
+      starting: !!active?.starting && active.startupDispatched,
+      turn: !!(active?.turnPending || (active?.adapter.busy && !active.compactionInFlight)),
+      tools: active ? [...active.liveItems.values()].filter((item) => item.kind === 'tool' && item.status === 'running').length : 0,
+      nativeChildren: active ? [...active.nativeChildren.values()].filter((child) => child.running).length : 0,
+      processes: writers === 'active' || !!active?.workspaceWriterClaim,
+      approvals: active?.approvals.size ?? 0,
+      compacting: !!active?.compactionInFlight,
+      queued: (this.get(id)?.queued ?? 0) + (this.managedDispatches.has(id) ? 1 : 0),
+      tearingDown: !!active?.tearingDown || retiring,
+      uncertain: !!active?.uncertain || writers === 'unknown' || unprovenClaims,
+    };
+    return { ...state, quiescent: !state.starting && !state.turn && !state.tools && !state.nativeChildren && !state.processes && !state.approvals && !state.compacting && !state.queued && !state.tearingDown && !state.uncertain };
+  }
+
+  private assertUnmanaged(id: string): void {
+    if (this.get(id)?.mission) throw new Error('Mission sessions must be controlled through Mission orchestration');
+  }
+
+  private managedMeta(id: string, generation: number): SessionMeta & { mission: MissionOwnership } {
+    const meta = this.get(id);
+    if (!meta?.mission) throw new Error('Mission session not found');
+    if (meta.mission.generation !== generation) throw new Error('Stale Mission session generation');
+    return meta as SessionMeta & { mission: MissionOwnership };
+  }
+
+  private requireMissionHooks(): MissionSessionHooks {
+    if (!this.missionHooks) throw new Error('Mission dispatch hooks are not attached');
+    return this.missionHooks;
+  }
+
   private settings(): AppSettings {
     return this.deps.settings.get();
+  }
+
+  private ordinaryOwnership(): boolean {
+    return this.deps.ordinaryProcessOwnership?.() ?? false;
+  }
+
+  /** Mission admission reserves managed dispatch always, ordinary dispatch only while ordinary
+   * process ownership is on: otherwise an ordinary send behaves exactly as it always did. */
+  private admits(meta: SessionMeta): boolean {
+    return !!this.deps.withWorkspaceDispatch && (!!meta.mission || this.ordinaryOwnership());
   }
 
   private pushSessions(): void {
@@ -471,6 +610,72 @@ export class SessionManager {
     return meta;
   }
 
+  /** Host-only creation: the Mission already selected the identity, preset and workspace. */
+  async createManaged(req: CreateSessionRequest, managed: ManagedSessionDescriptor): Promise<SessionMeta> {
+    this.deps.store.sessionDir(managed.id); // Validate the preallocated id before any write.
+    if (!path.isAbsolute(managed.cwd)) throw new Error('Mission workspace path must be absolute');
+    if (!Number.isSafeInteger(managed.ownership.generation) || managed.ownership.generation < 0) throw new Error('Invalid Mission generation');
+    const descriptor = {
+      title: req.title?.trim() || 'New session', config: req.config, cwd: managed.cwd,
+      worktreeBranch: managed.worktreeBranch, mission: managed.ownership,
+    };
+    const existing = this.get(managed.id);
+    if (existing) {
+      // JSON normalization makes optional undefined fields identical before and after restart.
+      const prior = { title: existing.title, config: existing.config, cwd: existing.cwd, worktreeBranch: existing.worktreeBranch, mission: existing.mission };
+      if (!isDeepStrictEqual(JSON.parse(JSON.stringify(prior)), JSON.parse(JSON.stringify(descriptor)))) throw new Error('Mission session descriptor does not match the existing id');
+      await this.deps.store.upsert(existing);
+      return existing;
+    }
+    const meta: SessionMeta = {
+      ...structuredClone(descriptor), id: managed.id, createdAt: Date.now(), updatedAt: Date.now(),
+      status: 'idle', harnessRef: {}, usage: emptyUsage(), activeModel: req.config.model,
+      activeEffort: req.config.effort ?? undefined, queued: 0,
+    };
+    await this.deps.store.upsert(meta);
+    this.deps.analytics.touchSession(meta);
+    this.pushSessions();
+    return meta;
+  }
+
+  /** Reconfiguration never silently resets a live runtime, even one parked between turns. */
+  async updateManaged(id: string, generation: number, patch: ManagedSessionUpdate): Promise<SessionMeta> {
+    const meta = this.managedMeta(id, generation);
+    if (!this.activity(id).quiescent) throw new Error('Mission session is not quiescent');
+    if (this.active.has(id)) throw new Error('Stop the Mission runtime before reconfiguring it');
+    const mission = { ...meta.mission, ...patch.mission };
+    if (mission.missionId !== meta.mission.missionId || mission.role !== meta.mission.role) throw new Error('Mission ownership cannot be transferred');
+    if (!Number.isSafeInteger(mission.generation) || mission.generation < generation) throw new Error('Invalid Mission generation');
+    if (patch.cwd !== undefined && !path.isAbsolute(patch.cwd)) throw new Error('Mission workspace path must be absolute');
+    meta.mission = structuredClone(mission);
+    if (patch.config) {
+      meta.config = { ...meta.config, ...structuredClone(patch.config) };
+      meta.activeModel = meta.config.model;
+      meta.activeEffort = meta.config.effort ?? undefined;
+    }
+    if (patch.cwd !== undefined) meta.cwd = patch.cwd;
+    if (Object.hasOwn(patch, 'worktreeBranch')) meta.worktreeBranch = patch.worktreeBranch;
+    meta.goal = undefined;
+    meta.nativeGoal = undefined;
+    meta.updatedAt = Date.now();
+    await this.deps.store.upsert(meta);
+    this.deps.analytics.touchSession(meta);
+    this.pushSessions();
+    return meta;
+  }
+
+  /** Archive is retention only. The service must first stop every owned child/runtime. */
+  async archiveManaged(id: string, generation: number, archived = true): Promise<SessionMeta> {
+    const meta = this.managedMeta(id, generation);
+    const owned = this.deps.store.list().filter((session) => session.mission?.missionId === meta.mission.missionId);
+    if (owned.some((session) => this.active.has(session.id) || !this.activity(session.id).quiescent)) throw new Error('Stop all Mission sessions before archiving');
+    meta.archived = archived;
+    meta.updatedAt = Date.now();
+    await this.deps.store.upsert(meta);
+    this.pushSessions();
+    return meta;
+  }
+
   private goalKickoffPrompt(goal: GoalState): string {
     return `You have a persistent goal for this session:\n\n${goal.objective}\n\nWork toward it autonomously. When you believe it is fully achieved and verified, run a completion audit (restate deliverables, map each requirement to concrete evidence, note gaps) and end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line. If anything is missing, keep working instead of declaring completion.`;
   }
@@ -485,6 +690,7 @@ export class SessionManager {
    * departure and picks one replacement selection instead of hopping through the doomed rows.
    */
   async deleteMany(ids: string[]): Promise<number> {
+    for (const id of ids) this.assertUnmanaged(id);
     let removed = 0;
     for (const id of ids) {
       const removeWt = !!this.get(id)?.worktreeBranch;
@@ -496,6 +702,7 @@ export class SessionManager {
 
   /** The delete itself, without the list push; resolves false when the id is already gone. */
   private async deleteOne(id: string, removeWt: boolean): Promise<boolean> {
+    this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) return false;
     const t0 = Date.now();
@@ -521,6 +728,9 @@ export class SessionManager {
   async patch(id: string, patch: Partial<SessionMeta>): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    if ('mission' in patch || (meta.mission && Object.keys(patch).some((key) => !['title', 'titleIsPlaceholder', 'pinned', 'pinnedAt'].includes(key)))) {
+      throw new Error('Mission ownership and execution state cannot be changed through session patch');
+    }
     // A rename is the user naming the session: no title model may overwrite it afterwards.
     const named = patch.title !== undefined && patch.titleIsPlaceholder === undefined ? { titleIsPlaceholder: undefined } : {};
     Object.assign(meta, patch, named, { updatedAt: Date.now() });
@@ -567,6 +777,7 @@ export class SessionManager {
 
   /** Archives a session; with `removeWt` it also deletes the worktree (the branch is kept so unarchive can restore it). */
   async setArchived(id: string, archived: boolean, removeWt = false, forceWt = false): Promise<SessionMeta> {
+    this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     if (archived) {
@@ -628,6 +839,7 @@ export class SessionManager {
    * the Claude SDK can interrupt a turn but not one child, so it must refuse rather than no-op.
    */
   async subagentCommand(id: string, runId: string, kind: 'stop' | 'steer', message?: string): Promise<{ ok: boolean; error?: string }> {
+    this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) return { ok: false, error: 'Session not found' };
     if (!subagentSupport(meta.config.harness).control) return { ok: false, error: `Subagent stop/steer is not available for the ${meta.config.harness} harness` };
@@ -678,26 +890,38 @@ export class SessionManager {
     return { items: order.map((k) => map.get(k) as TranscriptItem), seq: this.seq };
   }
 
-  private buildContext(meta: SessionMeta, id: string): HarnessContext {
+  private buildContext(meta: SessionMeta, id: string, current = () => true): HarnessContext {
     const store = this.deps.store;
     const sessionDir = store.sessionDir(id);
+    const managed = !!meta.mission;
+    const snapshot = structuredClone(meta);
+    // A retired managed runtime reads its launch snapshot. An ordinary runtime always reads the
+    // live session, as it always did: a permission mode tightened after start must still govern the
+    // approvals it raises while it shuts down.
+    const session = () => managed && !current() ? snapshot : this.get(id) ?? meta;
     return {
       sessionId: id,
-      session: () => this.get(id) ?? meta,
+      session,
       settings: () => this.settings(),
       runtime: this.deps.runtime,
       sessionDir,
-      permissionMode: () => (this.get(id) ?? meta).config.permissionMode,
+      permissionMode: () => session().config.permissionMode,
+      ordinaryProcessOwnership: () => !managed && this.ordinaryOwnership(),
       effort: () => {
-        const session = this.get(id) ?? meta;
+        const m = session();
         // An explicit omission must not borrow the preference retained for effort-capable models.
-        // A later deliberate effort switch still wins, as it does for an explicit level.
-        return session.activeEffort ?? (session.config.effort === null ? undefined : session.config.effort ?? this.settings().defaultEffort);
+        // A later deliberate effort switch still wins, as it does for an explicit level. A Mission
+        // preset that keeps the runtime's reasoning default never inherits the app default either.
+        if (m.activeEffort) return m.activeEffort;
+        if (m.config.effort === null) return undefined;
+        return m.config.effort ?? (m.mission?.reasoningDefault ? undefined : this.settings().defaultEffort);
       },
       getApiKey: (providerId) => this.deps.getSecret(providerId),
-      mcpServers: () => {
-        const m = this.get(id) ?? meta;
-        return resolveForSession(
+      mcpServers: async () => {
+        if (!current()) throw new Error('Session runtime is no longer current');
+        const m = session();
+        const hooks = m.mission ? this.requireMissionHooks() : undefined;
+        const servers = await resolveForSession(
           { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, branch: m.worktreeBranch },
           {
             getSecret: this.deps.getSecret,
@@ -708,17 +932,23 @@ export class SessionManager {
             log: (level, message) => this.deps.log(level, `[${id}] ${message}`)
           }
         );
+        if (!current() || (hooks && this.missionHooks !== hooks)) throw new Error('Session runtime is no longer current');
+        const resolved = hooks ? await hooks.mcpServers(m, servers) : servers;
+        if (!current() || (hooks && this.missionHooks !== hooks)) throw new Error('Session runtime is no longer current');
+        return resolved;
       },
       ownedMcpIds: () => builtinServerIds(),
-      emit: (event) => this.emit(id, event),
-      requestApproval: (draft) => this.requestApproval(id, draft),
+      emit: (event) => { if (current()) this.emit(id, event); },
+      requestApproval: (draft) => current() ? this.requestApproval(id, draft) : Promise.resolve({ optionId: 'deny', note: 'Session runtime is no longer current' }),
       updateRef: (patch: Partial<HarnessRef>) => {
+        if (!current()) return;
         const m = this.get(id);
         if (!m) return;
         m.harnessRef = { ...m.harnessRef, ...patch };
         this.schedulePersist(m);
       },
       updateMeta: (patch) => {
+        if (!current()) return;
         const m = this.get(id);
         if (!m) return;
         Object.assign(m, patch);
@@ -727,7 +957,7 @@ export class SessionManager {
         if ('activeModel' in patch) this.deps.analytics.touchSession(m);
         // The harness just reported the commands it accepts: `/goal` may have changed hands.
         if ('harnessCommands' in patch) {
-          void this.applyGoalDriver(m)
+          void this.applyGoalDriver(m, current)
             .then((changed) => {
               if (!changed) return;
               this.schedulePersist(m);
@@ -737,16 +967,18 @@ export class SessionManager {
         }
         this.schedulePersist(m);
         this.pushSessions();
+        if (m.mission) this.publish(id, { type: 'meta', patch });
       },
       log: (level, message) => this.deps.log(level, `[${id}] ${message}`),
       readJson: (name) => readJson(path.join(sessionDir, name), null),
-      writeJson: (name, data) => writeJson(path.join(sessionDir, name), data)
+      writeJson: (name, data) => current() ? writeJson(path.join(sessionDir, name), data) : Promise.resolve()
     };
   }
 
   private async ensureActive(id: string): Promise<ActiveSession> {
     const existing = this.active.get(id);
     if (existing) {
+      if (existing.tearingDown || existing.uncertain) throw new Error('Session runtime is stopping or uncertain');
       if (existing.starting) await existing.starting;
       return existing;
     }
@@ -755,15 +987,37 @@ export class SessionManager {
     // The previous run's advertised commands say nothing about this one: the harness re-reports them
     // once it starts. Recompute the driver before the first send, so a `/goal` opening a resumed
     // session is not handed to a command this harness no longer has.
-    if (meta.harnessCommands?.length) {
+    if (meta.mission) {
+      meta.harnessCommands = undefined;
+      meta.goal = undefined;
+      meta.nativeGoal = undefined;
+    } else if (meta.harnessCommands?.length) {
       meta.harnessCommands = undefined;
       await this.applyGoalDriver(meta);
       this.schedulePersist(meta);
     }
-    const ctx = this.buildContext(meta, id);
+    const generation = meta.mission?.generation;
+    const managed = !!meta.mission;
+    const seq = (this.runtimeSeq.get(id) ?? 0) + 1;
+    this.runtimeSeq.set(id, seq);
+    let active: ActiveSession;
+    // A managed runtime is fenced as soon as its teardown starts. An ordinary runtime keeps
+    // recording its own events and writes while it disposes (its interrupted turn, final usage,
+    // history), as it always did, and is fenced only once a newer runtime supersedes it.
+    const current = managed
+      ? () => !!active && this.active.get(id) === active && !active.tearingDown && this.get(id)?.mission?.generation === generation
+      : () => this.runtimeSeq.get(id) === seq && this.get(id)?.mission?.generation === generation;
+    const live = () => current() && !active.tearingDown;
+    const ctx = this.buildContext(meta, id, current);
     const adapter = createAdapter(meta.config.harness, ctx);
-    const active: ActiveSession = {
+    active = {
       adapter,
+      turnPending: false,
+      startupDispatched: false,
+      tearingDown: false,
+      uncertain: false,
+      disposal: null,
+      nativeChildren: new Map(),
       approvals: new Map(),
       liveItems: new Map(),
       toolModels: new Map(),
@@ -789,13 +1043,31 @@ export class SessionManager {
     const resume = describeResume(meta.harnessRef);
     this.deps.log('info', `[${id}] starting ${meta.config.harness} (model=${describeModel(meta.activeModel)} permissions=${meta.config.permissionMode} cwd=${meta.cwd}${resume ? ` resume=${resume}` : ''})`);
     const t0 = Date.now();
-    active.starting = adapter
-      .start()
+    const start = async () => {
+      if (!live()) throw new Error('Session stopped before its runtime could start.');
+      active.startupDispatched = true;
+      if (meta.config.permissionMode !== 'plan') await this.claimWorkspaceWriter(meta, active);
+      if (!live()) throw new Error('Session stopped before its runtime could start.');
+      await adapter.start();
+    };
+    active.starting = (this.admits(meta) ? this.deps.withWorkspaceDispatch!(meta, start) : start())
       .then(() => {
         active.starting = null;
         this.deps.log('info', `[${id}] ${meta.config.harness} started in ${Date.now() - t0}ms`);
+        // An ordinary Stop does not wait for startup. A start that completed after it must not
+        // leave its process running, so dispose again (managed teardown awaits startup instead).
+        if (!managed && active.tearingDown) {
+          void Promise.resolve().then(() => adapter.dispose()).catch((e) => this.deps.log('warn', `[${id}] dispose after a start that outlived Stop failed: ${errorMessage(e)}`));
+          return;
+        }
+        // An owned launch that fell back to a plain one tracks nothing, so it holds no claim.
+        const claim = active.workspaceWriterClaim;
+        if (claim && adapter.workspaceWriterState?.() === undefined) {
+          active.workspaceWriterClaim = undefined;
+          void this.dropWriterClaim(id, claim).catch((e) => this.deps.log('warn', `[${id}] writer claim bookkeeping failed: ${errorMessage(e)}`));
+        }
         const m = this.get(id);
-        if (m && m.status === 'starting') {
+        if (live() && m && m.status === 'starting') {
           m.status = 'idle';
           m.statusDetail = undefined;
           this.pushSessions();
@@ -803,12 +1075,13 @@ export class SessionManager {
       })
       .catch((e) => {
         active.starting = null;
-        this.active.delete(id);
+        if (this.active.get(id) !== active) throw e;
         // The transcript card below is what the user sees; this line is what a bug report needs.
         this.deps.log('error', `[${id}] ${meta.config.harness} failed to start after ${Date.now() - t0}ms: ${e instanceof Error ? e.stack ?? e.message : errorMessage(e)}`);
         // Start failed after spawn: dispose the adapter so no harness child process is orphaned
         // (pi/acp start() have no self-cleaning handshake either).
-        active.adapter.dispose().catch((de) => this.deps.log('warn', `[${id}] dispose after failed start: ${errorMessage(de)}`));
+        const disposal = this.disposeRuntime(id, active, 'error');
+        disposal.catch((de) => this.deps.log('warn', `[${id}] dispose after failed start: ${errorMessage(de)}`));
         const m = this.get(id);
         if (m) {
           m.status = 'error';
@@ -828,16 +1101,66 @@ export class SessionManager {
     return this.sendAs(id, input, 'user');
   }
 
+  /** Starts only the pinned managed runtime and observes its handshake; never sends a prompt.
+   * Kept off generic IPC: configuration/catalog entries are not runtime Mission certification. */
+  async prepareManaged(id: string, generation: number) {
+    const meta = this.managedMeta(id, generation);
+    const hooks = this.requireMissionHooks();
+    if (meta.archived) throw new Error('Mission session is archived');
+    const before = this.activity(id);
+    if (before.turn || before.tools || before.approvals || before.compacting || before.tearingDown || before.uncertain) throw new Error('Mission runtime is not idle for capability inspection');
+    const active = await this.ensureActive(id);
+    const readiness = await active.adapter.missionReadiness?.() ?? { ready: false, tools: [], reason: 'This adapter has not certified the Mission control protocol.' };
+    const models = await active.adapter.listModels?.() ?? [];
+    this.managedMeta(id, generation);
+    if (this.active.get(id) !== active || this.missionHooks !== hooks || active.tearingDown || active.uncertain) throw new Error('Mission capability observation became stale');
+    return { readiness, models };
+  }
+
+  /** Host verification/delivery uses the same user-visible approval channel as harness tools.
+   * Starting an idle lead here connects its runtime only; it never sends model input. */
+  async requestManagedApproval(id: string, generation: number, draft: ApprovalDraft): Promise<ApprovalDecision> {
+    const meta = this.managedMeta(id, generation);
+    const hooks = this.requireMissionHooks();
+    if (meta.mission!.questionId) throw new Error('Completed Mission answers cannot request execution approvals.');
+    if (meta.mission!.role !== 'lead' || meta.archived) throw new Error('Host operation approvals belong to the active Mission lead');
+    const active = await this.ensureActive(id);
+    this.managedMeta(id, generation);
+    if (this.active.get(id) !== active || this.missionHooks !== hooks || active.tearingDown || active.uncertain) throw new Error('Mission approval owner changed');
+    const decision = await this.requestApproval(id, draft);
+    this.managedMeta(id, generation);
+    if (this.active.get(id) !== active || this.missionHooks !== hooks || active.tearingDown || active.uncertain) throw new Error('Mission approval owner changed');
+    return decision;
+  }
+
+  async sendManaged(id: string, input: UserInput, generation: number): Promise<void> {
+    const meta = this.managedMeta(id, generation);
+    this.requireMissionHooks();
+    if (meta.archived) throw new Error('Mission session is archived');
+    if (meta.mission.questionId && (meta.mission.role !== 'lead' || meta.mission.sourceAccess !== 'read_only' || meta.config.permissionMode !== 'plan' || meta.mission.attemptId)) throw new Error('Completed Mission answers require the read-only lead scope.');
+    if (/^\/goal(?:\s|$)/i.test(input.text.trimStart())) throw new Error('Mission owns continuation; native goals are not allowed');
+    const activity = this.activity(id);
+    // Compaction alone can be waited out by dispatchInput; no other activity admits another send.
+    if (activity.starting || activity.turn || activity.tools || activity.approvals || activity.queued || activity.tearingDown || activity.uncertain) throw new Error('Mission session is not ready for dispatch');
+    this.managedDispatches.set(id, { canceled: false });
+    try {
+      await this.sendAs(id, input, 'mission', generation);
+    } finally {
+      this.managedDispatches.delete(id);
+      this.publish(id, { type: 'meta', patch: { queued: this.get(id)?.queued ?? 0 } });
+    }
+  }
+
   /**
-   * `source` names who wrote the prompt. A goal kickoff or continuation writes its own prompt and
-   * runs unattended, so it is not a message the user sent: counting it would float a background
-   * session over the one the user is actually working in.
+   * `source` is host provenance, never supplied by a renderer or model. Goal and Mission dispatch
+   * are not user actions: they confer no new authority and must not affect user recency.
    */
-  private async sendAs(id: string, input: UserInput, source: 'user' | 'goal'): Promise<void> {
-    const meta = this.get(id);
+  private async sendAs(id: string, input: UserInput, source: 'user' | 'goal' | 'mission', generation?: number): Promise<void> {
+    const meta = source === 'mission' ? this.managedMeta(id, generation!) : this.get(id);
     if (!meta) throw new Error('Session not found');
+    if (source !== 'mission') this.assertUnmanaged(id);
     // Size and shape only: the prompt itself belongs to the transcript, not the log.
-    this.deps.log('debug', `[${id}] user input: ${input.text.length} chars${input.images?.length ? `, ${input.images.length} image(s)` : ''}${input.mode ? `, mode=${input.mode}` : ''}`);
+    this.deps.log('debug', `[${id}] ${source === 'mission' ? 'mission' : 'user'} input: ${input.text.length} chars${input.images?.length ? `, ${input.images.length} image(s)` : ''}${input.mode ? `, mode=${input.mode}` : ''}`);
     const userItem: TranscriptItem = { id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text, images: input.images, queuedAs: input.mode };
     this.emit(id, { type: 'item.upsert', item: userItem });
     // The sidebar orders rows by the user's own last message: stamp it before the harness even
@@ -846,7 +1169,7 @@ export class SessionManager {
     // A session named from a dialog prompt or a goal is already carrying a placeholder, and that
     // placeholder is the better one: it was cut from what the user wrote, not from a `/goal …`
     // command the app composed. Keep it on screen and let the model replace it.
-    if (isPlaceholderTitle(meta) && input.text.trim()) {
+    if (source !== 'mission' && isPlaceholderTitle(meta) && input.text.trim()) {
       const placeholder = meta.title === 'New session' ? titleFromPrompt(input.text) : meta.title;
       // A goal kickoff is the app's own prompt; the objective behind it is what names the session.
       const seed = (source === 'goal' && meta.goal?.objective?.trim()) || input.text;
@@ -856,11 +1179,12 @@ export class SessionManager {
     }
     this.schedulePersist(meta);
     this.pushSessions();
-    await this.dispatchInput(id, { ...input, transcriptItemId: userItem.id });
+    await this.dispatchInput(id, { ...input, transcriptItemId: userItem.id }, generation);
   }
 
   /** Replaces a sent prompt only when its adapter can restore a durable pre-message checkpoint. */
   async editAndResend(id: string, userItemId: string, input: UserInput): Promise<TranscriptItem[]> {
+    this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     if (!input.text.trim() && !input.images?.length) throw new Error('Message cannot be empty');
@@ -896,13 +1220,44 @@ export class SessionManager {
     return this.transcript(id);
   }
 
-  private async dispatchInput(id: string, input: UserInput): Promise<void> {
+  private async dispatchInput(id: string, input: UserInput, generation?: number): Promise<void> {
+    const assertGeneration = () => {
+      if (generation === undefined) return;
+      this.managedMeta(id, generation);
+      if (this.managedDispatches.get(id)?.canceled) throw new Error('Session stopped before the message could be sent.');
+    };
+    assertGeneration();
+    const hooks = generation !== undefined ? this.requireMissionHooks() : undefined;
     const active = await this.ensureActive(id);
     // Compaction can run without marking an adapter busy. Keep a new turn from reading or
     // mutating its context until that operation has settled.
     if (active.compactionInFlight) await active.compactionInFlight.catch(() => undefined);
-    if (this.active.get(id) !== active) throw new Error('Session stopped before the message could be sent.');
-    await active.adapter.send(await this.withSessionPreamble(id, input));
+    const assertCurrent = () => {
+      assertGeneration();
+      if (this.active.get(id) !== active || active.tearingDown || active.uncertain) throw new Error('Session stopped before the message could be sent.');
+      if (hooks && this.requireMissionHooks() !== hooks) throw new Error('Mission dispatch hooks changed');
+    };
+    assertCurrent();
+    const prepared = await this.withSessionPreamble(id, input);
+    assertCurrent();
+    const dispatch = async () => {
+      if (hooks) {
+        await hooks.beforeDispatch(this.managedMeta(id, generation!), prepared);
+        assertCurrent();
+      }
+      assertCurrent();
+      active.turnPending = true;
+      try {
+        await active.adapter.send(prepared);
+      } catch (e) {
+        if (hooks) active.uncertain = true; // A rejected transport request need not mean no work ran.
+        throw e;
+      }
+    };
+    const meta = this.get(id);
+    if (meta && this.admits(meta)) await this.deps.withWorkspaceDispatch!(meta, dispatch);
+    else await dispatch();
+    if (hooks) assertCurrent();
     await this.clearSessionPreamble(id);
   }
 
@@ -982,7 +1337,195 @@ export class SessionManager {
     }
   }
 
+  async interruptManaged(id: string, generation: number): Promise<void> {
+    this.managedMeta(id, generation);
+    const pending = this.managedDispatches.get(id);
+    if (pending) pending.canceled = true;
+    const active = this.active.get(id);
+    if (!active) return;
+    if (active.tearingDown) throw new Error('Mission session is stopping');
+    this.cancelApprovals(id, active, 'Interrupted');
+    try {
+      await active.adapter.interrupt();
+    } catch (e) {
+      active.uncertain = true;
+      throw e;
+    }
+  }
+
+  async stopManaged(id: string, generation: number): Promise<void> {
+    this.managedMeta(id, generation);
+    const pending = this.managedDispatches.get(id);
+    if (pending) pending.canceled = true;
+    const active = this.active.get(id);
+    if (active) await this.disposeRuntime(id, active);
+  }
+
+  /** Only a runtime that tracks its writers (ordinary Pi while ordinary process ownership is on)
+   * persists a claim; `undefined` from `workspaceWriterState` means untracked, like Claude/Codex. */
+  private async claimWorkspaceWriter(meta: SessionMeta, active: ActiveSession): Promise<void> {
+    if (meta.mission || active.adapter.workspaceWriterState?.() === undefined) return;
+    if (active.workspaceWriterClaim) return active.workspaceWriterClaimPersisted;
+    active.workspaceWriterClaim = shortId('writer_');
+    meta.workspaceWriterClaims = [...(meta.workspaceWriterClaims ?? []), active.workspaceWriterClaim];
+    // A crash after this write is unknown, not an empty runtime map proving settlement. A later
+    // launch remains usable but owns only its new claim; it cannot erase an earlier process tree.
+    // Bookkeeping never fails the ordinary start itself: the claim stays in memory either way.
+    active.workspaceWriterClaimPersisted = Promise.resolve(this.deps.store.upsert(meta)).then(
+      () => undefined,
+      (e) => this.deps.log('warn', `[${meta.id}] workspace writer claim persist failed: ${errorMessage(e)}`),
+    );
+    await active.workspaceWriterClaimPersisted;
+  }
+
+  private disposeRuntime(id: string, active: ActiveSession, status: 'idle' | 'stopped' | 'error' = 'stopped'): Promise<void> {
+    return this.get(id)?.mission ? this.disposeManaged(id, active, status) : this.retireOrdinary(id, active, status === 'idle');
+  }
+
+  /** Keep the process owned until disposal succeeds; a timeout is not evidence of quiescence. */
+  private disposeManaged(id: string, active: ActiveSession, status: 'idle' | 'stopped' | 'error'): Promise<void> {
+    if (active.disposal) return active.disposal;
+    active.tearingDown = true;
+    if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
+    if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
+    active.pendingGoalKickoff = null;
+    const operation = Promise.resolve().then(async () => {
+      // Install the disposal promise before notifying observers, which may themselves request stop.
+      this.cancelApprovals(id, active, 'Mission session stopped');
+      // A delayed start must not spawn after we disposed its adapter.
+      if (active.starting) await active.starting.catch(() => undefined);
+      try {
+        await active.adapter.dispose();
+        const writers = active.adapter.workspaceWriterState?.();
+        if (writers && writers !== 'quiescent') throw new Error('Session process-tree disposal is unproven. Workspace writer ownership is retained.');
+        await this.flushLive(id, active, true);
+        const meta = this.get(id);
+        if (meta) {
+          meta.status = status;
+          meta.statusDetail = undefined;
+          meta.queued = 0;
+          await this.deps.store.upsert(meta);
+        }
+        if (this.active.get(id) === active) this.active.delete(id);
+        this.pushSessions();
+        this.publish(id, { type: 'status', status });
+      } catch (e) {
+        active.uncertain = true;
+        const meta = this.get(id);
+        if (meta) {
+          meta.status = 'error';
+          meta.lastError = `Mission runtime disposal uncertain: ${errorMessage(e)}`;
+          meta.statusDetail = meta.lastError;
+          this.schedulePersist(meta);
+          this.pushSessions();
+        }
+        throw e;
+      } finally {
+        active.disposal = null;
+      }
+    });
+    active.disposal = operation;
+    return operation;
+  }
+
+  /**
+   * Ordinary teardown, as it always was: the session is released at once (a new send starts a new
+   * runtime), live items are saved, disposal errors are logged, and nothing waits unboundedly:
+   * neither a pending startup nor a hung dispose. Ownership bookkeeping never fails it. A writer
+   * claim is dropped only on positive proof; an unproven one stays as Mission admission information.
+   * `explicit` is a user Stop (the status returns to idle); otherwise the harness ended itself and
+   * its own status stays.
+   */
+  private retireOrdinary(id: string, active: ActiveSession, explicit: boolean): Promise<void> {
+    if (active.disposal) return active.disposal;
+    active.tearingDown = true;
+    if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
+    if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
+    active.pendingGoalKickoff = null;
+    if (this.active.get(id) === active) this.active.delete(id);
+    const retiring = this.retiring.get(id) ?? new Set<ActiveSession>();
+    retiring.add(active);
+    this.retiring.set(id, retiring);
+    const operation = Promise.resolve().then(async () => {
+      // Install the disposal promise before notifying observers, which may themselves request stop.
+      this.cancelApprovals(id, active, 'Session stopped');
+      await this.flushLive(id, active, true).catch((e) => this.deps.log('warn', `[${id}] live flush on stop failed: ${errorMessage(e)}`));
+      const settled = Promise.resolve()
+        .then(() => active.adapter.dispose())
+        .then(() => {
+          const writers = active.adapter.workspaceWriterState?.();
+          return writers === undefined || writers === 'quiescent';
+        }, (e) => {
+          this.deps.log('warn', `[${id}] dispose failed: ${errorMessage(e)}`);
+          return false;
+        })
+        .then((proven) => this.settleWriterClaim(id, active, proven))
+        .catch((e) => this.deps.log('warn', `[${id}] writer claim bookkeeping failed: ${errorMessage(e)}`))
+        .finally(() => {
+          retiring.delete(active);
+          if (!retiring.size && this.retiring.get(id) === retiring) this.retiring.delete(id);
+        });
+      let timer: NodeJS.Timeout | undefined;
+      const finished = await Promise.race([
+        settled.then(() => true),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), this.deps.disposeWaitMs ?? ORDINARY_DISPOSE_WAIT_MS); timer.unref?.(); }),
+      ]);
+      clearTimeout(timer);
+      if (!finished) this.deps.log('warn', `[${id}] ${active.adapter.id} is still shutting down after ${this.deps.disposeWaitMs ?? ORDINARY_DISPOSE_WAIT_MS}ms; the session is available again`);
+      const meta = this.get(id);
+      if (meta && explicit) {
+        // Stopping the harness does not change the branch's git state either.
+        if (meta.status !== 'pr' && meta.status !== 'merged') {
+          meta.status = 'idle';
+          meta.statusDetail = undefined;
+        }
+        meta.queued = 0;
+        await Promise.resolve(this.deps.store.upsert(meta)).catch((e) => this.deps.log('warn', `[${id}] meta persist on stop failed: ${errorMessage(e)}`));
+      }
+      this.pushSessions();
+    }).finally(() => {
+      active.disposal = null;
+    });
+    active.disposal = operation;
+    return operation;
+  }
+
+  /** A retired runtime's own claim goes only with positive proof (or when it never tracked writers). */
+  private async settleWriterClaim(id: string, active: ActiveSession, proven: boolean): Promise<void> {
+    const claim = active.workspaceWriterClaim;
+    if (!claim || !this.get(id)?.workspaceWriterClaims?.includes(claim)) return;
+    if (!proven) {
+      this.deps.log('warn', `[${id}] process-tree disposal is unproven; its workspace writer claim is kept for Mission admission only`);
+      return;
+    }
+    await this.dropWriterClaim(id, claim);
+  }
+
+  private async dropWriterClaim(id: string, claim: string): Promise<void> {
+    const meta = this.get(id);
+    if (!meta?.workspaceWriterClaims?.includes(claim)) return;
+    const kept = meta.workspaceWriterClaims.filter((entry) => entry !== claim);
+    meta.workspaceWriterClaims = kept.length ? kept : undefined;
+    await this.deps.store.upsert(meta);
+  }
+
+  /** An explicit user Stop, Archive, Delete or Move is the acknowledgment for writer claims that no
+   * runtime of this process still holds: ones left by an earlier app run (crash, kill, quit timeout)
+   * or by a disposal that could not prove itself. Claims of live or disposing runtimes stay. */
+  private async releaseStaleWriterClaims(id: string): Promise<void> {
+    const meta = this.get(id);
+    if (!meta?.workspaceWriterClaims?.length) return;
+    const held = new Set([this.active.get(id), ...(this.retiring.get(id) ?? [])].flatMap((runtime) => runtime?.workspaceWriterClaim ? [runtime.workspaceWriterClaim] : []));
+    const stale = meta.workspaceWriterClaims.filter((claim) => !held.has(claim));
+    if (!stale.length) return;
+    const kept = meta.workspaceWriterClaims.filter((claim) => held.has(claim));
+    meta.workspaceWriterClaims = kept.length ? kept : undefined;
+    this.deps.log('warn', `[${id}] released ${stale.length} unproven workspace writer claim(s) no runtime of this app run holds, on an explicit stop`);
+    await Promise.resolve(this.deps.store.upsert(meta)).catch((e) => this.deps.log('warn', `[${id}] meta persist on stop failed: ${errorMessage(e)}`));
+  }
+
   async interrupt(id: string): Promise<void> {
+    this.assertUnmanaged(id);
     const active = this.active.get(id);
     if (!active) return;
     this.deps.log('info', `[${id}] interrupt requested`);
@@ -990,37 +1533,32 @@ export class SessionManager {
     await active.adapter.interrupt();
   }
 
+  /** User Stop (also Archive, Delete and Move): never fails or wedges an ordinary session. */
   async stop(id: string): Promise<void> {
+    this.assertUnmanaged(id);
+    await this.releaseStaleWriterClaims(id);
+    await this.stopOrdinary(id);
+  }
+
+  private async stopOrdinary(id: string): Promise<void> {
     const active = this.active.get(id);
     if (!active) return;
     this.deps.log('info', `[${id}] stopping ${active.adapter.id}${active.adapter.busy ? ' (turn in progress)' : ''}`);
-    this.cancelApprovals(id, active, 'Session stopped');
-    if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
-    if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
-    this.active.delete(id);
-    await this.flushLive(id, active, true);
-    try {
-      await active.adapter.dispose();
-    } catch (e) {
-      this.deps.log('warn', `[${id}] dispose failed: ${errorMessage(e)}`);
-    }
-    const meta = this.get(id);
-    if (meta) {
-      // Stopping the harness does not change the branch's git state either.
-      if (meta.status !== 'pr' && meta.status !== 'merged') {
-        meta.status = 'idle';
-        meta.statusDetail = undefined;
-      }
-      meta.queued = 0;
-      await this.deps.store.upsert(meta);
-      this.pushSessions();
-    }
+    await this.disposeRuntime(id, active, 'idle');
   }
 
+  /** App quit. Never rejects, so the caller still flushes persistence and analytics afterwards. */
   async stopAll(): Promise<void> {
-    const ids = [...this.active.keys()];
+    const ids = [...new Set([...this.active.keys(), ...this.managedDispatches.keys()])];
     if (ids.length) this.deps.log('info', `stopping ${ids.length} running session(s)`);
-    await Promise.all(ids.map((id) => this.stop(id)));
+    const results = await Promise.allSettled(ids.map((id) => {
+      const mission = this.get(id)?.mission;
+      // Quitting is not a user acknowledgment: unproven claims survive for the next run.
+      return mission ? this.stopManaged(id, mission.generation) : this.stopOrdinary(id);
+    }));
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') this.deps.log('warn', `[${ids[index]}] stop during shutdown failed: ${errorMessage(result.reason)}`);
+    });
   }
 
   /**
@@ -1032,6 +1570,7 @@ export class SessionManager {
   }
 
   async setModel(id: string, model: ModelRef): Promise<SessionMeta> {
+    this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     const active = this.active.get(id);
@@ -1047,6 +1586,7 @@ export class SessionManager {
   }
 
   async setEffort(id: string, effort: EffortLevel): Promise<SessionMeta> {
+    this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     this.deps.log('info', `[${id}] effort ${meta.activeEffort ?? 'default'} → ${effort}`);
@@ -1060,14 +1600,24 @@ export class SessionManager {
   }
 
   async setPermissionMode(id: string, mode: PermissionMode): Promise<SessionMeta> {
+    this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
-    // Permission changes are the one setting worth an audit trail: they decide what runs unasked.
-    this.deps.log('info', `[${id}] permission mode ${meta.config.permissionMode} → ${mode}`);
-    meta.config.permissionMode = mode;
     const active = this.active.get(id);
-    if (active) await active.adapter.setPermissionMode(mode);
-    await this.deps.store.upsert(meta);
+    const apply = async () => {
+      if (active && (this.active.get(id) !== active || active.tearingDown)) throw new Error('Session runtime changed before permission update.');
+      // Persist ownership before making a previously read-only runtime writable. The workspace
+      // lease also holds this transition, including native-child completion's automatic follow-up.
+      if (active && mode !== 'plan') await this.claimWorkspaceWriter(meta, active);
+      if (active && (this.active.get(id) !== active || active.tearingDown)) throw new Error('Session runtime changed before permission update.');
+      // Permission changes are the one setting worth an audit trail: they decide what runs unasked.
+      this.deps.log('info', `[${id}] permission mode ${meta.config.permissionMode} → ${mode}`);
+      meta.config.permissionMode = mode;
+      if (active) await active.adapter.setPermissionMode(mode);
+      await this.deps.store.upsert(meta);
+    };
+    if (active?.adapter.workspaceWriterState?.() !== undefined && mode !== 'plan' && this.admits(meta)) await this.deps.withWorkspaceDispatch!(meta, apply);
+    else await apply();
     this.pushSessions();
     this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Permission mode set to ${mode}.` } });
     return meta;
@@ -1076,6 +1626,7 @@ export class SessionManager {
   async compact(id: string): Promise<{ ok: boolean; detail?: string }> {
     const active = this.active.get(id);
     if (!active) return { ok: false, detail: 'Session is not running.' };
+    if (active.tearingDown || active.uncertain) return { ok: false, detail: 'Session runtime is stopping or uncertain.' };
     if (!active.adapter.compact) return { ok: false, detail: 'This harness does not support compaction.' };
     if (active.compactionInFlight) return { ok: false, detail: 'Context compaction is already in progress.' };
     const threshold = this.settings().autoCompactionThreshold;
@@ -1161,7 +1712,8 @@ export class SessionManager {
     const meta = this.get(id);
     const threshold = this.settings().autoCompactionThreshold;
     // A cleared threshold is not a no-op: an engine that was handed a window has to be told.
-    if (!active || !meta) return;
+    if (!active || !meta || active.tearingDown || active.uncertain) return;
+    if (meta.mission && (active.turnPending || active.approvals.size || this.managedDispatches.has(id))) return;
     if (active.autoCompactionThreshold !== threshold) {
       active.autoCompactionThreshold = threshold;
       active.autoCompactionLatched = false;
@@ -1208,6 +1760,7 @@ export class SessionManager {
     active.compactionInFlight = operation;
     try {
       const compacted = await operation;
+      if (this.active.get(id) !== active || active.tearingDown) return;
       if (compacted === false) {
         active.autoCompactionLatched = false;
         active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
@@ -1215,6 +1768,7 @@ export class SessionManager {
         this.note(id, 'Automatic context compaction is waiting for more conversation history.');
       }
     } catch (e) {
+      if (this.active.get(id) !== active || active.tearingDown) return;
       active.autoCompactionLatched = false;
       active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
       this.scheduleAutoCompactionRetry(id, active);
@@ -1222,11 +1776,18 @@ export class SessionManager {
       this.deps.log('warn', `[${id}] automatic compaction failed: ${message}`);
       this.note(id, `Automatic context compaction failed: ${message}`, 'warn');
     } finally {
-      if (active.compactionInFlight === operation) active.compactionInFlight = null;
+      if (active.compactionInFlight === operation) {
+        active.compactionInFlight = null;
+        // Compaction-end info may precede RPC settlement. Notify through the same normalized
+        // stream only after activity changes, or Mission's event-driven admission can strand.
+        // A retired runtime must never wake or rewrite its replacement's status.
+        if (meta.mission && this.active.get(id) === active && !active.tearingDown && !active.uncertain) this.emit(id, { type: 'status', status: meta.status });
+      }
     }
   }
 
   async clearTranscript(id: string): Promise<void> {
+    this.assertUnmanaged(id);
     if (!this.get(id)) throw new Error('Session not found');
     const active = this.active.get(id);
     if (active) {
@@ -1255,27 +1816,27 @@ export class SessionManager {
       item.decidedAt = Date.now();
       this.emit(sessionId, { type: 'item.upsert', item: { ...item } });
     }
-    this.emit(sessionId, { type: 'approval.resolved', requestId, decision });
     const meta = this.get(sessionId);
     if (meta && active.approvals.size === 0 && meta.status === 'awaiting') {
       meta.status = 'running';
       meta.statusDetail = undefined;
       this.pushSessions();
     }
+    this.emit(sessionId, { type: 'approval.resolved', requestId, decision });
   }
 
   private requestApproval(sessionId: string, draft: ApprovalDraft): Promise<ApprovalDecision> {
     const active = this.active.get(sessionId);
     const meta = this.get(sessionId);
-    if (!active || !meta) return Promise.resolve({ optionId: 'deny', note: 'Session gone' });
+    if (!active || !meta || active.tearingDown) return Promise.resolve({ optionId: 'deny', note: 'Session gone' });
     const request: ApprovalRequest = { ...draft, id: shortId('ap_'), sessionId, harness: meta.config.harness, createdAt: Date.now() };
     const d = deferred<ApprovalDecision>();
     active.approvals.set(request.id, d);
     this.deps.log('info', `[${sessionId}] approval ${request.id} requested (${meta.config.permissionMode}): ${request.title.slice(0, 120)}`);
-    this.emit(sessionId, { type: 'item.upsert', item: { id: request.id, kind: 'approval', ts: Date.now(), request } });
-    this.emit(sessionId, { type: 'approval.request', request });
     meta.status = 'awaiting';
     meta.statusDetail = request.title;
+    this.emit(sessionId, { type: 'item.upsert', item: { id: request.id, kind: 'approval', ts: Date.now(), request } });
+    this.emit(sessionId, { type: 'approval.request', request });
     this.pushSessions();
     this.deps.notify(sessionId, `${meta.title}: approval needed`, request.command ?? request.title);
     return d.promise;
@@ -1293,6 +1854,13 @@ export class SessionManager {
     }
     const meta = this.get(sessionId);
     const active = this.active.get(sessionId);
+    // Ownership/configuration are host-owned even if an adapter emits the broad normalized meta shape.
+    if (meta?.mission && event.type === 'meta') {
+      const patch = event.patch;
+      const { activeModel, activeEffort, title, queued, statusDetail, harnessCommands } = patch;
+      const allowed = { activeModel, activeEffort, title, queued, statusDetail, harnessCommands };
+      event = { ...event, patch: Object.fromEntries(Object.entries(allowed).filter(([key]) => key in patch)) };
+    }
     switch (event.type) {
       case 'item.upsert': {
         const item = event.item;
@@ -1307,8 +1875,9 @@ export class SessionManager {
           if (streaming) this.checkpointStream(sessionId, active, item);
           else active.checkpoints?.delete(item.id);
         }
+        if (item.kind === 'turn' && active) active.turnPending = false;
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
-        if (item.kind === 'user' && meta) this.deps.analytics.recordUserMessage(meta, item);
+        if (item.kind === 'user' && meta && !meta.mission) this.deps.analytics.recordUserMessage(meta, item);
         if (item.kind === 'tool') {
           // Keep the model from the start of the call: a model switch before its terminal upsert
           // must not move the call to the newly selected model.
@@ -1354,9 +1923,7 @@ export class SessionManager {
               if (event.status === 'stopped') {
                 // The harness exited on its own: pending approvals would hang forever and the
                 // adapter must be disposed, mirroring the fatal-error path.
-                this.active.delete(sessionId);
-                this.cancelApprovals(sessionId, active, 'Harness stopped');
-                active.adapter.dispose().catch((e) => this.deps.log('warn', `[${sessionId}] dispose after harness stop failed: ${errorMessage(e)}`));
+                void this.disposeRuntime(sessionId, active).catch((e) => this.deps.log('warn', `[${sessionId}] dispose after harness stop failed: ${errorMessage(e)}`));
               }
             }
             this.schedulePersist(meta);
@@ -1370,7 +1937,7 @@ export class SessionManager {
             // A goal installed while another turn was in flight belongs to the next turn, not
             // the old reply. Wait for this idle boundary even if that turn was interrupted.
             const pending = active?.pendingGoalKickoff;
-            if (pending && meta.goal === pending.goal && meta.goal.status === 'active') {
+            if (!meta.mission && pending && meta.goal === pending.goal && meta.goal.status === 'active') {
               const prompt = pending.resume
                 ? `Resuming the goal: ${pending.goal.objective}\nContinue where you left off.`
                 : this.goalKickoffPrompt(pending.goal);
@@ -1402,6 +1969,13 @@ export class SessionManager {
           if (meta.status === 'idle' || active?.adapter.setAutoCompactionWindow) this.scheduleAutoCompaction(meta.id);
         }
         break;
+      case 'subagent.run': {
+        const previous = active?.nativeChildren.get(event.run.runId);
+        if (active && (!previous || previous.startedAt === event.run.startedAt && previous.running)) {
+          active.nativeChildren.set(event.run.runId, { startedAt: event.run.startedAt, running: event.run.status === 'running' });
+        }
+        break;
+      }
       case 'subagent':
         if (meta) this.deps.analytics.recordSubagent(meta, event.completion);
         break;
@@ -1423,9 +1997,7 @@ export class SessionManager {
             meta.queued = 0;
             if (active) {
               // Tear the adapter down cleanly so no approval waits forever and streamed items are saved.
-              this.active.delete(sessionId);
-              this.cancelApprovals(sessionId, active, 'Harness failed');
-              void this.flushLive(sessionId, active, true).then(() => active.adapter.dispose()).catch((e) => this.deps.log('warn', `[${sessionId}] dispose after fatal error failed: ${errorMessage(e)}`));
+              void this.disposeRuntime(sessionId, active, 'error').catch((e) => this.deps.log('warn', `[${sessionId}] dispose after fatal error failed: ${errorMessage(e)}`));
             }
           }
           this.schedulePersist(meta);
@@ -1439,11 +2011,19 @@ export class SessionManager {
     this.publish(sessionId, event);
   }
 
-  /** Stamps a monotonic sequence onto every event this manager pushes. `transcriptSnapshot`
-   *  reports the counter the same events count against, which is what makes a snapshot plus a
-   *  live stream reconcilable for a remote client. */
+  /** Stamps a monotonic sequence onto every event this manager pushes and hands the same
+   *  timestamped envelope to observers. `transcriptSnapshot` reports the counter these events
+   *  count against, which is what makes a snapshot plus a live stream reconcilable for a remote
+   *  client; the Mission hook needs the envelope for every event either way. */
   private publish(sessionId: string, event: SessionEvent): void {
-    this.deps.pushEvent({ sessionId, event, ts: Date.now(), seq: ++this.seq });
+    const env: SessionEventEnvelope = { sessionId, event, ts: Date.now(), seq: ++this.seq };
+    this.deps.pushEvent(env);
+    const listeners = [...this.listeners];
+    if (this.get(sessionId)?.mission && this.missionHooks?.onEvent) listeners.push(this.missionHooks.onEvent);
+    for (const listener of listeners) {
+      try { listener(env); }
+      catch (e) { this.deps.log('warn', `session event observer failed: ${errorMessage(e)}`); }
+    }
   }
 
   /** Transcript appends must never reject into the void; log a warning instead. */
@@ -1466,7 +2046,10 @@ export class SessionManager {
       const saved: TranscriptItem = streaming ? { ...item, streaming: false } : item;
       await this.deps.store.appendTranscript(sessionId, saved);
       active.dirty.delete(id);
-      if (streaming) this.publish(sessionId, { type: 'item.upsert', item: saved });
+      if (streaming) {
+        active.liveItems.set(id, saved);
+        this.publish(sessionId, { type: 'item.upsert', item: saved });
+      }
     }
   }
 
@@ -1526,13 +2109,14 @@ export class SessionManager {
       `[${meta.id}] turn ${turn.status}${turn.durationMs !== undefined ? ` in ${(turn.durationMs / 1000).toFixed(1)}s` : ''}${turn.usage ? ` (${turn.usage.inputTokens} in / ${turn.usage.outputTokens} out)` : ''}${turn.costUsd ? ` $${turn.costUsd.toFixed(4)}` : ''}${turn.error ? `: ${turn.error}` : ''}`
     );
     const active = this.active.get(meta.id);
-    if (this.settings().notifications && turn.status !== 'interrupted') {
+    if (this.settings().notifications && turn.status !== 'interrupted' && (!meta.mission || turn.status !== 'completed')) {
       this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);
     }
     // An answer belongs to one turn only. In particular, a pre-goal answer must not be
     // mistaken for the next kickoff's answer if that turn produces no assistant text.
     const text = active?.lastAssistantText ?? '';
     if (active) active.lastAssistantText = '';
+    if (meta.mission) return;
     const goal = meta.goal;
     if (!goal || goal.status !== 'active' || !active) return;
     // This reply began before the new goal was submitted. Its token (or lack of one) says
@@ -1575,7 +2159,7 @@ export class SessionManager {
    */
   private scheduleGoalContinuation(id: string, prompt: string, attempt = 0, pending?: ActiveSession['pendingGoalKickoff']): void {
     const active = this.active.get(id);
-    if (!active) return;
+    if (!active || this.get(id)?.mission) return;
     const expectedGoal = pending?.goal ?? this.get(id)?.goal;
     if (attempt === 0 && active.goalContinuationTimer) {
       clearTimeout(active.goalContinuationTimer);
@@ -1585,7 +2169,7 @@ export class SessionManager {
       active.goalContinuationTimer = null;
       if (this.active.get(id) !== active) return;
       const meta = this.get(id);
-      if (!meta || meta.goal !== expectedGoal || meta.goal?.status !== 'active') return;
+      if (!meta || meta.mission || meta.goal !== expectedGoal || meta.goal?.status !== 'active') return;
       if (pending && active.pendingGoalKickoff !== pending) return;
       // A normal continuation belongs to the turn behind an approval. A new goal's kickoff,
       // however, must survive that turn, even if it pauses for approval in the meantime.
@@ -1606,6 +2190,7 @@ export class SessionManager {
   }
 
   async goal(id: string, action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update', opts: { objective?: string; autoContinue?: boolean; maxIterations?: number }): Promise<SessionMeta> {
+    this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     const s = this.settings();
@@ -1664,6 +2249,7 @@ export class SessionManager {
 
   /** Kick off now if free; otherwise reserve the first idle boundary after the current turn. */
   private startGoal(id: string, meta: SessionMeta, resume: boolean): void {
+    if (meta.mission) return;
     const goal = meta.goal!;
     const prompt = resume ? `Resuming the goal: ${goal.objective}\nContinue where you left off.` : this.goalKickoffPrompt(goal);
     const active = this.active.get(id);
@@ -1683,6 +2269,7 @@ export class SessionManager {
    * configured to load `~/.claude` at all.
    */
   private async resolveNativeGoal(meta: SessionMeta): Promise<string | null> {
+    if (meta.mission) return null;
     return this.harnessGoal(meta.config.harness, meta.harnessCommands);
   }
 
@@ -1701,8 +2288,19 @@ export class SessionManager {
   }
 
   /** Applies the driver to one session; true when it changed. */
-  private async applyGoalDriver(meta: SessionMeta): Promise<boolean> {
+  private async applyGoalDriver(meta: SessionMeta, current = () => true): Promise<boolean> {
+    if (meta.mission) {
+      if (!current()) return false;
+      const changed = !!(meta.nativeGoal || meta.goal);
+      meta.nativeGoal = undefined;
+      meta.goal = undefined;
+      const active = this.active.get(meta.id);
+      if (active?.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
+      if (active) { active.goalContinuationTimer = null; active.pendingGoalKickoff = null; }
+      return changed;
+    }
     const next = await this.resolveNativeGoal(meta);
+    if (!current()) return false;
     if (next ? meta.nativeGoal === next : meta.nativeGoal === undefined) return false;
     if (next) meta.nativeGoal = next;
     else delete meta.nativeGoal;
@@ -1726,12 +2324,13 @@ export class SessionManager {
    * provider resume state is tied to the old directory, so it is dropped (the app transcript stays).
    */
   async moveTo(id: string, cwd: string): Promise<SessionMeta> {
+    this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     if (!path.isAbsolute(cwd)) throw new Error('Worktree path must be absolute');
     if (path.resolve(meta.cwd) === path.resolve(cwd)) return meta;
     const wasRunning = !!this.active.get(id);
-    if (wasRunning) await this.stop(id);
+    if (wasRunning || meta.workspaceWriterClaims?.length) await this.stop(id);
     this.deps.log('info', `[${id}] session moved ${meta.cwd} → ${cwd}${wasRunning ? ' (harness was running; provider resume state dropped)' : ''}`);
     meta.cwd = cwd;
     const info = await worktreeInfo(cwd).catch(() => null);
@@ -1758,6 +2357,7 @@ export class SessionManager {
   }
 
   async fork(id: string, harness?: HarnessId): Promise<SessionMeta | null> {
+    this.assertUnmanaged(id);
     const src = this.get(id);
     if (!src) return null;
     const items = await this.transcript(id);
@@ -1795,6 +2395,8 @@ export class SessionManager {
       pinned: undefined,
       pinnedAt: undefined,
       archived: undefined,
+      // Writer claims belong to the source's runtimes; a fork has run nothing yet.
+      workspaceWriterClaims: undefined,
       cwd: own?.path ?? src.cwd,
       // Only a worktree this fork created is the fork's to remove. When it shares the source's
       // directory it owns no worktree: claiming the source's would make archiving the fork delete it.

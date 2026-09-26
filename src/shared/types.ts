@@ -8,6 +8,8 @@ import type { ShortcutCommand } from './shortcuts';
 import type { KnowledgeSettings } from './knowledge';
 import type { ReliabilityReport } from './analytics/reliability';
 import type { CodeOutputReport } from './analytics/code-output';
+import type { MissionOwnership } from './mission';
+import type { MissionConfig, MissionProjectOverride } from './mission-config';
 
 import type { SubagentRunMode, SubagentRunStatus } from './subagents';
 
@@ -176,7 +178,7 @@ export interface McpServerDef {
 }
 
 /** Ids of the MCP servers this app ships itself. A same-named user entry is not theirs to edit, so it is ignored everywhere. */
-export const MCP_BUILTIN_IDS: readonly string[] = ['gitnexus', 'vocs-memory', 'cua-driver'];
+export const MCP_BUILTIN_IDS: readonly string[] = ['gitnexus', 'vocs-memory', 'cua-driver', 'vocs-mission'];
 
 /**
  * Authorization profile Cua Driver runs under. The mode is read once, when the process that owns
@@ -783,7 +785,9 @@ export interface SessionMeta {
    * the fork starts its counters at zero.
    */
   forkedFrom?: string;
-  /** Effective working directory (worktree path if isolated). */
+  /** Host-managed Mission identity; absent for ordinary sessions. Children are not sidebar rows. */
+  mission?: MissionOwnership;
+  /** Effective working directory (worktree path if isolated), never the Mission integration view. */
   cwd: string;
   /**
    * The app-managed worktree this session owns and may remove. A fork of a worktree session gets
@@ -831,6 +835,9 @@ export interface SessionMeta {
   /** Epoch ms when pinned; pinned rows sort by it ascending (first pin on top). Rewritten on drag-reorder. */
   pinnedAt?: number;
   archived?: boolean;
+  /** Ordinary runtime writer claims persisted before writable startup. Only the same runtime's
+   * positive disposal proof clears its claim; restart or a newer runtime cannot clear old debt. */
+  workspaceWriterClaims?: string[];
   /** Number of queued (steer/follow-up) messages waiting. */
   queued?: number;
 }
@@ -1148,6 +1155,9 @@ export interface FolderSessionDefaults {
 }
 
 export interface AppSettings {
+  /** User-approved execution presets. Missing on older settings means Mission is unconfigured. */
+  mission?: MissionConfig;
+  missionProjects?: Record<string, MissionProjectOverride>;
   version: 1;
   theme: ThemeId;
   defaultHarness: HarnessId;

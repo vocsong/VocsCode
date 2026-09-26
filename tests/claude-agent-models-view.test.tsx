@@ -15,7 +15,7 @@ import type { ClaudeAgentTypesInfo } from '../src/shared/ipc';
 import type { ModelInfo, SessionMeta } from '../src/shared/types';
 
 const { invoke, on } = vi.hoisted(() => ({ invoke: vi.fn(), on: vi.fn(() => () => {}) }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, on, isMac: false, modKey: 'Ctrl', platform: 'win32', isWeb: false, webShim: vi.fn() }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke, on, isMac: false, modKey: 'Ctrl', platform: 'win32', isWeb: false, webShim: vi.fn() }));
 
 const session = (harness: SessionMeta['config']['harness'] = 'claude'): SessionMeta =>
   ({

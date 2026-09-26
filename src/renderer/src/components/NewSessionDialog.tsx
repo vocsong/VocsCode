@@ -9,8 +9,18 @@ import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
 import { fileToAttachment } from './Composer';
+import { MissionLaunch } from './mission/MissionLaunch';
 
 export function NewSessionDialog() {
+  const kind = useStore((s) => s.newSessionKind);
+  const choices = <div className="mission-kind row gap8" role="group" aria-label="Session kind">
+    <Button variant={kind === 'normal' ? 'primary' : 'subtle'} aria-pressed={kind === 'normal'} onClick={() => useStore.setState({ newSessionKind: 'normal' })}>Normal session</Button>
+    <Button variant={kind === 'mission' ? 'primary' : 'subtle'} aria-pressed={kind === 'mission'} onClick={() => useStore.setState({ newSessionKind: 'mission' })}>Mission</Button>
+  </div>;
+  return kind === 'mission' ? <MissionLaunch choices={choices} /> : <NormalSessionDialog choices={choices} />;
+}
+
+function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const settings = useStore((s) => s.settings)!;
   const availability = useStore((s) => s.availability);
   const availabilityError = useStore((s) => s.availabilityError);
@@ -236,6 +246,7 @@ export function NewSessionDialog() {
         </>
       }
     >
+      {choices}
       <div className="ns-grid">
         <section className="ns-col" ref={harnessColRef}>
           <Field label="Harness">

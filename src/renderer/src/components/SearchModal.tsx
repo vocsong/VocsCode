@@ -99,7 +99,7 @@ export function SearchModal() {
                 <Icon name={KIND_ICON[r.kind] ?? 'file'} size={14} />
                 <span className="search-body">
                   <span className="search-title">
-                    {s?.title ?? r.sessionId}
+                    {s?.mission?.role === 'worker' ? `Mission specialist · ${s.title} (read-only)` : s?.title ?? r.sessionId}
                     <span className="qs-root">
                       {s ? `${harnessShort(s.config.harness)} · ${basename(s.config.projectRoot)} · ${relTime(s.updatedAt)}` : ''}
                     </span>

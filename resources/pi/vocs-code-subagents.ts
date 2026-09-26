@@ -124,7 +124,7 @@ interface ChildSession {
   prompt(text: string): Promise<void>;
   steer(text: string): Promise<void>;
   abort(): Promise<void>;
-  dispose(): void;
+  dispose(): void | Promise<void>;
   readonly messages: Array<Record<string, unknown>>;
   readonly model?: ModelLike;
   readonly modelRuntime?: { registerProvider(id: string, config: unknown): void };
@@ -148,8 +148,12 @@ interface ActiveRun {
   assistantStartedAt: number;
   toolsThisTurn: string[];
   aborted: boolean;
-  settled: Promise<void>;
-  settle: () => void;
+  interrupted: boolean;
+  starting: Promise<void>;
+  started: () => void;
+  execution: Promise<void> | null;
+  settling: Promise<void> | null;
+  events: Promise<void>;
 }
 
 /** The run's usage in pi's `Usage` shape, so a foreground result folds child spend into the
@@ -240,6 +244,8 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
   let approvalChain: Promise<unknown> = Promise.resolve();
   let pendingCompletions: ActiveRun[] = [];
   let completionTimer: NodeJS.Timeout | null = null;
+  let shuttingDown = false;
+  let shutdown: Promise<void> | null = null;
 
   pi.events?.on(GRANT_EVENT, (payload) => {
     const tool = (payload as { tool?: unknown } | null)?.tool;
@@ -247,7 +253,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
   });
 
   const notify = (payload: Record<string, unknown>): void => {
-    parentCtx?.ui?.notify(NOTIFY_MARKER + JSON.stringify(payload), 'info');
+    parentCtx?.ui?.notify(NOTIFY_MARKER + JSON.stringify({ ...payload, version: 1, nonce: process.env.VOCS_CODE_PI_NONCE }), 'info');
   };
 
   const emitItem = (run: ActiveRun, item: RunItem): void => {
@@ -335,25 +341,39 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
 
   const settleRun = async (run: ActiveRun, status: RunStatus, error?: string): Promise<void> => {
     if (run.status !== 'running') return;
-    run.status = status;
-    run.error = error;
-    run.session?.dispose();
-    run.session = null;
-    const item: RunItem = {
-      id: `${run.id}-end`,
-      ts: Date.now(),
-      kind: 'info',
-      summary: error ? `Run ${status}: ${error}` : `Run ${status}`,
-      status: status === 'completed' ? 'done' : status === 'error' ? 'error' : 'declined',
-    };
-    await store?.item(run.id, item);
-    await store?.end(run.id, status, run.totals, error);
-    notify({ kind: 'end', runId: run.id, status, totals: run.totals, error, endedAt: Date.now(), output: run.output.slice(-4_000) });
-    if (run.mode === 'background') scheduleCompletion(run);
-    run.settle();
-    // Keep finished runs addressable for `subagent_result`; the map is bounded by the session cap.
+    if (run.settling) return run.settling;
+    const operation = Promise.resolve().then(async () => {
+      await run.events;
+      // prompt/abort acceptance is not child disposal. Keep the run visibly running on failure.
+      await run.session?.dispose();
+      run.session = null;
+      run.status = run.interrupted ? 'interrupted' : status;
+      status = run.status;
+      run.error = error;
+      const item: RunItem = {
+        id: `${run.id}-end`,
+        ts: Date.now(),
+        kind: 'info',
+        summary: error ? `Run ${status}: ${error}` : `Run ${status}`,
+        status: status === 'completed' ? 'done' : status === 'error' ? 'error' : 'declined',
+      };
+      await store?.item(run.id, item);
+      await store?.end(run.id, status, run.totals, error);
+      notify({ kind: 'end', runId: run.id, status, totals: run.totals, error, endedAt: Date.now(), output: run.output.slice(-4_000) });
+      if (run.mode === 'background' && !shuttingDown) scheduleCompletion(run);
+      // Keep finished runs addressable for `subagent_result`; the map is bounded by the session cap.
+    });
+    run.settling = operation;
+    try { await operation; } finally { run.settling = null; }
   };
 
+  const reportUncertain = (run: ActiveRun, error: unknown): void => {
+    run.error = error instanceof Error ? error.message : String(error);
+    notify({ kind: 'uncertain', runId: run.id, error: run.error });
+  };
+
+  // Child completion is not root/OS-writer quiescence: this debounce deliberately queues a new
+  // parent turn. The host's process ownership must span the idle gap and the resulting follow-up.
   const scheduleCompletion = (run: ActiveRun): void => {
     pendingCompletions.push(run);
     if (completionTimer) clearTimeout(completionTimer);
@@ -361,7 +381,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
       completionTimer = null;
       const finished = pendingCompletions;
       pendingCompletions = [];
-      if (!finished.length || !pi.sendMessage) return;
+      if (shuttingDown || !finished.length || !pi.sendMessage) return;
       const lines = finished.map((r) => {
         const where = runDir ? ` Full transcript: ${path.join(runDir, `${r.id}.jsonl`)}` : '';
         const head = r.output ? r.output.slice(0, 1_500) : (r.error ?? '');
@@ -391,15 +411,14 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     // Read the user's pi-subagents concurrency settings on every spawn so a change in Settings
     // applies to this session without a restart, and a cap always matches what the app shows.
     const limits = await readSubagentLimits(agentDir);
+    if (shuttingDown) throw new Error('Subagent session is shutting down.');
     if (activeCount() >= limits.session) throw new Error(`Vocs Code allows ${limits.session} active subagent runs per session; wait for one to finish or stop one first.`);
     if (params.background && activeCount('background') >= limits.background) throw new Error(`Vocs Code allows ${limits.background} background subagent runs at once; wait for one to finish or run this one in the foreground.`);
     if (!params.background && limits.foreground > 0 && activeCount('foreground') >= limits.foreground) throw new Error(`Vocs Code allows ${limits.foreground} foreground subagent runs at once; wait for one to finish or run this one in the background.`);
 
     const runId = `agent_${randomUUID().slice(0, 8)}`;
-    let settle: () => void = () => undefined;
-    const settled = new Promise<void>((resolve) => {
-      settle = resolve;
-    });
+    let started: () => void = () => undefined;
+    const starting = new Promise<void>((resolve) => { started = resolve; });
     const run: ActiveRun = {
       id: runId,
       agent,
@@ -416,91 +435,101 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
       pendingCall: null,
       assistantStartedAt: 0,
       toolsThisTurn: [],
-      aborted: false,
-      settled,
-      settle,
+      aborted: !!signal?.aborted,
+      interrupted: false,
+      starting,
+      started,
+      execution: null,
+      settling: null,
+      events: Promise.resolve(),
     };
     runs.set(runId, run);
     signal?.addEventListener('abort', () => {
       run.aborted = true;
-      void run.session?.abort();
+      void run.session?.abort().catch((error) => reportUncertain(run, error));
     }, { once: true });
 
-    const cwd = ctx.cwd ?? process.cwd();
-    const parentPrompt = (() => {
-      try {
-        return ctx.getSystemPrompt?.() ?? '';
-      } catch {
-        return '';
+    try {
+      const cwd = ctx.cwd ?? process.cwd();
+      const parentPrompt = (() => {
+        try {
+          return ctx.getSystemPrompt?.() ?? '';
+        } catch {
+          return '';
+        }
+      })();
+      let model: unknown;
+      if (params.model) {
+        const slash = params.model.indexOf('/');
+        if (slash > 0) model = ctx.modelRegistry?.find?.(params.model.slice(0, slash), params.model.slice(slash + 1));
+        if (!model) throw new Error(`Model "${params.model}" is not available; use provider/model-id or omit it to inherit the session model.`);
+      } else if (agent.model) {
+        model = ctx.modelRegistry?.find?.(agent.model.provider, agent.model.model);
+        if (!model) throw new Error(`Model "${agent.model.provider}/${agent.model.model}" pinned by agent "${agent.name}" is not available.`);
+      } else {
+        model = ctx.model;
       }
-    })();
-    let model: unknown;
-    if (params.model) {
-      const slash = params.model.indexOf('/');
-      if (slash > 0) model = ctx.modelRegistry?.find?.(params.model.slice(0, slash), params.model.slice(slash + 1));
-      if (!model) throw new Error(`Model "${params.model}" is not available; use provider/model-id or omit it to inherit the session model.`);
-    } else if (agent.model) {
-      model = ctx.modelRegistry?.find?.(agent.model.provider, agent.model.model);
-      if (!model) throw new Error(`Model "${agent.model.provider}/${agent.model.model}" pinned by agent "${agent.name}" is not available.`);
-    } else {
-      model = ctx.model;
-    }
 
-    await store?.start({
-      runId,
-      agent: agent.name,
-      description: params.description,
-      mode: run.mode,
-      provider: (model as ModelLike | undefined)?.provider,
-      model: (model as ModelLike | undefined)?.id,
-      cwd,
-      startedAt: run.startedAt,
-    });
-    notify({ kind: 'start', runId, agent: agent.name, description: params.description, mode: run.mode, provider: (model as ModelLike | undefined)?.provider, model: (model as ModelLike | undefined)?.id, startedAt: run.startedAt, cwd });
+      await store?.start({
+        runId,
+        agent: agent.name,
+        description: params.description,
+        mode: run.mode,
+        provider: (model as ModelLike | undefined)?.provider,
+        model: (model as ModelLike | undefined)?.id,
+        cwd,
+        startedAt: run.startedAt,
+      });
+      notify({ kind: 'start', runId, agent: agent.name, description: params.description, mode: run.mode, provider: (model as ModelLike | undefined)?.provider, model: (model as ModelLike | undefined)?.id, startedAt: run.startedAt, cwd });
 
-    // A child gets the session's MCP tools unless its agent definition opts out (`mcp: false`),
-    // the same opt-out the app's own templates use for its read-only Explore and Plan agents.
-    const childMcpTools = agent.mcp ? await mcpToolNames() : [];
-    const loader = new sdk.DefaultResourceLoader({
-      cwd,
-      agentDir,
-      noExtensions: true,
-      noSkills: true,
-      noPromptTemplates: true,
-      noThemes: true,
-      noContextFiles: false,
-      extensionFactories: [gateFactoryFor(run), ...(childMcpTools.length ? [mcpFactoryFor()] : [])],
-      systemPromptOverride: () => buildSystemPrompt(agent, parentPrompt),
-      appendSystemPromptOverride: () => [],
-    });
-    await loader.reload();
-    const created = await sdk.createAgentSession({
-      cwd,
-      agentDir,
-      resourceLoader: loader,
-      sessionManager: sdk.SessionManager.inMemory(cwd),
-      tools: [...toolNamesFor(agent), ...childMcpTools],
-      excludeTools: [...EXCLUDED_CHILD_TOOLS],
-      ...(model ? { model } : {}),
-      ...(ctx.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
-    });
-    run.session = created.session;
-    registerProviderForChild(ctx, run.session);
+      // A child gets the session's MCP tools unless its agent definition opts out (`mcp: false`),
+      // the same opt-out the app's own templates use for its read-only Explore and Plan agents.
+      const childMcpTools = agent.mcp ? await mcpToolNames() : [];
+      const loader = new sdk.DefaultResourceLoader({
+        cwd,
+        agentDir,
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: false,
+        extensionFactories: [gateFactoryFor(run), ...(childMcpTools.length ? [mcpFactoryFor()] : [])],
+        systemPromptOverride: () => buildSystemPrompt(agent, parentPrompt),
+        appendSystemPromptOverride: () => [],
+      });
+      await loader.reload();
+      const created = await sdk.createAgentSession({
+        cwd,
+        agentDir,
+        resourceLoader: loader,
+        sessionManager: sdk.SessionManager.inMemory(cwd),
+        tools: [...toolNamesFor(agent), ...childMcpTools],
+        excludeTools: [...EXCLUDED_CHILD_TOOLS],
+        ...(model ? { model } : {}),
+        ...(ctx.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
+      });
+      run.session = created.session;
+      registerProviderForChild(ctx, run.session);
 
-    run.session.subscribe((event) => {
-      void handleChildEvent(run, event);
-    });
+      run.session.subscribe((event) => {
+        run.events = run.events.then(() => handleChildEvent(run, event));
+        void run.events.catch((error) => reportUncertain(run, error));
+      });
 
-    void run.session
-      .prompt(params.prompt)
-      .then(async () => {
+      run.execution = Promise.resolve().then(async () => {
+        if (!run.aborted && !shuttingDown) await run.session!.prompt(params.prompt);
+      }).then(async () => {
         const status: RunStatus = run.aborted ? 'stopped' : lastError(run) ? 'error' : 'completed';
         await settleRun(run, status, lastError(run));
-      })
-      .catch(async (error: unknown) => {
+      }, async (error: unknown) => {
         await settleRun(run, run.aborted ? 'stopped' : 'error', error instanceof Error ? error.message : String(error));
       });
-    return run;
+      void run.execution.catch((error) => reportUncertain(run, error));
+      return run;
+    } catch (error) {
+      await settleRun(run, run.aborted ? 'stopped' : 'error', error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally { run.started(); }
   };
 
   const lastError = (run: ActiveRun): string | undefined => {
@@ -627,7 +656,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
             details: runSummary(run),
           };
         }
-        await run.settled;
+        await run.execution;
         const statusLine = `${run.agent.name} ${run.status} — ${run.totals.turns} turn(s), ${run.totals.toolUses} tool call(s), ${(run.totals.durationMs / 1000).toFixed(1)}s${run.totals.costUsd ? `, $${run.totals.costUsd.toFixed(4)}` : ''}`;
         const body = run.output || run.error || '(no output)';
         return { content: [{ type: 'text', text: `${body}\n\n[${statusLine}]` }], details: runSummary(run), usage: usageForPi(run.totals) };
@@ -696,13 +725,22 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
   });
 
   pi.on('session_shutdown', (_event, ctx) => {
+    if (shutdown) return shutdown;
+    shuttingDown = true;
+    if (completionTimer) clearTimeout(completionTimer);
+    completionTimer = null;
+    pendingCompletions = [];
     ctx.ui?.notify('VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce: process.env.VOCS_CODE_PI_NONCE, capability: 'subagents', ready: false }), 'info');
-    for (const run of runs.values()) {
-      if (run.status !== 'running') continue;
-      run.aborted = true;
-      void run.session?.abort();
-      void settleRun(run, 'interrupted');
-    }
+    const active = [...runs.values()].filter((run) => run.status === 'running');
+    for (const run of active) { run.aborted = true; run.interrupted = true; }
+    shutdown = Promise.all(active.map(async (run) => {
+      await run.starting;
+      await run.session?.abort();
+      // A successful abort request is not a terminal prompt. Never dispose ahead of execution.
+      await run.execution;
+      await settleRun(run, 'interrupted');
+    })).then(() => undefined).finally(() => { shutdown = null; });
+    return shutdown;
   });
 
   // A user-pressed stop aborts the parent turn; every child of that turn stops with it.
@@ -712,7 +750,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     for (const run of runs.values()) {
       if (run.status !== 'running') continue;
       run.aborted = true;
-      void run.session?.abort();
+      void run.session?.abort().catch((error) => reportUncertain(run, error));
     }
     return undefined;
   });

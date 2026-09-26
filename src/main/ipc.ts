@@ -1,6 +1,6 @@
 /** Binds the transport-agnostic handler registry (handlers.ts) to Electron's ipcMain and pushes events to the renderer window. */
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
-import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry } from './handlers';
+import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry, type MissionHandlerService } from './handlers';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
 import type { RuntimeResolver } from './runtime';
@@ -18,6 +18,7 @@ export interface IpcDeps {
   settings: SettingsStore;
   secrets: SecretStore;
   sessions: SessionManager;
+  missions?: MissionHandlerService;
   terminals: TerminalManager;
   runtime: RuntimeResolver;
   analytics: AnalyticsStore;
@@ -111,6 +112,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     settings: deps.settings,
     secrets: deps.secrets,
     sessions: deps.sessions,
+    missions: deps.missions,
     terminals: deps.terminals,
     runtime: deps.runtime,
     analytics: deps.analytics,

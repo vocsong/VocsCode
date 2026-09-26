@@ -5,7 +5,8 @@ Technical reference moved out of the README. For the friendly overview, read the
 ## Source layout
 
 ```
-src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette (no runtime deps)
+src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette (no runtime deps);
+                  mission*.ts hold the Mission record, preset/config and command contracts
 src/main
   harness/        one adapter per harness → normalized SessionEvent stream
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
@@ -15,6 +16,10 @@ src/main
     pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
     acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
+  mission/        durable Mission coordination (service/state/store), scoped tools, scheduling,
+                  workspaces, verification, delivery and restart recovery (docs/MISSIONS.md)
+  owned-windows-job.ts + terminal-process.ts   Windows Job Object supervisor that proves a process
+                  tree has ended (resources/mission/windows-check-job.ps1)
   models/         provider clients and model discovery, with offline catalogs and pricing
   util/           fs and async helpers shared by the adapters (no Electron imports)
   session-manager.ts  sessions, transcripts, approvals, goals, worktrees
@@ -31,6 +36,7 @@ src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
     analytics/    the usage dashboard: tabs, view model (model.ts) and the SVG chart primitives (charts.tsx)
+    mission/      Mission settings, launch dialog, panel, workspace inspector and completion report
   terminal/       xterm.js instances kept alive outside React (host.ts)
   theme.ts        injects the data-driven palettes and applies the active theme to <html>
   store.ts        session state; api.ts wraps the preload bridge
@@ -40,7 +46,9 @@ src/web           the browser shell at code.vocs.io/app (plain Vite build into r
   screens/        pairing, Connect with GitHub, sessions home, one session
   sheets/         bottom sheets: computers, devices, new session, read-only terminal
   components/     web composer, session header, status chip, connection banner
-resources/pi      the approvals extension loaded into pi at spawn time
+resources/pi      extensions loaded into pi at spawn time: approvals, tools, subagents, the MCP bridge and,
+                  for Mission-managed sessions only, vocs-code-mission.ts
+resources/mission the Windows Job Object helper (windows-check-job.ps1) shared by Mission checks and owned processes
 tests             unit + format + review-fixes run offline; smoke and e2e are opt-in
 ```
 
@@ -131,6 +139,42 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - Sessions must resume after restart for every harness; keep that path working when touching persistence.
 - A session forked from one in an app-managed worktree gets a worktree and branch of its own, branched from the source checkout's HEAD; a fork never shares the source's directory, so archiving the source with its worktree cannot delete the fork's. A provider resume id belongs to the directory it ran in, so a same-harness fork that moved is handed the conversation as text instead (`pendingForkContext`).
 - A session's usage counts only the money it spent itself. Turn rows are the itemized ledger and `SessionMeta.usage` is the counter over it; a fork carries the conversation, never the ledger.
+
+## Mission ownership
+
+[Mission guide](MISSIONS.md) · [status and support matrix](MISSION-STATUS.md) · [specification](MISSION-SPEC-v0.2.md)
+
+Missions are experimental and run only with Pi presets on Windows. The harness matrix above
+describes ordinary sessions and says nothing about Mission support.
+
+`mission/runtime.ts` composes the privileged coordinator at desktop startup. `MissionService`
+owns versioned plans, generated profiles, task/attempt admission, mailbox, integration and delivery;
+`SessionManager` still owns every harness, normalized event, transcript, approval and usage ledger.
+Renderer state only reconstructs views and sends genuine user actions. There is one active lead
+and no second app/native goal loop on a managed participant.
+
+The journal is committed/fsynced before external effects. Stable operation identities and
+immutable receipts reconcile acknowledgment loss; checksummed snapshots are caches, not an
+alternative authority. Restart never automatically resumes pending Mission execution. Unknown
+schema versions, corrupt journals and uncertain process effects stay blocked rather than inferred
+from a newly empty process/session map.
+
+T5 and worker presets are immutable attempt snapshots. Live disablement/restrictions still
+apply at dispatch. Runtime readiness comes from the exact initialized adapter's model/effort,
+connection and coordination observations, not a merged catalog. The scoped loopback Mission
+broker binds role/session/generation/attempt authority in an ephemeral bearer capability; model
+payloads cannot select those identities or invoke user-only authorization/configuration controls.
+
+Workspace leases hold application writer admission across capture/integration and across the
+async runtime-start/dispatch gap. Verification owns isolated processes/resources until descendant
+quiescence is proven. Git worktrees, permission gates and process ownership are not an OS
+sandbox. Unexpected edits and uncertain cleanup remain retained. Actual test counts, exact content
+identity, independent review, settled operations and real delivery receipts gate completion.
+
+Generic IPC and remote mutations also check managed workspace ownership, including ordinary
+session aliases. The main diff is the accepted result versus baseline, not whichever participant
+is currently selected for inspection. Specialists remain owned sessions internally but are not
+independent sidebar chats or separately charged Mission rollups.
 
 ## Adding a harness
 

@@ -154,6 +154,28 @@ describe('Pi subagent activity bridge', () => {
     expect(completion).toMatchObject({ status: 'error', error: 'model refused', usage: { inputTokens: 500, costUsd: 0.1, turns: 1 } });
   });
 
+  it('never settles a known child from a stale nonce, malformed end, or a duplicate terminal', () => {
+    const { notify, events } = host();
+    notify('VCODE_SUBAGENT::', start('agent_known', { mode: 'background' }));
+    notify('VCODE_SUBAGENT::', { kind: 'end', runId: 'agent_known', status: 'completed', nonce: 'old-process' });
+    notify('VCODE_SUBAGENT::', { kind: 'end', runId: 'agent_known', status: 'not-a-terminal' });
+    expect(events.filter((event) => event.type === 'subagent.run')).toMatchObject([{ run: { status: 'running' } }]);
+    notify('VCODE_SUBAGENT::', { kind: 'end', runId: 'agent_known', status: 'completed' });
+    notify('VCODE_SUBAGENT::', { kind: 'end', runId: 'agent_known', status: 'completed' });
+    notify('VCODE_SUBAGENT::', start('agent_known', { mode: 'background' }));
+    expect(events.filter((event) => event.type === 'subagent.run')).toMatchObject([{ run: { status: 'running' } }, { run: { status: 'completed' } }]);
+    expect(events.filter((event) => event.type === 'subagent')).toHaveLength(1);
+  });
+
+  it('keeps a known third-party background Agent in the normalized run stream until its completion', () => {
+    const { feed, events } = host();
+    feed({ type: 'tool_execution_start', toolCallId: 'spawn', toolName: 'Agent', args: { description: 'write later' } });
+    feed({ type: 'tool_execution_end', toolCallId: 'spawn', toolName: 'Agent', result: { details: { agentId: 'legacy', status: 'running', description: 'write later' } } });
+    expect(events.filter((event) => event.type === 'subagent.run')).toMatchObject([{ run: { runId: 'legacy', status: 'running' } }]);
+    feed({ type: 'message_end', message: { role: 'custom', customType: 'subagent-notification', details: { id: 'legacy', status: 'completed' } } });
+    expect(events.filter((event) => event.type === 'subagent.run')).toMatchObject([{ run: { status: 'running' } }, { run: { status: 'completed' } }]);
+  });
+
   it('ignores a malformed or run-less subagent notification', () => {
     const { feed, events } = host();
     feed({ type: 'extension_ui_request', method: 'notify', message: 'VCODE_SUBAGENT::not json' });

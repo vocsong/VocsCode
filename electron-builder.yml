@@ -13,6 +13,8 @@ extraResources:
     to: pi
   - from: resources/mcp
     to: mcp
+  - from: resources/mission
+    to: mission
   - from: resources/icons
     to: icons
 asarUnpack:

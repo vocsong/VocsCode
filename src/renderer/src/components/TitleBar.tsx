@@ -157,7 +157,7 @@ function FileMenu({ close }: { close: () => void }) {
       <MenuItem hint={`${modKey}+N`} onClick={run(() => void st.startNewSession())}>
         New session
       </MenuItem>
-      <MenuItem disabled={!session} onClick={run(() => session && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)).catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error')))}>
+      <MenuItem disabled={!session || !!session.mission} hint={session?.mission ? 'Mission owns execution; generic fork is unavailable.' : undefined} onClick={run(() => session && !session.mission && void invoke('sessions:fork', { id: session.id }).then((f) => f && st.setActive(f.id)).catch((e) => st.toast(e instanceof Error ? e.message : String(e), 'error')))}>
         Fork session
       </MenuItem>
       {session && <ForkIntoItems session={session} onForked={(f) => st.setActive(f.id)} />}
