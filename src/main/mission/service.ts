@@ -16,17 +16,17 @@ import {
   type ExecutionPreset, type MissionConfig, type MissionPresetCapabilities, type MissionProjectOverride,
 } from '../../shared/mission-config';
 import { isMissionAffirmative } from '../../shared/mission-command';
-import { isMissionQuestionOperation } from '../../shared/mission';
+import { isMissionQuestionOperation, missionBlockerFamily } from '../../shared/mission';
 import type { ImageAttachment, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UserInput } from '../../shared/types';
 import type { SessionManager } from '../session-manager';
 import { captureMissionSource, missionKickoff, missionLeadPolicy, missionWorkerBrief, missionWorkerPolicy } from './context';
-import { assertMissionMutation, assertMissionRecord, implementationBlockers, missionCompletionReport, readyTasks, reduceMission, type MissionActor, type MissionMutation } from './state';
+import { assertMissionMutation, assertMissionRecord, implementationBlockers, MissionAdmissionError, missionCheckCommandIssue, missionCompletionReport, readyTasks, reduceMission, type MissionActor, type MissionMutation } from './state';
 import { MissionStoreError, type MissionStore } from './store';
 import type { CapacityLease, MissionScheduler } from './scheduler';
 import { MissionToolBroker, type MissionToolActor, type MissionToolBinding, type MissionToolHost, type MissionToolName, type MissionToolRequest } from './tools';
 import type { MissionVerification, VerificationRequest } from './verification';
 import type { MissionDeliveryRequest } from './delivery';
-import type { MissionBaseline, MissionWorkspaces, MissionWorkspace as GitWorkspace, TargetFetchAuthorization } from './workspaces';
+import type { BaselineProbe, MissionBaseline, MissionWorkspaces, MissionWorkspace as GitWorkspace, TargetFetchAuthorization } from './workspaces';
 import { budgetUsage, mergeBudgetUsage, missionBudgetIssue, missionBudgetSessions, type MissionBudgetUsage } from './budget';
 import { classifyMissionDispatch, classifyMissionTurn, currentMissionFailureOwner, missionFailureNotice, observeMissionTrouble, type MissionTurnTrouble } from './failures';
 import { missionMadeProgress, missionProgressSnapshot, verificationRetryIssue, verificationScope } from './progress';
@@ -69,6 +69,9 @@ export interface MissionServiceDeps {
   /** Positive bounded-owner reconciliation under held admission. Empty maps/PID absence are
    * not proof; unsupported or incomplete ownership stays blocked. */
   reconcileExternalActivity?(record: MissionRecord): Promise<{ quiescent: boolean; receipt?: string; detail?: string }>;
+  /** Human-readable app terminals/sessions that may still write inside these paths. Display only:
+   * workspace admission, not this description, decides whether a baseline may be captured. */
+  describeWorkspaceWriters?(...paths: string[]): string[] | Promise<string[]>;
 }
 
 type Turn = Extract<TranscriptItem, { kind: 'turn' }>;
@@ -125,6 +128,11 @@ export class MissionService implements MissionToolHost {
   private readonly pumpRuns = new Map<string, Promise<void>>();
   private readonly dirty = new Set<string>();
   private readonly yielded = new Set<string>();
+  /** One in-flight baseline re-probe per Mission, and the completed-turn count of the last probe. */
+  private readonly baselineRetries = new Map<string, Promise<void>>();
+  private readonly baselineProbes = new Map<string, number>();
+  /** Status each reconciliation started from, so a later Stop is not absorbed by an older run. */
+  private readonly reconcileStarts = new Map<string, MissionRecord['status']>();
   private readonly workspaceWaiters = new Map<string, Set<{ missionId: string; resolve(): void; reject(error: Error): void }>>();
   private closed = false;
 
@@ -321,7 +329,9 @@ export class MissionService implements MissionToolHost {
   private leadWorkspace(r: MissionRecord): MissionWorkspace | undefined {
     const attempt = r.attempts.findLast((a) => a.sessionId === r.leadSessionId && !a.profile);
     const infrastructure = r.operations.findLast((op) => op.payload.leadSessionId === r.leadSessionId && ['baseline', 'lead_handover'].includes(String(op.payload.infrastructure)));
-    const workspaceId = attempt?.workspaceId ?? (infrastructure?.payload.infrastructure === 'baseline' ? infrastructure.payload.leadWorkspaceId : infrastructure?.payload.workspaceId);
+    // A handover before any baseline provisions no tree: that lead reads the source like the first.
+    const workspaceId = attempt?.workspaceId ?? (infrastructure?.payload.infrastructure === 'baseline' ? infrastructure.payload.leadWorkspaceId
+      : infrastructure && r.baseline ? infrastructure.payload.workspaceId : undefined);
     if (workspaceId) {
       const workspace = r.workspaces.find((w) => w.id === workspaceId);
       if (!workspace || workspace.role !== 'lead' || workspace.ownerSessionId !== r.leadSessionId || workspace.cleanedAt) throw new Error('Current lead workspace mapping needs reconciliation; retained trees were not reassigned.');
@@ -345,14 +355,17 @@ export class MissionService implements MissionToolHost {
   private async establishBaseline(id: string): Promise<void> {
     const r = this.record(id);
     if (r.baseline) return;
+    this.baselineProbes.set(id, r.progress.completedTurns);
     if (r.originSessionId && !this.deps.sessions.activity(r.originSessionId).quiescent) {
-      await this.block(id, 'environment', 'Source workspace is active. Wait for its writer to settle, then resume or execute; the source session was not interrupted.', 'baseline'); return;
+      const origin = this.deps.sessions.get(r.originSessionId);
+      await this.baselineBlocked(id, `Source session "${origin?.title ?? r.originSessionId}" (${r.originSessionId}) is still active in ${r.sourceCwd}; the source session was not interrupted. Let its turn, tools and approvals finish.`);
+      return;
     }
     const probe = await this.deps.workspaces.probeBaseline(r.sourceCwd);
-    if (!probe.ok) { await this.block(id, 'environment', `${probe.message}${probe.changes.length ? ` Changes: ${probe.changes.map((c) => c.path).join(', ')}` : ''}`, 'baseline'); return; }
+    if (!probe.ok) { await this.baselineBlocked(id, await this.baselineProblem(r, probe)); return; }
     const opId = identity('op', id, 'baseline', r.revision);
     await this.change(id, `${opId}-intent`, (state) => {
-      if (state.phase !== 'planning' || state.attempts.some(active) || this.fenced.has(id)) throw new Error('Baseline provisioning is not currently admitted.');
+      if (state.phase !== 'planning' || state.attempts.some(active) || this.fenced.has(id)) throw new MissionAdmissionError('Baseline provisioning is not currently admitted.');
       state.operations.push({ id: opId, idempotencyKey: opId, kind: 'dispatch', actor: 'host', expectedRevision: state.revision, state: 'intent_recorded', payload: { infrastructure: 'baseline', baseline: probe.baseline, leadSessionId: state.leadSessionId, leadWorkspaceId: identity('w', id, 'lead'), integrationWorkspaceId: identity('w', id, 'integration') } });
       return state;
     });
@@ -368,6 +381,55 @@ export class MissionService implements MissionToolHost {
       });
       await this.opState(id, opId, 'succeeded');
     } catch (e) { await this.opState(id, opId, 'failed', message(e)); throw e; }
+  }
+  /** Actionable, specific and current: which writer holds the checkout and what to do next. */
+  private async baselineProblem(r: MissionRecord, probe: Extract<BaselineProbe, { ok: false }>): Promise<string> {
+    if (probe.reason === 'busy') {
+      let holders: string[] = [];
+      try { holders = [...await this.deps.describeWorkspaceWriters?.(r.projectRoot, r.sourceCwd) ?? []]; } catch (e) { this.deps.log?.(`Mission ${r.id} could not describe workspace writers: ${message(e)}`); }
+      if (!holders.length) holders = this.deps.sessions.list().filter((s) => s.mission?.missionId !== r.id && [r.projectRoot, r.sourceCwd].some((root) => this.overlaps(root, s.cwd)) && !this.deps.sessions.activity(s.id).quiescent)
+        .map((s) => `session "${s.title}" (${s.id}), which is still running`);
+      return `Source checkout ${r.sourceCwd} is in use${holders.length ? ` by ${holders.join('; ')}` : ' by an app-owned terminal or session'}. Close those app terminals and let those sessions finish before execution can start.`;
+    }
+    return `${probe.message}${probe.changes.length ? ` Changes: ${probe.changes.map((c) => c.path).join(', ')}.` : ''}`;
+  }
+  private overlaps(a: string, b: string): boolean {
+    const key = (value: string) => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+    const contains = (root: string, target: string) => { const relative = path.relative(key(root), key(target)); return !relative || relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative); };
+    return contains(a, b) || contains(b, a);
+  }
+  /** One current baseline blocker: an older observation (a since-closed terminal) becomes history. */
+  private async baselineBlocked(id: string, problem: string): Promise<void> {
+    const r = this.record(id);
+    const retry = r.executionAuthorization ? 'Mission re-checks the baseline at the principal engineer\'s next turn boundary and when you Resume' : 'Mission re-checks the baseline when you approve execution or Resume';
+    const reason = `${problem} ${retry}; nothing in the checkout was stashed, reset, committed or copied.`;
+    const stale = r.blockers.filter((b) => b.id.startsWith('baseline_') && b.resolvedAt === undefined && b.message !== reason).map((b) => b.id);
+    if (stale.length && !terminal(r)) await this.change(id, identity('baseline-superseded', id, stale), (state) => {
+      for (const blocker of state.blockers) if (stale.includes(blocker.id) && blocker.resolvedAt === undefined) blocker.resolvedAt = Date.now();
+      return state;
+    });
+    await this.block(id, 'environment', reason, 'baseline');
+  }
+  /** Explicit Resume/Proceed or a lead safe boundary re-probes the source; never a timer, and never
+   * while owned attempts run. Probe refusals become the current actionable baseline blocker. */
+  private retryBaseline(id: string): Promise<void> {
+    const existing = this.baselineRetries.get(id);
+    if (existing) return existing;
+    const promise = (async () => {
+      if (this.record(id).baseline) return;
+      try { await this.establishBaseline(id); }
+      catch (e) {
+        if (e instanceof MissionAdmissionError) return; // Pause/Stop closed admission meanwhile; Resume retries.
+        await this.baselineBlocked(id, `Baseline provisioning failed: ${message(e)}`);
+        return;
+      }
+      const after = this.record(id);
+      if (after.baseline) await this.mail(id, { id: identity('mail', id, 'baseline', after.baseline.baseCommitSha, after.baseline.contentHash), kind: 'progress', sessionId: after.leadSessionId,
+        text: `Clean source baseline established at ${after.baseline.baseCommitSha} (content ${after.baseline.contentHash}); earlier baseline blockers are resolved. ${after.executionAuthorization ? 'Implementation may now be claimed or delegated within the recorded authorization.' : 'Execution still requires the user\'s explicit approval of the current plan.'}`,
+        artifactIds: [], createdAt: Date.now() });
+    })().finally(() => { if (this.baselineRetries.get(id) === promise) this.baselineRetries.delete(id); });
+    this.baselineRetries.set(id, promise);
+    return promise;
   }
   private workspace(w: GitWorkspace, ownerSessionId?: string): MissionWorkspace {
     return { id: w.id, role: w.role === 'integration-attempt' ? 'verification' : w.role, path: w.cwd, branch: w.branch, base: w.baseRevision, ...(ownerSessionId ? { ownerSessionId } : {}) };
@@ -431,8 +493,9 @@ export class MissionService implements MissionToolHost {
     try { const result = await promise; this.userInputs.delete(actionId); return result; }
     catch (error) {
       // A conflicting retry after restart must not poison the in-memory slot for the
-      // original request: the immutable store receipt remains the authority.
-      if (error instanceof MissionStoreError && error.code === 'IDEMPOTENCY_CONFLICT') this.userInputs.delete(actionId);
+      // original request: the immutable store receipt remains the authority. A CAS rejection
+      // was never admitted either; the client rereads and retries this key at the new revision.
+      if (error instanceof MissionStoreError && (error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'REVISION_CONFLICT')) this.userInputs.delete(actionId);
       throw error;
     } finally { entry.promise = undefined; }
   }
@@ -451,15 +514,20 @@ export class MissionService implements MissionToolHost {
     if (control.action === 'cleanup') return this.maintenanceControl(request, () => this.cleanup(request));
     const stopAdmission = ['pause', 'stop', 'continue_planning', 'narrow_delivery'].includes(control.action);
     if (stopAdmission) { this.fenced.add(initial.id); this.deps.scheduler.pause(initial.id); this.cancelWorkspaceWaiters(initial.id); }
+    // A committed Resume retains its own mailbox receipt; a lost-acknowledgment retry replays it.
+    const resumeReplay = control.action === 'resume' && initial.mailbox.some((item) => item.id === actionId);
+    let resumed: Awaited<ReturnType<MissionService['prepareResume']>> | undefined;
+    let resolvedForResume: MissionRecord['blockers'] = [];
     try {
       if (control.action === 'execute' || control.action === 'steer' && !control.images?.length && initial.pendingProposal && isMissionAffirmative(control.text)) {
         if (!this.deps.sessions.activity(initial.leadSessionId).quiescent) throw new Error('Wait for the planning turn and its tools to settle before approving execution.');
         if (!initial.baseline) {
           // Do not silently refresh the approval revision while resolving source state.
-          await this.establishBaseline(initial.id);
+          await this.retryBaseline(initial.id);
           throw new Error('Baseline was rechecked. Review the current Mission revision and submit Proceed again.');
         }
       }
+      if (control.action === 'resume' && !resumeReplay) resumed = await this.prepareResume(initial);
       const updated = await this.deps.store.transact(initial.id, { idempotencyKey: actionId, actor: actorKey(user), expectedRevision: request.expectedRevision, kind: `user.${control.action}`, request: retained ? { ...request, control: { action: 'steer', fingerprint: retained.fingerprint, attachments: retained.attachments } } : request }, (r) => {
         const receivedRevision = r.revision, specificationRevision = r.specificationRevision, planRevision = r.planRevision;
         const question = r.status === 'waiting_for_user' ? r.questions.find((q) => q.answer === undefined) : undefined;
@@ -495,12 +563,7 @@ export class MissionService implements MissionToolHost {
         } else if (control.action === 'pause' || control.action === 'stop') mutation = { kind: `control.${control.action}` };
         else if (control.action === 'resume') {
           if (r.workspaces.some((workspace) => workspace.cleanedAt && (workspace.role === 'integration' || workspace.ownerSessionId === r.leadSessionId))) throw new Error('Required managed workspaces were cleaned up; start a new Mission from the retained result.');
-          // An explicit user retry clears only a safely stopped lead-start failure. The exact
-          // runtime probe still runs again before any prompt; uncertainty/verification gates stay.
-          if (r.status === 'paused' && this.isQuiescent(r)) for (const blocker of r.blockers.filter((b) => b.id.startsWith('lead_dispatch_') && b.resolvedAt === undefined)) blocker.resolvedAt = Date.now();
-          const budget = this.budgetIssue(r);
-          if (budget) throw new Error(budget);
-          for (const blocker of r.blockers.filter((b) => b.id.startsWith('budget_') && b.resolvedAt === undefined)) blocker.resolvedAt = Date.now();
+          resolvedForResume = this.resolveForResume(r, resumed?.handover);
           mutation = { kind: 'control.resume', quiescent: this.isQuiescent(r) };
         }
         else if (control.action === 'continue_planning') mutation = { kind: 'control.continue_planning' };
@@ -517,6 +580,7 @@ export class MissionService implements MissionToolHost {
           if (retained!.attachments.length) item.attachments = structuredClone(retained!.attachments);
         }
         if (control.action === 'execute' || control.action === 'resume' || control.action === 'continue_planning') r = reduceMission(r, host, { kind: 'host.mailbox.append', item: { id: actionId, kind: 'user', sessionId: r.leadSessionId, text: `User ${control.action}; specification ${r.specificationRevision}. Continue within the recorded authorization.`, artifactIds: [], createdAt: Date.now() } });
+        if (control.action === 'resume') r = this.resumeNotices(r, resolvedForResume);
         r.updatedAt = Date.now(); return r;
       });
       this.publish(initial.id);
@@ -532,18 +596,99 @@ export class MissionService implements MissionToolHost {
       if (['pausing', 'stopping'].includes(updated.status) || control.action === 'narrow_delivery' && updated.status === 'recovering') {
         this.broker.revoke(initial.id);
         this.deps.verification.cancel(initial.id);
-        await this.reconcile(initial.id, updated.status === 'recovering');
+        // A Stop of a restart-recovering Mission reconciles with restart semantics.
+        await this.reconcile(initial.id, updated.status === 'recovering' || initial.status === 'recovering');
       } else {
         if (control.action === 'resume' || control.action === 'continue_planning') {
           if (!this.deps.scheduler.register(initial.id, updated.config.limits.maxConcurrentWorkersPerMission)) throw new Error('Global Mission lead capacity is unavailable.');
-          this.fenced.delete(initial.id); this.deps.scheduler.resume(initial.id);
+          // A replayed Resume must not reopen a Mission the user has since paused again.
+          if (!['pausing', 'paused', 'stopping', 'recovering'].includes(this.record(initial.id).status)) { this.fenced.delete(initial.id); this.deps.scheduler.resume(initial.id); }
         }
+        if (control.action === 'resume' && !this.fenced.has(initial.id)) await this.afterResume(initial.id);
         this.wake(initial.id);
       }
       return this.get(initial.id)!;
     } catch (e) {
+      if (resumed?.registered && this.deps.store.get(initial.id)?.status === 'paused') { try { this.deps.scheduler.unregister(initial.id); } catch { /* Owned capacity stays until positive teardown. */ } }
       if (stopAdmission && !['pausing', 'stopping', 'paused', 'recovering'].includes(this.record(initial.id).status)) { this.fenced.delete(initial.id); this.deps.scheduler.resume(initial.id); }
       throw e;
+    }
+  }
+
+  /** Resume re-runs reconciliation before it changes anything: a pausing/recovering Mission is
+   * reconciled again (and the user reviews the result), and an interrupted handover is finished
+   * from its retained intent. Lead capacity is reserved before the Resume can commit. */
+  private async prepareResume(r: MissionRecord): Promise<{ handover?: MissionWorkspace; registered: boolean }> {
+    if (['pausing', 'recovering'].includes(r.status)) {
+      await this.reconcile(r.id, r.status === 'recovering');
+      const now = this.record(r.id), open = now.blockers.filter((b) => b.resolvedAt === undefined).map((b) => b.message);
+      // Never adopt the revision reconciliation produced as though the user had reviewed it.
+      throw new Error(now.status === 'paused' ? `Owned activity is now reconciled and the Mission is paused at revision ${now.revision}. Review it, then Resume again.`
+        : `The Mission is still ${now.status}: owned activity is not positively reconciled.${open.length ? ` ${open.join(' ')}` : ''}`);
+    }
+    if (r.status !== 'paused') throw new Error(`Mission is ${r.status}; only a reconciled paused Mission can resume.`);
+    let handover: MissionWorkspace | undefined;
+    const op = this.handoverIntent(r);
+    if (op && r.baseline && !this.handoverMapped(r) && r.blockers.some((b) => b.resolvedAt === undefined && missionBlockerFamily(b) === 'handover')) {
+      // Same deterministic workspace identity as the original intent; provisioning is idempotent.
+      handover = this.workspace(await this.deps.workspaces.provision({ missionId: r.id, baseline: this.baseline(r), role: 'lead', workspaceId: String(op.payload.workspaceId) }), r.leadSessionId);
+    }
+    const registered = !this.deps.scheduler.snapshot().missions.includes(r.id);
+    if (!this.deps.scheduler.register(r.id, r.config.limits.maxConcurrentWorkersPerMission)) throw new Error('Global Mission lead capacity is unavailable. Pause or stop another Mission, then Resume.');
+    this.deps.scheduler.pause(r.id);
+    return { handover, registered };
+  }
+  private handoverIntent(r: MissionRecord): MissionOperation | undefined {
+    return r.operations.findLast((op) => op.payload.infrastructure === 'lead_handover' && op.payload.leadSessionId === r.leadSessionId);
+  }
+  private handoverMapped(r: MissionRecord): boolean {
+    const op = this.handoverIntent(r);
+    return !op || !r.baseline || r.workspaces.some((w) => w.id === op.payload.workspaceId && w.role === 'lead' && w.ownerSessionId === r.leadSessionId && !w.cleanedAt);
+  }
+  /** Inside the Resume transaction: every resumable family is re-established from this host's
+   * positive quiescence, budget and preparation observations and kept as history. Unknown
+   * ownership, crossed remote effects and integrity reconciliation still refuse the Resume. */
+  private resolveForResume(r: MissionRecord, handover?: MissionWorkspace): MissionRecord['blockers'] {
+    if (r.status !== 'paused') throw new Error(`Mission is ${r.status}; only a reconciled paused Mission can resume.`);
+    if (!this.isQuiescent(r)) throw new Error('Owned activity/operations must first be reconciled and quiescent.');
+    const budget = this.budgetIssue(r);
+    if (budget) throw new Error(budget);
+    if (handover && !r.workspaces.some((w) => w.id === handover.id)) {
+      if (r.workspaces.some((w) => w.path === handover.path)) throw new Error('The replacement lead workspace path is already owned.');
+      r.workspaces.push(handover);
+    }
+    const now = Date.now(), resolved: MissionRecord['blockers'] = [];
+    for (const blocker of r.blockers) {
+      const family = missionBlockerFamily(blocker);
+      if (blocker.resolvedAt !== undefined || !family || family === 'handover' && !this.handoverMapped(r)) continue;
+      blocker.resolvedAt = now; resolved.push(blocker);
+    }
+    const open = r.blockers.filter((b) => b.resolvedAt === undefined);
+    if (open.length) throw new Error(`Resolve blockers before resuming: ${open.map((b) => b.message).join(' ')}`);
+    return resolved;
+  }
+  private resumeNotices(r: MissionRecord, resolved: MissionRecord['blockers']): MissionRecord {
+    for (const blocker of resolved) {
+      const family = missionBlockerFamily(blocker);
+      if (family === 'progress') {
+        r = reduceMission(r, host, { kind: 'host.mailbox.append', item: { id: identity('mail', blocker.id, 'diagnosis'), kind: 'decision', sessionId: r.leadSessionId, artifactIds: [], createdAt: Date.now(),
+          text: `Automation paused after ${r.progress.checkpointsWithoutProgress} progress checkpoints without a new candidate, captured evidence, integrated task or resolved decision. The user resumed for your diagnosis turn: inspect the retained record, then record your diagnosis and changed approach (mission_decision_request + mission_decision_resolve, citing evidence where possible) or ask the user about a genuine blocker. The checkpoint bound was not reset: a turn that records no progress pauses automation again, and repeated identical failures still need their recorded decision.` } });
+      } else if (family === 'handover') {
+        const op = this.handoverIntent(r), mailId = op && identity('mail', op.id, 'handover');
+        if (op && mailId && !r.mailbox.some((item) => item.id === mailId)) r = reduceMission(r, host, { kind: 'host.mailbox.append', item: { id: mailId, kind: 'user', sessionId: r.leadSessionId, artifactIds: [], createdAt: Date.now(),
+          text: `Explicit T5 handover from ${String(op.payload.oldLeadSessionId)}. Read the retained Mission plan, decisions, evidence, source and unresolved mailbox. No old attempt or delivery may be replayed.` } });
+      }
+    }
+    return r;
+  }
+  /** After Resume commits: re-probe a missing baseline, then retry capture of already-submitted
+   * candidates by their original identity (an interrupted capture intent still refuses drift). */
+  private async afterResume(id: string): Promise<void> {
+    if (!this.record(id).baseline && this.record(id).phase === 'planning') await this.retryBaseline(id);
+    const r = this.record(id);
+    for (const attempt of r.attempts.filter((a) => a.status === 'terminal' && a.outcome === 'submitted' && !r.candidates.some((c) => c.attemptId === a.id)
+      && r.tasks.some((t) => t.id === a.taskId && t.currentAttemptId === a.id && t.revision === a.taskRevision && t.status === 'candidate_ready'))) {
+      this.background(identity('capture-retry', attempt.id, r.revision), () => this.capture(id, attempt, true));
     }
   }
 
@@ -605,7 +750,8 @@ export class MissionService implements MissionToolHost {
       await this.opState(initial.id, operationId, 'succeeded');
     } catch (e) {
       await this.opState(initial.id, operationId, 'failed', message(e));
-      await this.block(initial.id, 'environment', `Lead handover requires reconciliation: ${message(e)}`);
+      // Resume finishes the handover from this retained intent once owned activity is quiescent.
+      await this.block(initial.id, 'environment', `Lead handover requires reconciliation: ${message(e)} Resume retries it from the retained handover intent.`, 'handover');
     }
     await this.change(initial.id, `${operationId}-quiet`, (r) => reduceMission(r, host, { kind: 'host.quiesce', quiescent: this.isQuiescent(r) }));
     this.publish(initial.id);
@@ -837,8 +983,12 @@ export class MissionService implements MissionToolHost {
   async archive(missionId: string, archived: boolean): Promise<MissionRecord> {
     let r = this.record(missionId);
     if (archived && r.status === 'completed') { await this.endQuestion(missionId, 'Read-only answer canceled for archive.'); r = this.record(missionId); }
-    if (archived && !terminal(r) && r.status !== 'paused') r = await this.control({ missionId, expectedRevision: r.revision, idempotencyKey: randomUUID(), control: { action: 'pause' } });
-    if (!this.isQuiescent(r)) throw new Error('Reconcile all owned activity before archiving a Mission.');
+    // Pause cannot interrupt restart recovery or an in-progress Stop: archiving such a Mission
+    // stops it, reaching a terminal record that releases capacity and retains every workspace.
+    if (archived && !terminal(r) && r.status !== 'paused') r = await this.control({ missionId, expectedRevision: r.revision, idempotencyKey: randomUUID(), control: { action: ['recovering', 'stopping'].includes(r.status) ? 'stop' : 'pause' } });
+    // A stopped record may retain unproven restart ownership; archiving needs only this host's own
+    // sessions, terminals and checks to be quiet. Cleanup still requires the full ownership proof.
+    if (!(terminal(r) ? this.hostActivityQuiescent(r) : this.isQuiescent(r))) throw new Error('Reconcile all owned activity before archiving a Mission.');
     for (const meta of this.deps.sessions.list().filter((s) => s.mission?.missionId === missionId)) {
       await this.deps.sessions.stopManaged(meta.id, meta.mission!.generation);
       await this.deps.sessions.archiveManaged(meta.id, meta.mission!.generation, archived);
@@ -911,7 +1061,7 @@ export class MissionService implements MissionToolHost {
   private async waitForWorkspace(missionId: string, cwd: string): Promise<void> {
     if (!this.deps.assertWorkspaceAvailable) return;
     for (;;) {
-      if (this.fenced.has(missionId) || this.closed) throw new Error('Workspace admission canceled.');
+      if (this.fenced.has(missionId) || this.closed) throw new MissionAdmissionError('Workspace admission canceled.');
       const key = path.resolve(cwd);
       // Install the wakeup before the async guard, so a lease release cannot be lost between it
       // reporting busy and this turn registering its wait.
@@ -931,7 +1081,7 @@ export class MissionService implements MissionToolHost {
   }
   private cancelWorkspaceWaiters(id: string): void {
     for (const [key, waiting] of this.workspaceWaiters) {
-      for (const waiter of waiting) if (waiter.missionId === id) { waiter.reject(new Error('Workspace admission canceled.')); waiting.delete(waiter); }
+      for (const waiter of waiting) if (waiter.missionId === id) { waiter.reject(new MissionAdmissionError('Workspace admission canceled.')); waiting.delete(waiter); }
       if (!waiting.size) this.workspaceWaiters.delete(key);
     }
   }
@@ -1302,16 +1452,37 @@ export class MissionService implements MissionToolHost {
     this.pumping.add(id);
     const run = Promise.resolve().then(async () => {
       try { while (this.dirty.delete(id)) await this.pump(id); }
-      catch (e) { await this.block(id, 'environment', message(e)); }
+      catch (e) { await this.pumpFailed(id, e); }
       finally { this.pumping.delete(id); this.pumpRuns.delete(id); }
     });
     this.pumpRuns.set(id, run);
+  }
+  /** Pause, Stop, a budget fence or a question can close admission while a turn is settling. That
+   * refusal is the expected boundary, not a fault: reconciliation or the user's Resume owns what
+   * happens next. Any other coordinator failure is a resumable blocker, never a permanent one. */
+  private async pumpFailed(id: string, error: unknown): Promise<void> {
+    const r = this.deps.store.get(id);
+    if (this.closed || !r || terminal(r)) { this.deps.log?.(`Mission ${id} coordination ended: ${message(error)}`); return; }
+    if (error instanceof MissionAdmissionError) {
+      this.deps.log?.(`Mission ${id} coordination stopped at closed admission: ${message(error)}`);
+      this.requestReconcile(id);
+      return;
+    }
+    await this.block(id, 'environment', `Mission coordination failed: ${message(error)} Pause, then Resume to retry from the recorded state; no operation was replayed.`, 'pump');
+  }
+  /** A wakeup during pause/stop/recovery retries reconciliation unless one is already running.
+   * Keyed on the live reconciliation itself, not a finished job wrapper, so a later terminal or
+   * teardown observation is never dropped. */
+  private requestReconcile(id: string): void {
+    const r = this.deps.store.get(id);
+    if (this.closed || !r || !['pausing', 'stopping', 'recovering'].includes(r.status) || this.reconciliations.has(id)) return;
+    void this.reconcile(id, r.status === 'recovering').catch((error) => this.deps.log?.(message(error)));
   }
   private async pump(id: string): Promise<void> {
     let r = this.record(id);
     if (terminal(r)) return;
     if (this.fenced.has(id)) {
-      if (['pausing', 'stopping', 'recovering'].includes(r.status)) this.background(`reconcile:${id}`, () => this.reconcile(id, r.status === 'recovering'));
+      this.requestReconcile(id);
       return;
     }
     for (const [sessionId, live] of this.turns) {
@@ -1324,14 +1495,27 @@ export class MissionService implements MissionToolHost {
       if (op.payload.claim === true && this.deps.sessions.activity(r.leadSessionId).quiescent) this.background(op.id, () => this.dispatchAttempt(id, op.id));
       if (['verify', 'integrate', 'deliver'].includes(op.kind) && !op.payload.parentOperationId && this.isQuiescent(r)) this.background(op.id, () => this.performOperation(id, op.id));
     }
-    for (const attempt of r.attempts.filter((a) => active(a) && this.yielded.has(a.sessionId) && !this.turns.has(a.sessionId))) {
-      const decision = r.decisions.find((d) => d.requestedBy === attempt.sessionId && d.resolution && !r.operations.some((o) => o.payload.continuation === d.id && o.payload.attemptId === attempt.id));
-      if (decision) this.background(identity('continue', attempt.id, decision.id), () => this.continueAttempt(id, attempt, `Decision ${decision.id} resolved: ${decision.resolution}. ${decision.rationale}`, decision.id));
-      const evidence = r.evidence.find((e) => e.attemptId === attempt.id && !r.operations.some((o) => o.payload.continuation === e.id && o.payload.attemptId === attempt.id));
-      if (!decision && evidence) this.background(identity('continue', attempt.id, evidence.id), () => this.continueAttempt(id, attempt, `Requested check ended: ${evidence.checkId} is ${evidence.result}; evidence ${evidence.id}. Continue or submit the structured result.`, evidence.id));
+    // Idle attempts wake only on events they can use: a yielded attempt on its own decisions,
+    // evidence, refused checks or (for the lead's claimed task) the lead mailbox; an attempt whose
+    // turn ended without a result while admission was closed gets its deferred format repair.
+    const admitting = !r.blockers.some((b) => b.resolvedAt === undefined);
+    for (const attempt of r.attempts.filter((a) => active(a) && a.status === 'running' && !this.turns.has(a.sessionId)
+      && !r.operations.some((o) => o.kind === 'dispatch' && pending(o) && (o.payload.attemptId === a.id || o.payload.sessionId === a.sessionId)))) {
+      if (!admitting || !this.deps.sessions.activity(attempt.sessionId).quiescent) continue;
+      if (this.yielded.has(attempt.sessionId)) {
+        const wake = this.yieldWake(r, attempt);
+        if (wake) this.background(identity('continue', attempt.id, wake.cause), () => this.continueAttempt(id, attempt, wake.text, wake.cause, wake.mailboxIds));
+      } else if (!attempt.result && attempt.repairTurns === 0) this.background(identity('repair', attempt.id), () => this.repair(id, attempt));
     }
     if (r.operations.some((o) => pending(o) && o.kind === 'deliver')) return;
     if (this.turns.has(r.leadSessionId) || !this.deps.sessions.activity(r.leadSessionId).quiescent || r.attempts.some((a) => a.sessionId === r.leadSessionId && active(a)) || r.operations.some((o) => pending(o) && (o.payload.claim === true || o.payload.lead === true))) return;
+    if (this.baselineRetryDue(r)) {
+      // The lead is idle at a safe boundary and execution is authorized, but its input is still
+      // blocked: re-probe once per completed turn so a closed terminal or cleaned checkout unblocks.
+      await this.retryBaseline(id);
+      r = this.record(id);
+      if (r.status !== 'running' || this.fenced.has(id) || !this.deps.sessions.activity(r.leadSessionId).quiescent) return;
+    }
     const mail = r.mailbox.filter((m) => m.deliveredAt === undefined).sort((a, b) => priority[a.kind] - priority[b.kind] || a.createdAt - b.createdAt);
     if (!mail.length) return;
     // Baseline blockers permit read-only dialogue, not implementation. Other capability blockers
@@ -1346,7 +1530,7 @@ export class MissionService implements MissionToolHost {
     if (initial.operations.some((o) => o.id === opId)) return;
     try {
       await this.change(id, `${opId}-intent`, (r) => {
-        if (r.status !== 'running' || this.fenced.has(id)) throw new Error('Lead dispatch is paused.');
+        if (r.status !== 'running' || this.fenced.has(id)) throw new MissionAdmissionError('Lead dispatch is paused.');
         if (r.operations.some((o) => pending(o) && (o.payload.lead === true || o.payload.claim === true))) throw new Error('The principal engineer already owns a pending dispatch.');
         // Read-only planning may inspect dirty input; blockers remain present and authoritative
         // for every implementation operation. No implementation grant is fabricated here.
@@ -1372,17 +1556,54 @@ export class MissionService implements MissionToolHost {
       this.turns.set(initial.leadSessionId, { operationId: opId, lease, generation: this.record(id).leadGeneration }); lease = undefined;
       this.yielded.delete(initial.leadSessionId);
       await this.markRuntimeStart(id, opId);
-      const images: ImageAttachment[] = [];
-      for (const item of mail) for (const attachment of item.attachments ?? []) {
-        const image = userImageSchema.parse(JSON.parse((await this.deps.store.readArtifact(id, attachment.ref)).toString('utf8')));
-        if (image.mimeType !== attachment.mimeType || image.name !== attachment.name) throw new Error('Retained user attachment metadata does not match its immutable content.');
-        images.push(image);
-      }
-      await this.deps.sessions.sendManaged(initial.leadSessionId, { text: mail.map((m) => `[${m.kind}; ${m.id}]\n${m.text}${m.attachments?.length ? `\nRetained image references: ${m.attachments.map((a) => a.ref).join(', ')}` : ''}${m.userAction && m.userAction.kind !== 'authorization' ? '\nFor a material correction, use mission_plan_update material.source:{kind:"user_instruction"}; the host binds this delivered instruction once. Preserve required criteria. This is not execution or permission approval.' : ''}`).join('\n\n'), ...(images.length ? { images } : {}) }, this.record(id).leadGeneration);
+      const images = await this.mailImages(id, mail);
+      await this.deps.sessions.sendManaged(initial.leadSessionId, { text: this.leadMailText(mail), ...(images.length ? { images } : {}) }, this.record(id).leadGeneration);
     } catch (e) { lease?.release(true); await this.dispatchFailure(id, opId, initial.leadSessionId, message(e)); }
   }
+  private leadMailText(mail: MissionMailboxItem[]): string {
+    return mail.map((m) => `[${m.kind}; ${m.id}]\n${m.text}${m.attachments?.length ? `\nRetained image references: ${m.attachments.map((a) => a.ref).join(', ')}` : ''}${m.userAction && m.userAction.kind !== 'authorization' ? '\nFor a material correction, use mission_plan_update material.source:{kind:"user_instruction"}; the host binds this delivered instruction once. Preserve required criteria. This is not execution or permission approval.' : ''}`).join('\n\n');
+  }
+  private async mailImages(id: string, mail: MissionMailboxItem[]): Promise<ImageAttachment[]> {
+    const images: ImageAttachment[] = [];
+    for (const item of mail) for (const attachment of item.attachments ?? []) {
+      const image = userImageSchema.parse(JSON.parse((await this.deps.store.readArtifact(id, attachment.ref)).toString('utf8')));
+      if (image.mimeType !== attachment.mimeType || image.name !== attachment.name) throw new Error('Retained user attachment metadata does not match its immutable content.');
+      images.push(image);
+    }
+    return images;
+  }
+  private baselineRetryDue(r: MissionRecord): boolean {
+    return !r.baseline && !!r.executionAuthorization && r.phase === 'planning' && !r.attempts.some(active) && !this.baselineRetries.has(r.id)
+      && r.blockers.some((b) => b.resolvedAt === undefined && missionBlockerFamily(b) === 'baseline') && r.progress.completedTurns > (this.baselineProbes.get(r.id) ?? -1);
+  }
+  /** The next event a yielded attempt can act on, if any. Each event continues it at most once. */
+  private yieldWake(r: MissionRecord, attempt: MissionAttempt): { cause: string; text: string; mailboxIds?: string[] } | undefined {
+    const handled = (cause: string) => r.operations.some((o) => o.payload.continuation === cause && o.payload.attemptId === attempt.id);
+    const decision = r.decisions.find((d) => d.requestedBy === attempt.sessionId && d.resolution && !handled(d.id));
+    if (decision) return { cause: decision.id, text: `Decision ${decision.id} resolved: ${decision.resolution}. ${decision.rationale}` };
+    const evidence = r.evidence.find((e) => e.attemptId === attempt.id && !handled(e.id));
+    if (evidence) return { cause: evidence.id, text: `Requested check ended: ${evidence.checkId} is ${evidence.result}; evidence ${evidence.id}. Continue or submit the structured result.` };
+    const refused = r.operations.find((o) => o.kind === 'verify' && o.payload.requesterAttemptId === attempt.id && o.state === 'failed' && !o.resultRef && !handled(o.id));
+    if (refused) return { cause: refused.id, text: `Requested verification ${String(refused.payload.checkId)} did not run: ${refused.error ?? 'it was refused'} No evidence was captured. Continue, request a decision, or submit the structured result.` };
+    if (!attempt.profile && attempt.sessionId === r.leadSessionId) {
+      // The principal engineer's own claimed task is the only live lead: its mailbox (including
+      // results of the checks, integrations and workers it requested) arrives at this boundary.
+      const mail = r.mailbox.filter((m) => m.deliveredAt === undefined).sort((a, b) => priority[a.kind] - priority[b.kind] || a.createdAt - b.createdAt);
+      if (mail.length) return { cause: identity('mail', attempt.id, mail.map((m) => m.id)), text: `Events for your claimed task ${attempt.taskId} (attempt ${attempt.id}):\n\n${this.leadMailText(mail)}`, mailboxIds: mail.map((m) => m.id) };
+    }
+    return undefined;
+  }
+  /** Something that will produce a wake event later: an unresolved decision it asked for, an
+   * operation it requested, an event already available, or (for the lead) running workers. */
+  private yieldPending(r: MissionRecord, attempt: MissionAttempt): boolean {
+    const actor = `${attempt.profile ? 'worker' : 'lead'}:${attempt.sessionId}:${attempt.generation}`;
+    return r.decisions.some((d) => d.requestedBy === attempt.sessionId && !d.resolution)
+      || r.operations.some((o) => pending(o) && (o.actor === actor || o.payload.requesterAttemptId === attempt.id))
+      || !!this.yieldWake(r, attempt)
+      || !attempt.profile && r.attempts.some((a) => active(a) && a.id !== attempt.id);
+  }
 
-  private async settleTurn(id: string, sessionId: string, live: LiveTurn): Promise<void> {
+  private async settleTurn(id: string, sessionId: string, live: LiveTurn, quiescing = false): Promise<void> {
     const end = live.terminal!;
     const before = this.record(id);
     const meta = this.deps.sessions.get(sessionId);
@@ -1414,9 +1635,12 @@ export class MissionService implements MissionToolHost {
         op.payload.terminalTurnId = end.id;
         if (diagnosis) op.payload.failure = diagnosis;
         if (this.budgetObservations.has(op.id)) op.payload.budgetUsage = this.budgetObservations.get(op.id);
-        if (r.progress.completedTurns % r.config.limits.progressCheckpointEveryTurns === 0) {
+        // At the no-progress bound, a resumed diagnosis turn is evaluated immediately: real
+        // progress since the last checkpoint resets the count; Resume alone never does.
+        const diagnosing = r.progress.checkpointsWithoutProgress >= r.config.limits.maxNoProgressCheckpoints;
+        if (r.progress.completedTurns % r.config.limits.progressCheckpointEveryTurns === 0 || diagnosing) {
           const previous = Math.max(0, ...r.operations.map((o) => typeof o.payload.progressCheckpointRevision === 'number' ? o.payload.progressCheckpointRevision : 0));
-          r.progress.checkpointsWithoutProgress = r.progress.lastProgressRevision > previous ? 0 : r.progress.checkpointsWithoutProgress + 1;
+          r.progress.checkpointsWithoutProgress = r.progress.lastProgressRevision > previous ? 0 : r.progress.checkpointsWithoutProgress + (diagnosing ? 0 : 1);
           op.payload.progressCheckpointRevision = r.revision;
         }
       }
@@ -1425,7 +1649,7 @@ export class MissionService implements MissionToolHost {
     });
     if (!settledCurrent || this.turns.get(sessionId) !== live) return;
     this.turns.delete(sessionId); live.lease.release(true);
-    if (this.budgetIssue(this.record(id))) {
+    if (!quiescing && this.budgetIssue(this.record(id))) {
       // Capture an already-settled submitted result before pausing; this is retained work, not
       // another model dispatch. Every competing admission still rechecks the same budget gate.
       const settled = this.record(id).attempts.find((a) => a.id === attempt?.id);
@@ -1438,15 +1662,22 @@ export class MissionService implements MissionToolHost {
         if (settled.result?.status === 'candidate' && settled.outcome === 'submitted') await this.capture(id, settled);
         const reported = settled.failure && settled.result ? `\nWorker-reported result (not host-verified): ${JSON.stringify({ status: settled.result.status, summary: settled.result.summary, unresolved: settled.result.unresolved })}` : '';
         await this.mail(id, { id: identity('mail', settled.id, 'terminal'), kind: settled.failure?.recovery === 'user_action' ? 'permission' : settled.outcome === 'submitted' ? 'candidate' : 'decision', sessionId, taskId: settled.taskId, text: `Attempt ${settled.id} ended: ${settled.outcome}. ${settled.failure ? missionFailureNotice(settled.failure) : settled.result?.summary ?? 'No valid result.'}${reported}`, artifactIds: settled.result?.artifactIds ?? [], createdAt: Date.now() });
-        if (settled.failure?.recovery === 'user_action') { this.pauseForObservedFailure(id, live.operationId); return; }
-      } else if (!this.yielded.has(sessionId)) {
-        if (settled.repairTurns === 0) await this.repair(id, settled);
-        else {
-          await this.change(id, `${settled.id}-protocol-failure`, (r) => reduceMission(r, host, { kind: 'host.attempt.transition', attemptId: settled.id, expectedStatus: settled.status, status: 'terminal', at: Date.now(), terminalTurnId: end.id, outcome: 'failed', failure: { kind: 'protocol', message: 'No structured result after one format-repair turn.' } }));
-          await this.mail(id, { id: identity('mail', settled.id, 'protocol-failure'), kind: 'decision', sessionId, taskId: settled.taskId,
-            text: `Attempt ${settled.id} failed the structured-result protocol after one repair. Diagnose its retained transcript before selecting another attempt.`, artifactIds: [], createdAt: Date.now() });
-        }
+        if (!quiescing && settled.failure?.recovery === 'user_action') { this.pauseForObservedFailure(id, live.operationId); return; }
+      } else if (quiescing) {
+        // No result: reconciliation records the attempt interrupted. Never start a repair turn
+        // while admission is closing.
+      } else if (!this.yielded.has(sessionId)) await this.resultMissing(id, settled, end.id, sessionId);
+      else if (!this.yieldPending(this.record(id), settled)) {
+        // Nothing it asked for can ever wake it: a silent stall. Ask for its structured result
+        // instead and tell the principal engineer, rather than leaving the task running forever.
+        this.yielded.delete(sessionId);
+        const waitFor = JSON.stringify(Array.isArray(operation.payload.waitFor) ? operation.payload.waitFor : []);
+        if (settled.profile) await this.mail(id, { id: identity('mail', settled.id, 'idle-yield', end.id), kind: 'decision', sessionId, taskId: settled.taskId, artifactIds: [], createdAt: Date.now(),
+          text: `Worker attempt ${settled.id} (task ${settled.taskId}) yielded for ${waitFor} without an unresolved decision, pending verification or other event that could wake it. The host asked it for its structured result instead of letting it wait silently.` });
+        await this.resultMissing(id, settled, end.id, sessionId, `You yielded for ${waitFor}, but nothing you requested is pending, so no event would wake you. `);
       }
+    } else if (quiescing) {
+      // The lead's turn settled during reconciliation; nothing further is dispatched here.
     } else if (failed) {
       if (diagnosis?.recovery === 'user_action') {
         await this.mail(id, { id: identity('mail', live.operationId, 'failure'), kind: 'permission', sessionId, text: missionFailureNotice(diagnosis), artifactIds: [], createdAt: Date.now() });
@@ -1454,21 +1685,33 @@ export class MissionService implements MissionToolHost {
       }
       this.fenced.add(id); this.deps.scheduler.pause(id);
       await this.block(id, diagnosis?.kind ?? 'unknown', `The principal engineer failed. ${diagnosis ? missionFailureNotice(diagnosis) : ''} Pause/reconcile and explicitly resume; no automatic replacement or new worker admission.`, 'lead_dispatch');
-      await this.change(id, `${live.operationId}-lead-blocked`, (r) => { r.status = 'blocked'; return r; });
+      await this.change(id, `${live.operationId}-lead-blocked`, (r) => { if (!['pausing', 'paused', 'stopping', 'recovering'].includes(r.status)) r.status = 'blocked'; return r; });
     } else if (!this.yielded.has(sessionId) && this.record(id).status === 'running' && !this.record(id).mailbox.some((m) => m.deliveredAt === undefined)) {
       const r = this.record(id);
       if (!r.operations.some((o) => pending(o) && (o.payload.claim || o.kind === 'deliver'))) {
         await this.mail(id, { id: identity('mail', sessionId, end.id), kind: 'progress', sessionId, text: 'Continue the Mission from the recorded state. Use typed tools to advance a required outcome, ask a planning question, propose execution, or yield for named events. Quiet text and GOAL_COMPLETE are not completion.', artifactIds: [], createdAt: Date.now() });
       }
     }
+    if (quiescing) return;
     const after = this.record(id);
     if (after.progress.checkpointsWithoutProgress >= after.config.limits.maxNoProgressCheckpoints && after.status === 'running') {
       this.fenced.add(id); this.deps.scheduler.pause(id); this.cancelWorkspaceWaiters(id);
-      await this.block(id, 'requirements', 'Repeated progress checkpoints produced no new candidate, captured evidence, accepted outcome, or resolved decision. Automation paused for lead diagnosis.');
+      await this.block(id, 'requirements', 'Repeated progress checkpoints produced no new candidate, captured evidence, accepted outcome, or resolved decision. Automation paused for lead diagnosis. Resume gives the principal engineer one diagnosis turn; unless that turn records progress (for example an evidence-backed resolved decision), automation pauses again.', 'progress');
       await this.change(id, `no-progress-${after.revision}`, (r) => reduceMission(r, host, { kind: 'host.recover' }));
       await this.reconcile(id, false, false);
     }
     this.wake(id);
+  }
+  /** A turn ended without a structured result: one bounded format repair, then protocol failure.
+   * If admission is closed (a question, blocker or pause), the pump repairs it once reopened. */
+  private async resultMissing(id: string, attempt: MissionAttempt, turnId: string, sessionId: string, reason = ''): Promise<void> {
+    if (attempt.repairTurns === 0) {
+      try { await this.repair(id, attempt, reason); } catch (e) { if (!(e instanceof MissionAdmissionError)) throw e; }
+      return;
+    }
+    await this.change(id, `${attempt.id}-protocol-failure`, (r) => reduceMission(r, host, { kind: 'host.attempt.transition', attemptId: attempt.id, expectedStatus: attempt.status, status: 'terminal', at: Date.now(), terminalTurnId: turnId, outcome: 'failed', failure: { kind: 'protocol', message: 'No structured result after one format-repair turn.' } }));
+    await this.mail(id, { id: identity('mail', attempt.id, 'protocol-failure'), kind: 'decision', sessionId, taskId: attempt.taskId,
+      text: `Attempt ${attempt.id} failed the structured-result protocol after one repair. Diagnose its retained transcript before selecting another attempt.`, artifactIds: [], createdAt: Date.now() });
   }
 
   /** A credential/denial observation never becomes model approval. Reconcile outside the
@@ -1483,11 +1726,14 @@ export class MissionService implements MissionToolHost {
     });
   }
 
-  private async continueAttempt(id: string, attempt: MissionAttempt, instruction: string, cause: string): Promise<void> {
+  private async continueAttempt(id: string, attempt: MissionAttempt, instruction: string, cause: string, mailboxIds?: string[]): Promise<void> {
     if (!this.deps.sessions.activity(attempt.sessionId).quiescent) return; // The next terminal/tool event owns the safe boundary.
     const opId = identity('op', attempt.id, cause);
     if (this.record(id).operations.some((o) => o.id === opId)) return;
-    await this.change(id, `${opId}-intent`, (r) => reduceMission(r, host, { kind: 'host.operation.record', operation: { id: opId, idempotencyKey: opId, actor: 'host', kind: 'dispatch', expectedRevision: r.revision, state: 'intent_recorded', payload: { attemptId: attempt.id, sessionId: attempt.sessionId, continuation: cause } } }));
+    // Closed admission keeps the attempt yielded; the pump wakes it again once Resume reopens.
+    try { this.assertAdmission(id); } catch (e) { if (e instanceof MissionAdmissionError) return; throw e; }
+    await this.change(id, `${opId}-intent`, (r) => reduceMission(r, host, { kind: 'host.operation.record', operation: { id: opId, idempotencyKey: opId, actor: 'host', kind: 'dispatch', expectedRevision: r.revision, state: 'intent_recorded',
+      payload: { attemptId: attempt.id, sessionId: attempt.sessionId, generation: attempt.generation, continuation: cause, ...(mailboxIds ? { mailboxIds } : {}) } } }));
     let lease: CapacityLease | undefined;
     try {
       lease = await this.deps.scheduler.acquire({ missionId: id, ownerId: opId, kind: attempt.profile ? 'worker' : 'lead', accountId: attempt.preset.model.connectionId ?? attempt.preset.model.provider });
@@ -1496,11 +1742,13 @@ export class MissionService implements MissionToolHost {
       this.yielded.delete(attempt.sessionId);
       this.turns.set(attempt.sessionId, { operationId: opId, lease, generation: attempt.generation }); lease = undefined;
       await this.markRuntimeStart(id, opId);
-      await this.deps.sessions.sendManaged(attempt.sessionId, { text: instruction }, attempt.generation);
+      const mail = mailboxIds ? this.record(id).mailbox.filter((item) => mailboxIds.includes(item.id)) : [];
+      const images = await this.mailImages(id, mail);
+      await this.deps.sessions.sendManaged(attempt.sessionId, { text: instruction, ...(images.length ? { images } : {}) }, attempt.generation);
     } catch (e) { lease?.release(true); await this.dispatchFailure(id, opId, attempt.sessionId, message(e)); }
   }
 
-  private async repair(id: string, attempt: MissionAttempt): Promise<void> {
+  private async repair(id: string, attempt: MissionAttempt, reason = ''): Promise<void> {
     await this.change(id, `${attempt.id}-repair`, (r) => reduceMission(r, host, { kind: 'host.attempt.repair', attemptId: attempt.id }));
     const opId = identity('op', attempt.id, 'repair');
     await this.change(id, `${opId}-intent`, (r) => reduceMission(r, host, { kind: 'host.operation.record', operation: { id: opId, idempotencyKey: opId, actor: 'host', kind: 'dispatch', expectedRevision: r.revision, state: 'intent_recorded', payload: { attemptId: attempt.id, sessionId: attempt.sessionId, repair: true } } }));
@@ -1512,14 +1760,20 @@ export class MissionService implements MissionToolHost {
         await this.opState(id, opId, 'in_flight');
         this.turns.set(attempt.sessionId, { operationId: opId, lease, generation: attempt.generation }); lease = undefined;
         await this.markRuntimeStart(id, opId);
-        await this.deps.sessions.sendManaged(attempt.sessionId, { text: `One result-format repair only: submit mission_report with result bound to task ${attempt.taskId}@${attempt.taskRevision}, attempt ${attempt.id}, specification ${attempt.specificationRevision}. Report candidate, partial, blocked or failed truthfully; do not invent evidence.` }, attempt.generation);
+        await this.deps.sessions.sendManaged(attempt.sessionId, { text: `${reason}One result-format repair only: submit mission_report with result bound to task ${attempt.taskId}@${attempt.taskRevision}, attempt ${attempt.id}, specification ${attempt.specificationRevision}. Report candidate, partial, blocked or failed truthfully; do not invent evidence.` }, attempt.generation);
       } catch (e) { lease?.release(true); await this.dispatchFailure(id, opId, attempt.sessionId, message(e)); }
     });
   }
 
-  private async capture(id: string, attempt: MissionAttempt): Promise<void> {
-    const opId = identity('op', attempt.id, 'capture');
-    await this.change(id, `${opId}-intent`, (r) => reduceMission(r, host, { kind: 'host.operation.record', operation: { id: opId, idempotencyKey: opId, actor: 'host', kind: 'capture', expectedRevision: r.revision, state: 'intent_recorded', payload: { attemptId: attempt.id, workspaceId: attempt.workspaceId, candidateId: identity('c', attempt.id) } } }));
+  /** Retains an already-submitted candidate; closed admission (pause/stop/question) cannot refuse
+   * it. A Resume retry reuses the original candidate identity, so an interrupted capture intent
+   * still refuses a drifted workspace rather than adopting later edits. */
+  private async capture(id: string, attempt: MissionAttempt, retry = false): Promise<void> {
+    const before = this.record(id), prior = before.operations.filter((o) => o.kind === 'capture' && o.payload.attemptId === attempt.id);
+    if (before.candidates.some((c) => c.attemptId === attempt.id) || prior.some(pending)) return;
+    const opId = retry ? identity('op', attempt.id, 'capture', prior.length) : identity('op', attempt.id, 'capture');
+    if (prior.some((o) => o.id === opId)) return;
+    await this.change(id, `${opId}-intent`, (r) => reduceMission(r, host, { kind: 'host.operation.record', operation: { id: opId, idempotencyKey: opId, actor: 'host', kind: 'capture', expectedRevision: r.revision, state: 'intent_recorded', payload: { attemptId: attempt.id, workspaceId: attempt.workspaceId, candidateId: identity('c', attempt.id), ...(retry ? { retry: true } : {}) } } }));
     await this.opState(id, opId, 'in_flight');
     try {
       const candidate = await this.deps.workspaces.captureCandidate(attempt.workspaceId, attempt.id, identity('c', attempt.id));
@@ -1528,7 +1782,16 @@ export class MissionService implements MissionToolHost {
         sourceRevision: attempt.sourceRevision, revision: candidate.revision, changedPaths: [...candidate.changedPaths], capturedAt: Date.parse(candidate.createdAt),
       } }));
       await this.opState(id, opId, 'succeeded');
-    } catch (e) { await this.opState(id, opId, 'failed', message(e)); await this.block(id, 'integration', `Candidate capture failed for ${attempt.id}: ${message(e)}`); }
+      const stale = (b: MissionRecord['blockers'][number]) => b.resolvedAt === undefined && b.message.startsWith(`Candidate capture failed for ${attempt.id}:`);
+      if (this.record(id).blockers.some(stale)) await this.change(id, `${opId}-resolved`, (r) => { for (const blocker of r.blockers.filter(stale)) blocker.resolvedAt = Date.now(); return r; });
+    } catch (e) {
+      await this.opState(id, opId, 'failed', message(e));
+      // A failed Resume retry goes to the principal engineer (replan the task for a fresh
+      // attempt); it never becomes another blocker that no further user action could clear.
+      if (retry) await this.mail(id, { id: identity('mail', opId, 'failed'), kind: 'decision', sessionId: attempt.sessionId, taskId: attempt.taskId, artifactIds: [], createdAt: Date.now(),
+        text: `Candidate capture for attempt ${attempt.id} failed again after Resume: ${message(e)} No candidate was recorded and the retained workspace was not adopted. Replan task ${attempt.taskId} with a new revision for a fresh attempt, or inspect the retained workspace read-only.` });
+      else await this.block(id, 'integration', `Candidate capture failed for ${attempt.id}: ${message(e)} Resume retries the capture with the same candidate identity.`, 'capture');
+    }
   }
 
   private async requestOperation(binding: MissionToolBinding, name: MissionToolName, request: MissionToolRequest): Promise<unknown> {
@@ -1548,6 +1811,8 @@ export class MissionService implements MissionToolHost {
       if (kind === 'verify') {
         const check = state.deliveryPolicy.checks.find((c) => 'checkId' in payload && c.id === payload.checkId);
         if (!check) throw new Error('Unknown approved check; register the required check before requesting execution.');
+        const refused = missionCheckCommandIssue(check.command);
+        if (refused) throw new Error(refused);
         const candidate = 'candidateId' in payload && payload.candidateId ? state.candidates.find((c) => c.id === payload.candidateId) : undefined;
         if ('candidateId' in payload && payload.candidateId && !candidate) throw new Error('Unknown immutable candidate.');
         const revision = candidate?.revision ?? state.acceptedRevision;
@@ -1761,6 +2026,9 @@ export class MissionService implements MissionToolHost {
   }
 
   private async runCheck(id: string, parentOp: string, request: VerificationRequest) {
+    // Checks verify; they never publish or mutate shared repository state, in any permission mode.
+    const refused = missionCheckCommandIssue(request.check.command);
+    if (refused) throw new Error(refused);
     const scope = verificationScope(request.specificationRevision, request.check, request.revision);
     await this.change(id, `${request.operationId}-intent`, (r) => {
       this.assertAdmission(id);
@@ -1817,17 +2085,30 @@ export class MissionService implements MissionToolHost {
     const r = this.record(id);
     const budget = this.budgetGate(id);
     if (budget) throw new Error(budget);
-    if (this.closed || this.fenced.has(id) || r.status !== 'running' || this.deps.store.isBlocked(id) || !planning && r.blockers.some((b) => b.resolvedAt === undefined)) throw new Error('Mission admission is paused or blocked; resolve the recorded blocker before dispatch.');
+    if (this.closed || this.fenced.has(id) || r.status !== 'running' || this.deps.store.isBlocked(id) || !planning && r.blockers.some((b) => b.resolvedAt === undefined)) throw new MissionAdmissionError('Mission admission is paused or blocked; resolve the recorded blocker before dispatch.');
   }
   /** Shared with the host's verification/delivery ports; no trust in a model-provided idle flag. */
   isQuiescent(r: MissionRecord): boolean {
+    return this.hostActivityQuiescent(r) && !this.externalUncertainty.has(r.id);
+  }
+  /** Only this host's own sessions, terminals, checks and turns. Restart ownership that no bounded
+   * receipt proved is a separate uncertainty (it still refuses Resume and cleanup). */
+  private hostActivityQuiescent(r: MissionRecord): boolean {
     return this.deps.sessions.list().filter((s) => s.mission?.missionId === r.id).every((s) => this.deps.sessions.activity(s.id).quiescent)
-      && !this.externalUncertainty.has(r.id) && !this.deps.additionalActivity?.(r) && this.deps.verification.active(r.id).length === 0 && ![...this.turns.keys()].some((id) => this.deps.sessions.get(id)?.mission?.missionId === r.id);
+      && !this.deps.additionalActivity?.(r) && this.deps.verification.active(r.id).length === 0 && ![...this.turns.keys()].some((id) => this.deps.sessions.get(id)?.mission?.missionId === r.id);
   }
 
   private reconcile(id: string, recovering: boolean, drainPump = true): Promise<void> {
     const existing = this.reconciliations.get(id);
-    if (existing) return existing;
+    if (existing) {
+      // A Stop can land while an earlier run is still reconciling the previous state (for example
+      // restart recovery). Finish the newer status afterwards instead of absorbing it.
+      const status = this.record(id).status;
+      return existing.catch(() => undefined).then(() => {
+        if (this.reconciliations.has(id) || this.deps.store.get(id)?.status !== status || this.reconcileStarts.get(id) === status || !['pausing', 'stopping', 'recovering'].includes(status)) return;
+        return this.reconcile(id, recovering, drainPump);
+      });
+    }
     const promise = this.performReconciliation(id, recovering, drainPump);
     this.reconciliations.set(id, promise);
     void promise.finally(() => { if (this.reconciliations.get(id) === promise) this.reconciliations.delete(id); }).catch(() => undefined);
@@ -1838,12 +2119,16 @@ export class MissionService implements MissionToolHost {
     if (drainPump) await this.pumpRuns.get(id);
     const old = this.record(id);
     if (!['pausing', 'stopping', 'recovering'].includes(old.status)) return;
+    this.reconcileStarts.set(id, old.status);
     if (this.externalUncertainty.has(id)) {
       let observation: Awaited<ReturnType<NonNullable<MissionServiceDeps['reconcileExternalActivity']>>> | undefined;
       try { observation = await this.deps.reconcileExternalActivity?.(old); }
       catch (error) { observation = { quiescent: false, detail: message(error) }; }
       if (!observation?.quiescent || !observation.receipt?.trim()) {
-        await this.block(id, 'environment', `External ownership is uncertain after restart. A prior harness/tool may still be alive; Resume and cleanup require exact durable bounded-owner receipts, not an empty session map. ${observation?.detail ?? ''}`.trim(), 'external');
+        const reason = `External ownership is uncertain after restart. A prior harness/tool may still be alive; Resume and cleanup require exact durable bounded-owner receipts, not an empty session map. ${observation?.detail ?? ''}`.trim();
+        // A user Stop must still end: terminal, capacity released, uncertainty retained, no cleanup.
+        if (this.record(id).status === 'stopping') { await this.stopUnproven(id, reason); return; }
+        await this.block(id, 'environment', reason, 'external');
         return;
       }
       await this.change(id, `external-reconciled-${old.revision}`, (r) => {
@@ -1860,21 +2145,32 @@ export class MissionService implements MissionToolHost {
     try {
       await this.deps.stopOwnedTerminals?.(this.record(id));
       if (this.deps.additionalActivity?.(this.record(id))) throw new Error('Owned terminal activity remains live, closing or uncertain.');
-    } catch (e) { terminalsUncertain = true; await this.block(id, 'environment', `Owned terminals did not stop: ${message(e)}`); }
+    } catch (e) { terminalsUncertain = true; await this.block(id, 'environment', `Owned terminals did not stop: ${message(e)}`, 'quiesce'); }
     // A slow or unsupported actor must not delay interruption of the other owned writers.
     // Each keeps its lease until its own positive teardown; any uncertainty prevents pause.
     const stopped = await Promise.all(this.deps.sessions.list().filter((s) => s.mission?.missionId === id).map(async (meta) => {
       try {
-        if (!recovering && this.deps.sessions.activity(meta.id).active) await this.deps.sessions.interruptManaged(meta.id, meta.mission!.generation);
+        // A runtime whose earlier teardown failed is still tearing down: retry its disposal
+        // directly (interrupt refuses a stopping session) rather than failing the same way forever.
+        const activity = this.deps.sessions.activity(meta.id);
+        if (!recovering && activity.active && !activity.tearingDown) await this.deps.sessions.interruptManaged(meta.id, meta.mission!.generation);
         await this.deps.sessions.stopManaged(meta.id, meta.mission!.generation);
         if (!this.deps.sessions.activity(meta.id).quiescent) throw new Error('Owned runtime did not establish quiescence.');
-        const live = this.turns.get(meta.id); if (live && !terminalsUncertain) { live.lease.release(true); this.turns.delete(meta.id); }
+        const live = this.turns.get(meta.id);
+        if (live && !terminalsUncertain) {
+          // A turn that already ended on its own, with its structured result, is settled from
+          // that observation (candidate captured) before anything is declared interrupted.
+          if (live.terminal?.status === 'completed' && !live.dispatchFailed && !live.questionId) {
+            try { await this.settleTurn(id, meta.id, live, true); } catch (e) { this.deps.log?.(`Mission ${id} could not retain settled turn ${live.terminal.id}: ${message(e)}`); }
+          }
+          if (this.turns.get(meta.id) === live) { live.lease.release(true); this.turns.delete(meta.id); }
+        }
         return true;
-      } catch (e) { await this.block(id, 'environment', `Owned session ${meta.id} did not stop: ${message(e)}`); return false; }
+      } catch (e) { await this.block(id, 'environment', `Owned session ${meta.id} did not stop: ${message(e)}`, 'quiesce'); return false; }
     }));
     if (terminalsUncertain || stopped.includes(false)) return;
     for (const operation of this.record(id).operations.filter(pending)) if (this.jobs.has(operation.id)) await this.jobs.get(operation.id);
-    if (this.deps.verification.active(id).length) { await this.block(id, 'environment', 'Verification still owns an active or uncertain process; Mission remains pausing/stopping.'); return; }
+    if (this.deps.verification.active(id).length) { await this.block(id, 'environment', 'Verification still owns an active or uncertain process; Mission remains pausing/stopping.', 'quiesce'); return; }
     if (recovering) await this.reconcileResources(id);
     // A job already executing an external effect cannot be declared canceled from its promise
     // acceptance. Wait for its own result; controls never hold the state lock while doing so.
@@ -1883,7 +2179,7 @@ export class MissionService implements MissionToolHost {
       if (!recovering && this.jobs.has(op.id)) await this.jobs.get(op.id);
       const current = this.record(id).operations.find((o) => o.id === op.id)!;
       if (!pending(current)) continue;
-      if (recovering && (op.kind === 'deliver' && op.payload.deliveryRequestedAt !== undefined || ['integrate', 'capture'].includes(op.kind))) await this.block(id, 'stale_state', `Interrupted ${op.kind} operation ${op.id} needs receipt/artifact reconciliation. It was not replayed.`);
+      if (recovering && (op.kind === 'deliver' && op.payload.deliveryRequestedAt !== undefined || ['integrate', 'capture'].includes(op.kind))) await this.block(id, 'stale_state', `Interrupted ${op.kind} operation ${op.id} needs receipt/artifact reconciliation. It was not replayed.`, 'stale');
       if (recovering && current.payload.dispatchStartedAt !== undefined) await this.change(id, `${op.id}-retain-dispatch`, (r) => {
         for (const item of r.mailbox) if ((current.payload.mailboxIds as string[] | undefined)?.includes(item.id)) item.deliveredAt ??= Number(current.payload.dispatchStartedAt);
         return r;
@@ -1895,8 +2191,25 @@ export class MissionService implements MissionToolHost {
       return r;
     });
     await this.opState(id, interruptId, 'succeeded');
-    await this.change(id, `${interruptId}-quiet`, (r) => reduceMission(r, host, { kind: 'host.quiesce', quiescent: this.isQuiescent(r) }));
+    await this.change(id, `${interruptId}-quiet`, (r) => {
+      const quiescent = this.isQuiescent(r);
+      // The same positive observation that permits paused/stopped proves earlier teardown
+      // blockers stale; they stay in history, resolved.
+      if (quiescent) for (const blocker of r.blockers) if (blocker.resolvedAt === undefined && missionBlockerFamily(blocker) === 'quiesce') blocker.resolvedAt = Date.now();
+      return reduceMission(r, host, { kind: 'host.quiesce', quiescent });
+    });
     this.deps.scheduler.unregister(id);
+  }
+  /** Stop after restart when bounded ownership could not be proven: terminal and capacity-free,
+   * but the uncertainty is retained, nothing is replayed, and cleanup stays refused. */
+  private async stopUnproven(id: string, reason: string): Promise<void> {
+    const r = this.record(id);
+    await this.change(id, `stop-unproven-${r.revision}`, (state) => reduceMission(state, host, { kind: 'host.stop.unproven', at: Date.now(),
+      blocker: { id: identity('external', id, 'stop-unproven', r.revision), kind: 'environment', message: `Stopped without proof that owned activity ended. ${reason} Workspaces are retained and cleanup stays refused until exact ownership receipts reconcile.` } }));
+    this.broker.revoke(id); this.deps.verification.cancel(id); this.cancelWorkspaceWaiters(id);
+    try { this.deps.scheduler.unregister(id); } catch (e) { this.deps.log?.(`Mission ${id} retains capacity for owned activity after an unproven stop: ${message(e)}`); }
+    try { this.deps.sessions.note(r.leadSessionId, 'Mission stopped without proof that owned activity ended after restart. Workspaces are retained; cleanup requires exact ownership receipts.', 'warn'); }
+    catch (e) { this.deps.log?.(message(e)); }
   }
 
   /** Reconcile only identities the journal already owns. This never repeats a model turn or
@@ -1924,7 +2237,7 @@ export class MissionService implements MissionToolHost {
       } catch (e) {
         // An intent with no workspace metadata never spawned a writer. Do not provision one on
         // restart. Previously registered resources, however, must remain explicit blockers.
-        if ((e as NodeJS.ErrnoException).code !== 'ENOENT' || r.workspaces.some((w) => w.id === workspaceId)) await this.block(id, 'stale_state', `Workspace ${workspaceId} needs reconciliation: ${message(e)}`);
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT' || r.workspaces.some((w) => w.id === workspaceId)) await this.block(id, 'stale_state', `Workspace ${workspaceId} needs reconciliation: ${message(e)}`, 'stale');
       }
     }
     const baselineOp = r.operations.find((op) => op.payload.infrastructure === 'baseline');
@@ -1937,7 +2250,7 @@ export class MissionService implements MissionToolHost {
           state.operations.find((op) => op.id === baselineOp.id)!.state = 'succeeded';
           return state;
         });
-      } catch (e) { await this.block(id, 'stale_state', `Baseline needs reconciliation: ${message(e)}`); }
+      } catch (e) { await this.block(id, 'stale_state', `Baseline needs reconciliation: ${message(e)}`, 'stale'); }
     }
     for (const attempt of r.attempts.filter((a) => a.status === 'terminal' && a.outcome === 'submitted' && !r.candidates.some((c) => c.attemptId === a.id))) {
       try {
@@ -1953,7 +2266,7 @@ export class MissionService implements MissionToolHost {
           for (const blocker of state.blockers) if (blocker.resolvedAt === undefined && blocker.message.startsWith(`Candidate capture failed for ${attempt.id}:`)) blocker.resolvedAt = Date.now();
           return state;
         });
-      } catch (e) { await this.block(id, 'stale_state', `Candidate ${attempt.id} needs reconciliation: ${message(e)}`); }
+      } catch (e) { await this.block(id, 'stale_state', `Candidate ${attempt.id} needs reconciliation: ${message(e)}`, 'stale'); }
     }
     // A durably rejected check is not an unknown apply. Keep the immutable failed attempt,
     // but allow an explicit replan/fresh candidate instead of manufacturing restart uncertainty.
@@ -2006,11 +2319,11 @@ export class MissionService implements MissionToolHost {
           if (!saved) state.workspaces.push(workspace);
           return state;
         });
-      } catch (e) { await this.block(id, 'stale_state', `Integration ${operation.id} needs reconciliation: ${message(e)}`); }
+      } catch (e) { await this.block(id, 'stale_state', `Integration ${operation.id} needs reconciliation: ${message(e)}`, 'stale'); }
     }
     for (const operation of this.record(id).operations.filter((op) => op.kind === 'deliver' && (op.payload.deliveryRequestedAt !== undefined || op.state === 'succeeded'))) {
       if (!this.deps.delivery.inspect) {
-        await this.block(id, 'stale_state', `Delivery ${operation.id} needs read-only receipt inspection before resuming; no external action was replayed.`);
+        await this.block(id, 'stale_state', `Delivery ${operation.id} needs read-only receipt inspection before resuming; no external action was replayed.`, 'stale');
         continue;
       }
       try {
@@ -2032,14 +2345,14 @@ export class MissionService implements MissionToolHost {
           for (const blocker of state.blockers) if (blocker.resolvedAt === undefined && (blocker.message.startsWith(`Delivery ${operation.id} `) || blocker.message.startsWith(`Interrupted deliver operation ${operation.id} `))) blocker.resolvedAt = Date.now();
           return state;
         });
-      } catch (e) { await this.block(id, 'stale_state', `Delivery ${operation.id} needs reconciliation: ${message(e)}`); }
+      } catch (e) { await this.block(id, 'stale_state', `Delivery ${operation.id} needs reconciliation: ${message(e)}`, 'stale'); }
     }
     const current = this.record(id);
     if (current.acceptedRevision) {
       try {
         const accepted = await this.deps.workspaces.acceptedRevision(id);
         if (!sameRevision(accepted, current.acceptedRevision)) throw new Error('Workspace promotion advanced without a recorded integration receipt; checks were not replayed.');
-      } catch (e) { await this.block(id, 'stale_state', `Accepted content needs reconciliation: ${message(e)}`); }
+      } catch (e) { await this.block(id, 'stale_state', `Accepted content needs reconciliation: ${message(e)}`, 'stale'); }
     }
   }
 
@@ -2058,7 +2371,7 @@ export class MissionService implements MissionToolHost {
     if (live) live.dispatchFailed = true; // Teardown/late terminal events cannot produce a second outcome.
     if (meta?.mission) {
       try { await this.deps.sessions.stopManaged(sessionId, meta.mission.generation); }
-      catch { await this.block(id, 'environment', `Dispatch failed with uncertain owned runtime: ${diagnosis.message}`); return; }
+      catch { await this.block(id, 'environment', `Dispatch failed with uncertain owned runtime: ${diagnosis.message}`, 'quiesce'); return; }
     }
     let settledCurrent = false;
     await this.change(id, `${opId}-failure`, (r) => {
@@ -2083,7 +2396,7 @@ export class MissionService implements MissionToolHost {
       if (diagnosis.recovery === 'user_action') { this.pauseForObservedFailure(id, opId); return; }
       if (sessionId === r.leadSessionId) {
         await this.block(id, diagnosis.kind, missionFailureNotice(diagnosis), 'lead_dispatch');
-        await this.change(id, `${opId}-lead-blocked`, (state) => { state.status = 'blocked'; return state; });
+        await this.change(id, `${opId}-lead-blocked`, (state) => { if (!['pausing', 'paused', 'stopping', 'recovering'].includes(state.status)) state.status = 'blocked'; return state; });
         this.fenced.add(id); this.deps.scheduler.pause(id); this.broker.revoke(id); this.cancelWorkspaceWaiters(id);
       } else this.wake(id);
     }

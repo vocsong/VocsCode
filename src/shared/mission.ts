@@ -457,6 +457,21 @@ export interface MissionRecord {
   archived?: boolean;
 }
 
+/** Host blocker families (the ID prefix before its digest). Resume re-establishes these from
+ * fresh host observations and keeps them in history: a stopped lead start, a budget that is
+ * back under its threshold, a re-probed baseline, a coordinator step, a no-progress diagnosis
+ * turn, teardown that later proved quiescent, a lead handover or a candidate capture.
+ * Every other family (unknown process ownership after restart, already-admitted remote
+ * publication, receipt/integrity reconciliation) stays blocking until its own proof exists. */
+export const MISSION_RESUMABLE_BLOCKER_FAMILIES = ['lead_dispatch', 'budget', 'baseline', 'pump', 'progress', 'quiesce', 'handover', 'capture'] as const;
+export type MissionResumableBlockerFamily = typeof MISSION_RESUMABLE_BLOCKER_FAMILIES[number];
+export function missionBlockerFamily(blocker: Pick<MissionRecord['blockers'][number], 'id'>): MissionResumableBlockerFamily | undefined {
+  return MISSION_RESUMABLE_BLOCKER_FAMILIES.find((family) => blocker.id.startsWith(`${family}_`));
+}
+export function isMissionBlockerResumable(blocker: Pick<MissionRecord['blockers'][number], 'id'>): boolean {
+  return missionBlockerFamily(blocker) !== undefined;
+}
+
 export interface MissionSource {
   schemaVersion: 1;
   originSessionId?: string;

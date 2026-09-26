@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { createDefaultMissionConfig, type ExecutionPreset } from '../src/shared/mission-config';
 import type { MissionAttempt, MissionCodeRevision, MissionEvidence, MissionProfile, MissionRecord, MissionResult, MissionReview, MissionTask } from '../src/shared/mission';
-import { assertMissionMutation, assertMissionRecord, completionBlockers, implementationBlockers, missionCompletionReport, missionMutationPayloadSchema, readyTasks, reduceMission, type MissionActor, type MissionMutation, type MissionTaskContract } from '../src/main/mission/state';
+import { assertMissionMutation, assertMissionRecord, completionBlockers, implementationBlockers, MissionAdmissionError, missionCheckCommandIssue, missionCompletionReport, missionMutationPayloadSchema, readyTasks, reduceMission, type MissionActor, type MissionMutation, type MissionTaskContract } from '../src/main/mission/state';
 
 const host: MissionActor = { kind: 'host' };
 const lead: MissionActor = { kind: 'lead', sessionId: 'lead-session', generation: 1 };
@@ -599,5 +599,73 @@ describe('Mission recovery, pause, stop and operational intent', () => {
     refuses(r, host, { kind: 'host.operation.transition', operationId: 'op1', expectedState: 'intent_recorded', state: 'succeeded' }, /Invalid operation/);
     r = mutate(r, host, { kind: 'host.operation.transition', operationId: 'op1', expectedState: 'intent_recorded', state: 'in_flight' });
     refuses(r, host, { kind: 'host.operation.transition', operationId: 'op1', expectedState: 'intent_recorded', state: 'failed', error: 'stale' }, /Stale/);
+  });
+});
+
+describe('Mission check commands verify; they never publish or mutate shared repository state', () => {
+  it.each([
+    'git push origin HEAD', 'git -C ../source push --force', 'git remote add upstream https://example.invalid/r.git', 'git config core.hooksPath hooks', 'git stash push -m keep',
+    'git branch -f main HEAD~1', 'git branch -D feature', 'git branch release', 'git tag -a v1 -m release', 'git update-ref refs/heads/main HEAD', 'git fetch origin', 'git pull',
+    'git worktree remove ../other', 'git commit -am wip', 'git reset --hard HEAD~1', 'git checkout -b escape', 'git -c alias.x="!git push" x',
+    'gh pr merge 12 --squash', 'gh pr create --fill', 'gh repo delete owner/repo --yes', 'gh release create v1', 'gh api -X POST repos/o/r/pulls', 'gh api graphql -f query=mutation',
+    'gh auth token', 'npm publish', 'pnpm -r publish', 'yarn npm publish', 'npm version patch', 'npx semantic-release', 'cargo publish', 'docker push registry.invalid/app',
+    'npm test && git push origin HEAD', 'node -e "require(\'child_process\').execSync(\'git push origin HEAD\')"', 'sh -c "gh pr merge 1"', '"C:\\Program Files\\Git\\cmd\\git.exe" push',
+    '/usr/bin/git push', './gradlew publish',
+  ])('refuses %s', (command) => {
+    expect(missionCheckCommandIssue(command)).toMatch(/only verify content/);
+  });
+  it.each([
+    'npm test', 'node --test --test-reporter=tap case.cjs', 'npx vitest run --reporter=json', 'git diff --exit-code', 'git status --porcelain', 'git log -1 --format=%H',
+    'git rev-parse HEAD', 'git ls-files', 'git branch --show-current', 'git branch -a', 'git tag -l "v*"', 'git clean -fdx && npm ci && npm run build', 'gh pr view 12 --json title',
+    'gh api repos/o/r/pulls', 'npm run build', 'pnpm --filter app test', 'cargo test', 'docker build .', 'node -e "require(\'node:assert\').strictEqual(1, 1)"',
+  ])('admits %s', (command) => {
+    expect(missionCheckCommandIssue(command)).toBeUndefined();
+  });
+  it('refuses a model-added publishing check before it enters the plan, in every permission mode', () => {
+    for (const mode of ['auto', 'full-auto'] as const) {
+      const r = planned(); r.requestedPermissionMode = mode;
+      const check = { id: 'publish', name: 'Publish check', kind: 'build' as const, command: 'npm run build && git push origin HEAD:main', criterionIds: ['correctness'], required: true, heavy: false, timeoutMs: 60_000 };
+      refuses(r, lead, { kind: 'plan.update', expectedPlanRevision: r.planRevision, plan: r.plan, checks: [check] }, /only verify content.*git push/);
+      const allowed = mutate(r, lead, { kind: 'plan.update', expectedPlanRevision: r.planRevision, plan: r.plan, checks: [{ ...check, id: 'build', command: 'npm run build' }] });
+      expect(allowed.deliveryPolicy.checks.map((c) => c.id)).toEqual(['unit', 'build']);
+    }
+  });
+});
+
+describe('Mission admission boundaries retain produced work', () => {
+  const capture = (r: MissionRecord, attemptId = 'a1') => ({ kind: 'host.operation.record' as const, operation: { id: `capture-${attemptId}`, idempotencyKey: `capture-${attemptId}`, kind: 'capture' as const, actor: 'host', expectedRevision: r.revision, state: 'intent_recorded' as const, payload: { attemptId, workspaceId: 'w1', candidateId: `c-${attemptId}` } } });
+  function settledSubmission(): MissionRecord {
+    let r = dispatch(); r = mutate(r, host, { kind: 'host.evidence.capture', evidence: evidence() }); r = mutate(r, worker, { kind: 'result.report', result: result() });
+    return mutate(r, host, { kind: 'host.attempt.transition', attemptId: 'a1', expectedStatus: 'running', status: 'terminal', outcome: 'submitted', terminalTurnId: 'turn1', at: 9 });
+  }
+  it('records the capture of an already-submitted attempt while pausing, stopping or blocked, never a new writer', () => {
+    for (const close of [
+      (r: MissionRecord) => mutate(r, user, { kind: 'control.pause' }),
+      (r: MissionRecord) => mutate(r, user, { kind: 'control.stop' }),
+      (r: MissionRecord) => mutate(r, host, { kind: 'host.blocker.add', blocker: { id: 'baseline_x', kind: 'environment', message: 'Source checkout is busy' } }),
+    ]) {
+      const r = close(settledSubmission());
+      expect(mutate(r, host, capture(r)).operations.at(-1)).toMatchObject({ kind: 'capture', state: 'intent_recorded' });
+      const other = { ...capture(r), operation: { ...capture(r).operation, id: 'other', idempotencyKey: 'other', kind: 'verify' as const, payload: { checkId: 'unit' } } };
+      expect(() => reduceMission(r, host, other)).toThrow(MissionAdmissionError);
+    }
+  });
+  it('still refuses a capture that retains no submitted attempt when admission is closed', () => {
+    const r = mutate(dispatch(), user, { kind: 'control.pause' });
+    expect(() => reduceMission(r, host, capture(r))).toThrow(MissionAdmissionError);
+  });
+  it('keeps a user Stop across restart recovery and can finish it without ownership proof, retaining the uncertainty', () => {
+    let r = mutate(dispatch(), host, { kind: 'host.operation.record', operation: { id: 'check', idempotencyKey: 'check', kind: 'verify', actor: 'host', expectedRevision: 0, state: 'intent_recorded', payload: { checkId: 'unit' } } });
+    r = mutate(r, user, { kind: 'control.stop' });
+    r = mutate(r, host, { kind: 'host.recover' });
+    expect(r.status).toBe('stopping'); expect(r.operations[0].state).toBe('reconciling');
+    const blocker = { id: 'external_stop', kind: 'environment' as const, message: 'Stopped without proof that owned activity ended.' };
+    refuses(executing(), host, { kind: 'host.stop.unproven', blocker, at: 20 }, /user Stop/);
+    const stopped = mutate(r, host, { kind: 'host.stop.unproven', blocker, at: 20 });
+    expect(stopped).toMatchObject({ status: 'stopped', blockers: [blocker], attempts: [{ id: 'a1', status: 'terminal', outcome: 'canceled', failure: { code: 'ownership_unproven' } }], operations: [{ id: 'check', state: 'failed' }] });
+    expect(stopped.operations[0].error).toMatch(/without proof/);
+    expect(stopped.workspaces).toEqual(r.workspaces);
+    refuses(stopped, user, { kind: 'control.resume', quiescent: true }, /immutable/);
+    expect(() => assertMissionRecord(stopped)).not.toThrow();
   });
 });

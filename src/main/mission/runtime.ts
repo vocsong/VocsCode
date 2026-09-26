@@ -12,12 +12,12 @@ import type { TerminalManager } from '../terminal';
 import type { Logger } from '../log';
 import { commandApproval, gateAction, OPTIONS_ALLOW_DENY_NO_SESSION } from '../harness/permissions';
 import { MissionWorkspaceAdmission } from './admission';
-import { MissionDeliveryService, type MissionDeliveryRequest } from './delivery';
+import { MissionDeliveryService, missionDeliveryBranch, type MissionDeliveryRequest } from './delivery';
 import { resolveMissionDeliveryPolicy } from './policy';
 import { MissionScheduler } from './scheduler';
 import { MissionRecovery } from './recovery';
 import { MissionService, type MissionCapabilityPort } from './service';
-import { assertMissionRecord, implementationBlockers } from './state';
+import { assertMissionRecord, implementationBlockers, missionCheckCommandIssue } from './state';
 import { MissionStore } from './store';
 import { assertMissionUsageObservation } from './budget';
 import { MissionVerification, VerificationApprovalDenied, type VerificationRequest } from './verification';
@@ -62,6 +62,27 @@ export function missionCapabilities(sessions: SessionManager, settings: Pick<Set
       projectAllowed: true, missionTools: true, delegationControl: true, tools: [...readiness.tools],
     };
   } };
+}
+
+/** Display-only: which app terminals and writable sessions may still hold a checkout, so a baseline
+ * blocker can say what to close. Workspace admission remains the authority for capture. */
+export function describeWorkspaceWriters(sessions: Pick<SessionManager, 'list' | 'get' | 'activity'>, terminals: Pick<TerminalManager, 'activity'>, paths: readonly string[]): string[] {
+  const key = (value: string) => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+  const contains = (root: string, target: string) => { const relative = path.relative(key(root), key(target)); return !relative || relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative); };
+  const inside = (location: string | undefined) => !!location && paths.some((root) => contains(root, location) || contains(location, root));
+  const holders: string[] = [];
+  for (const terminal of terminals.activity()) {
+    const owner = sessions.get(terminal.sessionId);
+    if (![terminal.cwd, terminal.reportedCwd, owner?.cwd].some(inside)) continue;
+    holders.push(`${terminal.state === 'live' ? 'the open' : `a ${terminal.state}`} terminal ${terminal.terminalId} of session "${owner?.title ?? terminal.sessionId}" (${terminal.reportedCwd || terminal.cwd})`);
+  }
+  for (const session of sessions.list()) {
+    if (session.mission?.sourceAccess === 'read_only' || !inside(session.cwd)) continue;
+    const activity = sessions.activity(session.id);
+    if (activity.quiescent) continue;
+    holders.push(`session "${session.title}" (${session.id}), which is ${activity.approvals ? 'waiting for a permission decision' : activity.turn ? 'running a turn' : activity.tools ? 'running tools' : 'still active'}`);
+  }
+  return holders;
 }
 
 export class MissionRuntime {
@@ -117,6 +138,7 @@ export class MissionRuntime {
         const sessionIds = new Set([record.leadSessionId, ...record.attempts.map((a) => a.sessionId), ...deps.sessions.list().filter((s) => s.mission?.missionId === record.id).map((s) => s.id)]);
         await Promise.all([...sessionIds].map((id) => deps.terminals.closeManagedSession(id)));
       },
+      describeWorkspaceWriters: (...paths) => describeWorkspaceWriters(deps.sessions, deps.terminals, paths),
       delivery: { resolve: (root, options) => resolveMissionDeliveryPolicy(root, options), deliver: (request) => this.delivery.deliver(request), inspect: (request) => this.delivery.inspect(request), authorizeTargetFetch: (request) => this.authorizeTargetFetch(request) },
       onChange: deps.changed, log: (message) => deps.log('warn', `mission: ${message}`),
     });
@@ -163,6 +185,10 @@ export class MissionRuntime {
   }
 
   private async authorizeCheck(request: VerificationRequest): Promise<void> {
+    // Checks verify content in every permission mode; publication and shared repository changes
+    // stay behind delivery's own gates even under full-auto. Refused before any approval card.
+    const refused = missionCheckCommandIssue(request.check.command);
+    if (refused) throw new Error(refused);
     const validate = () => {
       const record = this.current(request.missionId, request.operationId, 'verify');
       const operation = record.operations.find((o) => o.id === request.operationId)!;
@@ -203,10 +229,14 @@ export class MissionRuntime {
     const record = validate();
     const workspace = record.workspaces.find((w) => w.role === 'integration' && !w.cleanedAt);
     if (!workspace) throw new Error('The retained integration workspace is missing.');
+    // Name the exact branch delivery pushes: after an approved-target refresh it carries the
+    // observation suffix, so the approval must not show the plain mission branch.
+    const observed = request.mission.deliveryPolicy.endpoint === 'local_commit' ? undefined : await this.workspaces.integratedTargetObservation(request.mission.id);
+    const branch = missionDeliveryBranch(request.mission, observed);
     const command = action === 'commit' ? `git commit-tree ${record.acceptedRevision!.contentHash}`
-      : action === 'push' ? `git push ${record.deliveryPolicy.remote} mission/${record.id}-delivery`
-        : action === 'create_pr' ? `gh pr create --base ${record.deliveryPolicy.targetBranch} --head mission/${record.id}-delivery`
-          : `gh pr merge mission/${record.id}-delivery --${record.deliveryPolicy.mergeMethod ?? 'merge'}`;
+      : action === 'push' ? `git push ${record.deliveryPolicy.remote} ${branch}`
+        : action === 'create_pr' ? `gh pr create --base ${record.deliveryPolicy.targetBranch} --head ${branch}`
+          : `gh pr merge ${branch} --${record.deliveryPolicy.mergeMethod ?? 'merge'}`;
     await this.permission(record, request.operationId, action, command, workspace.path);
     validate();
   }

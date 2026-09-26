@@ -160,6 +160,25 @@ it('does not treat a scripted Native runtime as having production crash ownershi
   expect(createAdapter).not.toHaveBeenCalled();
 });
 
+it.each(['stop', 'archive'] as const)('lets a user %s end an unproven restart recovery: terminal, capacity released, uncertainty kept, no cleanup', async (action) => {
+  const saved = record([dispatch(randomUUID())]); saved.leadPreset.harnessId = 'native'; saved.config.presets[0].harnessId = 'native';
+  await persist(saved); const { runtime } = await boot('native');
+  expect(runtime.service.get('mission')!.status).toBe('recovering');
+  expect(runtime.scheduler.snapshot().missions).toContain('mission');
+  await expect(runtime.service.control({ missionId: 'mission', idempotencyKey: 'pause-recovering', expectedRevision: runtime.service.get('mission')!.revision, control: { action: 'pause' } })).rejects.toThrow(/stop\/recovery/);
+  if (action === 'stop') await runtime.service.control({ missionId: 'mission', idempotencyKey: 'stop-unproven', expectedRevision: runtime.service.get('mission')!.revision, control: { action: 'stop' } });
+  else await runtime.service.archive('mission', true);
+  const stopped = runtime.service.get('mission')!;
+  expect(stopped.status).toBe('stopped');
+  expect(stopped.archived === true).toBe(action === 'archive');
+  expect(runtime.scheduler.snapshot().missions).not.toContain('mission');
+  expect(stopped.operations.find((op) => op.id === 'dispatch')).toMatchObject({ state: 'failed', error: expect.stringContaining('without proof') });
+  expect(stopped.blockers.filter((blocker) => blocker.resolvedAt === undefined).map((blocker) => blocker.message).join('\n')).toMatch(/Stopped without proof[\s\S]*cleanup stays refused/);
+  expect(runtime.service.isQuiescent(stopped)).toBe(false);
+  await expect(runtime.service.control({ missionId: 'mission', idempotencyKey: 'cleanup-unproven', expectedRevision: stopped.revision, control: { action: 'cleanup' } })).rejects.toThrow(/quiescent|reconciled/);
+  expect(createAdapter).not.toHaveBeenCalled();
+});
+
 it('keeps a verification operation blocked if the host died before persisting its process intent', async () => {
   await persist(record([operation('check', 'verify')])); const { runtime } = await boot();
   expect(runtime.service.get('mission')!.status).toBe('recovering');
