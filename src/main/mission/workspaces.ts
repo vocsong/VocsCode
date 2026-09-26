@@ -171,6 +171,8 @@ interface WorkspaceRecord extends MissionWorkspace {
   state: 'provisioning' | 'ready' | 'refreshing' | 'removing' | 'removed';
   accounted?: Snapshot;
   integration?: { candidateId: string; expected: CodeRevision; status: string; result?: CodeRevision };
+  /** The pinned source snapshot and exact target of an in-flight refresh/removal checkout. */
+  transition?: { from: Snapshot; to: CodeRevision };
 }
 
 interface TargetObservationIntent {
@@ -465,12 +467,22 @@ export class MissionWorkspaces {
     return this.queue(missionId, async () => this.accepted(missionId, await this.initializeAccepted(missionId, await this.mission(missionId))));
   }
 
-  /** Actual final scope, including target refreshes and deletions absent from worker candidates. */
+  /** Every path a permitted delivery can publish, for policy holds: baseline→accepted (a local
+   * commit; target refreshes and deletions absent from worker candidates included) and, once the
+   * integrated target contains the baseline so a PR may be built on it, target→accepted. That PR
+   * delta can hold paths the baseline delta does not, e.g. an upstream change the Mission reverts.
+   * A baseline the target lacks can never be published remotely (delivery refuses it). */
   async acceptedChangedPaths(missionId: string): Promise<string[]> {
     return this.queue(missionId, async () => {
       const mission = await this.mission(missionId);
       const accepted = await this.accepted(missionId, mission);
-      return (await this.changes(mission.baseline.sourceRoot, mission.baseline.revision.contentHash, accepted.contentHash)).map((change) => change.path);
+      const cwd = mission.baseline.sourceRoot;
+      const paths = new Set((await this.changes(cwd, mission.baseline.revision.contentHash, accepted.contentHash)).map((change) => change.path));
+      const target = await this.integratedTargetObservation(missionId);
+      if (target && (await git(cwd, ['merge-base', '--is-ancestor', mission.baseline.revision.baseCommitSha, objectId(target.commitSha)], { allowFailure: true })).code === 0) {
+        for (const change of await this.changes(cwd, target.contentHash, accepted.contentHash)) paths.add(change.path);
+      }
+      return [...paths].sort();
     });
   }
 
@@ -535,8 +547,7 @@ export class MissionWorkspaces {
           const [head, ref] = rows[0].split(/\s+/);
           if (rows.length !== 1 || ref !== `refs/heads/${intent.targetBranch}`) throw new MissionWorkspaceError('git', 'Approved remote target is missing or ambiguous.');
           intent = { ...intent, expectedHead: objectId(head), stage: 'fetching' };
-          await noLinks(this.root!, file);
-          await writeJson(file, intent);
+          await this.writeOwned(file, intent);
           await lease.assertQuiescent();
           await checkEndpoint();
           await git(record.cwd, args);
@@ -662,8 +673,7 @@ export class MissionWorkspaces {
             changes, changedPaths: changes.map((change) => change.path), createdAt: intent.createdAt,
           };
           intent = { ...intent, candidate: { ...data, hostHash: hash(JSON.stringify(data)) } };
-          await noLinks(this.root!, intentFile);
-          await writeJson(intentFile, intent);
+          await this.writeOwned(intentFile, intent);
         }
         const candidate = intent.candidate!;
         matches(candidate);
@@ -732,8 +742,7 @@ export class MissionWorkspaces {
       if (receipt.status === 'applying' || receipt.status === 'checking') throw new MissionWorkspaceError('drift', 'Candidate integration was interrupted; its attempt is retained and will not be reapplied or rechecked under the same identity.');
       const save = async (patch: Partial<CandidateIntegrationReceipt>): Promise<void> => {
         receipt = { ...receipt!, ...patch };
-        await noLinks(this.root!, file);
-        await writeJson(file, receipt);
+        await this.writeOwned(file, receipt);
       };
       let record = await this.queue(input.missionId, async () => {
         if (!(await maybeStat(this.file('workspaces', id)))) {
@@ -917,8 +926,7 @@ export class MissionWorkspaces {
       }
       const save = async (patch: Partial<TargetIntegrationReceipt>): Promise<void> => {
         receipt = { ...receipt!, ...patch };
-        await noLinks(this.root!, file);
-        await writeJson(file, receipt);
+        await this.writeOwned(file, receipt);
       };
       let record = await this.queue(input.missionId, async () => {
         if (!(await maybeStat(this.file('workspaces', id)))) {
@@ -1012,10 +1020,17 @@ export class MissionWorkspaces {
         if (!record.accounted || expectedFingerprint !== record.fingerprint || current.fingerprint !== expectedFingerprint) throw new MissionWorkspaceError('drift', 'Workspace has unaccounted changes; capture/reconcile them before refreshing.');
         const next = await this.accepted(record.missionId, mission);
         await this.guardTreePaths(record.cwd, next.contentHash, current.contentHash);
-        await this.save({ ...record, state: 'refreshing' });
-        await lease.assertQuiescent();
-        await this.replaceAccounted(record, current, next.contentHash, lease);
-        record = { ...record, baseRevision: next };
+        const { transition: _stale, ...ready } = record;
+        // The durable target makes an interrupted multi-step checkout resumable (see settle()).
+        await this.save({ ...ready, state: 'refreshing', transition: { from: current, to: next } });
+        try {
+          await lease.assertQuiescent();
+          await this.replaceAccounted(ready, current, next.contentHash, lease);
+        } catch (error) {
+          await this.restoreUnchanged(ready, current, next.contentHash, lease);
+          throw error;
+        }
+        record = { ...ready, baseRevision: next };
         const after = await this.snapshot(record, lease);
         if (after.contentHash !== next.contentHash) throw new MissionWorkspaceError('drift', 'Materialized content does not match the accepted tree.');
         await this.pin(record, `refresh-${randomUUID()}`, after, lease);
@@ -1032,9 +1047,20 @@ export class MissionWorkspaces {
     try { initial = await this.record(workspaceId); } catch (error) { return { removed: false, reason: 'not_owned', message: message(error) }; }
     return this.queue(initial.missionId, async () => {
       try {
-        const record = await this.record(workspaceId);
+        let record = await this.record(workspaceId);
         const mission = await this.mission(record.missionId);
+        const { transition: _transition, ...base } = record;
+        if ((record.state === 'removing' || record.state === 'removed') && !(await maybeStat(record.cwd))) {
+          // `worktree remove` already happened; only its acknowledgment was lost. Nothing is
+          // deleted here, and a registration Git still holds is left for explicit repair.
+          await noLinks(await this.storage(), record.cwd);
+          if ((await this.worktrees(mission)).some((entry) => entry.some((field) => field.startsWith('worktree ') && equalPath(field.slice(9), record.cwd)))) return { removed: false, reason: 'git_refused', message: 'Git still registers the missing workspace; retained for reconciliation.' };
+          if (record.state !== 'removed') await this.save({ ...base, state: 'removed' });
+          return { removed: true };
+        }
         return await this.quiet(record.cwd, async (lease): Promise<WorkspaceCleanupResult> => {
+          // Finish an interrupted refresh/removal of our own before deciding what can be removed.
+          if (record.state === 'refreshing' || record.state === 'removing') record = await this.settle(record, mission, lease);
           await this.owned(record, mission);
           const ignored = (await git(record.cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])).stdout;
           if (ignored) return { removed: false, reason: 'uncaptured', message: 'Ignored files are not captured; move or remove them explicitly before cleanup.' };
@@ -1043,16 +1069,28 @@ export class MissionWorkspaces {
           // Preserve both staged and effective content before making Git's ordinary (non-force)
           // remove possible. This is an explicit disposal of exactly the already-retained state.
           await this.pin(record, `cleanup-${randomUUID()}`, current, lease);
-          await this.save({ ...record, state: 'removing' });
-          await lease.assertQuiescent();
-          await this.replaceAccounted(record, current, mission.baseline.revision.contentHash, lease);
+          const { transition: _stale, ...ready } = record;
+          const removing: WorkspaceRecord = { ...ready, state: 'removing', transition: { from: current, to: mission.baseline.revision } };
+          await this.save(removing);
+          try {
+            await lease.assertQuiescent();
+            await this.replaceAccounted(ready, current, mission.baseline.revision.contentHash, lease);
+          } catch (error) {
+            await this.restoreUnchanged(ready, current, mission.baseline.revision.contentHash, lease);
+            throw error;
+          }
           await lease.assertQuiescent();
           // Git's non-force removal still discards ignored files. Check again after normalization,
           // not just before capture, so build output appearing during cleanup is never swept away.
-          if ((await git(record.cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])).stdout) return { removed: false, reason: 'uncaptured', message: 'Ignored files appeared during cleanup; workspace retained for reconciliation.' };
+          if ((await git(record.cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])).stdout) {
+            // The pinned content is already normalized away; record that settled state honestly.
+            await this.settle(removing, mission, lease);
+            return { removed: false, reason: 'uncaptured', message: 'Ignored files appeared during cleanup; workspace retained for reconciliation.' };
+          }
           await lease.assertQuiescent();
           await git(mission.baseline.sourceRoot, ['worktree', 'remove', record.cwd], { filterCwd: record.cwd });
-          await this.save({ ...record, state: 'removed' });
+          const { transition: _done, ...removed } = removing;
+          await this.save({ ...removed, state: 'removed' });
           return { removed: true };
         });
       } catch (error) {
@@ -1095,11 +1133,29 @@ export class MissionWorkspaces {
     return path.join(this.root ?? path.resolve(this.options.root), kind, `${identifier(id)}.json`);
   }
 
+  /** A path can be spelled from the configured root before storage() pinned its canonical form
+   * (8.3 short names, a junctioned/relocated profile, case). Rebase exactly that configured
+   * spelling onto the canonical root; components below it are then link-checked as usual. */
+  private async anchor(file: string): Promise<string> {
+    const root = await this.storage();
+    if (contains(root, file)) return file;
+    const configured = path.resolve(this.options.root);
+    if (!contains(configured, file)) throw new MissionWorkspaceError('unsafe', 'Path is outside its owned root.');
+    return path.join(root, path.relative(configured, file));
+  }
+
   private async json<T>(file: string): Promise<T> {
-    await this.storage();
+    file = await this.anchor(file);
     await noLinks(this.root!, file);
     await this.portableIdentity(file);
     return JSON.parse(await fs.readFile(file, 'utf8')) as T;
+  }
+
+  /** Replace a mutable receipt/record in place (atomic rename), never through a link. */
+  private async writeOwned(file: string, value: unknown): Promise<void> {
+    file = await this.anchor(file);
+    await noLinks(this.root!, file);
+    await writeJson(file, value);
   }
 
   private async portableIdentity(file: string): Promise<void> {
@@ -1110,6 +1166,7 @@ export class MissionWorkspaces {
   }
 
   private async immutable(file: string, value: unknown): Promise<void> {
+    file = await this.anchor(file);
     await noLinks(this.root!, file);
     await fs.mkdir(path.dirname(file), { recursive: true });
     await this.portableIdentity(file);
@@ -1124,9 +1181,7 @@ export class MissionWorkspaces {
   }
 
   private async save(record: WorkspaceRecord): Promise<void> {
-    const file = this.file('workspaces', record.id);
-    await noLinks(this.root!, file);
-    await writeJson(file, record);
+    await this.writeOwned(this.file('workspaces', record.id), record);
   }
 
   private async mission(id: string): Promise<MissionRecord> {
@@ -1157,8 +1212,9 @@ export class MissionWorkspaces {
   }
 
   private async records(): Promise<WorkspaceRecord[]> {
-    const dir = path.join(this.root!, 'workspaces');
-    await noLinks(this.root!, dir);
+    const root = await this.storage();
+    const dir = path.join(root, 'workspaces');
+    await noLinks(root, dir);
     if (!(await maybeStat(dir))) return [];
     const files = await fs.readdir(dir);
     return Promise.all(files.filter((file) => file.endsWith('.json')).map((file) => this.record(file.slice(0, -5))));
@@ -1215,16 +1271,15 @@ export class MissionWorkspaces {
         await safeTree(mission.baseline.sourceRoot, current.stdout.trim());
       }
       const initialized: MissionRecord = { ...mission, initialized: true };
-      const file = this.file('missions', id);
-      await noLinks(this.root!, file);
-      await writeJson(file, initialized);
+      await this.writeOwned(this.file('missions', id), initialized);
       return initialized;
     });
   }
 
   private async candidates(missionId: string): Promise<WorkspaceCandidate[]> {
-    const dir = path.join(this.root!, 'candidates');
-    await noLinks(this.root!, dir);
+    const root = await this.storage();
+    const dir = path.join(root, 'candidates');
+    await noLinks(root, dir);
     if (!(await maybeStat(dir))) return [];
     const candidates: WorkspaceCandidate[] = [];
     for (const file of (await fs.readdir(dir)).filter((file) => file.endsWith('.json'))) {
@@ -1239,8 +1294,9 @@ export class MissionWorkspaces {
     if (sameRevision(requested, mission.baseline.revision) || sameRevision(requested, await this.accepted(id, mission))) return;
     if ((await this.candidates(id)).some((candidate) => sameRevision(candidate.revision, requested))) return;
     if ((await this.records()).some((record) => record.missionId === id && record.integration && (sameRevision(record.integration.expected, requested) || (record.integration.status === 'accepted' && record.integration.result && sameRevision(record.integration.result, requested))))) return;
-    const targets = path.join(this.root!, 'target-integrations');
-    await noLinks(this.root!, targets);
+    const root = await this.storage();
+    const targets = path.join(root, 'target-integrations');
+    await noLinks(root, targets);
     if (await maybeStat(targets)) for (const file of (await fs.readdir(targets)).filter((entry) => entry.endsWith('.json'))) {
       const receipt = await this.json<TargetIntegrationReceipt>(this.file('target-integrations', file.slice(0, -5)));
       if (receipt.missionId === id && receipt.result && ['checking', 'promoting', 'accepted'].includes(receipt.status) && sameRevision(receipt.result, requested)) return;
@@ -1293,6 +1349,7 @@ export class MissionWorkspaces {
 
   private async recover(record: WorkspaceRecord, mission: MissionRecord): Promise<WorkspaceRecord> {
     if (record.state === 'ready') { await this.owned(record, mission); return record; }
+    if (record.state === 'refreshing' || record.state === 'removing') return this.quiet(record.cwd, (lease) => this.settle(record, mission, lease));
     if (record.state !== 'provisioning') throw new MissionWorkspaceError('not_owned', `Workspace retained for reconciliation (${record.state}); no automatic reset is safe.`);
     return this.quiet(record.cwd, async (lease) => {
       await this.repository(mission);
@@ -1327,19 +1384,79 @@ export class MissionWorkspaces {
     });
   }
 
+  /** Finish this store's own interrupted refresh/removal checkout (a Windows file lock, another
+   * tool's index.lock or a timeout must not strand the workspace). The source snapshot is pinned
+   * and the target is a baseline/accepted tree, so completing it discards nothing. Every path in
+   * the effective bytes and the index must still hold a version that transition explains; any
+   * other byte is an unexplained writer and stays retained. Idempotent once settled. */
+  private async settle(record: WorkspaceRecord, mission: MissionRecord, lease: WorkspaceQuiescenceLease): Promise<WorkspaceRecord> {
+    if (record.state !== 'refreshing' && record.state !== 'removing') throw new MissionWorkspaceError('not_owned', `Workspace retained for reconciliation (${record.state}); no automatic reset is safe.`);
+    await this.repository(mission);
+    await this.gitOwnership(record, mission);
+    const from = record.transition?.from ?? record.accounted;
+    // Older intents did not record their target: removal always targets the baseline, and a
+    // refresh can only be completed toward the current accepted tree (still path-verified).
+    const to = record.transition?.to ?? (record.state === 'removing' ? mission.baseline.revision : await this.accepted(record.missionId, mission));
+    if (!from) throw new MissionWorkspaceError('not_owned', `Workspace retained for reconciliation (${record.state}); it has no accounted snapshot to resume from.`);
+    await this.authorizeRevision(record.missionId, mission, to);
+    for (const tree of new Set([from.contentHash, from.indexContentHash, to.contentHash])) await safeTree(record.cwd, tree);
+    const now = await this.snapshot(record, lease);
+    const unexplained = await this.unexplained(record.cwd, now.contentHash, [from.contentHash, to.contentHash])
+      ?? await this.unexplained(record.cwd, now.indexContentHash, [from.contentHash, from.indexContentHash, to.contentHash]);
+    if (unexplained !== undefined) throw new MissionWorkspaceError('drift', `Interrupted ${record.state === 'removing' ? 'removal' : 'refresh'} left content its transition cannot explain (${unexplained}); retained without resetting it.`);
+    if (now.contentHash !== to.contentHash || now.indexContentHash !== to.contentHash) {
+      await lease.assertQuiescent();
+      await this.replaceAccounted(record, now, to.contentHash, lease);
+    }
+    const after = await this.snapshot(record, lease);
+    if (after.contentHash !== to.contentHash || after.indexContentHash !== to.contentHash) throw new MissionWorkspaceError('drift', 'Resumed checkout does not match its recorded target; retained for reconciliation.');
+    const { transition: _transition, ...rest } = record;
+    const settled: WorkspaceRecord = { ...rest, baseRevision: revision(to.baseCommitSha, to.contentHash), state: 'ready', accounted: after, fingerprint: after.fingerprint };
+    await this.pin(settled, `settled-${randomUUID()}`, after, lease);
+    await this.save(settled);
+    return settled;
+  }
+
+  /** A failed checkout that provably changed nothing returns to its ready record at once, so an
+   * ordinary retry works without a restart; anything else keeps its transition for settle(). */
+  private async restoreUnchanged(ready: WorkspaceRecord, before: Snapshot, target: string, lease: WorkspaceQuiescenceLease): Promise<void> {
+    try {
+      await lease.assertQuiescent();
+      // Fingerprints cover tracked and untracked bytes; a new target-only path could be ignored.
+      await this.guardTreePaths(ready.cwd, target, before.contentHash);
+      if (await this.fingerprint(ready.cwd) !== before.fingerprint) return;
+      await lease.assertQuiescent();
+      await this.save(ready);
+    } catch { /* Retained in its transition state for settle(). */ }
+  }
+
+  /** First path of `tree` whose exact mode/blob matches none of `allowed`, if any. */
+  private async unexplained(cwd: string, tree: string, allowed: string[]): Promise<string | undefined> {
+    let remaining: Set<string> | undefined;
+    for (const candidate of new Set(allowed)) {
+      const differs = new Set((await this.changes(cwd, candidate, tree)).map((change) => change.path));
+      remaining = remaining ? new Set([...remaining].filter((file) => differs.has(file))) : differs;
+      if (!remaining.size) return undefined;
+    }
+    return remaining ? [...remaining].sort()[0] : undefined;
+  }
+
   private async createWorkspace(id: string, mission: MissionRecord, role: MissionWorkspaceRole, base: CodeRevision, attemptId?: string, workspaceId = `w_${randomUUID()}`, operationId?: string): Promise<WorkspaceRecord> {
     identifier(workspaceId);
     await this.repository(mission);
     await safeTree(mission.baseline.sourceRoot, base.contentHash);
-    const cwd = path.join(this.root!, 'worktrees', workspaceId);
-    await noLinks(this.root!, cwd);
+    const root = await this.storage();
+    const cwd = path.join(root, 'worktrees', workspaceId);
+    await noLinks(root, cwd);
     if (await maybeStat(cwd)) throw new MissionWorkspaceError('not_owned', 'Preallocated workspace path already exists; it was not adopted.');
-    const branches = (await git(mission.baseline.sourceRoot, ['for-each-ref', '--format=%(refname:short)', 'refs/heads'])).stdout.trim().split('\n');
+    const branches = (await git(mission.baseline.sourceRoot, ['for-each-ref', '--format=%(refname)', 'refs/heads'])).stdout.split(/\r?\n/).filter(Boolean).map((ref) => ref.slice('refs/heads/'.length).toLowerCase());
     const leaf = `${slugify(id)}-${role}-${randomUUID()}`;
     // A pre-existing branch named "mission" owns the entire namespace. Use a flat name rather
-    // than creating mission/foo and failing (or ever replacing someone else's branch).
+    // than creating mission/foo and failing (or ever replacing someone else's branch). Loose
+    // refs are files, so on case-insensitive filesystems "Mission" claims the namespace too.
     const branch = `${branches.includes('mission') ? 'mission-' : 'mission/'}${leaf}`;
-    if (branches.some((name) => name === branch || name.startsWith(`${branch}/`) || branch.startsWith(`${name}/`))) throw new MissionWorkspaceError('git', 'Mission branch namespace collision; no existing ref was changed.');
+    const lower = branch.toLowerCase();
+    if (branches.some((name) => name === lower || name.startsWith(`${lower}/`) || lower.startsWith(`${name}/`))) throw new MissionWorkspaceError('git', 'Mission branch namespace collision; no existing ref was changed.');
     const record: WorkspaceRecord = { version: 1, id: workspaceId, missionId: id, role, ...(attemptId ? { attemptId } : {}), ...(operationId ? { operationId } : {}), cwd, branch, baseRevision: base, fingerprint: '', gitDir: '', state: 'provisioning' };
     await this.immutable(this.file('workspaces', workspaceId), record);
     return this.recover(record, mission);
@@ -1378,8 +1495,9 @@ export class MissionWorkspaces {
     await lease.assertQuiescent();
     const cwd = record.cwd;
     const before = await this.fingerprint(cwd);
-    const scratchRoot = path.join(this.root!, 'scratch');
-    await noLinks(this.root!, scratchRoot);
+    const root = await this.storage();
+    const scratchRoot = path.join(root, 'scratch');
+    await noLinks(root, scratchRoot);
     await fs.mkdir(scratchRoot, { recursive: true });
     const scratch = await fs.mkdtemp(path.join(scratchRoot, 'index-'));
     const index = path.join(scratch, 'index');

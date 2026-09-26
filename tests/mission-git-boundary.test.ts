@@ -8,7 +8,7 @@ import * as runtime from '../src/main/runtime';
 import { MissionWorkspaces, type MissionWorkspace, type TargetObservation } from '../src/main/mission/workspaces';
 import { MissionDeliveryService, localMissionDeliveryPolicy, type MissionDeliveryRequest } from '../src/main/mission/delivery';
 import { resolveMissionDeliveryPolicy } from '../src/main/mission/policy';
-import { runMissionGit } from '../src/main/mission/git-boundary';
+import { missionGitArgs, runMissionGit } from '../src/main/mission/git-boundary';
 import { missionFixture } from './support/mission-fixture';
 import { fixtureGitHubRemote, fixtureGitHubRepo, fixtureGitHubTransport, fixturePr } from './support/mission-github-fixture';
 
@@ -51,7 +51,7 @@ function protectedProcesses(calls: ReturnType<typeof trace>['calls']) {
     expect(options?.env?.GIT_INDEX_FILE).not.toBe(path.join(source, '.git', 'index'));
     expect(options?.env?.GIT_SSH_COMMAND).toContain('BatchMode=yes');
     expect(options?.env?.GIT_ASKPASS).not.toBe('fixture-askpass');
-    expect(args).toEqual(expect.arrayContaining(['core.hooksPath=', 'core.fsmonitor=false', 'submodule.recurse=false']));
+    expect(args).toEqual(expect.arrayContaining(['core.hooksPath=', 'core.fsmonitor=false', 'submodule.recurse=false', ...(process.platform === 'win32' ? ['core.longpaths=true'] : [])]));
   }
 }
 async function preserved() {
@@ -116,6 +116,36 @@ describe('Mission production Git routing and noninteractive processes', () => {
     expect(calls.filter(({ args }) => network(args)).map(({ args }) => commandArgs(args)[2])).toEqual([remote]);
     expect(await preserved()).toEqual(before);
   });
+
+  it('enables long paths for every Windows Mission Git process and leaves other platforms unchanged', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+      const windows = missionGitArgs(['status']);
+      expect(windows[windows.indexOf('core.longpaths=true') - 1]).toBe('-c');
+      expect(windows.at(-1)).toBe('status');
+      Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+      expect(missionGitArgs(['status'])).not.toContain('core.longpaths=true');
+    } finally { Object.defineProperty(process, 'platform', platform); }
+  });
+
+  it.runIf(process.platform === 'win32')('materializes and captures repository paths beyond MAX_PATH inside deep owned storage', async () => {
+    // userData\mission-workspaces\worktrees\<66-character id> alone uses ~140 of MAX_PATH's 260.
+    const folders = ['nested-fixture', 'd'.repeat(50), 'e'.repeat(50)];
+    await fs.mkdir(path.join(source, ...folders), { recursive: true });
+    await fs.writeFile(path.join(source, ...folders, 'file.txt'), 'deep\n');
+    git(source, ['add', '.']); git(source, ['commit', '-m', 'Deep path fixture']);
+    const workspaces = new MissionWorkspaces({ root: path.join(root, 's'.repeat(40), 't'.repeat(40)), quiescence: { acquire: async () => ({ assertQuiescent: async () => undefined, release: () => undefined }) } });
+    const probe = await workspaces.probeBaseline(source); if (!probe.ok) throw new Error(probe.message);
+    const worker = await workspaces.provision({ missionId: 'm01', baseline: probe.baseline, role: 'worker', attemptId: 'a1' });
+    const deep = path.join(worker.cwd, ...folders, 'file.txt');
+    expect(deep.length).toBeGreaterThan(260);
+    expect(await fs.readFile(deep, 'utf8')).toBe('deep\n');
+    await fs.writeFile(deep, 'changed beyond MAX_PATH\n');
+    const candidate = await workspaces.captureCandidate(worker.id, 'a1', 'c_deep');
+    expect(candidate.changedPaths).toEqual([[...folders, 'file.txt'].join('/')]);
+    expect(git(source, ['show', `${candidate.revision.contentHash}:${[...folders, 'file.txt'].join('/')}`])).toBe('changed beyond MAX_PATH');
+  }, 60_000);
 
   it('protects real delivery commit/ref processes without replacing configured or inherited Git identity', async () => {
     const fixture = await owned(); const before = await preserved(); const { calls } = trace(); poisonEnvironment();

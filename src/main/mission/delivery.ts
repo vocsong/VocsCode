@@ -1,5 +1,5 @@
 /** One delivery owner, explicit targets and replayable receipts. Never infer publishing authority. */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { MissionCodeRevision, MissionDelivery, MissionDeliveryPolicy, MissionRecord } from '../../shared/mission';
@@ -41,6 +41,8 @@ interface Receipt {
   parentCommitSha?: string;
   targetObservationId?: string;
   commitSha?: string;
+  /** Set when an earlier operation of this Mission created the content-identical commit reused here. */
+  commitOperationId?: string;
   pullRequestUrl?: string;
   mergedCommitSha?: string;
   stage: 'intent' | 'committed' | 'pushing' | 'pushed' | 'creating_pr' | 'pr_created' | 'merging' | 'delivered' | 'held' | 'uncertain';
@@ -55,7 +57,10 @@ async function serialized<T>(key: string, action: () => Promise<T>): Promise<T> 
 }
 const sha = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const gitOid = (value: string): boolean => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value);
-function safeId(value: string): void { if (!/^[a-z0-9][a-z0-9_-]{0,127}$/.test(value)) throw new Error('Invalid delivery operation identity'); }
+const operationPattern = /^[a-z0-9][a-z0-9_-]{0,127}$/;
+const samePath = (a: string, b: string): boolean => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
+function safeId(value: string): void { if (!operationPattern.test(value)) throw new Error('Invalid delivery operation identity'); }
 function safeRef(value: string): void { if (!/^[A-Za-z0-9][A-Za-z0-9_./-]*$/.test(value) || value.includes('..') || value.includes('//') || value.endsWith('/') || value.endsWith('.lock')) throw new Error('Invalid delivery branch/remote'); }
 
 /** Execution and recovery must compute exactly the same immutable intent, including policy. */
@@ -75,6 +80,7 @@ function assertReceiptIdentity(receipt: Receipt, expected: Receipt): void {
   }
   if ((receipt.parentCommitSha ?? receipt.baseCommitSha) !== expected.parentCommitSha) throw new Error('Delivery receipt identity/payload conflict');
   if (receipt.commitSha && !gitOid(receipt.commitSha)) throw new Error('Invalid delivery commit receipt');
+  if (receipt.commitOperationId !== undefined && (!operationPattern.test(receipt.commitOperationId) || !receipt.commitSha)) throw new Error('Invalid delivery commit receipt');
   if (!['intent', 'committed', 'pushing', 'pushed', 'creating_pr', 'pr_created', 'merging', 'delivered', 'held', 'uncertain'].includes(receipt.stage)) throw new Error('Invalid delivery receipt stage');
 }
 const holdReason = (policy: MissionDeliveryPolicy): string => `Project review hold: ${policy.holdConditions.join('; ')}`;
@@ -89,6 +95,9 @@ function pullRequestNumber(value: unknown, github: MissionGitHubTarget): number 
 }
 
 export class MissionDeliveryService {
+  /** Canonical receipt root, pinned on first use. */
+  private storageRoot?: string;
+
   constructor(private readonly deps: MissionDeliveryDeps) {}
 
   /** Recovery is observation only. An exact admitted remote effect can complete a partial
@@ -163,9 +172,8 @@ export class MissionDeliveryService {
     if (observed) {
       if (observed.missionId !== mission.id || observed.remote !== policy.remote || observed.targetBranch !== policy.targetBranch || observed.commitSha !== policy.targetHead || !gitOid(observed.commitSha)) throw new Error('Integrated target observation differs from the approved delivery target; refresh integration and policy together.');
       if (missionRemoteUrl(observed.remoteUrl) !== observed.remoteUrl) throw new Error('Integrated target endpoint is not canonical; observe and approve it again.');
-    } else if (policy.endpoint !== 'local_commit' && (await this.tryCommand('git', ['merge-base', '--is-ancestor', policy.targetHead!, revision.baseCommitSha], cwd)).code !== 0) {
-      throw new Error('The approved target is not included in the source baseline. Observe, integrate and reverify its exact head before delivery.');
     }
+    if (policy.endpoint !== 'local_commit') await this.assertPublishableBaseline(revision.baseCommitSha, policy, observed !== undefined, cwd);
     const remoteUrl = policy.endpoint === 'local_commit' ? undefined : observed?.remoteUrl ?? await this.remoteEndpoint(policy.remote!, cwd);
     // Establish the GitHub authority before recording intent, committing, or publishing content.
     const github = remoteUrl ? missionGitHubTarget(remoteUrl) : undefined;
@@ -200,13 +208,15 @@ export class MissionDeliveryService {
       const existing = await this.tryCommand('git', ['rev-parse', '--verify', `refs/heads/${branch}`], cwd);
       if (existing.code === 0) {
         const commit = existing.stdout.trim();
-        const tree = (await this.command('git', ['rev-parse', `${commit}^{tree}`], cwd)).trim();
-        const body = await this.command('git', ['log', '-1', '--format=%B', commit], cwd);
-        const parents = (await this.command('git', ['show', '-s', '--format=%P', commit], cwd)).trim();
-        if (tree !== revision.contentHash || parents !== parentCommitSha || !body.includes(`Mission-Operation: ${operationId}`)) throw new Error('Delivery branch already exists with unrelated content or ancestry');
-        await save({ commitSha: commit, stage: 'committed' });
+        // An earlier operation of this Mission may have committed exactly this content before a
+        // definite failure. Reuse that commit (it is never rewritten or force-pushed) instead of
+        // stranding every retry; another tree, parent or a non-delivery commit stays refused.
+        const owner = await this.deliveryCommitOwner(commit, revision.contentHash, parentCommitSha!, cwd);
+        if (!owner) throw new Error('Delivery branch already exists with unrelated content or ancestry');
+        await save({ commitSha: commit, ...(owner === operationId ? {} : { commitOperationId: owner }), stage: 'committed' });
       } else {
         if (receipt.pendingAction === 'commit') throw new Error('Commit creation acknowledgment was lost; reconcile the retained intent instead of creating another commit.');
+        await this.assertBranchNamespace(branch, cwd);
         // No author/committer override: git config and the session owner's ordinary environment win.
         const message = `${commitMessage}\n\nMission-Operation: ${operationId}`;
         await save({ pendingAction: 'commit' });
@@ -248,9 +258,24 @@ export class MissionDeliveryService {
       if (receipt.pendingAction === 'push') throw new Error('Push outcome is uncertain and the recorded branch is absent; no external mutation was replayed.');
       await save({ stage: 'pushing', pendingAction: 'push' });
       await this.checkRemoteEndpoint(policy.remote!, remote, cwd);
+      let failure: unknown;
       try { await this.command('git', ['push', remote, `${receipt.commitSha}:refs/heads/${branch}`], cwd); }
-      catch (error) { await save({ stage: 'uncertain' }); throw error; }
-      if (await this.remoteHead(remote, branch, cwd) !== receipt.commitSha) throw new Error('Pushed branch acknowledgment could not be verified');
+      catch (error) { failure = error; }
+      // Reconcile from the exact remote ref, never by replaying. Our commit there is success even
+      // if the acknowledgment was lost. After a failed push (auth, hook rejection, timeout) an
+      // absent branch is a definite, retryable failure: a later non-force push of this exact
+      // commit to this new branch cannot publish anything else or overwrite anyone's work.
+      let pushed: string | undefined;
+      try { pushed = await this.remoteHead(remote, branch, cwd); }
+      catch (error) { await save({ stage: 'uncertain' }); throw failure ?? error; }
+      if (pushed !== receipt.commitSha) {
+        if (failure !== undefined && pushed === undefined) {
+          await save({ stage: 'committed', pendingAction: undefined });
+          throw new Error(`The delivery push did not publish ${branch} (the remote has no such branch), so nothing was published and the attempt can be retried once the cause is fixed. ${errorText(failure)}`);
+        }
+        await save({ stage: 'uncertain' });
+        throw new Error(pushed === undefined ? 'Pushed branch acknowledgment could not be verified' : 'Remote delivery branch contains different content; no force push was attempted');
+      }
     }
     if (receipt.pendingAction !== 'create_pr' && receipt.pendingAction !== 'merge_pr') await save({ stage: 'pushed', pendingAction: undefined });
     let pr = existingPr ?? await this.findPr(github!, branch, target, receipt.commitSha!, cwd);
@@ -261,17 +286,21 @@ export class MissionDeliveryService {
       await this.deps.authorize(request, 'create_pr');
       await this.checkRemoteEndpoint(policy.remote!, remote, cwd);
       if (await this.remoteHead(remote, target, cwd) !== policy.targetHead) return asDelivery('blocked', 'Remote target advanced before PR creation; refresh integration and verification.');
-      await save({ stage: 'creating_pr', pendingAction: 'create_pr' });
-      let createdUrl: string | undefined;
-      try {
-        createdUrl = (await this.command('gh', ['pr', 'create', '--repo', github!.repository, '--head', branch, '--base', target, '--title', commitMessage.split('\n')[0], '--body', request.report ?? `Mission ${mission.id}\n\nVerified content: ${revision.contentHash}\n\nMission-Operation: ${operationId}`], cwd)).trim();
-      } catch (error) {
-        // Lost acknowledgment is not proof of failure. Look up the exact head/base pair first.
-        pr = await this.findPr(github!, branch, target, receipt.commitSha!, cwd);
-        if (!pr) { await save({ stage: 'uncertain' }); throw error; }
-      }
-      const createdNumber = createdUrl === undefined ? undefined : pullRequestNumber(createdUrl, github!);
-      pr ??= await this.findPr(github!, branch, target, receipt.commitSha!, cwd);
+      // A report can exceed Windows' 32,767-character command line, so the body never travels in
+      // argv. The file exists before the intent is recorded: a local write failure is not a PR.
+      const created = await this.withBodyFile(request.report ?? `Mission ${mission.id}\n\nVerified content: ${revision.contentHash}\n\nMission-Operation: ${operationId}`, async (bodyFile) => {
+        await save({ stage: 'creating_pr', pendingAction: 'create_pr' });
+        try {
+          return { url: (await this.command('gh', ['pr', 'create', '--repo', github!.repository, '--head', branch, '--base', target, '--title', commitMessage.split('\n')[0], '--body-file', bodyFile], cwd)).trim() };
+        } catch (error) {
+          // Lost acknowledgment is not proof of failure. Look up the exact head/base pair first.
+          const found = await this.findPr(github!, branch, target, receipt.commitSha!, cwd);
+          if (!found) { await save({ stage: 'uncertain' }); throw error; }
+          return { found };
+        }
+      });
+      const createdNumber = created.url === undefined ? undefined : pullRequestNumber(created.url, github!);
+      pr = created.found ?? await this.findPr(github!, branch, target, receipt.commitSha!, cwd);
       if (!pr || createdNumber !== undefined && pr.number !== createdNumber) throw new Error('Invalid exact PR receipt: creation could not be verified');
     }
     if (receipt.pendingAction === 'merge_pr') throw new Error('Merge outcome is uncertain and the exact PR is not merged; no merge was replayed.');
@@ -346,7 +375,59 @@ export class MissionDeliveryService {
     const parents = (await this.command('git', ['show', '-s', '--format=%P', receipt.commitSha!], cwd)).trim();
     if (tree !== receipt.contentHash || parents !== (receipt.parentCommitSha ?? receipt.baseCommitSha)) throw new Error('Delivery commit does not contain verified content and the exact observed parent');
     const body = await this.command('git', ['log', '-1', '--format=%B', receipt.commitSha!], cwd);
-    if (!body.split(/\r?\n/).includes(`Mission-Operation: ${receipt.operationId}`)) throw new Error('Delivery commit does not belong to the retained operation');
+    if (!body.split(/\r?\n/).includes(`Mission-Operation: ${receipt.commitOperationId ?? receipt.operationId}`)) throw new Error('Delivery commit does not belong to the retained operation');
+  }
+
+  /** The operation whose trailer ends an exact delivery commit (verified tree and parent). Any
+   * other commit on a Mission delivery branch is unrelated content and is never adopted. */
+  private async deliveryCommitOwner(commit: string, contentHash: string, parent: string, cwd: string): Promise<string | undefined> {
+    if (!gitOid(commit)) return undefined;
+    const tree = (await this.command('git', ['rev-parse', `${commit}^{tree}`], cwd)).trim();
+    const parents = (await this.command('git', ['show', '-s', '--format=%P', commit], cwd)).trim();
+    if (tree !== contentHash || parents !== parent) return undefined;
+    // Delivery appends the marker as the final line; a marker inside the message proves nothing.
+    const last = (await this.command('git', ['log', '-1', '--format=%B', commit], cwd)).split(/\r?\n/).filter((line) => line.trim()).at(-1) ?? '';
+    const owner = /^Mission-Operation: (.+)$/.exec(last)?.[1];
+    return owner !== undefined && operationPattern.test(owner) ? owner : undefined;
+  }
+
+  /** A remote delivery commit is parented on the approved target head, so its PR contains
+   * target→accepted. Baseline commits the target lacks (e.g. an unpushed feature branch) would be
+   * squashed into the Mission commit and published or merged without their own review. */
+  private async assertPublishableBaseline(baseline: string, policy: MissionDeliveryPolicy, integrated: boolean, cwd: string): Promise<void> {
+    const target = policy.targetHead!;
+    const contained = await this.tryCommand('git', ['merge-base', '--is-ancestor', baseline, target], cwd);
+    if (contained.code === 1) {
+      const counted = await this.tryCommand('git', ['rev-list', '--count', `${target}..${baseline}`], cwd);
+      const commits = counted.code === 0 && /^\d+$/.test(counted.stdout.trim()) ? `${counted.stdout.trim()} local commit(s)` : 'local commits';
+      throw new Error(`The Mission baseline has ${commits} that ${policy.remote}/${policy.targetBranch} does not contain. The ${policy.endpoint === 'merge_pr' ? 'merged ' : ''}PR would publish them inside the Mission commit without their own review, so nothing was committed or pushed. Push or merge those commits into ${policy.targetBranch} outside the Mission, then observe, integrate and reverify its new head; or narrow delivery to a local commit.`);
+    }
+    if (!integrated && (await this.tryCommand('git', ['merge-base', '--is-ancestor', target, baseline], cwd)).code !== 0) throw new Error('The approved target is not included in the source baseline. Observe, integrate and reverify its exact head before delivery.');
+    if (contained.code !== 0) throw new Error('Cannot verify that the approved target head contains the Mission baseline. Observe, integrate and reverify the target before delivery.');
+  }
+
+  /** Loose refs are files: on case-insensitive filesystems a user branch "Mission" (or any branch
+   * that prefixes, extends or case-aliases the delivery branch) makes it impossible to create. */
+  private async assertBranchNamespace(branch: string, cwd: string): Promise<void> {
+    const lower = branch.toLowerCase();
+    const names = (await this.command('git', ['for-each-ref', '--format=%(refname)', 'refs/heads'], cwd)).split(/\r?\n/).filter(Boolean).map((ref) => ref.slice('refs/heads/'.length));
+    const conflict = names.find((name) => name !== branch && (name.toLowerCase() === lower || lower.startsWith(`${name.toLowerCase()}/`) || name.toLowerCase().startsWith(`${lower}/`)));
+    if (conflict !== undefined) throw new Error(`Local branch "${conflict}" occupies the Mission delivery branch namespace "${branch}" (branches that differ only by case, or where one prefixes the other, cannot coexist). Rename it outside the Mission, then retry delivery.`);
+  }
+
+  /** gh reads the PR body from a private file in owned receipt storage, created exclusively (never
+   * through a planted file or link) and removed once gh has returned. */
+  private async withBodyFile<T>(body: string, run: (file: string) => Promise<T>): Promise<T> {
+    // Dot-prefixed, so it can never be a Mission receipt folder.
+    const scratch = path.join(await this.receiptRoot(true), '.scratch');
+    await fs.mkdir(scratch, { recursive: true });
+    if ((await fs.lstat(scratch)).isSymbolicLink()) throw new Error('Unsafe delivery scratch path');
+    const file = path.join(scratch, `pr-body-${randomUUID()}.md`);
+    try {
+      const handle = await fs.open(file, 'wx', 0o600);
+      try { await handle.writeFile(body, 'utf8'); } finally { await handle.close(); }
+      return await run(file);
+    } finally { await fs.rm(file, { force: true }).catch(() => undefined); }
   }
 
   private async verifyReceipt(receipt: Receipt, policy: MissionDeliveryPolicy, cwd: string, readOnly = false): Promise<void> {
@@ -426,10 +507,29 @@ export class MissionDeliveryService {
     return oid;
   }
 
-  private async receiptFile(missionId: string, operationId: string, create = true): Promise<string> {
-    const root = path.resolve(this.deps.root);
+  /** Canonicalize once, like workspace storage: the realpath of the nearest existing ancestor, so
+   * 8.3 short names or a junctioned/relocated profile are not mistaken for a planted link. Later
+   * relocation is refused, and nothing below the pinned root may resolve elsewhere. */
+  private async receiptRoot(create: boolean): Promise<string> {
+    let existing = path.resolve(this.deps.root);
+    const tail: string[] = [];
+    for (;;) {
+      try { await fs.lstat(existing); break; } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || path.dirname(existing) === existing) throw error;
+        tail.unshift(path.basename(existing));
+        existing = path.dirname(existing);
+      }
+    }
+    const root = path.join(await fs.realpath(existing), ...tail);
+    if (this.storageRoot !== undefined && !samePath(root, this.storageRoot)) throw new Error('Delivery storage location changed since it was first used; retained receipts were not relocated.');
     if (create) await fs.mkdir(root, { recursive: true });
-    if ((await fs.lstat(root)).isSymbolicLink() || await fs.realpath(root) !== root) throw new Error('Delivery storage root must not traverse a symlink/junction');
+    if (!samePath(await fs.realpath(root), root)) throw new Error('Delivery storage root must not traverse a symlink/junction');
+    this.storageRoot = root;
+    return root;
+  }
+
+  private async receiptFile(missionId: string, operationId: string, create = true): Promise<string> {
+    const root = await this.receiptRoot(create);
     const folder = path.join(root, missionId);
     if (create) await fs.mkdir(folder, { recursive: true });
     if ((await fs.lstat(folder)).isSymbolicLink()) throw new Error('Unsafe delivery storage path');
