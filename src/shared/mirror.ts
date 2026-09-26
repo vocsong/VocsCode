@@ -18,6 +18,8 @@ export interface MirrorIndexEntry {
 export interface MirrorIndex {
   hostName: string;
   updatedAt: number;
+  /** The session the desktop was last on, so an offline browser can open it. */
+  focus?: string | null;
   sessions: MirrorIndexEntry[];
 }
 

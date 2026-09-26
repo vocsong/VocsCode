@@ -14,7 +14,7 @@ Last reviewed 2026-09-25, after #407 (which completes #394) was merged and deplo
 | Surface | State | How it was verified |
 | --- | --- | --- |
 | `code.vocs.io/` | Landing (Astro, `vocs-code` Worker, custom domain) | `curl` 200 |
-| `code.vocs.io/app` | Web client SPA behind the GitHub login gate | Signed-out `/app` redirects to `/login`; production relay account routing remains the released single-account version until the multi-account relay release |
+| `code.vocs.io/app` | Web shell SPA (ungated until the login gate is enabled) | `/app/` and `/app/assets/*` 200; CSP and the security headers arrive through the landing; no `token=` in the bundle |
 | `code.vocs.io/v1/*` | Relay from #407, deployed 2026-09-25 by the approved `deploy-relay` run 36033701244 | `/v1/devices` 401, `/v1/pair/start` 403, `POST /v1/ws/ticket` 401, `POST /v1/token/challenge` 401 |
 | Pairing → handshake → invoke on production | **Verified live** | `npm run test:remote-live` against `code.vocs.io` executed and passed: pairing, sealed credential, proof-of-possession tokens, handshake, invoke, mirror key, revocation |
 
@@ -53,6 +53,19 @@ the deployed smoke.
 **Status: gated, multi-account rollout pending.** The GitHub login gate is live, but production still
 runs the released single-account relay until this change ships. Do not add other people's GitHub
 logins to `ALLOWED_LOGINS` until the per-account relay and landing assertion secret are deployed.
+
+### Web-shell overhaul (in review)
+
+`relay/src/page.ts`'s hand-written DOM page is replaced by a React shell in `src/web/`, built by
+plain Vite into the same `relay/public/app/` (`npm run build:web`; the committed bundle and
+`relay:page` are gone). It reuses the desktop store and transcript over a capability-gated
+transport: sequenced session events with a transcript-page floor, bounded remote responses, a
+`desktop:focus` read and push, paged transcripts with Load earlier, offline mirror browsing (via
+`MirrorIndex.focus`), and a phone layout with sheets and a sticky composer. Landed so far: the
+shared channel manifest (PR 1), sequencing and the frame budget (PR 2), desktop focus (PR 3,
+held), the renderer capability core (PR 4, held), the shell (PR 5, held) and the sessions home /
+follow-my-computer / approval banner / control sheets (PR 6). The deploy workflow builds the
+bundle and checks `relay/public/app/index.html` before the dry-run and the deploy.
 
 ## 2. Workstreams
 

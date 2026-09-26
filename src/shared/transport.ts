@@ -7,4 +7,8 @@ export interface Transport {
   invoke<K extends IpcChannel>(channel: K, request: IpcRequest<K>): Promise<IpcResponse<K>>;
   on<K extends PushChannel>(channel: K, listener: (payload: PushPayloads[K]) => void): () => void;
   platform: string;
+  /** Whether this transport can serve a channel. Absent means everything is allowed (desktop IPC).
+   *  A remote transport refuses channels off its allowlist and, in view-only mode, writes — so the
+   *  renderer can hide a control it would be refused instead of provoking an audited refusal. */
+  can?<K extends IpcChannel>(channel: K): boolean;
 }

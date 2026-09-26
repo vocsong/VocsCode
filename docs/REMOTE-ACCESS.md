@@ -120,12 +120,14 @@ New pieces:
    landing Worker owns the hostname and forwards `/app` and `/v1` to the relay Worker
    (service binding), so the app, the API and the WebSocket share one origin with no CORS and no
    second DNS record. It is never pointed at a local machine's server; it reaches desktops only
-   through the relay. A distinct web shell around the reused renderer core — different
-   `window.harness` transport, browser-native chrome (desktop titlebar/menu hidden in web
-   builds), slim account/device header, code.vocs.io branding, fully responsive layout (drawer
-   sidebar, touch targets), account/pairing screens, and a few shims. The sidebar
-   lists sessions across all paired hosts, grouped by host; interactive ops target the
-   host that owns the selected session.
+   through the relay. The shell lives in `src/web/` and is built by `vite.config.web.ts` into
+   `relay/public/app/` (base `/app/`, minified, `es2022`/`safari16`): a different `window.harness`
+   transport (`src/web/transport/`), browser-native chrome, hash routes, pairing/connect screens,
+   bottom sheets and a phone-first stylesheet over the renderer's `styles.css`. It reuses the
+   shared store (`configureStore({ pagedTranscripts: true })`), `Transcript`, `ApprovalCard`,
+   `ModelPicker`, `ui.tsx` and the format/order helpers; local capability gates (`Transport.can`,
+   `TranscriptCapabilities`) hide what the host would refuse. The P1 localhost web server
+   (`VOCS_CODE_WEB=1`) remains the dev dogfood, serving the desktop renderer bundle instead.
 
 Key idea: **the web client is the existing renderer with a different transport.** The
 less the renderer knows about how `window.harness` is backed, the more is reused.
@@ -149,7 +151,8 @@ interface Transport {
 - `LocalTransport` = today's `ipcRenderer.invoke/on` (unchanged desktop behavior).
 - `RemoteTransport` = WebSocket, JSON frames `{ id, channel, payload }` with response
   correlation; push channels arrive as server-initiated frames — only the remote push surface
-  (`push:sessionEvent`, `push:sessionsChanged`, `push:settingsChanged`, `push:remotePolicy`); PTY
+  (`push:sessionEvent`, `push:sessionsChanged`, `push:settingsChanged`, `push:remotePolicy`,
+  `push:desktopFocus`); PTY
   output, the assistant panel and the desktop's own remote state (which carries the live pairing
   code) never leave the machine.
 - **Addressing:** relay frames carry a target host id — an account may pair several
@@ -167,7 +170,8 @@ interface Transport {
 
 **Filtered surface.** Remote gets: `sessions:*`, `approvals:respond`, read-mostly
 `git:*`, `fs:list/search/read`, `analytics:*`, `skills:list/read`,
-`harness:availability/models`, and the read-only terminal view `terminal:list/screen` (P3.5,
+`harness:availability/models`, `desktop:focus` (which session the desktop window is on, read-only),
+and the read-only terminal view `terminal:list/screen` (P3.5,
 step one: plain text, never attached, resized or typed into). Excluded or remapped: `window:*`,
 `app:pickFolder`, `app:openPath`, `app:openInEditor`, `secrets:*`, `dialog` flows, terminal
 input. The web client never touches or needs API keys.
@@ -180,6 +184,16 @@ sealing), and a result that still does not fit comes back as `response too large
 being dropped into a client timeout. Session metadata is projected for the remote surface —
 `knowledgeDigest`, `harnessCommands` and the pending fork/knowledge priming flags never leave the
 desktop.
+
+**Client gate.** A remote transport exposes `can(channel)`; the shared renderer core consults it
+(`canInvoke`, `useCanInvoke`, `TranscriptCapabilities`) and stops asking for what it cannot have:
+a view-only client loses the write controls, a browser never edits and reruns a message, shows
+the row context menu, or stars a favorite, and an approval it cannot answer says "Decide on your
+computer" instead of offering buttons. This is UX only — the host refuses the channel and audits
+the refusal either way, and the store skips refused boot calls (`terminal:list`, `update:state`,
+`agent:state`) rather than logging a refusal on every load. A paged store loads tail-first, holds
+the events that race a page and replays them past its floor, and resyncs (list, settings, focus,
+active window) after a reconnect or a computer switch.
 
 ## 6. Auth, pairing, trust — detailed plan
 

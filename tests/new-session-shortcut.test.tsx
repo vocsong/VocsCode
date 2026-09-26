@@ -9,7 +9,7 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import type { AppSettings, SessionMeta } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(), isMac: false, isWeb: false, platform: 'win32', modKey: 'Ctrl' }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(), isMac: false, isWeb: false, platform: 'win32', modKey: 'Ctrl', canInvoke: () => true }));
 vi.mock('../src/renderer/src/terminal/host', () => ({ createTerminal: vi.fn().mockResolvedValue(null) }));
 
 import { App } from '../src/renderer/src/App';

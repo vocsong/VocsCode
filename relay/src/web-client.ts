@@ -226,12 +226,28 @@ export class RelayClient {
     await this.persist();
   }
 
+  /** True while the e2e session is usable (the socket is open and handshaken). */
+  isConnected(): boolean {
+    return !!this.session;
+  }
+
   private disconnect(): void {
     this.connectAttempt++;
+    // Whatever is in flight cannot be answered on a socket that is going away: fail those calls
+    // now instead of letting each wait out its 30-second timeout.
+    this.rejectPending('disconnected');
     this.socket?.close();
     this.socket = null;
     this.session = null;
     this.earlyFrames = [];
+  }
+
+  /** Fails every pending invoke with one reason (a drop, a disconnect, a superseded connect). */
+  private rejectPending(reason: string): void {
+    if (!this.pending.size) return;
+    const error = new Error(reason);
+    for (const entry of this.pending.values()) entry.reject(error);
+    this.pending.clear();
   }
 
   /** Forgets every pairing locally, without telling the relay (tests and a full reset). */
@@ -398,6 +414,7 @@ export class RelayClient {
       if (this.socket !== socket) return;
       this.socket = null;
       this.session = null;
+      this.rejectPending('connection lost');
       onClose?.();
     };
     const onMessage = (raw: string) => {

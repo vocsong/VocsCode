@@ -21,10 +21,10 @@ For a manual deploy or recovery (run from a release tag's checkout, not an unmer
 
 ```bash
 npm ci --include=dev
-npm run typecheck:relay && npm run typecheck:relay-test && npm run typecheck:page
-npx vitest run tests/relay-core.test.ts tests/relay-routes.test.ts tests/relay-edge.test.ts tests/remote-e2e.test.ts tests/remote-mirror.test.ts tests/remote-host-lifecycle.test.ts tests/web-client.test.ts tests/browser-socket.test.ts tests/relay-page-layout.test.ts tests/remote-workerd.test.ts
+npm run typecheck:relay && npm run typecheck:relay-test
+npx vitest run tests/relay-core.test.ts tests/relay-routes.test.ts tests/relay-edge.test.ts tests/remote-e2e.test.ts tests/remote-mirror.test.ts tests/remote-host-lifecycle.test.ts tests/web-client.test.ts tests/browser-socket.test.ts tests/web-transport.test.ts tests/web-router.test.ts tests/web-shell.test.tsx tests/remote-workerd.test.ts
 npm run test:relay-do  # real workerd/Hub sockets and storage
-npm run relay:page && git diff --exit-code -- relay/public/app/app.js
+npm run build:web && test -f public/app/index.html  # the shell is built, not committed
 cd relay
 npx wrangler deploy --dry-run  # validate before touching production
 npx wrangler deploy
