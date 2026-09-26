@@ -10,6 +10,9 @@ export interface MissionCommandRequest {
   images?: ImageAttachment[];
 }
 
+/** `/mission status` in a session that has no Mission: said out loud, never a silent no-op. */
+export const MISSION_NOT_LINKED_MESSAGE = 'No Mission is linked to this session.';
+
 export type MissionCommand =
   | { kind: 'show' }
   | { kind: 'launch'; mode: MissionMode; objective: string; explicit: boolean }

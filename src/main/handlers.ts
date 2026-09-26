@@ -7,11 +7,14 @@ import { promises as fs } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
-import type { CreateMissionRequest, MissionControlRequest, MissionRecord, MissionUserControl } from '../shared/mission';
-import { parseMissionCommand } from '../shared/mission-command';
+import type { CreateMissionRequest, MissionCodeRevision, MissionControlRequest, MissionRecord, MissionUserControl } from '../shared/mission';
+import { MISSION_NOT_LINKED_MESSAGE, parseMissionCommand } from '../shared/mission-command';
+import { missionRevisionConflictMessage } from '../shared/mission-errors';
 import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { PUSH_CHANNELS, TEXT_EXPORT_MAX_BYTES } from '../shared/ipc';
 import { missionPlanMarkdown } from './mission/context';
+import { missionDeliveryBranch } from './mission/delivery';
+import type { TargetObservation } from './mission/workspaces';
 import { Vesta } from './agents';
 import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAgent, setProjectAgentTracked } from './agent-files';
 import { createClaudeAgent, isPinnedModel, listClaudeAgents, setClaudeAgentModel } from './claude-agents';
@@ -162,7 +165,24 @@ const MISSION_GIT_MUTATIONS = new Set<string>([
 ]);
 const MISSION_REPO_MUTATIONS = new Set<string>(['git:setRemote', 'git:createGitHubRepo', 'git:setIdentity', 'git:pruneWorktrees', 'git:fetchPrune']);
 const MISSION_PROJECT_WRITES = new Set<string>(['mcp:project:save', 'mcp:project:state', 'mcp:export', 'knowledge:publish']);
-const MISSION_TERMINAL_CONTROLS = new Set<string>(['terminal:attach', 'terminal:input', 'terminal:resize', 'terminal:restart', 'terminal:kill', 'terminal:close', 'terminal:clear']);
+const MISSION_TERMINAL_CONTROLS = new Set<string>(['terminal:attach', 'terminal:restart', 'terminal:kill', 'terminal:close', 'terminal:clear']);
+/** Every keystroke and resize. Checked synchronously so input reaches the PTY in order and never
+ * waits on, or fails with, a filesystem round-trip (terminal:ack/detach carry no authority). */
+const MISSION_TERMINAL_IO = new Set<string>(['terminal:input', 'terminal:resize']);
+
+/** Every delivery branch execution can use for this Mission, named by missionDeliveryBranch
+ * itself: the plain branch and, after an approved-target integration, one per retained target
+ * observation for the current accepted revision and for each recorded delivery request's. */
+function missionDeliveryBranches(mission: MissionRecord): string[] {
+  const observations = mission.operations.flatMap((op) => {
+    const observed = op.kind === 'integrate' && op.payload.target === 'approved' ? op.payload.targetObservation as TargetObservation | undefined : undefined;
+    return observed && typeof observed.id === 'string' ? [observed] : [];
+  });
+  const revisions = [mission.acceptedRevision, ...mission.operations.flatMap((op) => op.kind === 'deliver' && op.payload.expectedAccepted ? [op.payload.expectedAccepted as MissionCodeRevision] : [])];
+  const branches = new Set([missionDeliveryBranch(mission)]);
+  for (const acceptedRevision of revisions) for (const observed of observations) branches.add(missionDeliveryBranch({ ...mission, acceptedRevision }, observed));
+  return [...branches];
+}
 
 export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const { settings, secrets, sessions, terminals, runtime } = deps;
@@ -194,7 +214,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     }
     const t0 = Date.now();
     try {
-      await guardMissionBoundary(channel, req, actor);
+      // Undefined for the synchronous paths (most channels, every keystroke): nothing to await.
+      const guard = guardMissionBoundary(channel, req, actor);
+      if (guard) await guard;
       return await fn(req as never);
     } catch (e) {
       // The renderer shows the message as a toast, but a toast is gone in seconds; the log line
@@ -234,7 +256,14 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const realResource = async (p: string): Promise<string> => {
     const absolute = path.resolve(missionTextSchema.parse(p));
     try { return pathKey(await fs.realpath(absolute)); } catch (e) {
-      if (!['ENOENT', 'ENOTDIR'].includes((e as NodeJS.ErrnoException).code ?? '')) throw e;
+      const code = (e as NodeJS.ErrnoException).code ?? '';
+      if (!['ENOENT', 'ENOTDIR'].includes(code)) {
+        // EPERM/EACCES/EBUSY and friends (network shares, locked or odd paths) must not fail an
+        // ordinary request. Compare the lexical path: Mission roots are recorded canonical, so a
+        // path inside one still matches; only a link the host cannot resolve right now escapes.
+        deps.log('debug', `mission guard: realpath failed (${code || 'unknown'}); comparing the lexical path`);
+        return pathKey(absolute);
+      }
       const parent = path.dirname(absolute);
       if (parent === absolute) return pathKey(absolute);
       return pathKey(path.join(await realResource(parent), path.basename(absolute)));
@@ -267,12 +296,14 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     await assertOrdinaryWorkspace(session.cwd);
     return session;
   }
+  const assertLeadShell = (session: SessionMeta, mission: MissionRecord): void => {
+    requireLead(session, mission);
+    if (!mission.executionAuthorization || session.mission?.sourceAccess === 'read_only' || mission.status !== 'running' || mission.phase !== 'executing') throw new Error('Mission planning, paused and non-executing workspaces do not allow interactive shells.');
+  };
   async function assertInteractiveWorkspace(session: SessionMeta | undefined, cwd: string): Promise<void> {
     const mission = session && missionFor(session);
-    if (mission) {
-      requireLead(session!, mission);
-      if (!mission.executionAuthorization || session!.mission?.sourceAccess === 'read_only' || mission.status !== 'running' || mission.phase !== 'executing') throw new Error('Mission planning, paused and non-executing workspaces do not allow interactive shells.');
-    } else await assertOrdinaryWorkspace(cwd);
+    if (mission) assertLeadShell(session!, mission);
+    else await assertOrdinaryWorkspace(cwd);
     const owners = await workspaceOwners(cwd);
     if (mission && !owners.length) denyMissionControl();
     for (const owner of owners) {
@@ -297,7 +328,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       }
       if (!sameRepo) continue;
       if (repositoryWide) denyMissionControl();
-      const ownedBranches = new Set([...mission.workspaces.filter((w) => w.cleanedAt === undefined).map((w) => w.branch), `mission/${mission.id}-delivery`]);
+      const ownedBranches = new Set([...mission.workspaces.filter((w) => w.cleanedAt === undefined).map((w) => w.branch), ...missionDeliveryBranches(mission)]);
       for (const branch of ownedBranches) protectedBranches.add(branch);
       for (const branch of branches) {
         if (typeof branch === 'string' && ownedBranches.has(branch.trim().replace(/^refs\/heads\//, '').split(':').at(-1)!)) denyMissionControl();
@@ -305,54 +336,132 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     }
     return protectedBranches;
   }
-  async function guardMissionBoundary(channel: string, input: unknown, actor: 'user' | 'agent'): Promise<void> {
-    if (actor === 'agent' && (channel.startsWith('missions:') || channel === 'app:fileSaveAs')) throw new Error('User export and Mission actions cannot originate from an agent tool.');
-    const req = input && typeof input === 'object' ? input as Record<string, unknown> : {};
-    if (MISSION_SESSION_CONTROLS.has(channel)) {
+  /** Nothing is Mission-owned until a Mission record or a host-created owned session exists: a
+   * user who never starts a Mission pays for no resource check (no realpath, no Git probe). */
+  const missionOwnershipPossible = (): boolean => sessions.list().some((s) => !!s.mission) || !!deps.missions?.list().length;
+  /** Terminal id → verdict of its last full resource check (create, attach and restart establish
+   * one; any refused terminal control revokes it), bound to the cwd it covered. Keystrokes and
+   * resizes reuse it instead of resolving paths per PTY event. */
+  const terminalVerdicts = new Map<string, { cwd: string; allowed: boolean }>();
+  const recordTerminalVerdict = (terminal: { id: string; cwd: string }, allowed: boolean): void => {
+    const live = new Set(terminals.list().map((t) => t.id));
+    for (const id of terminalVerdicts.keys()) if (!live.has(id)) terminalVerdicts.delete(id);
+    terminalVerdicts.set(terminal.id, { cwd: pathKey(terminal.cwd), allowed });
+  };
+  /** Synchronous, lexical-only ownership: Mission roots are recorded canonical. */
+  const lexicallyMissionOwned = (target: string): boolean => {
+    const key = pathKey(target);
+    const roots = [...(deps.missions?.list() ?? []).flatMap((m) => m.workspaces.filter((w) => w.cleanedAt === undefined).map((w) => w.path)),
+      ...sessions.list().filter((s) => s.mission && s.worktreeBranch).map((s) => s.cwd)];
+    return roots.some((root) => containsPath(pathKey(root), key));
+  };
+  /** Synchronous by design (MISSION_TERMINAL_IO): the owning session's metadata plus the verdict of
+   * this terminal's last full check. An owned session's shell still needs its live executing lead. */
+  function guardTerminalIo(req: Record<string, unknown>): void {
+    const terminal = terminals.list().find((t) => t.id === req.terminalId);
+    if (!terminal) return; // the handler reports an unknown terminal itself
+    const session = sessions.get(terminal.sessionId);
+    if (session?.mission) {
+      const mission = deps.missions?.get(session.mission.missionId);
+      if (!mission) throw new Error('Mission ownership cannot be resolved. Resume/reconcile the Mission before changing this session.');
+      assertLeadShell(session, mission);
+    }
+    const verdict = terminalVerdicts.get(terminal.id);
+    if (verdict?.cwd === pathKey(terminal.cwd)) {
+      if (!verdict.allowed) denyMissionControl();
+      return;
+    }
+    // Not fully checked yet: a restored tab only buffers input until its first attach, which runs
+    // the full check before any shell starts. Refuse anything lexically inside a Mission root.
+    if (lexicallyMissionOwned(terminal.cwd)) denyMissionControl();
+  }
+  /** The resource check a generic writer/lifecycle channel needs, or undefined when it needs none. */
+  function missionResourceCheck(channel: string, req: Record<string, unknown>, actor: 'user' | 'agent'): (() => Promise<void>) | undefined {
+    if (MISSION_SESSION_CONTROLS.has(channel)) return async () => {
       const session = await assertOrdinarySession(req.id);
       if (channel === 'sessions:moveTo') await assertOrdinaryWorkspace(missionTextSchema.parse(req.cwd));
       if (channel.startsWith('agents:') || channel.startsWith('claude-agents:')) await assertOrdinaryWorkspace(session.config.projectRoot);
-    } else if (channel === 'sessions:send' || channel === 'sessions:archive') {
+    };
+    if (channel === 'sessions:send' || channel === 'sessions:archive') return async () => {
       const session = sessionFor(req.id);
       const mission = missionFor(session);
       if (mission) {
         requireLead(session, mission);
         if (actor !== 'user') throw new Error('Mission user actions cannot originate from an agent tool.');
       } else await assertOrdinaryWorkspace(session.cwd);
-    } else if (channel === 'sessions:create') {
+    };
+    if (channel === 'sessions:create') {
       const config = req.config && typeof req.config === 'object' ? req.config as Record<string, unknown> : {};
-      if (['mission', 'missionId', 'missionRole', 'ownership', 'activeAttemptId'].some((key) => key in req || key in config)) throw new Error('Mission ownership is host-only; use missions:create.');
-      if (typeof config.projectRoot === 'string') {
-        await assertOrdinaryWorkspace(config.projectRoot);
-        if (req.checkoutBranch) await assertOrdinaryBranch({ cwd: config.projectRoot, config } as unknown as SessionMeta, [req.checkoutBranch]);
-      }
-    } else if (channel === 'folders:remove' && deps.missions) {
-      const root = await realResource(missionTextSchema.parse(req.root));
-      for (const mission of deps.missions.list()) if (await realResource(mission.projectRoot) === root) denyMissionControl();
-      for (const session of sessions.list().filter((s) => pathKey(s.config.projectRoot) === pathKey(String(req.root)))) await assertOrdinarySession(session.id);
-      await assertOrdinaryWorkspace(String(req.root), true);
-    } else if (MISSION_GIT_MUTATIONS.has(channel)) {
+      const projectRoot = config.projectRoot;
+      if (typeof projectRoot !== 'string') return undefined;
+      return async () => {
+        await assertOrdinaryWorkspace(projectRoot);
+        if (req.checkoutBranch) await assertOrdinaryBranch({ cwd: projectRoot, config } as unknown as SessionMeta, [req.checkoutBranch]);
+      };
+    }
+    if (channel === 'folders:remove') {
+      const missions = deps.missions;
+      if (!missions) return undefined;
+      return async () => {
+        const root = await realResource(missionTextSchema.parse(req.root));
+        for (const mission of missions.list()) if (await realResource(mission.projectRoot) === root) denyMissionControl();
+        for (const session of sessions.list().filter((s) => pathKey(s.config.projectRoot) === pathKey(String(req.root)))) await assertOrdinarySession(session.id);
+        await assertOrdinaryWorkspace(String(req.root), true);
+      };
+    }
+    if (MISSION_GIT_MUTATIONS.has(channel)) return async () => {
       const session = await assertOrdinarySession(req.sessionId);
       if (typeof req.path === 'string') await assertOrdinaryWorkspace(path.resolve(session.cwd, req.path), channel === 'git:removeWorktree');
       const currentBranch = deps.missions?.list().some((m) => m.workspaces.some((w) => w.cleanedAt === undefined)) ? (await gitFolderBranch(session.cwd)).branch : undefined;
       await assertOrdinaryBranch(session, [req.branch, req.head, req.base, session.worktreeBranch, currentBranch], MISSION_REPO_MUTATIONS.has(channel));
-    } else if (MISSION_PROJECT_WRITES.has(channel) || channel === 'mcp:import' && req.to === 'repo') {
+    };
+    if (MISSION_PROJECT_WRITES.has(channel) || channel === 'mcp:import' && req.to === 'repo') return async () => {
       const session = await assertOrdinarySession(req.sessionId);
       await assertOrdinaryWorkspace(session.config.projectRoot);
-    } else if (channel === 'terminal:create') {
+    };
+    if (channel === 'terminal:create') return async () => {
       const session = sessionFor(req.sessionId);
       await assertInteractiveWorkspace(session, session.cwd);
-    } else if (MISSION_TERMINAL_CONTROLS.has(channel)) {
+    };
+    if (MISSION_TERMINAL_CONTROLS.has(channel)) return async () => {
       const terminal = terminals.list().find((t) => t.id === req.terminalId);
       if (!terminal) throw new Error('Terminal not found');
-      const session = sessionFor(terminal.sessionId);
-      await assertInteractiveWorkspace(session, terminal.cwd);
-    } else if (channel === 'app:openTerminal') {
-      await assertInteractiveWorkspace(undefined, missionTextSchema.parse(req.cwd));
-    } else if (channel === 'app:openInEditor' && deps.missions) {
+      try { await assertInteractiveWorkspace(sessionFor(terminal.sessionId), terminal.cwd); }
+      catch (e) { recordTerminalVerdict(terminal, false); throw e; }
+      if (channel === 'terminal:attach' || channel === 'terminal:restart') recordTerminalVerdict(terminal, true);
+    };
+    if (channel === 'app:openTerminal') return async () => { await assertInteractiveWorkspace(undefined, missionTextSchema.parse(req.cwd)); };
+    if (channel === 'app:openInEditor' && deps.missions) return async () => {
       const session = sessionFor(req.sessionId);
       await assertOrdinaryWorkspace(path.resolve(session.cwd, missionTextSchema.parse(req.path)));
+    };
+    return undefined;
+  }
+  /** Mission ownership at generic channels (V23/V24). Returns a promise only when a filesystem/Git
+   * check must finish first; unguarded channels, keystrokes and any request made while nothing can
+   * be Mission-owned are decided synchronously. */
+  function guardMissionBoundary(channel: string, input: unknown, actor: 'user' | 'agent'): Promise<void> | undefined {
+    if (actor === 'agent' && (channel.startsWith('missions:') || channel === 'app:fileSaveAs')) throw new Error('User export and Mission actions cannot originate from an agent tool.');
+    const req = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    if (channel === 'sessions:create') {
+      const config = req.config && typeof req.config === 'object' ? req.config as Record<string, unknown> : {};
+      if (['mission', 'missionId', 'missionRole', 'ownership', 'activeAttemptId'].some((key) => key in req || key in config)) throw new Error('Mission ownership is host-only; use missions:create.');
     }
+    if (MISSION_TERMINAL_IO.has(channel)) {
+      guardTerminalIo(req);
+      return undefined;
+    }
+    const check = missionResourceCheck(channel, req, actor);
+    if (!check) return undefined;
+    if (!missionOwnershipPossible()) {
+      // Nothing can own this terminal's cwd yet, and a later Mission only provisions fresh roots.
+      if (channel === 'terminal:attach' || channel === 'terminal:restart') {
+        const terminal = terminals.list().find((t) => t.id === req.terminalId);
+        if (terminal) recordTerminalVerdict(terminal, true);
+      }
+      return undefined;
+    }
+    return check();
   }
 
   async function createMission(input: unknown): Promise<MissionRecord> {
@@ -364,9 +473,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       if (mission) requireLead(source, mission);
       else await assertOrdinaryWorkspace(source.cwd);
       if (await realResource(request.projectRoot) !== await realResource(source.config.projectRoot)) throw new Error('Source session belongs to a different project.');
-      // Never let renderer fields choose the source cwd, its model or an elevated permission mode.
+      // Never let renderer fields choose the source cwd or its model. The permission mode is the
+      // caller's explicit choice: the launch dialog's "Mission permissions" (which must win, so a
+      // narrower choice is never widened back to the source's), or for a typed /mission, which has
+      // no dialog, the source's own mode as missions:command passes it.
       request.projectRoot = source.config.projectRoot;
-      request.permissionMode = mission?.requestedPermissionMode ?? source.config.permissionMode;
     } else {
       if (!knownFolder(request.projectRoot)) throw new Error('Choose a known project folder or pick one in New Session.');
       await assertOrdinaryWorkspace(request.projectRoot);
@@ -380,7 +491,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const request = missionControlSchema.parse(input);
     const mission = missionService().get(request.missionId);
     if (!mission) throw new Error('Mission not found.');
-    if (request.expectedRevision !== mission.revision) throw new Error('Stale Mission revision. Refresh before applying this control.');
+    // The recognised pre-commit conflict, so the UI retires the stale request and binds the newer
+    // record instead of replaying the same expectedRevision on every later click.
+    if (request.expectedRevision !== mission.revision) throw new Error(missionRevisionConflictMessage(request.expectedRevision, mission.revision));
     if (request.control.action === 'execute') {
       const proposal = mission.pendingProposal;
       if (!proposal || proposal.id !== request.control.proposalId || proposal.specificationRevision !== request.control.specificationRevision ||
@@ -414,8 +527,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     let mission = missionFor(source);
     if (mission) requireLead(source, mission);
     else await assertOrdinaryWorkspace(source.cwd);
-    if (command.kind === 'show' || command.kind === 'control' && command.action === 'status') {
-      return { kind: command.kind === 'show' ? 'show' : 'status', ...(mission ? { mission, sessionId: mission.leadSessionId } : {}) };
+    if (command.kind === 'show') return { kind: 'show', ...(mission ? { mission, sessionId: mission.leadSessionId } : {}) };
+    if (command.kind === 'control' && command.action === 'status') {
+      return mission ? { kind: 'status', mission, sessionId: mission.leadSessionId } : { kind: 'status', message: MISSION_NOT_LINKED_MESSAGE };
     }
     if (command.kind === 'launch' && (!mission || command.explicit)) {
       const created = await createMission({ idempotencyKey: req.idempotencyKey, projectRoot: source.config.projectRoot, originSessionId: source.id,
@@ -1412,7 +1526,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('terminal:list', () => terminals.list());
   handle('terminal:screen', ({ terminalId, lines }) => terminals.screenText(String(terminalId ?? ''), typeof lines === 'number' ? lines : undefined));
   handle('terminal:shells', () => terminals.shells());
-  handle('terminal:create', ({ sessionId, shell, cols, rows }) => terminals.create(sessionId, { shell, cols, rows }));
+  handle('terminal:create', ({ sessionId, shell, cols, rows }) => {
+    const info = terminals.create(sessionId, { shell, cols, rows });
+    // The guard just cleared this session's cwd (or nothing could own it); keystrokes reuse that.
+    const session = sessions.get(sessionId);
+    if (session && pathKey(session.cwd) === pathKey(info.cwd)) recordTerminalVerdict(info, true);
+    return info;
+  });
   handle('terminal:attach', ({ terminalId, cols, rows }) => terminals.attach(terminalId, cols, rows));
   handle('terminal:detach', ({ terminalId }) => terminals.detach(terminalId));
   handle('terminal:input', ({ terminalId, data }) => terminals.input(terminalId, data));
