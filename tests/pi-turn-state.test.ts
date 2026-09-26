@@ -119,6 +119,38 @@ describe('Pi adapter tool outcomes', () => {
 });
 
 describe('Pi adapter turn-state tracking', () => {
+  it('does not duplicate assistant text when one message contains multiple tool calls', () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    const text = 'I will inspect both files.';
+    const first = { id: 'call-1', name: 'bash', arguments: { command: 'first' } };
+    const second = { id: 'call-2', name: 'bash', arguments: { command: 'second' } };
+
+    feed(a, { type: 'message_start', message: { role: 'assistant', content: [] } });
+    feed(a, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: text } });
+    feed(a, { type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: 1 } });
+    feed(a, { type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 1, toolCall: first } });
+    // Tool-call start/delta updates must not create a fresh empty assistant bubble after the first
+    // call closes the text bubble. message_end carries the whole message, not just the last block.
+    feed(a, { type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: 2 } });
+    feed(a, { type: 'message_update', assistantMessageEvent: { type: 'toolcall_delta', contentIndex: 2, delta: '{}' } });
+    feed(a, { type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 2, toolCall: second } });
+    feed(a, {
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [{ type: 'text', text }, { type: 'toolCall', ...first }, { type: 'toolCall', ...second }]
+      }
+    });
+
+    const upserts = events.filter((e): e is Extract<SessionEvent, { type: 'item.upsert' }> => e.type === 'item.upsert');
+    const assistantById = new Map(upserts.map((e) => e.item).filter((item): item is Extract<TranscriptItem, { kind: 'assistant' }> => item.kind === 'assistant').map((item) => [item.id, item]));
+    expect([...assistantById.values()].filter((item) => item.text).map((item) => item.text)).toEqual([text]);
+    expect([...assistantById.values()]).toHaveLength(1);
+    expect(upserts.filter((e) => e.item.kind === 'tool').map((e) => e.item.id)).toEqual(['call-1', 'call-2']);
+  });
+
   it('marks a turn failed when pi ends it with an error stopReason', async () => {
     const { ctx, events } = stubCtx();
     const a = new PiAdapter(ctx);
