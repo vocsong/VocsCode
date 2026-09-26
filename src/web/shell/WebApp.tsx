@@ -3,7 +3,7 @@
  *  connection and the active computer change. */
 import { useEffect, useRef, useState } from 'react';
 import { TranscriptCapabilitiesProvider } from '@renderer/capabilities';
-import { Button, ConfirmHost, Icon, Spinner } from '@renderer/components/ui';
+import { Button, ConfirmHost, Icon, Spinner, Toggle } from '@renderer/components/ui';
 import { useStore } from '@renderer/store';
 import type { RelayClient } from '../../../relay/src/web-client';
 import { navigate, readRoute, type Route } from '../router';
@@ -17,6 +17,7 @@ import { SessionList } from '../screens/SessionList';
 import { SessionView } from '../screens/SessionView';
 import { ConnectionBanner } from '../components/ConnectionBanner';
 import { useConnection } from './useConnection';
+import { useFollow } from './useFollow';
 import { useKeyboardInset } from './useViewport';
 import { loadAccount, type AccountState } from './account';
 import type { RelayTransport } from '../transport/relay-transport';
@@ -44,9 +45,13 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
   const hostDeviceId = credentials?.hostDeviceId ?? null;
   const [online, setOnline] = useState<Map<string, boolean>>(() => new Map());
   const [, forceRender] = useState(0);
+  /** Every transport state change nudges this; batching 'connecting' and 'online' into one render
+   *  must not hide a host switch from the boot effect. */
+  const [connVersion, setConnVersion] = useState(0);
   const connection = useConnection(transport);
   const keyboard = useKeyboardInset();
   const sessions = useStore((s) => s.sessions);
+  const activeId = useStore((s) => s.activeId);
   const focus = useStore((s) => s.desktopFocus);
   const viewOnly = useStore((s) => s.remoteAccess.viewOnly);
   const toasts = useStore((s) => s.toasts);
@@ -55,10 +60,14 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
   const booted = useRef(false);
   const host = useRef<string | null>(null);
   const defaulted = useRef(false);
+  const seenAwaiting = useRef<Set<string>>(new Set());
+  const follow = useFollow(hostDeviceId, focus, (id) => navigate({ name: 'session', host: hostDeviceId ?? '', session: id }));
 
   useEffect(() => {
     transport.start();
   }, [transport]);
+
+  useEffect(() => transport.onState(() => setConnVersion((v) => v + 1)), [transport]);
 
   // Load the vault before deciding which screen to show: a pairing must survive a reload, and a
   // browser that cannot keep its keys (no IndexedDB) must say so instead of pairing uselessly.
@@ -163,7 +172,7 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
     } else {
       void useStore.getState().resync().then(() => setDataHost(current)).catch(() => undefined);
     }
-  }, [connection, client, transport]);
+  }, [connection, client, transport, connVersion]);
 
   // Default route: a deep link wins; otherwise open the session the desktop is on; otherwise home.
   // Only once, so Back to home is not immediately bounced into the focused session. While the focus
@@ -177,6 +186,17 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
       navigate({ name: 'session', host: hostDeviceId ?? '', session: focused }, true);
     }
   }, [route, focus, sessions, client, dataHost, hostDeviceId]);
+
+  // A background session that starts waiting for a person: say so without stealing the view.
+  useEffect(() => {
+    const awaiting = new Set(sessions.filter((s) => s.status === 'awaiting').map((s) => s.id));
+    for (const id of [...seenAwaiting.current]) if (!awaiting.has(id)) seenAwaiting.current.delete(id);
+    for (const session of sessions) {
+      if (session.status !== 'awaiting' || session.id === activeId || seenAwaiting.current.has(session.id)) continue;
+      seenAwaiting.current.add(session.id);
+      useStore.getState().toast(`${session.title} needs approval`, 'info');
+    }
+  }, [sessions, activeId]);
 
   // The iOS keyboard: keep the composer above it without a style attribute (CSP forbids those).
   useEffect(() => {
@@ -275,11 +295,14 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
           <Button variant="ghost" size="sm" icon="more" aria-label="Menu" onClick={() => setSheet('menu')} />
         </header>
 
-        {route.name === 'session' ? (
-          <SessionView sessionId={route.session} connection={connection} onBack={() => navigate({ name: 'home' })} />
-        ) : (
-          <SessionList host={hostId} onNew={() => setSheet('new')} />
-        )}
+        <div className="w-main" data-has-session={route.name === 'session' ? '1' : undefined}>
+          <SessionList
+            focus={focus?.sessionId ?? null}
+            onNew={() => setSheet('new')}
+            onOpen={(id) => navigate({ name: 'session', host: hostId, session: id })}
+          />
+          {route.name === 'session' && <SessionView sessionId={route.session} connection={connection} onBack={() => navigate({ name: 'home' })} />}
+        </div>
 
         {sheet === 'computers' && (
           <ComputersSheet
@@ -304,6 +327,10 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
         {sheet === 'menu' && (
           <BottomSheet title="Menu" onClose={() => setSheet('none')}>
             <div className="w-menu">
+              <div className="w-field-row">
+                <span>Follow my computer</span>
+                <Toggle checked={follow.following} onChange={() => follow.toggle()} label="Follow my computer" />
+              </div>
               <Button variant="ghost" icon="terminal" onClick={() => { setSheet('devices'); }}>Devices</Button>
               <Button variant="ghost" icon="plus" onClick={() => { setSheet('none'); navigate({ name: 'pair' }); }}>Add a computer</Button>
               <Button variant="ghost" icon="x" onClick={() => { setSheet('none'); void client.unpair(); }}>Unpair this browser</Button>
@@ -317,6 +344,13 @@ export function WebApp({ client, transport, initialCode, connectHash }: {
           </BottomSheet>
         )}
 
+        {follow.snackbar && (
+          <div className="w-snackbar" role="status" data-testid="follow-snackbar">
+            <span>Your computer moved to “{follow.snackbar.title}”</span>
+            <Button size="sm" variant="primary" onClick={follow.followNow}>Follow</Button>
+            <Button size="sm" variant="ghost" onClick={follow.dismiss}>Dismiss</Button>
+          </div>
+        )}
         <ConfirmHost />
         <Toasts toasts={toasts} dismiss={dismissToast} />
       </div>
