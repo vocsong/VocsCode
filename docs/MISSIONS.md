@@ -122,6 +122,8 @@ Present npm `typecheck`, `test` and `build` scripts are baseline gates when no m
 
 Before those conventional checks run, the host installs dependencies with `npm ci` in the isolated verification worktree, once per worktree and content, under the same approval and heavy-check slot. It needs a committed `package-lock.json` and a git-ignored `node_modules`. It uses your npm cache but not your `~/.npmrc`, so registry credentials and proxy settings never reach install scripts. A setup problem is reported as an environment blocker, not a failed test. Projects that use pnpm, Yarn or Bun lockfiles, a private registry or a proxy need a manifest with their own setup in the check command. The conventional test check also allows no skipped tests, so a suite with environment-gated skips (this repository's, for one) needs a manifest too. The principal engineer adds behavior-specific checks without removing existing required outcomes or widening publishing rights.
 
+Check commands only verify content. The host refuses a check that would publish, fetch or mutate shared repository state (`git push`/`commit`/`stash`/`config`, `gh` writes, registry publishes, release tools) when it is added and again before each run, in every permission mode; publishing belongs to Mission integration and delivery.
+
 `holdConditions` records explicit human-review reasons. `holdIsEndpoint: true` permits the configured review hold to be reported as the final policy outcome; it is never reported as a merge. Documented permission/secrets review conditions are checked again against actual captured change paths before publishing. Delivery records exact commit/PR/merge identifiers and uses operation receipts to reconcile acknowledgment loss instead of repeating remote actions blindly.
 
 ## Pause, restart and cleanup
@@ -129,6 +131,8 @@ Before those conventional checks run, the host installs dependencies with `npm c
 Pause/Stop fences new admission first, then reconciles positively owned activity. A timeout, root-process exit or failed kill request is not proof all descendants stopped. Uncertain ownership remains blocked and cannot be replaced with another writer on the same mutable workspace.
 
 Restart restores records but does **not** automatically resume execution. Inspect retained state and choose Resume. An empty new SessionManager is not evidence that old external effects finished. Missing or ambiguous dispatch/process/integration/remote receipts need reconciliation rather than automatic replay.
+
+Resume re-runs reconciliation and the source-baseline probe first, so a since-closed terminal or cleaned checkout clears its baseline blocker. Resolvable coordinator, budget, dispatch, handover, progress and capture blockers are re-established from fresh host observations and kept in history; unknown ownership, partial remote effects and integrity failures still refuse it. A Stop of a Mission that is recovering or stopping after a restart reaches a terminal stopped record that releases scheduler capacity and retains the uncertainty and every workspace; cleanup still requires exact ownership receipts.
 
 Retain worktrees by default. Explicit cleanup only removes positively owned, quiescent, fully accounted work; dirty/untracked uncaptured content and the original checkout are never force-deleted. Archive/delete/rewind/fork/revert and generic Git/shell controls are guarded at the host boundary, not merely hidden in the UI.
 
