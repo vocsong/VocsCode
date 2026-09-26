@@ -84,21 +84,24 @@ describe('remote host end-to-end (fake relay, real core)', () => {
   it('pairs, handshakes, serves filtered invokes and pushes over e2e', async () => {
     const calls: string[] = [];
     const registry = {
-      channels: () => ['sessions:list', 'sessions:send', 'secrets:has'],
+      channels: () => ['sessions:list', 'sessions:send', 'secrets:has', 'desktop:focus'],
       invoke: async (channel: string) => {
         calls.push(channel);
         if (channel === 'sessions:send') return undefined;
         if (channel === 'sessions:list') return [{ id: 's1', title: 'T' }];
+        if (channel === 'desktop:focus') return { sessionId: 's1', at: 5, windowFocused: true };
         if (channel === 'secrets:has') return 'LEAK';
         throw new Error('unknown');
       }
     } as unknown as HandlerRegistry;
+    let viewOnly = false;
     const host = new RemoteHost({
       registry: () => registry,
       secrets: { get: async () => undefined, set: async () => undefined },
       pushState: () => undefined,
       log: () => undefined,
-      broadcast: () => undefined
+      broadcast: () => undefined,
+      viewOnly: () => viewOnly
     });
 
     // Desktop: enable with the enrollment secret, request a pairing code.
@@ -209,6 +212,24 @@ describe('remote host end-to-end (fake relay, real core)', () => {
     expect((await openFrame<{ id: number; ok: boolean }>(session.key, (await finalReply).payload as never))).toMatchObject({ id: 6, ok: true });
     expect(calls).toEqual(['sessions:list', 'sessions:send', 'sessions:send', 'sessions:send']);
 
+    // The desktop's session focus is readable, and stays readable in view-only mode.
+    await send({ type: 'invoke', id: 7, channel: 'desktop:focus', request: null });
+    const focusRead = await openFrame<{ ok: boolean; value: unknown }>(session.key, ((await waitFrame(ws, (m) => m.t === 'd')) as { payload: never }).payload);
+    expect(focusRead).toEqual({ type: 'result', id: 7, ok: true, value: { sessionId: 's1', at: 5, windowFocused: true } });
+    // Writing it is desktop-only: a browser follows the desktop, it does not steer it.
+    await send({ type: 'invoke', id: 8, channel: 'desktop:setFocus', request: { sessionId: 's1' } });
+    const focusWrite = await openFrame<{ ok: boolean; error?: string }>(session.key, ((await waitFrame(ws, (m) => m.t === 'd')) as { payload: never }).payload);
+    expect(focusWrite).toMatchObject({ ok: false, error: 'channel not available remotely' });
+    expect(calls).toEqual(['sessions:list', 'sessions:send', 'sessions:send', 'sessions:send', 'desktop:focus']);
+    viewOnly = true;
+    await send({ type: 'invoke', id: 9, channel: 'desktop:focus', request: null });
+    expect(await openFrame<{ ok: boolean }>(session.key, ((await waitFrame(ws, (m) => m.t === 'd')) as { payload: never }).payload)).toMatchObject({ ok: true });
+    // The write half stays refused before dispatch, so no registry call is made.
+    await send({ type: 'invoke', id: 10, channel: 'sessions:send', request: { id: 's1', input: { text: 'view-only' } } });
+    const blocked = await openFrame<{ ok: boolean; error?: string }>(session.key, ((await waitFrame(ws, (m) => m.t === 'd')) as { payload: never }).payload);
+    expect(blocked).toMatchObject({ ok: false, error: 'remote access is in view-only mode' });
+    viewOnly = false;
+
     // Local pushes fan out sealed.
     await host.broadcastPush('push:settingsChanged', { notifications: false });
     const push = await openFrame<{ type: string; channel: string; payload: unknown }>(session.key, ((await waitFrame(ws, (m) => m.t === 'd')) as { payload: never }).payload);
@@ -224,7 +245,11 @@ describe('remote host end-to-end (fake relay, real core)', () => {
     await host.broadcastPush('push:sessionEvent', { sessionId: 's1', event: { type: 'status', status: 'idle' } });
     const allowed = await openFrame<{ type: string; channel: string; payload: unknown }>(session.key, ((await firstAfter) as { payload: never }).payload);
     expect(allowed).toEqual({ type: 'push', channel: 'push:sessionEvent', payload: { sessionId: 's1', event: { type: 'status', status: 'idle' } } });
-    expect([...REMOTE_PUSH_CHANNELS].sort()).toEqual(['push:remotePolicy', 'push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged']);
+    // The desktop's focus reaches a browser as its own push, so it can follow along.
+    const focusPush = waitFrame(ws, (m) => m.t === 'd');
+    await host.broadcastPush('push:desktopFocus', { sessionId: 's1', at: 9, windowFocused: true });
+    expect(await openFrame(session.key, (await focusPush).payload as never)).toEqual({ type: 'push', channel: 'push:desktopFocus', payload: { sessionId: 's1', at: 9, windowFocused: true } });
+    expect([...REMOTE_PUSH_CHANNELS].sort()).toEqual(['push:desktopFocus', 'push:remotePolicy', 'push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged']);
 
     ws.close();
     await host.disable();

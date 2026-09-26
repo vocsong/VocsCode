@@ -34,6 +34,7 @@ import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readS
 import { PiConfigStore, runPiCommand } from './pi-config';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
+import type { DesktopFocusTracker } from './desktop-focus';
 import { relayUrl, signInAvailable } from './remote/relay-url';
 import { transcriptPage } from '../shared/transcript-page';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
@@ -85,6 +86,8 @@ export interface HandlerDeps {
   gitnexusIndexer?: Pick<GitnexusIndexer, 'schedule' | 'index'>;
   /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
   remote?: RemoteHost;
+  /** Which session the desktop window is on, mirrored to paired browsers; absent in tests. */
+  desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
   remoteMirror?: { sync(): void; disable(): void };
   /** Base-pi global config (Settings → Pi); a default store is created when absent. */
@@ -273,6 +276,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return { zoomFactor: r ?? 1 };
   });
   handle('window:edit', ({ command }) => deps.desktop.edit(command));
+
+  // The renderer reports where the desktop is; a paired browser reads it and follows the push.
+  handle('desktop:setFocus', ({ sessionId }) => deps.desktopFocus?.setSession(sessionId));
+  handle('desktop:focus', () => deps.desktopFocus?.state() ?? { sessionId: null, at: 0, windowFocused: false });
 
   handle('settings:get', () => settings.get());
   handle('settings:update', async (patch) => {

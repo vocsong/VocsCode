@@ -30,6 +30,8 @@ export class RemoteMirror {
       host: () => RemoteHost | null;
       sessions: () => SessionMeta[];
       transcript: (id: string) => Promise<TranscriptItem[]>;
+      /** The desktop's current session, if any; mirrored so offline mode can open it. */
+      focus?: () => string | null;
       enabled: () => boolean;
       log: Logger;
       /** Quiet period before an upload; tests shrink it. */
@@ -103,6 +105,7 @@ export class RemoteMirror {
     const index: MirrorIndex = {
       hostName: os.hostname(),
       updatedAt: Date.now(),
+      focus: this.deps.focus?.() ?? null,
       sessions: this.recentSessions().map((s) => ({
         id: s.id,
         title: s.title,
