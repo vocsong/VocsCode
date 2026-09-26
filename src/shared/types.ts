@@ -784,6 +784,10 @@ export interface SessionMeta {
   forkedFrom?: string;
   /** Effective working directory (worktree path if isolated). */
   cwd: string;
+  /**
+   * The app-managed worktree this session owns and may remove. A fork of a worktree session gets
+   * its own branch here; absent means the session shares a directory it must not remove.
+   */
   worktreeBranch?: string;
   status: SessionStatus;
   statusDetail?: string;
@@ -791,8 +795,10 @@ export interface SessionMeta {
   statusLabel?: string;
   harnessRef: HarnessRef;
   /**
-   * Set on a cross-harness fork: the copied transcript is written to `fork-context.md` and prefixed
-   * to the next user message so the new harness starts with the prior conversation, then cleared.
+   * Set when the harness has to be handed the conversation on its next message: a fork into another
+   * harness, and a same-harness fork that moved to its own worktree and so cannot resume the
+   * provider session the source ran in. Written to `fork-context.md` and cleared once the harness
+   * accepted the seeded message.
    */
   pendingForkContext?: boolean;
   /**

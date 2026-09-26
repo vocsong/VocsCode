@@ -1,4 +1,4 @@
-/** "Fork into <harness>": forks a session into a different harness on the same worktree. */
+/** "Fork into <harness>": forks a session, giving a worktree session a worktree of its own. */
 import type { ReactNode } from 'react';
 import type { HarnessId, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID, HARNESSES } from '../../../shared/harness-meta';
@@ -23,7 +23,7 @@ export function ForkIntoDropdown({ session, onForked, trigger }: {
     void invoke('sessions:fork', { id: session.id, harness })
       .then((f) => {
         if (f) {
-          toast(`Forked into ${harnessShort(f.config.harness)} on the same worktree`, 'success');
+          toast(`Forked into ${harnessShort(f.config.harness)}${forkLocation(session, f)}`, 'success');
           onForked?.(f);
         }
       })
@@ -58,6 +58,11 @@ export function ForkIntoDropdown({ session, onForked, trigger }: {
   );
 }
 
+/** Where the fork landed, read off the returned row: a moved fork has a different directory. */
+function forkLocation(source: SessionMeta, fork: SessionMeta): string {
+  return fork.worktreeBranch && fork.cwd !== source.cwd ? ' on a new worktree' : ' in the same directory';
+}
+
 /** Menu items variant used inside larger menus (title bar, command menus). */
 export function ForkIntoItems({ session, onForked }: { session: SessionMeta; onForked?: (s: SessionMeta) => void }) {
   const availability = useStore((s) => s.availability);
@@ -84,7 +89,7 @@ export function ForkIntoItems({ session, onForked }: { session: SessionMeta; onF
               void invoke('sessions:fork', { id: session.id, harness: h.id })
                 .then((f) => {
                   if (f) {
-                    toast(`Forked into ${harnessShort(h.id)} on the same worktree`, 'success');
+                    toast(`Forked into ${harnessShort(h.id)}${forkLocation(session, f)}`, 'success');
                     onForked?.(f);
                   }
                 })

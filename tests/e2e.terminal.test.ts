@@ -13,6 +13,7 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
+import type { SessionMeta } from '../src/shared/types';
 import { expectQuietWindow, openNewSession, seedSettings } from './e2e-ui';
 
 const enabled = process.env.HARNESS_E2E === '1';
@@ -332,6 +333,89 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       const tail = (arr: string[], n: number) => arr.slice(-n).join('\n');
       console.error(`[e2e terminal] failure\nrenderer console:\n${tail(consoleLines.filter((l) => !l.startsWith('[debug]')), 30)}\nmain log:\n${tail(mainLog.join('').split('\n').filter((l) => !l.includes(' DEBUG ')), 30)}`);
       throw e;
+    }
+  });
+});
+
+/**
+ * Forking a worktree session must give the fork a worktree of its own: sharing the source's
+ * directory meant archiving the source with its worktree removed deleted the folder the fork was
+ * running in. The source is created through the dialog with no prompt, so no harness runs and no
+ * API key is needed; the fork is the sidebar's own action, and the worktrees are asserted on disk.
+ */
+describe.runIf(enabled)('electron e2e: fork a worktree session', () => {
+  it('gives the fork its own worktree, so archiving the source with its worktree cannot break it', async () => {
+    const tmp = path.join(os.tmpdir(), `vocs-code-e2e-fork-${Date.now()}`);
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(project, 'README.md'), '# fork project\n');
+    execFileSync('git', ['init', '-q'], { cwd: project });
+    execFileSync('git', ['add', '-A'], { cwd: project });
+    execFileSync('git', ['-c', 'user.email=e2e@example.com', '-c', 'user.name=e2e', 'commit', '-qm', 'init'], { cwd: project });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== 'ELECTRON_RUN_AS_NODE' && k !== 'ANTHROPIC_BASE_URL' && k !== 'CLAUDECODE' && !k.startsWith('CLAUDE_CODE_')) env[k] = v;
+    env.VOCS_CODE_USER_DATA = userData;
+
+    let forkApp: ElectronApplication | null = null;
+    try {
+      forkApp = await electron.launch({ executablePath: require('electron') as string, args: [path.join(root, 'out', 'main', 'index.js')], env, timeout: 60_000 });
+      const win: Page = await forkApp.firstWindow();
+      await win.waitForSelector('.brand', { timeout: 60_000 });
+      await expectQuietWindow(forkApp);
+      const stored = async (): Promise<SessionMeta[]> => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
+      const present = (p: string): Promise<boolean> => fs.stat(p).then(() => true, () => false);
+
+      // A session isolated in a worktree, started from the dialog with no prompt.
+      await openNewSession(win);
+      await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
+      const isolate = win.locator('.toggle', { hasText: 'Isolate in a git worktree' });
+      await isolate.locator('.muted', { hasText: 'new branch under' }).waitFor({ timeout: 15_000 });
+      await isolate.click();
+      await win.click('button:has-text("Start session")');
+      await win.waitForSelector('.header', { timeout: 30_000 });
+
+      await expect.poll(async () => (await stored()).length, { timeout: 20_000 }).toBe(1);
+      const src = (await stored())[0];
+      expect(src.worktreeBranch).toBeTruthy();
+      expect(src.cwd).toContain(path.join('.vocs-code', 'worktrees'));
+      expect(await present(src.cwd), 'the source worktree exists on disk').toBe(true);
+
+      // Fork from the sidebar row: the fork gets its own directory and its own branch.
+      const srcRow = win.locator(`[data-session-id="${src.id}"]`);
+      await srcRow.hover();
+      await srcRow.locator('[aria-label="Fork session"]').click();
+      await win.locator('.dropdown-menu .menu-item', { hasText: 'Native' }).click();
+      await expect.poll(async () => (await stored()).length, { timeout: 20_000 }).toBe(2);
+
+      const fork = (await stored()).find((s) => s.forkedFrom === src.id)!;
+      expect(fork.title).toContain('(fork)');
+      expect(fork.cwd).not.toBe(src.cwd);
+      expect(fork.worktreeBranch).toBeTruthy();
+      expect(fork.worktreeBranch).not.toBe(src.worktreeBranch);
+      expect(await present(fork.cwd), 'the fork worktree exists on disk').toBe(true);
+
+      // Archive the source with its worktree removed: its folder goes, the fork's stays.
+      const srcRowAgain = win.locator(`[data-session-id="${src.id}"]`);
+      await srcRowAgain.hover();
+      await srcRowAgain.locator('[aria-label="Archive session"]').click();
+      await win.locator('.modal button:has-text("Archive & remove")').click();
+      await expect.poll(async () => (await stored()).find((s) => s.id === src.id)?.archived, { timeout: 30_000 }).toBe(true);
+      await expect.poll(() => present(src.cwd), { timeout: 20_000 }).toBe(false);
+      expect(await present(fork.cwd), 'the fork worktree survives the source worktree removal').toBe(true);
+
+      // The fork is the only row left, still opens, and says it runs in the worktree it created.
+      await expect.poll(async () => win.locator('.session-row').count(), { timeout: 20_000 }).toBe(1);
+      const forkRow = win.locator(`[data-session-id="${fork.id}"]`);
+      await forkRow.click();
+      await win.waitForSelector('.header', { timeout: 20_000 });
+      expect(await forkRow.locator('.session-worktree').getAttribute('title')).toBe(`Worktree · ${fork.worktreeBranch}`);
+      await win.screenshot({ path: path.join(shots, 'e2e-09-fork-worktree.png') });
+    } finally {
+      await forkApp?.close().catch(() => undefined);
     }
   });
 });
