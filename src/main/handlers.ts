@@ -576,7 +576,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
-  handle('sessions:transcriptPage', async (req) => transcriptPage(await sessions.transcript(req.id), req));
+  handle('sessions:transcriptPage', async (req) => {
+    const { items, seq } = await sessions.transcriptSnapshot(req.id);
+    return { ...transcriptPage(items, req), seq };
+  });
   handle('subagents:list', ({ id }) => sessions.subagentRuns(id));
   handle('subagents:get', ({ id, runId }) => sessions.subagentRun(id, runId));
   handle('subagents:stop', ({ id, runId }) => sessions.subagentCommand(id, runId, 'stop'));

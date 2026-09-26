@@ -868,6 +868,9 @@ export type TranscriptItem =
       ts: number;
       text: string;
       images?: ImageAttachment[];
+      /** Set instead of `images` when a remote projection dropped them to fit the relay frame
+       *  budget; the count is what the bubble reports as not shown. */
+      imagesOmitted?: number;
       queuedAs?: SendMode;
     }
   | {
@@ -1014,6 +1017,11 @@ export interface SessionEventEnvelope {
   sessionId: string;
   event: SessionEvent;
   ts: number;
+  /** Monotonic across every event this desktop pushes. A remote client takes a transcript snapshot
+   *  together with the counter it reflects (`sessions:transcriptPage`'s `seq`) and applies only
+   *  later events, so a follow-up stream cannot double text the snapshot already has. Absent on
+   *  desktops that predate sequencing; clients fall back to their old heuristic then. */
+  seq?: number;
 }
 
 /** Subagent spend attributed to the model that produced it. */

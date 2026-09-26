@@ -160,8 +160,10 @@ interface Transport {
   transport-agnostic registry keyed by channel; `ipcMain` binding and the WS server both
   bind the same registry. Handler logic stays identical.
 - Reconnect semantics already exist conceptually: replay `sessions:list` +
-  `sessions:transcript` + `terminal:attach` snapshot — the same boot sequence the
-  renderer does today on window focus.
+  `sessions:transcriptPage` + `terminal:attach` snapshot — the same boot sequence the
+  renderer does today on window focus. The page carries the event floor it reflects (`seq`), so
+  the live stream that overlaps the replay can be reconciled by sequence number instead of
+  guessed at.
 
 **Filtered surface.** Remote gets: `sessions:*`, `approvals:respond`, read-mostly
 `git:*`, `fs:list/search/read`, `analytics:*`, `skills:list/read`,
@@ -169,6 +171,15 @@ interface Transport {
 step one: plain text, never attached, resized or typed into). Excluded or remapped: `window:*`,
 `app:pickFolder`, `app:openPath`, `app:openInEditor`, `secrets:*`, `dialog` flows, terminal
 input. The web client never touches or needs API keys.
+
+**Sizing and projection.** Every pushed event carries a monotonic `seq`; a transcript window
+reports the floor it reflects, so a client takes a snapshot and then applies only later events.
+The relay forwards at most 1 MiB per frame and drops anything larger without telling either side,
+so remote responses are bounded: transcript pages are trimmed and byte-budgeted (~512 KiB before
+sealing), and a result that still does not fit comes back as `response too large` instead of
+being dropped into a client timeout. Session metadata is projected for the remote surface —
+`knowledgeDigest`, `harnessCommands` and the pending fork/knowledge priming flags never leave the
+desktop.
 
 ## 6. Auth, pairing, trust — detailed plan
 
@@ -495,8 +506,10 @@ security bar must go up, not sideways:
    seq + ack flow control exist, but WAN latency and reconnect-mid-PTY need tuning
    (coalescing, larger ack windows, snapshot-on-reconnect).
 5. **Transcript replay size.** The web client loads transcripts tail-first
-   (`sessions:transcriptPage`, newest 150 items, Load earlier on demand) and coalesces refreshes
-   during a streaming turn instead of replaying the whole transcript on every event.
+   (`sessions:transcriptPage`, newest 200 items, Load earlier on demand), serves each page
+   trimmed to a byte budget that fits the relay frame, and follows a streaming turn by applying
+   only `push:sessionEvent`s newer than the page's `seq` floor instead of replaying the whole
+   transcript on every event.
 6. **Secrets invariant.** Holds trivially in Model A (keys never leave the machine) —
    but it must be *tested*: no channel in the remote surface may ever resolve a secret.
 7. **Platform bits.** ConPTY-specific terminal behavior, native notifications, and

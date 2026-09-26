@@ -486,6 +486,11 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
             )}
           </div>
         ) : null}
+        {!images.length && item.imagesOmitted ? (
+          <Badge tone="neutral" title="Images are too large to send to a paired browser">
+            {item.imagesOmitted === 1 ? '1 image not shown' : `${item.imagesOmitted} images not shown`}
+          </Badge>
+        ) : null}
       </div>
       <div className="msg-user-meta">
         <time dateTime={new Date(item.ts).toISOString()} title={new Date(item.ts).toLocaleString()}>{timestamp}</time>
