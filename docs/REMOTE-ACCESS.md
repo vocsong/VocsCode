@@ -280,11 +280,10 @@ of relying on review. The public pairing endpoints also carry in-memory fixed-wi
 binding (vocs.io PR #18); the landing forwards `/app` and `/v1` including REST and `/v1/ws/*`
 WebSockets, with no CORS hop or second DNS record. The GitHub login gate is live on the landing:
 `/app` redirects signed-out visitors to GitHub OAuth, and the landing's allowlist controls who may
-sign in. The production relay still has the incumbent `vocs-v1` registry until the per-account
-relay release is deployed. This change adds account assertions, one Hub per account, account-bound
-enrollment and pairing, and disables the relay's direct `workers.dev` endpoint so browser traffic
-must pass through the gate. Do not enable another login until the matching relay release and landing
-assertion secret are deployed together.
+sign in. **Live since 2026-09-26** (v0.7.0): the relay and the landing run per-account Hubs,
+account assertions, account-bound enrollment and pairing, and the relay's direct `workers.dev`
+endpoint is disabled so browser traffic must pass through the gate. The incumbent login stays mapped
+to `vocs-v1`. Do not enable another login until the two-account live check passes.
 
 The desktop's signed Allow/Deny remains mandatory. Login authenticates an account; device credentials
 and signatures continue to authorize device operations.
@@ -298,10 +297,18 @@ are not live until a release ships them.
 smoke passed against `code.vocs.io`): the proof-of-possession token model; non-extractable browser
 keys; per-account device caps; the kill switch; mirror re-keying on revocation; QR pairing; the
 multi-computer web client; tail-first transcripts; a read-only terminal view (P3.5, step one); edge
-rate limits; and the landing's GitHub login gate. This change extends that gate into per-account
-isolation. The relay verifies a short-lived HMAC assertion from the landing; it never accepts an
-unsigned account id from a request. The login gate and account assertion do not replace paired-device
-authorization or the desktop's signed approval.
+rate limits; and the landing's GitHub login gate.
+
+**Live since 2026-09-26** (v0.7.0; the relay deployed by the approved `deploy-relay` run
+36263306950, the landing promoted to production right after): the React web shell that replaced the
+hand-written page (sessions home, follow-my-computer, approval banner, control sheets, paged
+transcripts), and per-account isolation on top of the gate. The landing signs a short-lived HMAC
+assertion bound to account, method and pathname; the relay verifies it, routes to one Hub Durable
+Object per account, and refuses code claims, polls and owner routes without it. It never accepts an
+unsigned account id from a request. The incumbent GitHub login maps to `vocs-v1`, so existing
+desktops, devices and mirrors stay in place; the login gate and account assertion do not replace
+paired-device authorization or the desktop's signed approval. Widening `ALLOWED_LOGINS` still waits
+on the two-account live check.
 
 Implementation notes: crypto primitives are P-256 ECDSA + ECDH, HKDF-SHA-256 and
 AES-256-GCM — all via WebCrypto with zero new dependencies. A browser's private keys are
@@ -577,11 +584,11 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 **Relay MVP → beta: roughly 8–11 weeks (chat-first; terminal lands in P3.5 after).**
 Cloud workspaces: separate track afterward.
 
-**Status:** P0–P4 and P3.5 read-only are implemented. This change completes the P2 account
-routing boundary: allowlisted GitHub subjects get separate Hub DOs, enrollment grants resolve to
+**Status:** P0–P4 and P3.5 read-only are implemented, and the P2 account routing boundary is live
+(v0.7.0, 2026-09-26): allowlisted GitHub subjects get separate Hub DOs, enrollment grants resolve to
 the signed-in account, browser claims/polls require that account, and the web vault is partitioned.
-Production still needs the relay release and coordinated landing deployment before other logins are
-added. Read/write terminal remains the next remote-access feature.
+The remaining P2 work is operational: run the live smoke and the two-account check before other
+logins are added. Read/write terminal remains the next remote-access feature.
 
 ## 11. Decisions and open questions
 
