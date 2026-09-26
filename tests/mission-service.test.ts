@@ -30,7 +30,9 @@ import { deferred } from '../src/main/util/async';
 import { createHandlerRegistry, type HandlerDeps } from '../src/main/handlers';
 import { resolveMissionDeliveryPolicy } from '../src/main/mission/policy';
 import * as processRuntime from '../src/main/runtime';
-const wait = (assertion: () => void) => vi.waitFor(assertion, { timeout: 15_000, interval: 30 });
+// Real Git, PowerShell checks and delivery receipts run inside these waits; 15s expired under a
+// loaded full-suite run while the pipeline was still progressing (the isolated run passes).
+const wait = (assertion: () => void) => vi.waitFor(assertion, { timeout: 30_000, interval: 30 });
 
 vi.mock('../src/main/harness/registry', () => ({ createAdapter: vi.fn() }));
 let root: string, project: string, data: string, workspaceRoot: string, receiptRoot: string;

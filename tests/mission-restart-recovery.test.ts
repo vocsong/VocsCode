@@ -292,5 +292,8 @@ it('retains a terminal intent with no tab/owner-file until an exact positive rec
   await terminals.reconcileOwnership(); expect(terminals.activity()).toHaveLength(1);
   await fs.writeFile(intent.receiptPath, JSON.stringify(proof));
   await terminals.reconcileOwnership(); expect(terminals.activity()).toEqual([]);
-  expect(await processOwnershipQuiescent((await processOwnershipIntents(path.dirname(intent.path)))[0])).toBe(true);
+  // Positive settlement retires the generation's intent and receipts, so a later boot cannot
+  // reinterpret settled ownership as uncertainty; the directory itself goes with them.
+  expect(await processOwnershipIntents(path.dirname(intent.path))).toEqual([]);
+  expect(await fs.readdir(path.dirname(intent.path)).catch(() => [])).toEqual([]);
 });
