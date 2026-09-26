@@ -42,7 +42,7 @@ import { PiConfigStore, runPiCommand } from './pi-config';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
 import { relayUrl, signInAvailable } from './remote/relay-url';
-import { transcriptPage } from './remote/transcript-page';
+import { transcriptPage } from '../shared/transcript-page';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
@@ -987,7 +987,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
-  handle('sessions:transcriptPage', async (req) => transcriptPage(await sessions.transcript(req.id), req));
+  handle('sessions:transcriptPage', async (req) => {
+    const { items, seq } = await sessions.transcriptSnapshot(req.id);
+    return { ...transcriptPage(items, req), seq };
+  });
   handle('subagents:list', ({ id }) => sessions.subagentRuns(id));
   handle('subagents:get', ({ id, runId }) => sessions.subagentRun(id, runId));
   handle('subagents:stop', ({ id, runId }) => sessions.subagentCommand(id, runId, 'stop'));

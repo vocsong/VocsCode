@@ -42,7 +42,7 @@ export interface ShortcutCommandInfo {
 
 export const SHORTCUT_COMMANDS: ShortcutCommandInfo[] = [
   { id: 'session.archive', label: 'Archive session', description: 'Archive the session you are on (a worktree is confirmed first).', icon: 'archive', needsSession: true },
-  { id: 'session.fork', label: 'Fork session', description: 'Fork the current session into a copy on the same worktree.', icon: 'fork', needsSession: true },
+  { id: 'session.fork', label: 'Fork session', description: 'Fork the current session into a copy; a session in a worktree gets one of its own.', icon: 'fork', needsSession: true },
   { id: 'session.interrupt', label: 'Interrupt turn', description: 'Interrupt the current turn of the active session.', icon: 'stop', needsSession: true },
   { id: 'session.pin', label: 'Pin / unpin session', description: 'Toggle the active session’s pin in the sidebar.', icon: 'pin', needsSession: true },
   { id: 'session.newTerminal', label: 'New terminal', description: 'Open a new terminal tab for the active session.', icon: 'terminal', needsSession: true },

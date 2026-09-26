@@ -223,8 +223,9 @@ export interface IpcContract {
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
-  /** Tail-first window of a transcript for remote clients: items [start, end), newest by default. */
-  'sessions:transcriptPage': [{ id: string; start?: number; end?: number; limit?: number }, { items: TranscriptItem[]; start: number; total: number }];
+  /** Tail-first window of a transcript for remote clients: items [start, end), newest by default.
+   *  `seq` is the event floor the window reflects; absent on desktops that predate sequencing. */
+  'sessions:transcriptPage': [{ id: string; start?: number; end?: number; limit?: number }, { items: TranscriptItem[]; start: number; total: number; seq?: number }];
   /** Subagent runs recorded for a pi session, newest first. */
   'subagents:list': [{ id: string }, SubagentRunSummary[]];
   /** One run with its transcript items and per-call rows, or null when it is gone. */
@@ -434,6 +435,8 @@ export type PushPayloads = {
   /** Vesta's whole transcript; the list is short, so state is replaced rather than patched. */
   'push:agentState': AgentState;
   'push:remoteState': RemoteState;
+  /** Remote-only: the view-only policy, pushed to paired browsers over the e2e session. */
+  'push:remotePolicy': { viewOnly: boolean };
   'push:updateState': UpdateState;
 };
 

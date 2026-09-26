@@ -130,6 +130,7 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo.
 - Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.
 - Sessions must resume after restart for every harness; keep that path working when touching persistence.
+- A session forked from one in an app-managed worktree gets a worktree and branch of its own, branched from the source checkout's HEAD; a fork never shares the source's directory, so archiving the source with its worktree cannot delete the fork's. A provider resume id belongs to the directory it ran in, so a same-harness fork that moved is handed the conversation as text instead (`pendingForkContext`).
 - A session's usage counts only the money it spent itself. Turn rows are the itemized ledger and `SessionMeta.usage` is the counter over it; a fork carries the conversation, never the ledger.
 
 ## Mission ownership

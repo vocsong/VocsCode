@@ -14,7 +14,7 @@ import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
 import type { SessionManager } from '../src/main/session-manager';
-import type { RemoteConfig, SessionMeta } from '../src/shared/types';
+import type { RemoteConfig, SessionMeta, TranscriptItem } from '../src/shared/types';
 import type { RemoteHost } from '../src/main/remote/host';
 import { signInProbe } from '../src/main/remote/relay-url';
 import { SettingsStore } from '../src/main/settings';
@@ -135,6 +135,21 @@ describe('handler registry', () => {
     for (const c of ['sessions:list', 'settings:get', 'terminal:input', 'git:summary', 'fs:read', 'approvals:respond', 'analytics:summary', 'window:zoom']) {
       expect(channels).toContain(c);
     }
+  });
+
+  it('returns the transcript page with its event floor, and rejects an unknown session', async () => {
+    const items: TranscriptItem[] = [{ id: 'a', kind: 'info', ts: 1, level: 'info', text: 'hi' }];
+    const { registry } = stubDeps({
+      sessions: {
+        transcriptSnapshot: async (id: string) => {
+          if (id !== 's_test') throw new Error('Session not found');
+          return { items, seq: 7 };
+        }
+      } as unknown as SessionManager
+    });
+    // The floor travels beside the window so a remote client can follow with seq-filtered events.
+    await expect(registry.invoke('sessions:transcriptPage', { id: 's_test' })).resolves.toEqual({ items, start: 0, total: 1, seq: 7 });
+    await expect(registry.invoke('sessions:transcriptPage', { id: 'nope' })).rejects.toThrow('Session not found');
   });
 
   it('serves every channel Vesta is allowed to reach', () => {

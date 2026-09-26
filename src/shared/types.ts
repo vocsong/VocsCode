@@ -789,6 +789,10 @@ export interface SessionMeta {
   mission?: MissionOwnership;
   /** Effective working directory (worktree path if isolated), never the Mission integration view. */
   cwd: string;
+  /**
+   * The app-managed worktree this session owns and may remove. A fork of a worktree session gets
+   * its own branch here; absent means the session shares a directory it must not remove.
+   */
   worktreeBranch?: string;
   status: SessionStatus;
   statusDetail?: string;
@@ -796,8 +800,10 @@ export interface SessionMeta {
   statusLabel?: string;
   harnessRef: HarnessRef;
   /**
-   * Set on a cross-harness fork: the copied transcript is written to `fork-context.md` and prefixed
-   * to the next user message so the new harness starts with the prior conversation, then cleared.
+   * Set when the harness has to be handed the conversation on its next message: a fork into another
+   * harness, and a same-harness fork that moved to its own worktree and so cannot resume the
+   * provider session the source ran in. Written to `fork-context.md` and cleared once the harness
+   * accepted the seeded message.
    */
   pendingForkContext?: boolean;
   /**
@@ -869,6 +875,9 @@ export type TranscriptItem =
       ts: number;
       text: string;
       images?: ImageAttachment[];
+      /** Set instead of `images` when a remote projection dropped them to fit the relay frame
+       *  budget; the count is what the bubble reports as not shown. */
+      imagesOmitted?: number;
       queuedAs?: SendMode;
     }
   | {
@@ -1015,6 +1024,11 @@ export interface SessionEventEnvelope {
   sessionId: string;
   event: SessionEvent;
   ts: number;
+  /** Monotonic across every event this desktop pushes. A remote client takes a transcript snapshot
+   *  together with the counter it reflects (`sessions:transcriptPage`'s `seq`) and applies only
+   *  later events, so a follow-up stream cannot double text the snapshot already has. Absent on
+   *  desktops that predate sequencing; clients fall back to their old heuristic then. */
+  seq?: number;
 }
 
 /** Subagent spend attributed to the model that produced it. */

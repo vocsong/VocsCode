@@ -30,14 +30,17 @@ import { HARNESSES } from '../src/shared/harness-meta';
 import type { AppSettings, EffortLevel, ModelInfo, ProviderConfig, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
-import { branchGitState, gitBranches, gitCheckout, gitWorktrees, removeWorktree, restoreWorktree, WorktreeDirtyError } from '../src/main/git';
+import { branchGitState, createForkWorktree, gitBranches, gitCheckout, gitWorktrees, removeWorktree, restoreWorktree, WorktreeDirtyError } from '../src/main/git';
 import { createLogger } from '../src/main/log';
 import { timed, watchEventLoop } from '../src/main/diag';
 
-// branchGitState is stubbed so PR-state refresh tests stay offline; every other git export stays real.
+// branchGitState is stubbed so PR-state refresh tests stay offline, and createForkWorktree keeps the
+// fake project roots (no repository) from shelling out: these forks share the source's directory.
+// The real worktree a fork gets is exercised against a real repo in session-worktree-isolation.test.ts.
 vi.mock('../src/main/git', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  branchGitState: vi.fn(async (): Promise<{ pr: boolean; merged: boolean }> => ({ pr: false, merged: false }))
+  branchGitState: vi.fn(async (): Promise<{ pr: boolean; merged: boolean }> => ({ pr: false, merged: false })),
+  createForkWorktree: vi.fn(async () => null)
 }));
 
 // Stub Electron's safeStorage so SecretStore is testable in plain node. Mutable flag lets the
@@ -581,6 +584,54 @@ describe('OpenRouter reasoning effort', () => {
   });
 });
 
+describe('DeepSeek reasoning effort', () => {
+  /** Captures the reasoning_effort the native loop puts on the wire for one DeepSeek step. */
+  async function sendDeepSeekStep(effort: EffortLevel): Promise<Record<string, unknown>> {
+    const model = 'deepseek-flash';
+    let body: Record<string, unknown> = {};
+    const server = await listenOnce((_req, res, raw) => {
+      body = JSON.parse(raw ?? '{}') as Record<string, unknown>;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const chunk = (delta: Record<string, unknown>, finish: string | null) => `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      res.write(chunk({ content: 'hi' }, null));
+      res.write(chunk({}, 'stop'));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    try {
+      const provider: ProviderConfig = { id: 'deepseek', kind: 'deepseek', name: 'DeepSeek', baseUrl: server.url, hasApiKey: true, models: [], enabled: true };
+      await openaiStep({
+        provider,
+        apiKey: 'sk-test',
+        model,
+        system: '',
+        history: [],
+        tools: [],
+        effort,
+        signal: AbortSignal.timeout(5_000),
+        onText: () => undefined,
+        onReasoning: () => undefined
+      });
+      return body;
+    } finally {
+      await server.close();
+    }
+  }
+
+  it('forwards max to DeepSeek instead of folding it into high', async () => {
+    // DeepSeek serves three tiers — low/high/max, the scalar efforts 50/75/100 — so folding max
+    // into high made the top tier unreachable from the app.
+    expect((await sendDeepSeekStep('max')).reasoning_effort).toBe('max');
+  });
+
+  it('folds only the levels DeepSeek has no tier for', async () => {
+    expect((await sendDeepSeekStep('minimal')).reasoning_effort).toBe('low');
+    expect((await sendDeepSeekStep('xhigh')).reasoning_effort).toBe('high');
+    expect((await sendDeepSeekStep('high')).reasoning_effort).toBe('high');
+    expect((await sendDeepSeekStep('low')).reasoning_effort).toBe('low');
+  });
+});
+
 describe('OpenCode Go session headers', () => {
   /** Captures the headers the OpenAI client actually put on the wire for one step. */
   async function stepHeaders(over: Partial<ProviderConfig>, sessionId?: string): Promise<IncomingMessage['headers']> {
@@ -938,7 +989,7 @@ describe('SessionManager fork', () => {
     return { manager, transcripts };
   };
 
-  it('forks into a different harness on the same worktree with a fresh provider session', async () => {
+  it('forks into a different harness with a fresh provider session', async () => {
     const src = sourceSession();
     src.config.acpAgent = 'dsh';
     src.config.codexModelProvider = { id: 'x', name: 'x', baseUrl: 'https://x' };
@@ -952,9 +1003,11 @@ describe('SessionManager fork', () => {
     expect(fork).toBeTruthy();
     expect(fork!.id).not.toBe(src.id);
     expect(fork!.config.harness).toBe('pi');
-    // Same directory and branch as the source.
+    // No repository behind this fake project root, so the fork shares the source's directory and
+    // must not claim the source's worktree: archiving the fork would otherwise remove it.
     expect(fork!.cwd).toBe(src.cwd);
-    expect(fork!.worktreeBranch).toBe('agent/source-session');
+    expect(fork!.worktreeBranch).toBeUndefined();
+    expect(fork!.config.useWorktree).toBe(false);
     // The new harness cannot resume the source's provider session; the transcript is handed over as text.
     expect(fork!.harnessRef).toEqual({});
     expect(fork!.pendingForkContext).toBe(true);
@@ -971,7 +1024,7 @@ describe('SessionManager fork', () => {
     expect(fork!.title).toContain('fork');
   });
 
-  it('keeps same-harness fork semantics: drops the worktree claim and carries provider state', async () => {
+  it('keeps same-harness fork semantics in a shared directory: drops the worktree claim and carries provider state', async () => {
     const src = sourceSession();
     const items: TranscriptItem[] = [{ id: 'u_1', kind: 'user', ts: 1, text: 'hi' }];
     const { manager, transcripts } = forkManager(src);
@@ -980,9 +1033,31 @@ describe('SessionManager fork', () => {
     expect(fork!.config.harness).toBe('claude');
     expect(fork!.worktreeBranch).toBeUndefined();
     expect(fork!.harnessRef).toEqual({ claudeSessionId: 'claude_abc', forkOnResume: true });
+    expect(fork!.pendingForkContext).toBeUndefined();
     const copied = transcripts.get(fork!.id) ?? [];
     expect(copied.some((i) => i.kind === 'info')).toBe(false);
     expect(copied.map((i) => i.id)).toContain('u_1');
+  });
+
+  it('gives a worktree fork its own worktree, and hands over the conversation the provider resume can no longer reach', async () => {
+    const src = sourceSession();
+    const items: TranscriptItem[] = [{ id: 'u_1', kind: 'user', ts: 1, text: 'hi' }];
+    const { manager, transcripts } = forkManager(src);
+    transcripts.set(src.id, items);
+    vi.mocked(createForkWorktree).mockResolvedValueOnce({ path: 'G:/proj/a/.vocs-code/worktrees/source-fork', branch: 'vocscode/source-fork' });
+
+    const fork = await manager.fork(src.id);
+
+    // The fork runs in its own checkout on its own branch, so archiving the source (and removing
+    // its worktree) leaves the fork's directory alone.
+    expect(fork!.cwd).toBe('G:/proj/a/.vocs-code/worktrees/source-fork');
+    expect(fork!.worktreeBranch).toBe('vocscode/source-fork');
+    // A provider session id is bound to its directory: the relocated fork cannot resume claude_abc.
+    expect(fork!.harnessRef).toEqual({});
+    expect(fork!.pendingForkContext).toBe(true);
+    // The note says where the fork landed and why the next message carries the conversation.
+    const note = (transcripts.get(fork!.id) ?? []).find((i) => i.kind === 'info');
+    expect(note?.kind === 'info' && note.text).toContain('vocscode/source-fork');
   });
 });
 

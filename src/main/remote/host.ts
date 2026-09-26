@@ -7,130 +7,18 @@ import os from 'node:os';
 import { WebSocket } from 'ws';
 import { enrollTokenContext, generateIdentity, hostAccept, openFrame, openSealedToKey, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob, type SealedToKey } from '../../shared/crypto';
 import { connectCheckCode, connectLink } from '../../shared/pairing';
+import { isRemoteChannel, isRemotePushChannel, isRemoteReadChannel, REMOTE_FRAME_MAX_BYTES } from '../../shared/remote-channels';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
 import type { Logger } from '../log';
 import type { RemoteAudit } from './audit';
+import { projectRemoteValue } from './project';
 
-/** Channels a paired web client may invoke (docs/REMOTE-ACCESS.md §5). Interactive P3:
- *  chat send/interrupt/stop, session lifecycle and per-session model controls are in; the
- *  terminal is read-only (P3.5 step one) and destructive git stays desktop-only. */
-export const REMOTE_CHANNELS = new Set<string>([
-  'app:info',
-  'settings:get',
-  'harness:availability',
-  'harness:models',
-  'sessions:list',
-  'sessions:get',
-  'sessions:transcript',
-  'sessions:transcriptPage',
-  'sessions:search',
-  'missions:list',
-  'missions:get',
-  'missions:exportPlan',
-  'missions:create',
-  'missions:control',
-  'missions:command',
-  'sessions:send',
-  'sessions:interrupt',
-  'sessions:stop',
-  'sessions:create',
-  'sessions:rename',
-  'sessions:setModel',
-  'sessions:setEffort',
-  'sessions:setPermissionMode',
-  'approvals:respond',
-  'analytics:summary',
-  'analytics:executions',
-  'skills:list',
-  'skills:read',
-  'git:folderBranch',
-  'git:folderIsRepo',
-  'git:summary',
-  'git:diff',
-  'git:branches',
-  'git:branchesOverview',
-  'git:worktrees',
-  'git:pullRequests',
-  'git:issues',
-  'git:issueComments',
-  'git:prComments',
-  'fs:list',
-  'fs:search',
-  'fs:read',
-  // P3.5, read-only first: list terminals and read a plain-text screen. No input, resize or attach.
-  'terminal:list',
-  'terminal:screen'
-]);
-
-/** View-only mode (P4) admits the read half and refuses the write half. Every channel in
- *  REMOTE_CHANNELS must be classified here or in REMOTE_WRITE_CHANNELS; a test asserts the two
- *  partition the set, so a newly added channel cannot silently become writable when view-only. */
-export const REMOTE_READ_CHANNELS = new Set<string>([
-  'app:info',
-  'settings:get',
-  'harness:availability',
-  'harness:models',
-  'sessions:list',
-  'sessions:get',
-  'sessions:transcript',
-  'sessions:transcriptPage',
-  'sessions:search',
-  'missions:list',
-  'missions:get',
-  'missions:exportPlan',
-  'analytics:summary',
-  'analytics:executions',
-  'skills:list',
-  'skills:read',
-  'git:folderBranch',
-  'git:folderIsRepo',
-  'git:summary',
-  'git:diff',
-  'git:branches',
-  'git:branchesOverview',
-  'git:worktrees',
-  'git:pullRequests',
-  'git:issues',
-  'git:issueComments',
-  'git:prComments',
-  'fs:list',
-  'fs:search',
-  'fs:read',
-  // P3.5, read-only first: list terminals and read a plain-text screen. No input, resize or attach.
-  'terminal:list',
-  'terminal:screen'
-]);
-
-export const REMOTE_WRITE_CHANNELS = new Set<string>([
-  'missions:create',
-  'missions:control',
-  // Even `/mission status` travels on a mixed command channel: never classify it as a read.
-  'missions:command',
-  'sessions:send',
-  'sessions:interrupt',
-  'sessions:stop',
-  'sessions:create',
-  'sessions:rename',
-  'sessions:setModel',
-  'sessions:setEffort',
-  'sessions:setPermissionMode',
-  'approvals:respond'
-]);
-
-/** Push channels a paired browser receives: the ones the remote surface consumes. Everything else
- *  the desktop pushes stays on this machine — terminal output (not remote until P3.5), the
- *  assistant panel, update prompts, and push:remoteState, which carries the live pairing code
- *  and pending pairing requests. */
-export const REMOTE_PUSH_CHANNELS = new Set<string>([
-  'push:sessionEvent',
-  'push:sessionsChanged',
-  // Mission records contain public coordination state, not broker credentials or provider keys.
-  'push:missionsChanged',
-  'push:settingsChanged',
-  'push:remotePolicy'
-]);
+/** The remote channel manifest (docs/REMOTE-ACCESS.md §5) lives in src/shared/remote-channels.ts
+ *  so the web shell imports the same allowlist it is held to. Re-exported because desktop callers
+ *  and tests have always imported it from the host. */
+export { REMOTE_CHANNELS, REMOTE_PUSH_CHANNELS, REMOTE_READ_CHANNELS, REMOTE_WRITE_CHANNELS } from '../../shared/remote-channels';
 
 interface HostCredentials {
   identity: Identity;
@@ -400,9 +288,12 @@ export class RemoteHost {
   /** Fan a local push event out to every connected web client, sealed per client. Only the
    *  remote push surface leaves the machine; the rest is dropped here, before sealing. */
   async broadcastPush(channel: string, payload: unknown): Promise<void> {
-    if (!REMOTE_PUSH_CHANNELS.has(channel)) return;
+    if (!isRemotePushChannel(channel)) return;
+    // Session pushes carry SessionMeta; strip what only the desktop may see before sealing.
+    const body = channel === 'push:sessionsChanged' ? projectRemoteValue(payload) : payload;
     for (const clientId of [...this.sessions.keys()]) {
-      await this.sendTo(clientId, { type: 'push', channel, payload });
+      const outcome = await this.sendTo(clientId, { type: 'push', channel, payload: body });
+      if (outcome === 'oversize') this.deps.log('warn', `remote: dropped a ${channel} push for ${clientId} (over the relay frame limit)`);
     }
   }
 
@@ -860,7 +751,7 @@ export class RemoteHost {
     session.inSalt = sealed.salt;
     session.inSeq = seq;
     if (inner.type === 'invoke' && inner.channel) {
-      const allowed = REMOTE_CHANNELS.has(inner.channel);
+      const allowed = isRemoteChannel(inner.channel);
       // Approvals are signed inside the e2e channel (§6.8): only a paired device key resolves.
       const signedOk = inner.channel !== 'approvals:respond' || (!!inner.sig && (await verify(session.identity, inner.request, inner.sig)));
       if (!allowed || !signedOk) {
@@ -872,15 +763,20 @@ export class RemoteHost {
       }
       // View-only mode (P4): the read half is served, the write half is refused before dispatch,
       // so no send, approval, session change or lifecycle action can reach the registry.
-      if (this.deps.viewOnly?.() && !REMOTE_READ_CHANNELS.has(inner.channel)) {
+      if (this.deps.viewOnly?.() && !isRemoteReadChannel(inner.channel)) {
         this.deps.log('info', `remote: refused ${inner.channel} from ${from} (view-only mode)`);
         this.deps.audit?.record('view-only-blocked', { device: from, detail: inner.channel });
         await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: 'remote access is in view-only mode' });
         return;
       }
       try {
-        const value = await this.deps.registry().invoke(inner.channel, inner.request);
-        await this.sendTo(from, { type: 'result', id: inner.id, ok: true, value });
+        const value = projectRemoteValue(await this.deps.registry().invoke(inner.channel, inner.request));
+        const outcome = await this.sendTo(from, { type: 'result', id: inner.id, ok: true, value });
+        if (outcome === 'oversize') {
+          // The relay would drop the frame silently and leave the client waiting out its timeout.
+          this.deps.log('warn', `remote: ${inner.channel} response for ${from} exceeded the relay frame limit`);
+          await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: 'response too large' });
+        }
       } catch (e) {
         await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: e instanceof Error ? e.message : String(e) });
       }
@@ -892,19 +788,27 @@ export class RemoteHost {
     }
   }
 
-  private async sendTo(clientId: string, inner: unknown): Promise<void> {
+  /** One sealed frame's fate: 'oversize' means it was refused unsent because the relay would have
+   *  dropped it, 'skipped' that the client or its socket is already gone. */
+  private async sendTo(clientId: string, inner: unknown): Promise<'sent' | 'oversize' | 'skipped'> {
     const session = this.sessions.get(clientId);
-    if (!session) return;
-    const send = session.outgoing.then(async () => {
+    if (!session) return 'skipped';
+    const send = session.outgoing.then(async (): Promise<'sent' | 'oversize' | 'skipped'> => {
       const socket = this.ws;
-      if (this.sessions.get(clientId) !== session || !socket || socket.readyState !== WebSocket.OPEN) return;
+      if (this.sessions.get(clientId) !== session || !socket || socket.readyState !== WebSocket.OPEN) return 'skipped';
       const sealed = await sealFrame(session.key, session.salt, session.out++, inner);
+      const wire = JSON.stringify({ t: 'd', to: clientId, seq: sealed.seq, payload: sealed });
+      // The relay drops anything over MAX_WS_FRAME_BYTES without telling either side
+      // (relay/src/hub.ts). Refuse it here, where the sender can still say so.
+      if (Buffer.byteLength(wire, 'utf8') > REMOTE_FRAME_MAX_BYTES) return 'oversize';
       if (this.sessions.get(clientId) === session && this.ws === socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ t: 'd', to: clientId, seq: sealed.seq, payload: sealed }));
+        socket.send(wire);
+        return 'sent';
       }
+      return 'skipped';
     });
-    session.outgoing = send.catch(() => undefined);
-    await send;
+    session.outgoing = send.then(() => undefined, () => undefined);
+    return send;
   }
 }
 

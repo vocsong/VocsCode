@@ -619,8 +619,8 @@ describe('Mission remote policy', () => {
   it('classifies list/get/export as reads, never the mixed command endpoint or desktop saver', () => {
     expect(REMOTE_CHANNELS.has('app:fileSaveAs')).toBe(false);
     expect(REMOTE_READ_CHANNELS.has('app:fileSaveAs')).toBe(false);
-    for (const channel of ['missions:list', 'missions:get', 'missions:exportPlan']) { expect(REMOTE_CHANNELS.has(channel)).toBe(true); expect(REMOTE_READ_CHANNELS.has(channel)).toBe(true); }
-    for (const channel of ['missions:create', 'missions:control', 'missions:command']) { expect(REMOTE_CHANNELS.has(channel)).toBe(true); expect(REMOTE_WRITE_CHANNELS.has(channel)).toBe(true); expect(REMOTE_READ_CHANNELS.has(channel)).toBe(false); }
+    for (const channel of ['missions:list', 'missions:get', 'missions:exportPlan'] as const) { expect(REMOTE_CHANNELS.has(channel)).toBe(true); expect(REMOTE_READ_CHANNELS.has(channel)).toBe(true); }
+    for (const channel of ['missions:create', 'missions:control', 'missions:command'] as const) { expect(REMOTE_CHANNELS.has(channel)).toBe(true); expect(REMOTE_WRITE_CHANNELS.has(channel)).toBe(true); expect(REMOTE_READ_CHANNELS.has(channel)).toBe(false); }
   });
 
   it('refuses new mutations before the real registry is invoked, but permits reads over the sealed connection', async () => {
