@@ -160,6 +160,13 @@ describe('handler registry', () => {
     for (const c of agentChannels()) expect(channels, `${c} is on the agent allowlist but not registered`).toContain(c);
   });
 
+  it('rejects an empty MCP import with an actionable message and no settings write', async () => {
+    const { registry, deps } = stubDeps();
+    const update = vi.spyOn(deps.settings, 'update');
+    await expect(registry.invoke('mcp:import', { servers: [], to: 'global' })).resolves.toEqual({ ok: false, error: 'No MCP servers to import.' });
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('removes a folder from the app: its sessions in one batch, its settings, nothing on disk', async () => {
     const rooted = (id: string, projectRoot: string): SessionMeta => ({
       id,
@@ -280,7 +287,7 @@ describe('handler registry', () => {
     expect(info.isPackaged).toBe(false);
     await registry.invoke('app:notify', { title: 't', body: 'b' });
     expect(calls).toContain('notify:t');
-    registry.invoke('window:toggleFullScreen', undefined);
+    await registry.invoke('window:toggleFullScreen', undefined);
     expect(calls).toContain('toggleFullScreen');
     const zoom = (await registry.invoke('window:zoom', { direction: 'in' })) as { zoomFactor: number };
     expect(zoom).toEqual({ zoomFactor: 1 }); // no window -> zoom bridge returns null -> defaults to 1
@@ -329,6 +336,7 @@ describe('handler registry', () => {
       } as unknown as TerminalManager,
       sessions: {
         list: () => [],
+        get: (id: string) => id === 's_test' ? { id, cwd: ws, config: { projectRoot: ws } } as SessionMeta : undefined,
         setArchived: async (...args: unknown[]) => {
           order.push(`setArchived:${args.map(String).join(',')}`);
           return { id: 's_test' } as unknown as SessionMeta;

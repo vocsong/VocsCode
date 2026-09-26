@@ -27,7 +27,7 @@ const { invoke, on, listeners } = vi.hoisted(() => {
     })
   };
 });
-vi.mock('../src/renderer/src/api', () => ({ invoke, on, isMac: false, modKey: 'Ctrl', platform: 'win32', isWeb: false, webShim: vi.fn() }));
+vi.mock('../src/renderer/src/api', () => ({ canInvoke: () => true, invoke, on, isMac: false, modKey: 'Ctrl', platform: 'win32', isWeb: false, webShim: vi.fn() }));
 
 const session = (harness: SessionMeta['config']['harness'] = 'pi'): SessionMeta =>
   ({

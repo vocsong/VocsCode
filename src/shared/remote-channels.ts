@@ -18,6 +18,9 @@ const READ: readonly IpcChannel[] = [
   'sessions:transcript',
   'sessions:transcriptPage',
   'sessions:search',
+  'missions:list',
+  'missions:get',
+  'missions:exportPlan',
   'analytics:summary',
   'analytics:executions',
   'skills:list',
@@ -44,6 +47,10 @@ const READ: readonly IpcChannel[] = [
 /** Interactive P3: chat send/interrupt/stop, session lifecycle and per-session model controls.
  *  Destructive git stays desktop-only. */
 const WRITE: readonly IpcChannel[] = [
+  'missions:create',
+  'missions:control',
+  // Even `/mission status` travels on a mixed command channel: never classify it as a read.
+  'missions:command',
   'sessions:send',
   'sessions:interrupt',
   'sessions:stop',
@@ -59,7 +66,10 @@ const WRITE: readonly IpcChannel[] = [
  *  the desktop pushes stays on this machine — terminal output (not remote until P3.5), the
  *  assistant panel, update prompts, and push:remoteState, which carries the live pairing code
  *  and pending pairing requests. */
-const PUSH: readonly PushChannel[] = ['push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged', 'push:remotePolicy', 'push:desktopFocus'];
+const PUSH: readonly PushChannel[] = ['push:sessionEvent', 'push:sessionsChanged',
+  // Mission records contain public coordination state, not broker credentials or provider keys.
+  'push:missionsChanged',
+  'push:settingsChanged', 'push:remotePolicy', 'push:desktopFocus'];
 
 /** A typed runtime lookup: the arrays above are checked against the contract where they are
  *  written, and callers get channel names back rather than arbitrary strings. */

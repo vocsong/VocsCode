@@ -16,13 +16,30 @@ import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './
 import { ModelPicker } from './ModelPicker';
 import { PairingQr } from './PairingQr';
 import { PiSection } from './PiSettings';
+import { MissionSettings } from './mission/MissionSettings';
 
-type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
+export type SettingsSection = 'general' | 'mission' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
+type Section = SettingsSection;
+
+/** Deep links ("Configure Mission") land on their section, whether or not Settings is open. */
+let requestedSection: Section | null = null;
+const sectionListeners = new Set<(section: Section) => void>();
+export function openSettings(section: Section): void {
+  requestedSection = section;
+  for (const listener of sectionListeners) listener(section);
+  useStore.getState().setView('settings');
+}
 
 export function SettingsView() {
   const settings = useStore((s) => s.settings)!;
   const setView = useStore((s) => s.setView);
-  const [section, setSection] = useState<Section>('general');
+  const [section, setSection] = useState<Section>(() => requestedSection ?? 'general');
+  useEffect(() => {
+    requestedSection = null;
+    const listener = (next: Section) => { requestedSection = null; setSection(next); };
+    sectionListeners.add(listener);
+    return () => { sectionListeners.delete(listener); };
+  }, []);
   const update = (patch: Partial<AppSettings>) => void invoke('settings:update', patch);
   return (
     <div className="settings">
@@ -34,6 +51,7 @@ export function SettingsView() {
         {(
           [
             ['general', 'General', 'settings'],
+            ['mission', 'Mission', 'flag'],
             ['shortcuts', 'Shortcuts', 'keyboard'],
             ['terminal', 'Terminal', 'terminal'],
             ['providers', 'Providers & keys', 'key'],
@@ -51,6 +69,7 @@ export function SettingsView() {
       </div>
       <div className="settings-body">
         {section === 'general' && <General settings={settings} update={update} />}
+        {section === 'mission' && <MissionSettings settings={settings} />}
         {section === 'shortcuts' && <ShortcutsSection settings={settings} />}
         {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
         {section === 'providers' && <Providers settings={settings} />}
