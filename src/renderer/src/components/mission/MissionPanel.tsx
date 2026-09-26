@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { MissionAttempt, MissionRecord, MissionUserControl } from '../../../../shared/mission';
 import type { SessionMeta, TranscriptItem } from '../../../../shared/types';
 import { HARNESS_BY_ID } from '../../../../shared/harness-meta';
+import { missionFailureLabel, readableMissionText } from '../../../../shared/mission-errors';
 import { controlMission, MISSION_MANAGED_REASON, missionStatusLabel } from '../../missions';
 import { useStore } from '../../store';
 import { invoke, isWeb } from '../../api';
@@ -103,7 +104,7 @@ function MissionDetails({ record }: { record: MissionRecord }) {
     {proposal && <section className="callout"><strong>Proceed with execution?</strong><p>Approve specification revision {proposal.specificationRevision}, plan revision {proposal.planRevision}.</p><div className="row gap8"><Button variant="primary" disabled={busy || leadBusy || !validProposal} onClick={() => void run({ action: 'execute', proposalId: proposal.id, specificationRevision: proposal.specificationRevision })}>Proceed</Button><Button disabled={busy || leadBusy || !validProposal} onClick={() => void run({ action: 'continue_planning' })}>Continue planning</Button></div>{!validProposal && <p>This proposal is no longer current. Wait for the lead's revised proposal.</p>}{validProposal && leadBusy && <p>Wait for the planning turn and its tools to settle before proceeding.</p>}</section>}
     {error && <div role="alert" className="callout warn">{error}</div>}
     <section><h3>Tasks and dependencies</h3>{record.tasks.length === 0 && <p className="muted">No tasks recorded yet.</p>}{record.tasks.map((task) => <article key={task.id} className="mission-card"><div><strong>{task.objective}</strong> <Badge>{missionStatusLabel(task.status)}</Badge></div><p>{task.scope}</p><p className="muted small">{task.id} · revision {task.revision} · {task.assignment.kind === 'lead' ? 'Principal engineer' : record.profiles.find((p) => p.id === (task.assignment as { profileId: string }).profileId)?.name ?? 'Specialist'}</p>{task.dependsOn.length > 0 && <p>Depends on: {task.dependsOn.map((dep) => `${dep.taskId} (${missionStatusLabel(dep.condition)})`).join(', ')}</p>}{task.reason && <p>{task.reason}</p>}<Button size="sm" variant="ghost" disabled={!!record.archived} onClick={() => ask(`task ${task.id}, revision ${task.revision}`)}>Ask lead about this</Button></article>)}</section>
-    <section><h3>Blockers and decisions</h3>{record.blockers.filter((b) => !b.resolvedAt).map((b) => <p className="callout warn" key={b.id}>{b.kind}: {b.message}</p>)}{record.decisions.map((d) => <div key={d.id}><strong>{d.question}</strong><p>{d.resolution ?? d.proposedResolution ?? 'Unresolved'}{d.rationale ? ` — ${d.rationale}` : ''}</p></div>)}{!record.blockers.some((b) => !b.resolvedAt) && !record.decisions.length && <p className="muted">No recorded blockers or decisions.</p>}</section>
+    <section><h3>Blockers and decisions</h3>{record.blockers.filter((b) => !b.resolvedAt).map((b) => <MissionBlocker key={b.id} blocker={b} />)}{record.decisions.map((d) => <div key={d.id}><strong>{d.question}</strong><p>{d.resolution ?? d.proposedResolution ?? 'Unresolved'}{d.rationale ? ` — ${d.rationale}` : ''}</p></div>)}{!record.blockers.some((b) => !b.resolvedAt) && !record.decisions.length && <p className="muted">No recorded blockers or decisions.</p>}</section>
     <section><h3>Verification evidence</h3>{record.evidence.length === 0 && <p className="muted">No verification evidence recorded. Not verified.</p>}{record.evidence.map((e) => <article key={e.id} className="mission-card"><strong>{e.commandOrFlow}</strong><p>{e.result}{e.invalidatedBy ? ' · stale evidence' : ''} · {missionStatusLabel(e.provenance)}</p><p className="small">{e.executedTests !== undefined ? `${e.executedTests} tests executed · ${e.skippedTests ?? 0} skipped` : 'Executed test count unknown'} · revision {e.sourceRevision.contentHash}</p><p className="mono small">{e.cwd}</p></article>)}</section>
     <section><h3>Delivery</h3><p>{missionStatusLabel(record.deliveryPolicy.endpoint)}{record.deliveryPolicy.endpoint !== 'local_commit' && record.deliveryPolicy.targetBranch ? ` → ${record.deliveryPolicy.targetBranch}` : ''}{record.deliveryPolicy.fallback ? ' · fallback policy' : ''}</p><p>{record.delivery ? `${record.delivery.status}${record.delivery.reason ? ` — ${record.delivery.reason}` : ''}` : 'Not delivered.'}</p>
       {record.delivery && <MissionDeliveryIdentity delivery={record.delivery} />}
@@ -120,6 +121,12 @@ function MissionDetails({ record }: { record: MissionRecord }) {
     <MissionUsage record={record} />
     <p className="muted small">{MISSION_MANAGED_REASON}</p>
   </div>;
+}
+
+/** A typed failure classification names its own category; a plain blocker is labelled by kind. */
+function MissionBlocker({ blocker }: { blocker: MissionRecord['blockers'][number] }) {
+  const text = readableMissionText(blocker.message);
+  return <p className="callout warn">{text === blocker.message ? `${missionFailureLabel(blocker.kind)}: ${text}` : text}</p>;
 }
 
 /** Fetch at click time: the panel's cached revision is not the export authority. */
@@ -193,7 +200,7 @@ function MissionInspector({ record, attempt, itemId, ask }: { record: MissionRec
     <h4>{attempt.profile?.name ?? attempt.taskId} — read-only</h4><p>T{attempt.tierId} · {attempt.preset.name} · {attempt.outcome ?? attempt.status}</p>
     <div className="row gap8 wrap">{(['transcript', 'result', 'diff'] as const).map((tab) => <Button size="sm" key={tab} aria-pressed={view === tab} onClick={() => setView(tab)}>{tab === 'diff' ? 'Unaccepted workspace diff' : tab === 'result' ? 'Result' : 'Transcript'}</Button>)}<Button size="sm" disabled={!!record.archived} onClick={ask}>Ask lead about this</Button></div>
     {view === 'transcript' && <>{!loaded && !error && <Spinner />}{error && <p role="alert">{error}</p>}{items.map((item) => <article key={item.id} data-mission-item={item.id} className={`mission-card ${item.id === itemId ? 'mission-match' : ''}`}><strong>{item.kind}</strong><pre>{transcriptText(item)}</pre></article>)}</>}
-    {view === 'result' && <><p>{attempt.result?.summary ?? 'No structured result submitted.'}</p>{attempt.result?.unresolved.map((u, i) => <p key={i}>{u.blocking ? 'Blocking: ' : ''}{u.description}</p>)}{attempt.result && <p className="small">Artifacts: {attempt.result.artifactIds.join(', ') || 'none'} · Evidence: {attempt.result.evidenceIds.join(', ') || 'none'}</p>}{attempt.failure && <p role="alert">{attempt.failure.kind}: {attempt.failure.message}</p>}</>}
+    {view === 'result' && <><p>{attempt.result?.summary ?? 'No structured result submitted.'}</p>{attempt.result?.unresolved.map((u, i) => <p key={i}>{u.blocking ? 'Blocking: ' : ''}{u.description}</p>)}{attempt.result && <p className="small">Artifacts: {attempt.result.artifactIds.join(', ') || 'none'} · Evidence: {attempt.result.evidenceIds.join(', ') || 'none'}</p>}{attempt.failure && <p role="alert">{missionFailureLabel(attempt.failure.kind)} failure: {attempt.failure.message}</p>}</>}
     {view === 'diff' && <>{diffError && <p role="alert">{diffError}</p>}{diff === undefined && !diffError ? <Spinner /> : <DiffView diff={diff ?? ''} />}</>}
   </div>;
 }

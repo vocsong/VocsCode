@@ -1,12 +1,14 @@
 /** Mission UI actions only: the main-process coordinator owns admission and execution. */
 import type { CreateMissionRequest, MissionControlRequest, MissionRecord, MissionUserControl } from '../../shared/mission';
+import { MISSION_NOT_LINKED_MESSAGE } from '../../shared/mission-command';
 import { applyMissionProjectOverride, DEFAULT_MISSION_CONFIG } from '../../shared/mission-config';
-import { isMissionRevisionConflict } from '../../shared/mission-errors';
+import { isMissionRevisionConflict, readableMissionText } from '../../shared/mission-errors';
 import type { AppSettings, ImageAttachment, SessionMeta, UserInput } from '../../shared/types';
 import { invoke } from './api';
 import { useStore } from './store';
 
 export const MISSION_MANAGED_REASON = 'Mission owns execution and accepted changes. Ask the lead for a change; generic fork, rewind, revert and commit are unavailable.';
+export const MISSION_CHANGED_REASON = 'The Mission changed before this action was applied, so nothing was done. Its latest state is shown now; review it and try again.';
 export const isTopLevelSession = (session: SessionMeta): boolean => session.mission?.role !== 'worker';
 export const missionStatusLabel = (status: string): string => status.replace(/_/g, ' ');
 
@@ -50,7 +52,7 @@ export async function openMission(record: MissionRecord): Promise<void> {
     const lead = await invoke('sessions:get', { id: record.leadSessionId });
     if (!lead) {
       const latest = useStore.getState().missions[record.id] ?? record;
-      const reason = latest.blockers.filter((blocker) => blocker.resolvedAt === undefined).map((blocker) => blocker.message).join('\n');
+      const reason = latest.blockers.filter((blocker) => blocker.resolvedAt === undefined).map((blocker) => readableMissionText(blocker.message)).join('\n');
       throw new Error(`The Mission principal-engineer session is not available.${reason ? ` ${reason}` : ' Retry after the host has created the session.'}`);
     }
     useStore.getState().setSessions([...useStore.getState().sessions, lead]);
@@ -68,10 +70,19 @@ export async function createMission(input: Omit<CreateMissionRequest, 'idempoten
 }
 
 export async function controlMission(record: MissionRecord, control: MissionUserControl): Promise<MissionRecord> {
-  const next = await request(`control:${record.id}:${JSON.stringify(control)}`, (idempotencyKey) => {
-    const input: MissionControlRequest = { missionId: record.id, expectedRevision: record.revision, idempotencyKey, control };
-    return () => invoke('missions:control', input);
-  });
+  let next: MissionRecord;
+  try {
+    next = await request(`control:${record.id}:${JSON.stringify(control)}`, (idempotencyKey) => {
+      const input: MissionControlRequest = { missionId: record.id, expectedRevision: record.revision, idempotencyKey, control };
+      return () => invoke('missions:control', input);
+    });
+  } catch (error) {
+    if (!isMissionRevisionConflict(error)) throw error;
+    // Refused before anything committed. Load the current record so the next click binds it: a
+    // missed push must not leave Pause/Resume/Stop failing until the window reloads.
+    await useStore.getState().loadMission(record.id);
+    throw new Error(MISSION_CHANGED_REASON);
+  }
   useStore.getState().setMission(next);
   if (next.leadSessionId !== record.leadSessionId) await openMission(next);
   return next;
@@ -93,7 +104,8 @@ export async function commandMission(session: SessionMeta, text: string, images?
     return reply;
   });
   if (reply.kind === 'show') useStore.getState().openMissionLaunch(session.config.projectRoot, session.id);
-  if (reply.message) useStore.getState().toast(reply.message);
+  const message = reply.message ?? (reply.kind === 'status' && !reply.mission ? MISSION_NOT_LINKED_MESSAGE : undefined);
+  if (message) useStore.getState().toast(message);
 }
 
 export function pauseMissionSession(session: SessionMeta): void {
