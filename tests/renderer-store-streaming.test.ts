@@ -149,6 +149,20 @@ describe('renderer streaming batches', () => {
     unsubscribe();
   });
 
+  it('drops events at or below a paged transcript floor and keeps newer ones', () => {
+    useStore.setState({ transcripts: { a: [assistant('reply', 'base')] }, transcriptFloors: { a: 5 } });
+    const push = (seq: number, event: SessionEvent) => useStore.getState().applyEvent({ sessionId: 'a', event, ts: 1, seq });
+    push(4, { type: 'item.upsert', item: assistant('reply', 'stale') });
+    push(5, { type: 'item.delta', id: 'reply', textDelta: '-stale' });
+    push(6, { type: 'item.delta', id: 'reply', textDelta: '+fresh' });
+    flushFrame();
+    expect(useStore.getState().transcripts.a).toEqual([assistant('reply', 'base+fresh')]);
+    // An event with no seq (an older desktop) is never dropped by a floor.
+    useStore.getState().applyEvent({ sessionId: 'a', event: { type: 'item.delta', id: 'reply', textDelta: '=legacy' }, ts: 1 });
+    flushFrame();
+    expect(useStore.getState().transcripts.a).toEqual([assistant('reply', 'base+fresh=legacy')]);
+  });
+
   it('does not publish an update for missing targets', () => {
     const original = { a: [assistant('reply')] };
     useStore.setState({ transcripts: original });

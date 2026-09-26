@@ -1,10 +1,11 @@
 import React from 'react';
-import type { ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
-import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
+import type { ModelInfo, SessionMeta } from '../../../shared/types';
+import { HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { modelRefName, parseTypedModel } from '../../../shared/model-names';
 import { invoke } from '../api';
 import { basename, fmtCost, fmtTokens, harnessShort, harnessTone } from '../format';
 import { archiveSession, setSessionEffort } from '../sessionActions';
+import { effortOptions, permissionOptions } from '../session-controls';
 import { useSessionModels } from '../models';
 import { useGitSummary } from '../gitReads';
 import { useStore } from '../store';
@@ -30,7 +31,8 @@ export function Header({ session }: { session: SessionMeta }) {
 
   const current = session.activeModel ?? session.config.model;
   const currentInfo = models.find((m) => current && m.id === current.model && m.provider === current.provider);
-  const effortOptions = currentInfo?.supportedEfforts?.length ? currentInfo.supportedEfforts : [...EFFORT_LEVELS];
+  const effortLevels = effortOptions(session, currentInfo);
+  const modes = permissionOptions(session);
   const mode = session.config.permissionMode;
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
   const ctxPct = session.usage.contextWindow && session.usage.contextTokens ? Math.min(100, Math.round((session.usage.contextTokens / session.usage.contextWindow) * 100)) : null;
@@ -94,26 +96,32 @@ export function Header({ session }: { session: SessionMeta }) {
           )}
         </Dropdown>
 
-        {h.capabilities.effort && (
+        {h.capabilities.effort && effortLevels.length > 0 && (
           <Dropdown align="right" width={200} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Reasoning effort"><Icon name="brain" size={13} /> {session.activeEffort ?? session.config.effort ?? 'effort'} <Icon name="chevron" size={12} /></button>}>
             {(close) => (
               <>
-                {effortOptions.map((l) => (
-                  <MenuItem key={l} active={(session.activeEffort ?? session.config.effort) === l} onClick={() => { close(); void setSessionEffort(session.id, l, toast); }}>
-                    {l}
+                {effortLevels.map((option) => (
+                  <MenuItem key={option.value} active={(session.activeEffort ?? session.config.effort) === option.value} onClick={() => { close(); void setSessionEffort(session.id, option.value, toast); }}>
+                    {option.label}
                   </MenuItem>
                 ))}
               </>
             )}
           </Dropdown>
         )}
+        {/* A model that takes no effort keeps the pill in place, disabled, so switching models does not shift the row. */}
+        {h.capabilities.effort && effortLevels.length === 0 && (
+          <button type="button" className="pill" disabled aria-label="Reasoning effort" title={`${currentInfo?.displayName ?? 'This model'} does not support reasoning effort`}>
+            <Icon name="brain" size={13} /> effort
+          </button>
+        )}
 
         <Dropdown align="right" width={300} trigger={(open) => <button type="button" className={`pill mode-${mode} ${open ? 'open' : ''}`} title={PERMISSION_MODE_LABELS[mode].description}><Icon name="shield" size={13} /> {PERMISSION_MODE_LABELS[mode].short} <Icon name="chevron" size={12} /></button>}>
           {(close) => (
             <>
-              {h.capabilities.permissionModes.map((m) => (
-                <MenuItem key={m} active={m === mode} hint={PERMISSION_MODE_LABELS[m].description} onClick={() => { close(); void invoke('sessions:setPermissionMode', { id: session.id, mode: m as PermissionMode }); }}>
-                  {PERMISSION_MODE_LABELS[m].label}
+              {modes.map((option) => (
+                <MenuItem key={option.value} active={option.value === mode} hint={option.hint} onClick={() => { close(); void invoke('sessions:setPermissionMode', { id: session.id, mode: option.value }); }}>
+                  {option.label}
                 </MenuItem>
               ))}
             </>

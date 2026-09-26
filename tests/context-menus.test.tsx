@@ -14,6 +14,7 @@ const invokeMock = vi.fn().mockResolvedValue({});
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Sidebar } from '../src/renderer/src/components/Sidebar';
 import { Transcript } from '../src/renderer/src/components/Transcript';
+import { TranscriptCapabilitiesProvider } from '../src/renderer/src/capabilities';
 import { ContextMenuHost } from '../src/renderer/src/components/ContextMenu';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
@@ -168,6 +169,22 @@ describe('transcript context menu', () => {
     const input = document.createElement('textarea');
     transcriptEl.append(input);
     rightClick(input);
+    expect(document.querySelector('[data-testid="context-menu"]')).toBeNull();
+  });
+
+  it('leaves no menu at all when the host turns the row menu off', () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue({});
+    useStore.setState({ sessions: [session('s_a')], settings, transcripts: { s_a: items }, loaded: { s_a: true }, showThinking: false, searchJump: null, toasts: [] });
+    const { container } = render(
+      <>
+        <TranscriptCapabilitiesProvider value={{ contextMenu: false, editAndResend: true, openFile: true }}>
+          <Transcript session={session('s_a')} />
+        </TranscriptCapabilitiesProvider>
+        <ContextMenuHost />
+      </>
+    );
+    rightClick(container.querySelector('.msg-user .msg-text') as HTMLElement);
     expect(document.querySelector('[data-testid="context-menu"]')).toBeNull();
   });
 });

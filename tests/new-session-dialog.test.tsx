@@ -9,6 +9,8 @@ vi.mock('../src/renderer/src/api', () => ({
   on: vi.fn(),
   isMac: false,
   modKey: 'Ctrl',
+  canInvoke: () => true,
+  isWeb: false,
 }));
 
 import { NewSessionDialog } from '../src/renderer/src/components/NewSessionDialog';
