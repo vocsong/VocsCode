@@ -381,13 +381,10 @@ export const useStore = create<State>((set, get) => ({
     if (get().booted && get().settings && !get().bootError) return Promise.resolve();
     set({ bootError: null, booted: false });
     bootInFlight = (async () => {
-      try {
-        const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
-        // A web shell cannot list local terminals: ask only for what this host can serve.
-        const terminals = canInvoke('terminal:list') ? await invoke('terminal:list', undefined) : [];
-        set({ settings, sessions, terminals, terminalsLoaded: true, booted: true, remoteAccess: { viewOnly: settings.remote?.viewOnly === true } });
-        if (!subscribed) {
-          subscribed = true;
+      // Install the push subscriptions before any round trip: a boot that fails halfway must not
+      // leave the store deaf to events, and a reconnect must not need a second boot to listen.
+      if (!subscribed) {
+        try {
           on('push:sessionsChanged', (list) => get().setSessions(list));
           on('push:settingsChanged', (s) => get().setSettings(s));
           on('push:sessionEvent', (env) => get().applyEvent(env));
@@ -397,7 +394,17 @@ export const useStore = create<State>((set, get) => ({
           on('push:updateState', (s) => set({ updateState: s }));
           on('push:desktopFocus', (focus) => set({ desktopFocus: focus }));
           on('push:remotePolicy', ({ viewOnly }) => set({ remoteAccess: { viewOnly } }));
+          subscribed = true;
+        } catch {
+          // No usable bridge (a torn-down test window, a failed preload): the invoke below reports
+          // the failure; a later boot retries the subscriptions.
         }
+      }
+      try {
+        const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
+        // A web shell cannot list local terminals: ask only for what this host can serve.
+        const terminals = canInvoke('terminal:list') ? await invoke('terminal:list', undefined) : [];
+        set({ settings, sessions, terminals, terminalsLoaded: true, booted: true, remoteAccess: { viewOnly: settings.remote?.viewOnly === true } });
         // Refused channels are never invoked: a browser cannot update the app or read Vesta's state.
         if (canInvoke('update:state')) void invoke('update:state', undefined).then((s) => set({ updateState: s })).catch(() => undefined);
         if (canInvoke('agent:state')) void invoke('agent:state', undefined).then((s) => get().setAgentState(s)).catch(() => undefined);

@@ -20,13 +20,14 @@
     "dev": "electron-vite dev",
     "setup": "npm install --include=dev && npm run dev",
     "update": "git pull && npm install --include=dev && npm run build && npm start",
-    "build": "electron-vite build",
+    "build": "electron-vite build && npm run build:web",
+    "build:web": "vite build --config vite.config.web.ts",
     "preview": "electron-vite preview",
     "start": "electron-vite preview",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:test && npm run typecheck:relay && npm run typecheck:relay-test && npm run typecheck:page",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:test && npm run typecheck:relay && npm run typecheck:relay-test",
     "test": "vitest run --exclude tests/smoke.remote-live.test.ts",
     "dist:win": "electron-vite build && electron-builder --win --config electron-builder.yml",
     "dist:dir": "electron-vite build && electron-builder --dir --config electron-builder.yml",
@@ -41,9 +42,7 @@
     "test:remote-live": "node -e \"if (process.env.REMOTE_LIVE !== '1') { console.error('Set REMOTE_LIVE=1 to authorize the remote live smoke.'); process.exit(1) }\" && vitest run tests/smoke.remote-live.test.ts",
     "test:relay-do": "vitest run --config vitest.relay.config.ts",
     "typecheck:relay": "tsc --noEmit -p relay/tsconfig.json",
-    "typecheck:relay-test": "tsc --noEmit -p relay/tsconfig.test.json",
-    "typecheck:page": "tsc --noEmit -p relay/tsconfig.page.json",
-    "relay:page": "esbuild relay/src/page.ts --bundle --format=iife --outfile=relay/public/app/app.js"
+    "typecheck:relay-test": "tsc --noEmit -p relay/tsconfig.test.json"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.5.0",
