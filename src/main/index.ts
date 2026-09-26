@@ -8,6 +8,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
 import { AnalyticsStore } from './analytics';
+import { DesktopFocusTracker } from './desktop-focus';
 import { watchEventLoop } from './diag';
 import { setGitLog } from './git';
 import { PRODUCT_APP_ID, resolveAppIdentity } from './identity';
@@ -314,6 +315,18 @@ async function main(): Promise<void> {
     void remoteHost?.broadcastPush(channel, payload);
   };
 
+  // Which session the desktop window is on, pushed to paired browsers so they can open the same
+  // one. The window's focus/blur is wired in `createWindow`; the list reconcile forgets a target
+  // that was deleted or archived since it was reported.
+  const desktopFocus = new DesktopFocusTracker({
+    hasSession: (id) => !!sessionsRef.get(id),
+    push: (focus) => {
+      pushAll(PUSH_CHANNELS.desktopFocus, focus);
+      remoteMirror?.notifyIndex();
+    }
+  });
+  sessionsChangedHooks.push(() => desktopFocus.reconcile());
+
   // In-app auto-update (issue #198): packaged builds only — never in dev, and opt-out for e2e runs.
   // The startup check is deferred a beat so the first paint and git reads do not share its network.
   if (app.isPackaged && !process.env.VOCS_CODE_UPDATER_DISABLE) {
@@ -379,6 +392,7 @@ async function main(): Promise<void> {
     host: () => remoteHost,
     sessions: () => sessionsRef.list(),
     transcript: (id) => sessionsRef.transcript(id),
+    focus: () => desktopFocus.state().sessionId,
     enabled: () => settings.get().remote?.mirror === true,
     log
   });
@@ -395,6 +409,7 @@ async function main(): Promise<void> {
     knowledge,
     gitnexusIndexer,
     remote: remoteHost,
+    desktopFocus,
     remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },
     updater: updater ?? undefined,
     broadcast: (channel, payload) => {
@@ -453,7 +468,7 @@ async function main(): Promise<void> {
   // application menu because the system requires one for the app menu and standard shortcuts.
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
-  createWindow(settings, appRoot);
+  createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused));
 
   log('info', `ready in ${Math.round(process.uptime() * 1000)}ms: ${store.list().length} session(s), ${terminals.list().length} terminal tab(s)`);
 
@@ -465,7 +480,7 @@ async function main(): Promise<void> {
   if (analytics.forkSweepPending) void reconcileForkInheritance(analytics, store, logTo);
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot);
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused));
   });
   app.on('window-all-closed', () => {
     // macOS convention: stay resident so the 'activate' dock handler can reopen a window.
@@ -688,7 +703,7 @@ function applyChrome(): void {
   }
 }
 
-function createWindow(settings: SettingsStore, appRoot: string): void {
+function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (focused: boolean) => void): void {
   const s = settings.get();
   const bounds = s.windowBounds ?? { width: 1440, height: 900 };
   const icon = appIconPath(appRoot);
@@ -743,6 +758,9 @@ function createWindow(settings: SettingsStore, appRoot: string): void {
     log('debug', 'window closed');
     mainWindow = null;
   });
+  // Presence for paired browsers: they follow the desktop only while its window is foregrounded.
+  win.on('focus', () => onWindowFocus(true));
+  win.on('blur', () => onWindowFocus(false));
   // A preload failure leaves the renderer with no IPC bridge; the crash, stall and load-failure
   // handlers live with the recovery wiring below.
   win.webContents.on('preload-error', (_e, preloadPath, error) => {

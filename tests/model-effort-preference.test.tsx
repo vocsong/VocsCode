@@ -2,11 +2,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { NewSessionDialog } from '../src/renderer/src/components/NewSessionDialog';
+import { setSessionEffort } from '../src/renderer/src/sessionActions';
 import { useStore } from '../src/renderer/src/store';
 import type { EffortLevel, ModelInfo } from '../src/shared/types';
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl' }));
+const { invoke, gate } = vi.hoisted(() => ({ invoke: vi.fn(), gate: { settings: true } }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', isWeb: false, canInvoke: (channel: string) => channel !== 'settings:update' || gate.settings }));
 
 class ResizeObserverMock {
   observe() {}
@@ -63,6 +64,7 @@ beforeEach(() => {
     if (channel === 'harness:models') return Promise.resolve({ models: harnessModels });
     if (channel === 'sessions:create') return Promise.resolve({ id: 's_new' });
     if (channel === 'sessions:transcript') return Promise.resolve([]);
+    if (channel === 'sessions:setEffort') return Promise.resolve(undefined);
     return Promise.resolve({});
   });
 });
@@ -73,6 +75,18 @@ afterEach(() => {
 });
 
 describe('reasoning effort preference', () => {
+  it('switches a session effort without trying to remember it when settings writes are refused', async () => {
+    gate.settings = false;
+    try {
+      await setSessionEffort('s1', 'high', vi.fn());
+      expect(invoke).toHaveBeenCalledWith('sessions:setEffort', { id: 's1', effort: 'high' });
+      // The session switch lands; only the app-wide memory is skipped, so nothing is refused.
+      expect(invoke).not.toHaveBeenCalledWith('settings:update', expect.anything());
+    } finally {
+      gate.settings = true;
+    }
+  });
+
   it('starts with the remembered effort and saves the next successful session choice', async () => {
     seed('low');
     render(<NewSessionDialog />);

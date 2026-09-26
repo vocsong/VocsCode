@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { Transcript, UserMessage } from '../src/renderer/src/components/Transcript';
+import { TranscriptCapabilitiesProvider } from '../src/renderer/src/capabilities';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 
@@ -36,7 +37,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  useStore.setState({ transcripts: {}, loaded: {}, searchJump: null });
+  useStore.setState({ transcripts: {}, loaded: {}, searchJump: null, transcriptStarts: {}, transcriptFloors: {} });
   for (const [name, descriptor] of Object.entries(originals)) {
     if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
     else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
@@ -165,5 +166,44 @@ describe('windowed transcript', () => {
     expect(container.querySelectorAll('.transcript-row').length).toBeLessThan(400);
     fireEvent.keyDown(window, { key: 'f', ctrlKey: true });
     expect(container.querySelectorAll('.transcript-row').length).toBe(400);
+  });
+
+  it('serves a paged window: Load earlier appears and pipes through loadEarlier', () => {
+    const loadEarlier = vi.fn().mockResolvedValue(undefined);
+    useStore.setState({ transcripts: { s1: messages(5) }, loaded: { s1: true }, transcriptStarts: { s1: 3 }, showThinking: false, searchJump: null, loadEarlier });
+    render(<Transcript session={session} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Load earlier' }));
+    expect(loadEarlier).toHaveBeenCalledWith('s1');
+  });
+
+  it('keeps the reading position when older items are prepended', () => {
+    // Height proportional to the rendered rows, so the prepend visibly grows the list above.
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        const rows = this.querySelectorAll('.transcript-row').length;
+        return rows ? rows * 100 : 600;
+      }
+    });
+    useStore.setState({ transcripts: { s1: messages(10) }, loaded: { s1: true }, showThinking: false, searchJump: null });
+    const { container } = render(<Transcript session={session} />);
+    const el = container.querySelector('.transcript') as HTMLElement;
+    el.scrollTop = 250;
+    fireEvent.scroll(el);
+    const older = Array.from({ length: 5 }, (_, i) => ({ id: `old${i}`, kind: 'assistant', ts: -i, text: `older ${i}`, phase: 'final' }) as TranscriptItem);
+    act(() => { useStore.setState({ transcripts: { s1: [...older, ...messages(10)] } }); });
+    // Five rows (500px) were added above; the same content must sit at the same distance from the top.
+    expect(el.scrollTop).toBe(750);
+  });
+
+  it('honours the host capabilities: no edit control, and the header slot renders', () => {
+    useStore.setState({ transcripts: { s1: [{ id: 'u1', kind: 'user', ts: 1, text: 'hello' }] }, loaded: { s1: true }, showThinking: false, searchJump: null });
+    render(
+      <TranscriptCapabilitiesProvider value={{ contextMenu: true, editAndResend: false, openFile: false, header: <div data-testid="web-banner">banner</div> }}>
+        <Transcript session={session} />
+      </TranscriptCapabilitiesProvider>
+    );
+    expect(screen.queryByRole('button', { name: 'Edit and rerun message' })).toBeNull();
+    expect(screen.getByTestId('web-banner')).toBeTruthy();
   });
 });

@@ -40,6 +40,12 @@ src/renderer      React 19 + zustand UI
   terminal/       xterm.js instances kept alive outside React (host.ts)
   theme.ts        injects the data-driven palettes and applies the active theme to <html>
   store.ts        session state; api.ts wraps the preload bridge
+src/web           the browser shell at code.vocs.io/app (plain Vite build into relay/public/app)
+  transport/      RelayTransport (window.harness over the e2e session, local `can` gate) + mirror backend + IndexedDB vault
+  shell/          WebApp root, connection state, account probe, viewport keyboard inset
+  screens/        pairing, Connect with GitHub, sessions home, one session
+  sheets/         bottom sheets: computers, devices, new session, read-only terminal
+  components/     web composer, session header, status chip, connection banner
 resources/pi      extensions loaded into pi at spawn time: approvals, tools, subagents, the MCP bridge and,
                   for Mission-managed sessions only, vocs-code-mission.ts
 resources/mission the Windows Job Object helper (windows-check-job.ps1) shared by Mission checks and owned processes
@@ -121,6 +127,7 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - `src/main` — all privileged work. `harness/` holds one adapter per harness; `models/` provider clients; `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
 - `src/preload` — the only bridge. Renderer calls go through `window.harness`; channels and payloads are defined once in `src/shared/ipc.ts`.
 - `src/renderer` — React 19 + zustand. **Never touches Node or Electron directly.** `terminal/host.ts` keeps xterm.js instances alive outside React.
+- `src/web` — the browser shell. It may import `src/renderer/src`, `src/shared` and `relay/src/web-client.ts`; it must **never** import `src/main`, Electron or `terminal/host` (xterm). It binds its own `window.harness` before any renderer module loads (`install-transport.ts`).
 
 ## Key invariants
 

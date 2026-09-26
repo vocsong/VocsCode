@@ -1,0 +1,706 @@
+/* The web shell's own chrome, layered over the renderer's styles.css (which brings the transcript,
+   tool cards, approvals and controls). Mobile-first: everything is sized for a phone and widens at
+   900px. No inline styles anywhere: the /app CSP has no style-src 'unsafe-inline'. */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  -webkit-text-size-adjust: 100%;
+}
+
+input,
+textarea,
+select,
+button {
+  font-family: inherit;
+}
+
+/* 16px keeps iOS from zooming a field on focus; the .w-app scope outranks the reused
+   transcript/approval styles, which set smaller mono sizes. */
+.w-app input,
+.w-app textarea,
+.w-app select {
+  font-size: 16px;
+}
+
+.w-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  padding-bottom: calc(var(--w-keyboard, 0px) + env(safe-area-inset-bottom));
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  overflow: hidden;
+}
+
+/* --- Pairing and connect screens ------------------------------------------------ */
+
+.w-screen {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 16px;
+  overflow-y: auto;
+}
+
+.w-card {
+  width: min(560px, 100%);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: var(--shadow);
+}
+
+.w-card h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.w-card h2 {
+  font-size: 15px;
+  margin: 16px 0 8px;
+}
+
+.w-steps {
+  color: var(--fg-muted);
+  padding-left: 20px;
+  margin: 12px 0;
+  font-size: 14px;
+}
+
+.w-steps li {
+  margin: 6px 0;
+}
+
+.w-steps li.is-current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.w-check-code {
+  font-family: var(--mono);
+  font-size: 28px;
+  letter-spacing: 4px;
+  text-align: center;
+  padding: 12px;
+  background: var(--bg-sunken);
+  border-radius: 12px;
+}
+
+.w-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.w-hint {
+  color: var(--fg-muted);
+  font-size: 14px;
+}
+
+.w-error {
+  color: var(--red);
+  font-size: 14px;
+}
+
+.w-loading,
+.w-empty {
+  color: var(--fg-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px 16px;
+  text-align: center;
+}
+
+.w-select {
+  width: 100%;
+  margin: 8px 0;
+  padding: 8px;
+}
+
+/* --- Connection banner and top bar ---------------------------------------------- */
+
+.w-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--amber-soft);
+  color: var(--fg);
+}
+
+.w-banner-mirror,
+.w-banner-offline {
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+}
+
+.w-banner-revoked {
+  background: var(--red-soft);
+}
+
+.w-topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  min-height: 56px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.w-computer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.w-computer-off {
+  color: var(--fg-faint);
+  font-weight: 400;
+  font-size: 12px;
+}
+
+.w-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+  flex: none;
+}
+
+.w-dot.is-online {
+  background: var(--green);
+}
+
+.w-dot.is-connecting,
+.w-dot.is-restoring {
+  background: var(--amber);
+}
+
+.w-dot.is-offline,
+.w-dot.is-mirror,
+.w-dot.is-revoked {
+  background: var(--red);
+}
+
+.w-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.w-back {
+  transform: rotate(90deg);
+}
+
+/* --- Sessions home -------------------------------------------------------------- */
+
+.w-home {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.w-home-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.w-home-head h1 {
+  font-size: 20px;
+  margin: 4px 0;
+}
+
+.w-filter {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+
+.w-sessions,
+.w-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.w-session-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.w-session-row-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.w-session-row-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.w-session-row-meta {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.w-status {
+  flex: none;
+}
+
+/* Touch targets: every control the shell itself renders is at least 44px tall, so a phone does not
+   need a steady thumb. (The reused transcript keeps its own compact controls.) */
+.w-app .btn,
+.w-app .w-chip,
+.w-app .w-icon-btn,
+.w-app .w-computer,
+.w-app input,
+.w-app textarea,
+.w-app select {
+  min-height: 44px;
+}
+
+/* --- Two panes (wide screens) ------------------------------------------------------ */
+
+.w-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+@media (max-width: 899px) {
+  .w-main[data-has-session] .w-home {
+    display: none;
+  }
+
+  .w-main:not([data-has-session]) .w-session {
+    display: none;
+  }
+}
+
+@media (min-width: 900px) {
+  .w-home {
+    max-width: 340px;
+    border-right: 1px solid var(--border);
+    flex: none;
+    width: 340px;
+    box-sizing: border-box;
+  }
+}
+
+/* --- Sessions home sections ------------------------------------------------------- */
+
+.w-section {
+  margin: 14px 0;
+}
+
+.w-section h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--fg-muted);
+  margin: 0 0 6px;
+}
+
+.w-section details summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+.w-continue-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 12px;
+}
+
+.w-continue-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.w-continue-title {
+  font-weight: 600;
+}
+
+.w-continue-meta {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.w-row-detail {
+  color: var(--amber);
+  font-size: 12px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Session controls, approval banner, follow snackbar ---------------------------- */
+
+.w-controls {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.w-chip {
+  min-height: 44px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.w-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.w-approval-banner {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  border-bottom: 1px solid var(--amber);
+  background: var(--amber-soft);
+  color: var(--fg);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.w-snackbar {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+  font-size: 14px;
+}
+
+.w-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
+}
+
+/* --- One session ----------------------------------------------------------------- */
+
+.w-session {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.w-session-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.w-session-title {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.w-session-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.w-session-path {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.w-session .transcript-wrap {
+  flex: 1;
+  min-height: 0;
+}
+
+/* --- Composer -------------------------------------------------------------------- */
+
+.w-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.w-composer textarea {
+  flex: 1;
+  resize: none;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.w-composer-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.w-composer-blocked {
+  color: var(--fg-muted);
+  font-size: 14px;
+  justify-content: center;
+}
+
+/* --- Sheets ---------------------------------------------------------------------- */
+
+.w-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.w-sheet {
+  width: 100%;
+  max-height: 82vh;
+  overflow-y: auto;
+  background: var(--bg-elev);
+  border-radius: 16px 16px 0 0;
+  padding: 8px 16px calc(16px + env(safe-area-inset-bottom));
+  box-shadow: var(--shadow);
+}
+
+.w-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  min-height: 36px;
+}
+
+.w-sheet-head .w-icon-btn {
+  position: absolute;
+  right: 0;
+  top: 0;
+}
+
+.w-sheet-grab {
+  width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  margin: 6px auto 10px;
+}
+
+.w-sheet-title {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+.w-sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.w-menu {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.w-list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.w-list-row.is-active {
+  background: var(--accent-soft);
+  border-radius: 10px;
+}
+
+.w-list-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 44px;
+  justify-content: center;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  text-align: left;
+}
+
+.w-list-name {
+  font-weight: 600;
+}
+
+.w-list-hint {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.w-terminal {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-sunken);
+  border-radius: 10px;
+  padding: 10px;
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+/* --- Toasts ---------------------------------------------------------------------- */
+
+.w-toasts {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.w-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg);
+  box-shadow: var(--shadow);
+  text-align: left;
+  font-size: 14px;
+}
+
+.w-toast-error {
+  border-color: var(--red);
+}
+
+/* --- Wide screens: a session list column beside the session ---------------------------------- */
+
+@media (min-width: 900px) {
+  .w-app[data-connection] {
+    display: grid;
+    grid-template-rows: auto auto 1fr;
+  }
+
+  .w-sheet-backdrop {
+    align-items: center;
+  }
+
+  .w-sheet {
+    width: min(520px, 92vw);
+    border-radius: 16px;
+  }
+
+  .w-session-head {
+    padding: 4px 12px;
+  }
+}

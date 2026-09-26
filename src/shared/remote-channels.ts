@@ -10,6 +10,7 @@ import type { IpcChannel, PushChannel } from './ipc';
 const READ: readonly IpcChannel[] = [
   'app:info',
   'settings:get',
+  'desktop:focus',
   'harness:availability',
   'harness:models',
   'sessions:list',
@@ -68,7 +69,7 @@ const WRITE: readonly IpcChannel[] = [
 const PUSH: readonly PushChannel[] = ['push:sessionEvent', 'push:sessionsChanged',
   // Mission records contain public coordination state, not broker credentials or provider keys.
   'push:missionsChanged',
-  'push:settingsChanged', 'push:remotePolicy'];
+  'push:settingsChanged', 'push:remotePolicy', 'push:desktopFocus'];
 
 /** A typed runtime lookup: the arrays above are checked against the contract where they are
  *  written, and callers get channel names back rather than arbitrary strings. */

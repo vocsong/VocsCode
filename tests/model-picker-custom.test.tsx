@@ -43,4 +43,17 @@ describe('ModelPicker custom ids', () => {
     expect(screen.queryByRole('button', { name: /^Use “/ })).toBeNull();
     expect(screen.getByText('No models match “glm-4.6”.')).toBeTruthy();
   });
+
+  it('hides the favorite stars when app settings cannot be written', () => {
+    const harness = (window as unknown as { harness: { can?: (channel: string) => boolean } }).harness;
+    harness.can = (channel: string) => channel !== 'settings:update';
+    try {
+      render(<ModelPicker models={MODELS} onSelect={vi.fn()} />);
+      // Favorites still list (they came from settings), but nothing writes a new one.
+      expect(screen.queryByRole('button', { name: 'Add to favorites' })).toBeNull();
+      expect(screen.getByRole('button', { name: /Claude Sonnet 5/ })).toBeTruthy();
+    } finally {
+      delete harness.can;
+    }
+  });
 });

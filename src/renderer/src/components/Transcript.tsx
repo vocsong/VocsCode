@@ -1,6 +1,7 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
+import { useCanInvoke, useTranscriptCapabilities } from '../capabilities';
 import { fmtCost, fmtDuration, fmtRate, fmtTokens } from '../format';
 import { installMarkdownHandlers } from '../markdown';
 import { useStore } from '../store';
@@ -43,8 +44,12 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const loaded = useStore((s) => s.loaded[session.id]);
   const transcriptError = useStore((s) => s.transcriptErrors[session.id]);
   const loadTranscript = useStore((s) => s.loadTranscript);
+  const loadEarlier = useStore((s) => s.loadEarlier);
+  // A paged transcript's first item index; zero on the desktop, where the whole file is loaded.
+  const transcriptStart = useStore((s) => s.transcriptStarts[session.id] ?? 0);
   const showThinking = useStore((s) => s.showThinking);
   const jump = useStore((s) => s.searchJump);
+  const caps = useTranscriptCapabilities();
   const ref = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
   const [findOpen, setFindOpen] = useState(false);
@@ -55,11 +60,17 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const heights = useRef(new Map<string, number>());
   const rowObserver = useRef<ResizeObserver | null>(null);
   const scrollFrame = useRef(0);
+  /** The reader's distance from the bottom, so prepending older items does not move the view. */
+  const anchor = useRef<{ firstId: string | null; fromBottom: number }>({ firstId: null, fromBottom: 0 });
   const onImageExpand = useCallback((images: LightboxImage[], index: number) => {
     setLightbox({ images, index });
   }, []);
   /** Inline file references (`\`src/store.ts\``) open in the Files tab of the right panel. */
-  const openFile = useCallback((path: string, line?: number) => useStore.getState().revealFile(session.id, path, line), [session.id]);
+  const openFile = useCallback(
+    (path: string, line?: number) => useStore.getState().revealFile(session.id, path, line),
+    [session.id]
+  );
+  const canEdit = caps.editAndResend && !session.mission && session.config.harness === 'native' && session.status === 'idle';
 
   const chunks = useMemo(() => {
     const grouped = groupTranscript(items);
@@ -171,17 +182,45 @@ export function Transcript({ session }: { session: SessionMeta }) {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    return installMarkdownHandlers(el, (url) => void invoke('app:openExternal', { url }), openFile);
-  }, [openFile]);
+    return installMarkdownHandlers(el, (url) => void invoke('app:openExternal', { url }), caps.openFile ? openFile : undefined);
+  }, [openFile, caps.openFile]);
 
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
     if (stick && !findOpen && !jumpHere && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
   }, [items, mission?.completionReport, stick, findOpen, jumpHere, measureVersion]);
 
+  // Prepending older items must not move what the reader is looking at: restore the distance from
+  // the bottom captured before the prepend. Only runs `some` when the head actually changed.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const firstId = items[0]?.id ?? null;
+    const previous = anchor.current;
+    if (previous.firstId && firstId !== previous.firstId && items.some((item) => item.id === previous.firstId)) {
+      el.scrollTop = Math.max(0, el.scrollHeight - previous.fromBottom);
+    }
+    anchor.current = { firstId, fromBottom: el.scrollHeight - el.scrollTop };
+  }, [items]);
+
+  // Near the top of a paged transcript, fetch the previous page automatically (the desktop loads
+  // the whole file at once, so this only runs in a web shell with `transcriptStart > 0`).
+  const earlierBusy = useRef(false);
+  const lastAutoLoad = useRef(0);
+  useEffect(() => {
+    if (!loaded || transcriptStart <= 0 || scrollTop > 160 || earlierBusy.current) return;
+    if (Date.now() - lastAutoLoad.current < 500) return;
+    lastAutoLoad.current = Date.now();
+    earlierBusy.current = true;
+    void loadEarlier(session.id).finally(() => {
+      earlierBusy.current = false;
+    });
+  }, [loaded, transcriptStart, scrollTop, loadEarlier, session.id]);
+
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
+    anchor.current = { firstId: items[0]?.id ?? null, fromBottom: el.scrollHeight - el.scrollTop };
     setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
     if (typeof requestAnimationFrame !== 'function') {
       setScrollTop(el.scrollTop);
@@ -269,7 +308,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
 
   return (
     <div className="transcript-wrap">
-      <div className={`transcript ${virtual ? 'virtual' : ''}`} ref={ref} onScroll={onScroll} onContextMenu={onContextMenu}>
+      <div className={`transcript ${virtual ? 'virtual' : ''}`} ref={ref} onScroll={onScroll} onContextMenu={caps.contextMenu ? onContextMenu : undefined}>
         {!loaded && !transcriptError && <div className="transcript-loading"><Spinner /> Loading…</div>}
         {!loaded && transcriptError && (
           <div className="transcript-error callout warn" role="alert">
@@ -287,8 +326,16 @@ export function Transcript({ session }: { session: SessionMeta }) {
           </div>
         )}
         {virtual && range.start > 0 && <div className="transcript-spacer" style={{ height: tops[range.start] }} aria-hidden />}
+        {caps.header}
+        {loaded && transcriptStart > 0 && (
+          <div className="transcript-more">
+            <Button size="sm" variant="ghost" icon="chevron" onClick={() => void loadEarlier(session.id)}>
+              Load earlier
+            </Button>
+          </div>
+        )}
         {visible.map((chunk) => (
-          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} canEdit={!session.mission && session.config.harness === 'native' && session.status === 'idle'} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} live={chunk.kind === 'work' && chunk.id === liveWorkId} />
+          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} live={chunk.kind === 'work' && chunk.id === liveWorkId} />
         ))}
         {virtual && range.end < chunks.length && <div className="transcript-spacer" style={{ height: tops[chunks.length]! - tops[range.end]! }} aria-hidden />}
         {(session.status === 'running' || session.status === 'starting') && (
@@ -802,6 +849,9 @@ function ToolCard({ item, sessionId, dataItemId }: { item: Extract<TranscriptIte
 
 export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem, { kind: 'approval' }>; sessionId: string }) {
   const req = item.request;
+  // A view-only or browser client cannot answer: it says where the decision has to be made.
+  const canRespond = useCanInvoke('approvals:respond');
+  const toast = useStore((s) => s.toast);
   const [note, setNote] = useState('');
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [editedCommand, setEditedCommand] = useState<string | null>(null);
@@ -810,7 +860,9 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
     const decision: { optionId: string; note?: string; answers?: Record<string, string>; updatedInput?: unknown } = { optionId, note: note.trim() || undefined };
     if (req.questions?.length) decision.answers = answers;
     if (editedCommand !== null && editedCommand !== req.command && req.input && typeof req.input === 'object') decision.updatedInput = { ...(req.input as Record<string, unknown>), command: editedCommand };
-    void invoke('approvals:respond', { sessionId, requestId: req.id, decision });
+    void invoke('approvals:respond', { sessionId, requestId: req.id, decision }).catch((e: unknown) => {
+      toast(`Approval could not be sent: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    });
   };
   return (
     <div className={`approval ${decided ? 'decided' : 'pending'}`}>
@@ -849,7 +901,7 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
           {decided && item.decision?.answers?.[q.id] && <div className="approval-answer">→ {item.decision.answers[q.id]}</div>}
         </div>
       ))}
-      {!decided && (
+      {!decided && canRespond && (
         <div className="approval-actions">
           {req.options.map((o) => (
             <Button key={o.id} variant={o.kind === 'allow' ? 'primary' : o.kind === 'allow_session' || o.kind === 'allow_always' ? 'default' : 'ghost'} size="sm" onClick={() => respond(o.id)} title={o.description}>
@@ -859,6 +911,7 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
           <input className="approval-note" placeholder="Optional note for the agent (sent when denying)" value={note} onChange={(e) => setNote(e.target.value)} />
         </div>
       )}
+      {!decided && !canRespond && <div className="approval-remote muted small">Decide on your computer</div>}
     </div>
   );
 }

@@ -16,7 +16,7 @@
     "forceConsistentCasingInFileNames": true,
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
-    "paths": { "@renderer/*": ["src/renderer/src/*"], "@shared/*": ["src/shared/*"] }
+    "paths": { "@renderer/*": ["src/renderer/src/*"], "@web/*": ["src/web/*"], "@shared/*": ["src/shared/*"] }
   },
-  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/shared/**/*.ts"]
+  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/web/**/*.ts", "src/web/**/*.tsx", "src/shared/**/*.ts"]
 }

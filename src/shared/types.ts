@@ -1451,6 +1451,15 @@ export interface RemoteConfig {
   mirror?: boolean;
 }
 
+export interface DesktopFocus {
+  /** The session the desktop window is on, or null while it is on Home. */
+  sessionId: string | null;
+  /** Epoch ms of the last change, so a client can tell a fresh report from a stale one. */
+  at: number;
+  /** Whether the desktop window is foregrounded; a browser only follows while it is. */
+  windowFocused: boolean;
+}
+
 export interface RemoteState {
   status: 'off' | 'connecting' | 'online' | 'error';
   detail?: string;

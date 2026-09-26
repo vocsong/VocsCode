@@ -4,7 +4,7 @@ import { act, cleanup, render, screen, fireEvent } from '@testing-library/react'
 import type { AppSettings, SessionMeta } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', platform: 'win32' }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', platform: 'win32', canInvoke: () => true, isWeb: false }));
 vi.mock('../src/renderer/src/models', () => ({ useSessionModels: () => ({ models: [], loading: false }) }));
 vi.mock('../src/renderer/src/terminal/host', () => ({
   clearFind: vi.fn(),

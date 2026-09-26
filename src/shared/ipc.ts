@@ -7,6 +7,7 @@ import type {
   CuaInstallResult,
   CuaPreviewResult,
   CuaStatus,
+  DesktopFocus,
   DoctorReport,
   EffortLevel,
   FsEntry,
@@ -123,6 +124,11 @@ export interface IpcContract {
   'window:toggleDevTools': [void, void];
   'window:zoom': [{ direction: 'in' | 'out' | 'reset' }, { zoomFactor: number }];
   'window:edit': [{ command: 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll' }, void];
+
+  /** The renderer reports the session it is showing; local only, never on the remote surface. */
+  'desktop:setFocus': [{ sessionId: string | null }, void];
+  /** The session the desktop is on, for a paired browser to open by default. */
+  'desktop:focus': [void, DesktopFocus];
 
   'settings:get': [void, AppSettings];
   'settings:update': [Partial<AppSettings>, AppSettings];
@@ -419,6 +425,7 @@ export const PUSH_CHANNELS = {
   terminalsChanged: 'push:terminalsChanged',
   agentState: 'push:agentState',
   remoteState: 'push:remoteState',
+  desktopFocus: 'push:desktopFocus',
   updateState: 'push:updateState'
 } as const;
 
@@ -435,6 +442,8 @@ export type PushPayloads = {
   /** Vesta's whole transcript; the list is short, so state is replaced rather than patched. */
   'push:agentState': AgentState;
   'push:remoteState': RemoteState;
+  /** Where the desktop's own window is looking, so a paired browser can open the same session. */
+  'push:desktopFocus': DesktopFocus;
   /** Remote-only: the view-only policy, pushed to paired browsers over the e2e session. */
   'push:remotePolicy': { viewOnly: boolean };
   'push:updateState': UpdateState;
