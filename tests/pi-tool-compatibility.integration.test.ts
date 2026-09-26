@@ -39,7 +39,7 @@ describe.skipIf(!enabled)('real Pi 0.85.1 offline compatibility dispatch', () =>
   });
   afterEach(async () => {
     await Promise.all(runners.splice(0).map((runner) => runner.close()));
-    if (root) await fs.rm(root, { recursive: true, force: true });
+    if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
   const start = (options: Partial<ConstructorParameters<typeof PiOfflineRunner>[0]> = {}) => {
     const runner = new PiOfflineRunner({ cwd, agentDir, ...options });
