@@ -1,6 +1,8 @@
 node_modules/
 out/
 dist/
+# The web shell is built, not committed: npm run build:web fills relay/public/app for deploys.
+relay/public/app/
 *.log
 .DS_Store
 .vite/
