@@ -567,6 +567,54 @@ describe('OpenRouter reasoning effort', () => {
   });
 });
 
+describe('DeepSeek reasoning effort', () => {
+  /** Captures the reasoning_effort the native loop puts on the wire for one DeepSeek step. */
+  async function sendDeepSeekStep(effort: EffortLevel): Promise<Record<string, unknown>> {
+    const model = 'deepseek-flash';
+    let body: Record<string, unknown> = {};
+    const server = await listenOnce((_req, res, raw) => {
+      body = JSON.parse(raw ?? '{}') as Record<string, unknown>;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const chunk = (delta: Record<string, unknown>, finish: string | null) => `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      res.write(chunk({ content: 'hi' }, null));
+      res.write(chunk({}, 'stop'));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    try {
+      const provider: ProviderConfig = { id: 'deepseek', kind: 'deepseek', name: 'DeepSeek', baseUrl: server.url, hasApiKey: true, models: [], enabled: true };
+      await openaiStep({
+        provider,
+        apiKey: 'sk-test',
+        model,
+        system: '',
+        history: [],
+        tools: [],
+        effort,
+        signal: AbortSignal.timeout(5_000),
+        onText: () => undefined,
+        onReasoning: () => undefined
+      });
+      return body;
+    } finally {
+      await server.close();
+    }
+  }
+
+  it('forwards max to DeepSeek instead of folding it into high', async () => {
+    // DeepSeek serves three tiers — low/high/max, the scalar efforts 50/75/100 — so folding max
+    // into high made the top tier unreachable from the app.
+    expect((await sendDeepSeekStep('max')).reasoning_effort).toBe('max');
+  });
+
+  it('folds only the levels DeepSeek has no tier for', async () => {
+    expect((await sendDeepSeekStep('minimal')).reasoning_effort).toBe('low');
+    expect((await sendDeepSeekStep('xhigh')).reasoning_effort).toBe('high');
+    expect((await sendDeepSeekStep('high')).reasoning_effort).toBe('high');
+    expect((await sendDeepSeekStep('low')).reasoning_effort).toBe('low');
+  });
+});
+
 describe('OpenCode Go session headers', () => {
   /** Captures the headers the OpenAI client actually put on the wire for one step. */
   async function stepHeaders(over: Partial<ProviderConfig>, sessionId?: string): Promise<IncomingMessage['headers']> {
