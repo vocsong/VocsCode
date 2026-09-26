@@ -13,7 +13,7 @@ import type { Logger } from '../log';
 import { commandApproval, gateAction, OPTIONS_ALLOW_DENY_NO_SESSION } from '../harness/permissions';
 import { MissionWorkspaceAdmission } from './admission';
 import { MissionDeliveryService, missionDeliveryBranch, type MissionDeliveryRequest } from './delivery';
-import { resolveMissionDeliveryPolicy } from './policy';
+import { isConventionalMissionCheck, resolveMissionDeliveryPolicy } from './policy';
 import { MissionScheduler } from './scheduler';
 import { MissionRecovery } from './recovery';
 import { MissionService, type MissionCapabilityPort } from './service';
@@ -169,15 +169,15 @@ export class MissionRuntime {
     return record;
   }
 
-  private async permission(record: MissionRecord, operationId: string, action: string, command: string, cwd: string): Promise<void> {
+  private async permission(record: MissionRecord, operationId: string, action: string, command: string, cwd: string, note?: string): Promise<void> {
     const verdict = gateAction(record.requestedPermissionMode, { mutating: true, isEdit: false, command });
     if (verdict === 'deny') throw new Error('Plan permission mode does not authorize project execution or delivery.');
     if (verdict === 'allow') return;
-    const token = createHash('sha256').update(JSON.stringify([record.id, operationId, action, command, cwd, record.leadGeneration, record.requestedPermissionMode, record.executionAuthorization])).digest('hex');
+    const token = createHash('sha256').update(JSON.stringify([record.id, operationId, action, command, cwd, note, record.leadGeneration, record.requestedPermissionMode, record.executionAuthorization])).digest('hex');
     if (this.allowed.has(token)) return;
     const decision = await this.deps.sessions.requestManagedApproval(record.leadSessionId, record.leadGeneration, commandApproval(command, cwd, {
       title: action === 'verify' ? 'Run Mission verification?' : `Allow Mission ${action.replaceAll('_', ' ')}?`,
-      description: 'The principal engineer requested this operation. This approval is for the exact persisted operation, not permission to change the plan or provider.',
+      description: `The principal engineer requested this operation. This approval is for the exact persisted operation, not permission to change the plan or provider.${note ? ` ${note}` : ''}`,
       options: OPTIONS_ALLOW_DENY_NO_SESSION,
     }));
     if (decision.optionId !== 'allow') throw new VerificationApprovalDenied('Mission operation was not approved by the user.');
@@ -199,7 +199,8 @@ export class MissionRuntime {
     const record = validate();
     const workspace = await this.workspaces.workspaceAt(request.cwd);
     if (workspace.missionId !== record.id || !['verification', 'integration-attempt'].includes(workspace.role)) throw new Error('Checks require an exact owned isolated verification workspace.');
-    await this.permission(record, request.operationId, 'verify', request.check.command, request.cwd);
+    await this.permission(record, request.operationId, 'verify', request.check.command, request.cwd,
+      isConventionalMissionCheck(request.check) ? 'Before the check, the host installs the locked npm dependencies with `npm ci` in this isolated worktree, running package lifecycle scripts under this same approval.' : undefined);
     validate();
   }
 
