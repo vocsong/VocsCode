@@ -1,7 +1,7 @@
 import { promises as fs, statSync } from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import type { AppSettings, HarnessAvailability, HarnessId } from '../shared/types';
+import type { AppSettings, HarnessAvailability, HarnessBinarySource, HarnessId, HarnessUpdate } from '../shared/types';
 import { killTree, spawnTool } from './harness/spawn';
 import { exists } from './util/fs';
 
@@ -244,8 +244,30 @@ function codexTargetTriple(): string | null {
 
 export interface ResolvedBinary {
   path: string;
-  source: 'settings' | 'system' | 'app-runtime' | 'bundled';
+  source: HarnessBinarySource;
 }
+
+/** The npm packages the app installs and updates harness CLIs from: one table for install and check. */
+export const HARNESS_PACKAGES = {
+  claude: '@anthropic-ai/claude-code',
+  codex: '@openai/codex',
+  pi: '@earendil-works/pi-coding-agent',
+  dsh: '@deepseek-ai/dsh'
+} as const;
+
+export type InstallableHarness = keyof typeof HARNESS_PACKAGES;
+
+/**
+ * Harness ids the update check covers and the npm package each is compared against. Both Codex
+ * harnesses run the same CLI, so they share one lookup; `acp` runs dsh.
+ */
+export const HARNESS_UPDATE_PACKAGES: Partial<Record<HarnessId, InstallableHarness>> = {
+  claude: 'claude',
+  codex: 'codex',
+  'codex-exec': 'codex',
+  pi: 'pi',
+  acp: 'dsh'
+};
 
 export class RuntimeResolver {
   constructor(
@@ -302,6 +324,7 @@ export class RuntimeResolver {
           available: v.code === 0,
           version: v.stdout.trim() || undefined,
           binaryPath: bin.path,
+          source: bin.source,
           detail: `${bin.source} runtime`,
           authenticated: authenticated ? true : 'unknown'
         };
@@ -318,6 +341,7 @@ export class RuntimeResolver {
           available: v.code === 0,
           version: v.stdout.trim() || undefined,
           binaryPath: bin.path,
+          source: bin.source,
           detail: text.trim().split('\n')[0] || `${bin.source} runtime`,
           authenticated: loggedIn
         };
@@ -327,7 +351,7 @@ export class RuntimeResolver {
         if (!bin) return { available: false, detail: 'pi not found on PATH.', installHint: 'npm install -g @earendil-works/pi-coding-agent' };
         const v = await probeOnce(bin.path, ['--version'], 20_000);
         const authenticated = await piHasCredentials();
-        return { available: v.code === 0, version: v.stdout.trim() || undefined, binaryPath: bin.path, authenticated };
+        return { available: v.code === 0, version: v.stdout.trim() || undefined, binaryPath: bin.path, source: bin.source, authenticated };
       }
       case 'acp': {
         const dsh = this.resolve('dsh');
@@ -338,6 +362,7 @@ export class RuntimeResolver {
             available: true,
             version: v.stdout.trim() || undefined,
             binaryPath: dsh.path,
+            source: dsh.source,
             detail: 'DeepSeek Harness found',
             authenticated: 'unknown'
           };
@@ -346,6 +371,7 @@ export class RuntimeResolver {
           return {
             available: true,
             binaryPath: npx.path,
+            source: npx.source,
             detail: 'ACP agents can be launched through npx (dsh is not installed globally).',
             authenticated: 'unknown',
             installHint: 'npm install -g @deepseek-ai/dsh'
@@ -370,23 +396,167 @@ export class RuntimeResolver {
   }
 
   /** Installs a harness CLI into the app runtime dir with npm. */
-  async install(id: 'pi' | 'dsh' | 'codex' | 'claude'): Promise<{ ok: boolean; log: string }> {
-    const pkg = {
-      pi: '@earendil-works/pi-coding-agent',
-      dsh: '@deepseek-ai/dsh',
-      codex: '@openai/codex',
-      claude: '@anthropic-ai/claude-code'
-    }[id];
+  async install(id: InstallableHarness): Promise<{ ok: boolean; log: string }> {
+    const pkg = HARNESS_PACKAGES[id];
     await fs.mkdir(this.paths.appRuntimeDir, { recursive: true });
     const npm = which('npm');
     if (!npm) return { ok: false, log: 'npm not found on PATH.' };
     const r = await runCapture(npm, ['install', '-g', '--prefix', this.paths.appRuntimeDir, `${pkg}@latest`], {
       timeoutMs: 600_000
     });
-    // The install put a new binary in the runtime dir; drop the memoized misses so it is found.
-    if (r.code === 0) clearWhichCache();
+    // The install put a new binary in the runtime dir; drop the memoized misses so it is found,
+    // and the version probes so the next read reports what was just installed rather than the TTL.
+    if (r.code === 0) {
+      clearWhichCache();
+      probeCache.clear();
+    }
     return { ok: r.code === 0, log: r.stdout + r.stderr };
   }
+
+  /**
+   * Installed-vs-published versions for the harness CLIs the app installs from npm. Probes
+   * availability the way the Settings card does, then makes one registry lookup per package.
+   */
+  async checkUpdates(ids: HarnessId[], deps: { fetchImpl?: FetchLike } = {}): Promise<Partial<Record<HarnessId, HarnessUpdate>>> {
+    const installed: Partial<Record<HarnessId, HarnessAvailability>> = {};
+    // Only ids with a package behind them are probed: anything else has nothing to compare against.
+    const wanted = ids.filter((id) => HARNESS_UPDATE_PACKAGES[id] !== undefined);
+    await Promise.all(wanted.map(async (id) => (installed[id] = await this.availability(id))));
+    return checkHarnessUpdates(installed, deps);
+  }
+}
+
+/** npm registry lookups are small but can hang; this caps the wait when the network is slow. */
+const REGISTRY_TIMEOUT_MS = 8_000;
+/**
+ * How long a published version stays fresh. A check can be run as often as the user clicks, and the
+ * registry asks not to be polled: one lookup per package per window.
+ */
+const LATEST_TTL_MS = 10 * 60_000;
+
+type FetchLike = (
+  url: string,
+  init?: { signal?: AbortSignal; headers?: Record<string, string> }
+) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+const latestVersionCache = new Map<string, { at: number; result: { version?: string; error?: string } }>();
+/** In-flight lookups, so harness ids that share a package cost one request rather than two. */
+const latestVersionPending = new Map<string, Promise<{ version?: string; error?: string }>>();
+
+/** Test seam: the registry cache lives as long as the module, so stubbed cases need a clean slate. */
+export function clearLatestVersionCache(): void {
+  latestVersionCache.clear();
+  latestVersionPending.clear();
+}
+
+/**
+ * The first semver-looking token of a CLI's version line: '2.1.280 (Claude Code)' and
+ * 'codex-cli 0.154.0' both name a version, and the rest of the line is not ours to interpret.
+ */
+export function parseVersion(text: string): string | null {
+  return /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)/.exec(text)?.[1] ?? null;
+}
+
+function splitVersion(version: string): { segments: number[]; prerelease: string } {
+  const withoutBuild = version.trim().replace(/^[v=\s]+/, '').split('+')[0];
+  const dash = withoutBuild.indexOf('-');
+  const core = dash === -1 ? withoutBuild : withoutBuild.slice(0, dash);
+  return { segments: core.split('.').map((s) => Number.parseInt(s, 10) || 0), prerelease: dash === -1 ? '' : withoutBuild.slice(dash + 1) };
+}
+
+/** Numeric-segment compare; a prerelease sorts below the release it precedes. Negative means a < b. */
+export function compareVersions(a: string, b: string): number {
+  const left = splitVersion(a);
+  const right = splitVersion(b);
+  for (let i = 0; i < Math.max(left.segments.length, right.segments.length); i++) {
+    const delta = (left.segments[i] ?? 0) - (right.segments[i] ?? 0);
+    if (delta) return delta < 0 ? -1 : 1;
+  }
+  if (left.prerelease === right.prerelease) return 0;
+  if (!left.prerelease) return 1;
+  if (!right.prerelease) return -1;
+  return left.prerelease < right.prerelease ? -1 : 1;
+}
+
+/**
+ * Newest version an npm package publishes, from the registry's `/latest` manifest. Cached for
+ * LATEST_TTL_MS including failures, so a second click after an offline check does not go out again.
+ */
+export async function fetchLatestVersion(
+  pkg: string,
+  deps: { fetchImpl?: FetchLike } = {}
+): Promise<{ version?: string; error?: string }> {
+  const cached = latestVersionCache.get(pkg);
+  if (cached && Date.now() - cached.at < LATEST_TTL_MS) return cached.result;
+  // Codex and codex-exec are two ids over one CLI: whoever asks first makes the request.
+  let pending = latestVersionPending.get(pkg);
+  if (!pending) {
+    pending = lookupLatestVersion(pkg, deps).then((result) => {
+      latestVersionCache.set(pkg, { at: Date.now(), result });
+      latestVersionPending.delete(pkg);
+      return result;
+    });
+    latestVersionPending.set(pkg, pending);
+  }
+  return pending;
+}
+
+async function lookupLatestVersion(pkg: string, deps: { fetchImpl?: FetchLike }): Promise<{ version?: string; error?: string }> {
+  // The scoped name's slash must be escaped; the registry route is otherwise a plain path.
+  const url = `https://registry.npmjs.org/${pkg.replace('/', '%2F')}/latest`;
+  const doFetch = deps.fetchImpl ?? (fetch as unknown as FetchLike);
+  try {
+    const res = await doFetch(url, { signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS), headers: { accept: 'application/json' } });
+    if (!res.ok) return { error: `the npm registry answered ${res.status}` };
+    const body = (await res.json()) as { version?: unknown };
+    return typeof body?.version === 'string' && body.version.trim() ? { version: body.version.trim() } : { error: `${pkg} publishes no version` };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Whether a binary in the app runtime dir is what this harness runs. An explicit `binaries.<tool>`
+ * path and a runtime the app bundles both take precedence over that dir, so an install there would
+ * be shadowed: the card explains why instead of offering a button that could not change anything.
+ */
+function appRuntimeWins(av: HarnessAvailability): boolean {
+  return av.source === 'system' || av.source === 'app-runtime';
+}
+
+/**
+ * Compares each installed harness CLI against the newest version its npm package publishes. Ids the
+ * app has no package for (native, cursor) and harnesses that reported no version are skipped.
+ */
+export async function checkHarnessUpdates(
+  installed: Partial<Record<HarnessId, HarnessAvailability>>,
+  deps: { fetchImpl?: FetchLike } = {}
+): Promise<Partial<Record<HarnessId, HarnessUpdate>>> {
+  const out: Partial<Record<HarnessId, HarnessUpdate>> = {};
+  await Promise.all(
+    (Object.entries(installed) as [HarnessId, HarnessAvailability][]).map(async ([id, av]) => {
+      const pkgKey = HARNESS_UPDATE_PACKAGES[id];
+      const current = av?.version ? parseVersion(av.version) : null;
+      if (!pkgKey || !av || !av.available || !current) return;
+      const pkg = HARNESS_PACKAGES[pkgKey];
+      const updatable = appRuntimeWins(av);
+      const { version: latest, error } = await fetchLatestVersion(pkg, deps);
+      if (!latest) {
+        out[id] = { package: pkg, current, newer: false, updatable, error };
+        return;
+      }
+      const newer = compareVersions(latest, current) > 0;
+      out[id] = {
+        package: pkg,
+        current,
+        latest,
+        newer,
+        updatable,
+        reason: newer && !updatable ? (av.source === 'settings' ? 'its binary path is pinned under Settings → Harnesses' : 'it runs the runtime Vocs Code bundles, which moves with an app update') : undefined
+      };
+    })
+  );
+  return out;
 }
 
 /** Cursor SDK stores a browser login's minted API key in ~/.cursor/sdk/auth.json. */
