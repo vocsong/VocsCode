@@ -149,7 +149,8 @@ interface Transport {
 - `LocalTransport` = today's `ipcRenderer.invoke/on` (unchanged desktop behavior).
 - `RemoteTransport` = WebSocket, JSON frames `{ id, channel, payload }` with response
   correlation; push channels arrive as server-initiated frames — only the remote push surface
-  (`push:sessionEvent`, `push:sessionsChanged`, `push:settingsChanged`, `push:remotePolicy`); PTY
+  (`push:sessionEvent`, `push:sessionsChanged`, `push:settingsChanged`, `push:remotePolicy`,
+  `push:desktopFocus`); PTY
   output, the assistant panel and the desktop's own remote state (which carries the live pairing
   code) never leave the machine.
 - **Addressing:** relay frames carry a target host id — an account may pair several
@@ -167,7 +168,8 @@ interface Transport {
 
 **Filtered surface.** Remote gets: `sessions:*`, `approvals:respond`, read-mostly
 `git:*`, `fs:list/search/read`, `analytics:*`, `skills:list/read`,
-`harness:availability/models`, and the read-only terminal view `terminal:list/screen` (P3.5,
+`harness:availability/models`, `desktop:focus` (which session the desktop window is on, read-only),
+and the read-only terminal view `terminal:list/screen` (P3.5,
 step one: plain text, never attached, resized or typed into). Excluded or remapped: `window:*`,
 `app:pickFolder`, `app:openPath`, `app:openInEditor`, `secrets:*`, `dialog` flows, terminal
 input. The web client never touches or needs API keys.

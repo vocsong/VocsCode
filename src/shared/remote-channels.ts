@@ -10,6 +10,7 @@ import type { IpcChannel, PushChannel } from './ipc';
 const READ: readonly IpcChannel[] = [
   'app:info',
   'settings:get',
+  'desktop:focus',
   'harness:availability',
   'harness:models',
   'sessions:list',
@@ -58,7 +59,7 @@ const WRITE: readonly IpcChannel[] = [
  *  the desktop pushes stays on this machine — terminal output (not remote until P3.5), the
  *  assistant panel, update prompts, and push:remoteState, which carries the live pairing code
  *  and pending pairing requests. */
-const PUSH: readonly PushChannel[] = ['push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged', 'push:remotePolicy'];
+const PUSH: readonly PushChannel[] = ['push:sessionEvent', 'push:sessionsChanged', 'push:settingsChanged', 'push:remotePolicy', 'push:desktopFocus'];
 
 /** A typed runtime lookup: the arrays above are checked against the contract where they are
  *  written, and callers get channel names back rather than arbitrary strings. */
