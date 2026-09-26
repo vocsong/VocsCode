@@ -14,7 +14,7 @@ import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
 import type { SessionManager } from '../src/main/session-manager';
-import type { RemoteConfig, SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { RemoteConfig, HarnessId, SessionMeta, TranscriptItem } from '../src/shared/types';
 import type { RemoteHost } from '../src/main/remote/host';
 import { signInProbe } from '../src/main/remote/relay-url';
 import { SettingsStore } from '../src/main/settings';
@@ -382,6 +382,26 @@ describe('handler registry', () => {
     const { registry, logs } = stubDeps();
     await registry.invoke('sessions:send', { id: 's_test', input: { text: 'hi' } });
     expect(logs.some(([level, msg]) => level === 'warn' && msg.includes('slow ipc sessions:send'))).toBe(true);
+  });
+
+  it('checks harness updates over a bounded set of ids', async () => {
+    const asked: HarnessId[][] = [];
+    const { registry, logs } = stubDeps({
+      runtime: {
+        checkUpdates: async (ids: HarnessId[]) => {
+          asked.push(ids);
+          return { pi: { package: '@earendil-works/pi-coding-agent', current: '0.85.1', latest: '0.87.1', newer: true, updatable: true } };
+        }
+      } as unknown as RuntimeResolver
+    });
+    const updates = (await registry.invoke('harness:checkUpdates', undefined)) as Record<string, { latest?: string }>;
+    expect(asked[0]).toEqual(['claude', 'codex', 'pi', 'acp']);
+    expect(updates.pi.latest).toBe('0.87.1');
+    expect(logs).toContainEqual(['debug', 'harness pi: 0.85.1 installed, 0.87.1 published (update available)']);
+
+    // The card asks for its own three; the handler passes the request through untouched.
+    await registry.invoke('harness:checkUpdates', { ids: ['claude', 'codex', 'pi'] });
+    expect(asked[1]).toEqual(['claude', 'codex', 'pi']);
   });
 
   it('records renderer errors in the main log', async () => {

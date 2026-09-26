@@ -850,6 +850,17 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     else deps.log('warn', `install of ${id} failed: ${r.log.trim().split('\n').slice(-5).join(' | ').slice(0, 600)}`);
     return r;
   });
+  handle('harness:checkUpdates', async (req) => {
+    const ids: HarnessId[] = req && 'ids' in req && req.ids?.length ? req.ids : ['claude', 'codex', 'pi', 'acp'];
+    const updates = await runtime.checkUpdates(ids);
+    for (const [id, u] of Object.entries(updates)) {
+      deps.log(
+        'debug',
+        `harness ${id}: ${u.current ?? 'unknown'} installed, ${u.latest ?? u.error ?? 'unknown'} published${u.newer ? ' (update available)' : ''}${u.reason ? ` — ${u.reason}` : ''}`
+      );
+    }
+    return updates;
+  });
 
   handle('skills:list', () => listSkills());
   handle('skills:read', ({ path: p }) => readSkillDoc(p));

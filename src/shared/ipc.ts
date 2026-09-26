@@ -21,6 +21,7 @@ import type {
   GitWorktreeInfo,
   HarnessAvailability,
   HarnessId,
+  HarnessUpdate,
   ImageAttachment,
   McpInspectResult,
   McpProjectInfo,
@@ -159,6 +160,8 @@ export interface IpcContract {
     { models: ModelInfo[]; error?: string }
   ];
   'harness:install': [{ id: 'pi' | 'dsh' | 'codex' | 'claude' }, { ok: boolean; log: string }];
+  /** On-demand comparison of the installed harness CLIs against what each npm package publishes. */
+  'harness:checkUpdates': [{ ids?: HarnessId[] } | void, Partial<Record<HarnessId, HarnessUpdate>>];
 
   /** Global skills (SKILL.md folders) per harness, for the Skills page. */
   'skills:list': [void, SkillRootInfo[]];

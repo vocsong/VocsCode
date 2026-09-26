@@ -112,6 +112,7 @@ suites alive** below):
 | Terminal panel, PTY, `terminal/host.ts` | `e2e.terminal` |
 | Approval cards, `harness/permissions.ts` | `e2e.approval` (live) |
 | Mission configuration, orchestration, controls or managed workspaces | `tests/mission-*.test.ts` + `e2e.mission-settings`, `e2e.mission`; managed or ordinary Pi process ownership also needs `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/mission-pi.integration.test.ts tests/mission-ordinary-pi.integration.test.ts`. Suites that need Windows Job Objects (`mission-check-job`, `mission-terminal-windows`, `mission-receipt-recovery`, `mission-ordinary-pi`, the app-death part of `mission-restart-recovery`) skip on macOS/Linux, so the ubuntu CI gate does not cover them. Live demonstrations: see below and `docs/MISSION-STATUS.md`. |
+| Harness CLI update check (`runtime.ts` `checkUpdates`, Harness logins card) | `tests/harness-updates.test.ts`, `tests/harness-update-ui.test.tsx` + `e2e.vision` |
 | Vesta panel, `agents/` pi bridge, `resources/pi/vocs-code-vesta.ts` | `tests/vesta.test.ts` + `e2e.vesta` (opt-in, real pi) |
 | Updater, `main/updater*.ts`, update pill, About updates panel | `tests/updater.test.ts`, `tests/update-ui.test.tsx` + `e2e.update` (opt-in, packaged + mock feed) |
 | pi harness (`harness/pi.ts`), `resources/pi/**` | `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-tool-compatibility.integration.test.ts tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts` + live `HARNESS_SMOKE_ONLY=pi` |

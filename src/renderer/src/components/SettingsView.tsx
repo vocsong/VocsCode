@@ -1,7 +1,7 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
 import React, { useEffect, useRef, useState } from 'react';
 import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
-import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ModelInfo, ProviderConfig, ProviderKind, RemoteAuditEntry, RemoteDeviceInfo, RemoteState, SecretStatus, UpdateState } from '../../../shared/types';
+import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, HarnessUpdate, ModelInfo, ProviderConfig, ProviderKind, RemoteAuditEntry, RemoteDeviceInfo, RemoteState, SecretStatus, UpdateState } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
@@ -585,30 +585,73 @@ function ProviderBaseUrl({ provider, onSave }: { provider: ProviderConfig; onSav
   );
 }
 
-/** Login state for harnesses that bring their own credentials, shown next to the key vault. */
+/** The harnesses this card manages: their own logins, and an npm package that can be updated here. */
+const LOGIN_HARNESSES = ['claude', 'codex', 'pi'] as const;
+type LoginHarness = (typeof LOGIN_HARNESSES)[number];
+
+/**
+ * Login state for harnesses that bring their own credentials, shown next to the key vault. The same
+ * card checks those CLIs against what their npm package publishes and updates them in place; both
+ * are explicit actions, so opening Settings never reaches the network on its own.
+ */
 function HarnessLogins() {
   const availability = useStore((s) => s.availability);
   const refresh = useStore((s) => s.refreshAvailability);
+  const toast = useStore((s) => s.toast);
   const [refreshing, setRefreshing] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [updates, setUpdates] = useState<Partial<Record<HarnessId, HarnessUpdate>> | null>(null);
+  const [updating, setUpdating] = useState<LoginHarness | null>(null);
   const credHome: Partial<Record<HarnessId, string>> = { claude: '~/.claude', codex: '~/.codex', pi: '~/.pi/agent' };
+
+  const checkUpdates = async () => {
+    setChecking(true);
+    try {
+      setUpdates((await invoke('harness:checkUpdates', { ids: [...LOGIN_HARNESSES] })) ?? {});
+    } catch (e) {
+      toast(`Could not check for harness updates: ${(e as Error).message}`, 'error');
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const refreshNow = async () => {
     setRefreshing(true);
     await refresh();
     setRefreshing(false);
   };
+
+  const update = async (id: LoginHarness) => {
+    setUpdating(id);
+    const r = await invoke('harness:install', { id });
+    setUpdating(null);
+    if (!r.ok) {
+      toast(`Update failed: ${r.log.slice(-400)}`, 'error');
+      return;
+    }
+    toast(`Updated ${HARNESSES.find((h) => h.id === id)?.name ?? id} to ${updates?.[id]?.latest ?? 'the newest version'}`, 'success');
+    await refresh();
+    await checkUpdates();
+  };
+
+  const summary = updates ? updateSummary(updates) : null;
   return (
     <div className="provider-card">
       <div className="provider-head">
         <span className="provider-name">Harness logins</span>
         <span className="spacer" />
+        <Button size="sm" variant="ghost" disabled={checking} onClick={() => void checkUpdates()}>
+          {checking ? <Spinner /> : 'Check for updates'}
+        </Button>
         <Button size="sm" variant="ghost" icon="refresh" onClick={() => void refreshNow()}>
           {refreshing ? <Spinner /> : 'Refresh'}
         </Button>
       </div>
       <div className="provider-body">
-        {(['claude', 'codex', 'pi'] as HarnessId[]).map((id) => {
+        {LOGIN_HARNESSES.map((id) => {
           const h = HARNESSES.find((x) => x.id === id)!;
           const av = availability[id];
+          const upd = updates?.[id];
           return (
             <div key={id} className="row gap8" style={{ alignItems: 'center' }}>
               <strong>{h.name}</strong>
@@ -627,13 +670,41 @@ function HarnessLogins() {
                 {av?.version ? `${av.version} · ` : ''}
                 uses its own credentials from {credHome[id]}
               </span>
+              {upd?.newer && (
+                <>
+                  <span className="spacer" />
+                  {upd.updatable ? (
+                    <Button size="sm" disabled={updating !== null} title={`Install ${upd.package} ${upd.latest} into Vocs Code's own runtime folder`} onClick={() => void update(id)}>
+                      {updating === id ? <Spinner size={11} /> : `Update to ${upd.latest}`}
+                    </Button>
+                  ) : (
+                    <Badge tone="neutral">{upd.latest} available</Badge>
+                  )}
+                </>
+              )}
             </div>
           );
         })}
+        {summary && <p className={`muted small${summary.error ? ' info-error' : ''}`}>{summary.text}</p>}
         <p className="muted small">Log in from a terminal with <code>claude</code>, <code>codex login</code> or <code>pi</code>; these sessions then reuse that login. API keys below are only used for the native loop and as a fallback.</p>
       </div>
     </div>
   );
+}
+
+/**
+ * What the update check found, in one line: what npm could not be reached for, what is newer but
+ * cannot be updated from here and why, or the all-clear. An offered update needs no sentence — the
+ * row carries its own button.
+ */
+function updateSummary(updates: Partial<Record<HarnessId, HarnessUpdate>>): { text: string; error?: boolean } | null {
+  const nameOf = (id: HarnessId): string => HARNESSES.find((h) => h.id === id)?.name ?? id;
+  const rows = Object.entries(updates) as [HarnessId, HarnessUpdate][];
+  const failed = rows.filter(([, u]) => u.error);
+  if (failed.length) return { text: `Could not reach npm for ${failed.map(([id]) => nameOf(id)).join(', ')}: ${failed[0][1].error}`, error: true };
+  const held = rows.filter(([, u]) => u.newer && !u.updatable);
+  if (held.length) return { text: held.map(([id, u]) => `${nameOf(id)} ${u.latest} is newer, but ${u.reason}.`).join(' ') };
+  return rows.length ? { text: 'The harness CLIs are up to date.' } : null;
 }
 
 /**
