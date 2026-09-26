@@ -198,6 +198,20 @@ describe.runIf(enabled)('remote access settings', () => {
       await win.getByRole('button', { name: 'Allow' }).click();
       expect((await pairing).hostDeviceId).toBe(added.hostDeviceId);
       await expect.poll(async () => win.getByText(/Browser: Signed-in phone/).count(), { timeout: 20_000 }).toBe(1);
+
+      // A browser follows where the desktop is: creating a session and clicking it reports the
+      // focus through main, which pushes it to the paired browser over the relay.
+      const focusPushes: Array<{ sessionId: string | null }> = [];
+      browser.onPush((channel, payload) => {
+        if (channel === 'push:desktopFocus') focusPushes.push(payload as { sessionId: string | null });
+      });
+      await browser.connect();
+      const created = (await win.evaluate(
+        (projectRoot) => window.harness.invoke('sessions:create', { config: { harness: 'native', permissionMode: 'ask', projectRoot } }),
+        project
+      )) as { id: string };
+      await win.locator('[data-testid="session-row"]').first().click();
+      await expect.poll(() => focusPushes.some((focus) => focus.sessionId === created.id), { timeout: 20_000 }).toBe(true);
     } finally {
       await signInApp?.close().catch(() => undefined);
       await gate.stop();
