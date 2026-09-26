@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { defaultSettings, type SettingsStore } from '../src/main/settings';
 import { SessionManager } from '../src/main/session-manager';
+import { createForkWorktree } from '../src/main/git';
 import { renderForkContext } from '../src/main/fork-context';
 import { emptyUsage } from '../src/main/models/static-models';
 import { sessionUsageStats } from '../src/renderer/src/session-usage';
@@ -26,6 +27,14 @@ vi.mock('../src/main/harness/registry', () => ({
     setPermissionMode: async () => undefined,
     dispose: async () => undefined
   })
+}));
+
+// These fixtures have no repository behind their project root, so the default is "share the
+// source's directory"; the relocated case overrides it per test. The real one is covered against a
+// real repo in session-worktree-isolation.test.ts.
+vi.mock('../src/main/git', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  createForkWorktree: vi.fn(async () => null)
 }));
 
 const source = (harness: SessionMeta['config']['harness']): SessionMeta => ({
@@ -126,7 +135,7 @@ describe('cross-harness fork context', () => {
     expect(sent[1].text).toBe('and run it');
   });
 
-  it('does not seed a same-harness fork', async () => {
+  it('does not seed a same-harness fork that stayed in the source directory', async () => {
     sent.length = 0;
     const { manager } = makeManager(source('claude'), conversation);
     const fork = await manager.fork('s_src');
@@ -134,6 +143,31 @@ describe('cross-harness fork context', () => {
     await manager.send(fork!.id, { text: 'continue' });
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toBe('continue');
+  });
+
+  it('hands the conversation to a same-harness fork that moved to its own worktree', async () => {
+    sent.length = 0;
+    const src = { ...source('claude'), harnessRef: { claudeSessionId: 'claude_abc' } };
+    vi.mocked(createForkWorktree).mockResolvedValueOnce({ path: 'G:/proj/.vocs-code/worktrees/source-fork', branch: 'vocscode/source-fork' });
+    const { manager } = makeManager(src, conversation);
+
+    const fork = await manager.fork('s_src');
+    // A provider session id is bound to the directory it ran in, so the moved fork starts fresh
+    // from the transcript instead of resuming claude_abc in a directory that never held it.
+    expect(fork!.cwd).toBe('G:/proj/.vocs-code/worktrees/source-fork');
+    expect(fork!.worktreeBranch).toBe('vocscode/source-fork');
+    expect(fork!.harnessRef).toEqual({});
+    expect(fork!.pendingForkContext).toBe(true);
+
+    await manager.send(fork!.id, { text: 'now add a regression test' });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain('Handoff from a previous session');
+    expect(sent[0].text).toContain('fix the login bug');
+    expect(sent[0].text.endsWith('now add a regression test')).toBe(true);
+    expect(manager.get(fork!.id)!.pendingForkContext).toBeUndefined();
+
+    await manager.send(fork!.id, { text: 'and run it' });
+    expect(sent[1].text).toBe('and run it');
   });
 });
 

@@ -1046,8 +1046,8 @@ export async function excludeVocsCodeDir(root: string): Promise<void> {
   }
 }
 
-/** Creates an isolated worktree under <root>/.vocs-code/worktrees/<slug> on a new branch. */
-export async function createWorktree(projectRoot: string, slug: string): Promise<{ path: string; branch: string }> {
+/** Creates an isolated worktree under <root>/.vocs-code/worktrees/<slug> on a new branch, at `startPoint` when given. */
+export async function createWorktree(projectRoot: string, slug: string, startPoint?: string): Promise<{ path: string; branch: string }> {
   const root = await gitRoot(projectRoot);
   if (!root) throw new Error('Worktrees require a git repository.');
   const base = path.join(root, '.vocs-code', 'worktrees');
@@ -1060,9 +1060,34 @@ export async function createWorktree(projectRoot: string, slug: string): Promise
   while ((await exists(path.join(base, name))) || (await branchExists(`vocscode/${name}`))) name = `${slug}-${++i}`;
   const wtPath = path.join(base, name);
   const branch = `vocscode/${name}`;
-  const r = await git(root, ['worktree', 'add', '-b', branch, wtPath], 60_000);
+  const r = await git(root, ['worktree', 'add', '-b', branch, wtPath, ...(startPoint ? [startPoint] : [])], 60_000);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
   return { path: wtPath, branch };
+}
+
+/** The commit this exact folder has checked out, or null when there is none (missing folder, unborn branch). */
+async function gitHeadCommit(cwd: string): Promise<string | null> {
+  const r = await git(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+  return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+}
+
+/** The tip of one local branch in this repository, or null when the branch is gone. */
+async function gitBranchHead(root: string, branch: string): Promise<string | null> {
+  const r = await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+  return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+}
+
+/**
+ * Creates the worktree a fork runs in: a new branch starting at the source checkout's HEAD, so
+ * committed work carries over. A source whose folder is already gone (an archived session) still
+ * has its kept branch to start from; with neither, the repository's own HEAD stands in. Returns
+ * null when the project has no repository at all.
+ */
+export async function createForkWorktree(projectRoot: string, slug: string, source: { cwd: string; branch: string }): Promise<{ path: string; branch: string } | null> {
+  const root = await gitRoot(projectRoot);
+  if (!root) return null;
+  const start = (await gitHeadCommit(source.cwd)) ?? (await gitBranchHead(root, source.branch)) ?? undefined;
+  return createWorktree(root, slug, start);
 }
 
 /** Creates a worktree under .vocs-code/worktrees for an EXISTING branch (new-session-on-branch flow). */
