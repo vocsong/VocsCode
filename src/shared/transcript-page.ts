@@ -3,7 +3,7 @@
  *  transcript on every refresh. Positions are stable because a transcript keeps each item where
  *  it first appeared (updates replace it in place); a clear rewrites the file shorter, which a
  *  client sees as `total` dropping below its window. */
-import type { TranscriptItem } from '../../shared/types';
+import type { TranscriptItem } from './types';
 
 export const TRANSCRIPT_PAGE_DEFAULT = 200;
 /** Upper bound on one response, whatever the request asks for. */

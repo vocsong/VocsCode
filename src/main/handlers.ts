@@ -35,7 +35,7 @@ import { PiConfigStore, runPiCommand } from './pi-config';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
 import { relayUrl, signInAvailable } from './remote/relay-url';
-import { transcriptPage } from './remote/transcript-page';
+import { transcriptPage } from '../shared/transcript-page';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
