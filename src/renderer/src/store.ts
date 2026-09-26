@@ -2,10 +2,10 @@
 import { create } from 'zustand';
 import type { AgentState } from '../../shared/agent';
 import { EMPTY_AGENT_STATE } from '../../shared/agent';
-import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
+import type { AppSettings, DesktopFocus, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import { resolveNewSessionDefaults } from '../../shared/session-defaults';
-import { invoke, on } from './api';
+import { invoke, on, canInvoke } from './api';
 import { recencyAt, sortSessionRows } from './sessionOrder';
 
 export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
@@ -56,6 +56,10 @@ interface State {
   loaded: Record<string, boolean>;
   /** Last transcript load failure per session; the transcript pane offers a retry instead of spinning forever. */
   transcriptErrors: Record<string, string>;
+  /** Event floor per session: events at or below it are already in the loaded window (web shells). */
+  transcriptFloors: Record<string, number>;
+  /** First item index of each paged transcript; greater than zero means earlier items exist. */
+  transcriptStarts: Record<string, number>;
   models: Record<string, ModelInfo[]>;
   /** Per-harness catalog, keyed by harness id, used until that session's process reports its own list. */
   modelCatalog: Partial<Record<HarnessId, ModelCatalogEntry>>;
@@ -118,6 +122,10 @@ interface State {
   agent: AgentState;
   /** In-app auto-update state (issue #198); idle (never transitions) in dev and web builds. */
   updateState: UpdateState;
+  /** Where the desktop window is looking, from desktop:focus / push:desktopFocus. */
+  desktopFocus: DesktopFocus | null;
+  /** The host's remote policy, pushed over the e2e session; view-only gates write controls. */
+  remoteAccess: { viewOnly: boolean };
   /** Text another part of the UI wants Vesta's composer to start from. */
   agentPrefill: { text: string; nonce: number } | null;
   toasts: Toast[];
@@ -127,7 +135,14 @@ interface State {
 
   boot(): Promise<void>;
   setActive(id: string | null): Promise<void>;
-  loadTranscript(id: string): Promise<void>;
+  /** `force` reloads a transcript that is already marked loaded (resync); items stay until it lands. */
+  loadTranscript(id: string, force?: boolean): Promise<void>;
+  /** Prepends the page before a paged transcript's first item (web shells). */
+  loadEarlier(id: string): Promise<void>;
+  /** Re-reads the list, settings and focus, then replaces the active transcript window. */
+  resync(): Promise<void>;
+  /** Clears per-host state on a computer switch; push subscriptions stay in place. */
+  reset(): void;
   applyEvent(env: SessionEventEnvelope): void;
   setSettings(s: AppSettings): void;
   setSessions(list: SessionMeta[]): void;
@@ -202,8 +217,31 @@ let subscribed = false;
 let bootInFlight: Promise<void> | null = null;
 /** Share transcript reads; removing an entry also invalidates its delayed response. */
 const transcriptLoads = new Map<string, Promise<void>>();
+/** Share the "load earlier" reads of a paged transcript, keyed by session. */
+const transcriptEarlier = new Map<string, Promise<void>>();
+/** Events that arrived while a page was in flight; replayed once the page's floor is known. */
+const bufferedEvents = new Map<string, SessionEventEnvelope[]>();
+/** Bumped by reset(): in-flight reads from the previous host must not write into the new one. */
+let storeGeneration = 0;
 /** The deferred boot-time availability probe; a second boot must not stack a second timer. */
 let availabilityTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** What a host shell asks of the shared store (web shells configure it before mounting). */
+export interface StoreOptions {
+  /** Load transcripts tail-first from `sessions:transcriptPage`, with a sequence floor. */
+  pagedTranscripts?: boolean;
+  /** Skip the deferred availability probe at boot (a browser cannot install harnesses). */
+  probeAvailabilityOnBoot?: boolean;
+  /** Leave the first session unopened at boot (a web shell routes to its own default). */
+  openFirstSessionOnBoot?: boolean;
+}
+
+let storeOptions: StoreOptions = {};
+
+/** Set before the first boot; later calls merge, so a test can turn one behavior on alone. */
+export function configureStore(options: StoreOptions): void {
+  storeOptions = { ...storeOptions, ...options };
+}
 
 /** Background sessions in another worktree do not change the foreground diff. */
 function affectsActiveWorkspace(s: State, sessionId: string): boolean {
@@ -243,6 +281,15 @@ function dropPendingDeltas(sessionId: string, itemId?: string): void {
     const d = pendingDeltas[i];
     if (d.sessionId === sessionId && (itemId === undefined || (d.event.type === 'item.delta' && d.event.id === itemId))) pendingDeltas.splice(i, 1);
   }
+}
+
+/** Replays what arrived while a page was loading. The floor set with the page decides which of
+ *  those events the snapshot already contains; the rest apply in arrival order. */
+function replayBuffered(get: Getter, id: string): void {
+  const events = bufferedEvents.get(id);
+  bufferedEvents.delete(id);
+  if (!events?.length) return;
+  for (const env of events) get().applyEvent(env);
 }
 
 /** Set while back/forward is replaying an entry, so the replay does not push new history. */
@@ -286,6 +333,8 @@ export const useStore = create<State>((set, get) => ({
   transcripts: {},
   loaded: {},
   transcriptErrors: {},
+  transcriptFloors: {},
+  transcriptStarts: {},
   models: {},
   modelCatalog: {},
   availability: {},
@@ -319,6 +368,8 @@ export const useStore = create<State>((set, get) => ({
   showThinking: true,
   agent: EMPTY_AGENT_STATE,
   updateState: { status: 'idle' },
+  desktopFocus: null,
+  remoteAccess: { viewOnly: false },
   agentPrefill: null,
   toasts: [],
   changesVersion: 0,
@@ -331,8 +382,10 @@ export const useStore = create<State>((set, get) => ({
     set({ bootError: null, booted: false });
     bootInFlight = (async () => {
       try {
-        const [settings, sessions, terminals] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined), invoke('terminal:list', undefined)]);
-        set({ settings, sessions, terminals, terminalsLoaded: true, booted: true });
+        const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
+        // A web shell cannot list local terminals: ask only for what this host can serve.
+        const terminals = canInvoke('terminal:list') ? await invoke('terminal:list', undefined) : [];
+        set({ settings, sessions, terminals, terminalsLoaded: true, booted: true, remoteAccess: { viewOnly: settings.remote?.viewOnly === true } });
         if (!subscribed) {
           subscribed = true;
           on('push:sessionsChanged', (list) => get().setSessions(list));
@@ -342,19 +395,25 @@ export const useStore = create<State>((set, get) => ({
           on('push:terminalsChanged', (list) => get().setTerminals(list));
           on('push:agentState', (s) => get().setAgentState(s));
           on('push:updateState', (s) => set({ updateState: s }));
+          on('push:desktopFocus', (focus) => set({ desktopFocus: focus }));
+          on('push:remotePolicy', ({ viewOnly }) => set({ remoteAccess: { viewOnly } }));
         }
-        void invoke('update:state', undefined).then((s) => set({ updateState: s })).catch(() => undefined);
-        void invoke('agent:state', undefined).then((s) => get().setAgentState(s)).catch(() => undefined);
+        // Refused channels are never invoked: a browser cannot update the app or read Vesta's state.
+        if (canInvoke('update:state')) void invoke('update:state', undefined).then((s) => set({ updateState: s })).catch(() => undefined);
+        if (canInvoke('agent:state')) void invoke('agent:state', undefined).then((s) => get().setAgentState(s)).catch(() => undefined);
+        if (canInvoke('desktop:focus')) void invoke('desktop:focus', undefined).then((focus) => set({ desktopFocus: focus })).catch(() => undefined);
         const first = sessions.find((s) => !s.archived);
-        if (first) await get().setActive(first.id);
+        if (first && storeOptions.openFirstSessionOnBoot !== false) await get().setActive(first.id);
         // Availability probes spawn one subprocess per harness; kicking them off right as the
         // window opens competes with the first git calls and stalls startup under antivirus.
         // On-demand refreshes (dialogs, settings, fork menus) stay immediate.
-        if (availabilityTimer) clearTimeout(availabilityTimer);
-        availabilityTimer = setTimeout(() => {
-          availabilityTimer = null;
-          void get().refreshAvailability();
-        }, 2_500);
+        if (storeOptions.probeAvailabilityOnBoot !== false) {
+          if (availabilityTimer) clearTimeout(availabilityTimer);
+          availabilityTimer = setTimeout(() => {
+            availabilityTimer = null;
+            void get().refreshAvailability();
+          }, 2_500);
+        }
       } catch (error) {
         set({ booted: false, bootError: bootErrorMessage(error) });
       }
@@ -382,10 +441,15 @@ export const useStore = create<State>((set, get) => ({
     await applyNav(set, get, history[historyIndex + 1], historyIndex + 1);
   },
 
-  loadTranscript(id) {
+  loadTranscript(id, force = false) {
     const pending = transcriptLoads.get(id);
     if (pending) return pending;
-    if (get().loaded[id]) return Promise.resolve();
+    if (!force && get().loaded[id]) return Promise.resolve();
+    const generation = storeGeneration;
+    const paged = storeOptions.pagedTranscripts === true;
+    // A paged read has no floor until it lands; hold its events so the snapshot and the stream can
+    // be reconciled by sequence instead of the events landing on an empty list.
+    if (paged) bufferedEvents.set(id, []);
     // Register before invoking IPC or notifying subscribers, which may request the same load.
     const request = Promise.resolve().then(async () => {
       if (transcriptLoads.get(id) !== request) return;
@@ -397,15 +461,28 @@ export const useStore = create<State>((set, get) => ({
         return { transcriptErrors };
       });
       try {
-        const items = await invoke('sessions:transcript', { id });
-        if (transcriptLoads.get(id) !== request) return;
-        // The snapshot already contains any streamed text; queued deltas would duplicate it.
-        dropPendingDeltas(id);
-        set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
+        if (paged) {
+          const page = await invoke('sessions:transcriptPage', { id });
+          if (transcriptLoads.get(id) !== request || generation !== storeGeneration) return;
+          set((s) => ({
+            transcripts: { ...s.transcripts, [id]: page.items },
+            loaded: { ...s.loaded, [id]: true },
+            transcriptFloors: page.seq === undefined ? s.transcriptFloors : { ...s.transcriptFloors, [id]: page.seq },
+            transcriptStarts: { ...s.transcriptStarts, [id]: page.start }
+          }));
+          replayBuffered(get, id);
+        } else {
+          const items = await invoke('sessions:transcript', { id });
+          if (transcriptLoads.get(id) !== request || generation !== storeGeneration) return;
+          // The snapshot already contains any streamed text; queued deltas would duplicate it.
+          dropPendingDeltas(id);
+          set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
+        }
       } catch (e) {
-        if (transcriptLoads.get(id) !== request) return;
+        if (transcriptLoads.get(id) !== request || generation !== storeGeneration) return;
         // Never throw: the transcript pane stays mounted with a retry instead of loading forever.
         set((s) => ({ transcriptErrors: { ...s.transcriptErrors, [id]: e instanceof Error ? e.message : String(e) } }));
+        if (paged) replayBuffered(get, id);
       }
     }).finally(() => {
       if (transcriptLoads.get(id) === request) transcriptLoads.delete(id);
@@ -414,8 +491,105 @@ export const useStore = create<State>((set, get) => ({
     return request;
   },
 
+  loadEarlier(id) {
+    const start = get().transcriptStarts[id];
+    if (storeOptions.pagedTranscripts !== true || start === undefined || start <= 0) return Promise.resolve();
+    const pending = transcriptEarlier.get(id);
+    if (pending) return pending;
+    const generation = storeGeneration;
+    // The older page brings no floor of its own: events during the read keep counting against the
+    // current one, so replay holds them until it returns and then applies them in order.
+    bufferedEvents.set(id, []);
+    const request = Promise.resolve()
+      .then(async () => {
+        try {
+          const page = await invoke('sessions:transcriptPage', { id, end: start });
+          if (generation !== storeGeneration || transcriptEarlier.get(id) !== request) return;
+          set((s) => ({
+            transcripts: { ...s.transcripts, [id]: [...page.items, ...(s.transcripts[id] ?? [])] },
+            transcriptStarts: { ...s.transcriptStarts, [id]: page.start }
+          }));
+        } catch (e) {
+          if (generation !== storeGeneration) return;
+          get().toast(e instanceof Error ? e.message : String(e), 'error');
+        } finally {
+          if (generation === storeGeneration) replayBuffered(get, id);
+        }
+      })
+      .finally(() => {
+        if (transcriptEarlier.get(id) === request) transcriptEarlier.delete(id);
+      });
+    transcriptEarlier.set(id, request);
+    return request;
+  },
+
+  async resync() {
+    const generation = storeGeneration;
+    const [settings, sessions] = await Promise.all([invoke('settings:get', undefined), invoke('sessions:list', undefined)]);
+    if (generation !== storeGeneration) return;
+    set({ settings, sessions, remoteAccess: { viewOnly: settings.remote?.viewOnly === true } });
+    if (canInvoke('desktop:focus')) {
+      void invoke('desktop:focus', undefined).then((focus) => {
+        if (generation === storeGeneration) set({ desktopFocus: focus });
+      }).catch(() => undefined);
+    }
+    const active = get().activeId;
+    // Force the window even when it is marked loaded; the current items stay on screen until the
+    // fresh page replaces them, so a reconnect never blanks the transcript.
+    if (active) await get().loadTranscript(active, true);
+  },
+
+  reset() {
+    storeGeneration++;
+    transcriptLoads.clear();
+    transcriptEarlier.clear();
+    bufferedEvents.clear();
+    bootInFlight = null;
+    if (availabilityTimer) {
+      clearTimeout(availabilityTimer);
+      availabilityTimer = null;
+    }
+    // The push subscriptions from boot stay in place: they resolve the store dynamically, and a
+    // computer switch must not double-subscribe when the new host boots.
+    set({
+      booted: false,
+      bootError: null,
+      settings: null,
+      sessions: [],
+      activeId: null,
+      transcripts: {},
+      loaded: {},
+      transcriptErrors: {},
+      transcriptFloors: {},
+      transcriptStarts: {},
+      models: {},
+      modelCatalog: {},
+      availability: {},
+      availabilityError: null,
+      terminals: [],
+      terminalsLoaded: false,
+      activeTerminal: {},
+      drafts: {},
+      composerHistory: {},
+      desktopFocus: null,
+      remoteAccess: { viewOnly: false },
+      history: [],
+      historyIndex: -1
+    });
+  },
+
   applyEvent(env) {
     const { event, sessionId } = env;
+    // A page in flight has no floor yet: hold the event until the page lands, then replay past it.
+    const buffered = bufferedEvents.get(sessionId);
+    if (buffered) {
+      buffered.push(env);
+      return;
+    }
+    // Paged clients get a floor with the window; anything at or below it is already in the list.
+    // `seq` is absent from an older desktop, in which case nothing is dropped.
+    const floor = get().transcriptFloors[sessionId];
+    if (floor !== undefined && env.seq !== undefined && env.seq <= floor) return;
     if (event.type === 'item.delta') {
       pendingDeltas.push(env);
       if (!flushScheduled) {
@@ -548,6 +722,8 @@ export const useStore = create<State>((set, get) => ({
       for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.loaded)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.transcriptErrors)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.transcriptFloors)) if (!ids.has(id)) removed.add(id);
+      for (const id of Object.keys(s.transcriptStarts)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
@@ -568,6 +744,8 @@ export const useStore = create<State>((set, get) => ({
       const transcripts = { ...s.transcripts };
       const loaded = { ...s.loaded };
       const transcriptErrors = { ...s.transcriptErrors };
+      const transcriptFloors = { ...s.transcriptFloors };
+      const transcriptStarts = { ...s.transcriptStarts };
       const activeTerminal = { ...s.activeTerminal };
       const models = { ...s.models };
       const drafts = { ...s.drafts };
@@ -576,6 +754,8 @@ export const useStore = create<State>((set, get) => ({
         delete transcripts[id];
         delete loaded[id];
         delete transcriptErrors[id];
+        delete transcriptFloors[id];
+        delete transcriptStarts[id];
         delete activeTerminal[id];
         delete models[id];
         delete drafts[id];
@@ -586,6 +766,8 @@ export const useStore = create<State>((set, get) => ({
         transcripts,
         loaded,
         transcriptErrors,
+        transcriptFloors,
+        transcriptStarts,
         activeTerminal,
         models,
         drafts,
@@ -732,11 +914,20 @@ export const useStore = create<State>((set, get) => ({
     }
   },
   clearTranscriptLocal(id) {
-    set((s) => ({ transcripts: { ...s.transcripts, [id]: [] } }));
+    set((s) => {
+      // A cleared transcript starts a new window: the old floor must not hide the new events.
+      const floors = { ...s.transcriptFloors };
+      delete floors[id];
+      return { transcripts: { ...s.transcripts, [id]: [] }, transcriptFloors: floors, transcriptStarts: { ...s.transcriptStarts, [id]: 0 } };
+    });
   },
   replaceTranscript(id, items) {
     dropPendingDeltas(id);
-    set((s) => ({ transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true } }));
+    set((s) => {
+      const floors = { ...s.transcriptFloors };
+      delete floors[id];
+      return { transcripts: { ...s.transcripts, [id]: items }, loaded: { ...s.loaded, [id]: true }, transcriptFloors: floors };
+    });
   },
   setLocalInfo(sessionId, id, text, opts) {
     set((s) => {

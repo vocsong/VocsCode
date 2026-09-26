@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { ModelInfo, ModelRef } from '../../../shared/types';
 import { modelName } from '../../../shared/model-names';
 import { invoke } from '../api';
+import { useCanInvoke } from '../capabilities';
 import { fmtTokens } from '../format';
 import { useStore } from '../store';
 import { Icon, Spinner } from './ui';
@@ -34,6 +35,8 @@ export function ModelPicker({
   emptyText?: string;
 }) {
   const favorites = useStore((s) => s.settings?.favoriteModels ?? EMPTY_FAVORITES);
+  // A remote shell cannot write app settings, so it shows favorites read-only (no stars).
+  const canFavorite = useCanInvoke('settings:update');
   const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -100,18 +103,20 @@ export function ModelPicker({
           <span className="menu-item-hint" title={metadata}>{metadata}</span>
           {active && <Icon name="check" size={14} />}
         </button>
-        <button
-          type="button"
-          className={`mp-star ${fav ? 'on' : ''}`}
-          title={fav ? 'Remove from favorites' : 'Add to favorites'}
-          aria-label={fav ? 'Remove from favorites' : 'Add to favorites'}
-          onClick={(e) => {
-            e.stopPropagation();
-            toggleFavorite(m);
-          }}
-        >
-          <Icon name="star" size={14} />
-        </button>
+        {canFavorite && (
+          <button
+            type="button"
+            className={`mp-star ${fav ? 'on' : ''}`}
+            title={fav ? 'Remove from favorites' : 'Add to favorites'}
+            aria-label={fav ? 'Remove from favorites' : 'Add to favorites'}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleFavorite(m);
+            }}
+          >
+            <Icon name="star" size={14} />
+          </button>
+        )}
       </div>
     );
   };

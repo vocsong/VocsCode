@@ -11,7 +11,7 @@ import type { KnowledgeGraph, KnowledgePageDetail, KnowledgePageMeta, KnowledgeP
 import type { SessionMeta } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl' }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', canInvoke: () => true, isWeb: false }));
 
 const session = (): SessionMeta =>
   ({

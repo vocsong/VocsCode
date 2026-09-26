@@ -2,7 +2,7 @@
 /** Unit tests for the web-build invoke shims in api.ts: the browser-served desktop
  *  affordances (open URL guard, folder prompt, clipboard paste) and pass-through. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { webShim } from '../src/renderer/src/api';
+import { canInvoke, webShim } from '../src/renderer/src/api';
 
 describe('web invoke shims', () => {
   beforeEach(() => {
@@ -46,5 +46,11 @@ describe('web invoke shims', () => {
   it('handles app:notify without a Notification API', async () => {
     // jsdom has no Notification: the shim must not throw and must not reach the host.
     await expect(webShim('app:notify', { title: 't', body: 'b' })).resolves.toBeNull();
+  });
+
+  it('allows every channel when the bound transport has no gate', () => {
+    // The desktop preload exposes no `can`; only a remote transport narrows the surface.
+    expect(canInvoke('terminal:list')).toBe(true);
+    expect(canInvoke('settings:update')).toBe(true);
   });
 });
