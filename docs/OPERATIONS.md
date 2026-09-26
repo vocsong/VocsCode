@@ -53,7 +53,11 @@ The landing Worker (`code.vocs.io`) is owned by the separate `vocs.io` repo and 
 secret. For manual deploy, rollback, verification and secret-rotation instructions see
 [`relay/README.md`](../relay/README.md) and the live checklist in
 [`REMOTE-ACCESS-ROADMAP.md`](./REMOTE-ACCESS-ROADMAP.md#appendix-a--live-verification-checklist).
-Keep `workers.dev` enabled until the login gate is live and the direct-origin policy is settled.
+Deploy the per-account relay before the landing assertion code, then set `workers_dev: false` so browser requests cannot bypass the live GitHub gate. The production rollout needs the same `ACCOUNT_ASSERTION_SECRET` on both Workers; see `relay/README.md`.
+
+The account-isolated relay requires `ACCOUNT_ASSERTION_SECRET` to match on the landing and relay,
+plus a stable relay-only `DEVICE_ROUTE_SECRET` for account-tagged device ids; do not rotate the latter
+without a device-id migration. See `relay/README.md` before changing either secret.
 
 The proof-of-possession relay (access tokens, sealed pairing delivery, socket tickets) has been live
 since 2026-09-25 and is incompatible with older desktops: they cannot connect until they run the new

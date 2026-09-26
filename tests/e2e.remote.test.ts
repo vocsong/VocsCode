@@ -184,7 +184,7 @@ describe.runIf(enabled)('remote access settings', () => {
       await expect.poll(() => win.getByTestId('remote-sign-in-code').textContent(), { timeout: 20_000 }).toBe(connectCheckCode(nonceHash));
 
       // The signed-in browser adds this computer: it comes online, registered, with nothing typed.
-      const signedIn: typeof fetch = (input, init = {}) => fetch(input, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), cookie: TEST_SESSION_COOKIE } });
+      const signedIn: typeof fetch = (input, init = {}) => fetch(input, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), cookie: TEST_SESSION_COOKIE, origin: gate.origin } });
       const browser = new RelayClient({ vault: memoryVault(), fetchImpl: signedIn });
       await browser.addComputer(gate.origin, nonceHash);
       await expect.poll(async () => win.getByTestId('remote-status').innerText(), { timeout: 30_000 }).toMatch(/online/);

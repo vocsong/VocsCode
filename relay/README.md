@@ -48,23 +48,25 @@ Worker already uses those numbers.
 
 The landing Worker at `code.vocs.io` forwards `/app` and `/v1` (REST and WebSockets under
 `/v1/ws/*`) through a service binding. It is a **separate repo and deployment** (`vocs.io`:
-`npm run deploy:code`); a relay deployment does not update the landing Worker. After any deploy,
-run the HTTP checklist in `docs/REMOTE-ACCESS-ROADMAP.md` Appendix A and the opt-in live remote
-smoke. Until the login gate is deployed, the web client at `/app` remains ungated; do not
-advertise it publicly.
+`npm run deploy:code`); a relay deployment does not update the landing Worker. The landing's GitHub
+gate is live. This relay change adds one Hub DO per allowlisted GitHub subject, verifies its
+short-lived account assertions, and sets `workers_dev: false` so browser requests cannot bypass the
+gate. Deploy the relay first, then deploy the landing Worker with the same `ACCOUNT_ASSERTION_SECRET`;
+never enable additional logins between those deployments. After any deploy, run the HTTP checklist in
+`docs/REMOTE-ACCESS-ROADMAP.md` Appendix A and the opt-in live smoke.
 
 ## Enrollment secret
 
-`ENROLL_TOKEN` authorizes the owner: a desktop's **first** pairing, before it has a device of its
-own, and the owner routes (`/v1/owner/*`: add a computer that clicked Connect with GitHub, list
-computers, ask one to pair a browser). The landing Worker holds a copy as `RELAY_ENROLL_TOKEN` and
-presents it only for a signed-in, allowlisted GitHub session (vocs.io `code/worker`), which is what
-lets Connect with GitHub work with no secret on the desktop. An enrolled desktop starts every later
-pairing with its own device credential, so rotating the secret leaves every paired desktop and
-browser working. Rotation does not revoke devices; to cut off a lost or compromised device use
-Revoke (or Settings → Remote access → Revoke all, the kill switch).
+`ENROLL_TOKEN` is the legacy/manual enrollment capability for the incumbent `vocs-v1` account and
+is also the landing Worker's service credential for owner routes. On `/v1/owner/*`, the relay now
+requires both that credential and a valid account assertion from the landing; the assertion scopes
+computer list, enrollment grant and browser pair request to the signed-in GitHub subject. New GitHub
+accounts enroll via **Connect with GitHub**; they must not be given the incumbent's manual secret.
+An enrolled desktop starts every later pairing with its own device credential, so rotating the legacy
+secret leaves paired devices working. Rotation does not revoke devices; to cut off a lost or
+compromised device use Revoke (or Settings → Remote access → Revoke all, the kill switch).
 
-To rotate:
+To rotate the **legacy enrollment secret**:
 
 1. Prepare a new independent, high-entropy secret in the approved secret manager; never put the
    value in the repo, a shell command line, CI output or a ticket.
@@ -72,28 +74,45 @@ To rotate:
    prompt. Do not terminate Wrangler mid-write. An unauthenticated `/v1/pair/start` must still
    answer 403.
 3. In the vocs.io repo, run `npx wrangler secret put RELAY_ENROLL_TOKEN -c code/wrangler.jsonc` with
-   the same value, or Connect with GitHub and the signed-in computer list stop working (they answer
-   403 through the landing).
-4. Only desktops that have **never** paired need it, and only where signing in is unavailable: enter
-   it in Settings → Remote access → Connect.
-   A desktop the relay no longer recognizes (revoked, or pointed at a different relay) falls back to
-   enrolling and needs the current value too.
-5. Start one pairing from a desktop that enrolled with the new value, then let the code expire or
-   deny it, and confirm no temporary device remains in the device list.
+   the same value; owner routes will refuse requests if the copies differ.
+4. Only legacy `vocs-v1` desktops that have **never** paired need the enrollment secret, and only
+   where sign-in is unavailable. New GitHub accounts use Connect with GitHub, which binds enrollment
+   to their own account; the Settings fallback is hidden when the gate is available.
+5. A desktop the relay no longer recognizes (revoked, or pointed at a different relay) may need the
+   current legacy value to re-enroll. Start one pairing, then let the code expire or deny it, and
+   confirm no temporary device remains in the device list.
 
-If a rollout goes wrong, re-enter the new value on the affected desktop; do not roll back to a value
-suspected of compromise. A Worker code rollback does not restore an old secret.
+## Account routing secrets
+
+`ACCOUNT_ASSERTION_SECRET` (at least 32 random bytes) must match on both Workers. From `relay/`, run
+`npx wrangler secret put ACCOUNT_ASSERTION_SECRET`; in the vocs.io repo run
+`npx wrangler secret put ACCOUNT_ASSERTION_SECRET -c code/wrangler.jsonc`. Enter the same value at
+each interactive prompt; never put it in a command argument, committed file, log or ticket. A
+rotation requires coordinated updates and temporarily refuses signed-in account routes while values
+differ; verify `/v1/me`, owner routes and two-account separation before adding users. This secret is
+distinct from `ENROLL_TOKEN` and is never entered on desktops.
+
+`DEVICE_ROUTE_SECRET` (at least 32 random bytes) is relay-only. It MACs account routing hints into
+new device ids so arbitrary account names cannot create Durable Objects. Provision it with
+`npx wrangler secret put DEVICE_ROUTE_SECRET` before account onboarding. Keep it stable: changing it
+without a versioned device-id migration makes existing non-legacy device ids unroutable. It is not
+an account credential and never leaves the relay.
+
+If a legacy enrollment-secret rollout goes wrong, re-enter the new value on the affected desktop;
+do not roll back to a value suspected of compromise. A Worker code rollback does not restore an old
+secret.
 
 ## Layout
 
+- `src/account.ts` — signed landing assertions and MACed tenant-routing hints (Cloudflare-free, unit-tested)
 - `src/core.ts` — pairing state machine, device registry, refresh and access tokens, the offline
   mirror catalogue (storage-agnostic, unit-tested)
-- `src/routes.ts` — the deny-by-default HTTP route table and its authentication (Cloudflare-free, unit-tested)
+- `src/routes.ts` — the deny-by-default HTTP route table and its account/device authentication (Cloudflare-free, unit-tested)
 - `src/hub.ts` — frame routing between desktops and browsers, shared by the Durable Object and the
   test relay (`tests/fake-relay.ts`) so local suites run the production rules
 - `src/edge.ts` — the Worker's front door: `/v1` only, edge rate limits, bounded bodies
 - `src/rate.ts` — in-memory fixed-window rate limiter inside the Hub
-- `src/worker.ts` — the Worker + Hub Durable Object (platform glue only)
+- `src/worker.ts` — the Worker, per-account Hub Durable Object and short-lived EnrollmentDirectory (platform glue)
 - `src/web-client.ts` — the browser-side pairing, tokens, vault and e2e transport (DOM-free, unit-tested)
 - `src/page.ts` — the web page logic (bundled to `app/app.js` via `npm run relay:page` at the repo root)
 - `public/app/` — the static web client, served at `/app` (pairing, computer switcher, sessions,
@@ -105,7 +124,9 @@ suspected of compromise. A Worker code rollback does not restore an old secret.
 cd relay && npx wrangler dev   # http://localhost:8787 — state under relay/.wrangler (gitignored)
 ```
 
-Pass `--var ENROLL_TOKEN:<value>` (or a gitignored `.dev.vars`) for a local secret. Desktops always
+Use a gitignored `.dev.vars` for `ENROLL_TOKEN`, `ACCOUNT_ASSERTION_SECRET` and `DEVICE_ROUTE_SECRET`
+when exercising signed-in multi-account routes. Without those secrets, local development can use
+only the legacy `vocs-v1` account. Desktops always
 connect to `https://code.vocs.io`; start a development build with
 `VOCS_CODE_RELAY_URL=http://localhost:8787` to point it at this local relay instead. Tests start the
 same Worker programmatically (`tests/support/local-relay.ts`) with a throwaway secret and state

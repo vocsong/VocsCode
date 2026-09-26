@@ -90,7 +90,7 @@ describe('web app layout (/app on the landing origin)', () => {
     });
     try {
       Object.assign(dom.window, { TextEncoder, indexedDB: fakeIndexedDB() });
-      dom.window.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ login: 'vocs' }) })) as unknown as typeof fetch;
+      dom.window.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ login: 'vocs', accountId: 'vocs-v1' }) })) as unknown as typeof fetch;
       dom.window.eval(await read('relay/public/app/app.js'));
       await vi.waitFor(() => expect([...dom.window.document.querySelectorAll<HTMLFormElement>('.account-signout')].every((form) => !form.hidden)).toBe(true));
       for (const form of dom.window.document.querySelectorAll<HTMLFormElement>('.account-signout')) {
@@ -211,7 +211,7 @@ describe('web app signed in with GitHub (owner actions through the landing)', ()
 
   it('lists the account computers and pairs one without a code', async () => {
     const { calls, fetchMock } = landing({
-      'GET /v1/me': () => ({ login: 'vocs' }),
+      'GET /v1/me': () => ({ login: 'vocs', accountId: 'vocs-v1' }),
       'GET /v1/owner/hosts': () => [
         { deviceId: 'h_work', name: 'Work <PC>', platform: 'win32', lastSeen: 1, online: true },
         { deviceId: 'h_home', name: 'Home PC', platform: 'win32', lastSeen: 1, online: false }
@@ -247,7 +247,7 @@ describe('web app signed in with GitHub (owner actions through the landing)', ()
   it('adds the computer that opened the page, showing its check code, then asks it to pair', async () => {
     const hash = 'c0ffee'.repeat(10) + 'beef';
     const { calls, fetchMock } = landing({
-      'GET /v1/me': () => ({ login: 'vocs' }),
+      'GET /v1/me': () => ({ login: 'vocs', accountId: 'vocs-v1' }),
       'POST /v1/owner/enroll-grant': () => ({ expiresAt: 1 }),
       'GET /v1/owner/enroll-grant': () => ({ status: 'redeemed', hostDeviceId: 'h_new', hostName: 'New PC' }),
       'POST /v1/owner/pair-request': () => ({ code: 'ABCD2345', pollToken: 'poll-capability' }),

@@ -36,23 +36,26 @@ revocation. It is what found a refused request's unread body ending a `wrangler 
 revocation answering 500, which no fake could. `e2e.remote-web` (in `test:e2e:ci`) loads the web
 app in Electron's Chromium from that local relay: the native WebSocket, IndexedDB keys across a
 reload, the static CSP, the pairing link, the computer switcher, the read-only terminal and unpair;
-and, through `tests/support/test-landing.ts` (a stand-in for the landing's login gate that adds the
-enrollment secret to `/v1/owner/*` for a signed-in cookie), Connect with GitHub and pairing from the
-signed-in computer list. `e2e.remote` drives the desktop side of the same flow in the real app.
-The opt-in **deployed** smoke runs the same flow against a real origin, with an existing enrollment
-secret kept outside the repo:
+and, through `tests/support/test-landing.ts` (a stand-in for the landing that signs per-account
+assertions, gates owner routes and isolates accounts), Connect with GitHub, account switching and
+pairing from the signed-in computer list. `e2e.remote` drives the desktop side of the same flow in
+the real app. The opt-in **deployed** smoke runs the flow against the incumbent production account;
+it needs the enrollment secret and a signed-in session cookie kept outside the repo:
 
 ```bash
 REMOTE_LIVE=1 REMOTE_LIVE_ORIGIN=https://code.vocs.io \
-  REMOTE_LIVE_TOKEN_FILE=/absolute/path/to/relay-enroll-token.txt npm run test:remote-live
+  REMOTE_LIVE_TOKEN_FILE=/absolute/path/to/relay-enroll-token.txt \
+  REMOTE_LIVE_SESSION_COOKIE_FILE=/absolute/path/to/incumbent-session-cookie.txt npm run test:remote-live
 ```
 
 It attempts to revoke temporary devices and clear its mirror, including recovery through the
 claimant-only poll capability if the approved browser response is lost. A failed run can still
 leave devices when neither side receives credentials; inspect/revoke them through an existing
 authenticated desktop before rerunning. Never run it against a shared account without
-authorization. With `REMOTE_LIVE=1`, missing origin or token file fails loudly before network
-access. `npm test` excludes it, so a green offline run is not live verification. Run it
+authorization. The session-cookie preflight verifies it belongs to `vocs-v1` before any mutation;
+keep that HttpOnly credential private. With `REMOTE_LIVE=1`, missing origin, token file or session
+cookie fails loudly before network access. `npm test` excludes it, so a green offline run is not live
+verification. Run it
 after any production relay/landing deploy and after pairing, socket or mirror changes; if no
 credentials or deployment are available, report the live tier as unverified.
 
@@ -114,8 +117,8 @@ suites alive** below):
 | Project knowledge (wiki store, docs scan, distillation, PR reflection, relation graph), `src/main/knowledge/**`, `resources/mcp/vocs-memory.mjs` | `e2e.knowledge` |
 | MCP layer (`src/main/mcp/**`), built-in servers, computer use (`mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`) | `tests/mcp.test.ts`, `tests/mcp-gitnexus.test.ts`, `tests/mcp-client.test.ts`, `tests/cua.test.ts`, `tests/cua-preview.test.ts`, `tests/cua-card.test.tsx`, `tests/desktop-tab.test.tsx`, `tests/right-panel-bottom.test.tsx` |
 | Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy, the pairing QR (`shared/qr.ts`, `PairingQr.tsx`) | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/remote-host-lifecycle.test.ts`, `tests/web-client.test.ts`, `tests/remote-ui.test.tsx`, `tests/qr.test.ts` |
-| Relay routing, auth, tokens or rate limiting (`relay/src/{core,routes,edge,rate}.ts`) | `tests/relay-core.test.ts`, `tests/relay-routes.test.ts`, `tests/relay-edge.test.ts` + `tests/remote-e2e.test.ts`, `tests/remote-workerd.test.ts`, `test:relay-do`, `e2e.remote` |
-| Relay web app (`relay/public/app/**`, `relay/src/{page,web-client}.ts`, `relay/public/_headers`) | `tests/relay-page-layout.test.ts`, `tests/web-client.test.ts`, `tests/browser-socket.test.ts` + `e2e.remote-web` (a real browser; also checks the CSP) |
+| Relay account routing, auth, tokens or rate limiting (`relay/src/{account,core,routes,edge,rate}.ts`) | `tests/relay-account.test.ts`, `tests/relay-core.test.ts`, `tests/relay-routes.test.ts`, `tests/relay-edge.test.ts` + `tests/remote-e2e.test.ts`, `tests/remote-workerd.test.ts`, `test:relay-do`, `e2e.remote` |
+| Relay web app and account-partitioned browser vault (`relay/public/app/**`, `relay/src/{page,web-client}.ts`, `relay/public/_headers`) | `tests/relay-page-layout.test.ts`, `tests/web-client.test.ts`, `tests/browser-socket.test.ts` + `e2e.remote-web` (a real browser; also checks the CSP and account switching) |
 | Relay Durable Object and frame routing (`relay/src/{worker,hub}.ts`, socket lifecycle/tags/queues) | `test:relay-do`, `tests/remote-workerd.test.ts` + `test:remote-live` against the deployed origin after deploy |
 | Transcript rendering — message rows, work/command collapse groups, tool cards, shell panels (`components/Transcript.tsx`, `transcript-window.ts`) | `tests/tool-group.test.tsx`, `tests/transcript-window.test.ts`, `tests/transcript-virtual.test.tsx` + `e2e.transcript` |
 | Anything else under `src/renderer/**` | `npm run test:e2e:ci` |

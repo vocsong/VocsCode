@@ -197,7 +197,7 @@
     /** Loads the vault, migrating a pairing left in legacy storage. True when any pairing exists. */
     async restore() {
       let state = await this.deps.vault.load();
-      if (!state?.pairings.length) state = await this.migrateLegacy() ?? state;
+      if (!state?.pairings.length && this.deps.allowLegacyMigration !== false) state = await this.migrateLegacy() ?? state;
       this.list = state?.pairings ?? [];
       this.creds = this.list.find((p) => p.hostDeviceId === state?.active) ?? this.list[0] ?? null;
       return !!this.creds;
@@ -248,7 +248,7 @@
       this.list = [];
       this.creds = null;
       this.access.clear();
-      this.deps.legacy?.remove(LEGACY_CREDENTIALS_KEY);
+      if (this.deps.allowLegacyMigration !== false) this.deps.legacy?.remove(LEGACY_CREDENTIALS_KEY);
       await this.deps.vault.clear();
       for (const listener of [...this.changeListeners]) listener();
     }
@@ -625,6 +625,13 @@
     };
   }
 
+  // relay/src/account.ts
+  var LEGACY_ACCOUNT_ID = "vocs-v1";
+  var encoder = new TextEncoder();
+  function isAccountId(value) {
+    return value === LEGACY_ACCOUNT_ID || typeof value === "string" && /^github:[1-9]\d{0,19}$/.test(value);
+  }
+
   // src/shared/pairing.ts
   var PAIRING_CODE_PATTERN = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/;
   var CONNECT_HASH_PATTERN = /^[0-9a-f]{64}$/;
@@ -636,7 +643,8 @@
   }
 
   // relay/src/page.ts
-  function indexedDbVault() {
+  function indexedDbVault(accountId) {
+    const stateKey = `state:${accountId}`;
     const open = () => new Promise((resolve, reject) => {
       if (typeof indexedDB === "undefined") {
         reject(new Error("IndexedDB is unavailable"));
@@ -663,12 +671,20 @@
       });
     };
     return {
-      load: async () => await run("readonly", (store) => store.get("state")) ?? null,
+      load: async () => {
+        const current = await run("readonly", (store) => store.get(stateKey));
+        if (current || accountId !== LEGACY_ACCOUNT_ID) return current ?? null;
+        const legacy = await run("readonly", (store) => store.get("state"));
+        if (!legacy) return null;
+        await run("readwrite", (store) => store.put(legacy, stateKey));
+        await run("readwrite", (store) => store.delete("state"));
+        return legacy;
+      },
       save: async (state) => {
-        await run("readwrite", (store) => store.put(state, "state"));
+        await run("readwrite", (store) => store.put(state, stateKey));
       },
       clear: async () => {
-        await run("readwrite", (store) => store.delete("state"));
+        await run("readwrite", (store) => store.delete(stateKey));
       }
     };
   }
@@ -679,7 +695,7 @@
       remove: (k) => window.localStorage.removeItem(k)
     };
   }
-  var client = new RelayClient({ vault: indexedDbVault(), legacy: localStorageApi() });
+  var client;
   var sessions = [];
   var active = null;
   var activeStatus = "idle";
@@ -743,6 +759,14 @@
       const search = params.toString();
       window.history.replaceState(window.history.state, "", `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`);
     }
+    const account = await loadAccount();
+    const accountId = account?.accountId ?? "signed-out";
+    client = new RelayClient({
+      vault: indexedDbVault(accountId),
+      legacy: localStorageApi(),
+      allowLegacyMigration: accountId === LEGACY_ACCOUNT_ID
+    });
+    accountReady = Promise.resolve(account?.authenticated === true);
     el("pair-form").addEventListener("submit", (ev) => {
       ev.preventDefault();
       const code = el("code").value.trim();
@@ -776,7 +800,6 @@
     el("connect-cancel").addEventListener("click", () => client.hasCredentials() ? void enter() : openPairScreen());
     client.onPush((channel, payload) => void onPush(channel, payload));
     client.onPairingsChanged(() => renderHosts());
-    accountReady = loadAccount();
     let restored = false;
     try {
       restored = await client.restore();
@@ -896,17 +919,18 @@
   async function loadAccount() {
     try {
       const res = await fetch("/v1/me", { credentials: "same-origin", cache: "no-store" });
-      if (!res.ok) return false;
+      if (res.status === 503 || res.status === 404) return { accountId: LEGACY_ACCOUNT_ID, authenticated: false };
+      if (!res.ok) return null;
       const body = await res.json();
-      if (typeof body.login !== "string" || !body.login) return false;
+      if (typeof body.login !== "string" || !body.login || !isAccountId(body.accountId)) return null;
       for (const form of document.querySelectorAll(".account-signout")) {
         const label = form.querySelector(".account-name");
         if (label) label.textContent = `@${body.login}`;
         form.hidden = false;
       }
-      return true;
+      return { accountId: body.accountId, authenticated: true };
     } catch {
-      return false;
+      return null;
     }
   }
   function openPairScreen() {

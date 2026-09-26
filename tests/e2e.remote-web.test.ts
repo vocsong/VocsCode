@@ -42,7 +42,7 @@ app.whenReady().then(async () => {
   // Signed in with GitHub, as far as the (test) landing is concerned.
   if (process.env.REMOTE_WEB_COOKIE) {
     const [name, value] = process.env.REMOTE_WEB_COOKIE.split('=');
-    await session.defaultSession.cookies.set({ url: process.env.REMOTE_WEB_URL, name, value });
+    await session.defaultSession.cookies.set({ url: new URL(process.env.REMOTE_WEB_URL).origin, name, value });
   }
   const win = new BrowserWindow({ width: 1100, height: 800, show: false, webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, backgroundThrottling: false } });
   win.once('ready-to-show', () => {
@@ -113,6 +113,7 @@ async function approve(host: RemoteHost, browserName: string): Promise<void> {
 describe.runIf(enabled)('remote web client in a real browser', () => {
   it('pairs from the link, survives a reload, switches computers, sends, and unpairs', async () => {
     relay = await startLocalRelay();
+    landing = await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
     const work = await desk('Work', relay.origin, relay.enrollToken);
     const { code } = await work.host.startPairing('Work PC');
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-remote-web-'));
@@ -121,7 +122,7 @@ describe.runIf(enabled)('remote web client in a real browser', () => {
     app = await electron.launch({
       executablePath: require('electron') as string,
       args: [main, `--user-data-dir=${path.join(tmp, 'profile')}`],
-      env: isolatedEnv(path.join(tmp, 'userData'), { REMOTE_WEB_URL: `${relay.origin}/app/?code=${code}` }),
+      env: isolatedEnv(path.join(tmp, 'userData'), { REMOTE_WEB_URL: `${landing.origin}/app/?code=${code}`, REMOTE_WEB_COOKIE: TEST_SESSION_COOKIE }),
       timeout: 60_000
     });
     const page: Page = await app.firstWindow();
@@ -189,7 +190,7 @@ describe.runIf(enabled)('remote web client in a real browser', () => {
 
   it('adds a computer with Connect with GitHub, then pairs another from the signed-in list, with no code or secret', async () => {
     relay ??= await startLocalRelay();
-    landing = await startTestLanding(relay.origin, relay.enrollToken);
+    landing ??= await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
     // Desktops with no enrollment secret: they go through the landing, as they would at code.vocs.io.
     const office = await signInDesk('Office');
     let link = '';
@@ -231,7 +232,7 @@ describe.runIf(enabled)('remote web client in a real browser', () => {
     await lab.host.signIn(landing.origin, async (url) => void (labLink = url), 'Lab PC');
     const grant = await fetch(`${landing.origin}/v1/owner/enroll-grant`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: TEST_SESSION_COOKIE },
+      headers: { 'content-type': 'application/json', cookie: TEST_SESSION_COOKIE, origin: landing.origin },
       body: JSON.stringify({ nonceHash: new URL(labLink).searchParams.get('connect') })
     });
     expect(grant.status).toBe(200);
@@ -250,4 +251,78 @@ describe.runIf(enabled)('remote web client in a real browser', () => {
     expect(landing.ownerCalls).toEqual(expect.arrayContaining(['POST /v1/owner/enroll-grant', 'GET /v1/owner/enroll-grant', 'POST /v1/owner/pair-request', 'GET /v1/owner/hosts']));
     expect(cspViolations).toEqual([]);
   }, 180_000);
+
+  it('keeps each signed-in account in its own browser vault and host list', async () => {
+    relay ??= await startLocalRelay();
+    landing ??= await startTestLanding(relay.origin, relay.enrollToken, 'e2e-incumbent', 'vocs-v1', relay.accountAssertionSecret);
+    const accountA = 'github:710003';
+    const accountB = 'github:710004';
+    const cookieA = landing.sessionFor(accountA, 'account-a');
+    const cookieB = landing.sessionFor(accountB, 'account-b');
+    const desktopA = await signInDesk('Account A');
+    const desktopB = await signInDesk('Account B');
+    const addComputer = async (desktop: Desk, cookie: string, name: string) => {
+      let link = '';
+      await desktop.host.signIn(landing!.origin, async (url) => void (link = url), `${name} PC`);
+      const nonceHash = new URL(link).searchParams.get('connect')!;
+      const grant = await fetch(`${landing!.origin}/v1/owner/enroll-grant`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie, origin: landing!.origin },
+        body: JSON.stringify({ nonceHash })
+      });
+      expect(grant.status).toBe(200);
+      await expect.poll(() => desktop.host.state().status, { timeout: 30_000 }).toBe('online');
+    };
+    await addComputer(desktopA, cookieA, 'Account A');
+    await addComputer(desktopB, cookieB, 'Account B');
+
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-remote-account-switch-'));
+    const main = path.join(tmp, 'main.cjs');
+    await fs.writeFile(main, BROWSER_MAIN);
+    const accountApp = await electron.launch({
+      executablePath: require('electron') as string,
+      args: [main, `--user-data-dir=${path.join(tmp, 'profile')}`],
+      env: isolatedEnv(path.join(tmp, 'userData'), { REMOTE_WEB_URL: `${landing.origin}/app/`, REMOTE_WEB_COOKIE: cookieA }),
+      timeout: 60_000
+    });
+    try {
+      const page = await accountApp.firstWindow();
+      const aRow = page.locator('#owner-host-list li', { hasText: 'Account A PC' });
+      await expect.poll(() => aRow.textContent(), { timeout: 30_000 }).toContain('Account A PC');
+      await expect.poll(() => page.locator('#owner-host-list').textContent()).not.toContain('Account B PC');
+      await page.locator('#device-name').fill('Account A browser');
+      await aRow.getByRole('button', { name: 'Pair' }).click();
+      await approve(desktopA.host, 'Account A browser');
+      await expect.poll(() => page.locator('#conn').textContent(), { timeout: 30_000 }).toBe('connected');
+      await page.locator('#transcript').getByText('answer from Account A').waitFor({ timeout: 20_000 });
+
+      // Switch identities at the same origin and in the same IndexedDB. Account B must not load
+      // A's pairing or computer name while it lists/pairs only B's own host.
+      const [cookieName, cookieValue] = cookieB.split('=');
+      await page.context().addCookies([{ url: landing.origin, name: cookieName!, value: cookieValue! }]);
+      await page.reload();
+      const bRow = page.locator('#owner-host-list li', { hasText: 'Account B PC' });
+      await expect.poll(() => bRow.textContent(), { timeout: 30_000 }).toContain('Account B PC');
+      await expect.poll(() => page.locator('#owner-host-list').textContent()).not.toContain('Account A PC');
+      await expect.poll(async () => (await page.locator('#host-select option').allTextContents()).join('|')).not.toContain('Account A PC');
+      await page.locator('#device-name').fill('Account B browser');
+      await bRow.getByRole('button', { name: 'Pair' }).click();
+      await approve(desktopB.host, 'Account B browser');
+      await expect.poll(() => page.locator('#conn').textContent(), { timeout: 30_000 }).toBe('connected');
+      await page.locator('#transcript').getByText('answer from Account B').waitFor({ timeout: 20_000 });
+
+      // Returning to A restores A's own IndexedDB bucket, not B's.
+      const [nameA, valueA] = cookieA.split('=');
+      await page.context().addCookies([{ url: landing.origin, name: nameA!, value: valueA! }]);
+      await page.reload();
+      await expect.poll(() => page.locator('#conn').textContent(), { timeout: 30_000 }).toBe('connected');
+      await page.locator('#transcript').getByText('answer from Account A').waitFor({ timeout: 20_000 });
+      await expect.poll(async () => (await page.locator('#host-select option').allTextContents()).join('|')).toContain('Account A PC');
+      await expect.poll(async () => (await page.locator('#host-select option').allTextContents()).join('|')).not.toContain('Account B PC');
+    } finally {
+      await accountApp.close();
+      await desktopA.host.disable();
+      await desktopB.host.disable();
+    }
+  }, 240_000);
 });

@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { abortAllDurableObjects, evictDurableObject, runInDurableObject, SELF } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { hashToken } from '../src/core';
+import { ACCOUNT_ASSERTION_HEADER, createAccountAssertion, INTERNAL_ACCOUNT_ID_HEADER } from '../src/account';
 import { generateIdentity, openSealedToKey, pairingDecisionPayload, pairingTokenContext, publicOf, sign, tokenProofPayload, type Identity, type SealedToKey } from '../../src/shared/crypto';
 import type { Env as RelayEnv } from '../src/worker';
 
@@ -27,6 +28,13 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   if (!headers.has('cf-connecting-ip')) headers.set('cf-connecting-ip', callerIp);
   return SELF.fetch(new Request(`https://relay.test${path}`, { ...init, headers }));
+}
+
+async function accountRequest(path: string, init: RequestInit = {}, accountId = env.RELAY_ACCOUNT): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const url = new URL(path, 'https://relay.test');
+  headers.set(ACCOUNT_ASSERTION_HEADER, await createAccountAssertion(accountId, init.method ?? 'GET', url.pathname, env.ACCOUNT_ASSERTION_SECRET!, Date.now()));
+  return request(path, { ...init, headers });
 }
 
 function message(ws: WebSocket): Promise<Record<string, unknown>> {
@@ -117,7 +125,7 @@ async function pair(options: { identity?: Identity; enrolled?: { socket: WebSock
   expect(started.status).toBe(200);
   const { code } = await started.json<{ code: string }>();
   const incoming = message(enrolling);
-  const claim = await request('/v1/pair/claim', {
+  const claim = await accountRequest('/v1/pair/claim', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ code, name: 'browser', webPub })
   });
@@ -130,7 +138,7 @@ async function pair(options: { identity?: Identity; enrolled?: { socket: WebSock
   const approved = await result;
   expect(approved).toMatchObject({ t: 'pair.result', code, decision: 'approve' });
   expect((await request(`/v1/pair/poll?code=${code}`)).status).toBe(401);
-  const poll = await request(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } });
+  const poll = await accountRequest(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } });
   expect(poll.status).toBe(200);
   const web = await poll.json<{ status: string; sealedToken: SealedToKey; webDeviceId: string; hostDeviceId: string }>();
   expect(web.status).toBe('approved');
@@ -181,7 +189,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
     const { code } = await started.json<{ code: string }>();
     const ownerRequest = message(ownerSocket);
     const otherRequest = message(otherSocket);
-    const claim = await request('/v1/pair/claim', { method: 'POST', body: JSON.stringify({ code, webPub }), headers: { 'content-type': 'application/json' } });
+    const claim = await accountRequest('/v1/pair/claim', { method: 'POST', body: JSON.stringify({ code, webPub }), headers: { 'content-type': 'application/json' } });
     const { pollToken } = await claim.json<{ pollToken: string }>();
     expect(await ownerRequest).toMatchObject({ hostPub: JSON.parse(JSON.stringify(publicOf(owner))), webPub: JSON.parse(JSON.stringify(webPub)) });
     expect(await otherRequest).toMatchObject({ hostPub: JSON.parse(JSON.stringify(publicOf(owner))), webPub: JSON.parse(JSON.stringify(webPub)) });
@@ -191,7 +199,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
     const malformed = message(ownerSocket);
     send(ownerSocket, { t: 'pair.respond', code, signature: await sign(owner, pairingDecisionPayload(code, 'approve', webPub)) });
     expect(await malformed).toEqual({ t: 'pair.error', code, error: 'forbidden' });
-    expect((await request(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } })).status).toBe(200);
+    expect((await accountRequest(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } })).status).toBe(200);
     const final = message(ownerSocket);
     send(ownerSocket, { t: 'pair.respond', code, decision: 'approve', signature: await sign(owner, pairingDecisionPayload(code, 'approve', webPub)) });
     expect(await final).toMatchObject({ t: 'pair.result', decision: 'approve' });
@@ -253,7 +261,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
     const started = await request('/v1/pair/start', { method: 'POST', headers: { Authorization: `Bearer ${env.ENROLL_TOKEN}`, 'content-type': 'application/json' }, body: JSON.stringify({ hostPub: publicOf(hostIdentity) }) });
     const { code } = await started.json<{ code: string }>();
     const incoming = message(enrolling);
-    const claim = await request('/v1/pair/claim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, webPub }) });
+    const claim = await accountRequest('/v1/pair/claim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, webPub }) });
     const { pollToken } = await claim.json<{ pollToken: string }>();
     await incoming;
     const result = message(enrolling);
@@ -261,7 +269,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
     const approved = await result;
     const hostRefresh = approved.hostToken as string;
     const hostId = approved.hostDeviceId as string;
-    const poll = await (await request(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } })).json<{ sealedToken: SealedToKey; webDeviceId: string }>();
+    const poll = await (await accountRequest(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } })).json<{ sealedToken: SealedToKey; webDeviceId: string }>();
     // Nothing in storage holds either credential in the clear.
     const stored = await runInDurableObject(hub(), async (_instance, state) => JSON.stringify([...(await state.storage.list())]));
     const webRefresh = await openSealedToKey(webIdentity.enc, poll.sealedToken, pairingTokenContext(code, poll.webDeviceId));
@@ -341,7 +349,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(typeof env.PAIR_LIMIT?.limit).toBe('function');
     expect(typeof env.POLL_LIMIT?.limit).toBe('function');
     expect(typeof env.TOKEN_LIMIT?.limit).toBe('function');
-    const claim = () => request('/v1/pair/claim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'ABCD2345', webPub: {} }) });
+    const claim = () => accountRequest('/v1/pair/claim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'ABCD2345', webPub: {} }) });
     const statuses: Array<[number, string | null]> = [];
     for (let i = 0; i < 11; i++) {
       const res = await claim();
@@ -351,7 +359,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(statuses.slice(0, 10).every(([status, via]) => status === 400 && via === null)).toBe(true);
     expect(statuses[10]).toEqual([429, 'edge']);
     // Another address still gets through.
-    expect((await request('/v1/pair/claim', { method: 'POST', headers: { 'cf-connecting-ip': '198.51.100.200', 'content-type': 'application/json' }, body: '{}' })).status).toBe(400);
+    expect((await accountRequest('/v1/pair/claim', { method: 'POST', headers: { 'cf-connecting-ip': '198.51.100.200', 'content-type': 'application/json' }, body: '{}' })).status).toBe(400);
   });
 
   it('drops malformed and unsupported host frames without delivering them to a paired browser', async () => {

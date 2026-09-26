@@ -2,13 +2,15 @@
  *  transcripts and approval prompts. DOM layer over RelayClient. A browser can pair with several
  *  computers; the switcher in the top bar picks the one to drive and shows which are online. */
 import { PairingRevokedError, RelayClient, relayBaseFor, type PairingVault, type VaultState } from './web-client';
+import { isAccountId, LEGACY_ACCOUNT_ID } from './account';
 import { CONNECT_HASH_PATTERN, connectCheckCode, PAIRING_CODE_PATTERN } from '../../src/shared/pairing';
 import type { TerminalInfo } from '../../src/shared/terminal';
 import type { RemoteDeviceInfo, TranscriptItem } from '../../src/shared/types';
 
 /** Pairings (with their non-extractable keys) live in IndexedDB: structured clone keeps a
  *  CryptoKey usable without ever making it readable, which localStorage cannot. */
-function indexedDbVault(): PairingVault {
+function indexedDbVault(accountId: string): PairingVault {
+  const stateKey = `state:${accountId}`;
   const open = () =>
     new Promise<IDBDatabase>((resolve, reject) => {
       if (typeof indexedDB === 'undefined') {
@@ -36,12 +38,22 @@ function indexedDbVault(): PairingVault {
     });
   };
   return {
-    load: async () => ((await run('readonly', (store) => store.get('state'))) as VaultState | undefined) ?? null,
+    load: async () => {
+      const current = (await run('readonly', (store) => store.get(stateKey))) as VaultState | undefined;
+      if (current || accountId !== LEGACY_ACCOUNT_ID) return current ?? null;
+      // The pre-account vault belongs to the incumbent account only. Never import it for a new
+      // GitHub subject, and remove the old key after its one-time move.
+      const legacy = (await run('readonly', (store) => store.get('state'))) as VaultState | undefined;
+      if (!legacy) return null;
+      await run('readwrite', (store) => store.put(legacy, stateKey));
+      await run('readwrite', (store) => store.delete('state'));
+      return legacy;
+    },
     save: async (state) => {
-      await run('readwrite', (store) => store.put(state, 'state'));
+      await run('readwrite', (store) => store.put(state, stateKey));
     },
     clear: async () => {
-      await run('readwrite', (store) => store.delete('state'));
+      await run('readwrite', (store) => store.delete(stateKey));
     }
   };
 }
@@ -54,7 +66,7 @@ function localStorageApi() {
   };
 }
 
-const client = new RelayClient({ vault: indexedDbVault(), legacy: localStorageApi() });
+let client: RelayClient;
 let sessions: Array<{ id: string; title: string; status: string }> = [];
 let active: string | null = null;
 let activeStatus = 'idle';
@@ -135,6 +147,14 @@ async function boot(): Promise<void> {
     const search = params.toString();
     window.history.replaceState(window.history.state, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`);
   }
+  const account = await loadAccount();
+  const accountId = account?.accountId ?? 'signed-out';
+  client = new RelayClient({
+    vault: indexedDbVault(accountId),
+    legacy: localStorageApi(),
+    allowLegacyMigration: accountId === LEGACY_ACCOUNT_ID
+  });
+  accountReady = Promise.resolve(account?.authenticated === true);
   el('pair-form').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const code = (el('code') as HTMLInputElement).value.trim();
@@ -168,7 +188,6 @@ async function boot(): Promise<void> {
   el('connect-cancel').addEventListener('click', () => (client.hasCredentials() ? void enter() : openPairScreen()));
   client.onPush((channel, payload) => void onPush(channel, payload));
   client.onPairingsChanged(() => renderHosts());
-  accountReady = loadAccount();
   let restored = false;
   try {
     restored = await client.restore();
@@ -301,21 +320,24 @@ async function renderOwnerHosts(): Promise<void> {
 
 /** The login gate is on the landing origin. A local/ungated preview has no /v1/me, so keep
  *  account sign-out hidden there; unpairing this browser remains a separate device action. */
-async function loadAccount(): Promise<boolean> {
+async function loadAccount(): Promise<{ accountId: string; authenticated: boolean } | null> {
   try {
     const res = await fetch('/v1/me', { credentials: 'same-origin', cache: 'no-store' });
-    if (!res.ok) return false;
-    const body = (await res.json()) as { login?: unknown };
-    if (typeof body.login !== 'string' || !body.login) return false;
+    // An explicit 503/404 is the local or pre-gate preview: preserve the legacy dev account.
+    // A 401 or network failure is not an identity and must not load another user's vault.
+    if (res.status === 503 || res.status === 404) return { accountId: LEGACY_ACCOUNT_ID, authenticated: false };
+    if (!res.ok) return null;
+    const body = (await res.json()) as { login?: unknown; accountId?: unknown };
+    if (typeof body.login !== 'string' || !body.login || !isAccountId(body.accountId)) return null;
     for (const form of document.querySelectorAll<HTMLFormElement>('.account-signout')) {
       const label = form.querySelector('.account-name');
       if (label) label.textContent = `@${body.login}`;
       form.hidden = false;
     }
-    return true;
+    return { accountId: body.accountId as string, authenticated: true };
   } catch {
-    // Pre-gate deployments do not have /v1/me. Never expose an account control without it.
-    return false;
+    // Never expose or restore an account control without an authenticated identity.
+    return null;
   }
 }
 

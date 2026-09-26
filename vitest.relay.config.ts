@@ -5,7 +5,13 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   plugins: [cloudflareTest({
     wrangler: { configPath: './relay/wrangler.jsonc' },
-    miniflare: { bindings: { ENROLL_TOKEN: 'relay-do-test-enroll' } }
+    miniflare: {
+      bindings: {
+        ENROLL_TOKEN: 'relay-do-test-enroll',
+        ACCOUNT_ASSERTION_SECRET: 'relay-do-test-account-assertion-secret-32-bytes-min',
+        DEVICE_ROUTE_SECRET: 'relay-do-test-device-route-secret-32-bytes-min'
+      }
+    }
   })],
   test: {
     include: ['relay/tests/**/*.test.ts'],
