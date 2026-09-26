@@ -132,7 +132,7 @@ describe('Mission managed execution', () => {
     const next = await admission.acquire(meta.cwd); expect(next).toBeDefined(); await next!.release(); admission.close();
   });
 
-  it('persists ordinary writer debt before dispatch and never treats a fresh manager or a later runtime as old-tree proof', async () => {
+  it('persists ordinary writer debt before dispatch, keeps it through a fresh manager and a later runtime, and releases it on an explicit stop', async () => {
     const writerState = vi.fn<NonNullable<HarnessAdapter['workspaceWriterState']>>(() => 'active');
     vi.mocked(createAdapter).mockImplementation((_id, ctx) => {
       const runtime = scripted(ctx); runtimes.push(runtime);
@@ -150,19 +150,24 @@ describe('Mission managed execution', () => {
     await restored.setPermissionMode(meta.id, 'ask');
     await restored.send(meta.id, { text: 'Ordinary use still works despite missing old-tree proof' }); runtimes[1].finish();
     writerState.mockReturnValue('quiescent');
-    await expect(restored.stop(meta.id)).rejects.toThrow('earlier session process tree');
-    expect(restored.activity(meta.id)).toMatchObject({ active: false, uncertain: true, quiescent: false });
+    // A later runtime is not old-tree proof: the earlier run's claim still blocks a baseline.
+    expect(restored.activity(meta.id)).toMatchObject({ active: true, uncertain: true, quiescent: false });
     expect(await admission.acquire(meta.cwd)).toBeUndefined();
-    await expect(restored.moveTo(meta.id, path.join(root, 'elsewhere'))).rejects.toThrow('earlier session process tree');
-    await expect(restored.delete(meta.id)).rejects.toThrow('earlier session process tree');
-    expect(restored.get(meta.id)?.cwd).toBe(meta.cwd);
+    // The user's explicit stop is the acknowledgment; it never fails an ordinary session.
+    await restored.stop(meta.id);
+    expect(restored.get(meta.id)?.workspaceWriterClaims).toBeUndefined();
+    expect(restored.activity(meta.id)).toMatchObject({ active: false, uncertain: false, quiescent: true });
+    const lease = await admission.acquire(meta.cwd); expect(lease).toBeDefined(); await lease!.release();
+    await restored.moveTo(meta.id, path.join(root, 'elsewhere'));
+    await restored.delete(meta.id);
+    expect(restored.get(meta.id)).toBeUndefined();
     await restored.flushPendingPersists(); admission.close();
-    await manager.stop(meta.id);
   });
 
   it('holds a read-only source permission escalation behind an acquired baseline lease before persisting its writer claim', async () => {
     const admission = new MissionWorkspaceAdmission({ sessions: () => manager.list(), activity: (id) => manager.activity(id), terminals: () => [] });
-    manager = new SessionManager({ ...deps, withWorkspaceDispatch: (meta, dispatch) => admission.dispatch(meta.cwd, dispatch) });
+    // Ordinary sessions meet Mission admission only while ordinary process ownership is enabled.
+    manager = new SessionManager({ ...deps, withWorkspaceDispatch: (meta, dispatch) => admission.dispatch(meta.cwd, dispatch), ordinaryProcessOwnership: () => true });
     vi.mocked(createAdapter).mockImplementation((_id, ctx) => {
       const runtime = scripted(ctx); runtimes.push(runtime);
       return Object.assign(runtime.adapter, { workspaceWriterState: () => 'quiescent' as const });
@@ -179,22 +184,28 @@ describe('Mission managed execution', () => {
     await manager.stop(meta.id); const released = await admission.acquire(meta.cwd); expect(released).toBeDefined(); await released!.release(); admission.close();
   });
 
-  it('keeps ordinary deferred and rejected disposal owned without admitting a replacement or baseline', async () => {
+  it('releases an ordinary session on Stop while admission still sees its deferred disposal, and only logs a rejected one', async () => {
     const admission = new MissionWorkspaceAdmission({ sessions: () => manager.list(), activity: (id) => manager.activity(id), terminals: () => [] });
     const meta = await manager.create(request()); await manager.send(meta.id, { text: 'Work' }); runtimes[0].finish();
     const disposed = deferred<void>(); runtimes[0].adapter.dispose.mockImplementationOnce(() => disposed.promise);
-    const stopping = manager.stop(meta.id); const rejected = expect(stopping).rejects.toThrow('unproven tree');
+    const stopping = manager.stop(meta.id);
+    // Admission keeps seeing the disposing runtime; the session itself is free at once.
+    await vi.waitFor(() => expect(runtimes[0].adapter.dispose).toHaveBeenCalledTimes(1));
     expect(manager.activity(meta.id)).toMatchObject({ active: true, tearingDown: true, quiescent: false });
     expect(await admission.acquire(meta.cwd)).toBeUndefined();
-    runtimes[0].finish('late'); disposed.reject(new Error('unproven tree')); await rejected;
-    expect(manager.activity(meta.id)).toMatchObject({ active: true, tearingDown: true, uncertain: true, quiescent: false });
-    expect(await admission.acquire(meta.cwd)).toBeUndefined();
-    await expect(manager.send(meta.id, { text: 'No replacement' })).rejects.toThrow(/stopping|uncertain/);
+    await manager.send(meta.id, { text: 'A replacement starts immediately' });
+    expect(runtimes).toHaveLength(2);
+    expect(runtimes[1].adapter.send).toHaveBeenCalledTimes(1);
+    disposed.reject(new Error('unproven tree'));
+    await expect(stopping).resolves.toBeUndefined();
+    expect(deps.log).toHaveBeenCalledWith('warn', expect.stringContaining('dispose failed: unproven tree'));
+    runtimes[1].finish('next');
+    expect(manager.activity(meta.id)).toMatchObject({ active: true, tearingDown: false, uncertain: false, quiescent: true });
     await manager.stop(meta.id);
     const lease = await admission.acquire(meta.cwd); expect(lease).toBeDefined(); await lease!.release(); admission.close();
   });
 
-  it.each(['stopped', 'fatal', 'startup'] as const)('retains ordinary uncertainty when %s cleanup cannot prove disposal', async (failure) => {
+  it.each(['stopped', 'fatal', 'startup'] as const)('logs a %s cleanup whose disposal fails and leaves the ordinary session usable', async (failure) => {
     const meta = await manager.create(request());
     if (failure === 'startup') {
       vi.mocked(createAdapter).mockImplementationOnce((_id, ctx) => {
@@ -209,13 +220,16 @@ describe('Mission managed execution', () => {
       runtimes[0].adapter.dispose.mockRejectedValueOnce(new Error('tree unproven'));
       runtimes[0].ctx.emit(failure === 'fatal' ? { type: 'error', message: 'crashed', fatal: true } : { type: 'status', status: 'stopped' });
     }
-    await vi.waitFor(() => expect(manager.activity(meta.id)).toMatchObject({ active: true, tearingDown: true, uncertain: true, quiescent: false }));
-    await manager.stop(meta.id); expect(manager.activity(meta.id).quiescent).toBe(true);
+    await vi.waitFor(() => expect(deps.log).toHaveBeenCalledWith('warn', expect.stringContaining('dispose failed: tree unproven')));
+    expect(manager.activity(meta.id)).toMatchObject({ active: false, tearingDown: false, uncertain: false, quiescent: true });
+    await manager.send(meta.id, { text: 'Works again' });
+    expect(runtimes).toHaveLength(2);
+    expect(runtimes[1].adapter.send).toHaveBeenCalledTimes(1);
   });
 
   it('defers an ordinary source prompt behind a held snapshot, then retains writer activity until a terminal turn', async () => {
     const admission = new MissionWorkspaceAdmission({ sessions: () => manager.list(), activity: (id) => manager.activity(id), terminals: () => [] });
-    manager = new SessionManager({ ...deps, withWorkspaceDispatch: (meta, dispatch) => admission.dispatch(meta.cwd, dispatch) });
+    manager = new SessionManager({ ...deps, withWorkspaceDispatch: (meta, dispatch) => admission.dispatch(meta.cwd, dispatch), ordinaryProcessOwnership: () => true });
     const ordinary = await manager.create(request());
     const lease = await admission.acquire(ordinary.cwd); expect(lease).toBeDefined();
     const pending = manager.send(ordinary.id, { text: 'Change a source file' });

@@ -11,6 +11,9 @@ export interface OwnedTerminalProcess {
   quiescent: Promise<void>;
   /** The target shell's status from the supervisor, which can differ from the wrapper's status. */
   readonly exitCode?: number;
+  /** Resolves once the shell was assigned to the Job and resumed; rejects when it never ran, which
+   * lets an ordinary tab fall back to a plain shell. Absent (test doubles) means established. */
+  established?: Promise<void>;
   /** May be retried after a timeout/failure; ownership is not surrendered by cancellation. */
   close(): void;
 }
@@ -30,5 +33,5 @@ export function spawnOwnedTerminal(file: string, args: string[], options: PtyMod
     launch: (wrapper, argv) => spawn(wrapper, argv, options),
     observeExit: (pty, exited) => { pty.onExit(exited); }
   });
-  return { pty: owner.process, quiescent: owner.quiescent, get exitCode() { return owner.exitCode; }, close: () => owner.cancel() };
+  return { pty: owner.process, quiescent: owner.quiescent, established: owner.established, get exitCode() { return owner.exitCode; }, close: () => owner.cancel() };
 }

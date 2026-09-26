@@ -28,6 +28,8 @@ describe.runIf(process.platform === 'win32')('Mission terminal (real Windows Job
     const logs: string[] = [];
     const manager = new TerminalManager({
       dir: path.join(dir, 'snapshots'), version: 'test', cwdOf: () => dir, isManaged: () => managed,
+      // Ordinary shells are contained only while ordinary process ownership is enabled.
+      ordinaryProcessOwnership: () => true,
       windowsJobHelper: path.resolve('resources/mission/windows-check-job.ps1'),
       settings: () => ({ ...DEFAULT_TERMINAL_SETTINGS, shell: 'custom', customShellPath: process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe', customShellArgs: ['/d', '/q'] }),
       managedCloseTimeoutMs: 25_000,

@@ -184,35 +184,38 @@ describe('Mission terminal ownership', () => {
     processes[0].close.mockImplementation(() => undefined);
   });
 
-  it('keeps ordinary-source closing and exited shells visible to admission after their tabs disappear', async () => {
-    const { manager, processes } = await fixture({ isManaged: () => false });
+  it('keeps a closing plain ordinary shell visible to admission only until it exits, with no records', async () => {
+    const { manager, processes, dir } = await fixture({ isManaged: () => false });
     const terminal = manager.create('source');
     await manager.close(terminal.id);
     expect(manager.list()).toEqual([]);
-    expect(manager.activity('source')).toEqual([expect.objectContaining({ managed: false, state: 'uncertain' })]);
+    expect(manager.activity('source')).toEqual([expect.objectContaining({ managed: false, state: 'closing' })]);
     expect(processes[0].pty.kill).toHaveBeenCalledTimes(1);
     processes[0].pty.exit();
-    expect(manager.activity('source')).toHaveLength(1); // Root exit alone says nothing about its children.
-    await expect(manager.closeManagedSession('source')).rejects.toThrow(/without process-tree containment/);
+    // Ordinary process ownership is off: the plain shell owed nothing beyond its own exit.
+    expect(manager.activity('source')).toEqual([]);
+    await manager.closeManagedSession('source');
     expect(processes[0].pty.kill).toHaveBeenCalledTimes(1); // No signal sent to an exited/reusable PID.
+    expect((await fs.readdir(dir)).filter((file) => file.endsWith('.owner'))).toEqual([]);
   });
 
-  it('does not turn the ordinary closeForSession timeout into a quiescent admission result', async () => {
-    const { manager } = await fixture({ isManaged: () => false });
+  it('closes plain ordinary shells for a session with the bounded UI wait and retires them once they exit', async () => {
+    const { manager, processes } = await fixture({ isManaged: () => false });
     manager.create('source');
     await manager.closeForSession('source'); // Legacy callers still have their bounded UI wait.
     expect(manager.list()).toEqual([]);
-    expect(manager.activity('source')).toEqual([expect.objectContaining({ state: 'uncertain' })]);
-    await expect(manager.closeManagedSession('source')).rejects.toThrow(/cannot be confirmed/);
+    expect(manager.activity('source')).toEqual([expect.objectContaining({ state: 'closing' })]);
+    processes[0].pty.exit();
+    expect(manager.activity('source')).toEqual([]);
   });
 
-  it('retains both ordinary process generations across an immediate restart', async () => {
+  it('retires the killed predecessor of an ordinary restart when it exits instead of retaining it', async () => {
     const { manager, processes } = await fixture({ isManaged: () => false });
     const terminal = manager.create('source');
     await manager.restart(terminal.id);
     expect(manager.activity('source')).toHaveLength(2);
     processes[0].pty.exit();
-    expect(manager.activity('source').map((r) => r.state)).toEqual(['uncertain', 'live']);
+    expect(manager.activity('source').map((r) => r.state)).toEqual(['live']);
     expect(manager.list()[0].exit).toBeUndefined();
   });
 
@@ -234,9 +237,10 @@ describe('Mission terminal ownership', () => {
     processes[0].proof.resolve(); processes[0].pty.exit();
     await tick();
     await manager.closeManagedSession('missing'); // No resources, no synthetic error.
+    // Ordinary shells meet the Mission gate only while ordinary process ownership is enabled.
     const restored = new TerminalManager({
       dir, settings: () => DEFAULT_TERMINAL_SETTINGS, cwdOf: () => dir, version: 'test',
-      isManaged: () => false, beforeSpawn: () => { throw new Error('baseline lease held'); },
+      isManaged: () => false, ordinaryProcessOwnership: () => true, beforeSpawn: () => { throw new Error('baseline lease held'); },
       spawn, push: vi.fn(), log: vi.fn()
     });
     await restored.load();
@@ -245,6 +249,9 @@ describe('Mission terminal ownership', () => {
     expect(attached.info.exit?.code).toBe(-1);
     expect(attached.snapshot).toContain('baseline lease held');
     expect(spawn).toHaveBeenCalledTimes(1);
+    // The refused launch leaves no ownership records behind, not even from its Job attempt.
+    expect((await fs.readdir(dir)).filter((file) => file.endsWith('.owner'))).toEqual([]);
+    expect(await fs.readdir(path.join(dir, 'process-ownership', 'lead')).catch(() => [])).toEqual([]);
     await restored.closeAll();
   });
 
@@ -264,13 +271,16 @@ describe('Mission terminal ownership', () => {
     expect(() => recovered.create('lead')).toThrow(/uncertain/);
   });
 
-  it('does not quarantine an unreadable ownership record into a false quiet state on the next load', async () => {
-    const { manager, dir, spawn } = await fixture();
+  it('keeps an unreadable ownership record without failing app start, and Mission recovery still fails closed on it', async () => {
+    const log = vi.fn();
+    const { manager, dir, spawn } = await fixture({ log });
     const receipt = path.join(dir, 'unresolved.owner');
     await fs.writeFile(receipt, '{incomplete');
-    await expect(manager.load()).rejects.toThrow(/Cannot read terminal process ownership/);
-    await expect(manager.load()).rejects.toThrow(/Cannot read terminal process ownership/);
-    expect(await fs.readFile(receipt, 'utf8')).toBe('{incomplete');
+    await manager.load(); // Boot continues: a partial record must never stop the app from launching.
+    await manager.load();
+    expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('unresolved.owner'));
+    expect(await fs.readFile(receipt, 'utf8')).toBe('{incomplete'); // Not quarantined into a quiet state.
+    await expect(manager.reconcileOwnership(new Set(['lead']))).rejects.toThrow(/Cannot reconcile terminal process ownership/);
     expect(spawn).not.toHaveBeenCalled();
   });
 

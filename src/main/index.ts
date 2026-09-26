@@ -25,6 +25,7 @@ import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
 import { MissionRuntime } from './mission/runtime';
+import { ordinaryProcessOwnership as ordinaryOwnershipEnabled, ownedWindowsJobProbe } from './owned-windows-job';
 import { SettingsStore } from './settings';
 import { SessionStore } from './store';
 import { TerminalManager } from './terminal';
@@ -176,6 +177,12 @@ async function main(): Promise<void> {
     },
     () => settings.get()
   );
+  // Ordinary Pi sessions and shells join Mission's process ownership only on Windows, with Missions
+  // configured, and once the bundled Job helper has proven itself here (probed lazily, just once).
+  const windowsJobHelper = runtime.resource('mission', 'windows-check-job.ps1');
+  const jobHelperProbe = ownedWindowsJobProbe(windowsJobHelper);
+  const ordinaryProcessOwnership = () => ordinaryOwnershipEnabled(settings.get(), jobHelperProbe);
+  ordinaryProcessOwnership(); // Start the probe early: a PTY spawn cannot wait for it.
 
   // Prefer an installed `gitnexus`; otherwise run it through npx. Both are resolved, because a bare
   // `npx` on Windows is a `.cmd` shim only the resolved path lets `spawnTool` find.
@@ -251,6 +258,7 @@ async function main(): Promise<void> {
     memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
     memoryUserData: userData,
     withWorkspaceDispatch: (meta, dispatch) => missions ? missions.admission.dispatch(meta.cwd, dispatch) : dispatch(),
+    ordinaryProcessOwnership,
     knowledgeDigest: (scope) => {
       // Opening a session on a project with no wiki is the passive trigger for the first scan.
       void knowledge.ensureSeeded(scope);
@@ -333,14 +341,15 @@ async function main(): Promise<void> {
     beforeSpawn: (cwd) => missions?.admission.assertAvailableSync(cwd),
     isManaged: (id) => !!sessionsRef.get(id)?.mission,
     onActivity: (id) => { const missionId = sessionsRef.get(id)?.mission?.missionId; if (missionId) missions?.service.ownedActivityChanged(missionId); },
-    windowsJobHelper: path.join(app.isPackaged ? process.resourcesPath : path.join(appRoot, 'resources'), 'mission', 'windows-check-job.ps1'),
+    ordinaryProcessOwnership,
+    windowsJobHelper,
     push: pushAll,
     log
   });
   await terminals.load();
   missions = new MissionRuntime({
     userData, sessions: sessionsRef, settings, terminals,
-    windowsJobHelper: path.join(app.isPackaged ? process.resourcesPath : path.join(appRoot, 'resources'), 'mission', 'windows-check-job.ps1'),
+    windowsJobHelper,
     changed: (view) => pushAll(PUSH_CHANNELS.missionsChanged, view.record), log: logTo,
   });
   // Recovery restores blocked/paused coordination state; it never launches a model on boot.
@@ -424,6 +433,7 @@ async function main(): Promise<void> {
     // may stay silent on a switch — repaint the caption from the theme id directly.
     applyChrome();
     terminals?.updateSettings(s.terminal);
+    ordinaryProcessOwnership(); // Configuring Missions starts the Job helper probe.
   });
   currentTheme = settings.get().theme;
   nativeTheme.themeSource = themeSourceFor(currentTheme);
@@ -480,10 +490,11 @@ async function main(): Promise<void> {
         log('warn', `${label} during shutdown failed: ${describeError(error)}`);
       }
     };
+    // Each step is independent: a failed stop must never skip the persistence flushes after it.
     const drainSessions = safe('mission shutdown', missions?.close()).then(async () => {
-      await sessions?.stopAll();
-      await sessions?.flushPendingPersists();
-      await analytics.flush();
+      await safe('session stop', sessions?.stopAll());
+      await safe('session persist flush', sessions?.flushPendingPersists());
+      await safe('analytics flush', analytics.flush());
     });
     const shutdown = Promise.all([
       safe('session drain', drainSessions),

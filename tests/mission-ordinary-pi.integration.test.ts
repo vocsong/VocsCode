@@ -82,6 +82,8 @@ describe.skipIf(!enabled || process.platform !== 'win32')('ordinary Pi native wr
       analytics: { touchSession: vi.fn(), recordUserMessage: vi.fn(), recordToolCall: vi.fn(), recordTurn: vi.fn(), recordUsage: vi.fn(), recordSubagent: vi.fn() } as never,
       getSecret: async () => undefined, pushEvent: (event) => events.push(event), pushSessions: () => {}, notify: () => {}, log: (_level, message) => logs.push(message),
       withWorkspaceDispatch: (meta, dispatch) => admission!.dispatch(meta.cwd, dispatch),
+      // The ownership this suite exercises applies only while ordinary process ownership is enabled.
+      ordinaryProcessOwnership: () => true,
     });
     admission = new MissionWorkspaceAdmission({ sessions: () => manager!.list(), activity: (id) => manager!.activity(id), terminals: () => [] });
     const workspaces = new MissionWorkspaces({ root: path.join(root, 'workspaces'), quiescence: admission });

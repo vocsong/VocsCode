@@ -6,11 +6,17 @@ import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStd
 import { statSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import path from 'node:path';
+import type { AppSettings } from '../shared/types';
+import { applyMissionProjectOverride, type MissionProjectOverride } from '../shared/mission-config';
 
 export interface OwnedWindowsJob<T> {
   process: T;
   /** Positive empty-Job receipt AND supervisor exit. A lost proof rejects, never becomes success. */
   quiescent: Promise<void>;
+  /** Resolves once the suspended target is assigned to the Job and the host resumed it. Rejects when
+   * that never happened (setup failure, cancellation, supervisor loss): the target never ran.
+   * Always set by launchOwnedWindowsJob; absent (test doubles) means established. */
+  established?: Promise<void>;
   readonly exitCode?: number;
   readonly state: 'live' | 'closing' | 'uncertain' | 'quiescent';
   /** Safe to retry while the supervisor still owns the Job. Never signals a reusable numeric PID. */
@@ -74,10 +80,15 @@ export function launchOwnedWindowsJob<T>(options: OwnedWindowsJobOptions<T>): Ow
   const quiescent = new Promise<void>((resolve, fail) => { prove = resolve; reject = fail; });
   // Spawn/setup can fail before the caller receives a handle; never leave an unhandled rejection.
   void quiescent.catch(() => undefined);
+  let establish!: () => void, refuse!: (error: Error) => void;
+  const established = new Promise<void>((resolve, fail) => { establish = resolve; refuse = fail; });
+  void established.catch(() => undefined);
   const settle = () => {
     if (!failed && treeQuiet && rootExited) { state = 'quiescent'; prove(); }
   };
   const fail = (message: string) => {
+    // Settled promises ignore this; before 'ready' it records that the target never ran.
+    refuse(new Error(message));
     if (state === 'quiescent' || failed) return;
     failed = true; state = 'uncertain';
     clearTimeout(startup);
@@ -101,8 +112,11 @@ export function launchOwnedWindowsJob<T>(options: OwnedWindowsJobOptions<T>): Ow
             ready = true;
             clearTimeout(startup);
             client.write(requestedClose ? 'cancel\n' : 'resume\n');
+            if (requestedClose) refuse(new Error('Owned launch was canceled before its target ran'));
+            else establish();
           } else if (frame.type === 'done' && frame.quiescent === true && frame.childTreeZero === true && Number.isSafeInteger(frame.code) && !failed && !treeQuiet) {
             exitCode = frame.code as number;
+            if (!ready) refuse(new Error('Job supervisor finished without starting its target'));
             treeQuiet = true; clearTimeout(startup); settle(); client.end();
           } else if (frame.type === 'uncertain' && !treeQuiet) {
             // Kernel handles stay with the supervisor. A later empty-Job receipt may still arrive.
@@ -150,7 +164,7 @@ export function launchOwnedWindowsJob<T>(options: OwnedWindowsJobOptions<T>): Ow
     fail(`Cannot observe Job supervisor exit: ${String(error)}`);
   }
   return {
-    process: root, quiescent,
+    process: root, quiescent, established,
     get exitCode() { return exitCode; },
     get state() { return state; },
     cancel() {
@@ -162,4 +176,92 @@ export function launchOwnedWindowsJob<T>(options: OwnedWindowsJobOptions<T>): Ow
       if (!treeQuiet && socket && !socket.destroyed) socket.write('cancel\n');
     }
   };
+}
+
+/**
+ * Whether the bundled helper actually establishes a Job on this machine: it launches a trivial
+ * `cmd.exe /d /c exit 0` through the same independent supervisor path Pi uses and waits, bounded,
+ * for the positive empty-Job receipt. Constrained Language Mode, AppLocker, execution-policy GPOs or
+ * a CI runner can break the helper; any failure or timeout is simply "unavailable", never thrown.
+ */
+export async function probeOwnedWindowsJob(helperPath: string, timeoutMs = 15_000): Promise<boolean> {
+  if (process.platform !== 'win32') return false;
+  const system = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  let owned: OwnedWindowsJob<ChildProcessWithoutNullStreams> | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    owned = launchOwnedWindowsJob({
+      executable: path.join(system, 'cmd.exe'), args: ['/d', '/c', 'exit 0'], cwd: system, helperPath, startupTimeoutMs: timeoutMs,
+      launch: (file, argv) => {
+        const child = spawnIndependentWindowsSupervisor(file, argv, { cwd: system, env: process.env });
+        child.stdout.resume(); child.stderr.resume(); // Drain; the probe reads only the control pipe.
+        return child;
+      },
+      observeExit: (child, exited) => { child.once('close', exited); child.once('error', exited); },
+    });
+    await Promise.race([owned.quiescent, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Job helper probe timed out')), timeoutMs); })]);
+    return owned.exitCode === 0;
+  } catch {
+    try { owned?.cancel(); } catch { /* the failed probe is already settling */ }
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export type OwnedWindowsJobCapability = 'unknown' | 'available' | 'unavailable';
+
+/** Memoized, lazily started capability probe. Synchronous callers (a PTY spawn) never wait for it:
+ * until it has settled the capability is 'unknown', which counts as unavailable. */
+export class OwnedWindowsJobProbe {
+  private result: OwnedWindowsJobCapability = 'unknown';
+  private running: Promise<boolean> | undefined;
+  constructor(private readonly run: () => Promise<boolean>) {}
+
+  get capability(): OwnedWindowsJobCapability {
+    return this.result;
+  }
+
+  /** Starts the probe on first use; every later caller shares that one result. */
+  start(): Promise<boolean> {
+    this.running ??= this.run().catch(() => false).then((ok) => {
+      this.result = ok ? 'available' : 'unavailable';
+      return ok;
+    });
+    return this.running;
+  }
+
+  available(): boolean {
+    void this.start();
+    return this.result === 'available';
+  }
+}
+
+const probes = new Map<string, OwnedWindowsJobProbe>();
+
+/** One probe per helper path for the whole process. */
+export function ownedWindowsJobProbe(helperPath: string): OwnedWindowsJobProbe {
+  let probe = probes.get(helperPath);
+  if (!probe) probes.set(helperPath, probe = new OwnedWindowsJobProbe(() => probeOwnedWindowsJob(helperPath)));
+  return probe;
+}
+
+/** The user opted into Missions: a valid Mission config names a default (enabled T5) lead preset,
+ * globally or through a project override. Invalid or absent configuration is "not configured". */
+export function missionsConfigured(settings: Pick<AppSettings, 'mission' | 'missionProjects'>): boolean {
+  const mission = settings.mission;
+  if (!mission) return false;
+  const hasLead = (project?: MissionProjectOverride) => {
+    try { return !!applyMissionProjectOverride(mission, project).defaultLeadPresetId; } catch { return false; }
+  };
+  return hasLead() || Object.values(settings.missionProjects ?? {}).some((project) => hasLead(project));
+}
+
+/**
+ * The one predicate for ordinary (non-Mission) process ownership: Windows, Missions configured and a
+ * bundled Job helper that works on this machine. Anything else keeps ordinary Pi sessions and
+ * terminals on plain spawns with no ownership records. Reading it kicks off the probe when needed.
+ */
+export function ordinaryProcessOwnership(settings: Pick<AppSettings, 'mission' | 'missionProjects'>, probe: Pick<OwnedWindowsJobProbe, 'available'>, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32' && missionsConfigured(settings) && probe.available();
 }

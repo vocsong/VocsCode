@@ -70,7 +70,9 @@ export class MissionWorkspaceAdmission {
   async dispatch(cwd: string, run: () => Promise<void>): Promise<void> {
     for (;;) {
       await this.wait(cwd);
-      const canonical = key(realpathSync(cwd));
+      // Resolved through the nearest existing ancestor: a folder removed while its harness is
+      // still alive must not turn a send into an ENOENT. The check below runs after this await.
+      const canonical = await canonicalPath(cwd);
       if (this.closed) throw new Error('Workspace admission has closed.');
       if (this.held(canonical)) continue;
       const token = Symbol('workspace dispatch');
