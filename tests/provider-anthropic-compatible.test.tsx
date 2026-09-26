@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', platform: 'win32' }));
+vi.mock('../src/renderer/src/api', () => ({ invoke, isMac: false, modKey: 'Ctrl', platform: 'win32', canInvoke: () => true, isWeb: false }));
 vi.mock('../src/renderer/src/models', () => ({ useSessionModels: () => ({ models: [], loading: false }) }));
 vi.mock('../src/renderer/src/terminal/host', () => ({
   clearFind: vi.fn(),

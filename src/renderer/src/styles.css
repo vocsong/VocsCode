@@ -1710,6 +1710,12 @@ h4 {
   padding: 60px 0;
   text-align: center;
 }
+/* "Load earlier" at the head of a paged transcript; hidden entirely on the desktop. */
+.transcript-more {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 4px;
+}
 .working {
   display: flex;
   align-items: center;
@@ -2364,6 +2370,10 @@ h4 {
   gap: 6px;
   align-items: center;
   flex-wrap: wrap;
+}
+/* A client that cannot answer: says where the decision has to be made instead of showing buttons. */
+.approval-remote {
+  padding: 4px 0 2px;
 }
 .approval-note {
   flex: 1;
