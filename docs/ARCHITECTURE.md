@@ -56,13 +56,39 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 
 | Harness | Engine | Approvals | Models | MCP |
 | --- | --- | --- | --- | --- |
-| **Claude Agent SDK** | `@anthropic-ai/claude-agent-sdk` (Claude Code loop, hooks, MCP, checkpoints) | interactive (`canUseTool`) | Claude's catalog plus every provider with an Anthropic-format endpoint (OpenRouter, DeepSeek, OpenCode Go, or an anthropic-kind gateway); the endpoint follows the selected model's provider, with Bedrock/Vertex/Foundry via env | injected (`options.mcpServers`) |
-| **Codex (app-server)** | `codex app-server` JSON-RPC — the same engine as the Codex desktop app | interactive (command + file-change requests), steer, interrupt | Codex's `model/list` plus every enabled OpenAI-wire provider (OpenRouter, DeepSeek, OpenCode Go, Groq, …), registered per session as a `model_providers` entry using the Responses API | injected (`config.mcp_servers`) |
-| **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | Codex catalog | injected (`config.mcp_servers`; secrets via the environment) — Codex declines MCP tool calls under this adapter's `approvalPolicy: never` |
+| **Claude Agent SDK** | `@anthropic-ai/claude-agent-sdk` (Claude Code loop, hooks, MCP, checkpoints) | interactive (`canUseTool`) | a short-lived `supportedModels()` probe of the selected Claude runtime/login, started with the endpoint and key a session gets, followed by the saved/static rows it did not list (the whole saved/static catalog when the probe fails), plus every provider with an Anthropic-format endpoint (OpenRouter, DeepSeek, OpenCode Go, or an anthropic-kind gateway); the endpoint follows the selected model's provider, with Bedrock/Vertex/Foundry via env | injected (`options.mcpServers`) |
+| **Codex (app-server)** | `codex app-server` JSON-RPC — the same engine as the Codex desktop app | interactive (command + file-change requests), steer, interrupt | all pages of Codex's dynamic `model/list` (static fallback only), plus every enabled OpenAI-wire provider (OpenRouter, DeepSeek, OpenCode Go, Groq, …), registered per session as a `model_providers` entry using the Responses API | injected (`config.mcp_servers`) |
+| **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | all pages of Codex's dynamic `model/list` via a short-lived app-server probe (static fallback only) | injected (`config.mcp_servers`; secrets via the environment) — Codex declines MCP tool calls under this adapter's `approvalPolicy: never` |
 | **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan | inherited — Cursor reads its own `mcp.json`; import/export only |
 | **Pi** | `pi --mode rpc` + bundled approvals and MCP-bridge extensions | interactive | pi's registry plus the app's bundled catalogs for every provider pi already lists (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, OpenCode Go, Ollama, custom) | injected — the bridge extension registers each MCP tool with pi |
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
+
+Claude catalogs map every SDK row to the canonical wire id it resolves to, the recommended `default`
+included: that row leads as `<model> (recommended)` and is the New Session preselection, so a saved
+Claude selection is always a concrete version, never the moving alias. A `default` the runtime does
+not resolve is dropped, and so is `opusplan` (Opus Plan Mode is not supported: it is a mode, and it
+resolves to its execution model, so a pin would mislabel a plain Sonnet session). The rows then deduplicate by `(provider, id)`, keeping first-occurrence order
+and metadata. Deduplication applies to pre-session discovery, active-session model events/listing,
+and saved-catalog fallback. Distinct providers and explicit context variants remain separate;
+catalog refresh does not rewrite a session's pinned selection.
+
+A model's `supportedEfforts` has three states, and adapters must keep them apart: a list offers
+exactly those levels; `[]` means the model takes no effort, so the New Session select and header pill
+are disabled, `/effort` is refused, and the dialog neither submits nor remembers an effort level.
+It persists `SessionConfig.effort: null` to explicitly omit effort at the adapter boundary, including
+after restart, without clearing the app/folder preference. An absent config effort still inherits the
+app preference; a later explicit session effort replaces the omission. `supportedEfforts: undefined`
+is unknown and offers the harness's scale (`capabilities.effortLevels`, else every level). Claude Code
+omits the SDK's effort fields for a model without effort rather than sending `supportsEffort: false`,
+so a Claude row without them becomes `[]` only when another row in the same `supportedModels()`
+answer carries them; a runtime that reports them on no row leaves every model unknown. An ACP effort
+option with no level the app models stays unknown too.
+
+Both Codex harnesses discover their pre-session models through a short-lived app-server probe,
+following every `model/list` page rather than treating the bundled catalog as authoritative. The
+active app-server uses the same paginated discovery, and exec SDK model listing uses the one-shot
+probe too. Static Codex models are only a fallback when live discovery is unavailable or empty.
 
 **Pi's tool set is Vocs Code's, on Pi's implementations.** `resources/pi/vocs-code-tools.ts`
 registers Pi's own `grep`, `find` and `ls` definitions under the names `rg`, `glob` and `ls`, so a Pi

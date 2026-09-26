@@ -343,7 +343,8 @@ export interface SessionConfig {
   /** Project root chosen by the user (the git repo or folder). */
   projectRoot: string;
   model?: ModelRef;
-  effort?: EffortLevel;
+  /** null explicitly omits effort; undefined inherits the app preference. Survives restart. */
+  effort?: EffortLevel | null;
   permissionMode: PermissionMode;
   /** Run in an isolated git worktree under .vocs-code/worktrees. */
   useWorktree?: boolean;
@@ -1079,6 +1080,8 @@ export interface HarnessCapabilities {
   interrupt: boolean;
   liveModelSwitch: boolean;
   effort: boolean;
+  /** The levels to offer while a model's own `supportedEfforts` is unknown; every level when unset. */
+  effortLevels?: readonly EffortLevel[];
   images: boolean;
   /**
    * Whether the harness itself strips image attachments when its own catalog says the selected

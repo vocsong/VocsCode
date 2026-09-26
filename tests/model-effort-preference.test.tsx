@@ -142,4 +142,40 @@ describe('reasoning effort preference', () => {
     await startSession();
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({ config: expect.objectContaining({ effort: 'medium' }) })));
   });
+
+  it('disables effort for a model that takes none, starts without one and keeps the remembered effort', async () => {
+    harnessModels = [{ id: 'claude-haiku-4-5-20251001', provider: 'anthropic', displayName: 'Haiku 4.5', isDefault: true, supportedEfforts: [] }];
+    seed('high');
+    render(<NewSessionDialog />);
+
+    await waitFor(() => expect(effortSelect().disabled).toBe(true));
+    expect(effortSelect().value).toBe('');
+    expect([...effortSelect().options].map((o) => o.textContent)).toEqual(['Not supported']);
+    expect(effortSelect().title).toBe('Haiku 4.5 does not support reasoning effort');
+    await startSession();
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({
+      config: expect.objectContaining({ model: { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' }, effort: null })
+    })));
+    const saves = invoke.mock.calls.filter(([channel]) => channel === 'settings:update').map(([, patch]) => patch);
+    expect(saves).toHaveLength(1);
+    // The session's other choices are remembered; the app-wide and folder efforts are left alone.
+    expect(saves[0]).toMatchObject({ defaultHarness: 'claude', defaultModelByHarness: { claude: { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' } } });
+    expect(saves[0]).not.toHaveProperty('defaultEffort');
+    expect(saves[0].folderSessionDefaults['G:/repo']).toMatchObject({ harness: 'claude' });
+    expect(saves[0].folderSessionDefaults['G:/repo']).not.toHaveProperty('effort');
+  });
+
+  it('offers Claude its own levels, never minimal, while a model does not say which it takes', async () => {
+    harnessModels = [{ id: 'claude-next', provider: 'anthropic', displayName: 'Claude Next', isDefault: true }];
+    seed('minimal');
+    render(<NewSessionDialog />);
+
+    const start = screen.getByRole('button', { name: /Start session/ }) as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+    expect(effortSelect().disabled).toBe(false);
+    expect([...effortSelect().options].map((o) => o.value)).toEqual(['', 'low', 'medium', 'high', 'xhigh', 'max']);
+    // Claude has no `minimal`, so the remembered one falls back to the harness default.
+    expect(effortSelect().value).toBe('');
+  });
 });

@@ -226,7 +226,9 @@ export class AcpAdapter implements HarnessAdapter {
     if (!opt) return;
     const eff = this.effortOption();
     // Agents can advertise values the app does not model (none, auto, numeric levels); drop them at the boundary.
-    const efforts = eff ? flattenSelect(eff).map((o) => o.value).filter(isEffortLevel) : undefined;
+    // An option left with none is not a claim that the model takes no effort (`[]`), so it stays unknown.
+    const levels = eff ? flattenSelect(eff).map((o) => o.value).filter(isEffortLevel) : [];
+    const efforts = levels.length ? levels : undefined;
     this.modelValues.clear();
     const models: ModelInfo[] = flattenSelect(opt).map((o) => {
       // dsh-style agents advertise the route as a JSON [provider, model] tuple; expose the bare

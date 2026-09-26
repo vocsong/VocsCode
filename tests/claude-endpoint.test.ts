@@ -1,7 +1,7 @@
 /** Claude Code can run any Anthropic-compatible endpoint, so the harness must (a) offer the models
  *  of every anthropic-kind provider, (b) wire the selected model's endpoint and key into the
- *  subprocess, and (c) use a bearer token for a gateway. Regression coverage for "Claude Code on
- *  other models". */
+ *  subprocess, the pre-session model probe included, and (c) use a bearer token for a gateway.
+ *  Regression coverage for "Claude Code on other models". */
 import type { AppSettings, ModelRef, ProviderConfig, SessionEvent, SessionMeta } from '../src/shared/types';
 import type { HarnessContext } from '../src/main/harness/types';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +10,7 @@ const { queryMock, setModelMock } = vi.hoisted(() => ({ queryMock: vi.fn(), setM
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: queryMock }));
 
 import { ClaudeAdapter, claudeProviderEnv, claudeProviderFor } from '../src/main/harness/claude';
+import { listHarnessModels } from '../src/main/harness/registry';
 
 const ANTHROPIC: ProviderConfig = { id: 'anthropic', kind: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com', hasApiKey: false, models: [], enabled: true };
 const GATEWAY: ProviderConfig = { id: 'zai', kind: 'anthropic', name: 'Z.AI (GLM)', baseUrl: 'https://api.z.ai/api/anthropic', hasApiKey: false, models: [], enabled: true };
@@ -175,6 +176,68 @@ describe('Claude endpoint env', () => {
   });
 });
 
+describe('Claude model probe credentials', () => {
+  // The built-in Anthropic provider as settings.ts ships it, and the same provider behind a proxy.
+  const BUILTIN: ProviderConfig = { ...ANTHROPIC, envKey: 'ANTHROPIC_API_KEY' };
+  const PROXY_URL = 'https://llm-proxy.corp.example/anthropic';
+  const PROXIED: ProviderConfig = { ...BUILTIN, baseUrl: PROXY_URL };
+
+  interface Case {
+    name: string;
+    provider: ProviderConfig;
+    useProviderKey: boolean;
+    /** Key in the app's secret store. */
+    stored?: string;
+    /** Key in the provider's env var. */
+    fromEnv?: string;
+    /** Endpoint and credential variables Claude Code must start with; anything absent is unset. */
+    expected: Record<string, string>;
+  }
+  const cases: Case[] = [
+    // Anthropic's own endpoint takes the stored key only with the opt-in; otherwise the login or an inherited key stays.
+    { name: 'Anthropic endpoint, opt-in off, stored key', provider: BUILTIN, useProviderKey: false, stored: 'sk-stored', expected: {} },
+    { name: 'Anthropic endpoint, opt-in off, env key', provider: BUILTIN, useProviderKey: false, fromEnv: 'sk-env', expected: { ANTHROPIC_API_KEY: 'sk-env' } },
+    { name: 'Anthropic endpoint, opt-in on, stored key', provider: BUILTIN, useProviderKey: true, stored: 'sk-stored', expected: { ANTHROPIC_API_KEY: 'sk-stored' } },
+    { name: 'Anthropic endpoint, opt-in on, env key', provider: BUILTIN, useProviderKey: true, fromEnv: 'sk-env', expected: { ANTHROPIC_API_KEY: 'sk-env' } },
+    // A proxy gets the key as a bearer token whatever the opt-in says, and never the inherited x-api-key.
+    { name: 'proxy, opt-in off, stored key', provider: PROXIED, useProviderKey: false, stored: 'sk-stored', expected: { ANTHROPIC_AUTH_TOKEN: 'sk-stored', ANTHROPIC_BASE_URL: PROXY_URL } },
+    { name: 'proxy, opt-in off, env key', provider: PROXIED, useProviderKey: false, fromEnv: 'sk-env', expected: { ANTHROPIC_AUTH_TOKEN: 'sk-env', ANTHROPIC_BASE_URL: PROXY_URL } },
+    { name: 'proxy, opt-in on, stored key', provider: PROXIED, useProviderKey: true, stored: 'sk-stored', expected: { ANTHROPIC_AUTH_TOKEN: 'sk-stored', ANTHROPIC_BASE_URL: PROXY_URL } },
+    { name: 'proxy, opt-in on, env key', provider: PROXIED, useProviderKey: true, fromEnv: 'sk-env', expected: { ANTHROPIC_AUTH_TOKEN: 'sk-env', ANTHROPIC_BASE_URL: PROXY_URL } },
+    { name: 'proxy, stored key over env key', provider: PROXIED, useProviderKey: false, stored: 'sk-stored', fromEnv: 'sk-env', expected: { ANTHROPIC_AUTH_TOKEN: 'sk-stored', ANTHROPIC_BASE_URL: PROXY_URL } }
+  ];
+
+  /** Runs the pre-session model probe once and captures the env handed to the SDK. */
+  async function probeEnvFor(s: AppSettings, stored: string | undefined): Promise<Record<string, string | undefined>> {
+    queryMock.mockReset();
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([{ value: 'default', resolvedModel: 'claude-sonnet-5', displayName: 'Default (recommended)' }]), close: vi.fn() });
+    const r = await listHarnessModels({
+      harness: 'claude',
+      settings: s,
+      runtime: { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never,
+      getApiKey: async (id) => (id === 'anthropic' ? stored : undefined)
+    });
+    expect(r.error).toBeUndefined();
+    return (queryMock.mock.calls[0][0] as { options: { env: Record<string, string | undefined> } }).options.env;
+  }
+
+  const credentials = (env: Record<string, string | undefined>) => ({
+    ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+    ANTHROPIC_AUTH_TOKEN: env.ANTHROPIC_AUTH_TOKEN,
+    ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL
+  });
+
+  it.each(cases)('starts the probe with the credentials a session gets: $name', async ({ provider, useProviderKey, stored, fromEnv, expected }) => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    if (fromEnv) process.env.ANTHROPIC_API_KEY = fromEnv;
+    else delete process.env.ANTHROPIC_API_KEY;
+    const s = settings({ useProviderKey, providers: [provider] });
+    expect(credentials(await envFor(s, { provider: 'anthropic', model: 'claude-sonnet-5' }, stored))).toEqual(expected);
+    expect(credentials(await probeEnvFor(s, stored))).toEqual(expected);
+  });
+});
+
 describe('Claude endpoint is fixed for the process', () => {
   it('refuses a mid-session switch to a model from another provider', async () => {
     queryMock.mockReset();
@@ -189,6 +252,74 @@ describe('Claude endpoint is fixed for the process', () => {
 });
 
 describe('Claude model reporting', () => {
+  it('emits unique explicit model choices from SDK initialization without changing the pinned session model', async () => {
+    const pinned = 'claude-opus-pinned';
+    const next = 'claude-opus-future';
+    const supportedModels = vi.fn().mockResolvedValue([
+      { value: 'default', resolvedModel: next, displayName: 'Default' },
+      { value: 'opus', resolvedModel: next, displayName: 'Opus' },
+      { value: next, resolvedModel: next, displayName: 'Duplicate Opus' },
+      { value: 'opus[1m]', resolvedModel: `${next}[1m]`, displayName: 'Opus 1M' }
+    ]);
+    const close = vi.fn();
+    queryMock.mockReset();
+    queryMock.mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'sdk1', model: pinned };
+        yield { type: 'system', subtype: 'init', session_id: 'sdk1', model: pinned };
+      },
+      supportedModels, supportedCommands: vi.fn().mockResolvedValue([]), close, interrupt: vi.fn()
+    });
+    const events: SessionEvent[] = [];
+    const adapter = new ClaudeAdapter(stubCtx(settings(), { provider: 'anthropic', model: pinned }, undefined, events));
+    try {
+      await adapter.start();
+      await vi.waitFor(() => expect(events.some((e) => e.type === 'status' && e.status === 'stopped')).toBe(true));
+      const catalogs = events.filter((e) => e.type === 'models');
+      expect(catalogs).toHaveLength(1);
+      // The in-session list offers the recommendation as its concrete model too, never the alias.
+      expect(catalogs[0].models.map((m) => m.id)).toEqual([next, `${next}[1m]`]);
+      expect(catalogs[0].models[0]).toMatchObject({ displayName: `${next} (recommended)`, isDefault: true });
+      expect(queryMock.mock.calls[0][0].options.model).toBe(pinned);
+      expect(supportedModels).toHaveBeenCalledOnce();
+      expect(events.filter((e) => e.type === 'error')).toEqual([]);
+      expect(await adapter.listModels()).toEqual(catalogs[0].models);
+    } finally {
+      await adapter.dispose();
+    }
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('marks a model without effort in the in-session catalog', async () => {
+    const haiku = 'claude-haiku-4-5-20251001';
+    const supportedModels = vi.fn().mockResolvedValue([
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+      // Claude Code's shape for a model without effort: the fields are absent, never `false`.
+      { value: 'haiku', resolvedModel: haiku, displayName: 'Haiku' }
+    ]);
+    queryMock.mockReset();
+    queryMock.mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'sdk1', model: haiku };
+      },
+      supportedModels, supportedCommands: vi.fn().mockResolvedValue([]), close: vi.fn(), interrupt: vi.fn()
+    });
+    const events: SessionEvent[] = [];
+    const adapter = new ClaudeAdapter(stubCtx(settings(), { provider: 'anthropic', model: haiku }, undefined, events));
+    try {
+      await adapter.start();
+      await vi.waitFor(() => expect(events.some((e) => e.type === 'models')).toBe(true));
+      const catalogs = events.filter((e) => e.type === 'models');
+      expect(catalogs).toHaveLength(1);
+      expect(catalogs[0].models.map((m) => [m.id, m.supportedEfforts])).toEqual([
+        ['claude-opus-5-5', ['low', 'medium', 'high', 'xhigh', 'max']],
+        [haiku, []]
+      ]);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
   /** handle() is private; drive it directly with SDK-shaped messages. */
   const feed = (adapter: ClaudeAdapter, msg: Record<string, unknown>): void => {
     (adapter as unknown as { handle: (m: unknown, q: unknown) => void }).handle(msg as never, queryMock.mock.results[0]?.value);

@@ -1634,9 +1634,13 @@ h4 {
   max-width: 220px;
   overflow: hidden;
 }
-.pill:hover,
+.pill:hover:not(:disabled),
 .pill.open {
   background: var(--bg-hover);
+}
+.pill:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .pill.mode-full-auto {
   border-color: var(--red);

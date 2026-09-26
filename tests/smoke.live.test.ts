@@ -61,7 +61,7 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
     runtime,
     sessionDir: path.join(tmpRoot, 'sessions', harness),
     permissionMode: () => meta.config.permissionMode,
-    effort: () => meta.config.effort,
+    effort: () => meta.config.effort ?? undefined,
     getApiKey: async () => undefined,
     mcpServers: async () => mcp,
     ownedMcpIds: () => [],

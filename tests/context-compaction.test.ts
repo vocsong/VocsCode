@@ -11,7 +11,8 @@ import { defaultSettings, normalizeSettings } from '../src/main/settings';
 import { fetchProviderModels } from '../src/main/models/providers';
 import { enrichModelsFromProviders } from '../src/main/models/static-models';
 import { SessionManager } from '../src/main/session-manager';
-import { ClaudeAdapter, claudeModelToInfo } from '../src/main/harness/claude';
+import { ClaudeAdapter } from '../src/main/harness/claude';
+import { claudeModelToInfo } from '../src/main/models/claude-catalog';
 import { CodexAppServerAdapter } from '../src/main/harness/codex-app-server';
 import type { HarnessAdapter, HarnessContext } from '../src/main/harness/types';
 import type { AnalyticsStore } from '../src/main/analytics';
@@ -294,8 +295,8 @@ describe('adapter compaction coordination', () => {
 
 describe('model context metadata', () => {
   it('uses Claude canonical model ids to enrich selectable aliases', () => {
-    const model = claudeModelToInfo({ value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet' });
-    expect(model.id).toBe('sonnet');
+    const model = claudeModelToInfo({ value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet', description: 'Sonnet 5' });
+    expect(model.id).toBe('claude-sonnet-5');
     expect(model.contextWindow).toBe(1_000_000);
   });
 

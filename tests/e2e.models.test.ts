@@ -1,8 +1,8 @@
 /**
  * Regression test for an empty model dropdown on a brand-new session. A harness process is only
  * spawned by the first message, so its `models` event does not exist before that; the header has to
- * fall back to the process-free catalog instead of showing "no model list yet". Two more cases cover
- * the new-session dialog listing a configured provider for Codex and for Claude.
+ * fall back to the pre-session catalog instead of showing "no model list yet". Additional cases cover
+ * the new-session dialog listing configured providers and both Codex harnesses' live runtime catalog.
  *
  * Requires `npm run build` first. Gated by VOCS_CODE_E2E_UI=1. Each session is seeded straight into a
  * fresh userData — the New Session dialog picks its folder through a native chooser Playwright cannot
@@ -53,11 +53,14 @@ async function launch(userData: string): Promise<Page> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v === undefined) continue;
-    if (k === 'ELECTRON_RUN_AS_NODE' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
+    if (k === 'ELECTRON_RUN_AS_NODE' || k === 'ELECTRON_RENDERER_URL' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
     if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|OPENCODE|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
     env[k] = v;
   }
   env.VOCS_CODE_USER_DATA = userData;
+  // Keep the short-lived Claude model probe off the developer's real login. Claude Code may still
+  // report its runtime catalog, but this suite never borrows account credentials or starts a turn.
+  env.CLAUDE_CONFIG_DIR = path.join(userData, 'claude');
   // requestSingleInstanceLock() runs before VOCS_CODE_USER_DATA is applied, so a run started while
   // the app is open would exit silently; --user-data-dir is a Chromium switch and lands earlier.
   const args = [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`];
@@ -114,6 +117,38 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await picker2.locator('.mp-search input').fill('acme-custom-1');
     await picker2.getByRole('button', { name: 'Use “acme-custom-1”' }).click();
     await win.waitForSelector(`.pill[title="Model"]:has-text("${picked.split('/')[0]}/acme-custom-1")`, { timeout: 10_000 });
+  }, 180_000);
+
+  it.each([
+    { harness: 'codex', name: /^Codex \(app-server\)$/ },
+    { harness: 'codex-exec', name: /^Codex \(exec SDK\)$/ }
+  ] as const)('offers and selects the live $harness catalog in New Session', async ({ harness, name }) => {
+    const tmp = path.join(os.tmpdir(), `vocs-code-${harness}-live-models-${Date.now()}`);
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { providers: [] }), 'utf8');
+
+    const win = await launch(userData);
+    // Query the real main-process boundary, not a fixture or a renderer mock. A fallback catalog
+    // must fail this live-runtime check even if it happens to contain the model we select below.
+    const result = await win.evaluate(({ harness, projectRoot }) => window.harness.invoke('harness:models', { harness, projectRoot }), { harness, projectRoot: project });
+    expect(result.error).toBeUndefined();
+    expect(result.models.length).toBeGreaterThan(0);
+    const expected = result.models.map((m) => `${m.provider}/${m.id}`).sort();
+
+    await openNewSession(win);
+    await pickHarness(win, name);
+    const picker = win.locator('.ns-col-model .model-picker');
+    await expect.poll(async () => picker.locator('.mp-row .mp-name').evaluateAll((els) => els.map((el) => el.getAttribute('title')).sort()), { timeout: 60_000 }).toEqual(expected);
+    // The dialog makes its own discovery request: it must not silently display a fallback either.
+    expect(await picker.locator('.menu-empty').count()).toBe(0);
+
+    const picked = expected[expected.length - 1]!;
+    await pickModel(win, picked);
+    await expect.poll(async () => picker.locator('.mp-row.active .mp-name').getAttribute('title'), { timeout: 10_000 }).toBe(picked);
+    expect(await picker.locator('.mp-row.active').count()).toBe(1);
   }, 180_000);
 
   it('offers a configured provider model for the Codex harness', async () => {
@@ -174,15 +209,39 @@ describe.runIf(enabled)('model picker before the first message', () => {
       models: [{ id: 'z-ai/glm-4.6', provider: 'openrouter', displayName: 'GLM 4.6' }],
       enabled: true
     };
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { providers: [gateway, openrouter] }), 'utf8');
+    await fs.writeFile(
+      path.join(userData, 'settings.json'),
+      seedSettings(project, { providers: [gateway, openrouter], claude: { runtime: 'bundled', useProviderKey: false, settingSources: [] } }),
+      'utf8'
+    );
 
     const win = await launch(userData);
     await openNewSession(win);
     await pickHarness(win, /^Claude Agent SDK$/);
     const picker = win.locator('.ns-col-model .model-picker');
     await picker.locator('.mp-row').first().waitFor({ timeout: 60_000 });
+    await expect.poll(async () => picker.locator('.mp-name[title="anthropic/claude-opus-5-5[1m]"]').count(), { timeout: 20_000 }).toBe(1);
+    await expect.poll(async () => picker.locator('.mp-row:has(.mp-name[title="anthropic/claude-opus-5-5[1m]"])').innerText(), { timeout: 20_000 }).toContain('Opus 5.5');
     await expect.poll(async () => picker.locator('.mp-name[title="zai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
     await expect.poll(async () => picker.locator('.mp-name[title="openrouter/z-ai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
+
+    // SDK aliases and the recommended default can resolve to the same explicit choice; every
+    // selectable provider/id must appear once.
+    const catalogIds = await picker.locator('.mp-row .mp-name').evaluateAll((els) => els.map((el) => el.getAttribute('title')));
+    expect(catalogIds).not.toContain(null);
+    expect(new Set(catalogIds).size).toBe(catalogIds.length);
+
+    // Claude's recommendation opens selected under the concrete id it resolves to, so a session
+    // started without touching the picker is pinned to a version, never the moving `default` alias.
+    expect(catalogIds).not.toContain('anthropic/default');
+    const activeIds = () => picker.locator('.mp-row.active .mp-name').evaluateAll((els) => els.map((el) => el.getAttribute('title')));
+    await expect.poll(activeIds, { timeout: 10_000 }).toEqual([expect.stringMatching(/^anthropic\/claude-/)]);
+    expect(await picker.locator('.mp-row.active').innerText()).toContain('(recommended)');
+
+    // A newly advertised Claude model is selectable under its explicit id, whether or not it is
+    // today's recommendation.
+    await pickModel(win, 'anthropic/claude-opus-5-5[1m]');
+    await expect.poll(async () => picker.locator('.mp-row.active .mp-name[title="anthropic/claude-opus-5-5[1m]"]').count(), { timeout: 10_000 }).toBe(1);
 
     // The dialog starts on a listed model only: the header accepts a typed custom id after start,
     // but here the search must not offer one, so it can never leak into a new session's config.

@@ -549,7 +549,7 @@ export class SessionManager {
       harnessRef: {},
       usage: emptyUsage(),
       activeModel: cfg.model ?? s.defaultModelByHarness[cfg.harness],
-      activeEffort: cfg.effort,
+      activeEffort: cfg.effort ?? undefined,
       queued: 0
     };
     // Layer 2: prime the session with the project's curated knowledge digest. The digest names

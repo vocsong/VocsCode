@@ -153,4 +153,20 @@ describe('composer input history', () => {
     expect(invokeMock).not.toHaveBeenCalledWith('sessions:setEffort', expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
   });
+
+  it('refuses /effort for a model that takes no effort', async () => {
+    const haiku = { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' };
+    const haikuSession = { ...session, id: 's_haiku', config: { ...session.config, harness: 'claude' as const, model: haiku } };
+    useStore.setState({ toasts: [], models: { s_haiku: [{ id: haiku.model, provider: haiku.provider, displayName: 'Haiku 4.5', supportedEfforts: [] }] } });
+    const { container } = render(<Composer session={haikuSession} />);
+    const ta = container.querySelector('textarea') as HTMLTextAreaElement;
+    invokeMock.mockClear();
+
+    type(ta, '/effort high');
+    fireEvent.keyDown(ta, { key: 'Enter' });
+
+    await waitFor(() => expect(useStore.getState().toasts.map((toast) => toast.text)).toContain('Haiku 4.5 does not support reasoning effort.'));
+    expect(invokeMock).not.toHaveBeenCalledWith('sessions:setEffort', expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
+  });
 });
