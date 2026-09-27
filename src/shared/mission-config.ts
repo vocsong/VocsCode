@@ -157,10 +157,10 @@ export const DEFAULT_MISSION_CONFIG: MissionReadonly<MissionConfig> = freeze({
   revision: 1,
   presets: [],
   tiers: [
-    { id: 1, label: 'Routine', presetIds: [] },
-    { id: 2, label: 'Focused', presetIds: [] },
-    { id: 3, label: 'Standard', presetIds: [] },
-    { id: 4, label: 'Advanced', presetIds: [] },
+    { id: 1, label: 'Utility', presetIds: [] },
+    { id: 2, label: 'Executor', presetIds: [] },
+    { id: 3, label: 'Engineer', presetIds: [] },
+    { id: 4, label: 'Expert', presetIds: [] },
     { id: 5, label: 'Frontier', presetIds: [] }
   ],
   limits: {

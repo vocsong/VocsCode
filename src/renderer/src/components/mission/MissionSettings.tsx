@@ -16,6 +16,21 @@ import './MissionSettings.css';
 
 type Projects = Record<string, MissionProjectOverride>;
 const EMPTY_MODELS: ModelInfo[] = [];
+const TIER_ROLES: Record<TierId, string> = {
+  5: 'Principal, architecture, planning and difficult decisions',
+  4: 'Hard implementation, debugging and integration',
+  3: 'Substantial implementation',
+  2: 'Clearly specified implementation',
+  1: 'Mechanical edits, inspection, search and simple tests'
+};
+const TIER_REASONING: Record<TierId, string> = { 5: 'high–max', 4: 'high–max', 3: 'medium–high', 2: 'low–medium', 1: 'none–low' };
+const TIER_SUGGESTIONS: Record<TierId, string> = {
+  5: 'GPT-6 Astra, Claude Fable 5.1, Claude Opus 5.5',
+  4: 'Claude Opus 5.5, GPT-6 Astra, GPT-6 Sol, DeepSeek V4.1-Flash',
+  3: 'GPT-6 Sol, Claude Sonnet 5, DeepSeek V4.1-Flash',
+  2: 'GPT-6 Sol, Claude Sonnet 5, GPT-6 Luna, DeepSeek V4.1-Flash',
+  1: 'GPT-6 Luna, Claude Haiku 4.5, DeepSeek V4.1-Flash'
+};
 const LIMIT_LABELS: Record<keyof MissionNumericLimits, string> = {
   maxConcurrentWorkersPerMission: 'Workers per Mission',
   maxConcurrentAgentTurnsGlobal: 'Agent-turn slots app-wide (including leads and tools)',
@@ -165,7 +180,9 @@ export function MissionSettings({ settings }: { settings: AppSettings }) {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [editor, setEditor] = useState<ExecutionPreset | null>(null);
+  const [addingTier, setAddingTier] = useState<TierId | null>(null);
   const [projectRoot, setProjectRoot] = useState('');
+  const ensureCatalog = useStore((s) => s.ensureModelCatalog);
   const catalog = useStore((s) => s.modelCatalog);
   const mission = draft.mission;
   const projects = draft.projects;
@@ -213,6 +230,21 @@ export function MissionSettings({ settings }: { settings: AppSettings }) {
       if (tierId === 5 && !hasLead(projectLead, tiers.find((t) => t.id === 5)!.presetIds)) next.defaultLeadPresetId = null;
       setProject(next);
     }
+  };
+  const addModel = (tierId: TierId, model: ModelInfo) => {
+    const config = structuredClone(mission);
+    const tier = config.tiers.find((t) => t.id === tierId)!;
+    // Reuse an identical execution choice across tiers; never silently change its account or effort.
+    let preset = config.presets.find((p) => p.enabled && p.harnessId === 'pi' && p.model.provider === model.provider && p.model.model === model.id
+      && !p.model.connectionId && p.reasoning.kind === 'default' && !p.runtimeVariantId);
+    if (!preset) {
+      preset = { id: `preset-${crypto.randomUUID()}`, revision: 1, name: model.displayName || model.id, harnessId: 'pi',
+        model: { provider: model.provider, model: model.id }, reasoning: { kind: 'default' }, enabled: true };
+      config.presets.push(preset);
+    }
+    if (!tier.presetIds.includes(preset.id)) tier.presetIds.push(preset.id);
+    change(config);
+    setAddingTier(null);
   };
   const membership = (tierId: TierId, ids: string[], scope: 'global' | 'project', disabled = false) => <>
     {!ids.length && <p>Unavailable pool — no presets. No fallback.</p>}
@@ -267,10 +299,11 @@ export function MissionSettings({ settings }: { settings: AppSettings }) {
   return <div className="settings-section mission-settings">
     <h2>Mission</h2>
     <MissionSupportNotice />
-    <p>Configure execution presets and five tier pools. Saving never starts a Mission: start one from New Session → Mission, or type /mission in a session. It uses the default T5 principal engineer below.</p>
-    <p className="field-hint">A preset pins its harness, model, provider/connection and reasoning as one choice. Catalog entries do not prove runtime availability or lead capability. No automatic model, effort or billing-path fallback.</p>
+    <p>Add models directly to each tier. Saving never starts a Mission: start one from New Session → Mission, or type /mission in a session. Choose a T5 principal engineer to enable launch.</p>
+    <p className="field-hint">Each model is saved as an exact Pi execution choice with runtime-default reasoning. Edit a model for a different effort or connection. Catalog entries do not prove runtime availability; there is no automatic fallback.</p>
     {draft.error && <div role="alert"><p>{draft.error}</p><Button onClick={() => { change(createDefaultMissionConfig(), {}); }}>Replace invalid Mission settings</Button></div>}
     <fieldset disabled={busy || !!draft.error} className="mission-form">
+      <details className="mission-advanced"><summary>Advanced preset library</summary>
       <div className="mission-toolbar"><h3>Preset library</h3><Button disabled={!!editor} onClick={() => setEditor({ id: `preset-${crypto.randomUUID()}`, revision: 1, name: '', harnessId: isMissionHarnessSupported(settings.defaultHarness) ? settings.defaultHarness : MISSION_SUPPORTED_HARNESSES[0], model: { provider: '', model: '' }, reasoning: { kind: 'default' }, enabled: true })}>New preset</Button></div>
       {!mission.presets.length && <p>No presets configured. Add an exact execution choice to begin.</p>}
       {mission.presets.map((preset) => {
@@ -293,6 +326,7 @@ export function MissionSettings({ settings }: { settings: AppSettings }) {
             }}>Delete {preset.name}</Button></div>
         </section>;
       })}
+      </details>
       {editor && <PresetEditor key={editor.id} initial={editor} settings={settings} onCancel={() => setEditor(null)} onApply={(preset) => {
         const config = structuredClone(mission); const overrides = structuredClone(projects);
         const index = config.presets.findIndex((p) => p.id === preset.id);
@@ -301,13 +335,40 @@ export function MissionSettings({ settings }: { settings: AppSettings }) {
         validateMissionConfig(config, capabilities);
         change(config, overrides); setEditor(null);
       }} />}
-      <h3>Five tier pools</h3>
-      <p className="field-hint">Tier IDs and ordering are fixed. Labels and guidance are yours, not measured rankings.</p>
-      {mission.tiers.map((tier) => <section key={tier.id} className="mission-card" aria-label={`Tier ${tier.id}`}>
-        <h4>T{tier.id} — {tier.label}</h4>
-        <Field label={`T${tier.id} label`}><input aria-label={`T${tier.id} label`} value={tier.label} maxLength={200} onChange={(e) => change({ ...mission, tiers: mission.tiers.map((t) => t.id === tier.id ? { ...t, label: e.target.value } : t) })} /></Field>
-        <Field label={`T${tier.id} guidance`}><textarea aria-label={`T${tier.id} guidance`} value={tier.guidance ?? ''} maxLength={8_000} onChange={(e) => change({ ...mission, tiers: mission.tiers.map((t) => t.id === tier.id ? { ...t, guidance: e.target.value } : t) })} /></Field>
-        {membership(tier.id, tier.presetIds, 'global')}
+      <h3>Models by tier</h3>
+      <p className="field-hint">A model can appear in more than one tier. Tier labels and guidance describe intended work; they do not automatically set reasoning effort.</p>
+      {[...mission.tiers].reverse().map((tier) => <section key={tier.id} className="mission-card" aria-label={`Tier ${tier.id}`}>
+        <div className="mission-toolbar"><h4>T{tier.id} — {tier.label}</h4><Button size="sm" disabled={!!editor} onClick={() => { if (addingTier !== tier.id) void ensureCatalog('pi'); setAddingTier(addingTier === tier.id ? null : tier.id); }}>{addingTier === tier.id ? 'Close models' : `Add model to T${tier.id}`}</Button></div>
+        <p className="field-hint">{TIER_ROLES[tier.id]} · Suggested reasoning: {TIER_REASONING[tier.id]}</p>
+        <p className="field-hint">Suggested models: {TIER_SUGGESTIONS[tier.id]} (select the exact ID your Pi catalog offers).</p>
+        {!tier.presetIds.length && <p>Unavailable pool — no models. No fallback.</p>}
+        {!!tier.presetIds.length && !tier.presetIds.some((id) => mission.presets.some((p) => p.id === id && p.enabled)) && <p>Unavailable pool — all models are disabled.</p>}
+        {tier.presetIds.map((id) => {
+          const preset = mission.presets.find((p) => p.id === id);
+          if (!preset) return null;
+          const status = validatePresetEligibility(preset, { capabilities: catalog[preset.harnessId] ? capabilities : undefined });
+          return <div key={id} className="mission-tier-model">
+            <div><strong>{preset.name}</strong><span className="field-hint">{preset.model.provider}/{preset.model.model} · {preset.reasoning.kind === 'default' ? 'Runtime default' : preset.reasoning.value} · {MISSION_PRESET_STATUS_LABELS[status.status]}{!preset.enabled ? ' · Disabled' : ''}</span></div>
+            <div className="row gap6"><Button size="sm" variant="ghost" disabled={!!editor} onClick={() => setEditor(structuredClone(preset))}>Edit {preset.name}</Button>
+              <Button size="sm" variant="ghost" disabled={!!editor} onClick={() => chooseMembership(tier.id, id, false, 'global')}>Remove {preset.name} from T{tier.id}</Button></div>
+          </div>;
+        })}
+        {addingTier === tier.id && <div className="mission-add-model">
+          {mission.presets.some((p) => !tier.presetIds.includes(p.id)) && <Field label={`Add configured model to T${tier.id}`}>
+            <select aria-label={`Add configured model to T${tier.id}`} value="" onChange={(e) => { if (e.target.value) { chooseMembership(tier.id, e.target.value, true, 'global'); setAddingTier(null); } }}>
+              <option value="">Select an existing model</option>
+              {mission.presets.filter((p) => !tier.presetIds.includes(p.id)).map((p) => <option key={p.id} value={p.id}>{p.name} · {p.model.provider}/{p.model.model}</option>)}
+            </select>
+          </Field>}
+          <ModelPicker models={catalog.pi?.models ?? EMPTY_MODELS} loading={catalog.pi?.loading ?? true} error={catalog.pi?.error}
+          emptyText="No Pi models available. Configure a Pi provider or use the advanced preset library."
+          onSelect={(model) => { if (model) addModel(tier.id, model); }} />
+          <p className="field-hint">Select a Pi catalog model or reuse an existing configured choice. Other harnesses can be configured in the advanced library but cannot run Missions yet.</p>
+        </div>}
+        <details><summary>Tier description</summary>
+          <Field label={`T${tier.id} label`}><input aria-label={`T${tier.id} label`} value={tier.label} maxLength={200} onChange={(e) => change({ ...mission, tiers: mission.tiers.map((t) => t.id === tier.id ? { ...t, label: e.target.value } : t) })} /></Field>
+          <Field label={`T${tier.id} guidance`}><textarea aria-label={`T${tier.id} guidance`} value={tier.guidance ?? ''} maxLength={8_000} onChange={(e) => change({ ...mission, tiers: mission.tiers.map((t) => t.id === tier.id ? { ...t, guidance: e.target.value } : t) })} /></Field>
+        </details>
         {tier.id === 5 && leadSelect('global')}
       </section>)}
       {!mission.defaultLeadPresetId && <p role="note">Mission launch is unconfigured — no default principal engineer. No replacement is selected automatically.</p>}
