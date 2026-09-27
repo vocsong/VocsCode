@@ -13,6 +13,7 @@ import { Header } from '../src/renderer/src/components/Header';
 import { NewSessionDialog } from '../src/renderer/src/components/NewSessionDialog';
 import { SettingsView } from '../src/renderer/src/components/SettingsView';
 import { MissionPanel, MissionHeaderControls, MissionUsage } from '../src/renderer/src/components/mission/MissionPanel';
+import { MissionSettings } from '../src/renderer/src/components/mission/MissionSettings';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { Sidebar, sidebarNavModel } from '../src/renderer/src/components/Sidebar';
 import { CommandPalette } from '../src/renderer/src/components/CommandPalette';
@@ -351,6 +352,24 @@ describe('Mission launch and controls', () => {
     expect(screen.getByRole('button', { name: 'New preset' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Mission' }).className).toContain('active');
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('adds a catalog model directly to a tier and saves its exact Pi choice without inventing effort or lead', async () => {
+    const empty = createDefaultMissionConfig();
+    const local = { ...settings, mission: empty };
+    useStore.setState({ settings: local, modelCatalog: { pi: { models: [{ provider: 'openai', id: 'gpt-6-sol', displayName: 'GPT-6 Sol', supportedEfforts: ['medium', 'high'] }], loading: false } } });
+    invokeMock.mockImplementation(async (channel: string, patch?: { mission?: typeof empty }) => channel === 'settings:update' ? { ...local, ...patch } : {});
+    render(<MissionSettings settings={local} />);
+    const tier = screen.getByRole('region', { name: 'Tier 3' });
+    fireEvent.click(within(tier).getByRole('button', { name: 'Add model to T3' }));
+    fireEvent.click(within(tier).getByRole('button', { name: /openai\/gpt-6-sol/ }));
+    expect(within(tier).getByText(/openai\/gpt-6-sol · Runtime default/)).toBeTruthy();
+    expect(screen.getByText(/Mission launch is unconfigured/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Save Mission settings' }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('settings:update', expect.objectContaining({ mission: expect.objectContaining({
+      presets: [expect.objectContaining({ harnessId: 'pi', model: { provider: 'openai', model: 'gpt-6-sol' }, reasoning: { kind: 'default' } })],
+      tiers: expect.arrayContaining([expect.objectContaining({ id: 3, presetIds: [expect.any(String)] })])
+    }) })));
   });
 
   it('states the Mission support boundary and flags a principal engineer that cannot run one', () => {

@@ -72,7 +72,7 @@ These are implementable defaults selected to complete the design. They are not p
 | A03 | **Ten concurrent agent-turn slots app-wide, including in-flight tools**, including leads; **one heavy verification job app-wide**. | Keeps multiple Missions bounded and local test jobs from fighting each other. Both limits are configurable. |
 | A04 | The first release uses **Vocs-managed sessions** for the lead and workers. Native goal/subagent execution drivers are later optimizations. | Delivers arbitrary approved presets without depending on inconsistent native child controls. |
 | A05 | Delegation depth is **one**: lead at depth 0, workers at depth 1. Workers cannot spawn further agents. | One accountable team and a comprehensible process tree. |
-| A06 | Tier labels start as T1 Routine, T2 Focused, T3 Standard, T4 Advanced, T5 Frontier. IDs/order are fixed; labels/guidance may be edited. | Stable schema without making the illustrative labels a rigid taxonomy. |
+| A06 | Tier labels start as T1 Utility, T2 Executor, T3 Engineer, T4 Expert, T5 Frontier. IDs/order are fixed; labels/guidance may be edited. | Stable schema without making the illustrative labels a rigid taxonomy. |
 | A07 | T1-T4 may be empty. A valid T5 default lead is required. | Useful with a small roster; no setup requirement to subscribe to five model classes. |
 | A08 | Global preset/tier configuration is the baseline; projects may override tier membership and the default lead using the same preset library. Missions pin a configuration snapshot. | Reuse without making current behavior change invisibly during execution. |
 | A09 | Execution requires a **clean Git baseline** for the MVP. Read-only planning may inspect a dirty checkout, clearly marked as such. | Avoids silently omitting, stashing, committing, or publishing user changes. Dirty-input snapshot automation is deferred. |
@@ -255,10 +255,10 @@ A selected preset is atomic: the lead cannot choose it and silently replace its 
 | ID | Initial label | Routing guidance, not hard-coded role membership |
 | --- | --- | --- |
 | T5 | Frontier | Hardest uncertainty, principal engineering, complex architecture, critical failure diagnosis, adversarial review. |
-| T4 | Advanced | Complex cross-module implementation, substantial debugging, performance work, nuanced review. |
-| T3 | Standard | Normal autonomous feature implementation against a reasonably clear contract. |
-| T2 | Focused | Bounded low-ambiguity implementation, explicit test cases, established UI patterns. |
-| T1 | Routine | Mechanical edits, prescribed evidence collection, formatting, repetitive fixtures. |
+| T4 | Expert | Complex cross-module implementation, substantial debugging, performance work, nuanced review. |
+| T3 | Engineer | Normal autonomous feature implementation against a reasonably clear contract. |
+| T2 | Executor | Bounded low-ambiguity implementation, explicit test cases, established UI patterns. |
+| T1 | Utility | Mechanical edits, prescribed evidence collection, formatting, repetitive fixtures. |
 
 All five slots exist. T1-T4 can be empty and must be shown as unavailable pools, not silently filled. A user can assign the same model to different tiers through different effort presets. A preset may be referenced by more than one tier, but the UI should flag that overlapping membership does not create a capability difference.
 
