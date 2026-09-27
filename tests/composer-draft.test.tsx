@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
   on: vi.fn().mockReturnValue(() => undefined),
 };
 
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { Composer } from '../src/renderer/src/components/Composer';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta } from '../src/shared/types';
@@ -58,12 +58,12 @@ describe('per-session composer draft', () => {
     expect(ta.selectionEnd).toBe(ta.value.length);
   });
 
-  it('clears the stored draft after sending', () => {
+  it('clears the stored draft after sending', async () => {
     const a = render(<Composer session={makeSession('s1')} />);
     const ta = a.container.querySelector('textarea') as HTMLTextAreaElement;
     type(ta, 'to be sent');
     fireEvent.keyDown(ta, { key: 'Enter' });
-    expect(ta.value).toBe('');
+    await waitFor(() => expect(ta.value).toBe(''));
     expect(useStore.getState().drafts['s1']).toBe('');
     a.unmount();
 

@@ -285,6 +285,29 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     await expect.poll(() => work.sent.length, { timeout: 20_000 }).toBe(1);
     expect(work.sent[0]).toEqual({ id: 'Work-s1', input: { text: 'ship it' } });
 
+    // The browser sends only bounded non-image attachments; a refused file leaves the draft intact.
+    const picker = page.locator('input[aria-label="Choose files"]');
+    await picker.setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('from the browser') });
+    await page.getByRole('button', { name: 'Remove notes.txt' }).waitFor();
+    await page.locator('textarea[aria-label="Message"]').evaluate((el) => {
+      const clipboard = new DataTransfer();
+      clipboard.items.add(new File(['pasted'], 'pasted.md', { type: 'text/markdown' }));
+      el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, clipboardData: clipboard }));
+    });
+    await page.getByRole('button', { name: 'Remove pasted.md' }).waitFor();
+    await picker.setInputFiles({ name: 'third.txt', mimeType: 'text/plain', buffer: Buffer.from('third') });
+    await page.getByRole('alert').getByText(/2 files/).waitFor();
+    await page.getByRole('button', { name: 'Remove pasted.md' }).click();
+    await picker.setInputFiles({ name: 'too-big.txt', mimeType: 'text/plain', buffer: Buffer.alloc(128 * 1024 + 1) });
+    await page.getByRole('alert').getByText(/128 KiB/).waitFor();
+    await picker.setInputFiles({ name: 'photo.png', mimeType: 'image/png', buffer: Buffer.from('image') });
+    await page.getByRole('alert').getByText(/Images are not supported/).waitFor();
+    await page.locator('textarea[aria-label="Message"]').fill('read this');
+    await page.locator('[aria-label="Send"]').click();
+    await expect.poll(() => work.sent.length, { timeout: 20_000 }).toBe(2);
+    expect(work.sent[1]).toEqual({ id: 'Work-s1', input: { text: 'read this', files: [{ name: 'notes.txt', mimeType: 'text/plain', data: Buffer.from('from the browser').toString('base64') }] } });
+    await expect.poll(() => page.getByRole('button', { name: 'Remove notes.txt' }).count()).toBe(0);
+
     // A reload restores the pairing from IndexedDB and keeps the deep-linked session.
     await page.reload();
     await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');

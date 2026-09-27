@@ -1,14 +1,14 @@
 /** New session dialog: project directory, harness, model, permission mode and worktree isolation. */
 import React, { useEffect, useRef, useState } from 'react';
-import type { AppSettings, EffortLevel, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
+import type { AppSettings, EffortLevel, FileAttachment, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
 import { invoke } from '../api';
+import { FileAttachmentChips, readAttachments } from '../attachments';
 import { rememberEffort, rememberWithoutEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
-import { fileToAttachment } from './Composer';
 import { MissionLaunch } from './mission/MissionLaunch';
 
 export function NewSessionDialog() {
@@ -48,6 +48,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const [acpAgent, setAcpAgent] = useState(initial.acpAgent ?? settings.acpAgents[0]?.id ?? 'dsh');
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [files, setFiles] = useState<FileAttachment[]>([]);
   const [goal, setGoal] = useState('');
   const [title, setTitle] = useState('');
   const [advanced, setAdvanced] = useState(false);
@@ -184,7 +185,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
         })
       };
       await (noEffort ? rememberWithoutEffort(remembered) : rememberEffort(selectedEffort || undefined, remembered));
-      const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, initialImages: images.length ? images : undefined, goal: goal.trim() || undefined });
+      const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, initialImages: images.length ? images : undefined, initialFiles: files.length ? files : undefined, goal: goal.trim() || undefined });
       close();
       await setActive(meta.id);
     } catch (e) {
@@ -201,19 +202,17 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
     }
   };
 
-  // Same image handling as the chat composer: pasted or picked screenshots ride along with the first prompt.
-  const onPaste = async (e: React.ClipboardEvent) => {
-    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
-    if (!files.length) return;
-    e.preventDefault();
-    const imgs = await Promise.all(files.map(fileToAttachment));
-    setImages((prev) => [...prev, ...imgs]);
+  const addFiles = async (list: Iterable<File>) => {
+    const added = await readAttachments(list, (message) => toast(message, 'error'));
+    setImages((prev) => [...prev, ...added.images]);
+    setFiles((prev) => [...prev, ...added.files]);
   };
 
-  const addFiles = async (list: FileList | null) => {
-    if (!list) return;
-    const imgs = await Promise.all([...list].filter((f) => f.type.startsWith('image/')).map(fileToAttachment));
-    setImages((prev) => [...prev, ...imgs]);
+  const onPaste = (e: React.ClipboardEvent) => {
+    const pasted = [...(e.clipboardData?.files ?? [])];
+    if (!pasted.length) return;
+    e.preventDefault();
+    void addFiles(pasted);
   };
 
   const titleEl = (
@@ -362,14 +361,15 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
                 ))}
               </div>
             )}
+            <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
             <div className="ns-prompt-box">
               <textarea ref={promptRef} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
-              <label className="icon-btn ns-attach" title="Attach image">
-                <Icon name="image" size={14} />
-                <input type="file" accept="image/*" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
+              <label className="icon-btn ns-attach" title="Attach files">
+                <Icon name="file" size={14} />
+                <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
               </label>
             </div>
-            <span className="field-hint">Paste a screenshot or attach one with the button — it is sent with the first message.</span>
+            <span className="field-hint">Paste or attach files and images — they are sent with the first message.</span>
           </div>
           <Field
             label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>}

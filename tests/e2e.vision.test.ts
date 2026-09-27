@@ -51,10 +51,12 @@ describe.runIf(enabled)('vision capability UI', () => {
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
     const imageFile = path.join(tmp, 'shot.png');
+    const textFile = path.join(tmp, 'notes.txt');
     await fs.mkdir(userData, { recursive: true });
     await fs.mkdir(project, { recursive: true });
     await fs.writeFile(path.join(project, 'README.md'), '# vision e2e\n');
     await fs.writeFile(imageFile, Buffer.from(PNG_BASE64, 'base64'));
+    await fs.writeFile(textFile, 'attachment contents');
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
     await fs.mkdir(shots, { recursive: true });
 
@@ -75,8 +77,13 @@ describe.runIf(enabled)('vision capability UI', () => {
     // The pill names the model the same way the picker did: provider first.
     await win.waitForSelector('.pill:has-text("deepseek/deepseek-v4-flash")', { timeout: 30_000 });
 
-    // No attachment, no warning.
+    // Files can be picked without triggering an image-capability warning.
     expect(await win.locator('.composer-warn').count()).toBe(0);
+    await win.setInputFiles('.composer-actions input[type=file]', textFile);
+    await win.getByText('notes.txt', { exact: true }).waitFor();
+    expect(await win.locator('.composer-warn').count()).toBe(0);
+    await win.getByRole('button', { name: 'Remove notes.txt' }).click();
+    expect(await win.getByText('notes.txt', { exact: true }).count()).toBe(0);
 
     await win.setInputFiles('.composer-actions input[type=file]', imageFile);
     const warn = win.locator('.composer-warn');

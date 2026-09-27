@@ -1,10 +1,11 @@
 /** Prompt input: slash commands, @file mentions, and steer-vs-queue while a turn is running. */
 import React, { useEffect, useRef, useState } from 'react';
-import type { EffortLevel, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
+import type { EffortLevel, FileAttachment, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
 import { formatDoctorReport } from '../../../shared/doctor';
 import { HARNESS_BY_ID, SLASH_COMMANDS, effortOptionsFor } from '../../../shared/harness-meta';
 import { modelName, parseTypedModel } from '../../../shared/model-names';
 import { invoke } from '../api';
+import { FileAttachmentChips, readAttachments } from '../attachments';
 import { fmtCost, fmtTokens } from '../format';
 import { useSessionModels } from '../models';
 import { setSessionEffort } from '../sessionActions';
@@ -32,6 +33,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
   // Seed from the per-session draft kept in the store, so switching away and back preserves the text.
   const [text, setText] = useState(() => useStore.getState().drafts[session.id] ?? '');
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [files, setFiles] = useState<FileAttachment[]>([]);
   const [mention, setMention] = useState<{ query: string; start: number; results: string[]; index: number } | null>(null);
   const [mentionError, setMentionError] = useState<string | null>(null);
   const [slash, setSlash] = useState<{ query: string; index: number } | null>(null);
@@ -146,7 +148,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
 
   const send = async (mode: 'now' | 'steer' | 'queue' = 'now') => {
     const t = text.trim();
-    if (!t && !images.length) return;
+    if (!t && !images.length && !files.length) return;
     // Clears the draft and every popover/filter state derived from it. setText is programmatic here,
     // so onChange never fires — without this the stale mention/slash state keeps its key handling
     // alive and swallows ArrowUp/ArrowDown, breaking input history right after a send.
@@ -161,6 +163,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
     // Mission owns its exact token before native /goal or harness command forwarding.
     const missionCommand = parseMissionCommand(text);
     if (missionCommand) {
+      if (files.length) { toast('Mission commands cannot include file attachments. Remove them or send a regular message.', 'error'); return; }
       if (missionCommand.kind === 'error') { toast(missionCommand.message, 'error'); return; }
       if (missionPending.current) return;
       missionPending.current = true;
@@ -174,11 +177,13 @@ function SessionComposer({ session }: { session: SessionMeta }) {
           setDraft(session.id, '');
         }
         setImages((current) => current.filter((image) => !images.includes(image)));
+        setFiles((current) => current.filter((file) => !files.includes(file)));
       } catch (e) {
         toast(String((e as Error).message ?? e), 'error');
       } finally { missionPending.current = false; setMissionSending(false); }
       return;
     }
+    if (session.mission && files.length) { toast('Mission messages cannot include file attachments yet. Remove them or use a regular session.', 'error'); return; }
     if (session.mission && typedCommand === 'goal') {
       toast('Mission already owns execution. Use /mission pause, /mission resume, /mission stop, or Proceed on the current plan.', 'info');
       useStore.getState().setPanelTab('goal');
@@ -197,6 +202,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
       toast(`${harness.name} answers /${typedCommand} itself — sent to the harness.`, 'info');
       useStore.getState().setPanelTab('goal');
     } else if (typedCommand && SLASH_COMMANDS.some((c) => c.name === typedCommand)) {
+      if (files.length) { toast('App commands cannot include file attachments. Remove them or send a regular message.', 'error'); return; }
       // Known commands are cleared right away so long-running ones (/pr, /merge…) do not leave the
       // composer looking frozen; their progress and outcome appear as info lines in the transcript.
       clearDraft();
@@ -204,6 +210,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
       return;
     }
     if (t.startsWith('!')) {
+      if (files.length) { toast('Shell commands cannot include file attachments. Remove them first.', 'error'); return; }
       const command = t.slice(1).trim();
       pushHistory(session.id, t);
       clearDraft();
@@ -211,16 +218,20 @@ function SessionComposer({ session }: { session: SessionMeta }) {
       else toast('Type a command after ! — for example !git status', 'info');
       return;
     }
+    const input = { text: t, images: images.length ? images : undefined, files: files.length ? files : undefined, mode: session.mission ? 'now' as const : busy ? mode : 'now' as const };
     pushHistory(session.id, t);
     clearDraft();
-    setImages([]);
+    setImages((current) => current.filter((image) => !images.includes(image)));
+    setFiles((current) => current.filter((file) => !files.includes(file)));
     try {
-      const input = { text: t, images: images.length ? images : undefined, mode: session.mission ? 'now' as const : busy ? mode : 'now' as const };
       if (session.mission) await sendMissionUser(session.id, input);
       else await invoke('sessions:send', { id: session.id, input });
     } catch (e) {
       toast(String((e as Error).message ?? e), 'error');
-      setText(t);
+      // Keep a newer draft intact if the rejected send settled after the user began typing again.
+      setText((current) => current ? `${t}${t ? '\n\n' : ''}${current}` : t);
+      setImages((current) => [...images, ...current]);
+      setFiles((current) => [...files, ...current]);
     }
   };
 
@@ -458,18 +469,22 @@ function SessionComposer({ session }: { session: SessionMeta }) {
     ref.current?.focus();
   };
 
-  const onPaste = async (e: React.ClipboardEvent) => {
-    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
-    if (!files.length) return;
-    e.preventDefault();
-    const imgs = await Promise.all(files.map(fileToAttachment));
-    setImages((prev) => [...prev, ...imgs]);
+  const addFiles = async (list: Iterable<File>) => {
+    const chosen = [...list];
+    if (session.mission && chosen.some((file) => !file.type.startsWith('image/'))) {
+      toast('Mission messages support images only; non-image files are not accepted.', 'error');
+      return;
+    }
+    const added = await readAttachments(chosen, (message) => toast(message, 'error'));
+    setImages((prev) => [...prev, ...added.images]);
+    setFiles((prev) => [...prev, ...added.files]);
   };
 
-  const addFiles = async (list: FileList | null) => {
-    if (!list) return;
-    const imgs = await Promise.all([...list].filter((f) => f.type.startsWith('image/')).map(fileToAttachment));
-    setImages((prev) => [...prev, ...imgs]);
+  const onPaste = (e: React.ClipboardEvent) => {
+    const pasted = [...(e.clipboardData?.files ?? [])];
+    if (!pasted.length) return;
+    e.preventDefault();
+    void addFiles(pasted);
   };
 
   return (
@@ -525,6 +540,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
           </div>
         </>
       )}
+      <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
       <div className="composer-box">
         <textarea
           ref={ref}
@@ -537,9 +553,9 @@ function SessionComposer({ session }: { session: SessionMeta }) {
           spellCheck
         />
         <div className="composer-actions">
-          <label className="icon-btn" title="Attach image">
-            <Icon name="image" size={16} />
-            <input type="file" accept="image/*" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
+          <label className="icon-btn" title={session.mission ? 'Attach images' : 'Attach files'}>
+            <Icon name={session.mission ? 'image' : 'file'} size={16} />
+            <input type="file" accept={session.mission ? 'image/*' : undefined} multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
           </label>
           {shellDraft && !completed ? (
             <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
@@ -547,7 +563,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
             </Button>
           ) : session.mission || missionSending ? (
             <>
-              <Button size="sm" variant="primary" icon="send" disabled={missionSending || !!questions?.pending || (!text.trim() && !images.length)} onClick={() => void send()}>{missionSending ? 'Opening Mission…' : completed ? 'Ask lead' : 'Send to lead'}</Button>
+              <Button size="sm" variant="primary" icon="send" disabled={missionSending || !!questions?.pending || (!text.trim() && !images.length && !files.length)} onClick={() => void send()}>{missionSending ? 'Opening Mission…' : completed ? 'Ask lead' : 'Send to lead'}</Button>
               {questions?.pending && <Button size="sm" variant="danger" icon="stop" onClick={() => pauseMissionSession(session)}>Cancel answer</Button>}
             </>
           ) : busy ? (
@@ -563,7 +579,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
               <Button size="sm" variant="danger" icon="stop" className="btn-icon" onClick={() => pauseMissionSession(session)} title="Interrupt (Esc)" />
             </>
           ) : (
-            <Button size="sm" variant="primary" icon="send" onClick={() => void send()} disabled={!text.trim() && !images.length}>
+            <Button size="sm" variant="primary" icon="send" onClick={() => void send()} disabled={!text.trim() && !images.length && !files.length}>
               Send
             </Button>
           )}
