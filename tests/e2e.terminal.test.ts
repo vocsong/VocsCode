@@ -50,7 +50,6 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
     await fs.mkdir(project, { recursive: true });
     await fs.writeFile(path.join(project, 'README.md'), '# terminal project\n');
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
-    await fs.mkdir(shots, { recursive: true });
 
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== 'ELECTRON_RUN_AS_NODE' && k !== 'ANTHROPIC_BASE_URL' && k !== 'CLAUDECODE' && !k.startsWith('CLAUDE_CODE_')) env[k] = v;
@@ -204,13 +203,12 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
 
       // Keystrokes reach the PTY and the shell runs in the project directory.
       await win.locator('.xterm-helper-textarea').focus();
-      await win.waitForTimeout(1500); // let the shell print its prompt
+      // The earlier ! command has already run in this shell, so its prompt is ready.
       await win.keyboard.type('echo ok > vocs-marker.txt');
       await win.keyboard.press('Enter');
       const marker = await waitForFile(path.join(project, 'vocs-marker.txt'), 20_000);
       // Windows PowerShell redirects as UTF-16LE with a BOM; strip the NULs so the match is shell-agnostic.
       expect(marker.replace(/\0|﻿|�/g, '')).toMatch(/ok/);
-      await win.screenshot({ path: path.join(shots, 'e2e-07-terminal.png') });
 
       // The tab strip shows the shell's directory; "send to agent" drops the screen into the composer.
       expect(await win.locator('.term-cwd').innerText()).toBe('project');
@@ -226,6 +224,18 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await expect.poll(async () => win.locator('.composer textarea').inputValue(), { timeout: 10_000 }).toBe('');
       expect(await win.locator('.term-tab').count()).toBe(1); // reused the open terminal rather than spawning one
 
+      // Leave visible output in the first shell before reloading; the main-process PTY must
+      // reattach its screen, not merely restore the tab metadata.
+      const screenText = async (): Promise<string> => {
+        await win.click('button[aria-label="Send output to agent"]');
+        return win.locator('.composer textarea').inputValue();
+      };
+      await win.locator('.xterm-helper-textarea').focus();
+      await win.keyboard.type('echo VOCS_RELOAD_RETAINED');
+      await win.keyboard.press('Enter');
+      await expect.poll(screenText, { timeout: 20_000 }).toMatch(/(?:^|\n)\s*VOCS_RELOAD_RETAINED\s*(?:\n|$)/);
+      await win.fill('.composer textarea', '');
+
       // A second tab, then a renderer reload: the shells live in main and come back.
       await win.click('.term-new button[aria-label="New terminal"]');
       // The renderer CSP forbids eval, so poll with a locator instead of page.waitForFunction.
@@ -236,13 +246,20 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.waitForSelector('.term-tab', { timeout: 20_000 });
       await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(2);
       await win.waitForSelector('.term-view .xterm .xterm-helper-textarea', { timeout: 20_000 });
-      await win.screenshot({ path: path.join(shots, 'e2e-08-terminal-reload.png') });
+      // The first tab's pre-reload screen is still present; then prove its PTY accepts a new
+      // command after reattachment, with a real filesystem outcome (not an echoed command).
+      await win.locator('.term-tab').first().click();
+      await expect.poll(screenText, { timeout: 20_000 }).toMatch(/(?:^|\n)\s*VOCS_RELOAD_RETAINED\s*(?:\n|$)/);
+      await win.fill('.composer textarea', '');
+      await win.locator('.xterm-helper-textarea').focus();
+      await win.keyboard.type('echo post-reload-ok > post-reload.txt');
+      await win.keyboard.press('Enter');
+      expect((await waitForFile(path.join(project, 'post-reload.txt'), 20_000)).replace(/\0|﻿|�/g, '')).toMatch(/post-reload-ok/);
 
-      // Close the active tab with its ×; exit the remaining shell by typing `exit`.
-      await win.locator('.term-tab.active .term-tab-close').click();
+      // Close the other tab with its ×; exit the still-running first shell.
+      await win.locator('.term-tab').last().locator('.term-tab-close').click();
       await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 10_000 }).toBe(1);
       await win.locator('.xterm-helper-textarea').focus();
-      await win.waitForTimeout(500);
       await win.keyboard.type('exit');
       await win.keyboard.press('Enter');
       await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(0);
@@ -253,15 +270,12 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.click('.term-new button[aria-label="New terminal"]');
       await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(1);
       await win.waitForSelector('.term-view .xterm .xterm-helper-textarea', { timeout: 20_000 });
-      await win.locator('.xterm-helper-textarea').focus();
-      await win.waitForTimeout(1500); // let the shell print its prompt
-      await win.keyboard.type('echo VOCS_ARCHIVE_MARKER');
-      await win.keyboard.press('Enter');
+      // The composer sends to the PTY even while the renderer is attaching; wait for an
+      // observable shell response rather than assuming a fixed prompt startup time.
+      await win.fill('.composer textarea', '!echo VOCS_ARCHIVE_MARKER > archive-marker.txt');
+      await win.press('.composer textarea', 'Enter');
+      expect((await waitForFile(path.join(project, 'archive-marker.txt'), 20_000)).replace(/\0|﻿|�/g, '')).toMatch(/VOCS_ARCHIVE_MARKER/);
       // “Send output to agent” reads the renderer's own xterm buffer, so it is the screen itself.
-      const screenText = async (): Promise<string> => {
-        await win.click('button[aria-label="Send output to agent"]');
-        return win.locator('.composer textarea').inputValue();
-      };
       await expect.poll(screenText, { timeout: 20_000 }).toContain('VOCS_ARCHIVE_MARKER');
       await win.fill('.composer textarea', '');
 
@@ -329,6 +343,7 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       expect(await electronApp.evaluate(() => process.pid)).toBe(mainPid);
       expect(mainLog.join('')).toMatch(/ERROR renderer process gone: crashed/);
     } catch (e) {
+      await fs.mkdir(shots, { recursive: true });
       await win.screenshot({ path: path.join(shots, 'e2e-fail-terminal.png') }).catch(() => undefined);
       const tail = (arr: string[], n: number) => arr.slice(-n).join('\n');
       console.error(`[e2e terminal] failure\nrenderer console:\n${tail(consoleLines.filter((l) => !l.startsWith('[debug]')), 30)}\nmain log:\n${tail(mainLog.join('').split('\n').filter((l) => !l.includes(' DEBUG ')), 30)}`);
@@ -413,7 +428,12 @@ describe.runIf(enabled)('electron e2e: fork a worktree session', () => {
       await forkRow.click();
       await win.waitForSelector('.header', { timeout: 20_000 });
       expect(await forkRow.locator('.session-worktree').getAttribute('title')).toBe(`Worktree · ${fork.worktreeBranch}`);
-      await win.screenshot({ path: path.join(shots, 'e2e-09-fork-worktree.png') });
+    } catch (e) {
+      // Capture the live renderer before shutdown destroys the evidence.
+      const windows = forkApp?.windows() ?? [];
+      await fs.mkdir(shots, { recursive: true });
+      await windows[0]?.screenshot({ path: path.join(shots, 'e2e-fail-fork-worktree.png') }).catch(() => undefined);
+      throw e;
     } finally {
       await forkApp?.close().catch(() => undefined);
     }

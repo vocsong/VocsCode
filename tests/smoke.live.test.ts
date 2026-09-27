@@ -168,7 +168,7 @@ async function resumeRoundTrip(harness: HarnessId, refKey: keyof HarnessRef, ext
 
 describe('live harness smoke', () => {
   it.runIf(want('codex'))('codex app-server answers a prompt', async () => {
-    const { ctx, items, waitTurn, meta } = await makeCtx('codex');
+    const { ctx, items, events, waitTurn, meta } = await makeCtx('codex');
     const adapter = createAdapter('codex', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
@@ -177,29 +177,22 @@ describe('live harness smoke', () => {
     expect(models.length).toBeGreaterThan(0);
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
-    expect(assistantText(items)).toMatch(/PONG/i);
-    expect([...items.values()].some((i) => i.kind === 'turn' && i.status === 'completed')).toBe(true);
+    assertSuccessfulTurn(items, events, 'PONG');
   });
 
   it.runIf(want('codex-exec'))('codex exec SDK answers a prompt', async () => {
-    const { ctx, items, waitTurn } = await makeCtx('codex-exec');
+    const { ctx, items, events, waitTurn } = await makeCtx('codex-exec');
     const adapter = createAdapter('codex-exec', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
-    expect(assistantText(items)).toMatch(/PONG/i);
-    expect([...items.values()].some((i) => i.kind === 'turn' && i.status === 'completed')).toBe(true);
+    assertSuccessfulTurn(items, events, 'PONG');
   });
 
-  it.runIf(want('cursor'))('cursor SDK answers a prompt', async (t) => {
-    // The adapter passes no key when the store is empty, so the SDK's own fallbacks
-    // (CURSOR_API_KEY env, then a stored Cursor.auth.login()) carry the test.
-    if (!process.env.CURSOR_API_KEY) {
-      console.warn('cursor smoke skipped: no CURSOR_API_KEY in env');
-      return t.skip();
-    }
-    const { ctx, items, waitTurn, meta } = await makeCtx('cursor');
+  it.runIf(want('cursor'))('cursor SDK answers a prompt', async () => {
+    if (!process.env.CURSOR_API_KEY) throw new Error('Cursor smoke requested but CURSOR_API_KEY is not available.');
+    const { ctx, items, events, waitTurn, meta } = await makeCtx('cursor');
     const adapter = createAdapter('cursor', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
@@ -207,7 +200,7 @@ describe('live harness smoke', () => {
     expect(models.length).toBeGreaterThan(0);
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
-    expect(assistantText(items)).toMatch(/PONG/i);
+    assertSuccessfulTurn(items, events, 'PONG');
     expect(meta.harnessRef.cursorAgentId).toBeTruthy();
   });
 
@@ -228,7 +221,7 @@ describe('live harness smoke', () => {
   });
 
   it.runIf(want('claude'))('claude agent sdk answers a prompt', async () => {
-    const { ctx, items, waitTurn, meta } = await makeCtx('claude');
+    const { ctx, items, events, waitTurn, meta } = await makeCtx('claude');
     const adapter = createAdapter('claude', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
@@ -237,7 +230,7 @@ describe('live harness smoke', () => {
     expect(models.some((model) => model.contextWindow)).toBe(true);
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
-    expect(assistantText(items)).toMatch(/PONG/i);
+    assertSuccessfulTurn(items, events, 'PONG');
     expect(meta.harnessRef.claudeSessionId).toBeTruthy();
   });
 
@@ -270,14 +263,14 @@ describe('live harness smoke', () => {
   });
 
   it.runIf(want('acp'))('deepseek harness over ACP answers a prompt', async () => {
-    const { ctx, items, waitTurn, meta } = await makeCtx('acp', { acpAgent: process.env.HARNESS_SMOKE_ACP_AGENT ?? 'dsh' });
+    const { ctx, items, events, waitTurn, meta } = await makeCtx('acp', { acpAgent: process.env.HARNESS_SMOKE_ACP_AGENT ?? 'dsh' });
     const adapter = createAdapter('acp', ctx);
     cleanups.push(() => adapter.dispose());
     await adapter.start();
     expect(meta.harnessRef.acpSessionId).toBeTruthy();
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
-    expect(assistantText(items)).toMatch(/PONG/i);
+    assertSuccessfulTurn(items, events, 'PONG');
   });
 
   it.runIf(want('native'))('native loop answers a prompt through an OpenAI-compatible provider', async () => {
@@ -322,11 +315,8 @@ describe('live harness smoke', () => {
     await resumeRoundTrip('codex-exec', 'codexThreadId');
   });
 
-  it.runIf(wantResume('cursor'))('cursor resumes after dispose', async (t) => {
-    if (!process.env.CURSOR_API_KEY) {
-      console.warn('cursor resume smoke skipped: no CURSOR_API_KEY in env');
-      return t.skip();
-    }
+  it.runIf(wantResume('cursor'))('cursor resumes after dispose', async () => {
+    if (!process.env.CURSOR_API_KEY) throw new Error('Cursor resume smoke requested but CURSOR_API_KEY is not available.');
     await resumeRoundTrip('cursor', 'cursorAgentId');
   });
 

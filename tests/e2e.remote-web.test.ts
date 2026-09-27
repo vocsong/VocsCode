@@ -5,14 +5,14 @@
  * keys across a reload, the static CSP, the pairing link, streaming deltas with their sequence
  * floor, a signed approval, the computer switcher, unpair, and the phone layout.
  * Gated by VOCS_CODE_E2E_UI=1 (the e2e guard sets it); needs no app build and no account, but does
- * build the web bundle (src/web) in beforeAll.
+ * build the web bundle (src/web) in beforeAll unless a validated CI prebuild is opted in.
  */
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { RemoteHost } from '../src/main/remote/host';
 import type { HandlerRegistry } from '../src/main/handlers';
@@ -24,30 +24,82 @@ import type { SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/ty
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(import.meta.dirname, '..');
 const require = createRequire(import.meta.url);
-let app: ElectronApplication | null = null;
 let relay: LocalRelay | null = null;
-let ownerApp: ElectronApplication | null = null;
 let landing: TestLanding | null = null;
 const hosts: RemoteHost[] = [];
+const browsers: ElectronApplication[] = [];
+const browserDirs: string[] = [];
 
-beforeAll(() => {
+async function validateWebBundle(): Promise<void> {
+  const appDir = path.join(root, 'relay', 'public', 'app');
+  const html = await fs.readFile(path.join(appDir, 'index.html'), 'utf8');
+  const assets = [...html.matchAll(/(?:src|href)="(\/app\/assets\/[^"?#]+)"/g)].map((match) => match[1]!);
+  if (!assets.some((asset) => asset.endsWith('.js')) || !assets.some((asset) => asset.endsWith('.css'))) {
+    throw new Error('prebuilt web shell is missing its JavaScript or CSS references; run npm run build:web');
+  }
+  for (const asset of assets) {
+    const file = path.resolve(root, 'relay', 'public', asset.slice(1));
+    if (!file.startsWith(path.join(appDir, 'assets') + path.sep)) throw new Error(`invalid web asset: ${asset}`);
+    if (!(await fs.stat(file)).isFile()) throw new Error(`web asset is not a file: ${asset}`);
+  }
+}
+
+beforeAll(async () => {
   if (!enabled) return;
-  // The relay serves whatever is in relay/public/app; build the shell from source first.
-  const build = spawnSync(process.execPath, [path.join(root, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--config', 'vite.config.web.ts'], {
-    cwd: root,
-    encoding: 'utf8',
-    env: { ...process.env, NODE_ENV: 'production' }
-  });
-  if (build.status !== 0) throw new Error(`vite build failed:\n${build.stderr || build.stdout}`);
+  // CI runs npm run build first. Opt in to that artifact only explicitly; a standalone run
+  // still builds from source, so an old relay/public/app cannot silently pass as this checkout.
+  if (process.env.VOCS_CODE_E2E_WEB_PREBUILT !== '1') {
+    const build = spawnSync(process.execPath, [path.join(root, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--config', 'vite.config.web.ts'], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, NODE_ENV: 'production' }
+    });
+    if (build.status !== 0) throw new Error(`vite build failed:\n${build.stderr || build.stdout}`);
+  }
+  try {
+    await validateWebBundle();
+  } catch (error) {
+    throw new Error('web shell bundle is incomplete; run npm run build:web before setting VOCS_CODE_E2E_WEB_PREBUILT=1', { cause: error });
+  }
 });
 
-afterAll(async () => {
-  await app?.close().catch(() => undefined);
-  await ownerApp?.close().catch(() => undefined);
-  for (const host of hosts) await host.disable();
-  await landing?.stop();
-  await relay?.stop();
-});
+afterEach(async () => {
+  // Stop the clients before the hosts, then the landing before its upstream relay. Every
+  // resource is attempted even if an earlier close fails, including directories from a launch
+  // that failed before Playwright returned an application.
+  const errors: unknown[] = [];
+  const stop = async (label: string, action: () => Promise<unknown>) => {
+    try { await action(); } catch (error) { errors.push(new Error(`failed to stop ${label}`, { cause: error })); }
+  };
+  for (const browser of browsers.splice(0).reverse()) {
+    await stop('Electron browser', async () => {
+      try {
+        await browser.close();
+      } catch (error) {
+        // Playwright can reject if Chromium died mid-close. Do not leave a live process holding
+        // the profile directory just because graceful shutdown failed.
+        const child = browser.process();
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill();
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 5_000);
+            child.once('exit', () => { clearTimeout(timer); resolve(); });
+          });
+        }
+        throw error;
+      }
+    });
+  }
+  for (const host of hosts.splice(0).reverse()) await stop('remote host', () => host.disable());
+  const currentLanding = landing;
+  landing = null;
+  if (currentLanding) await stop('test landing', () => currentLanding.stop());
+  const currentRelay = relay;
+  relay = null;
+  if (currentRelay) await stop('local relay', () => currentRelay.stop());
+  for (const dir of browserDirs.splice(0).reverse()) await stop('browser profile', () => fs.rm(dir, { recursive: true, force: true }));
+  if (errors.length) throw new AggregateError(errors, 'remote web e2e cleanup failed');
+}, 60_000);
 
 /** A plain browser window on the page: no preload, no Node, sandboxed. Parked off every display and
  *  shown inactive like the other suites, unless VOCS_CODE_E2E_VISIBLE=1. */
@@ -146,19 +198,19 @@ async function approve(host: RemoteHost, browserName: string): Promise<void> {
   await host.respondPairing('approve');
 }
 
-function launchBrowser(url: string, cookie?: string): Promise<Page> {
-  return (async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-remote-web-'));
-    const main = path.join(tmp, 'main.cjs');
-    await fs.writeFile(main, BROWSER_MAIN);
-    app = await electron.launch({
-      executablePath: require('electron') as string,
-      args: [main, `--user-data-dir=${path.join(tmp, 'profile')}`],
-      env: isolatedEnv(path.join(tmp, 'userData'), { REMOTE_WEB_URL: url, ...(cookie ? { REMOTE_WEB_COOKIE: cookie } : {}) }),
-      timeout: 60_000
-    });
-    return app.firstWindow();
-  })();
+async function launchBrowser(url: string, cookie?: string): Promise<{ app: ElectronApplication; page: Page }> {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-remote-web-'));
+  browserDirs.push(tmp);
+  const main = path.join(tmp, 'main.cjs');
+  await fs.writeFile(main, BROWSER_MAIN);
+  const app = await electron.launch({
+    executablePath: require('electron') as string,
+    args: [main, `--user-data-dir=${path.join(tmp, 'profile')}`],
+    env: isolatedEnv(path.join(tmp, 'userData'), { REMOTE_WEB_URL: url, ...(cookie ? { REMOTE_WEB_COOKIE: cookie } : {}) }),
+    timeout: 60_000
+  });
+  browsers.push(app); // firstWindow may fail; afterEach still owns the launched process.
+  return { app, page: await app.firstWindow() };
 }
 
 function watchCsp(page: Page): string[] {
@@ -175,7 +227,7 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     landing = await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
     const work = await desk('Work', relay.origin, relay.enrollToken);
     const { code } = await work.host.startPairing('Work PC');
-    const page = await launchBrowser(`${landing.origin}/app/?code=${code}`, TEST_SESSION_COOKIE);
+    const { page } = await launchBrowser(`${landing.origin}/app/?code=${code}`, TEST_SESSION_COOKIE);
     const cspViolations = watchCsp(page);
 
     // The link fills the code; pairing still needs a human on each side.
@@ -272,7 +324,7 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
   }, 240_000);
 
   it('adds a computer with Connect with GitHub, then pairs another from the signed-in list, with no code or secret', async () => {
-    relay ??= await startLocalRelay();
+    relay = await startLocalRelay();
     landing = await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
     // Desktops with no enrollment secret: they go through the landing, as they would at code.vocs.io.
     const office = await desk('Office', '', '', { enable: false });
@@ -281,8 +333,7 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     const checkCode = office.host.state().signIn?.checkCode;
     expect(checkCode).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
 
-    const page = await launchBrowser(link, TEST_SESSION_COOKIE);
-    ownerApp = app;
+    const { page } = await launchBrowser(link, TEST_SESSION_COOKIE);
     const cspViolations = watchCsp(page);
 
     // The page the desktop opened asks before adding anything, and shows the desktop's own code.
@@ -324,7 +375,7 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
   }, 240_000);
 
   it('fits a 390x844 phone: no horizontal overflow, a visible composer, and 16px inputs', async () => {
-    relay ??= await startLocalRelay();
+    relay = await startLocalRelay();
     const long = 'x'.repeat(600);
     const items: TranscriptItem[] = [
       { id: 'm0', kind: 'user', ts: 1, text: 'read this' },
@@ -333,15 +384,15 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     ];
     const phone = await desk('Phone', relay.origin, relay.enrollToken, { items, focus: 'Phone-s1' });
     const { code } = await phone.host.startPairing('Phone PC');
-    landing ??= await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
-    const page = await launchBrowser(`${landing.origin}/app/?code=${code}`, TEST_SESSION_COOKIE);
+    landing = await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
+    const { app, page } = await launchBrowser(`${landing.origin}/app/?code=${code}`, TEST_SESSION_COOKIE);
     await expect.poll(() => page.locator('[data-testid="pair-code"]').inputValue(), { timeout: 30_000 }).toBe(code);
     await page.locator('[data-testid="pair-submit"]').click();
     await approve(phone.host, 'Browser');
     await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
 
     // A phone viewport: 390x844, as a real device reports it.
-    await app!.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setBounds({ x: 0, y: 0, width: 390, height: 844 }));
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setBounds({ x: 0, y: 0, width: 390, height: 844 }));
     await page.locator('.w-session-name').getByText('Phone session').waitFor({ timeout: 30_000 });
     await page.getByText('and the answer.').waitFor({ timeout: 20_000 });
 
@@ -411,8 +462,8 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
   }, 240_000);
 
   it('keeps each signed-in account in its own browser vault and host list', async () => {
-    relay ??= await startLocalRelay();
-    landing ??= await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
+    relay = await startLocalRelay();
+    landing = await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
     const accountA = 'github:710003';
     const accountB = 'github:710004';
     const cookieA = landing.sessionFor(accountA, 'account-a');
@@ -434,45 +485,38 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     await addComputer(desktopA, cookieA, 'Account A');
     await addComputer(desktopB, cookieB, 'Account B');
 
-    const page = await launchBrowser(`${landing.origin}/app/`, cookieA);
-    const accountApp = app;
-    try {
-      // Account A lists and pairs only its own computer.
-      const aRow = page.locator('.w-list-row', { hasText: 'Account A PC' });
-      await expect.poll(() => aRow.textContent(), { timeout: 30_000 }).toContain('Account A PC');
-      await expect.poll(async () => (await page.locator('.w-list-row').allTextContents()).join('|')).not.toContain('Account B PC');
-      await page.locator('[data-testid="pair-name"]').fill('Account A browser');
-      await aRow.locator('[data-testid="owner-pair"]').click();
-      await approve(desktopA.host, 'Account A browser');
-      await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
-      await page.locator('.w-session-name').getByText('Account A session').waitFor({ timeout: 20_000 });
+    const { page } = await launchBrowser(`${landing.origin}/app/`, cookieA);
+    // Account A lists and pairs only its own computer.
+    const aRow = page.locator('.w-list-row', { hasText: 'Account A PC' });
+    await expect.poll(() => aRow.textContent(), { timeout: 30_000 }).toContain('Account A PC');
+    await expect.poll(async () => (await page.locator('.w-list-row').allTextContents()).join('|')).not.toContain('Account B PC');
+    await page.locator('[data-testid="pair-name"]').fill('Account A browser');
+    await aRow.locator('[data-testid="owner-pair"]').click();
+    await approve(desktopA.host, 'Account A browser');
+    await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
+    await page.locator('.w-session-name').getByText('Account A session').waitFor({ timeout: 20_000 });
 
-      // Switching identities at the same origin and in the same IndexedDB must not load A's
-      // pairing, its computer list, or its vault bucket.
-      const [nameB, valueB] = cookieB.split('=');
-      await page.context().addCookies([{ url: landing!.origin, name: nameB!, value: valueB! }]);
-      await page.reload();
-      const bRow = page.locator('.w-list-row', { hasText: 'Account B PC' });
-      await expect.poll(() => bRow.textContent(), { timeout: 30_000 }).toContain('Account B PC');
-      await expect.poll(async () => (await page.locator('.w-list-row').allTextContents()).join('|')).not.toContain('Account A PC');
-      await page.locator('[data-testid="pair-name"]').fill('Account B browser');
-      await bRow.locator('[data-testid="owner-pair"]').click();
-      await approve(desktopB.host, 'Account B browser');
-      await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
-      await page.locator('.w-session-name').getByText('Account B session').waitFor({ timeout: 20_000 });
+    // Switching identities at the same origin and in the same IndexedDB must not load A's
+    // pairing, its computer list, or its vault bucket.
+    const [nameB, valueB] = cookieB.split('=');
+    await page.context().addCookies([{ url: landing!.origin, name: nameB!, value: valueB! }]);
+    await page.reload();
+    const bRow = page.locator('.w-list-row', { hasText: 'Account B PC' });
+    await expect.poll(() => bRow.textContent(), { timeout: 30_000 }).toContain('Account B PC');
+    await expect.poll(async () => (await page.locator('.w-list-row').allTextContents()).join('|')).not.toContain('Account A PC');
+    await page.locator('[data-testid="pair-name"]').fill('Account B browser');
+    await bRow.locator('[data-testid="owner-pair"]').click();
+    await approve(desktopB.host, 'Account B browser');
+    await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
+    await page.locator('.w-session-name').getByText('Account B session').waitFor({ timeout: 20_000 });
 
-      // Back to A: its own bucket restores its own pairing.
-      const [nameA, valueA] = cookieA.split('=');
-      await page.context().addCookies([{ url: landing!.origin, name: nameA!, value: valueA! }]);
-      await page.reload();
-      await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
-      await page.locator('.w-session-name').getByText('Account A session').waitFor({ timeout: 20_000 });
-      await page.locator('[data-testid="computers"]').click();
-      await expect.poll(async () => (await page.locator('.w-list-row').allTextContents()).join('|')).toContain('Account A PC');
-    } finally {
-      await accountApp?.close();
-      await desktopA.host.disable();
-      await desktopB.host.disable();
-    }
+    // Back to A: its own bucket restores its own pairing.
+    const [nameA, valueA] = cookieA.split('=');
+    await page.context().addCookies([{ url: landing!.origin, name: nameA!, value: valueA! }]);
+    await page.reload();
+    await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
+    await page.locator('.w-session-name').getByText('Account A session').waitFor({ timeout: 20_000 });
+    await page.locator('[data-testid="computers"]').click();
+    await expect.poll(async () => (await page.locator('.w-list-row').allTextContents()).join('|')).toContain('Account A PC');
   }, 240_000);
 });

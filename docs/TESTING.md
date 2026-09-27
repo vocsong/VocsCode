@@ -62,7 +62,7 @@ credentials or deployment are available, report the live tier as unverified.
 ## Opt-in Electron suites (no provider key)
 
 ```bash
-npm run build && npm run test:e2e:ci       # all seventeen below; fails if any reports skipped
+npm run build && npm run test:e2e:ci       # all nineteen no-provider suites; fails if any reports skipped
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:themes
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:models
@@ -78,6 +78,7 @@ npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.doctor.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.context-menu.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.transcript.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.mission-settings.test.ts tests/e2e.mission.test.ts
+npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.layout.test.ts tests/e2e.subagents.test.ts
 npm run build && HARNESS_E2E=1 npm run test:e2e:terminal
 # Vesta on the real pi runtime, offline scripted model (installed Pi 0.85.1; HARNESS_E2E_EXE for the packaged app).
 npm run build && VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/e2e.vesta.test.ts
@@ -88,7 +89,11 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.subagents.test.ts
 ```
 
-`npm run test:e2e:ci` runs the seventeen suites and fails if any of them reports *skipped*.
+`npm run test:e2e:ci` runs nineteen no-provider suites (including `e2e.layout` and the seeded
+`e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
+`e2e.subagents` is registered only with `VOCS_CODE_PI_INTEGRATION=1` and remains opt-in. The
+`tests/test-inventory.test.ts` gate requires every `e2e.*.test.ts` file to be in that CI list or
+explicitly classified as requiring a provider, installed Pi, or packaged app.
 
 Any run with `VOCS_CODE_E2E_UI=1` or `HARNESS_E2E=1` parks its window outside every display and never
 takes focus, so suites can run while you work. `VOCS_CODE_E2E_VISIBLE=1` brings the window back on
@@ -127,7 +132,13 @@ suites alive** below):
 | Anything else under `src/renderer/**` | `npm run test:e2e:ci` |
 
 `.github/workflows/ci.yml` runs `npm run typecheck && npm test && npm run build` plus `test:e2e:ci`
-on every PR into `develop`. The live tiers stay manual.
+on every PR into `develop`. A separate Windows offline job executes the Windows ownership, recovery,
+deep-path, and renderer/main import boundaries that Ubuntu cannot certify, and rejects skipped or
+uncollected requested files. The jobs print the slowest files and cases and upload sanitized timing
+reports; raw Vitest JSON stays in runner temp because failure messages could contain sensitive data. The Windows E2E job sets
+`VOCS_CODE_E2E_WEB_PREBUILT=1` only after `npm run build`, so `e2e.remote-web` consumes the
+validated prebuilt web bundle instead of building it again. Standalone runs still build it.
+The live tiers stay manual.
 
 ## Coverage rules for high-risk paths
 
