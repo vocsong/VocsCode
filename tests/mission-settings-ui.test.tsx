@@ -43,7 +43,21 @@ function open() {
   fireEvent.click(screen.getByRole('button', { name: 'Mission' }));
 }
 function change(label: string, value: string) { fireEvent.change(screen.getByLabelText(label), { target: { value } }); }
+function openLibrary() {
+  fireEvent.click(screen.getByText('Advanced preset library'));
+}
+function editPreset(name: string) {
+  fireEvent.click(within(screen.getByRole('region', { name: `Preset ${name}` })).getByRole('button', { name: `Edit ${name}` }));
+}
+function addConfigured(tier: number, name: string) {
+  fireEvent.click(within(screen.getByRole('region', { name: `Tier ${tier}` })).getByRole('button', { name: `Add model to T${tier}` }));
+  const select = screen.getByLabelText(`Add configured model to T${tier}`) as HTMLSelectElement;
+  const option = [...select.options].find((item) => item.textContent?.startsWith(`${name} · `));
+  expect(option).toBeDefined();
+  fireEvent.change(select, { target: { value: option!.value } });
+}
 async function addPreset(name = 'Engineer', provider = 'account-one') {
+  if (!screen.getByRole('button', { name: 'New preset' }).closest('details')?.open) openLibrary();
   fireEvent.click(screen.getByRole('button', { name: 'New preset' }));
   change('Preset name', name);
   await screen.findByTitle(`${provider}/engine`);
@@ -60,7 +74,7 @@ async function save() {
 describe('Mission Settings user flows', () => {
   it('lives in the settings shell with all five unavailable pools, no invented defaults or launch control', () => {
     open();
-    expect(screen.getAllByText('Unavailable pool — no presets. No fallback.')).toHaveLength(5);
+    expect(screen.getAllByText('Unavailable pool — no models. No fallback.')).toHaveLength(5);
     expect(screen.getByText(/Mission launch is unconfigured/)).toBeTruthy();
     expect((screen.getByLabelText('Default principal engineer (T5)') as HTMLSelectElement).value).toBe('');
     expect((screen.getByRole('button', { name: 'Save Mission settings' }) as HTMLButtonElement).disabled).toBe(true);
@@ -68,8 +82,23 @@ describe('Mission Settings user flows', () => {
     expect(invoke.mock.calls.some(([c]) => c === 'settings:update')).toBe(false);
   });
 
+  it('adds a Pi catalog model to T5 and reuses the exact choice in T3', async () => {
+    open();
+    fireEvent.click(within(screen.getByRole('region', { name: 'Tier 5' })).getByRole('button', { name: 'Add model to T5' }));
+    const model = await screen.findByTitle('account-one/engine');
+    fireEvent.click(model.closest('button')!);
+    expect(within(screen.getByRole('region', { name: 'Tier 5' })).getByText('First endpoint', { selector: 'strong' })).toBeTruthy();
+    addConfigured(3, 'First endpoint');
+    const lead = screen.getByLabelText('Default principal engineer (T5)') as HTMLSelectElement;
+    change('Default principal engineer (T5)', lead.options[1].value);
+    await save();
+    expect(saved.mission?.presets).toEqual([expect.objectContaining({ name: 'First endpoint', harnessId: 'pi', model: { provider: 'account-one', model: 'engine' }, reasoning: { kind: 'default' } })]);
+    expect(saved.mission?.tiers.find((tier) => tier.id === 5)?.presetIds).toEqual(saved.mission?.tiers.find((tier) => tier.id === 3)?.presetIds);
+  });
+
   it('creates an atomic exact preset, flags overlapping membership and persists one T5 default', async () => {
     open();
+    openLibrary();
     fireEvent.click(screen.getByRole('button', { name: 'New preset' }));
     // The app-wide default harness (native here) cannot run a Mission; a new preset starts on Pi.
     expect((screen.getByLabelText('Harness') as HTMLSelectElement).value).toBe('pi');
@@ -81,12 +110,12 @@ describe('Mission Settings user flows', () => {
     change('Reasoning', 'high');
     change('Preset selection guidance', 'Hard cross-module problems.');
     fireEvent.click(screen.getByRole('button', { name: 'Apply preset' }));
-    fireEvent.click(screen.getByLabelText('T5: Engineer'));
-    fireEvent.click(screen.getByLabelText('T3: Engineer'));
+    addConfigured(5, 'Engineer');
+    addConfigured(3, 'Engineer');
     const id = (screen.getByLabelText('Default principal engineer (T5)') as HTMLSelectElement).options[1].value;
     change('Default principal engineer (T5)', id);
     expect(screen.getByText(/Overlapping membership \(T3, T5\)/)).toBeTruthy();
-    expect(screen.getByText('Default principal engineer', { selector: '.badge' })).toBeTruthy();
+    expect((screen.getByLabelText('Default principal engineer (T5)') as HTMLSelectElement).value).toBe(id);
     expect(within(screen.getByRole('region', { name: 'Preset Engineer' })).getByText('Unverified', { exact: true })).toBeTruthy();
     expect(screen.queryByText('Available', { exact: true })).toBeNull();
     await save();
@@ -98,11 +127,11 @@ describe('Mission Settings user flows', () => {
 
   it('edits Default without app-wide effort fallback, and deleting the default never selects a replacement', async () => {
     open(); await addPreset(); await addPreset('Backup', 'account-two');
-    fireEvent.click(screen.getByLabelText('T5: Engineer')); fireEvent.click(screen.getByLabelText('T5: Backup'));
+    addConfigured(5, 'Engineer'); addConfigured(5, 'Backup');
     const select = screen.getByLabelText('Default principal engineer (T5)') as HTMLSelectElement;
     change('Default principal engineer (T5)', select.options[1].value);
     await save();
-    fireEvent.click(screen.getByRole('button', { name: 'Edit Engineer' }));
+    editPreset('Engineer');
     change('Preset name', 'Renamed engineer'); change('Reasoning', '');
     fireEvent.click(screen.getByRole('button', { name: 'Apply preset' }));
     await save();
@@ -117,25 +146,25 @@ describe('Mission Settings user flows', () => {
 
   it('clears global and inheriting-project defaults when removing T5 membership or disabling a preset', async () => {
     open(); await addPreset();
-    fireEvent.click(screen.getByLabelText('T5: Engineer'));
+    addConfigured(5, 'Engineer');
     const id = (screen.getByLabelText('Default principal engineer (T5)') as HTMLSelectElement).options[1].value;
     change('Default principal engineer (T5)', id);
     change('Project folder', '/project'); change('Project principal engineer (T5)', id);
-    fireEvent.click(screen.getByLabelText('T5: Engineer'));
+    fireEvent.click(within(screen.getByRole('region', { name: 'Tier 5' })).getByRole('button', { name: 'Remove Engineer from T5' }));
     expect((screen.getByLabelText('Default principal engineer (T5)') as HTMLSelectElement).value).toBe('');
     expect((screen.getByLabelText('Project principal engineer (T5)') as HTMLSelectElement).value).toBe('__none');
     await save();
     expect(saved.mission?.defaultLeadPresetId).toBeUndefined();
     expect(saved.missionProjects?.['/project'].defaultLeadPresetId).toBeNull();
-    fireEvent.click(screen.getByLabelText('T5: Engineer'));
+    addConfigured(5, 'Engineer');
     change('Default principal engineer (T5)', id);
-    fireEvent.click(screen.getByRole('button', { name: 'Edit Engineer' }));
+    editPreset('Engineer');
     fireEvent.click(screen.getByLabelText('Preset enabled'));
     fireEvent.click(screen.getByRole('button', { name: 'Apply preset' }));
     await save();
     expect(saved.mission?.presets[0].enabled).toBe(false);
     expect(saved.mission?.defaultLeadPresetId).toBeUndefined();
-    expect(screen.getAllByText('Unavailable pool — all presets are disabled.').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Unavailable pool — all models are disabled.').length).toBeGreaterThan(0);
   });
 
   it('offers only Default for models without effort and resets exact fields when the harness changes', async () => {
@@ -152,9 +181,10 @@ describe('Mission Settings user flows', () => {
 
   it('edits labels, guidance, membership, default and tightening restrictions for a configured folder using the same library', async () => {
     open(); await addPreset();
-    fireEvent.click(screen.getByLabelText('T5: Engineer'));
+    addConfigured(5, 'Engineer');
     const id = (screen.getByLabelText('Default principal engineer (T5)') as HTMLSelectElement).options[1].value;
     change('Default principal engineer (T5)', id);
+    fireEvent.click(within(screen.getByRole('region', { name: 'Tier 1' })).getByText('Tier description'));
     change('T1 label', 'Evidence'); change('T1 guidance', 'Collect prescribed evidence only.');
     change('Workers per Mission', '3');
     change('Project folder', '/project');
@@ -235,6 +265,7 @@ describe('Mission Settings user flows', () => {
     const card = screen.getByRole('region', { name: 'Preset Saved Claude' });
     expect(within(card).getByText('Not supported for Missions yet')).toBeTruthy();
     expect(within(card).getByText(/Claude Agent SDK presets are not supported for Missions yet/)).toBeTruthy();
+    openLibrary();
     fireEvent.click(screen.getByRole('button', { name: 'New preset' }));
     const harness = screen.getByLabelText('Harness') as HTMLSelectElement;
     expect(harness.value).toBe('pi');

@@ -3,7 +3,12 @@
 .mission-settings .mission-card { border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 12px 0; }
 .mission-settings .mission-toolbar, .mission-settings .mission-model, .mission-settings .mission-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
 .mission-settings .mission-toolbar { justify-content: space-between; }
-.mission-settings .mission-toolbar h3 { margin: 0; }
+.mission-settings .mission-toolbar h3, .mission-settings .mission-toolbar h4 { margin: 0; }
+.mission-settings .mission-advanced { margin: 16px 0; }
+.mission-settings .mission-advanced > summary, .mission-settings .mission-card summary { cursor: pointer; color: var(--accent); }
+.mission-settings .mission-tier-model { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; border-top: 1px solid var(--border); padding: 10px 0; }
+.mission-settings .mission-tier-model strong, .mission-settings .mission-tier-model .field-hint { display: block; }
+.mission-settings .mission-add-model { margin: 12px 0; }
 .mission-settings .mission-membership { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .mission-settings .mission-membership input[type="checkbox"] { width: auto; margin-right: 6px; }
 .mission-settings .mission-limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 20px; }
