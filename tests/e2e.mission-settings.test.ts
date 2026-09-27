@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { AppSettings } from '../src/shared/types';
+import { createDefaultMissionConfig } from '../src/shared/mission-config';
 import { expectQuietWindow, isolatedEnv, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -40,8 +41,13 @@ describe.runIf(enabled)('Mission settings UI', () => {
     const project = path.join(tmp, 'project');
     await fs.mkdir(userData); await fs.mkdir(project);
     const settingsPath = path.join(userData, 'settings.json');
+    const mission = createDefaultMissionConfig();
+    mission.presets.push({ id: 'native-engineer', revision: 1, name: 'Engineer', enabled: true, harnessId: 'native',
+      model: { provider: 'fixture-one', model: 'engine' }, reasoning: { kind: 'default' } });
+    mission.tiers.find((tier) => tier.id === 5)!.presetIds.push('native-engineer');
+    mission.tiers.find((tier) => tier.id === 3)!.presetIds.push('native-engineer');
     await fs.writeFile(settingsPath, seedSettings(project, {
-      defaultHarness: 'native', defaultEffort: 'max', agent: { enabled: false },
+      mission, defaultHarness: 'native', defaultEffort: 'max', agent: { enabled: false },
       providers: [{ id: 'fixture-one', kind: 'ollama', name: 'Fixture (no server)', enabled: true, hasApiKey: false,
         models: [{ id: 'engine', provider: 'fixture-one', displayName: 'Fixture engine', supportsReasoning: true, supportedEfforts: ['low', 'high'] }] }]
     }));
@@ -50,14 +56,25 @@ describe.runIf(enabled)('Mission settings UI', () => {
     // Honest support boundary for testers, and no stale "launch is not enabled" claim.
     await win.getByTestId('mission-support').getByText('Missions are experimental. Supported today: Pi presets on Windows.', { exact: true }).waitFor();
     expect(await win.getByText(/not enabled in this phase/).count()).toBe(0);
-    expect(await win.getByText('Unavailable pool — no presets. No fallback.', { exact: true }).count()).toBe(5);
+    expect(await win.getByRole('region', { name: 'Tier 5', exact: true }).getByRole('button', { name: 'Remove Engineer from T5' }).count()).toBe(1);
+    expect(await win.getByRole('region', { name: 'Tier 3', exact: true }).getByRole('button', { name: 'Remove Engineer from T3' }).count()).toBe(1);
     expect(await win.getByRole('button', { name: /start mission|launch mission/i }).count()).toBe(0);
-    await win.getByRole('button', { name: 'New preset', exact: true }).click();
+    // The primary tier action opens Pi's catalog, not the fixture model offered only by Native.
+    const tier2 = win.getByRole('region', { name: 'Tier 2', exact: true });
+    await tier2.getByRole('button', { name: 'Add model to T2', exact: true }).click();
+    await tier2.getByLabel('Search models', { exact: true }).waitFor();
+    expect(await tier2.locator('.mp-name[title="fixture-one/engine"]').count()).toBe(0);
+    await tier2.getByRole('button', { name: 'Close models', exact: true }).click();
+    await win.getByRole('region', { name: 'Tier 3', exact: true }).getByRole('button', { name: 'Remove Engineer from T3' }).click();
+    expect(await win.getByRole('region', { name: 'Tier 3', exact: true }).getByRole('button', { name: 'Edit Engineer' }).count()).toBe(0);
+    await win.getByRole('button', { name: 'Discard changes', exact: true }).click();
+    await win.getByRole('region', { name: 'Tier 3', exact: true }).getByRole('button', { name: 'Remove Engineer from T3' }).waitFor();
+    await win.getByText('Advanced preset library', { exact: true }).click();
+    await win.getByRole('button', { name: 'Edit Engineer', exact: true }).last().click();
     const harness = win.getByLabel('Harness', { exact: true });
-    expect(await harness.inputValue()).toBe('pi');
+    expect(await harness.inputValue()).toBe('native');
     expect(await harness.locator('option[value="native"]').textContent()).toBe('Native loop — not supported for Missions yet');
-    // The fixture catalog lives on the native harness: an explicit, labelled choice that is kept.
-    await harness.selectOption('native');
+    // The advanced library retains the explicit Native choice even though only Pi can run Missions.
     await win.getByLabel('Preset name', { exact: true }).fill('Engineer');
     await win.getByLabel('Provider / billing path', { exact: true }).selectOption('fixture-one');
     await win.locator('.mp-select:has(.mp-name[title="fixture-one/engine"])').click();
@@ -67,10 +84,12 @@ describe.runIf(enabled)('Mission settings UI', () => {
     await win.getByRole('region', { name: 'Preset Engineer', exact: true }).getByText('Unverified', { exact: true }).waitFor();
     await win.getByRole('region', { name: 'Preset Engineer', exact: true }).getByText('Not supported for Missions yet', { exact: true }).waitFor();
     expect(await win.getByText('Available', { exact: true }).count()).toBe(0);
-    await win.getByLabel('T5: Engineer', { exact: true }).check();
-    await win.getByLabel('T3: Engineer', { exact: true }).check();
+    await win.getByRole('region', { name: 'Tier 2', exact: true }).getByRole('button', { name: 'Add model to T2' }).click();
+    await win.getByLabel('Add configured model to T2', { exact: true }).selectOption('native-engineer');
+    await win.getByRole('region', { name: 'Tier 2', exact: true }).getByRole('button', { name: 'Remove Engineer from T2' }).waitFor();
     await win.getByLabel('Default principal engineer (T5)', { exact: true }).selectOption({ label: 'Engineer' });
-    await win.getByText(/Overlapping membership \(T3, T5\)/).waitFor();
+    await win.getByText(/Overlapping membership \(T2, T3, T5\)/).waitFor();
+    await win.getByRole('region', { name: 'Tier 1', exact: true }).getByText('Tier description', { exact: true }).click();
     await win.getByLabel('T1 label', { exact: true }).fill('Evidence');
     await win.getByLabel('T1 guidance', { exact: true }).fill('Prescribed evidence collection');
     await win.getByLabel('Workers per Mission', { exact: true }).fill('3');
@@ -97,19 +116,22 @@ describe.runIf(enabled)('Mission settings UI', () => {
     const persisted = await readSettings();
     const id = persisted.mission!.presets[0].id;
     expect(persisted.mission!.presets).toEqual([{
-      id, revision: 1, name: 'Engineer', enabled: true, harnessId: 'native',
+      id, revision: 2, name: 'Engineer', enabled: true, harnessId: 'native',
       model: { provider: 'fixture-one', model: 'engine', connectionId: 'subscription-one' }, reasoning: { kind: 'explicit', value: 'high' }
     }]);
     expect(persisted.mission!.defaultLeadPresetId).toBe(id);
     expect(persisted.mission!.limits).toMatchObject({ maxBudgetUsd: 2.5, maxTokens: 10000, accountLimits: { 'subscription-one': 2 } });
     expect(persisted.mission!.tiers[0]).toEqual({ id: 1, label: 'Evidence', guidance: 'Prescribed evidence collection', presetIds: [] });
+    expect(persisted.mission!.tiers[1].presetIds).toEqual([id]);
     expect(persisted.missionProjects![project]).toMatchObject({ defaultLeadPresetId: null, allowedProviderIds: [], tiers: [{ id: 1, presetIds: [id] }], limits: { maxConcurrentWorkersPerMission: 2 } });
     expect(persisted.defaultEffort).toBe('max');
 
     // A real process restart, not a renderer reload, proves persistence.
     await app!.close(); app = null;
     win = await launch(userData);
+    await win.getByText('Advanced preset library', { exact: true }).click();
     await win.getByRole('region', { name: 'Preset Engineer', exact: true }).getByText('Not supported for Missions yet', { exact: true }).waitFor();
+    await win.getByRole('region', { name: 'Tier 1', exact: true }).getByText('Tier description', { exact: true }).click();
     expect(await win.getByLabel('T1 label', { exact: true }).inputValue()).toBe('Evidence');
     expect(await win.getByLabel('Observed Mission cost threshold (USD)', { exact: true }).inputValue()).toBe('2.5');
     expect(await win.getByLabel('Observed Mission token threshold', { exact: true }).inputValue()).toBe('10000');
@@ -127,7 +149,7 @@ describe.runIf(enabled)('Mission settings UI', () => {
     await win.getByRole('alert').filter({ hasText: 'limits.maxConcurrentWorkersPerMission' }).waitFor();
     expect((await readSettings()).mission).toEqual(persisted.mission);
     await win.getByRole('button', { name: 'Discard changes', exact: true }).click();
-    await win.getByRole('button', { name: 'Edit Engineer', exact: true }).click();
+    await win.getByRole('region', { name: 'Preset Engineer', exact: true }).getByRole('button', { name: 'Edit Engineer', exact: true }).click();
     await win.getByLabel('Reasoning', { exact: true }).selectOption('');
     await win.getByRole('button', { name: 'Apply preset', exact: true }).click();
     await win.getByRole('button', { name: 'Save Mission settings', exact: true }).click();
