@@ -2561,8 +2561,22 @@ h4 {
   max-width: 920px;
   margin: 0 auto 6px;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
+.file-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  font-size: 12px;
+}
+.file-attachment span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-attachment button { display: inline-flex; border: 0; background: none; color: inherit; cursor: pointer; padding: 2px; }
 .composer-warn {
   max-width: 920px;
   margin: 0 auto 6px;

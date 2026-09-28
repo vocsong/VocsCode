@@ -122,6 +122,30 @@ describe('Mission user IPC', () => {
     expect(r.missions.create).not.toHaveBeenCalled();
   });
 
+  it('admits bounded files only as Mission context and never as a control or forged path', async () => {
+    const r = await rig();
+    const files = [{ name: 'notes.txt', mimeType: 'text/plain', data: Buffer.from('Mission context').toString('base64') }];
+    await r.registry.invoke('missions:command', { ...command('source', '/mission Inspect this'), files });
+    expect(r.missions.create).toHaveBeenCalledWith(expect.objectContaining({ files, submittedCommand: '/mission Inspect this' }));
+    await r.registry.invoke('sessions:send', { id: 'lead', input: { text: 'Review', files }, idempotencyKey: 'file-steer' });
+    expect(r.missions.sendUser).toHaveBeenCalledWith('lead', { text: 'Review', files }, 'file-steer');
+    await r.registry.invoke('missions:command', { ...command('lead', '/mission Continue review', 'file-command'), files });
+    expect(r.missions.sendUser).toHaveBeenLastCalledWith('lead', { text: '/mission Continue review', files }, 'file-command:steer');
+    for (const text of ['/mission', '/mission status', '/mission execute', '/mission stop']) {
+      await expect(r.registry.invoke('missions:command', { ...command('lead', text), files })).rejects.toThrow(/attachments/);
+    }
+    for (const invalid of [
+      [{ ...files[0], path: '/forged' }], [{ ...files[0], data: 'not-base64' }],
+      [{ ...files[0], data: Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64') }]
+    ]) {
+      await expect(r.registry.invoke('sessions:send', { id: 'lead', input: { text: 'Review', files: invalid } })).rejects.toThrow();
+    }
+    await expect(r.registry.invoke('missions:control', { missionId: 'mission', idempotencyKey: 'control-file', expectedRevision: r.record().revision,
+      control: { action: 'pause', files } })).rejects.toThrow();
+    expect(r.missions.control).not.toHaveBeenCalled();
+    expect(r.missions.sendUser).toHaveBeenCalledTimes(2);
+  });
+
   it('forwards command launch images with the actual source and submitted command, including an explicit sibling', async () => {
     const r = await rig(), images = [{ mimeType: 'image/png', data: 'aW1hZ2U=', name: 'current.png' }];
     for (const [id, text] of [['source', '  /mission plan Inspect this design  '], ['lead', '/mission start -- inspect a sibling design']]) {

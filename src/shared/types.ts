@@ -872,11 +872,26 @@ export interface ImageAttachment {
   name?: string;
 }
 
+export interface FileAttachment {
+  name: string;
+  mimeType: string;
+  /** Base64 data without the data: prefix. */
+  data: string;
+}
+
+/** Persisted reference to a file copied into the session's attachment directory. */
+export interface AttachedFile {
+  name: string;
+  mimeType: string;
+  path: string;
+}
+
 export type SendMode = 'now' | 'steer' | 'queue';
 
 export interface UserInput {
   text: string;
   images?: ImageAttachment[];
+  files?: FileAttachment[];
   mode?: SendMode;
   /** Internal link to the persisted user item; adapters use it to checkpoint rewindable context. */
   transcriptItemId?: string;
@@ -898,6 +913,7 @@ export type TranscriptItem =
       ts: number;
       text: string;
       images?: ImageAttachment[];
+      files?: AttachedFile[];
       /** Set instead of `images` when a remote projection dropped them to fit the relay frame
        *  budget; the count is what the bubble reports as not shown. */
       imagesOmitted?: number;
@@ -1609,6 +1625,7 @@ export interface CreateSessionRequest {
   initialPrompt?: string;
   /** Screenshots attached in the new-session dialog, sent together with the initial prompt. */
   initialImages?: ImageAttachment[];
+  initialFiles?: FileAttachment[];
   goal?: string;
   /** Start the session in a worktree on this existing branch (reusing one when it exists). */
   checkoutBranch?: string;

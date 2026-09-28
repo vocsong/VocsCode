@@ -50,7 +50,7 @@ export function SessionView({ sessionId, connection, onBack }: { sessionId: stri
         </button>
       )}
       {loaded ? <Transcript session={session} /> : <div className="w-loading"><Spinner /> Loading transcript…</div>}
-      <WebComposer session={session} offline={connection !== 'online'} />
+      <WebComposer key={session.id} session={session} offline={connection !== 'online'} />
       {terminal && <TerminalSheet sessionId={session.id} onClose={() => setTerminal(false)} />}
     </main>
   );

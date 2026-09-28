@@ -21,7 +21,7 @@ import { localMissionDeliveryPolicy } from '../src/main/mission/delivery';
 import type { MissionToolName, MissionToolRequest } from '../src/main/mission/tools';
 import { createDefaultMissionConfig } from '../src/shared/mission-config';
 import type { MissionProfile, MissionRecord } from '../src/shared/mission';
-import type { ImageAttachment, UserInput } from '../src/shared/types';
+import type { FileAttachment, ImageAttachment, UserInput } from '../src/shared/types';
 
 vi.mock('../src/main/harness/registry', () => ({ createAdapter: vi.fn() }));
 const wait = (assertion: () => void) => vi.waitFor(assertion, { timeout: 15_000, interval: 25 });
@@ -31,6 +31,7 @@ let service: MissionService, sessions: SessionManager, sessionStore: SessionStor
 let config: ReturnType<typeof createDefaultMissionConfig>, sequence: number;
 let runtimes: Map<string, ReturnType<typeof scripted>>;
 const image: ImageAttachment = { mimeType: 'image/png', name: 'exact visual.png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aVSUAAAAASUVORK5CYII=' };
+const file: FileAttachment = { name: 'requirements.csv', mimeType: 'text/csv', data: Buffer.from('name,value\nalpha,42\n').toString('base64') };
 function scripted(ctx: HarnessContext) {
   return { ctx, adapter: {
     id: 'native', busy: false, start: vi.fn(async () => undefined), missionReadiness: vi.fn(async () => ({ ready: true, tools: ['read', 'write'] })),
@@ -48,7 +49,7 @@ async function compose() {
   sessions = new SessionManager({ store: sessionStore, settings: { get: () => settings } as SettingsStore, runtime: {} as RuntimeResolver,
     analytics: { touchSession: vi.fn(), recordUserMessage: vi.fn(), recordToolCall: vi.fn(), recordTurn: vi.fn(), recordUsage: vi.fn() } as unknown as AnalyticsStore,
     getSecret: async () => undefined, pushEvent: vi.fn(), pushSessions: vi.fn(), notify: vi.fn(), log: vi.fn() });
-  store = new MissionStore<MissionRecord>(data, { validate: assertMissionRecord }); await store.load();
+  store = new MissionStore<MissionRecord>(data, { validate: assertMissionRecord, maxBlobBytes: 64 * 1024 * 1024 }); await store.load();
   scheduler = new MissionScheduler(config.limits);
   const held = new Set<string>();
   const workspaces = new MissionWorkspaces({ root: path.join(root, 'workspaces'), quiescence: { acquire: async (cwd) => {
@@ -304,6 +305,66 @@ describe('host-bound Mission user instructions', () => {
     await answer(r, { text: 'yes', images: [image] });
     expect(current(r).pendingProposal).toBeUndefined(); expect(current(r).executionAuthorization).toBeUndefined();
     expect(runtimes.get(r.leadSessionId)!.adapter.send.mock.calls.at(-1)![0].images).toEqual([image]);
+  });
+});
+
+describe('Mission non-image file retention', () => {
+  it('retains launch bytes behind source metadata, reads bounded chunks through an authorized opaque ref and survives restart', async () => {
+    const r = await service.create({ idempotencyKey: 'launch-files', projectRoot: project, objective: 'Use the attached requirements',
+      mode: 'interactive_plan', permissionMode: 'auto', files: [file] });
+    await wait(() => expect(runtimes.get(r.leadSessionId)?.adapter.send).toHaveBeenCalledTimes(1));
+    const ref = (await rpc(r, 'mission_context_read', { payload: { ref: r.sourceSnapshotId, listFiles: true } })).structuredContent.result.files[0];
+    expect(ref).toMatchObject({ kind: 'file', name: file.name, mimeType: file.mimeType, byteLength: 20 });
+    expect(JSON.stringify(current(r))).not.toContain(file.data);
+    const first = (await rpc(r, 'mission_context_read', { payload: { ref: ref.ref, offset: 0, limit: 5 } })).structuredContent.result;
+    expect(first).toMatchObject({ kind: 'source_file', data: Buffer.from('name,').toString('base64'), nextOffset: 5, byteLength: 20 });
+    const second = (await rpc(r, 'mission_context_read', { payload: { ref: ref.ref, offset: first.nextOffset } })).structuredContent.result;
+    expect(Buffer.from(first.data, 'base64').toString() + Buffer.from(second.data, 'base64').toString()).toBe('name,value\nalpha,42\n');
+    await restart();
+    expect((await service.create({ idempotencyKey: 'launch-files', projectRoot: project, objective: 'Use the attached requirements',
+      mode: 'interactive_plan', permissionMode: 'auto', files: [file] })).sourceSnapshotId).toBe(r.sourceSnapshotId);
+    await expect(service.create({ idempotencyKey: 'launch-files', projectRoot: project, objective: 'Use the attached requirements',
+      mode: 'interactive_plan', permissionMode: 'auto', files: [{ ...file, data: Buffer.from('different').toString('base64') }] })).rejects.toThrow(/idempotency|different/i);
+    await service.control({ missionId: r.id, expectedRevision: current(r).revision, idempotencyKey: 'resume-launch-file', control: { action: 'resume' } });
+    await wait(() => expect(sessions.activity(r.leadSessionId).turn).toBe(true));
+    expect((await rpc(r, 'mission_context_read', { payload: { ref: ref.ref } })).structuredContent.result.data).toBe(file.data);
+  });
+
+  it('rejects over-limit, noncanonical and changed files before state or retention, and rejects an unretained launch on initial call and retry', async () => {
+    const writes = vi.spyOn(store, 'retainArtifact');
+    const launch = (files: FileAttachment[], idempotencyKey: string) => service.create({ idempotencyKey, projectRoot: project,
+      objective: 'Use requirements', mode: 'interactive_plan', permissionMode: 'auto', files });
+    await expect(launch([{ ...file, data: Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64') }], 'oversized')).rejects.toThrow();
+    await expect(launch([{ ...file, data: 'YWJ=' }], 'noncanonical')).rejects.toThrow();
+    await expect(launch(Array.from({ length: 4 }, (_, i) => ({ ...file, name: `file-${i}`, data: Buffer.alloc(8 * 1024 * 1024).toString('base64') })), 'aggregate')).rejects.toThrow(/30 MiB/);
+    expect(writes).not.toHaveBeenCalled();
+    writes.mockImplementationOnce(async () => { throw new Error('Injected retention fault'); });
+    await expect(launch([file], 'source-fault')).rejects.toThrow(/source was not retained/);
+    await expect(launch([file], 'source-fault')).rejects.toThrow(/source was not retained/);
+  });
+
+  it('keeps file steering idempotent after a failed mailbox commit and restart, denies unassigned worker reads, and never treats yes with a file as approval', async () => {
+    const r = await start(); const lead = runtimes.get(r.leadSessionId)!;
+    lead.assistant('Plan ready. Proceed with execution?');
+    await tool(r, 'mission_execution_propose', { proposal: { id: 'file-proposal', specificationRevision: 1, planRevision: 1 } });
+    lead.finish(); await wait(() => expect(scheduler.snapshot().active).toHaveLength(0));
+    const transact = store.transact.bind(store);
+    const failure = vi.spyOn(store, 'transact').mockImplementation((id, metadata, mutation) => metadata.kind === 'user.steer' ? Promise.reject(new Error('Injected mailbox fault')) : transact(id, metadata, mutation));
+    const input = { text: 'yes', files: [file] };
+    await expect(service.sendUser(r.leadSessionId, input, 'file-steer')).rejects.toThrow(/mailbox fault/);
+    failure.mockRestore(); await restart();
+    await expect(service.sendUser(r.leadSessionId, { ...input, files: [{ ...file, data: Buffer.from('changed').toString('base64') }] }, 'file-steer')).rejects.toThrow(/different request|idempotency/i);
+    await service.sendUser(r.leadSessionId, input, 'file-steer');
+    const mail = current(r).mailbox.find((item) => item.attachments?.some((a) => a.kind === 'file'))!;
+    expect(mail.attachments).toEqual([expect.objectContaining({ kind: 'file', name: file.name })]);
+    expect(current(r).executionAuthorization).toBeUndefined(); expect(current(r).pendingProposal).toBeUndefined();
+    expect(JSON.stringify(current(r))).not.toContain(file.data);
+    await service.control({ missionId: r.id, expectedRevision: current(r).revision, idempotencyKey: 'resume-files', control: { action: 'resume' } });
+    await wait(() => expect(sessions.activity(r.leadSessionId).turn).toBe(true));
+    const worker = await delegate(r); const reads = vi.spyOn(store, 'readArtifact'); reads.mockClear();
+    await expect(rpc(r, 'mission_context_read', { payload: { ref: mail.attachments![0].ref } }, worker.sessionId)).rejects.toThrow(/assigned/);
+    expect(reads).not.toHaveBeenCalled();
+    expect((await rpc(r, 'mission_context_read', { payload: { ref: mail.attachments![0].ref } })).structuredContent.result.data).toBe(file.data);
   });
 });
 

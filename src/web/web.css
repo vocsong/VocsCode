@@ -512,14 +512,60 @@ button {
 
 .w-composer {
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 8px 10px;
   border-top: 1px solid var(--border);
   background: var(--bg-elev);
 }
 
+.w-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.w-composer-picker { display: none; }
+
+.w-composer-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.w-composer-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.w-composer-file span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.w-composer-file button {
+  flex: none;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+}
+
+.w-composer-error { color: var(--red); font-size: 12px; }
+
 .w-composer textarea {
+  min-width: 0;
   flex: 1;
   resize: none;
   padding: 10px;
@@ -539,7 +585,7 @@ button {
 .w-composer-blocked {
   color: var(--fg-muted);
   font-size: 14px;
-  justify-content: center;
+  align-items: center;
 }
 
 /* --- Sheets ---------------------------------------------------------------------- */

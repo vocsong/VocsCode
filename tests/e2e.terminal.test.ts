@@ -114,6 +114,10 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       const isolate = win.locator('.toggle', { hasText: 'Isolate in a git worktree' });
       await isolate.locator('.muted', { hasText: 'not a git repository' }).waitFor({ timeout: 15_000 });
       expect(await isolate.locator('input').isDisabled(), 'worktree isolation is disabled for a folder with no git repository').toBe(true);
+      await win.setInputFiles('.ns-prompt-box input[type=file]', path.join(project, 'README.md'));
+      await win.getByText('README.md', { exact: true }).waitFor();
+      await win.getByRole('button', { name: 'Remove README.md' }).click();
+      expect(await win.getByText('README.md', { exact: true }).count()).toBe(0);
       await win.locator('.modal').getByRole('button', { name: 'Cancel' }).click();
       await win.waitForSelector('.modal', { state: 'detached', timeout: 15_000 });
 

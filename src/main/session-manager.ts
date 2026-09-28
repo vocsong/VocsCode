@@ -31,6 +31,7 @@ import { modelName } from '../shared/model-names';
 import { skillInstalled } from './skills';
 import { createAdapter } from './harness/registry';
 import { renderForkContext } from './fork-context';
+import { promptWithFiles, retainMessageFiles } from './message-files';
 import { builtinServerIds, resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { branchGitState, createForkWorktree, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
@@ -598,20 +599,21 @@ export class SessionManager {
     this.pushSessions();
     const promptText = req.initialPrompt?.trim() ?? '';
     const initialImages = req.initialImages?.length ? req.initialImages : undefined;
+    const initialFiles = req.initialFiles?.length ? req.initialFiles : undefined;
     if (meta.nativeGoal) {
       // A slash command has to open its message, so the objective rides along as its argument. The
       // harness's own goal takes it from there — no kickoff prompt, no app-side continuation.
       if (!req.title?.trim()) this.scheduleLlmTitle(id, title, promptText || objective);
       void this.send(id, { text: `/${meta.nativeGoal} ${objective}` }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
-      if (promptText || initialImages) {
-        void this.send(id, { text: promptText, images: initialImages }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+      if (promptText || initialImages || initialFiles) {
+        void this.send(id, { text: promptText, images: initialImages, files: initialFiles }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
       }
-    } else if (promptText || initialImages) {
+    } else if (promptText || initialImages || initialFiles) {
       // A user-supplied title stands; otherwise the prompt-derived one is only a placeholder
       // until the one-shot LLM title call lands.
       if (!req.title?.trim() && promptText) this.scheduleLlmTitle(id, title, promptText);
       const prompt = meta.goal && promptText ? `${promptText}\n\nActive goal: ${meta.goal.objective}` : promptText;
-      void this.send(id, { text: prompt, images: initialImages }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+      void this.send(id, { text: prompt, images: initialImages, files: initialFiles }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     } else if (meta.goal) {
       void this.sendAs(id, { text: this.goalKickoffPrompt(meta.goal) }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     }
@@ -1168,9 +1170,14 @@ export class SessionManager {
     const meta = source === 'mission' ? this.managedMeta(id, generation!) : this.get(id);
     if (!meta) throw new Error('Session not found');
     if (source !== 'mission') this.assertUnmanaged(id);
+    // A Mission owns its own immutable user-input receipts; ordinary file uploads cannot bypass them.
+    if (source === 'mission' && input.files?.length) throw new Error('Mission file attachments are not supported.');
+    // Keep the no-attachment path synchronous until dispatch: managed runtimes expose starting
+    // activity immediately, and an unnecessary await would move that transition a tick later.
+    const files = input.files?.length ? await retainMessageFiles(this.deps.store.sessionDir(id), input.files) : [];
     // Size and shape only: the prompt itself belongs to the transcript, not the log.
-    this.deps.log('debug', `[${id}] ${source === 'mission' ? 'mission' : 'user'} input: ${input.text.length} chars${input.images?.length ? `, ${input.images.length} image(s)` : ''}${input.mode ? `, mode=${input.mode}` : ''}`);
-    const userItem: TranscriptItem = { id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text, images: input.images, queuedAs: input.mode };
+    this.deps.log('debug', `[${id}] ${source === 'mission' ? 'mission' : 'user'} input: ${input.text.length} chars${input.images?.length ? `, ${input.images.length} image(s)` : ''}${files.length ? `, ${files.length} file(s)` : ''}${input.mode ? `, mode=${input.mode}` : ''}`);
+    const userItem: TranscriptItem = { id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text, images: input.images, files: files.length ? files : undefined, queuedAs: input.mode };
     this.emit(id, { type: 'item.upsert', item: userItem });
     // The sidebar orders rows by the user's own last message: stamp it before the harness even
     // starts, so the row moves up on the send rather than on whatever the turn does next.
@@ -1188,7 +1195,7 @@ export class SessionManager {
     }
     this.schedulePersist(meta);
     this.pushSessions();
-    await this.dispatchInput(id, { ...input, transcriptItemId: userItem.id }, generation);
+    await this.dispatchInput(id, { ...input, files: undefined, text: promptWithFiles(input.text, files), transcriptItemId: userItem.id }, generation);
   }
 
   /** Replaces a sent prompt only when its adapter can restore a durable pre-message checkpoint. */
@@ -1196,7 +1203,7 @@ export class SessionManager {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
-    if (!input.text.trim() && !input.images?.length) throw new Error('Message cannot be empty');
+    if (!input.text.trim() && !input.images?.length && !input.files?.length) throw new Error('Message cannot be empty');
     if (meta.status === 'running' || meta.status === 'starting' || meta.status === 'awaiting') throw new Error('Wait for the current turn to finish before editing a message');
 
     const items = await this.deps.store.readTranscript(id);
@@ -1206,13 +1213,15 @@ export class SessionManager {
     const active = await this.ensureActive(id);
     if (active.compactionInFlight || active.approvals.size || active.adapter.busy) throw new Error('Wait for the current session activity to finish before editing a message');
     if (!active.adapter.rewindToUserMessage) throw new Error('This harness does not support editing past messages yet');
+    // Validate and write before rewinding: a failed upload must not discard later turns.
+    const files = input.files ? await retainMessageFiles(this.deps.store.sessionDir(id), input.files) : previous.files ?? [];
     if (!(await active.adapter.rewindToUserMessage(userItemId))) throw new Error('This message can no longer be rewound');
     this.deps.log('info', `[${id}] rewound to message ${userItemId} for edit-and-resend; ${items.length - index - 1} later item(s) dropped from the transcript`);
-
     const revised: TranscriptItem = {
       ...previous,
       text: input.text,
       images: input.images ?? previous.images,
+      files: files.length ? files : undefined,
       queuedAs: 'now'
     };
     // Context is now safely at the same boundary, so the persistence rewrite cannot diverge.
@@ -1225,7 +1234,7 @@ export class SessionManager {
     meta.lastUserMessageAt = Date.now();
     this.schedulePersist(meta);
     this.pushSessions();
-    await this.dispatchInput(id, { text: revised.text, images: revised.images, mode: 'now', transcriptItemId: userItemId });
+    await this.dispatchInput(id, { text: promptWithFiles(revised.text, files), images: revised.images, mode: 'now', transcriptItemId: userItemId });
     return this.transcript(id);
   }
 

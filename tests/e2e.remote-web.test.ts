@@ -284,6 +284,32 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     await page.locator('[aria-label="Send"]').click();
     await expect.poll(() => work.sent.length, { timeout: 20_000 }).toBe(1);
     expect(work.sent[0]).toEqual({ id: 'Work-s1', input: { text: 'ship it' } });
+    // The desktop receipt can lag the host-side send; wait for the composer to finish before
+    // selecting a file. Its picker intentionally ignores changes during an in-flight send.
+    await expect.poll(() => page.locator('[aria-label="Attach files"]').isEnabled()).toBe(true);
+
+    // The browser sends only bounded non-image attachments; a refused file leaves the draft intact.
+    const picker = page.locator('input[aria-label="Choose files"]');
+    await picker.setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('from the browser') });
+    await page.getByRole('button', { name: 'Remove notes.txt' }).waitFor();
+    await page.locator('textarea[aria-label="Message"]').evaluate((el) => {
+      const clipboard = new DataTransfer();
+      clipboard.items.add(new File(['pasted'], 'pasted.md', { type: 'text/markdown' }));
+      el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, clipboardData: clipboard }));
+    });
+    await page.getByRole('button', { name: 'Remove pasted.md' }).waitFor();
+    await picker.setInputFiles({ name: 'third.txt', mimeType: 'text/plain', buffer: Buffer.from('third') });
+    await page.getByRole('alert').getByText(/2 files/).waitFor();
+    await page.getByRole('button', { name: 'Remove pasted.md' }).click();
+    await picker.setInputFiles({ name: 'too-big.txt', mimeType: 'text/plain', buffer: Buffer.alloc(128 * 1024 + 1) });
+    await page.getByRole('alert').getByText(/128 KiB/).waitFor();
+    await picker.setInputFiles({ name: 'photo.png', mimeType: 'image/png', buffer: Buffer.from('image') });
+    await page.getByRole('alert').getByText(/Images are not supported/).waitFor();
+    await page.locator('textarea[aria-label="Message"]').fill('read this');
+    await page.locator('[aria-label="Send"]').click();
+    await expect.poll(() => work.sent.length, { timeout: 20_000 }).toBe(2);
+    expect(work.sent[1]).toEqual({ id: 'Work-s1', input: { text: 'read this', files: [{ name: 'notes.txt', mimeType: 'text/plain', data: Buffer.from('from the browser').toString('base64') }] } });
+    await expect.poll(() => page.getByRole('button', { name: 'Remove notes.txt' }).count()).toBe(0);
 
     // A reload restores the pairing from IndexedDB and keeps the deep-linked session.
     await page.reload();
@@ -394,7 +420,12 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     // A phone viewport: 390x844, as a real device reports it.
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setBounds({ x: 0, y: 0, width: 390, height: 844 }));
     await page.locator('.w-session-name').getByText('Phone session').waitFor({ timeout: 30_000 });
-    await page.getByText('and the answer.').waitFor({ timeout: 20_000 });
+    // This fixture has more rows than the initial transcript page and virtual window. Explicitly
+    // load earlier history and scroll to it rather than relying on a transient initial scroll.
+    const earlier = page.getByRole('button', { name: 'Load earlier' });
+    if (await earlier.count()) await earlier.click();
+    await page.locator('.transcript').evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); });
+    await page.getByText('and the answer.').waitFor({ timeout: 30_000 });
 
     const overflow = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth }));
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.innerWidth + 1);
