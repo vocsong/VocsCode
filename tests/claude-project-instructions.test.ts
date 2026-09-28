@@ -47,7 +47,7 @@ function ctx(cwd: string, settingSources: ('user' | 'project' | 'local')[], appe
     sessionId: 's1',
     session: () => meta,
     settings: () => ({ claude: { runtime: 'auto', useProviderKey: false, settingSources }, providers: [] }) as unknown as AppSettings,
-    runtime: { resolve: () => undefined },
+    runtime: { resolve: () => ({ path: process.execPath, source: 'system' }) },
     sessionDir: cwd,
     permissionMode: () => 'ask' as const,
     effort: () => undefined,

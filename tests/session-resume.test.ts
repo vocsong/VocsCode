@@ -229,7 +229,9 @@ function makeAdapterCtx(opts: { harness: HarnessId; ref?: HarnessRef; permission
     sessionId: meta.id,
     session: () => meta,
     settings: () => defaultSettings(),
-    runtime: opts.runtime ?? ({ resolve: () => null, resource: () => '/tmp/resource' } as never),
+    runtime: opts.runtime ?? (opts.harness === 'claude'
+      ? { resolve: () => ({ path: process.execPath, source: 'system' }) }
+      : { resolve: () => null, resource: () => '/tmp/resource' }) as never,
     sessionDir: nextSessionDir(),
     permissionMode: () => meta.config.permissionMode,
     effort: () => undefined,

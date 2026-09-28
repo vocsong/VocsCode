@@ -65,7 +65,7 @@ function stubCtx(s: AppSettings, model: ModelRef | undefined, events: SessionEve
     sessionId: 's1',
     session: () => meta,
     settings: () => s,
-    runtime: { resolve: () => undefined },
+    runtime: { resolve: () => ({ path: process.execPath, source: 'system' }) },
     sessionDir: '.',
     permissionMode: () => 'ask' as const,
     effort: () => undefined,
