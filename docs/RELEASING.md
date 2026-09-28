@@ -34,7 +34,10 @@ The bot reads master's **first-parent history**: it represents each merge commit
 
 ## Shipping a release
 
-1. Make sure `develop` is green — the latest merged PRs passed the verification bar.
+1. Make sure `develop` is green — the latest merged PRs passed the develop tier. The full tier
+   (whole offline suite, every no-provider E2E suite, Windows recovery) first runs on the ship PR
+   below; if it fails, fix it on `develop` with a normal PR, then rebuild the ship branch. Do not
+   merge a ship PR with a red check.
 2. Cut the ship branch off `master` carrying exactly `develop`'s new commits, open the ship PR from it, and rebase-merge it (see above for why the commits have to land on `master` individually):
 
    ```bash
