@@ -20,9 +20,11 @@ const root = path.resolve(__dirname, '..');
 const require = createRequire(import.meta.url);
 const shots = path.join(root, 'tests', 'artifacts');
 let app: ElectronApplication | null = null;
+let tmp: string | null = null;
 
 afterAll(async () => {
   await app?.close().catch(() => undefined);
+  if (tmp) await fs.rm(tmp, { recursive: true, force: true });
 });
 
 type Box = { x: number; y: number; width: number; height: number };
@@ -34,7 +36,7 @@ async function box(win: Page, selector: string): Promise<Box> {
 
 describe.runIf(enabled)('shell layout', () => {
   it('gives the sidebar a column when there is room and floats it as a drawer when there is not', async () => {
-    const tmp = path.join(os.tmpdir(), `vocs-code-layout-${Date.now()}`);
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-code-layout-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
     await fs.mkdir(userData, { recursive: true });
@@ -54,7 +56,7 @@ describe.runIf(enabled)('shell layout', () => {
     await win.waitForSelector('.theme-picker', { timeout: 20_000 });
 
     await win.setViewportSize({ width: 1280, height: 800 });
-    await win.waitForTimeout(300);
+    await expect.poll(async () => (await box(win, '.main')).width, { timeout: 10_000 }).toBeGreaterThan(900);
     const wide = { sidebar: await box(win, '.sidebar'), main: await box(win, '.main') };
     await win.screenshot({ path: path.join(shots, 'layout-01-wide.png') });
     expect(wide.sidebar.height, 'the sidebar fills the window height').toBeGreaterThan(600);
@@ -65,7 +67,7 @@ describe.runIf(enabled)('shell layout', () => {
     expect((await box(win, '.theme-picker')).width).toBeGreaterThan(400);
 
     await win.setViewportSize({ width: 820, height: 800 });
-    await win.waitForTimeout(300);
+    await expect.poll(async () => (await box(win, '.main')).width, { timeout: 10_000 }).toBe(820);
     const narrow = { sidebar: await box(win, '.sidebar'), main: await box(win, '.main'), backdrop: await box(win, '.sidebar-backdrop') };
     await win.screenshot({ path: path.join(shots, 'layout-02-drawer.png') });
     expect(narrow.main.x, 'content spans the window under the drawer').toBe(0);
@@ -76,7 +78,7 @@ describe.runIf(enabled)('shell layout', () => {
 
     // Dismissing the drawer hands the whole window to the content.
     await win.locator('.sidebar-backdrop').click();
-    await win.waitForTimeout(300);
+    await expect.poll(async () => win.locator('.sidebar').count(), { timeout: 10_000 }).toBe(0);
     expect(await win.locator('.sidebar').count()).toBe(0);
     expect((await box(win, '.main')).width).toBe(820);
   }, 180_000);

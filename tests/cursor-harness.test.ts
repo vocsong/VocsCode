@@ -488,7 +488,7 @@ describe('cursor harness adapter', () => {
     expect(run.cancelCalls).toBe(1);
     release();
     await new Promise((r) => setTimeout(r, 10));
-    await a.send({ text: 'nope' }).catch((e) => expect(String(e)).toContain('disposed'));
+    await expect(a.send({ text: 'nope' })).rejects.toThrow(/disposed/);
   });
 
   it('a stale persisted run (AgentBusyError) is recovered with force once', async () => {

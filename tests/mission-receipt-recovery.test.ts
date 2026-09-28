@@ -34,7 +34,8 @@ let root: string, project: string, data: string, crash: string;
 let runtime: MissionRuntime, sessions: SessionManager, settings: ReturnType<typeof defaultSettings>;
 let contexts: Map<string, HarnessContext>, sends: number, sequence: number;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim();
-const wait = (assertion: () => void) => vi.waitFor(assertion, { timeout: 30_000, interval: 25 });
+// Windows CI Git and real Job receipts can take longer than 30 seconds; still fail within a bounded operation window.
+const wait = (assertion: () => void) => vi.waitFor(assertion, { timeout: 75_000, interval: 25 });
 const current = (id: string) => runtime.service.get(id)!;
 const operation = (id: string, opId: string) => current(id).operations.find((op) => op.id === opId)!;
 
@@ -253,7 +254,8 @@ async function repositoryState() {
 }
 
 beforeEach(async () => {
-  root = await fs.mkdtemp(path.join(os.tmpdir(), 'mrr-')); project = path.join(root, 'p'); data = path.join(root, 'd'); crash = path.join(root, 'crash');
+  // CI's TEMP may use an 8.3 path. Delivery pins its realpath, so fault hooks must use that same destination.
+  root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mrr-'))); project = path.join(root, 'p'); data = path.join(root, 'd'); crash = path.join(root, 'crash');
   await fs.mkdir(project); git(project, 'init', '-b', 'main'); git(project, 'config', 'user.name', 'Receipt Recovery Fixture'); git(project, 'config', 'user.email', 'receipt-recovery@example.invalid'); git(project, 'config', 'commit.gpgsign', 'false'); git(project, 'config', 'core.autocrlf', 'false');
   await fs.writeFile(path.join(project, 'a.txt'), 'base\n'); git(project, 'add', '.'); git(project, 'commit', '-m', 'Receipt baseline');
   settings = defaultSettings(); settings.providers = []; settings.mcpDisabledBuiltins = ['gitnexus', 'vocs-memory', 'cua-driver']; settings.mission = missionFixture().config;

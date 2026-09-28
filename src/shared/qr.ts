@@ -294,12 +294,11 @@ function penalty(modules: boolean[][]): number {
         }
       }
       // A finder-like 1:1:3:1:1 pattern with four light modules on one side.
-      for (let j = 0; j + 10 < size; j++) {
-        const seq = Array.from({ length: 11 }, (_, k) => get(i, j + k));
-        const core = seq[4] && !seq[5] && seq[6] && seq[7] && seq[8] && !seq[9] && seq[10];
-        const coreRev = seq[0] && !seq[1] && seq[2] && seq[3] && seq[4] && !seq[5] && seq[6];
-        if (core && !seq[0] && !seq[1] && !seq[2] && !seq[3]) score += 40;
-        if (coreRev && !seq[7] && !seq[8] && !seq[9] && !seq[10]) score += 40;
+      // Slide an 11-bit window rather than allocating an array for each position.
+      let window = 0;
+      for (let j = 0; j < size; j++) {
+        window = ((window << 1) | (get(i, j) ? 1 : 0)) & 0x7ff;
+        if (j >= 10 && (window === 0b00001011101 || window === 0b10111010000)) score += 40;
       }
     }
   };
