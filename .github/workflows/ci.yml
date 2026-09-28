@@ -5,9 +5,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [develop]
+    branches: [develop, master]
   push:
-    branches: [develop]
+    branches: [develop, master]
   workflow_dispatch:
 
 concurrency:
@@ -80,6 +80,12 @@ jobs:
   # selected offline boundaries on the primary platform without needing a provider or installed Pi.
   windows-offline:
     name: Windows ownership and recovery (offline)
+    # Keep the expensive real-Job/real-Git suite on release-to-master and manual runs;
+    # the develop PR gate stays fast while the full platform suite remains enforced before release.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'pull_request' && github.base_ref == 'master')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
