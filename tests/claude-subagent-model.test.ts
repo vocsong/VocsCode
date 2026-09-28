@@ -60,7 +60,7 @@ function ctxFor(projectRoot: string, model: ModelRef | undefined): HarnessContex
     sessionId: 's1',
     session: () => meta,
     settings: () => settings,
-    runtime: { resolve: () => undefined },
+    runtime: { resolve: () => ({ path: process.execPath, source: 'system' }) },
     sessionDir: projectRoot,
     permissionMode: () => 'ask' as const,
     effort: () => undefined,
