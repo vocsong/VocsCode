@@ -131,17 +131,18 @@ suites alive** below):
 | Transcript rendering — message rows, work/command collapse groups, tool cards, shell panels (`components/Transcript.tsx`, `transcript-window.ts`) | `tests/tool-group.test.tsx`, `tests/transcript-window.test.ts`, `tests/transcript-virtual.test.tsx` + `e2e.transcript` |
 | Anything else under `src/renderer/**` | `npm run test:e2e:ci` |
 
-`.github/workflows/ci.yml` runs `npm run typecheck && npm test && npm run build` plus `test:e2e:ci`
-on every PR into `develop`. A separate Windows offline job executes the expensive Windows ownership,
-recovery, deep-path, and renderer/main import boundaries that Ubuntu cannot certify on pull requests
-to `master`, pushes to `master`, and manual runs; it rejects skipped or uncollected requested files.
-It preflights the ConPTY ownership cases before the long real-Git file; that focused probe does not
-replace the full no-skip run. The jobs print the slowest files
-and cases and upload sanitized timing reports; raw Vitest JSON stays in runner temp because failure
-messages could contain sensitive data. The Windows E2E job sets
+`.github/workflows/ci.yml` keeps develop PRs to typecheck, a reviewed fast Vitest allowlist
+(`npm run test:pr`), the relay Durable Object suite, and a production build. The allowlist is recorded
+in `scripts/pr-test-files.json`; the runner fails if any requested file is missing, uncollected, or
+skipped. The full offline Vitest suite, all no-provider Electron E2E suites, and the Windows
+ownership/recovery suite run on pull requests to `master`, pushes to `master`, and manual runs. The
+Windows job preflights ConPTY ownership before the long real-Git suite; the preflight does not replace
+the full no-skip run. This release gate preserves broad coverage while keeping routine develop PRs
+shorter. CI prints slow files/cases and uploads sanitized timing reports; raw Vitest JSON stays in
+runner temp because failure messages could contain sensitive data. The Windows E2E job sets
 `VOCS_CODE_E2E_WEB_PREBUILT=1` only after `npm run build`, so `e2e.remote-web` consumes the
 validated prebuilt web bundle instead of building it again. Standalone runs still build it.
-The live tiers stay manual.
+Paid/live tiers remain manual.
 
 ## Coverage rules for high-risk paths
 
