@@ -83,7 +83,8 @@ function makeManager(src: SessionMeta, items: TranscriptItem[]) {
     pushEvent: vi.fn(),
     pushSessions: vi.fn(),
     notify: vi.fn(),
-    log: vi.fn()
+    log: vi.fn(),
+    appInstructions: async () => 'App layer: be proactive.'
   });
   return { manager, store, sessions };
 }
@@ -227,5 +228,36 @@ describe('fork spend', () => {
     expect(stats.turns.costUsd).toBeCloseTo(0.42, 9);
     expect(stats.turns.total).toBe(1);
     expect(stats.carried.turns).toBe(2);
+  });
+});
+
+// The app's own instruction layer reaches a harness that owns no system prompt through the first
+// message, and reaches one that does own a prompt through the adapter instead (see
+// tests/claude-project-instructions.test.ts and tests/pi-startup-compatibility.test.ts).
+describe('app instructions on the first message', () => {
+  it('prefixes a harness with no system prompt, once', async () => {
+    sent.length = 0;
+    const { manager } = makeManager(source('claude'), conversation);
+    const fork = (await manager.fork('s_src', 'codex'))!;
+    expect(fork.pendingAppInstructions).toBe(true);
+
+    await manager.send(fork.id, { text: 'add a regression test' });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain('App layer: be proactive.');
+    expect(sent[0].text.endsWith('add a regression test')).toBe(true);
+    expect(manager.get(fork.id)!.pendingAppInstructions).toBeUndefined();
+
+    await manager.send(fork.id, { text: 'and run it' });
+    expect(sent[1].text).toBe('and run it');
+  });
+
+  it('leaves it to the adapter for a harness that has a system prompt', async () => {
+    sent.length = 0;
+    const { manager } = makeManager(source('claude'), conversation);
+    const fork = (await manager.fork('s_src', 'pi'))!;
+    expect(fork.pendingAppInstructions).toBeUndefined();
+
+    await manager.send(fork.id, { text: 'stay terse' });
+    expect(sent[0].text).not.toContain('App layer: be proactive.');
   });
 });

@@ -1,6 +1,8 @@
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type {
   AnalyticsSummary,
+  AppInstructionFile,
+  AppInstructionScope,
   ApprovalDecision,
   AppSettings,
   CreateSessionRequest,
@@ -192,6 +194,10 @@ export interface IpcContract {
   'pi:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
   /** Opens the agent dir (or a file inside it) in the OS file manager. */
   'pi:reveal': [{ path?: string }, void];
+
+  /** The app's own instruction layer (one file per scope), for Settings → Instructions. */
+  'instructions:read': [void, AppInstructionFile[]];
+  'instructions:write': [{ scope: AppInstructionScope; content: string }, AppInstructionFile[]];
 
   /** Every harness's own global MCP store, for the MCP page's read-only tabs. */
   'mcp:stores': [void, McpStoreInfo[]];

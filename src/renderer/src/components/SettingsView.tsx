@@ -16,9 +16,10 @@ import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './
 import { ModelPicker } from './ModelPicker';
 import { PairingQr } from './PairingQr';
 import { PiSection } from './PiSettings';
+import { InstructionsSection } from './InstructionsSection';
 import { MissionSettings } from './mission/MissionSettings';
 
-export type SettingsSection = 'general' | 'mission' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
+export type SettingsSection = 'general' | 'mission' | 'instructions' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
 type Section = SettingsSection;
 
 /** Deep links ("Configure Mission") land on their section, whether or not Settings is open. */
@@ -56,6 +57,7 @@ export function SettingsView() {
             ['terminal', 'Terminal', 'terminal'],
             ['providers', 'Providers & keys', 'key'],
             ['harnesses', 'Harnesses', 'shield'],
+            ['instructions', 'Instructions', 'edit'],
             ['pi', 'Pi', 'sparkles'],
             ['acp', 'ACP agents', 'fork'],
             ['remote', 'Remote access', 'bolt'],
@@ -74,6 +76,7 @@ export function SettingsView() {
         {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
         {section === 'providers' && <Providers settings={settings} />}
         {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
+        {section === 'instructions' && <InstructionsSection />}
         {section === 'pi' && <PiSection />}
         {section === 'acp' && <AcpAgents settings={settings} update={update} />}
         {section === 'remote' && <RemoteSection settings={settings} update={update} />}
