@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { fullRunReason } from '../scripts/test-changed-scope.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const workflow = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8').replace(/\r\n/g, '\n');
@@ -42,5 +43,29 @@ describe('CI tier boundaries', () => {
     expect(job('gate')).toContain('npm test --');
     expect(job('e2e')).toContain('npm run test:e2e:ci');
     expect(job('windows-offline')).toContain('tests/mission-receipt-recovery.test.ts');
+  });
+});
+
+describe('develop-tier local test scope', () => {
+  it('is the command the verification bar names', () => {
+    const scripts = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).scripts as Record<string, string>;
+    expect(scripts['test:changed']).toBe('node scripts/test-changed.mjs');
+    const script = readFileSync(path.join(root, 'scripts/test-changed.mjs'), 'utf8');
+    expect(script).toContain("'--changed', base");
+    expect(script).toContain('tests/smoke.remote-live.test.ts');
+    expect(readFileSync(path.join(root, 'AGENTS.md'), 'utf8')).toContain('`npm run test:changed`');
+  });
+
+  it('follows the import graph for source, test and docs edits', () => {
+    expect(fullRunReason(['src/main/session-manager.ts', 'tests/qr.test.ts', 'docs/TESTING.md', 'AGENTS.md'])).toBeUndefined();
+    expect(fullRunReason(['src/renderer/src/package.json', 'scripts/tsconfig-notes.md'])).toBeUndefined();
+  });
+
+  it.each([
+    'package.json', 'package-lock.json', 'tsconfig.test.json', 'relay/tsconfig.json',
+    'vitest.config.ts', 'vitest.relay.config.ts', 'vite.config.web.ts', 'electron.vite.config.ts'
+  ])('runs the whole offline suite when %s changes, which no test imports', (file) => {
+    expect(fullRunReason(['src/shared/qr.ts', file])).toBe(file);
+    expect(fullRunReason([file.replace(/\//g, '\\')])).toBe(file);
   });
 });

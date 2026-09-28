@@ -9,7 +9,9 @@ commands, the suite map and the mechanics behind them.
 ```bash
 npm run dev          # electron-vite dev server with HMR
 npm run typecheck    # main + renderer + tests, all strict
-npm test             # all offline suites (no network)
+npm run test:changed # offline tests reachable from your diff against origin/develop (develop PRs)
+npm run test:pr      # the reviewed develop CI allowlist (scripts/pr-test-files.json)
+npm test             # all offline suites (no network) — the release gate, ~12 min in CI
 npm run build        # bundles to out/
 npm run dist:win     # NSIS installer + dist/win-unpacked/
 ```
@@ -20,9 +22,29 @@ AppUserModelID and `Vocs Code (Dev)` Start Menu shortcut, so it never shares the
 single-instance lock, shortcut or profile — the two run side by side. The e2e suites go further and
 isolate every launch with their own `VOCS_CODE_USER_DATA` temp directory.
 
-`npm test` is the gate for every change. Add or extend a test when behavior changes;
-permission-gating changes must keep `tests/review-fixes.test.ts` passing and extend execution-level
-coverage. Screenshots land in `tests/artifacts/` (gitignored).
+## Verification tiers
+
+`develop` is the integration branch and is kept fast to iterate on; `master` is the release gate
+and carries the full weight.
+
+| Tier | When | Local, before the commit | CI |
+| --- | --- | --- | --- |
+| Develop | every PR into `develop` | `npm run typecheck`, `npm run test:changed` plus the unit test files the table below names for your area, `npm run build`; the E2E suite files you edited or added | typecheck, `test:pr`, `test:relay-do`, build (ubuntu, about two minutes) |
+| Release | the ship PR into `master`, pushes to `master`, manual dispatch | nothing extra — CI runs it | full `npm test`, every no-provider E2E suite (`test:e2e:ci`), Windows ownership/recovery |
+| Live | by hand, as the sections below require | provider-credit and logged-in-runtime suites | never |
+
+`npm run test:changed` (`scripts/test-changed.mjs`) runs `vitest --changed origin/develop`: every
+offline test file whose import graph reaches a file changed since `origin/develop`, tracked or not,
+so a new or edited test file always runs. `git fetch` first so the base is current, and set
+`VOCS_CODE_TEST_BASE` to diff against another ref. The import graph cannot see a dependency bump or
+a config edit, so a change to `package.json`, the lockfile, a `tsconfig*.json` or a
+vite/vitest/electron-vite config runs the whole offline suite instead. A diff no test reaches (docs
+only) runs nothing and passes. Extra arguments go to vitest.
+
+Failures the release gate finds are fixed on `develop` with a normal PR before the ship PR merges.
+Add or extend a test when behavior changes; permission-gating changes must keep
+`tests/review-fixes.test.ts` passing and extend execution-level coverage. Screenshots land in
+`tests/artifacts/` (gitignored).
 
 The relay is covered at four depths. `tests/fake-relay.ts` serves the relay's **real** route table
 and frame router (`relay/src/routes.ts`, `relay/src/hub.ts`) over `ws` sockets that throw on send
@@ -103,7 +125,9 @@ screen when you need to watch a run.
 ## Which suite a change must keep passing
 
 Extend the matching suite in the same PR when the change touches what it drives (see **Keeping the
-suites alive** below):
+suites alive** below). On a develop PR, run the unit test files named here (most are already in
+`test:changed`'s selection) and the `e2e.*` files you edited or added; the release gate runs every
+no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand when the row applies:
 
 | You changed | Required suite(s) |
 | --- | --- |
@@ -209,8 +233,9 @@ every unpacked SDK or copied resource loads.
 E2E upkeep is part of the change that would break it, not a follow-up — see **E2E discipline** in
 `AGENTS.md` for the rule and the change → suite table. In short:
 
-- If your change touches something a suite drives, update that suite in the same PR, and do not open
-  or merge the PR until it passes. If the change adds a user-visible flow no suite covers, add one.
+- If your change touches something a suite drives, update that suite in the same PR, run that suite
+  file, and do not merge the PR until it passes. If the change adds a user-visible flow no suite
+  covers, add one. The other suites run in the release gate.
 - Every suite self-skips unless its env gate is set, so `npm test` alone reports them all skipped and
   proves nothing. `scripts/e2e-guard.mjs` (behind `test:e2e:ci`) sets the gates and then fails the
   run if a named suite was skipped or collected no tests.
