@@ -172,8 +172,20 @@ public static class MissionCheckJob {
             var startup = new STARTUPINFOEX(); startup.info.cb = Marshal.SizeOf(typeof(STARTUPINFOEX)); startup.attributes = attributes;
             string command = Quote(guardianExecutable) + " -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + Quote(guardianHelper)
                 + " -OwnerIntent " + Quote(guardianIntent) + " -OwnerHash " + guardianHash + " -GuardianPipe " + name + " -GuardianJob " + ownJob.ToInt64() + " -GuardianParent " + ownParent.ToInt64();
-            Check(CreateProcess(guardianExecutable, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, true,
-                0x01000000 | 0x08000000 | 0x00080000, IntPtr.Zero, null, ref startup, out child), "CreateProcess(guardian breakaway)"); // BREAKAWAY_FROM_JOB | NO_WINDOW | EXTENDED_STARTUPINFO
+            uint guardianFlags = 0x01000000 | 0x08000000 | 0x00080000; // BREAKAWAY_FROM_JOB | NO_WINDOW | EXTENDED_STARTUPINFO
+            if (!CreateProcess(guardianExecutable, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, true,
+                guardianFlags, IntPtr.Zero, null, ref startup, out child)) {
+                int createError = Marshal.GetLastWin32Error();
+                // Hosted runners may put the supervisor in a non-breakaway Job. Retry without
+                // BREAKAWAY_FROM_JOB: the guardian still is not assigned to the target Job, and
+                // if its containing Job later kills it, recovery safely has no guardian receipt.
+                if (createError != 5) throw new Win32Exception(createError, "CreateProcess(guardian breakaway) failed (Win32 " + createError + ")");
+                if (!CreateProcess(guardianExecutable, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, true,
+                    guardianFlags & ~0x01000000u, IntPtr.Zero, null, ref startup, out child)) {
+                    int fallbackError = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(fallbackError, "CreateProcess(guardian in containing Job) failed (Win32 " + fallbackError + ")");
+                }
+            }
             if (!pipe.WaitForConnectionAsync().Wait(15000)) throw new Exception("Ownership guardian did not connect");
             return pipe;
         } catch { pipe.Dispose(); throw; }
