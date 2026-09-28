@@ -3,7 +3,8 @@
  * actually repaints the window, and Nebula is the only one that animates. Requires `npm run build`
  * first. Gated by VOCS_CODE_E2E_UI=1.
  *
- * Screenshots land in tests/artifacts/theme-*.png, one per theme, so the palettes can be eyeballed.
+ * On failure, a pre-shutdown screenshot lands in tests/artifacts/ for diagnosis. Set
+ * VOCS_CODE_E2E_CAPTURE_THEMES=1 for optional per-theme screenshots to eyeball palettes.
  *
  * The renderer's CSP forbids eval, so nothing here uses page.evaluate: themes are switched by
  * clicking the picker and verified through the data-theme attribute and rendered pixels.
@@ -12,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { decodePng, type Frame, openNewSession, pixelDelta, seedSettings } from './e2e-ui';
 import { GROUP_ORDER, THEMES } from '../src/shared/themes';
@@ -21,7 +22,16 @@ const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
 const require = createRequire(import.meta.url);
 const shots = path.join(root, 'tests', 'artifacts');
+const captureThemes = process.env.VOCS_CODE_E2E_CAPTURE_THEMES === '1';
 let app: ElectronApplication | null = null;
+let failedPage: Page | null = null;
+
+afterEach(async ({ task }) => {
+  // Capture the live renderer before afterAll shuts it down; successful runs leave no images.
+  if (task.result?.state !== 'fail' || !failedPage) return;
+  await fs.mkdir(shots, { recursive: true });
+  await failedPage.screenshot({ path: path.join(shots, 'e2e-fail-themes.png') }).catch(() => undefined);
+});
 
 afterAll(async () => {
   await app?.close().catch(() => undefined);
@@ -48,7 +58,6 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
     const project = path.join(tmp, 'project');
     await fs.mkdir(userData, { recursive: true });
     await fs.mkdir(project, { recursive: true });
-    await fs.mkdir(shots, { recursive: true });
     // `cat` is Get-Content on PowerShell and cat everywhere else, so this reaches the PTY either way.
     const esc = String.fromCharCode(27);
     const colored = ['31mRED', '32mGREEN', '34mBLUE', '33mYELLOW'].map((c) => esc + '[' + c).join(' ');
@@ -65,6 +74,7 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
 
     app = await electron.launch({ executablePath: require('electron') as string, args: [path.join(root, 'out', 'main', 'index.js')], env, timeout: 60_000 });
     const win: Page = await app.firstWindow();
+    failedPage = win;
     await win.waitForSelector('.brand', { timeout: 60_000 });
 
     await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
@@ -109,7 +119,10 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
     const frames = new Map<string, Frame>();
     for (const [i, theme] of grouped.entries()) {
       await pick(theme.name, theme.id);
-      await win.screenshot({ path: path.join(shots, `theme-${String(i).padStart(2, '0')}-${theme.id}.png`) });
+      if (captureThemes) {
+        await fs.mkdir(shots, { recursive: true });
+        await win.screenshot({ path: path.join(shots, `theme-${String(i).padStart(2, '0')}-${theme.id}.png`) });
+      }
       frames.set(theme.id, await shot());
     }
 
@@ -153,11 +166,16 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
     await win.waitForSelector('.header', { timeout: 30_000 });
     await win.click('.panel-tab:has-text("Terminal")');
     await win.waitForSelector('.term-view .xterm .xterm-helper-textarea', { timeout: 20_000 });
-    await win.locator('.xterm-helper-textarea').focus();
-    await win.waitForTimeout(1500); // let the shell print its prompt
-    await win.keyboard.type('cat colors.txt');
-    await win.keyboard.press('Enter');
-    await win.waitForTimeout(1500);
+    // Composer commands reach the PTY even during initial attach. Observe the actual xterm
+    // buffer rather than sleeping for a presumed prompt/output delay.
+    await win.fill('.composer textarea', '!cat colors.txt');
+    await win.press('.composer textarea', 'Enter');
+    const screenText = async (): Promise<string> => {
+      await win.click('button[aria-label="Send output to agent"]');
+      return win.locator('.composer textarea').inputValue();
+    };
+    await expect.poll(screenText, { timeout: 20_000 }).toContain('RED GREEN BLUE YELLOW');
+    await win.fill('.composer textarea', '');
 
     const term = win.locator('.term-view');
     const screens = new Map<string, Frame>();
@@ -172,8 +190,9 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
       // Back to the session: the shell is still running, so the terminal repaints its retained
       // screen in the new palette rather than starting empty.
       await win.waitForSelector('.term-view .xterm', { timeout: 20_000 });
-      await win.waitForTimeout(500);
-      await win.screenshot({ path: path.join(shots, `theme-terminal-${id}.png`) });
+      const previous = [...screens.values()].at(-1);
+      if (previous) await expect.poll(async () => pixelDelta(previous, decodePng(await term.screenshot())), { timeout: 10_000 }).toBeGreaterThan(SAME);
+      if (captureThemes) await win.screenshot({ path: path.join(shots, `theme-terminal-${id}.png`) });
       screens.set(id, decodePng(await term.screenshot()));
     }
     const painted = [...screens];

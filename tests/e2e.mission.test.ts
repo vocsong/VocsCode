@@ -36,9 +36,9 @@ const mainLog: string[] = [];
 const rendererLog: string[] = [];
 
 afterEach(async ({ task }) => {
-  if (tmp) {
-    // Keep the pre-shutdown UI, committed journal and host diagnostics. Cleanup/recovery can
-    // change the very state that explains a failure, so collect these before closing Electron.
+  if (tmp && task.result?.state === 'fail') {
+    // Keep the pre-shutdown UI, committed journal and host diagnostics on failure only.
+    // Cleanup/recovery can change that state, so collect these before closing Electron.
     const artifacts = path.join(root, 'tests', 'artifacts', `mission-${Date.now()}-${task.name.slice(0, 70).replace(/[^a-z0-9]+/gi, '-')}`);
     await fs.mkdir(artifacts, { recursive: true });
     const captures = await Promise.allSettled([
@@ -61,6 +61,7 @@ afterEach(async ({ task }) => {
   app = null;
   win = undefined;
   if (tmp) await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  tmp = '';
 });
 
 function git(cwd: string, args: string[]): string {
