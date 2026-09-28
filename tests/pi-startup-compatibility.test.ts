@@ -23,7 +23,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
-async function setup(capabilities: string[], extensionError = false, options: { appendSystemPrompt?: string; piPath?: string } = {}) {
+async function setup(capabilities: string[], extensionError = false, options: { appendSystemPrompt?: string; piPath?: string; appInstructions?: string } = {}) {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'vocs-pi-startup-'));
   roots.push(root);
   const events: SessionEvent[] = [];
@@ -61,6 +61,7 @@ async function setup(capabilities: string[], extensionError = false, options: { 
     settings: () => ({ pi: { extraArgs: ['--no-skills'] } }),
     runtime: { resolve: () => ({ path: options.piPath ?? '/fake/pi' }), resource: (...segments: string[]) => path.join(root, 'resources', ...segments) },
     sessionDir: root, permissionMode: () => 'ask', effort: () => undefined, getApiKey: async () => undefined, mcpServers: async () => [], ownedMcpIds: () => [],
+    ...(options.appInstructions ? { appInstructions: async () => options.appInstructions } : {}),
     emit: (event: SessionEvent) => events.push(event), log: () => {}, updateRef: () => {}, updateMeta: () => {},
   } as unknown as HarnessContext;
   return { adapter: new PiAdapter(ctx), events, commands, children, root };
@@ -88,6 +89,16 @@ describe('Pi adapter startup capability boundary', () => {
     expect(appends).toHaveLength(2);
     expect(appends[0]).toBe('Keep my custom instructions.');
     expect(appends[1]).toContain('timeout_ms explicitly means milliseconds');
+    await adapter.dispose();
+  });
+  it('puts the app instruction layer ahead of the session prompt', async () => {
+    const { adapter } = await setup(['approvals', 'tools', 'subagents'], false, { appInstructions: 'App layer: be proactive.' });
+    await adapter.send({ text: 'accepted' });
+    const args = spawn.spawnTool.mock.calls[0][1] as string[];
+    const appends = args.flatMap((arg, index) => arg === '--append-system-prompt' ? [args[index + 1]] : []);
+    expect(appends[0]).toContain('App layer: be proactive.');
+    expect(appends[0]).toContain('Keep my custom instructions.');
+    expect(appends[0]!.indexOf('App layer: be proactive.')).toBeLessThan(appends[0]!.indexOf('Keep my custom instructions.'));
     await adapter.dispose();
   });
   it.runIf(process.platform === 'win32')('passes command-unsafe append text through a prompt file without changing it', async () => {

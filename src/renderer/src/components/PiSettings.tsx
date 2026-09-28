@@ -327,7 +327,7 @@ export function PiSection() {
 
           <h3>System prompt files</h3>
           <p className="muted small">
-            Global instruction files in the agent dir. <code>SYSTEM.md</code> replaces pi&rsquo;s system prompt entirely, <code>APPEND_SYSTEM.md</code> appends to it, and <code>AGENTS.md</code> adds project-agnostic instructions. Saving an empty file removes it.
+            Global instruction files in the agent dir. <code>SYSTEM.md</code> replaces pi&rsquo;s system prompt entirely, <code>APPEND_SYSTEM.md</code> appends to it, and <code>AGENTS.md</code> adds project-agnostic instructions. Saving an empty file removes it. These are pi&rsquo;s own files; the layer this app adds to every harness is under Instructions.
           </p>
           <div className="pi-tabs">
             {setup.promptFiles.map((f) => (

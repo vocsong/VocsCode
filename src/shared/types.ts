@@ -441,6 +441,24 @@ export interface PiPromptFile {
   truncated?: boolean;
 }
 
+/**
+ * The app's own instruction layer, one file per scope. `global` applies to every harness; the
+ * rest add to it for the sessions of that harness family. Not to be confused with the harness's
+ * own global files (`APPEND_SYSTEM.md`, `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`), which the
+ * app never edits and which keep applying through their own engine.
+ */
+export type AppInstructionScope = 'global' | 'pi' | 'claude' | 'codex' | 'cursor' | 'acp' | 'native';
+
+export interface AppInstructionFile {
+  scope: AppInstructionScope;
+  path: string;
+  exists: boolean;
+  /** File contents; empty when absent. Capped at `APP_INSTRUCTION_MAX_CHARS`. */
+  content: string;
+  /** True when the file exceeds the cap, so the UI must not offer to save the truncated read. */
+  truncated?: boolean;
+}
+
 /** How a package source is materialized on disk. */
 export type PiPackageKind = 'npm' | 'git' | 'local';
 
@@ -806,6 +824,11 @@ export interface SessionMeta {
    * accepted the seeded message.
    */
   pendingForkContext?: boolean;
+  /**
+   * Set when a harness with no system prompt of its own has to be handed the app's instruction
+   * layer on its first message (`withSessionPreamble`); cleared once the harness accepted it.
+   */
+  pendingAppInstructions?: boolean;
   /**
    * The project's knowledge digest for this session, kept beside the config rather than folded into
    * `config.appendSystemPrompt`: a fork copies the source's config, and a digest baked into it would

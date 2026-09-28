@@ -340,7 +340,7 @@ export class PiAdapter implements HarnessAdapter {
       }
       const level = piThinkingLevel(intendedEffort);
       if (level) args.push('--thinking', level);
-      const append = sessionAppendPrompt(meta);
+      const append = sessionAppendPrompt(meta, await this.ctx.appInstructions?.());
       if (append) {
         await appendSystemPrompt(args, append, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
       }

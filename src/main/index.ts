@@ -28,6 +28,7 @@ import { SessionManager } from './session-manager';
 import { MissionRuntime } from './mission/runtime';
 import { ordinaryProcessOwnership as ordinaryOwnershipEnabled, ownedWindowsJobProbe } from './owned-windows-job';
 import { SettingsStore } from './settings';
+import { AppInstructions } from './app-instructions';
 import { SessionStore } from './store';
 import { TerminalManager } from './terminal';
 import { UpdateService } from './updater';
@@ -134,6 +135,9 @@ async function main(): Promise<void> {
   await secrets.load();
   const store = new SessionStore(userData, logTo);
   await store.load();
+  // The app's own instruction layer (Settings → Instructions), shared by the session manager and
+  // the settings handlers so both read the same files.
+  const appInstructions = new AppInstructions(userData, logTo);
   const analytics = new AnalyticsStore(userData, { log: logTo });
   const providers = settings.get().providers;
   await analytics.load(store.list(), (id) => store.readTranscript(id), providers);
@@ -258,6 +262,7 @@ async function main(): Promise<void> {
     gitnexusProxyPath: runtime.resource('mcp', 'gitnexus-scope.mjs'),
     memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
     memoryUserData: userData,
+    appInstructions: (harness) => appInstructions.effective(harness),
     withWorkspaceDispatch: (meta, dispatch) => missions ? missions.admission.dispatch(meta.cwd, dispatch) : dispatch(),
     ordinaryProcessOwnership,
     knowledgeDigest: (scope) => {
@@ -408,6 +413,7 @@ async function main(): Promise<void> {
     search,
     knowledge,
     gitnexusIndexer,
+    appInstructions,
     remote: remoteHost,
     desktopFocus,
     remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },

@@ -62,12 +62,13 @@ credentials or deployment are available, report the live tier as unverified.
 ## Opt-in Electron suites (no provider key)
 
 ```bash
-npm run build && npm run test:e2e:ci       # all nineteen no-provider suites; fails if any reports skipped
+npm run build && npm run test:e2e:ci       # all twenty no-provider suites; fails if any reports skipped
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:themes
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:models
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.files.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.pi-settings.test.ts
+npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.instructions.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.git.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.knowledge.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.remote.test.ts
@@ -89,7 +90,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.subagents.test.ts
 ```
 
-`npm run test:e2e:ci` runs nineteen no-provider suites (including `e2e.layout` and the seeded
+`npm run test:e2e:ci` runs twenty no-provider suites (including `e2e.layout` and the seeded
 `e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
 `e2e.subagents` is registered only with `VOCS_CODE_PI_INTEGRATION=1` and remains opt-in. The
 `tests/test-inventory.test.ts` gate requires every `e2e.*.test.ts` file to be in that CI list or
@@ -123,6 +124,7 @@ suites alive** below):
 | pi harness (`harness/pi.ts`), `resources/pi/**` | `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-tool-compatibility.integration.test.ts tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts` + live `HARNESS_SMOKE_ONLY=pi` |
 | Subagents panel, right-panel split | `VOCS_CODE_E2E_UI=1 vitest run tests/e2e.subagents.test.ts` + `e2e.layout`, `e2e.files` |
 | Project knowledge (wiki store, docs scan, distillation, PR reflection, relation graph), `src/main/knowledge/**`, `resources/mcp/vocs-memory.mjs` | `e2e.knowledge` |
+| The app's instruction layer (`src/main/app-instructions.ts`, Settings → Instructions, `harness/system-prompt.ts`, `session-manager.ts` first-message priming) | `tests/app-instructions.test.ts`, `tests/claude-project-instructions.test.ts`, `tests/pi-startup-compatibility.test.ts`, `tests/fork-context.test.ts`, `tests/handler-registry.test.ts` + `e2e.instructions` |
 | MCP layer (`src/main/mcp/**`), built-in servers, computer use (`mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`) | `tests/mcp.test.ts`, `tests/mcp-gitnexus.test.ts`, `tests/mcp-client.test.ts`, `tests/cua.test.ts`, `tests/cua-preview.test.ts`, `tests/cua-card.test.tsx`, `tests/desktop-tab.test.tsx`, `tests/right-panel-bottom.test.tsx` |
 | Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy, the pairing QR (`shared/qr.ts`, `PairingQr.tsx`) | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/remote-host-lifecycle.test.ts`, `tests/web-client.test.ts`, `tests/remote-ui.test.tsx`, `tests/qr.test.ts` |
 | Relay routing, accounts, auth, tokens or rate limiting (`relay/src/{account,core,routes,edge,rate}.ts`) | `tests/relay-account.test.ts`, `tests/relay-core.test.ts`, `tests/relay-routes.test.ts`, `tests/relay-edge.test.ts` + `tests/remote-e2e.test.ts`, `tests/remote-workerd.test.ts`, `test:relay-do`, `e2e.remote` |
