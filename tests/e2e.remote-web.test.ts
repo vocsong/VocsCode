@@ -420,7 +420,12 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     // A phone viewport: 390x844, as a real device reports it.
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setBounds({ x: 0, y: 0, width: 390, height: 844 }));
     await page.locator('.w-session-name').getByText('Phone session').waitFor({ timeout: 30_000 });
-    await page.getByText('and the answer.').waitFor({ timeout: 20_000 });
+    // This fixture has more rows than the initial transcript page and virtual window. Explicitly
+    // load earlier history and scroll to it rather than relying on a transient initial scroll.
+    const earlier = page.getByRole('button', { name: 'Load earlier' });
+    if (await earlier.count()) await earlier.click();
+    await page.locator('.transcript').evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); });
+    await page.getByText('and the answer.').waitFor({ timeout: 30_000 });
 
     const overflow = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth }));
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.innerWidth + 1);

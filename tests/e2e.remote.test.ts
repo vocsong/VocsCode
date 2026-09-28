@@ -89,7 +89,11 @@ describe.runIf(enabled)('remote access settings', () => {
     // Turning on the offline mirror is also persisted; the desktop would then sync snapshots.
     const mirrorToggle = win.locator('.field:has-text("Offline mirror") .toggle');
     await mirrorToggle.waitFor({ timeout: 10_000 });
+    // The previous save may be persisted before the settings panel releases its busy gate.
+    // Clicking a disabled label is a silent no-op, even though Playwright can click the label.
+    await expect.poll(() => mirrorToggle.locator('input').isEnabled()).toBe(true);
     await mirrorToggle.click();
+    await expect.poll(() => mirrorToggle.locator('.toggle-state').innerText()).toBe('On');
     await expect.poll(async () => (JSON.parse(await fs.readFile(settingsPath, 'utf8')) as { remote?: { mirror?: boolean } }).remote?.mirror).toBe(true);
 
     // A new host stays "connecting" until its first browser approves enrollment. With no browser
