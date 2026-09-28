@@ -34,7 +34,8 @@ const checkRoot = () => path.join(data, 'mission-process-ownership');
 const checkDir = () => checkOwnershipDirectory(checkRoot(), 'mission');
 const terminalDir = () => path.join(data, 'terminals');
 beforeEach(async () => {
-  root = await fs.mkdtemp(path.join(os.tmpdir(), 'mission-restart-')); data = path.join(root, 'data'); project = path.join(root, 'project');
+  // Recovery/admission pin realpaths; avoid a short TEMP alias naming a second apparent root.
+  root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mission-restart-'))); data = path.join(root, 'data'); project = path.join(root, 'project');
   await fs.mkdir(project); vi.mocked(createAdapter).mockReset().mockImplementation(() => { throw new Error('Recovery must not launch a harness'); });
 });
 afterEach(async () => {

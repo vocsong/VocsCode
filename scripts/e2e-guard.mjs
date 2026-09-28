@@ -9,10 +9,11 @@
  * Usage: node scripts/e2e-guard.mjs tests/e2e.vision.test.ts [...]
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { resolveVitestBin } from './vitest-bin.mjs';
+import { validateE2eReport } from './e2e-guard-report.mjs';
 
 const files = process.argv.slice(2);
 if (files.length === 0) {
@@ -33,31 +34,22 @@ const run = spawnSync(
   { env, stdio: 'inherit' }
 );
 
-let parsed;
+let reportText;
 try {
-  parsed = JSON.parse(readFileSync(report, 'utf8'));
-} catch (e) {
-  console.error(`\ne2e guard: no JSON report at ${report} (${e.message}); treating the run as failed.`);
+  reportText = readFileSync(report, 'utf8');
+} catch {
+  // Missing reports (including a child that never started) are rejected by the validator.
+} finally {
   rmSync(dir, { recursive: true, force: true });
-  process.exit(1);
 }
-rmSync(dir, { recursive: true, force: true });
-
-const tests = (parsed.testResults ?? []).flatMap((f) => (f.assertionResults ?? []).map((t) => ({ ...t, file: f.name })));
-const skipped = tests.filter((t) => t.status === 'pending' || t.status === 'skipped' || t.status === 'todo');
-const failed = tests.filter((t) => t.status === 'failed');
-const ran = tests.filter((t) => t.status === 'passed');
-
-console.log(`\ne2e guard: ${ran.length} passed, ${failed.length} failed, ${skipped.length} skipped across ${files.length} suite(s).`);
-
-const problems = [];
-if (run.status !== 0 || failed.length > 0) problems.push(`${failed.length} test(s) failed`);
-for (const t of skipped) problems.push(`skipped: ${t.file} > ${t.fullName ?? t.title}`);
-// A suite that collected nothing is just as dark as one that skipped.
-for (const file of files) {
-  const abs = path.resolve(file);
-  if (!tests.some((t) => path.resolve(t.file) === abs)) problems.push(`no tests collected: ${file}`);
+// CI retains the same report that was validated; standalone runs keep the temp-only default.
+if (process.env.VOCS_CODE_TEST_REPORT && reportText !== undefined) {
+  mkdirSync(path.dirname(process.env.VOCS_CODE_TEST_REPORT), { recursive: true });
+  writeFileSync(process.env.VOCS_CODE_TEST_REPORT, reportText);
 }
+
+const { passed, failed, skipped, problems } = validateE2eReport(reportText, files, run.status);
+console.log(`\ne2e guard: ${passed} passed, ${failed} failed, ${skipped} skipped across ${files.length} suite(s).`);
 
 if (problems.length > 0) {
   console.error('\ne2e guard: FAIL');

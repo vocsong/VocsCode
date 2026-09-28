@@ -4,11 +4,12 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as runtime from '../src/main/runtime';
 import { MissionWorkspaces, type MissionBaseline, type WorkspaceQuiescenceProvider } from '../src/main/mission/workspaces';
 
 let root: string;
+let templateRoot: string;
 let source: string;
 let storage: string;
 let service: MissionWorkspaces;
@@ -64,20 +65,31 @@ function failGit(match: (args: string[]) => boolean, when: 'before' | 'after') {
   return { restore: () => { expect(failures).toBe(1); spy.mockRestore(); } };
 }
 
+// Copy a complete, tiny Git repository rather than running init/config/add/commit for every
+// case. Each copy owns its own .git objects, index and refs: recovery tests mutate all three.
+beforeAll(async () => {
+  templateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'mission-recovery-template-'));
+  const template = path.join(templateRoot, 'source');
+  await fs.mkdir(template);
+  git(template, ['init', '--initial-branch=main']);
+  git(template, ['config', 'user.name', 'Mission Recovery Test']);
+  git(template, ['config', 'user.email', 'mission-recovery@example.invalid']);
+  git(template, ['config', 'commit.gpgsign', 'false']);
+  git(template, ['config', 'core.autocrlf', 'false']);
+  await write(template, 'a.txt', 'base\n');
+  await write(template, '.gitignore', 'ignored/\nnode_modules/\n');
+  git(template, ['add', '.']);
+  git(template, ['commit', '-m', 'Fixture baseline']);
+});
+afterAll(async () => {
+  if (templateRoot) await fs.rm(templateRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
+
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'mission recovery-'));
   source = path.join(root, 'source');
   storage = path.join(root, 'owned');
-  await fs.mkdir(source);
-  git(source, ['init', '--initial-branch=main']);
-  git(source, ['config', 'user.name', 'Mission Recovery Test']);
-  git(source, ['config', 'user.email', 'mission-recovery@example.invalid']);
-  git(source, ['config', 'commit.gpgsign', 'false']);
-  git(source, ['config', 'core.autocrlf', 'false']);
-  await write(source, 'a.txt', 'base\n');
-  await write(source, '.gitignore', 'ignored/\nnode_modules/\n');
-  git(source, ['add', '.']);
-  git(source, ['commit', '-m', 'Fixture baseline']);
+  await fs.cp(path.join(templateRoot, 'source'), source, { recursive: true });
   held = new Set();
   busy = new Set();
   service = restart();

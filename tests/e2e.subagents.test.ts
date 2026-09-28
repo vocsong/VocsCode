@@ -393,7 +393,8 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
     }
   }, 180_000);
 
-  it.runIf(piEnabled)('shows the run a real pi session actually recorded', async () => {
+  // The real-Pi tier has its own opt-in gate; do not register a skipped test in the no-key CI tier.
+  if (piEnabled) it('shows the run a real pi session actually recorded', async () => {
     piIntegrationPaths();
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-subagents-live-'));
     const userData = path.join(tmp, 'userData');

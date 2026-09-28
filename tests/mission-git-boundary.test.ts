@@ -89,7 +89,8 @@ async function githubObservation(fixture: Awaited<ReturnType<typeof owned>>, ope
 }
 
 beforeEach(async () => {
-  root = await fs.mkdtemp(path.join(os.tmpdir(), 'mission-git-boundary-')); source = path.join(root, 'source'); remote = path.join(root, 'remote fixture.git'); storage = path.join(root, 'storage');
+  // Keep fault-injection destinations identical to delivery's realpath-pinned storage on 8.3 TEMP paths.
+  root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mission-git-boundary-'))); source = path.join(root, 'source'); remote = path.join(root, 'remote fixture.git'); storage = path.join(root, 'storage');
   await fs.mkdir(source); git(source, ['init', '-b', 'main']);
   for (const [key, value] of [['user.name', 'Git Boundary Fixture'], ['user.email', 'git-boundary@example.invalid'], ['commit.gpgsign', 'false'], ['core.autocrlf', 'false']]) git(source, ['config', key, value]);
   await fs.writeFile(path.join(source, 'source.txt'), 'original\n');

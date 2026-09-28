@@ -53,6 +53,25 @@ async function inherited(commandLine: string) {
 }
 
 describe.skipIf(process.platform !== 'win32')('Windows owned Job Object resource', () => {
+  it('identifies the failed Win32 setup call without exposing the target path or claiming a started target', async () => {
+    const missing = path.join(root, 'missing.exe');
+    const child = spawn(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper],
+      { cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+    child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+    child.stdin.end(JSON.stringify({ shell: missing, command: 'ignored', cwd: root, timeoutMs: 0 }) + '\n');
+    const exit = await new Promise<number | null>((resolve) => child.once('close', resolve));
+    expect(exit).toBe(0);
+    expect(stderr).toBe('');
+    const frames = stdout.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ type: 'done', quiescent: true, childTreeZero: true, code: 1 });
+    const error = Buffer.from(frames[0].error64 as string, 'base64').toString('utf8');
+    expect(error).toBe('CreateProcess(target) failed (Win32 2)');
+    expect(error).not.toContain(root);
+  }, 20_000);
+
   it('inherits raw stdin/stdout but emits ownership proof only on the separate control pipe', async () => {
     await fs.writeFile(path.join(root, 'echo.cjs'), "process.stdin.once('data',d=>{process.stdout.write(d);process.stderr.write('warning');process.exit(0)});");
     const running = await inherited(`"${process.execPath}" echo.cjs`);

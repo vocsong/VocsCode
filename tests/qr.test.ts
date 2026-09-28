@@ -10,6 +10,14 @@ const jsQR = createRequire(import.meta.url)('jsqr') as (data: Uint8ClampedArray,
 
 const LEVELS: QrErrorCorrection[] = ['L', 'M', 'Q', 'H'];
 
+/** Baseline mask choices for the exhaustive payloads below, pinned across penalty-scoring changes. */
+const EXPECTED_MASKS: Record<QrErrorCorrection, string> = {
+  L: '6152732332663722246247243442452244622552',
+  M: '2522666622366232266552544234222221222222',
+  Q: '2776426422602573565236444441244522423242',
+  H: '3611722172234617352311352572725656663655'
+};
+
 /** Renders modules as RGBA pixels with a quiet zone, the way a camera frame would present them. */
 function decode(code: QrCode, scale = 3): { data: string; version: number } | null {
   const quiet = 4;
@@ -153,6 +161,7 @@ describe('QR encoder', () => {
       for (let version = 1; version <= 40; version++) {
         const text = payload(qrByteCapacity(version, level), version);
         const code = encodeQr(text, { errorCorrection: level, minVersion: version });
+        expect(code.mask, `v${version}-${level} mask choice`).toBe(Number(EXPECTED_MASKS[level][version - 1]));
         expect(code.version).toBe(version);
         expect(code.size).toBe(qrSize(version));
         const numBlocks = BLOCKS[level][version - 1];
