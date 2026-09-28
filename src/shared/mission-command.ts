@@ -1,6 +1,6 @@
 /** Exact command parsing shared by the composer and privileged launch handler. */
 import type { MissionMode } from './mission';
-import type { ImageAttachment } from './types';
+import type { FileAttachment, ImageAttachment } from './types';
 
 /** Genuine user command input; images are launch/steering context, never control authority. */
 export interface MissionCommandRequest {
@@ -8,6 +8,7 @@ export interface MissionCommandRequest {
   text: string;
   idempotencyKey: string;
   images?: ImageAttachment[];
+  files?: FileAttachment[];
 }
 
 /** `/mission status` in a session that has no Mission: said out loud, never a silent no-op. */

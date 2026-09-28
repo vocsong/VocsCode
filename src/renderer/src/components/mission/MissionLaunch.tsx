@@ -1,12 +1,12 @@
 import React, { useRef, useState } from 'react';
 import type { MissionMode } from '../../../../shared/mission';
-import type { ImageAttachment, PermissionMode } from '../../../../shared/types';
+import type { FileAttachment, ImageAttachment, PermissionMode } from '../../../../shared/types';
 import { HARNESS_BY_ID, isMissionHarnessSupported, MISSION_HARNESS_UNSUPPORTED_LABEL, PERMISSION_MODE_LABELS } from '../../../../shared/harness-meta';
 import { validatePresetEligibility, type ExecutionPreset } from '../../../../shared/mission-config';
 import { resolveNewSessionDefaults } from '../../../../shared/session-defaults';
+import { FileAttachmentChips, readAttachments } from '../../attachments';
 import { createMission, missionLaunchConfig } from '../../missions';
 import { useStore } from '../../store';
-import { fileToAttachment } from '../Composer';
 import { openSettings } from '../SettingsView';
 import { Button, Field, Modal, Spinner } from '../ui';
 import { missionHarnessWarning, MissionSupportNotice } from './MissionSupport';
@@ -25,6 +25,7 @@ export function MissionLaunch({ choices }: { choices: React.ReactNode }) {
   const [override, setOverride] = useState('');
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(source?.config.permissionMode ?? resolveNewSessionDefaults(settings!, root).permissionMode);
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [files, setFiles] = useState<FileAttachment[]>([]);
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const [error, setError] = useState<string>();
@@ -42,7 +43,7 @@ export function MissionLaunch({ choices }: { choices: React.ReactNode }) {
     setBusy(true);
     setError(undefined);
     try {
-      await createMission({ projectRoot: root, originSessionId: sourceId ?? undefined, objective: objective.trim(), mode, leadPresetId: override || undefined, permissionMode, images: images.length ? images : undefined });
+      await createMission({ projectRoot: root, originSessionId: sourceId ?? undefined, objective: objective.trim(), mode, leadPresetId: override || undefined, permissionMode, images: images.length ? images : undefined, files: files.length ? files : undefined });
       close();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -52,9 +53,10 @@ export function MissionLaunch({ choices }: { choices: React.ReactNode }) {
     }
   };
   // File conversion stays local; launch never edits ordinary-session defaults.
-  const addImages = async (files: File[]) => {
-    const converted = await Promise.all(files.filter((file) => file.type.startsWith('image/')).map(fileToAttachment));
-    setImages((old) => [...old, ...converted]);
+  const addFiles = async (list: Iterable<File>) => {
+    const added = await readAttachments(list, (message) => setError(message));
+    setImages((old) => [...old, ...added.images]);
+    setFiles((old) => [...old, ...added.files]);
   };
   return <Modal title="New session" onClose={close} width={620} footer={<><Button variant="ghost" onClick={close}>Cancel</Button><Button variant="primary" disabled={busy || !configured || !objective.trim() || !root || !modes.includes(permissionMode)} onClick={() => void launch()}>{busy && <Spinner />} Start Mission</Button></>}>
     {choices}
@@ -70,9 +72,10 @@ export function MissionLaunch({ choices }: { choices: React.ReactNode }) {
       {(!configured || configError) && <div className="callout warn" role="alert">{configError ?? 'Mission is unconfigured. Choose an enabled T5 principal engineer in Settings → Mission. No lower-tier fallback is used.'} <Button size="sm" onClick={() => { close(); openSettings('mission'); }}>Configure Mission</Button></div>}
       <Field label="Mission permissions"><select aria-label="Mission permissions" value={permissionMode} onChange={(e) => setPermissionMode(e.target.value as PermissionMode)}>{modes.map((p) => <option key={p} value={p}>{PERMISSION_MODE_LABELS[p].label}</option>)}</select></Field>
       {!modes.includes(permissionMode) && <p role="alert">Choose permissions supported by this preset.</p>}
-      <Field label="Mission objective"><textarea aria-label="Mission objective" rows={4} autoFocus value={objective} onChange={(e) => setObjective(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void launch(); } }} onPaste={(e) => { const files = [...e.clipboardData.files].filter((f) => f.type.startsWith('image/')); if (files.length) { e.preventDefault(); void addImages(files); } }} placeholder="Describe the outcome, not the steps" /></Field>
-      <label>Attach images <input type="file" accept="image/*" multiple onChange={(e) => void addImages([...(e.target.files ?? [])])} /></label>
+      <Field label="Mission objective"><textarea aria-label="Mission objective" rows={4} autoFocus value={objective} onChange={(e) => setObjective(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void launch(); } }} onPaste={(e) => { const pasted = [...e.clipboardData.files]; if (pasted.length) { e.preventDefault(); void addFiles(pasted); } }} placeholder="Describe the outcome, not the steps" /></Field>
+      <label>Attach files <input type="file" multiple onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} /></label>
       {images.map((image, i) => <div key={i} className="row gap8"><span>{image.name ?? 'Image'}</span><Button size="sm" onClick={() => setImages((old) => old.filter((_, j) => j !== i))}>Remove image</Button></div>)}
+      <FileAttachmentChips files={files} onRemove={(i) => setFiles((old) => old.filter((_, j) => j !== i))} />
       {error && <div className="callout warn" role="alert">{error} Retry uses the same launch request.</div>}
     </div>
   </Modal>;

@@ -1,10 +1,10 @@
 /** Ctrl+N quick picker: pick a known folder, then an optional first prompt — keyboard only.
  *  Stage 1 lists folders (arrows + Enter); stage 2 takes a prompt with pasted images, Enter sends. */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { ImageAttachment } from '../../../shared/types';
+import type { FileAttachment, ImageAttachment } from '../../../shared/types';
+import { FileAttachmentChips, readAttachments } from '../attachments';
 import { basename } from '../format';
 import { useStore } from '../store';
-import { fileToAttachment } from './Composer';
 import { Icon, Kbd } from './ui';
 
 export function QuickSessionPicker() {
@@ -17,6 +17,9 @@ export function QuickSessionPicker() {
   const [picked, setPicked] = useState<string | null>(null);
   const [prompt, setPrompt] = useState(prefill ?? '');
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [files, setFiles] = useState<FileAttachment[]>([]);
+  const sendingRef = useRef(false);
+  const toast = useStore((s) => s.toast);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (picked) promptRef.current?.focus();
@@ -49,12 +52,18 @@ export function QuickSessionPicker() {
     void useStore.getState().startNewSession();
   };
 
-  const send = () => {
-    const root = picked;
-    close();
-    void useStore.getState().createQuickSession(root!, { prompt, images });
+  const send = async (root = picked, message = prompt, attachedImages = images, attachedFiles = files) => {
+    if (!root || sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      if (await useStore.getState().createQuickSession(root, { prompt: message, images: attachedImages, ...(attachedFiles.length ? { files: attachedFiles } : {}) })) close();
+    } finally {
+      sendingRef.current = false;
+    }
   };
 
+  const sendRef = useRef(send);
+  sendRef.current = send;
   const [idx, setIdx] = useState(0);
   const total = roots.length + 1;
   // The capture listener is intentionally installed once. These refs keep it current without
@@ -64,11 +73,13 @@ export function QuickSessionPicker() {
   const rootsRef = useRef<string[]>([]);
   const promptValueRef = useRef('');
   const imagesRef = useRef<ImageAttachment[]>([]);
+  const filesRef = useRef<FileAttachment[]>([]);
   pickedRef.current = picked;
   idxRef.current = idx;
   rootsRef.current = roots;
   promptValueRef.current = prompt;
   imagesRef.current = images;
+  filesRef.current = files;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -78,12 +89,10 @@ export function QuickSessionPicker() {
         // Prompt stage: Enter sends, Escape backs out while the prompt is still empty.
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
-          const currentImages = imagesRef.current;
-          useStore.getState().openQuickSession(false);
-          void useStore.getState().createQuickSession(currentPicked, { prompt: promptValueRef.current, images: currentImages });
+          void sendRef.current(currentPicked, promptValueRef.current, imagesRef.current, filesRef.current);
         } else if (e.key === 'Escape') {
           e.preventDefault();
-          if (!promptValueRef.current.trim() && !imagesRef.current.length) {
+          if (!promptValueRef.current.trim() && !imagesRef.current.length && !filesRef.current.length) {
             pickedRef.current = null;
             setPicked(null);
           } else {
@@ -120,19 +129,17 @@ export function QuickSessionPicker() {
     return () => window.removeEventListener('keydown', onKey, true);
   }, []);
 
-  // Same image handling as the chat composer: pasted or picked screenshots ride along with the first prompt.
-  const onPaste = async (e: React.ClipboardEvent) => {
-    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
-    if (!files.length) return;
-    e.preventDefault();
-    const imgs = await Promise.all(files.map(fileToAttachment));
-    setImages((prev) => [...prev, ...imgs]);
+  const addFiles = async (list: Iterable<File>) => {
+    const added = await readAttachments(list, (message) => toast(message, 'error'));
+    setImages((prev) => [...prev, ...added.images]);
+    setFiles((prev) => [...prev, ...added.files]);
   };
 
-  const addFiles = async (list: FileList | null) => {
-    if (!list) return;
-    const imgs = await Promise.all([...list].filter((f) => f.type.startsWith('image/')).map(fileToAttachment));
-    setImages((prev) => [...prev, ...imgs]);
+  const onPaste = (e: React.ClipboardEvent) => {
+    const pasted = [...(e.clipboardData?.files ?? [])];
+    if (!pasted.length) return;
+    e.preventDefault();
+    void addFiles(pasted);
   };
 
   if (picked) {
@@ -161,6 +168,7 @@ export function QuickSessionPicker() {
                 ))}
               </div>
             )}
+            <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
             <div className="ns-prompt-box">
               <textarea
                 ref={promptRef}
@@ -170,12 +178,12 @@ export function QuickSessionPicker() {
                 onPaste={onPaste}
                 placeholder="First prompt (optional) — Enter starts the session, Shift+Enter for a new line"
               />
-              <label className="icon-btn ns-attach" title="Attach image">
-                <Icon name="image" size={14} />
-                <input type="file" accept="image/*" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
+              <label className="icon-btn ns-attach" title="Attach files">
+                <Icon name="file" size={14} />
+                <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
               </label>
             </div>
-            <span className="field-hint">Paste a screenshot or attach one with the button — it is sent with the first message.</span>
+            <span className="field-hint">Paste or attach files and images — they are sent with the first message.</span>
           </div>
         </div>
       </div>
