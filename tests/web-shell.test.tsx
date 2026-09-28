@@ -254,8 +254,8 @@ describe('signed-in owner', () => {
 describe('remote composer attachments', () => {
   const creds = { hostDeviceId: 'h1', hostName: 'Work PC', webDeviceId: 'w1', relayBase: 'http://localhost' };
 
-  async function open() {
-    const fixture = shell({ creds, sessions: [session] });
+  async function open(current: SessionMeta = session) {
+    const fixture = shell({ creds, sessions: [current] });
     mount({ client: fixture.client, transport: new RelayTransport(fixture.client as unknown as RelayClient) });
     await rtl.waitFor(() => expect(rtl.screen.getByRole('textbox', { name: 'Message' })).toBeTruthy());
     return fixture;
@@ -275,6 +275,24 @@ describe('remote composer attachments', () => {
       ['sessions:send', { id: 's1', input: { text: 'review this', files: [{ name: 'todo.md', mimeType: 'text/plain', data: 'd29ybGQ=' }] } }]
     ]));
     await rtl.waitFor(() => expect(rtl.screen.queryByRole('button', { name: 'Remove todo.md' })).toBeNull());
+  });
+
+  it('reuses a Mission file send key after a lost reply, but not after changing the payload', async () => {
+    const fixture = await open({ ...session, mission: { missionId: 'mission', role: 'lead', generation: 1, sourceAccess: 'read_only', requestedTools: [], reasoningDefault: true } });
+    const picker = rtl.screen.getByLabelText('Choose files');
+    rtl.fireEvent.change(picker, { target: { files: [file('notes.txt', 'mission')] } });
+    await rtl.waitFor(() => expect(rtl.screen.getByRole('button', { name: 'Remove notes.txt' })).toBeTruthy());
+    fixture.state.sendFails = true;
+    rtl.fireEvent.click(rtl.screen.getByRole('button', { name: 'Send' }));
+    await rtl.waitFor(() => expect(rtl.screen.getByText('Computer refused the send')).toBeTruthy());
+    fixture.state.sendFails = false;
+    rtl.fireEvent.click(rtl.screen.getByRole('button', { name: 'Send' }));
+    await rtl.waitFor(() => expect(fixture.invokes.filter(([channel]) => channel === 'sessions:send')).toHaveLength(2));
+    const [first, second] = fixture.invokes.filter(([channel]) => channel === 'sessions:send').map(([, value]) => value as { idempotencyKey: string; input: unknown });
+    expect(first.idempotencyKey).toMatch(/^[a-f0-9-]{36}$/);
+    expect(second.idempotencyKey).toBe(first.idempotencyKey);
+    expect(second.input).toEqual(first.input);
+    await rtl.waitFor(() => expect(rtl.screen.queryByRole('button', { name: 'Remove notes.txt' })).toBeNull());
   });
 
   it('allows a file-only message at the exact 128 KiB boundary', async () => {

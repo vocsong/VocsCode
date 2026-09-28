@@ -185,7 +185,9 @@ const questionSchema = z.strictObject({ id, text, purpose: z.enum(['clarificatio
 const proposalSchema = z.strictObject({ id, specificationRevision: rev, planRevision: counter, assistantMessageId: id, requestedAt: time });
 const blockerSchema = z.strictObject({ id, kind: failureKind, message: text, resolvedAt: time.optional() });
 const mailboxSchema = z.strictObject({ id, kind: z.enum(['user', 'permission', 'decision', 'verification', 'candidate', 'progress']), sessionId: id, taskId: id.optional(), text, artifactIds,
-  attachments: list(z.strictObject({ ref: id, mimeType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp']), name: text.optional() })).optional(),
+  attachments: list(z.strictObject({ ref: id, mimeType: text, name: text.optional(), kind: z.literal('file').optional(), byteLength: counter.optional() })
+    .refine((attachment) => attachment.kind === 'file' ? !!attachment.name && attachment.byteLength !== undefined && !attachment.mimeType.startsWith('image/')
+      : attachment.byteLength === undefined && ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'].includes(attachment.mimeType))).optional(),
   userAction: z.strictObject({ kind: z.enum(['instruction', 'answer', 'authorization', 'question']), receivedRevision: counter, specificationRevision: rev, planRevision: counter, requestFingerprint: id, questionId: id.optional(),
     materialBinding: z.strictObject({ revision: counter, operationId: id, sessionId: id, generation: rev }).optional(), appliedPlanRevision: rev.optional() }).optional(),
   createdAt: time, deliveredAt: time.optional() });

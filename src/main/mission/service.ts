@@ -17,7 +17,7 @@ import {
 } from '../../shared/mission-config';
 import { isMissionAffirmative } from '../../shared/mission-command';
 import { isMissionQuestionOperation, missionBlockerFamily } from '../../shared/mission';
-import type { ImageAttachment, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UserInput } from '../../shared/types';
+import type { FileAttachment, ImageAttachment, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UserInput } from '../../shared/types';
 import type { SessionManager } from '../session-manager';
 import { captureMissionSource, missionKickoff, missionLeadPolicy, missionWorkerBrief, missionWorkerPolicy } from './context';
 import { assertMissionMutation, assertMissionRecord, implementationBlockers, MissionAdmissionError, missionCheckCommandIssue, missionCompletionReport, readyTasks, reduceMission, type MissionActor, type MissionMutation } from './state';
@@ -98,10 +98,31 @@ const createSchema = z.strictObject({
   idempotencyKey: key, projectRoot: text, originSessionId: key.optional(), objective: text,
   mode: z.enum(['interactive_plan', 'autonomous']), leadPresetId: key.optional(),
   permissionMode: z.enum(['ask', 'accept-edits', 'plan', 'auto', 'full-auto']), submittedCommand: text.optional(),
-  images: z.array(z.unknown()).max(100).optional(),
+  images: z.array(z.unknown()).max(100).optional(), files: z.array(z.unknown()).max(10).optional(),
 });
 const userImageSchema = z.strictObject({ mimeType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp']),
   data: z.string().min(1).max(24 * 1024 * 1024).regex(/^[A-Za-z0-9+/]+={0,2}$/), name: z.string().min(1).max(100_000).refine((value) => !!value.trim() && !value.includes('\0')).optional() });
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_FILES_BYTES = 30 * 1024 * 1024;
+const userFileSchema = z.strictObject({
+  name: z.string().min(1).max(255).refine((value) => !!value.trim() && !/[\x00-\x1f\x7f]/.test(value)),
+  mimeType: z.string().min(1).max(255).regex(/^[\w.+-]+\/[\w.+-]+$/).refine((value) => !value.toLowerCase().startsWith('image/')),
+  data: z.string().min(1).max(Math.ceil(MAX_FILE_BYTES / 3) * 4).regex(/^[A-Za-z0-9+/=]+$/),
+});
+/** Decode only after bounding encoded length; canonical base64 prevents permissive decoder aliases. */
+function userFiles(files: FileAttachment[] | undefined): Array<{ file: FileAttachment; bytes: Buffer }> {
+  const parsed = z.array(userFileSchema).max(10).parse(files ?? []);
+  let total = 0;
+  return parsed.map((file) => {
+    const bytes = Buffer.from(file.data, 'base64');
+    if (!bytes.length || bytes.length > MAX_FILE_BYTES || bytes.toString('base64') !== file.data) throw new Error('Mission file must be canonical base64 and at most 10 MiB.');
+    total += bytes.length;
+    if (total > MAX_FILES_BYTES) throw new Error('Mission files exceed the 30 MiB total limit.');
+    return { file, bytes };
+  });
+}
+const fileIdentity = (files: FileAttachment[] | undefined) => files?.map(({ data, ...metadata }) => ({ ...metadata, sha256: createHash('sha256').update(data).digest('hex') }));
+const fileRef = (ref: string, file: FileAttachment, byteLength: number): MissionAttachmentRef => ({ ref, kind: 'file', name: file.name, mimeType: file.mimeType, byteLength });
 const priority: Record<MissionMailboxItem['kind'], number> = { user: 0, permission: 1, decision: 2, verification: 3, candidate: 4, progress: 5 };
 
 /** Intersect repository policy with an irrevocable user ceiling; never manufacture a grant. */
@@ -242,6 +263,7 @@ export class MissionService implements MissionToolHost {
   async create(input: CreateMissionRequest): Promise<MissionRecord> {
     createSchema.parse(input);
     if (input.images) z.array(userImageSchema).max(100).parse(input.images);
+    userFiles(input.files);
     if (!path.isAbsolute(input.projectRoot)) throw new Error('Choose an absolute project root.');
     const request = structuredClone(input);
     const id = identity('m', request.idempotencyKey);
@@ -258,12 +280,16 @@ export class MissionService implements MissionToolHost {
   private async createOnce(id: string, request: CreateMissionRequest): Promise<MissionRecord> {
     if (this.closed) throw new Error('Mission service is closed.');
     const existing = this.deps.store.get(id);
-    // The immutable source owns the image bytes (up to 64 MiB). Journal request metadata is
-    // bounded at 16 MiB: bind exact ordered bytes/name/type by digest instead of embedding
-    // base64 again. This remains retry authority even after the source discussion changes.
-    const retainedRequest = { ...request, images: request.images?.map(({ data, ...metadata }) => ({ ...metadata, sha256: createHash('sha256').update(data).digest('hex') })) };
+    // The immutable source owns image bytes; new files use separate immutable blobs.
+    // Journal request metadata binds ordered bytes/name/type by digest, never base64.
+    // This remains retry authority even after the source discussion changes.
+    const retainedRequest = { ...request, images: request.images?.map(({ data, ...metadata }) => ({ ...metadata, sha256: createHash('sha256').update(data).digest('hex') })), files: fileIdentity(request.files) };
     const metadata = { idempotencyKey: 'launch', actor: 'user', expectedRevision: 0, kind: 'mission.create', request: retainedRequest };
-    if (existing) { await this.deps.store.create(existing, metadata); return this.get(id)!; }
+    if (existing) {
+      await this.deps.store.create(existing, metadata);
+      if (!existing.sourceSnapshotId) throw new Error('Mission launch source was not retained. Its attachment status is uncertain; no launch acknowledgment was granted. Inspect or repair the blocked Mission before retrying.');
+      return this.get(id)!;
+    }
     const origin = request.originSessionId ? this.deps.sessions.get(request.originSessionId) : undefined;
     if (request.originSessionId && !origin) throw new Error('The source session no longer exists.');
     if (origin && path.resolve(origin.config.projectRoot) !== path.resolve(request.projectRoot)) throw new Error('Source session belongs to a different project.');
@@ -298,6 +324,12 @@ export class MissionService implements MissionToolHost {
     assertMissionRecord(record);
     await this.deps.store.create(record, metadata);
     try {
+      const files = userFiles(request.files);
+      if (files.length) source.files = [];
+      for (const [index, { file, bytes }] of files.entries()) {
+        const ref = await this.deps.store.retainArtifact(id, JSON.stringify(['launch-file', request.idempotencyKey, index]), bytes, retainedRequest);
+        source.files!.push(fileRef(ref, file, bytes.length));
+      }
       const sourceSnapshotId = await this.deps.store.writeSource(id, JSON.stringify(source));
       await this.change(id, 'source-retained', (r) => { r.sourceSnapshotId = sourceSnapshotId; return reduceMission(r, host, { kind: 'host.start' }); });
       this.config(this.record(id), leadPreset, 'read_only', '');
@@ -308,9 +340,16 @@ export class MissionService implements MissionToolHost {
       await this.mail(id, { id: identity('mail', id, 'kickoff'), kind: 'user', sessionId: record.leadSessionId, text: missionKickoff(this.record(id), source), artifactIds: [], createdAt: now });
       this.wake(id);
     } catch (e) {
-      await this.block(id, 'environment', message(e), 'lead_dispatch');
-      await this.change(id, 'launch-blocked', (r) => { r.status = 'blocked'; return r; });
+      try {
+        await this.block(id, 'environment', message(e), 'lead_dispatch');
+        await this.change(id, 'launch-blocked', (r) => { r.status = 'blocked'; return r; });
+      } catch (error) {
+        // A failed blob operation can itself fence the store before a blocker is journaled.
+        // Never acknowledge a launch whose source was not retained, even then.
+        this.deps.log?.(`Mission launch blocker could not be journaled: ${message(error)}`);
+      }
       this.fenced.add(id); this.deps.scheduler.pause(id);
+      if (!this.record(id).sourceSnapshotId) throw new Error(`Mission launch source was not retained; attachments remain uncertain and the launch was not accepted: ${message(e)}`);
     }
     this.publish(id);
     return this.get(id)!;
@@ -459,11 +498,12 @@ export class MissionService implements MissionToolHost {
     if (request.control.action !== 'steer') return this.controlOnce(request);
     if (this.closed) throw new Error('Mission service is closed.');
     const input = structuredClone(request);
-    const control = z.strictObject({ action: z.literal('steer'), text: z.string().max(100_000).refine((value) => !value.includes('\0')), images: z.array(userImageSchema).max(100).optional() })
-      .refine((value) => !!value.text.trim() || !!value.images?.length, 'Send an instruction or image.').parse(input.control);
+    const control = z.strictObject({ action: z.literal('steer'), text: z.string().max(100_000).refine((value) => !value.includes('\0')), images: z.array(userImageSchema).max(100).optional(), files: z.array(userFileSchema).max(10).optional() })
+      .refine((value) => !!value.text.trim() || !!value.images?.length || !!value.files?.length, 'Send an instruction or attachment.').parse(input.control);
+    const files = userFiles(control.files);
     key.parse(input.idempotencyKey); z.number().int().nonnegative().parse(input.expectedRevision);
     const current = this.record(input.missionId), actionId = identity('user', current.id, input.idempotencyKey);
-    const fingerprint = identity('input', control.text, control.images ?? []);
+    const fingerprint = identity('input', control.text, control.images ?? [], fileIdentity(control.files) ?? []);
     const prior = current.mailbox.find((item) => item.id === actionId);
     if (prior) {
       if (prior.userAction?.requestFingerprint !== fingerprint || prior.userAction.receivedRevision !== input.expectedRevision) throw new Error('User action idempotency key was reused for a different request.');
@@ -477,15 +517,21 @@ export class MissionService implements MissionToolHost {
     const entry: { request: MissionControlRequest; fingerprint: string; attachments: MissionAttachmentRef[]; promise?: Promise<MissionRecord> } = existing ?? { request: input, fingerprint, attachments: [] };
     this.userInputs.set(actionId, entry);
     const promise = (async () => {
-      // Bind the raw user key and image position, not a content-derived key: changed bytes
-      // must conflict even if the host died before committing the mailbox. The receipt also
-      // binds the complete instruction/ordered image identity without copying base64 into it.
-      const retainedRequest = { text: control.text, images: (control.images ?? []).map(({ data, ...metadata }) => ({ ...metadata, sha256: createHash('sha256').update(data).digest('hex') })) };
-      if (!control.images?.length && await this.deps.store.hasArtifactRetention(current.id, JSON.stringify(['user-image', input.idempotencyKey, 0]))) throw new MissionStoreError('IDEMPOTENCY_CONFLICT', 'User action idempotency key was already used for a different request with attachments.');
+      // Bind the raw user key and each attachment position, not a content-derived key:
+      // changed bytes must conflict even if the host died before committing the mailbox.
+      // The receipt binds the full instruction/ordered attachment identity without base64.
+      const retainedRequest = { text: control.text, images: (control.images ?? []).map(({ data, ...metadata }) => ({ ...metadata, sha256: createHash('sha256').update(data).digest('hex') })), files: fileIdentity(control.files) };
+      if (!control.images?.length && await this.deps.store.hasArtifactRetention(current.id, JSON.stringify(['user-image', input.idempotencyKey, 0]))
+        || !files.length && await this.deps.store.hasArtifactRetention(current.id, JSON.stringify(['user-file', input.idempotencyKey, 0]))) throw new MissionStoreError('IDEMPOTENCY_CONFLICT', 'User action idempotency key was already used for a different request with attachments.');
       for (let index = entry.attachments.length; index < (control.images?.length ?? 0); index++) {
         const image = control.images![index];
         const ref = await this.deps.store.retainArtifact(current.id, JSON.stringify(['user-image', input.idempotencyKey, index]), JSON.stringify(image), retainedRequest);
         entry.attachments.push({ ref, mimeType: image.mimeType, ...(image.name === undefined ? {} : { name: image.name }) });
+      }
+      for (let index = Math.max(0, entry.attachments.length - (control.images?.length ?? 0)); index < files.length; index++) {
+        const { file, bytes } = files[index];
+        const ref = await this.deps.store.retainArtifact(current.id, JSON.stringify(['user-file', input.idempotencyKey, index]), bytes, retainedRequest);
+        entry.attachments.push(fileRef(ref, file, bytes.length));
       }
       return this.controlOnce(input, { fingerprint, attachments: entry.attachments });
     })();
@@ -519,7 +565,7 @@ export class MissionService implements MissionToolHost {
     let resumed: Awaited<ReturnType<MissionService['prepareResume']>> | undefined;
     let resolvedForResume: MissionRecord['blockers'] = [];
     try {
-      if (control.action === 'execute' || control.action === 'steer' && !control.images?.length && initial.pendingProposal && isMissionAffirmative(control.text)) {
+      if (control.action === 'execute' || control.action === 'steer' && !control.images?.length && !control.files?.length && initial.pendingProposal && isMissionAffirmative(control.text)) {
         if (!this.deps.sessions.activity(initial.leadSessionId).quiescent) throw new Error('Wait for the planning turn and its tools to settle before approving execution.');
         if (!initial.baseline) {
           // Do not silently refresh the approval revision while resolving source state.
@@ -556,8 +602,8 @@ export class MissionService implements MissionToolHost {
         if (control.action === 'execute') mutation = { kind: 'execution.authorize', proposalId: control.proposalId, specificationRevision: control.specificationRevision, at: Date.now() };
         else if (control.action === 'steer') {
           if (!retained) throw new Error('User instructions require host-retained input.');
-          const instruction = control.text.trim() ? control.text : '[User attached images]';
-          if (!control.images?.length && r.pendingProposal && isMissionAffirmative(control.text)) mutation = { kind: 'execution.authorize', proposalId: r.pendingProposal.id, specificationRevision: r.pendingProposal.specificationRevision, at: Date.now() };
+          const instruction = control.text.trim() ? control.text : '[User attached files or images]';
+          if (!control.images?.length && !control.files?.length && r.pendingProposal && isMissionAffirmative(control.text)) mutation = { kind: 'execution.authorize', proposalId: r.pendingProposal.id, specificationRevision: r.pendingProposal.specificationRevision, at: Date.now() };
           else if (r.status === 'waiting_for_user') mutation = { kind: 'question.answer', questionId: question!.id, answer: instruction };
           else mutation = { kind: 'control.steer', text: instruction, at: Date.now() };
         } else if (control.action === 'pause' || control.action === 'stop') mutation = { kind: `control.${control.action}` };
@@ -573,7 +619,7 @@ export class MissionService implements MissionToolHost {
         } else throw new Error('Unsupported Mission control.');
         r = reduceMission(r, user, mutation);
         if (control.action === 'steer') {
-          if (mutation.kind !== 'control.steer') r = reduceMission(r, host, { kind: 'host.mailbox.append', item: { id: actionId, kind: 'user', sessionId: r.leadSessionId, text: control.text.trim() ? control.text : '[User attached images]', artifactIds: [], createdAt: Date.now() } });
+          if (mutation.kind !== 'control.steer') r = reduceMission(r, host, { kind: 'host.mailbox.append', item: { id: actionId, kind: 'user', sessionId: r.leadSessionId, text: control.text.trim() ? control.text : '[User attached files or images]', artifactIds: [], createdAt: Date.now() } });
           const item = r.mailbox.find((entry) => entry.id === actionId)!;
           item.userAction = { kind: mutation.kind === 'execution.authorize' || question?.purpose === 'authorization' ? 'authorization' : question ? 'answer' : 'instruction',
             receivedRevision, specificationRevision, planRevision, requestFingerprint: retained!.fingerprint, ...(question ? { questionId: question.id } : {}) };
@@ -808,7 +854,7 @@ export class MissionService implements MissionToolHost {
       const settings = this.deps.settings(r.projectRoot), revoked = checkMissionPresetRevocation(r.leadPreset, settings.config, settings.project);
       if (revoked.revoked) throw new Error(revoked.reasons.join(' '));
       const now = Date.now();
-      r.mailbox.push({ id: questionId, kind: 'user', sessionId: r.leadSessionId, text: question.text.trim() ? question.text : '[User attached images]', artifactIds: [],
+      r.mailbox.push({ id: questionId, kind: 'user', sessionId: r.leadSessionId, text: question.text.trim() ? question.text : '[User attached files or images]', artifactIds: [],
         ...(retained.attachments.length ? { attachments: structuredClone(retained.attachments) } : {}), createdAt: now,
         userAction: { kind: 'question', receivedRevision: r.revision, specificationRevision: r.specificationRevision, planRevision: r.planRevision, requestFingerprint: retained.fingerprint } });
       r.operations.push({ id: operationId, idempotencyKey: operationId, actor: 'host', kind: 'dispatch', expectedRevision: r.revision, state: 'intent_recorded',
@@ -859,6 +905,7 @@ export class MissionService implements MissionToolHost {
       const question = this.record(id).mailbox.find((item) => item.id === live.questionId)!;
       const images: ImageAttachment[] = [];
       for (const attachment of question.attachments ?? []) {
+        if (attachment.kind === 'file') continue;
         const image = userImageSchema.parse(JSON.parse((await this.deps.store.readArtifact(id, attachment.ref)).toString('utf8')));
         if (image.mimeType !== attachment.mimeType || image.name !== attachment.name) throw new Error('Retained user attachment metadata does not match its immutable content.');
         images.push(image);
@@ -977,7 +1024,7 @@ export class MissionService implements MissionToolHost {
     if (/^\/goal(?:\s|$)/i.test(input.text.trimStart())) throw new Error('Mission already owns continuation. Use Mission pause, resume or stop instead of /goal.');
     const actionId = identity('user', r.id, idempotencyKey);
     const expectedRevision = r.mailbox.find((item) => item.id === actionId)?.userAction?.receivedRevision ?? this.userInputs.get(actionId)?.request.expectedRevision ?? r.revision;
-    return this.control({ missionId: r.id, expectedRevision, idempotencyKey, control: { action: 'steer', text: input.text, images: input.images } });
+    return this.control({ missionId: r.id, expectedRevision, idempotencyKey, control: { action: 'steer', text: input.text, images: input.images, files: input.files } });
   }
 
   async archive(missionId: string, archived: boolean): Promise<MissionRecord> {
@@ -1237,17 +1284,37 @@ export class MissionService implements MissionToolHost {
       task, attempt, decisions: r.decisions.filter((d) => task.decisionRefs.includes(d.id) || d.requestedBy === actor.sessionId),
       evidence: r.evidence.filter((e) => e.attemptId === attempt.id), contextRefs: attempt.profile?.contextRefs ?? [] };
   }
+  private async sourceFiles(r: MissionRecord): Promise<MissionAttachmentRef[]> {
+    if (!r.sourceSnapshotId) return [];
+    const source = JSON.parse((await this.deps.store.readSource(r.id, r.sourceSnapshotId)).toString('utf8')) as MissionSource;
+    return z.array(z.strictObject({ ref: key, kind: z.literal('file'), name: userFileSchema.shape.name,
+      mimeType: userFileSchema.shape.mimeType, byteLength: z.number().int().positive().max(MAX_FILE_BYTES) })).max(10).parse(source.files ?? []);
+  }
+  private async sourceFileRefs(r: MissionRecord): Promise<string[]> { return (await this.sourceFiles(r)).map((file) => file.ref); }
   private async readContext(r: MissionRecord, actor: MissionToolActor, payload: Record<string, unknown>): Promise<unknown> {
     const query = z.strictObject({ ref: key, offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(64_000).optional(),
-      imageIndex: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), listImages: z.literal(true).optional(),
-    }).refine((value) => !(value.imageIndex !== undefined && value.listImages)
-      && (!(value.imageIndex !== undefined || value.listImages) || value.offset === undefined && value.limit === undefined),
-    'Select text pagination, one image index, or image descriptors, never both.').parse(payload);
+      imageIndex: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), listImages: z.literal(true).optional(), listFiles: z.literal(true).optional(),
+    }).refine((value) => !(value.imageIndex !== undefined && value.listImages) && !(value.listFiles && (value.imageIndex !== undefined || value.listImages))
+      && (!(value.imageIndex !== undefined || value.listImages || value.listFiles) || value.offset === undefined && value.limit === undefined),
+    'Select text/file pagination, an image index, or attachment descriptors, never both.').parse(payload);
     const attempt = actor.kind === 'worker' ? r.attempts.find((a) => a.id === actor.attemptId)! : undefined;
     const allowed = attempt ? new Set([...(attempt.profile?.contextRefs ?? []), ...r.evidence.filter((e) => e.attemptId === attempt.id).flatMap((e) => e.artifactIds), ...(attempt.result?.artifactIds ?? [])])
-      : new Set([r.sourceSnapshotId, ...r.mailbox.flatMap((item) => item.attachments?.map((attachment) => attachment.ref) ?? []), ...r.candidates.map((c) => c.id), ...r.profiles.flatMap((p) => p.contextRefs), ...r.evidence.flatMap((e) => e.artifactIds), ...r.attempts.flatMap((a) => a.result?.artifactIds ?? [])]);
+      : new Set([r.sourceSnapshotId, ...await this.sourceFileRefs(r), ...r.mailbox.flatMap((item) => item.attachments?.map((attachment) => attachment.ref) ?? []), ...r.candidates.map((c) => c.id), ...r.profiles.flatMap((p) => p.contextRefs), ...r.evidence.flatMap((e) => e.artifactIds), ...r.attempts.flatMap((a) => a.result?.artifactIds ?? [])]);
     if (!allowed.has(query.ref)) throw new Error('This opaque context reference is not assigned to this participant.');
-    const attachment = r.mailbox.flatMap((item) => item.attachments ?? []).find((item) => item.ref === query.ref);
+    const attachment = [...r.mailbox.flatMap((item) => item.attachments ?? []), ...(await this.sourceFiles(r))].find((item) => item.ref === query.ref);
+    if (attachment?.kind === 'file') {
+      if (query.imageIndex !== undefined || query.listImages || query.listFiles) throw new Error('File references support only bounded byte pagination.');
+      const bytes = await this.deps.store.readArtifact(r.id, query.ref);
+      if (bytes.length !== attachment.byteLength) throw new Error('Retained file length does not match its immutable metadata.');
+      const offset = query.offset ?? 0, limit = Math.min(query.limit ?? 24_000, 48_000);
+      const end = Math.min(bytes.length, offset + limit);
+      return { kind: 'source_file', ref: query.ref, name: attachment.name, mimeType: attachment.mimeType, byteLength: bytes.length,
+        offset, data: bytes.subarray(offset, end).toString('base64'), nextOffset: end < bytes.length ? end : undefined };
+    }
+    if (query.listFiles) {
+      if (query.ref !== r.sourceSnapshotId) throw new Error('File descriptors apply only to retained source.');
+      return { kind: 'source_files', ref: query.ref, files: await this.sourceFiles(r) };
+    }
     if (attachment) {
       if (query.offset !== undefined || query.limit !== undefined || query.imageIndex !== undefined && query.imageIndex !== 0) throw new Error('Retained user attachment is one image; use imageIndex 0 or listImages.');
       if (query.imageIndex === undefined) return { kind: 'source_images', ref: query.ref, images: [{ imageIndex: 0, mimeType: attachment.mimeType, ...(attachment.name === undefined ? {} : { name: attachment.name }) }] };
@@ -1561,11 +1628,12 @@ export class MissionService implements MissionToolHost {
     } catch (e) { lease?.release(true); await this.dispatchFailure(id, opId, initial.leadSessionId, message(e)); }
   }
   private leadMailText(mail: MissionMailboxItem[]): string {
-    return mail.map((m) => `[${m.kind}; ${m.id}]\n${m.text}${m.attachments?.length ? `\nRetained image references: ${m.attachments.map((a) => a.ref).join(', ')}` : ''}${m.userAction && m.userAction.kind !== 'authorization' ? '\nFor a material correction, use mission_plan_update material.source:{kind:"user_instruction"}; the host binds this delivered instruction once. Preserve required criteria. This is not execution or permission approval.' : ''}`).join('\n\n');
+    return mail.map((m) => `[${m.kind}; ${m.id}]\n${m.text}${m.attachments?.length ? `\nRetained attachment references (read files via mission_context_read): ${m.attachments.map((a) => `${a.ref}${a.kind === 'file' ? ` (${a.name}; ${a.mimeType}; ${a.byteLength} bytes)` : ' (image)'}`).join(', ')}` : ''}${m.userAction && m.userAction.kind !== 'authorization' ? '\nFor a material correction, use mission_plan_update material.source:{kind:"user_instruction"}; the host binds this delivered instruction once. Preserve required criteria. This is not execution or permission approval.' : ''}`).join('\n\n');
   }
   private async mailImages(id: string, mail: MissionMailboxItem[]): Promise<ImageAttachment[]> {
     const images: ImageAttachment[] = [];
     for (const item of mail) for (const attachment of item.attachments ?? []) {
+      if (attachment.kind === 'file') continue;
       const image = userImageSchema.parse(JSON.parse((await this.deps.store.readArtifact(id, attachment.ref)).toString('utf8')));
       if (image.mimeType !== attachment.mimeType || image.name !== attachment.name) throw new Error('Retained user attachment metadata does not match its immutable content.');
       images.push(image);

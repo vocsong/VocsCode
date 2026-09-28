@@ -21,7 +21,7 @@ import { Transcript } from '../src/renderer/src/components/Transcript';
 import { useStore } from '../src/renderer/src/store';
 import { archiveSession } from '../src/renderer/src/sessionActions';
 import { runShortcutCommand } from '../src/renderer/src/shortcuts';
-import { commandMission } from '../src/renderer/src/missions';
+import { commandMission, createMission, sendMissionUser } from '../src/renderer/src/missions';
 // Renderer fixtures stay browser-only; never import a main-process delivery/runtime dependency.
 function missionFixture(patch: Partial<MissionRecord> = {}): MissionRecord {
   const config = createDefaultMissionConfig();
@@ -136,7 +136,7 @@ describe('Mission composer boundary', () => {
     expect(invokeMock.mock.calls.some(([channel]) => channel === 'sessions:send')).toBe(false);
   });
 
-  it('does not discard text or images added while a command acknowledgment is pending', async () => {
+  it('does not discard text or attachments added while a command acknowledgment is pending', async () => {
     let accept!: (reply: { kind: string }) => void;
     invokeMock.mockImplementation(() => new Promise((resolve) => { accept = resolve; }));
     render(<Composer session={ordinary('pending-image-command')} />);
@@ -147,9 +147,12 @@ describe('Mission composer boundary', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep this next draft' } });
     fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { files: [new File(['next'], 'next.png', { type: 'image/png' })] } });
     await screen.findByAltText('next.png');
+    fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { files: [new File(['next file'], 'next.txt', { type: 'text/plain' })] } });
+    await screen.findByText('next.txt');
     await act(async () => accept({ kind: 'updated' }));
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Keep this next draft');
     expect(screen.getByAltText('next.png')).toBeTruthy(); expect(screen.queryByAltText('first.png')).toBeNull();
+    expect(screen.getByText('next.txt')).toBeTruthy();
     expect(useStore.getState().drafts['pending-image-command']).toBe('Keep this next draft');
   });
 
@@ -171,17 +174,84 @@ describe('Mission composer boundary', () => {
     expect(changed.images).toEqual(images); expect(changed.idempotencyKey).not.toBe(first.idempotencyKey);
   });
 
+  it('binds command retries to exact ordered file bytes and keeps file drafts after a lost reply', async () => {
+    const source = ordinary('file-command-retry');
+    const original = invokeMock.getMockImplementation()!;
+    let fail = true;
+    invokeMock.mockImplementation((channel, input) => channel === 'missions:command'
+      ? fail ? Promise.reject(new Error('Lost command reply')) : Promise.resolve({ kind: 'created', mission: record })
+      : original(channel, input));
+    render(<Composer session={source} />);
+    fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { files: [new File(['first'], 'first.txt', { type: 'text/plain' }), new File(['second'], 'second.txt', { type: 'text/plain' })] } });
+    await screen.findByText('second.txt');
+    submit('/mission Inspect these files');
+    await waitFor(() => expect(useStore.getState().toasts.at(-1)?.text).toContain('Lost command reply'));
+    const first = invokeMock.mock.calls.find(([channel]) => channel === 'missions:command')![1];
+    expect(first.files).toEqual([{ name: 'first.txt', mimeType: 'text/plain', data: btoa('first') }, { name: 'second.txt', mimeType: 'text/plain', data: btoa('second') }]);
+    expect(screen.getByText('first.txt')).toBeTruthy();
+    fail = false;
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+    await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(''));
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'missions:command').map(([, input]) => input)).toEqual([first, first]);
+    expect(screen.queryByText('first.txt')).toBeNull();
+    const files = [{ name: 'copy.txt', mimeType: 'text/plain', data: btoa('first') }];
+    invokeMock.mockRejectedValueOnce(new Error('Uncertain reply'));
+    const failed = commandMission(source, '/mission Compare', undefined, files);
+    files[0].data = btoa('changed');
+    await expect(failed).rejects.toThrow('Uncertain reply');
+    const captured = invokeMock.mock.calls.filter(([channel]) => channel === 'missions:command')[2][1];
+    expect(captured.files[0].data).toBe(btoa('first'));
+    invokeMock.mockResolvedValue({ kind: 'status' });
+    await commandMission(source, '/mission Compare', undefined, [{ ...captured.files[0] }]);
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'missions:command')[3][1]).toEqual(captured);
+    await commandMission(source, '/mission Compare', undefined, files);
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'missions:command')[4][1].idempotencyKey).not.toBe(captured.idempotencyKey);
+  });
+
   it('keeps a bare Mission command and images visible when its dialog boundary refuses attachments', async () => {
-    invokeMock.mockRejectedValue(new Error('Mission controls cannot take images. Add an objective to /mission.'));
     render(<Composer session={ordinary('bare-image-command')} />);
     fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { files: [new File(['pixels'], 'draft.png', { type: 'image/png' })] } });
     await screen.findByAltText('draft.png');
     submit('/mission');
-    await waitFor(() => expect(useStore.getState().toasts.at(-1)?.text).toContain('cannot take images'));
+    expect(useStore.getState().toasts.at(-1)?.text).toContain('cannot take attachments');
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('/mission');
     expect(screen.getByAltText('draft.png')).toBeTruthy();
     expect(useStore.getState().newSessionKind).toBe('normal');
-    expect(invokeMock).toHaveBeenCalledWith('missions:command', expect.objectContaining({ images: [{ mimeType: 'image/png', data: btoa('pixels'), name: 'draft.png' }] }));
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('passes attached files to Mission lead steering and completed read-only questions', async () => {
+    const lead = owned('lead');
+    const ui = render(<Composer session={lead} />);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Please inspect this document' } });
+    fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { files: [new File(['document'], 'requirements.txt', { type: 'text/plain' })] } });
+    await screen.findByText('requirements.txt');
+    fireEvent.click(screen.getByRole('button', { name: 'Send to lead' }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sessions:send', expect.objectContaining({ id: lead.id, input: expect.objectContaining({ text: 'Please inspect this document', files: [{ name: 'requirements.txt', mimeType: 'text/plain', data: btoa('document') }] }) })));
+    ui.unmount();
+    record = { ...record, status: 'completed', pendingProposal: undefined };
+    useStore.setState({ missions: { mission: record } });
+    render(<Composer session={lead} />);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'What did the report conclude?' } });
+    fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { files: [new File(['report'], 'report.pdf', { type: 'application/pdf' })] } });
+    await screen.findByText('report.pdf');
+    fireEvent.click(screen.getByRole('button', { name: 'Ask lead' }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sessions:send', expect.objectContaining({ id: lead.id, input: expect.objectContaining({ text: 'What did the report conclude?', files: [{ name: 'report.pdf', mimeType: 'application/pdf', data: btoa('report') }] }) })));
+  });
+
+  it('retains file attachments on bare/control commands, without sending or clearing them', async () => {
+    render(<Composer session={ordinary('file-control')} />);
+    fireEvent.paste(screen.getByRole('textbox'), { clipboardData: { files: [new File(['context'], 'context.txt', { type: 'text/plain' })] } });
+    await screen.findByText('context.txt');
+    submit('/mission pause');
+    expect(useStore.getState().toasts.at(-1)?.text).toContain('cannot take attachments');
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('/mission pause');
+    expect(screen.getByText('context.txt')).toBeTruthy();
+    expect(invokeMock).not.toHaveBeenCalled();
+    submit('/mission');
+    expect(screen.getByText('context.txt')).toBeTruthy();
+    expect(useStore.getState().newSessionKind).toBe('normal');
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
   it('retries a genuine Mission message with the original request key after a lost reply, including a remount', async () => {
@@ -207,6 +277,21 @@ describe('Mission composer boundary', () => {
     await waitFor(() => expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:send')).toHaveLength(3));
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:send')[2][1].idempotencyKey).not.toBe(first.idempotencyKey);
   });
+  it('keeps exact file bytes in message retry identity rather than mutable caller input', async () => {
+    const files = [{ name: 'evidence.txt', mimeType: 'text/plain', data: btoa('original') }];
+    invokeMock.mockRejectedValueOnce(new Error('Lost message reply'));
+    const failed = sendMissionUser('lead', { text: 'Look at this', files, mode: 'now' });
+    files[0].data = btoa('different');
+    await expect(failed).rejects.toThrow('Lost message reply');
+    const first = invokeMock.mock.calls.find(([channel]) => channel === 'sessions:send')![1];
+    expect(first.input.files[0].data).toBe(btoa('original'));
+    invokeMock.mockResolvedValue(undefined);
+    await sendMissionUser('lead', { text: 'Look at this', files: [{ ...first.input.files[0] }], mode: 'now' });
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:send')[1][1]).toEqual(first);
+    await sendMissionUser('lead', { text: 'Look at this', files, mode: 'now' });
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:send')[2][1].idempotencyKey).not.toBe(first.idempotencyKey);
+  });
+
   it('parses exactly before native forwarding; duplicate submissions and a network retry share the launch key', async () => {
     let reject!: (error: Error) => void;
     invokeMock.mockImplementation((channel: string) => channel === 'missions:command' ? new Promise((_resolve, no) => { reject = no; }) : Promise.resolve([]));
@@ -294,6 +379,41 @@ describe('Mission launch and controls', () => {
     expect(screen.queryByRole('button', { name: 'Open PR only' })).toBeNull();
     expect(!!screen.queryByRole('button', { name: 'Keep Mission local' })).toBe(endpoint === 'open_pr');
     expect(invokeMock.mock.calls.some(([channel]) => channel === 'sessions:send' || channel === 'settings:update')).toBe(false);
+  });
+
+  it('attaches files and images at launch and retries the exact attachment payload after a lost reply', async () => {
+    useStore.setState({ newSessionKind: 'mission', newMissionSourceId: 'source' });
+    const original = invokeMock.getMockImplementation()!;
+    let fail = true;
+    invokeMock.mockImplementation((channel, input) => channel === 'missions:create' && fail ? Promise.reject(new Error('Lost launch reply')) : original(channel, input));
+    render(<NewSessionDialog />);
+    fireEvent.change(screen.getByLabelText('Mission objective'), { target: { value: 'Inspect attachments' } });
+    fireEvent.paste(screen.getByLabelText('Mission objective'), { clipboardData: { files: [new File(['data'], 'notes.txt', { type: 'text/plain' }), new File(['pixels'], 'screenshot.png', { type: 'image/png' })] } });
+    await screen.findByText('notes.txt');
+    fireEvent.click(screen.getByRole('button', { name: 'Start Mission' }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Lost launch reply'));
+    const first = invokeMock.mock.calls.find(([channel]) => channel === 'missions:create')![1];
+    expect(first).toMatchObject({ objective: 'Inspect attachments', files: [{ name: 'notes.txt', mimeType: 'text/plain', data: btoa('data') }], images: [{ name: 'screenshot.png', mimeType: 'image/png', data: btoa('pixels') }], idempotencyKey: expect.any(String) });
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Start Mission' }));
+    await waitFor(() => expect(useStore.getState().activeId).toBe('lead'));
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'missions:create').map(([, input]) => input)).toEqual([first, first]);
+  });
+
+  it('captures the launch file payload before caller mutation, with exact-content retry identity', async () => {
+    const files = [{ name: 'evidence.txt', mimeType: 'text/plain', data: btoa('original') }];
+    const input = { projectRoot: '/project', objective: 'Investigate', mode: 'autonomous' as const, permissionMode: 'ask' as const, files };
+    invokeMock.mockRejectedValueOnce(new Error('Lost launch reply'));
+    const failed = createMission(input);
+    files[0].data = btoa('different');
+    await expect(failed).rejects.toThrow('Lost launch reply');
+    const first = invokeMock.mock.calls.find(([channel]) => channel === 'missions:create')![1];
+    expect(first.files[0].data).toBe(btoa('original'));
+    invokeMock.mockResolvedValue(record);
+    await createMission({ ...input, files: [{ ...first.files[0] }] });
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'missions:create')[1][1]).toEqual(first);
+    await createMission(input);
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'missions:create')[2][1].idempotencyKey).not.toBe(first.idempotencyKey);
   });
 
   it('offers normal/Mission, Plan together/Autonomous and only enabled T5 presets without changing source settings', async () => {

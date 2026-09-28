@@ -163,13 +163,16 @@ function SessionComposer({ session }: { session: SessionMeta }) {
     // Mission owns its exact token before native /goal or harness command forwarding.
     const missionCommand = parseMissionCommand(text);
     if (missionCommand) {
-      if (files.length) { toast('Mission commands cannot include file attachments. Remove them or send a regular message.', 'error'); return; }
+      if ((missionCommand.kind === 'show' || missionCommand.kind === 'control') && (images.length || files.length)) {
+        toast('Mission controls cannot take attachments. Add an objective to /mission or remove the attachments.', 'error');
+        return;
+      }
       if (missionCommand.kind === 'error') { toast(missionCommand.message, 'error'); return; }
       if (missionPending.current) return;
       missionPending.current = true;
       setMissionSending(true);
       try {
-        await commandMission(session, text, images);
+        await commandMission(session, text, images, files);
         pushHistory(session.id, t);
         if ((ref.current?.value ?? useStore.getState().drafts[session.id]) === text) {
           clearDraft();
@@ -183,7 +186,6 @@ function SessionComposer({ session }: { session: SessionMeta }) {
       } finally { missionPending.current = false; setMissionSending(false); }
       return;
     }
-    if (session.mission && files.length) { toast('Mission messages cannot include file attachments yet. Remove them or use a regular session.', 'error'); return; }
     if (session.mission && typedCommand === 'goal') {
       toast('Mission already owns execution. Use /mission pause, /mission resume, /mission stop, or Proceed on the current plan.', 'info');
       useStore.getState().setPanelTab('goal');
@@ -471,10 +473,6 @@ function SessionComposer({ session }: { session: SessionMeta }) {
 
   const addFiles = async (list: Iterable<File>) => {
     const chosen = [...list];
-    if (session.mission && chosen.some((file) => !file.type.startsWith('image/'))) {
-      toast('Mission messages support images only; non-image files are not accepted.', 'error');
-      return;
-    }
     const added = await readAttachments(chosen, (message) => toast(message, 'error'));
     setImages((prev) => [...prev, ...added.images]);
     setFiles((prev) => [...prev, ...added.files]);
@@ -548,14 +546,14 @@ function SessionComposer({ session }: { session: SessionMeta }) {
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste images)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… (/ commands, @ files, ! shell, paste images)'}
+          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste attachments)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… (/ commands, @ files, ! shell, paste images)'}
           rows={1}
           spellCheck
         />
         <div className="composer-actions">
-          <label className="icon-btn" title={session.mission ? 'Attach images' : 'Attach files'}>
-            <Icon name={session.mission ? 'image' : 'file'} size={16} />
-            <input type="file" accept={session.mission ? 'image/*' : undefined} multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
+          <label className="icon-btn" title="Attach files">
+            <Icon name="file" size={16} />
+            <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
           </label>
           {shellDraft && !completed ? (
             <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">

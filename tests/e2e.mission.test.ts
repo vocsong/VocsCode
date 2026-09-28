@@ -356,6 +356,9 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     await win.locator('.composer textarea').press('Enter');
     await win.getByLabel('Mission mode', { exact: true }).selectOption('interactive_plan');
     await win.getByLabel('Mission objective', { exact: true }).fill('Plan the linked change');
+    const launchFile = Buffer.from('dialog launch context');
+    await win.locator('.mission-launch input[type=file]').setInputFiles({ name: 'launch.txt', mimeType: 'text/plain', buffer: launchFile });
+    await win.getByRole('button', { name: 'Remove launch.txt' }).waitFor();
     await win.getByRole('button', { name: 'Start Mission', exact: true }).click();
     await win.getByTestId('mission-header').waitFor();
     await expect.poll(() => win.getByTestId('session-title').innerText()).toBe('Plan the linked change');
@@ -365,6 +368,9 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     const mission = await persisted(userData, ids[0]);
     expect(mission).toMatchObject({ originSessionId: source.id, sourceCutoffId: 'source-message', entryMode: 'interactive_plan', requestedPermissionMode: 'ask' });
     expect(mission.sourceSnapshotId).toBeTruthy();
+    const sourceBlob = JSON.parse(await fs.readFile(path.join(userData, 'missions', mission.id, 'source', mission.sourceSnapshotId!), 'utf8'));
+    expect(sourceBlob.files).toEqual([expect.objectContaining({ kind: 'file', name: 'launch.txt', mimeType: 'text/plain', byteLength: launchFile.length })]);
+    expect(await fs.readFile(path.join(userData, 'missions', mission.id, 'artifacts', `retained-${sourceBlob.files[0].ref.split('-')[1]}`, 'content'))).toEqual(launchFile);
     expect(mission.executionAuthorization).toBeUndefined();
     expect(mission.evidence).toEqual([]);
     expect(mission.delivery).toBeUndefined();
@@ -379,17 +385,21 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     expect(await fs.readFile(path.join(project, 'result.txt'), 'utf8')).toBe('source baseline\n');
   }, 120_000);
 
-  it('keeps bare-command image drafts visible, then retains the exact attachments when an objective is submitted', async () => {
+  it('keeps bare-command attachment drafts visible, then retains the exact files and images on objective launch', async () => {
     const { userData, project, source } = await setup(true);
     const win = await launch(userData);
     const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aVSUAAAAASUVORK5CYII=', 'base64');
     await win.locator('.composer input[type=file]').setInputFiles({ name: 'new-context.png', mimeType: 'image/png', buffer: bytes });
     await win.getByAltText('new-context.png', { exact: true }).waitFor();
+    const fileBytes = Buffer.from('typed command context');
+    await win.locator('.composer input[type=file]').setInputFiles({ name: 'context.txt', mimeType: 'text/plain', buffer: fileBytes });
+    await win.getByRole('button', { name: 'Remove context.txt' }).waitFor();
     await win.locator('.composer textarea').fill('/mission');
     await win.locator('.composer textarea').press('Enter');
-    await win.getByRole('alert').filter({ hasText: 'cannot take images' }).waitFor();
+    await win.getByRole('alert').filter({ hasText: 'cannot take attachments' }).waitFor();
     expect(await win.locator('.composer textarea').inputValue()).toBe('/mission');
     expect(await win.getByAltText('new-context.png', { exact: true }).count()).toBe(1);
+    expect(await win.getByRole('button', { name: 'Remove context.txt' }).count()).toBe(1);
     expect(await win.getByLabel('Mission objective', { exact: true }).count()).toBe(0);
     const command = '/mission plan Implement this visual requirement';
     await win.locator('.composer textarea').fill(command);
@@ -402,7 +412,11 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     const retained = JSON.parse(await fs.readFile(path.join(userData, 'missions', mission.id, 'source', mission.sourceSnapshotId!), 'utf8'));
     expect(retained).toMatchObject({ originSessionId: source.id, cutoffId: 'source-message', submittedCommand: command, images: [{ mimeType: 'image/png', data: bytes.toString('base64'), name: 'new-context.png' }] });
     expect(retained.items).toEqual([{ id: 'source-message', kind: 'user', ts: 1, text: 'Keep the source checkout unchanged.' }]);
-    expect((await fs.readFile(path.join(userData, 'missions', mission.id, 'journal.jsonl'), 'utf8')).includes(bytes.toString('base64'))).toBe(false);
+    expect(retained.files).toEqual([expect.objectContaining({ kind: 'file', name: 'context.txt', mimeType: 'text/plain', byteLength: fileBytes.length })]);
+    expect(await fs.readFile(path.join(userData, 'missions', mission.id, 'artifacts', `retained-${retained.files[0].ref.split('-')[1]}`, 'content'))).toEqual(fileBytes);
+    const journal = await fs.readFile(path.join(userData, 'missions', mission.id, 'journal.jsonl'), 'utf8');
+    expect(journal).not.toContain(bytes.toString('base64'));
+    expect(journal).not.toContain(fileBytes.toString('base64'));
     expect(mission.executionAuthorization).toBeUndefined();
     await win.getByRole('button', { name: 'Source discussion: Original discussion', exact: true }).click();
     expect(await win.locator('.composer textarea').inputValue()).toBe('');

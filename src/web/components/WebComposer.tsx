@@ -9,6 +9,8 @@ import type { FileAttachment, SessionMeta, SendMode } from '@shared/types';
 // Base64 and the sealed remote frame expand these bytes; keep the per-file cap conservative.
 const MAX_FILE_BYTES = 128 * 1024;
 const MAX_FILES = 2;
+// A lost reply must not become a second Mission action when the composer remounts.
+const pendingMissionSends = new Map<string, { payload: string; key: string }>();
 
 async function encodeFile(file: File): Promise<FileAttachment> {
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -35,7 +37,7 @@ export function WebComposer({ session, offline }: { session: SessionMeta; offlin
   const canSend = !sending && !reading && (!!draft.trim() || files.length > 0);
 
   const addFiles = async (list: FileList | File[]) => {
-    if (readingRef.current || sending || !readable || session.mission) return;
+    if (readingRef.current || sending || !readable) return;
     readingRef.current = true;
     setReading(true);
     setFileError('');
@@ -74,9 +76,16 @@ export function WebComposer({ session, offline }: { session: SessionMeta; offlin
   const send = async (mode: SendMode) => {
     const text = draft.trim();
     if ((!text && !files.length) || sending || readingRef.current || !readable) return;
+    const input = { text, ...(files.length ? { files } : {}), ...(mode !== 'now' ? { mode } : {}) };
+    const payload = JSON.stringify({ sessionId: session.id, input });
+    if (session.mission && pendingMissionSends.get(session.id)?.payload !== payload) {
+      pendingMissionSends.set(session.id, { payload, key: globalThis.crypto.randomUUID() });
+    }
+    const key = session.mission ? pendingMissionSends.get(session.id)!.key : undefined;
     setSending(true);
     try {
-      await invoke('sessions:send', { id: session.id, input: { text, ...(files.length ? { files } : {}), ...(mode !== 'now' ? { mode } : {}) } });
+      await invoke('sessions:send', { id: session.id, input, ...(key ? { idempotencyKey: key } : {}) });
+      if (key && pendingMissionSends.get(session.id)?.key === key) pendingMissionSends.delete(session.id);
       if (useStore.getState().drafts[session.id] === draft) setDraft(session.id, '');
       setFiles([]);
       setFileError('');
@@ -126,7 +135,7 @@ export function WebComposer({ session, offline }: { session: SessionMeta; offlin
         />
         <div className="w-composer-actions">
           <input ref={picker} className="w-composer-picker" type="file" multiple aria-label="Choose files" onChange={(e) => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }} />
-          <Button size="sm" variant="ghost" icon="file" disabled={sending || reading || !!session.mission} onClick={() => picker.current?.click()} aria-label="Attach files" title="Non-image files, max 2 · 128 KiB each" />
+          <Button size="sm" variant="ghost" icon="file" disabled={sending || reading} onClick={() => picker.current?.click()} aria-label="Attach files" title="Non-image files, max 2 · 128 KiB each" />
           {running ? (
             <>
               <Button size="sm" variant="ghost" disabled={!canSend} onClick={() => void send('steer')}>Steer</Button>

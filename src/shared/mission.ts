@@ -1,6 +1,6 @@
 /** Mission control-plane contracts. SessionManager still owns each harness and its usage ledger. */
 import type { ExecutionPreset, MissionConfig, MissionProviderRestrictions, TierId } from './mission-config';
-import type { ImageAttachment, PermissionMode, TranscriptItem, UsageTotals } from './types';
+import type { FileAttachment, ImageAttachment, PermissionMode, TranscriptItem, UsageTotals } from './types';
 
 export type MissionMode = 'interactive_plan' | 'autonomous';
 export type MissionPhase = 'planning' | 'executing' | 'verifying' | 'delivering' | 'done';
@@ -378,6 +378,9 @@ export interface MissionAttachmentRef {
   ref: string;
   mimeType: string;
   name?: string;
+  /** File bytes are retained outside the journal; older image refs omit this discriminator. */
+  kind?: 'file';
+  byteLength?: number;
 }
 
 export interface MissionMailboxItem {
@@ -480,6 +483,7 @@ export interface MissionSource {
   objective: string;
   items: TranscriptItem[];
   images?: ImageAttachment[];
+  files?: MissionAttachmentRef[];
   capturedAt: number;
 }
 
@@ -493,6 +497,7 @@ export interface CreateMissionRequest {
   permissionMode: PermissionMode;
   submittedCommand?: string;
   images?: ImageAttachment[];
+  files?: FileAttachment[];
 }
 
 export interface MissionView {
@@ -505,7 +510,7 @@ export interface MissionView {
 export type MissionUserControl =
   | { action: 'execute'; proposalId: string; specificationRevision: number }
   | { action: 'pause' | 'resume' | 'stop' | 'continue_planning' | 'cleanup' }
-  | { action: 'steer'; text: string; images?: ImageAttachment[] }
+  | { action: 'steer'; text: string; images?: ImageAttachment[]; files?: FileAttachment[] }
   | { action: 'replace_lead'; presetId: string }
   | { action: 'narrow_delivery'; endpoint: 'local_commit' | 'open_pr' }
   | { action: 'apply_configuration' };

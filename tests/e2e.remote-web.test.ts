@@ -284,6 +284,9 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     await page.locator('[aria-label="Send"]').click();
     await expect.poll(() => work.sent.length, { timeout: 20_000 }).toBe(1);
     expect(work.sent[0]).toEqual({ id: 'Work-s1', input: { text: 'ship it' } });
+    // The desktop receipt can lag the host-side send; wait for the composer to finish before
+    // selecting a file. Its picker intentionally ignores changes during an in-flight send.
+    await expect.poll(() => page.locator('[aria-label="Attach files"]').isEnabled()).toBe(true);
 
     // The browser sends only bounded non-image attachments; a refused file leaves the draft intact.
     const picker = page.locator('input[aria-label="Choose files"]');

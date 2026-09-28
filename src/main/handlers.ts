@@ -138,23 +138,31 @@ const missionKeySchema = z.string().min(1).max(200);
 const missionTextSchema = z.string().min(1).max(100_000).refine((text) => !!text.trim(), 'Text must not be empty');
 const missionImageSchema = z.strictObject({ mimeType: z.string().regex(/^image\/[a-z0-9.+-]+$/i), data: z.string().min(1).max(32_000_000), name: z.string().max(1000).optional() });
 const missionImagesSchema = z.array(missionImageSchema).max(100).optional();
+const missionFileSchema = z.strictObject({
+  name: z.string().min(1).max(255), mimeType: z.string().min(1).max(200),
+  data: z.string().min(1).max(Math.ceil(10 * 1024 * 1024 / 3) * 4 + 4).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'Invalid file encoding')
+});
+const missionFilesSchema = z.array(missionFileSchema).max(10).refine(
+  (files) => files.reduce((size, file) => size + Buffer.byteLength(file.data, 'base64'), 0) <= 30 * 1024 * 1024,
+  'Attachments exceed 30 MiB per message'
+).optional();
 const missionCreateSchema = z.strictObject({
   idempotencyKey: missionKeySchema, projectRoot: missionTextSchema, originSessionId: missionIdSchema.optional(),
   objective: missionTextSchema, mode: z.enum(['interactive_plan', 'autonomous']), leadPresetId: missionIdSchema.optional(),
-  permissionMode: z.enum(['ask', 'accept-edits', 'plan', 'auto', 'full-auto']), submittedCommand: missionTextSchema.optional(), images: missionImagesSchema
+  permissionMode: z.enum(['ask', 'accept-edits', 'plan', 'auto', 'full-auto']), submittedCommand: missionTextSchema.optional(), images: missionImagesSchema, files: missionFilesSchema
 });
 const missionControlSchema = z.strictObject({
   missionId: missionIdSchema, idempotencyKey: missionKeySchema, expectedRevision: z.number().int().nonnegative(), submittedCommand: missionTextSchema.optional(),
   control: z.discriminatedUnion('action', [
     z.strictObject({ action: z.literal('execute'), proposalId: missionIdSchema, specificationRevision: z.number().int().positive() }),
     z.strictObject({ action: z.enum(['pause', 'resume', 'stop', 'continue_planning', 'cleanup', 'apply_configuration']) }),
-    z.strictObject({ action: z.literal('steer'), text: missionTextSchema, images: missionImagesSchema }),
+    z.strictObject({ action: z.literal('steer'), text: missionTextSchema, images: missionImagesSchema, files: missionFilesSchema }),
     z.strictObject({ action: z.literal('replace_lead'), presetId: missionIdSchema }),
     z.strictObject({ action: z.literal('narrow_delivery'), endpoint: z.enum(['local_commit', 'open_pr']) })
   ])
 });
-const missionCommandSchema = z.strictObject({ sessionId: missionIdSchema, text: missionTextSchema, idempotencyKey: missionKeySchema, images: missionImagesSchema });
-const missionInputSchema = z.strictObject({ text: z.string().max(100_000), images: missionImagesSchema, mode: z.enum(['now', 'steer', 'queue']).optional() });
+const missionCommandSchema = z.strictObject({ sessionId: missionIdSchema, text: missionTextSchema, idempotencyKey: missionKeySchema, images: missionImagesSchema, files: missionFilesSchema });
+const missionInputSchema = z.strictObject({ text: z.string().max(100_000), images: missionImagesSchema, files: missionFilesSchema, mode: z.enum(['now', 'steer', 'queue']).optional() });
 
 /** All generic writer/lifecycle entry points must pass the same resource check, including
  * ordinary-session aliases. Read channels deliberately do not acquire mutation authority. */
@@ -532,7 +540,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const command = parseMissionCommand(req.text);
     if (!command) throw new Error('Use the exact /mission command. /missionary is not a Mission command.');
     if (command.kind === 'error') throw new Error(command.message);
-    if (req.images?.length && command.kind !== 'launch') throw new Error('Mission controls and the creation dialog cannot take images. Add an objective to /mission to send the images as context, or remove them before using a control.');
+    if ((req.images?.length || req.files?.length) && command.kind !== 'launch') throw new Error('Mission controls and the creation dialog cannot take attachments. Add an objective to /mission to send them as context, or remove them before using a control.');
     const source = sessionFor(req.sessionId);
     let mission = missionFor(source);
     if (mission) requireLead(source, mission);
@@ -543,7 +551,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     }
     if (command.kind === 'launch' && (!mission || command.explicit)) {
       const created = await createMission({ idempotencyKey: req.idempotencyKey, projectRoot: source.config.projectRoot, originSessionId: source.id,
-        objective: command.objective, mode: command.mode, permissionMode: mission?.requestedPermissionMode ?? source.config.permissionMode, submittedCommand: req.text, ...(req.images?.length ? { images: req.images } : {}) });
+        objective: command.objective, mode: command.mode, permissionMode: mission?.requestedPermissionMode ?? source.config.permissionMode, submittedCommand: req.text, ...(req.images?.length ? { images: req.images } : {}), ...(req.files?.length ? { files: req.files } : {}) });
       return { kind: 'created', mission: created, sessionId: created.leadSessionId };
     }
     if (!mission) throw new Error('Open a Mission first, or use /mission <objective> to create one.');
@@ -564,7 +572,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       // Retain the actual command and attachments through the same host user-input path as
       // chat. It restores the original received revision on a lost-reply retry; rebinding a
       // control to today's revision would either duplicate the input or reject an exact retry.
-      await missionService().sendUser(source.id, { text: req.text, ...(req.images?.length ? { images: req.images } : {}) }, `${req.idempotencyKey}:steer`);
+      await missionService().sendUser(source.id, { text: req.text, ...(req.images?.length ? { images: req.images } : {}), ...(req.files?.length ? { files: req.files } : {}) }, `${req.idempotencyKey}:steer`);
       mission = missionService().get(mission.id);
       if (!mission) throw new Error('Mission state is unavailable after retaining the command. Retry the same input.');
     }
