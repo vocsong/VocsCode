@@ -1,6 +1,5 @@
-# Continuous verification for PRs into develop: the AGENTS.md gate plus the e2e tiers that need no
-# provider credit. The live smoke/e2e tiers stay manual — they spend money and need a logged-in
-# runtime — so they are deliberately absent here.
+# Develop PRs run a compact reviewed test gate. Full offline and no-provider E2E coverage is run
+# before release to master (and on manual dispatch); paid/live tiers remain manual.
 name: CI
 
 on:
@@ -32,24 +31,46 @@ jobs:
       # The native search regressions exercise both real ripgrep and the JS fallback.
       - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm run typecheck
-      - run: npm test -- --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/offline-report.json"
-      - run: node scripts/test-metrics.mjs "$RUNNER_TEMP/offline-report.json" offline tests/artifacts/offline-metrics.json
-        if: always()
+      # The develop gate uses a reviewed small set; the broad offline suite runs before release.
+      - name: Focused develop regression suite
+        if: >-
+          github.event_name != 'workflow_dispatch' &&
+          !(github.event_name == 'push' && github.ref == 'refs/heads/master') &&
+          !(github.event_name == 'pull_request' && github.base_ref == 'master')
+        run: npm run test:pr
+        env:
+          VOCS_CODE_TEST_REPORT: ${{ runner.temp }}/pr-report.json
+      - name: Full offline suite
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+          (github.event_name == 'pull_request' && github.base_ref == 'master')
+        run: npm test -- --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/full-report.json"
+      - name: Summarize focused test timings
+        if: always() && github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/master' && github.base_ref != 'master'
+        run: node scripts/test-metrics.mjs "$RUNNER_TEMP/pr-report.json" develop-pr tests/artifacts/pr-metrics.json
+      - name: Summarize full test timings
+        if: always() && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master' || github.base_ref == 'master')
+        run: node scripts/test-metrics.mjs "$RUNNER_TEMP/full-report.json" full-offline tests/artifacts/offline-metrics.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: offline-test-report
-          path: tests/artifacts/offline-metrics.json
+          path: tests/artifacts/*-metrics.json
           if-no-files-found: ignore
           retention-days: 7
       # Run Hub + socket tags/queues in workerd; the Node fake cannot model DO hibernation.
       - run: npm run test:relay-do
       - run: npm run build
 
-  # Windows is the app's primary target (ConPTY, the NSIS installer, the unpacked node-pty binaries),
-  # so the Electron suites run there.
+  # Full no-provider Electron coverage runs on Windows as part of release-to-master validation.
   e2e:
     name: e2e, no provider credit (windows)
+    # The full browser suite is part of release-to-master/manual validation, not each develop PR.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'pull_request' && github.base_ref == 'master')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
