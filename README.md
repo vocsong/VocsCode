@@ -57,7 +57,7 @@ Vocs Code is developed agent-first — most changes land via coding agents. Prer
 git clone https://github.com/vocsong/VocsCode.git && cd VocsCode && npm run setup
 ```
 
-The default branch is `develop`; all PRs land there. Before opening one, read [AGENTS.md](AGENTS.md) — it sets the working agreements: every change must pass `npm run typecheck`, `npm test`, and `npm run build`; behavior changes need a test that fails before the fix; adapters, permissions, and persistence carry extra coverage rules.
+The default branch is `develop`; all PRs land there. Before opening one, read [AGENTS.md](AGENTS.md) — it sets the working agreements: every change must pass `npm run typecheck`, `npm run test:changed`, and `npm run build` (the full `npm test` and E2E tier run before each release to `master`); behavior changes need a test that fails before the fix; adapters, permissions, and persistence carry extra coverage rules.
 
 PRs are squash-merged, and titles follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `chore:`, `docs:`, …) — the squash commit's message is what the release bot parses to write the changelog and pick version bumps. How a merged PR becomes an installer on the Releases page is documented in [Releasing](docs/RELEASING.md).
 
