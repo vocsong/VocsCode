@@ -238,7 +238,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     // The engine reads the project's own CLAUDE.md through `settingSources`; everything it does not
     // read is appended here, so every harness starts from the same instruction files.
     const project = s.claude.settingSources.includes('project') ? await claudeProjectInstructions(meta.cwd) : undefined;
-    const append = [project, sessionAppendPrompt(meta)].filter(Boolean).join('\n\n') || undefined;
+    const append = [project, sessionAppendPrompt(meta, await this.ctx.appInstructions?.())].filter(Boolean).join('\n\n') || undefined;
     const mode = meta.mission?.sourceAccess === 'read_only' ? 'plan' : this.ctx.permissionMode();
     const bin = this.ctx.runtime.resolve('claude');
     // Windows cannot launch a batch shim through the SDK's shell-free spawn. If the resolver

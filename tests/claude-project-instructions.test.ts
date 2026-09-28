@@ -31,7 +31,7 @@ async function project(files: Record<string, string>): Promise<string> {
   return cwd;
 }
 
-function ctx(cwd: string, settingSources: ('user' | 'project' | 'local')[], appendSystemPrompt?: string): HarnessContext {
+function ctx(cwd: string, settingSources: ('user' | 'project' | 'local')[], appendSystemPrompt?: string, appInstructions?: string): HarnessContext {
   const meta: SessionMeta = {
     id: 's1',
     title: 't',
@@ -50,6 +50,7 @@ function ctx(cwd: string, settingSources: ('user' | 'project' | 'local')[], appe
     runtime: { resolve: () => ({ path: process.execPath, source: 'system' }) },
     sessionDir: cwd,
     permissionMode: () => 'ask' as const,
+    ...(appInstructions ? { appInstructions: async () => appInstructions } : {}),
     effort: () => undefined,
     getApiKey: async () => undefined,
     mcpServers: async () => [],
@@ -65,10 +66,10 @@ function ctx(cwd: string, settingSources: ('user' | 'project' | 'local')[], appe
 }
 
 /** Starts once against an empty message stream and returns the system prompt's append text. */
-async function appendFor(cwd: string, settingSources: ('user' | 'project' | 'local')[] = ['user', 'project', 'local'], appendSystemPrompt?: string): Promise<string | undefined> {
+async function appendFor(cwd: string, settingSources: ('user' | 'project' | 'local')[] = ['user', 'project', 'local'], appendSystemPrompt?: string, appInstructions?: string): Promise<string | undefined> {
   queryMock.mockReset();
   queryMock.mockReturnValue({ [Symbol.asyncIterator]: async function* () {}, setModel: vi.fn(), close: vi.fn(), interrupt: vi.fn() });
-  await new ClaudeAdapter(ctx(cwd, settingSources, appendSystemPrompt)).start();
+  await new ClaudeAdapter(ctx(cwd, settingSources, appendSystemPrompt, appInstructions)).start();
   const options = (queryMock.mock.calls[0][0] as { options: { systemPrompt: { append?: string } } }).options;
   return options.systemPrompt.append;
 }
@@ -102,5 +103,13 @@ describe('Claude project instructions', () => {
     expect(append).toContain('Project rule.');
     expect(append).toContain('Session rule.');
     expect(append!.indexOf('Project rule.')).toBeLessThan(append!.indexOf('Session rule.'));
+  });
+
+  it('adds the app instruction layer ahead of the session prompt', async () => {
+    const cwd = await project({ 'AGENTS.md': 'Project rule.' });
+    const append = await appendFor(cwd, ['project'], 'Session rule.', 'App layer rule.');
+    expect(append).toContain('App layer rule.');
+    expect(append!.indexOf('Project rule.')).toBeLessThan(append!.indexOf('App layer rule.'));
+    expect(append!.indexOf('App layer rule.')).toBeLessThan(append!.indexOf('Session rule.'));
   });
 });

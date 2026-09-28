@@ -199,7 +199,7 @@ export class NativeAdapter implements HarnessAdapter {
           this.history.push({ role: 'user', text: `[steer] ${s.text}`, images: s.images });
           this.ctx.updateMeta({ queued: this.queue.length + this.steer.length });
         }
-        const system = await buildSystemPrompt(this.ctx.session().cwd, { planMode: this.ctx.permissionMode() === 'plan', append: sessionAppendPrompt(this.ctx.session()), model });
+        const system = await buildSystemPrompt(this.ctx.session().cwd, { planMode: this.ctx.permissionMode() === 'plan', append: sessionAppendPrompt(this.ctx.session(), await this.ctx.appInstructions?.()), model });
         const assistant: Extract<TranscriptItem, { kind: 'assistant' }> = { id: shortId('a_'), kind: 'assistant', ts: Date.now(), text: '', thinking: '', streaming: true, model: model.model };
         let emitted = false;
         const ensure = () => {

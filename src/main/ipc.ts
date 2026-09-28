@@ -13,6 +13,7 @@ import type { RemoteHost } from './remote/host';
 import type { DesktopFocusTracker } from './desktop-focus';
 import type { UpdateService } from './updater';
 import type { GitnexusIndexer } from './mcp';
+import type { AppInstructions } from './app-instructions';
 
 export interface IpcDeps {
   settings: SettingsStore;
@@ -27,6 +28,8 @@ export interface IpcDeps {
   knowledge?: KnowledgeService;
   /** Passive built-in GitNexus freshness queue. */
   gitnexusIndexer?: GitnexusIndexer;
+  /** The app's own instruction layer, shared with the session manager. */
+  appInstructions?: AppInstructions;
   /** Remote access host (docs/REMOTE-ACCESS.md), wired in index.ts. */
   remote?: RemoteHost;
   /** Where the desktop window is looking, mirrored to paired browsers; wired in index.ts. */
@@ -119,6 +122,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     search: deps.search,
     knowledge: deps.knowledge,
     gitnexusIndexer: deps.gitnexusIndexer,
+    appInstructions: deps.appInstructions,
     remote: deps.remote,
     desktopFocus: deps.desktopFocus,
     remoteMirror: deps.remoteMirror,

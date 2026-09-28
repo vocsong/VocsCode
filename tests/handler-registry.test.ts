@@ -14,11 +14,12 @@ import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
 import type { SessionManager } from '../src/main/session-manager';
-import type { RemoteConfig, HarnessId, SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { RemoteConfig, HarnessId, SessionMeta, TranscriptItem, AppInstructionFile } from '../src/shared/types';
 import type { RemoteHost } from '../src/main/remote/host';
 import { signInProbe } from '../src/main/remote/relay-url';
 import { SettingsStore } from '../src/main/settings';
 import { PiConfigStore } from '../src/main/pi-config';
+import { AppInstructions } from '../src/main/app-instructions';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
 
@@ -150,6 +151,22 @@ describe('handler registry', () => {
     // The floor travels beside the window so a remote client can follow with seq-filtered events.
     await expect(registry.invoke('sessions:transcriptPage', { id: 's_test' })).resolves.toEqual({ items, start: 0, total: 1, seq: 7 });
     await expect(registry.invoke('sessions:transcriptPage', { id: 'nope' })).rejects.toThrow('Session not found');
+  });
+
+  it('writes the app instruction layer under userData and refuses an unknown scope', async () => {
+    // Its own root: the shared workspace fixture has an exact directory listing asserted elsewhere.
+    const dir = tmpDir('instructions');
+    const { registry } = stubDeps({ appInstructions: new AppInstructions(dir) });
+    const files = (await registry.invoke('instructions:read', undefined)) as AppInstructionFile[];
+    expect(files.map((f) => f.scope)).toEqual(['global', 'pi', 'claude', 'codex', 'cursor', 'acp', 'native']);
+    expect(files[0]).toMatchObject({ scope: 'global', exists: false, content: '' });
+
+    const written = (await registry.invoke('instructions:write', { scope: 'global', content: 'Be proactive.\n' })) as AppInstructionFile[];
+    expect(written.find((f) => f.scope === 'global')).toMatchObject({ exists: true, content: 'Be proactive.\n' });
+    expect(await fs.readFile(path.join(dir, 'instructions', 'global.md'), 'utf8')).toBe('Be proactive.\n');
+
+    // A scope the layer does not define never reaches the filesystem.
+    await expect(registry.invoke('instructions:write', { scope: '../../evil', content: 'x' })).rejects.toThrow('Unknown instruction scope');
   });
 
   it('serves every channel Vesta is allowed to reach', () => {
