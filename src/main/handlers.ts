@@ -39,6 +39,7 @@ import type { SessionManager } from './session-manager';
 import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
 import { PiConfigStore, runPiCommand } from './pi-config';
+import { AppInstructions } from './app-instructions';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
 import type { DesktopFocusTracker } from './desktop-focus';
@@ -111,6 +112,8 @@ export interface HandlerDeps {
   remoteMirror?: { sync(): void; disable(): void };
   /** Base-pi global config (Settings → Pi); a default store is created when absent. */
   piConfig?: PiConfigStore;
+  /** The app's own instruction layer (Settings → Instructions); created from userData when absent. */
+  appInstructions?: AppInstructions;
   /** In-app auto-update (issue #198); absent in dev and other unpackaged runs. */
   updater?: UpdateService;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
@@ -202,6 +205,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
         return runPiCommand(args, { piPath, cwd: deps.desktop.userDataPath(), log: deps.log });
       }
     });
+  // Built on first use, like piConfig's runner: hosts and tests wire up only what they exercise,
+  // and a registry that never touches the channels must not need a userData path.
+  let defaultAppInstructions: AppInstructions | undefined;
+  const appInstructions = (): AppInstructions => (defaultAppInstructions ??= deps.appInstructions ?? new AppInstructions(deps.desktop.userDataPath(), deps.log));
   const handlers = new Map<IpcChannel, (req: never) => unknown>();
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
 
@@ -874,6 +881,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   // Base-pi global config. Resource toggles and prompt writes are validated inside PiConfigStore
   // (path containment, type/name allowlists), so a tampered renderer cannot touch other files.
+  handle('instructions:read', () => appInstructions().read());
+  handle('instructions:write', ({ scope, content }) => appInstructions().write(scope, content));
   handle('pi:setup', () => piConfig.read());
   handle('pi:preferences', (patch) => piConfig.updatePreferences(patch));
   handle('pi:resource', ({ type, path: p, enabled }) => piConfig.setResourceEnabled(type, p, enabled));

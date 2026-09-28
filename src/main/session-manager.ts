@@ -69,6 +69,11 @@ export interface SessionManagerDeps {
   memoryUserData?: string;
   /** Layer 2 digest for priming a new session's system prompt; absent disables priming. */
   knowledgeDigest?: (scope: { projectRoot: string; cwd: string; branch?: string }) => Promise<string | null>;
+  /**
+   * The app's own instruction layer for one harness (see `shared/app-instructions.ts`). Read live:
+   * the three harnesses with a system prompt take it at start, the rest through the first message.
+   */
+  appInstructions?: (harness: HarnessId) => Promise<string | undefined>;
   /** Held Mission leases defer ordinary writers; reserve admission across async guards/startup.
    * Ordinary sessions go through it only while ordinary process ownership is enabled. */
   withWorkspaceDispatch?: (meta: SessionMeta, dispatch: () => Promise<void>) => Promise<void>;
@@ -552,6 +557,9 @@ export class SessionManager {
       activeEffort: cfg.effort ?? undefined,
       queued: 0
     };
+    // A harness with no system prompt of its own takes the app's instruction layer on its first
+    // message, like the digest below; the flag is cleared once the harness accepted it.
+    if (!HARNESS_BY_ID[cfg.harness].capabilities.systemPrompt) meta.pendingAppInstructions = true;
     // Layer 2: prime the session with the project's curated knowledge digest. The digest names
     // pages rather than pasting them, and never outranks the project's own instruction files.
     if (this.deps.knowledgeDigest && this.settings().knowledge?.prime !== false) {
@@ -906,6 +914,7 @@ export class SessionManager {
       runtime: this.deps.runtime,
       sessionDir,
       permissionMode: () => session().config.permissionMode,
+      ...(this.deps.appInstructions ? { appInstructions: () => this.deps.appInstructions!(session().config.harness) } : {}),
       ordinaryProcessOwnership: () => !managed && this.ordinaryOwnership(),
       effort: () => {
         const m = session();
@@ -1279,6 +1288,10 @@ export class SessionManager {
         // The blob is written before the flag is set; a read failure only means we have no context.
       }
     }
+    if (meta.pendingAppInstructions) {
+      const text = await this.deps.appInstructions?.(meta.config.harness);
+      if (text) parts.push(text);
+    }
     if (meta.pendingKnowledgeDigest && meta.knowledgeDigest) parts.push(meta.knowledgeDigest);
     return parts.length ? { ...input, text: `${parts.join('\n\n')}\n\n${input.text}` } : input;
   }
@@ -1286,9 +1299,10 @@ export class SessionManager {
   /** Cleared only after the harness accepted the seeded message, so a failed start retries with it. */
   private async clearSessionPreamble(id: string): Promise<void> {
     const meta = this.get(id);
-    if (!meta?.pendingForkContext && !meta?.pendingKnowledgeDigest) return;
+    if (!meta?.pendingForkContext && !meta?.pendingKnowledgeDigest && !meta?.pendingAppInstructions) return;
     meta.pendingForkContext = undefined;
     meta.pendingKnowledgeDigest = undefined;
+    meta.pendingAppInstructions = undefined;
     await this.deps.store.upsert(meta);
   }
 
@@ -2430,6 +2444,7 @@ export class SessionManager {
     // The fork keeps the project's digest (same project) but hands it over the way
     // its own harness can: in the system prompt, or on the first message.
     if (meta.knowledgeDigest && !HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
+    if (!HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingAppInstructions = true;
     const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision)).map(carriedItem);
     // A same-harness fork that lost the source directory also lost the provider session it would
     // have resumed; both it and a fork into another harness start from the conversation as text.

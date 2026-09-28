@@ -29,6 +29,12 @@ export interface HarnessContext {
   /** Per-session scratch/storage directory. */
   sessionDir: string;
   permissionMode(): PermissionMode;
+  /**
+   * The app's own instruction layer for this session's harness: the shared file plus this
+   * harness family's addition. Read live, so a new session picks up an edit without a restart.
+   * Absent in hosts that do not run the layer (tests, minimal embeddings).
+   */
+  appInstructions?(): Promise<string | undefined>;
   /** An ordinary (non-Mission) runtime may contain its process tree in the bundled Windows Job only
    * while this is true: Windows, Missions configured and a working helper. Absent means never. */
   ordinaryProcessOwnership?(): boolean;
