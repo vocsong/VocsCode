@@ -287,7 +287,13 @@ export class RuntimeResolver {
   resolve(tool: ToolName): ResolvedBinary | null {
     const s = this.getSettings();
     const explicit = (s.binaries as Record<string, string | undefined>)[tool];
-    if (explicit && explicit.trim()) return { path: explicit.trim(), source: 'settings' };
+    if (explicit && explicit.trim()) {
+      const selected = explicit.trim();
+      // The Agent SDK launches this path with spawn(), not cmd.exe. A pinned npm shim is no
+      // more executable than one found on PATH; do not hand it to the SDK.
+      if (tool === 'claude' && isWin && /\.(cmd|bat)$/i.test(selected)) return null;
+      return { path: selected, source: 'settings' };
+    }
 
     const preferBundled =
       (tool === 'claude' && s.claude.runtime === 'bundled') || (tool === 'codex' && s.codex.runtime === 'bundled');
@@ -299,10 +305,16 @@ export class RuntimeResolver {
     if (preferBundled && bundled) return { path: bundled, source: 'bundled' };
 
     const sys = which(tool, this.appRuntimeBin());
-    // The Claude Agent SDK spawns the executable directly; an npm .cmd shim cannot be spawned
-    // without a shell on Windows, so prefer the bundled native binary in that case. Both read
-    // the same ~/.claude credentials.
-    if (tool === 'claude' && sys && /\.(cmd|bat)$/i.test(sys) && bundled && !systemOnly) return { path: bundled, source: 'bundled' };
+    // The Claude Agent SDK spawns the executable directly; an npm .cmd/.bat shim cannot be
+    // spawned without a shell on Windows. Never report it as available, even if the bundled
+    // binary has gone missing or the user requested system-only mode.
+    if (tool === 'claude' && isWin && sys && /\.(cmd|bat)$/i.test(sys)) {
+      if (!systemOnly && bundled) return { path: bundled, source: 'bundled' };
+      // A shim earlier on PATH need not hide a real executable later on PATH.
+      const native = which('claude.exe', this.appRuntimeBin());
+      if (native) return { path: native, source: native.startsWith(this.paths.appRuntimeDir) ? 'app-runtime' : 'system' };
+      return null;
+    }
     if (sys) return { path: sys, source: sys.startsWith(this.paths.appRuntimeDir) ? 'app-runtime' : 'system' };
     if (!systemOnly && bundled) return { path: bundled, source: 'bundled' };
     return null;
@@ -317,7 +329,9 @@ export class RuntimeResolver {
     switch (id) {
       case 'claude': {
         const bin = this.resolve('claude');
-        if (!bin) return { available: false, detail: 'No Claude Code runtime found.', installHint: 'npm install -g @anthropic-ai/claude-code' };
+        if (!bin) return isWin
+          ? { available: false, detail: 'No launchable Claude Code runtime found (Windows .cmd/.bat shims cannot be started by the Agent SDK).', installHint: 'Reinstall Vocs Code (or run npm install --include=dev in a dev checkout), or select a native Claude executable.' }
+          : { available: false, detail: 'No Claude Code runtime found.', installHint: 'npm install -g @anthropic-ai/claude-code' };
         const v = await probeOnce(bin.path, ['--version'], 20_000);
         const authenticated = await claudeHasCredentials();
         return {

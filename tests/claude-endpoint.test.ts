@@ -45,7 +45,7 @@ function stubCtx(s: AppSettings, model: ModelRef | undefined, apiKey: string | u
     sessionId: 's1',
     session: () => metaFor(model),
     settings: () => s,
-    runtime: { resolve: () => undefined },
+    runtime: { resolve: () => ({ path: process.execPath, source: 'system' }) },
     sessionDir: '.',
     permissionMode: () => 'ask' as const,
     effort: () => undefined,
@@ -94,6 +94,13 @@ describe('Claude provider resolution', () => {
 });
 
 describe('Claude endpoint env', () => {
+  it.skipIf(process.platform !== 'win32')('refuses to start without a native executable instead of passing a batch shim to the SDK', async () => {
+    queryMock.mockClear();
+    const ctx = { ...stubCtx(settings(), undefined, undefined), runtime: { resolve: () => null } } as unknown as HarnessContext;
+    await expect(new ClaudeAdapter(ctx).start()).rejects.toThrow(/native Claude Code executable.*\.cmd\/\.bat/);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
   it('leaves the login untouched on the default endpoint when the opt-in is off', () => {
     expect(claudeProviderEnv(settings(), ANTHROPIC, 'sk-ant')).toEqual({});
   });
