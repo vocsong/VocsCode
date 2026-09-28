@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QuickSessionPicker } from '../src/renderer/src/components/QuickSessionPicker';
 import { useStore } from '../src/renderer/src/store';
 
@@ -8,7 +8,7 @@ afterEach(cleanup);
 
 const meta = (id: string, projectRoot: string) => ({ id, title: id, archived: false, config: { projectRoot } }) as never;
 
-function seedStore(opts: { openQuickSession?: () => void; createQuickSession?: (root: string) => void; startNewSession?: () => void } = {}) {
+function seedStore(opts: { openQuickSession?: () => void; createQuickSession?: (root: string) => Promise<boolean>; startNewSession?: () => void } = {}) {
   useStore.setState({
     quickSessionOpen: true,
     sessions: [meta('b', 'C:/work/beta'), meta('a', 'C:/work/alpha')],
@@ -18,7 +18,7 @@ function seedStore(opts: { openQuickSession?: () => void; createQuickSession?: (
       folderOrder: ['C:/work/alpha', 'C:/work/pinned']
     } as never,
     openQuickSession: opts.openQuickSession ?? (() => {}),
-    createQuickSession: opts.createQuickSession ?? (async () => {}),
+    createQuickSession: opts.createQuickSession ?? (async () => true),
     startNewSession: opts.startNewSession ?? (async () => {})
   } as never);
 }
@@ -36,8 +36,8 @@ describe('QuickSessionPicker', () => {
     expect(labels[labels.length - 1]).toContain('Browse for another folder');
   });
 
-  it('picks a folder on Enter, then creates the session on a second Enter', () => {
-    const createQuickSession = vi.fn();
+  it('picks a folder on Enter, then creates the session on a second Enter', async () => {
+    const createQuickSession = vi.fn().mockResolvedValue(true);
     const openQuickSession = vi.fn();
     seedStore({ createQuickSession, openQuickSession });
     render(<QuickSessionPicker />);
@@ -48,7 +48,7 @@ describe('QuickSessionPicker', () => {
     expect(screen.getByPlaceholderText(/First prompt/)).toBeTruthy();
     fireEvent.keyDown(window, { key: 'Enter' });
     expect(createQuickSession).toHaveBeenCalledWith('C:/work/pinned', { prompt: '', images: [] });
-    expect(openQuickSession).toHaveBeenCalledWith(false);
+    await waitFor(() => expect(openQuickSession).toHaveBeenCalledWith(false));
   });
 
   it('keeps the capture listener installed while the prompt changes', () => {
@@ -74,6 +74,20 @@ describe('QuickSessionPicker', () => {
     expect(createQuickSession).not.toHaveBeenCalled();
     fireEvent.keyDown(window, { key: 'Enter' });
     expect(createQuickSession).toHaveBeenCalledWith('C:/work/pinned', { prompt: 'Fix the flaky test', images: [] });
+  });
+
+  it('passes a picked text file into the first message', async () => {
+    const createQuickSession = vi.fn().mockResolvedValue(true);
+    seedStore({ createQuickSession });
+    const { container } = render(<QuickSessionPicker />);
+    fireEvent.click(screen.getByText('C:/work/pinned'));
+    const picker = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(picker, { target: { files: [new File(['notes'], 'notes.txt', { type: 'text/plain' })] } });
+    await screen.findByText('notes.txt');
+    fireEvent.keyDown(window, { key: 'Enter' });
+    await waitFor(() => expect(createQuickSession).toHaveBeenCalledWith('C:/work/pinned', {
+      prompt: '', images: [], files: [{ name: 'notes.txt', mimeType: 'text/plain', data: btoa('notes') }]
+    }));
   });
 
   it('backs out to the folder list on Escape while the prompt is empty', () => {

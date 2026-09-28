@@ -71,7 +71,7 @@ afterEach(() => {
   delete process.env.CLAUDE_CONFIG_DIR;
 });
 
-async function makeManager(baseUrl: string): Promise<{ manager: SessionManager; asked: () => string[]; settled: () => string[] }> {
+async function makeManager(baseUrl: string): Promise<{ manager: SessionManager; store: SessionStore; asked: () => string[]; settled: () => string[] }> {
   const store = new SessionStore(path.join(tmpRoot, `store${++counter}`));
   await store.load();
   const log = vi.fn();
@@ -93,11 +93,34 @@ async function makeManager(baseUrl: string): Promise<{ manager: SessionManager; 
   // Each title call logs when it goes out and again when it comes back, so a test can wait for an
   // attempt to settle rather than for its request to arrive — the two are a scheduling gap apart.
   const lines = (keep: boolean) => log.mock.calls.map((c) => String(c[1])).filter((m) => m.startsWith('session title') && m.includes('asking') === keep);
-  return { manager: new SessionManager(deps), asked: () => lines(true), settled: () => lines(false) };
+  return { manager: new SessionManager(deps), store, asked: () => lines(true), settled: () => lines(false) };
 }
 
 const create = (manager: SessionManager, extra: Record<string, unknown> = {}) =>
   manager.create({ config: { harness: 'native', projectRoot: path.join(tmpRoot, 'proj'), permissionMode: 'ask' }, ...extra } as never);
+
+describe('message files', () => {
+  it('sends a first-prompt upload to the adapter and retains only a file reference in the transcript', async () => {
+    const { manager, store } = await makeManager('http://127.0.0.1:1');
+    const data = Buffer.from('hello from upload').toString('base64');
+    const meta = await create(manager, { initialPrompt: 'read this', initialFiles: [{ name: 'notes.txt', mimeType: 'text/plain', data }] });
+    await vi.waitFor(() => expect(mocks.sent).toHaveLength(1));
+    const text = mocks.sent[0].input.text;
+    expect(text).toContain('read this');
+    expect(text).toContain('notes.txt');
+    const filePath = JSON.parse(text.match(/"([^"\\]*(?:\\.[^"\\]*)*)"\s*$/m)![0]) as string;
+    expect(await fs.readFile(filePath, 'utf8')).toBe('hello from upload');
+    await vi.waitFor(async () => expect((await store.readTranscript(meta.id)).some((i) => i.kind === 'user')).toBe(true));
+    const item = (await store.readTranscript(meta.id)).find((i) => i.kind === 'user');
+    expect(item?.kind === 'user' && item.files?.[0]?.path).toBe(filePath);
+    expect(JSON.stringify(item)).not.toContain(data);
+    const reopened = new SessionStore(path.dirname(path.dirname(store.sessionDir(meta.id))));
+    await reopened.load();
+    const restored = (await reopened.readTranscript(meta.id)).find((i) => i.kind === 'user');
+    expect(restored?.kind === 'user' && restored.files?.[0]?.path).toBe(filePath);
+    expect(await fs.readFile(filePath, 'utf8')).toBe('hello from upload');
+  });
+});
 
 describe('naming a session', () => {
   it('replaces the placeholder of a session created from the dialog prompt', async () => {

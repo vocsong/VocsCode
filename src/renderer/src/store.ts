@@ -2,7 +2,7 @@
 import { create } from 'zustand';
 import type { AgentState } from '../../shared/agent';
 import { EMPTY_AGENT_STATE } from '../../shared/agent';
-import type { AppSettings, DesktopFocus, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
+import type { AppSettings, DesktopFocus, HarnessAvailability, HarnessId, ImageAttachment, FileAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import type { MissionRecord } from '../../shared/mission';
 import { resolveNewSessionDefaults } from '../../shared/session-defaults';
@@ -178,7 +178,7 @@ interface State {
   /** Opens the quick picker; `prefill` seeds the first prompt (cleared again on close). */
   openQuickSession(open: boolean, prefill?: string): void;
   /** Starts a session for a known folder straight from settings defaults, skipping the dialog. */
-  createQuickSession(root: string, first?: { prompt?: string; images?: ImageAttachment[] }): Promise<void>;
+  createQuickSession(root: string, first?: { prompt?: string; images?: ImageAttachment[]; files?: FileAttachment[] }): Promise<boolean>;
   openPalette(open: boolean): void;
   openSearch(open: boolean): void;
   /** Closes the search modal, activates the session and scrolls to the matched item. */
@@ -901,7 +901,7 @@ export const useStore = create<State>((set, get) => ({
   },
   async createQuickSession(root, first) {
     const settings = get().settings;
-    if (!settings) return;
+    if (!settings) return false;
     // Same memory as the dialog: the folder's remembered choices, app-wide defaults for the rest.
     const defaults = resolveNewSessionDefaults(settings, root);
     const harness = defaults.harness;
@@ -918,11 +918,14 @@ export const useStore = create<State>((set, get) => ({
       const meta = await invoke('sessions:create', {
         config,
         initialPrompt: first?.prompt?.trim() || undefined,
-        initialImages: first?.images?.length ? first.images : undefined
+        initialImages: first?.images?.length ? first.images : undefined,
+        initialFiles: first?.files?.length ? first.files : undefined
       });
       await get().setActive(meta.id);
+      return true;
     } catch (e) {
       get().toast(String((e as Error).message ?? e), 'error');
+      return false;
     }
   },
   openPalette(paletteOpen) {

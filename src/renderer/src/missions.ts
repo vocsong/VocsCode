@@ -3,7 +3,7 @@ import type { CreateMissionRequest, MissionControlRequest, MissionRecord, Missio
 import { MISSION_NOT_LINKED_MESSAGE } from '../../shared/mission-command';
 import { applyMissionProjectOverride, DEFAULT_MISSION_CONFIG } from '../../shared/mission-config';
 import { isMissionRevisionConflict, readableMissionText } from '../../shared/mission-errors';
-import type { AppSettings, ImageAttachment, SessionMeta, UserInput } from '../../shared/types';
+import type { AppSettings, FileAttachment, ImageAttachment, SessionMeta, UserInput } from '../../shared/types';
 import { invoke } from './api';
 import { useStore } from './store';
 
@@ -62,8 +62,9 @@ export async function openMission(record: MissionRecord): Promise<void> {
 }
 
 export async function createMission(input: Omit<CreateMissionRequest, 'idempotencyKey'>): Promise<MissionRecord> {
-  return request(`create:${JSON.stringify(input)}`, (idempotencyKey) => async () => {
-    const record = await invoke('missions:create', { ...input, idempotencyKey });
+  const captured = structuredClone(input);
+  return request(`create:${JSON.stringify(captured)}`, (idempotencyKey) => async () => {
+    const record = await invoke('missions:create', { ...captured, idempotencyKey });
     await openMission(record);
     return record;
   });
@@ -96,8 +97,8 @@ export function sendMissionUser(sessionId: string, input: UserInput): Promise<vo
     invoke('sessions:send', { id: sessionId, input: captured, idempotencyKey }), false);
 }
 
-export async function commandMission(session: SessionMeta, text: string, images?: ImageAttachment[]): Promise<void> {
-  const input = structuredClone({ sessionId: session.id, text, ...(images?.length ? { images } : {}) });
+export async function commandMission(session: SessionMeta, text: string, images?: ImageAttachment[], files?: FileAttachment[]): Promise<void> {
+  const input = structuredClone({ sessionId: session.id, text, ...(images?.length ? { images } : {}), ...(files?.length ? { files } : {}) });
   const reply = await request(`command:${JSON.stringify(input)}`, (idempotencyKey) => async () => {
     const reply = await invoke('missions:command', { ...input, idempotencyKey });
     if (reply.mission) await openMission(reply.mission);

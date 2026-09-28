@@ -492,7 +492,7 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
 
   const rerun = async () => {
     const text = draft.trim();
-    if (!text && !images.length) return;
+    if (!text && !images.length && !item.files?.length) return;
     if (!sessionId || managed) return;
     const confirmed = await askConfirm({
       title: 'Edit and rerun this message?',
@@ -523,7 +523,7 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
             <textarea aria-label="Edit message" value={draft} onChange={(e) => setDraft(e.target.value)} rows={Math.max(2, Math.min(8, draft.split('\n').length))} autoFocus />
             <div className="msg-edit-actions">
               <Button size="sm" onClick={() => { setDraft(item.text); setEditing(false); }} disabled={rerunning}>Cancel</Button>
-              <Button size="sm" variant="primary" icon="refresh" onClick={() => void rerun()} disabled={rerunning || (!draft.trim() && !images.length)}>{rerunning ? 'Rerunning…' : 'Save & rerun'}</Button>
+              <Button size="sm" variant="primary" icon="refresh" onClick={() => void rerun()} disabled={rerunning || (!draft.trim() && !images.length && !item.files?.length)}>{rerunning ? 'Rerunning…' : 'Save & rerun'}</Button>
             </div>
           </div>
         ) : (
@@ -548,6 +548,7 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
             )}
           </div>
         ) : null}
+        {item.files?.length ? <div className="msg-files" aria-label="Attached files">{item.files.map((file) => <Badge key={file.path} tone="neutral">{file.name}</Badge>)}</div> : null}
         {!images.length && item.imagesOmitted ? (
           <Badge tone="neutral" title="Images are too large to send to a paired browser">
             {item.imagesOmitted === 1 ? '1 image not shown' : `${item.imagesOmitted} images not shown`}
