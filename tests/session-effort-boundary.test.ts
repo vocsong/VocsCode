@@ -67,7 +67,7 @@ async function boot() {
   await store.load();
   const manager = new SessionManager({
     store, settings: { get: () => settings, update: async (patch: Partial<AppSettings>) => Object.assign(settings, patch) } as never,
-    runtime: { resolve: () => null } as never,
+    runtime: { resolve: () => ({ path: process.execPath, source: 'system' }) } as never,
     analytics: { touchSession: vi.fn(), recordToolCall: vi.fn(), recordUsage: vi.fn(), recordTurn: vi.fn(), recordUserMessage: vi.fn() } as never,
     getSecret: async () => undefined,
     pushEvent: ({ event }) => events.push(event), pushSessions: vi.fn(), notify: vi.fn(), log: vi.fn()

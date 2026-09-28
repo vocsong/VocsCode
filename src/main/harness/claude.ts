@@ -241,6 +241,9 @@ export class ClaudeAdapter implements HarnessAdapter {
     const append = [project, sessionAppendPrompt(meta)].filter(Boolean).join('\n\n') || undefined;
     const mode = meta.mission?.sourceAccess === 'read_only' ? 'plan' : this.ctx.permissionMode();
     const bin = this.ctx.runtime.resolve('claude');
+    // Windows cannot launch a batch shim through the SDK's shell-free spawn. If the resolver
+    // found no native executable, fail before query() instead of falling into an opaque SDK error.
+    if (process.platform === 'win32' && !bin) throw new Error('Claude Agent SDK needs a native Claude Code executable. Reinstall Vocs Code (or run npm install --include=dev in a dev checkout), or select a native .exe; npm .cmd/.bat shims cannot be spawned.');
     const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
     // Never let this app's own Claude Code host variables leak into a nested session.
     for (const k of Object.keys(env)) if (k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDE_CODE_USE_BEDROCK' && k !== 'CLAUDE_CODE_USE_VERTEX' && k !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[k];

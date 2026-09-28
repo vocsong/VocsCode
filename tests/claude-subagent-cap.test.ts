@@ -48,7 +48,7 @@ async function envFor(): Promise<Record<string, string | undefined>> {
     sessionId: 's1',
     session: () => meta,
     settings: () => ({ claude: { settingSources: [], useProviderKey: false }, pi: { extraArgs: [] }, providers: [] }) as never,
-    runtime: { resolve: () => undefined } as never,
+    runtime: { resolve: () => ({ path: process.execPath, source: 'system' }) } as never,
     sessionDir: dir,
     permissionMode: () => 'ask' as const,
     effort: () => undefined,
