@@ -99,11 +99,17 @@ public static class MissionCheckJob {
             byte[] bytes = Encoding.UTF8.GetBytes(json + "\n");
             file.Write(bytes, 0, bytes.Length); file.Flush(true);
         }
-        Check(MoveFileEx(temporary, receiptPath, 8)); // Atomic same-volume rename, WRITE_THROUGH; no replacement.
+        Check(MoveFileEx(temporary, receiptPath, 8), "MoveFileEx(receipt)"); // Atomic same-volume rename, WRITE_THROUGH; no replacement.
     }
     // Only used when connecting/reading the launch request failed before Run could create a target.
     public static void RecordNotStarted() { WriteOwnershipReceipt("not_started"); }
-    static void Check(bool value) { if (!value) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+    // Constant API/stage labels and numeric Win32 codes only: never log paths, argv, or handles.
+    static void Check(bool value, string operation) {
+        if (!value) {
+            int code = Marshal.GetLastWin32Error();
+            throw new Win32Exception(code, operation + " failed (Win32 " + code + ")");
+        }
+    }
     static void Close(ref IntPtr handle) { if (handle != IntPtr.Zero && handle != new IntPtr(-1)) CloseHandle(handle); handle = IntPtr.Zero; }
     static string Flag(bool value) { return value ? "true" : "false"; }
     static string Enc(string text) { return Convert.ToBase64String(Encoding.UTF8.GetBytes(text)); }
@@ -116,11 +122,11 @@ public static class MissionCheckJob {
         // prevent the durable empty-Job receipt that the next desktop process needs for recovery.
     }
     static void Inherit(int kind, out IntPtr handle) {
-        Check(DuplicateHandle(GetCurrentProcess(), GetStdHandle(kind), GetCurrentProcess(), out handle, 0, true, 2));
+        Check(DuplicateHandle(GetCurrentProcess(), GetStdHandle(kind), GetCurrentProcess(), out handle, 0, true, 2), "DuplicateHandle(stdio)");
     }
     static uint Active(IntPtr job) {
         ACCOUNTING accounting;
-        Check(QueryInformationJobObject(job, 1, out accounting, Marshal.SizeOf(typeof(ACCOUNTING)), IntPtr.Zero));
+        Check(QueryInformationJobObject(job, 1, out accounting, Marshal.SizeOf(typeof(ACCOUNTING)), IntPtr.Zero), "QueryInformationJobObject(accounting)");
         return accounting.activeProcesses;
     }
     static Task Pump(IntPtr handle, string kind) {
@@ -136,14 +142,14 @@ public static class MissionCheckJob {
     static bool Stop(IntPtr job, IntPtr process, bool assigned) {
         if (assigned) {
             if (Active(job) == 0) return true;
-            Check(TerminateJobObject(job, 1));
+            Check(TerminateJobObject(job, 1), "TerminateJobObject");
             var until = Stopwatch.StartNew();
             while (Active(job) != 0 && until.ElapsedMilliseconds < 10000) Thread.Sleep(20);
             return Active(job) == 0;
         }
         if (process == IntPtr.Zero) return true;
         if (WaitForSingleObject(process, 0) == 0) return true;
-        Check(TerminateProcess(process, 1)); // Still suspended: it has never run or spawned children.
+        Check(TerminateProcess(process, 1), "TerminateProcess(suspended target)"); // Still suspended: it has never run or spawned children.
         return WaitForSingleObject(process, 10000) == 0;
     }
 
@@ -157,17 +163,17 @@ public static class MissionCheckJob {
         bool initialized = false;
         PROCESS_INFORMATION child = new PROCESS_INFORMATION();
         try {
-            Check(DuplicateHandle(GetCurrentProcess(), job, GetCurrentProcess(), out ownJob, 0, true, 2));
-            Check(DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), out ownParent, 0, true, 2));
+            Check(DuplicateHandle(GetCurrentProcess(), job, GetCurrentProcess(), out ownJob, 0, true, 2), "DuplicateHandle(guardian Job)");
+            Check(DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), out ownParent, 0, true, 2), "DuplicateHandle(guardian parent)");
             IntPtr size = IntPtr.Zero; InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
-            attributes = Marshal.AllocHGlobal(size); Check(InitializeProcThreadAttributeList(attributes, 1, 0, ref size)); initialized = true;
+            attributes = Marshal.AllocHGlobal(size); Check(InitializeProcThreadAttributeList(attributes, 1, 0, ref size), "InitializeProcThreadAttributeList(guardian)"); initialized = true;
             handles = Marshal.AllocHGlobal(IntPtr.Size * 2); Marshal.WriteIntPtr(handles, 0, ownJob); Marshal.WriteIntPtr(handles, IntPtr.Size, ownParent);
-            Check(UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x20002), handles, new IntPtr(IntPtr.Size * 2), IntPtr.Zero, IntPtr.Zero));
+            Check(UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x20002), handles, new IntPtr(IntPtr.Size * 2), IntPtr.Zero, IntPtr.Zero), "UpdateProcThreadAttribute(guardian handles)");
             var startup = new STARTUPINFOEX(); startup.info.cb = Marshal.SizeOf(typeof(STARTUPINFOEX)); startup.attributes = attributes;
             string command = Quote(guardianExecutable) + " -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + Quote(guardianHelper)
                 + " -OwnerIntent " + Quote(guardianIntent) + " -OwnerHash " + guardianHash + " -GuardianPipe " + name + " -GuardianJob " + ownJob.ToInt64() + " -GuardianParent " + ownParent.ToInt64();
             Check(CreateProcess(guardianExecutable, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, true,
-                0x01000000 | 0x08000000 | 0x00080000, IntPtr.Zero, null, ref startup, out child)); // BREAKAWAY_FROM_JOB | NO_WINDOW | EXTENDED_STARTUPINFO
+                0x01000000 | 0x08000000 | 0x00080000, IntPtr.Zero, null, ref startup, out child), "CreateProcess(guardian breakaway)"); // BREAKAWAY_FROM_JOB | NO_WINDOW | EXTENDED_STARTUPINFO
             if (!pipe.WaitForConnectionAsync().Wait(15000)) throw new Exception("Ownership guardian did not connect");
             return pipe;
         } catch { pipe.Dispose(); throw; }
@@ -192,7 +198,7 @@ public static class MissionCheckJob {
         } catch { }
         // A disconnected pipe alone is NOT a no-more-spawns proof. Wait for the exact original
         // supervisor handle, unless it explicitly committed to never spawning again.
-        if (!handedOff) Check(WaitForSingleObject(parent, 0xffffffff) == 0);
+        if (!handedOff) Check(WaitForSingleObject(parent, 0xffffffff) == 0, "WaitForSingleObject(guardian parent)");
         bool quiet = false;
         while (!quiet) { try { quiet = Stop(job, IntPtr.Zero, true); } catch { } if (!quiet) Thread.Sleep(100); }
         try {
@@ -226,13 +232,13 @@ public static class MissionCheckJob {
                 consoleAttached = SetConsoleCtrlHandler(ignoreConsoleInterrupt, true);
                 // Detached RPC supervisors deliberately have pipes but no console. ConPTY still
                 // installs this handler; lack of a console is not a failed ownership boundary.
-                if (!consoleAttached && Marshal.GetLastWin32Error() != 6) Check(false);
+                if (!consoleAttached && Marshal.GetLastWin32Error() != 6) Check(false, "SetConsoleCtrlHandler");
             }
             job = CreateJobObject(IntPtr.Zero, null);
-            Check(job != IntPtr.Zero);
+            Check(job != IntPtr.Zero, "CreateJobObject");
             var limits = new EXTENDED_LIMIT();
             limits.basic.flags = 0x2000; // KILL_ON_JOB_CLOSE; neither BREAKAWAY nor SILENT_BREAKAWAY.
-            Check(SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(typeof(EXTENDED_LIMIT))));
+            Check(SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(typeof(EXTENDED_LIMIT))), "SetInformationJobObject(limits)");
             if (guardianExecutable != null) {
                 guardian = StartGuardian(job);
                 guardianReader = new StreamReader(guardian, new UTF8Encoding(false));
@@ -246,26 +252,26 @@ public static class MissionCheckJob {
                 Inherit(-10, out input); Inherit(-11, out outWrite); Inherit(-12, out errWrite);
             } else {
                 var sa = new SECURITY_ATTRIBUTES { length = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES)), inherit = true };
-                Check(CreatePipe(out outRead, out outWrite, ref sa, 0));
-                Check(CreatePipe(out errRead, out errWrite, ref sa, 0));
-                Check(SetHandleInformation(outRead, 1, 0)); Check(SetHandleInformation(errRead, 1, 0));
+                Check(CreatePipe(out outRead, out outWrite, ref sa, 0), "CreatePipe(stdout)");
+                Check(CreatePipe(out errRead, out errWrite, ref sa, 0), "CreatePipe(stderr)");
+                Check(SetHandleInformation(outRead, 1, 0), "SetHandleInformation(stdout)"); Check(SetHandleInformation(errRead, 1, 0), "SetHandleInformation(stderr)");
                 input = CreateFile("NUL", 0x80000000, 3, ref sa, 3, 0, IntPtr.Zero);
-                Check(input != new IntPtr(-1));
+                Check(input != new IntPtr(-1), "CreateFile(NUL stdin)");
             }
             IntPtr size = IntPtr.Zero;
             InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
             attributes = Marshal.AllocHGlobal(size);
-            Check(InitializeProcThreadAttributeList(attributes, 1, 0, ref size)); attributesReady = true;
+            Check(InitializeProcThreadAttributeList(attributes, 1, 0, ref size), "InitializeProcThreadAttributeList(target)"); attributesReady = true;
             handles = Marshal.AllocHGlobal(IntPtr.Size * 3);
             Marshal.WriteIntPtr(handles, 0, input); Marshal.WriteIntPtr(handles, IntPtr.Size, outWrite); Marshal.WriteIntPtr(handles, IntPtr.Size * 2, errWrite);
-            Check(UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x20002), handles, new IntPtr(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero));
+            Check(UpdateProcThreadAttribute(attributes, 0, new IntPtr(0x20002), handles, new IntPtr(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero), "UpdateProcThreadAttribute(target handles)");
             var startup = new STARTUPINFOEX();
             startup.info.cb = Marshal.SizeOf(typeof(STARTUPINFOEX)); startup.info.flags = 0x100;
             startup.info.stdin = input; startup.info.stdout = outWrite; startup.info.stderr = errWrite; startup.attributes = attributes;
             uint flags = 0x00000004 | 0x00080000; // CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT
             if (!inheritStdio || !consoleAttached) flags |= 0x08000000; // Captured checks / detached RPC: no new target console.
-            Check(CreateProcess(executable, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, flags, IntPtr.Zero, cwd, ref startup, out process));
-            Check(AssignProcessToJobObject(job, process.process)); assigned = true;
+            Check(CreateProcess(executable, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, flags, IntPtr.Zero, cwd, ref startup, out process), "CreateProcess(target)");
+            Check(AssignProcessToJobObject(job, process.process), "AssignProcessToJobObject(target)"); assigned = true;
             Close(ref outWrite); Close(ref errWrite); Close(ref input);
             if (!inheritStdio) {
                 output = Pump(outRead, "stdout"); outRead = IntPtr.Zero;
@@ -275,12 +281,12 @@ public static class MissionCheckJob {
             // A verification host releases its listening-port reservation at this barrier. The
             // terminal mode defaults to immediate resume and keeps raw stdin out of this protocol.
             while (waitForResume && Volatile.Read(ref resumeRequested) == 0 && Volatile.Read(ref canceled) == 0) Thread.Sleep(10);
-            if (Volatile.Read(ref canceled) == 0) Check(ResumeThread(process.thread) != 0xffffffff);
+            if (Volatile.Read(ref canceled) == 0) Check(ResumeThread(process.thread) != 0xffffffff, "ResumeThread(target)");
             var elapsed = Stopwatch.StartNew();
             while (true) {
                 uint wait = WaitForSingleObject(process.process, 20);
                 if (wait == 0) {
-                    Check(GetExitCodeProcess(process.process, out exit));
+                    Check(GetExitCodeProcess(process.process, out exit), "GetExitCodeProcess(target)");
                     // A signaled root may precede the Job accounting decrement by a few ticks.
                     // Keep ownership during this bounded drain, then terminate any remaining child.
                     var drain = Stopwatch.StartNew();
@@ -289,11 +295,11 @@ public static class MissionCheckJob {
                     quiet = lingering ? Stop(job, process.process, assigned) : true;
                     break;
                 }
-                Check(wait == 258);
+                Check(wait == 258, "WaitForSingleObject(target)");
                 timedOut = timeoutMs > 0 && elapsed.ElapsedMilliseconds >= timeoutMs;
                 if (timedOut || Volatile.Read(ref canceled) != 0) {
                     quiet = Stop(job, process.process, assigned);
-                    if (quiet) Check(GetExitCodeProcess(process.process, out exit));
+                    if (quiet) Check(GetExitCodeProcess(process.process, out exit), "GetExitCodeProcess(target)");
                     break;
                 }
             }

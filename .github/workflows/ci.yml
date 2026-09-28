@@ -90,6 +90,11 @@ jobs:
       - run: npm ci --include=dev
         env:
           NODE_ENV: development
+      # A broken ConPTY guardian otherwise fails only after the long real-Git recovery file.
+      # This is a fast diagnostic, not a substitute for the full no-skip gate below.
+      - name: Preflight Windows terminal ownership
+        shell: bash
+        run: npx vitest run tests/mission-restart-recovery.test.ts -t 'recovers terminal only' --reporter=verbose
       - name: Execute Windows-only boundaries
         shell: bash
         run: |

@@ -134,8 +134,10 @@ suites alive** below):
 `.github/workflows/ci.yml` runs `npm run typecheck && npm test && npm run build` plus `test:e2e:ci`
 on every PR into `develop`. A separate Windows offline job executes the Windows ownership, recovery,
 deep-path, and renderer/main import boundaries that Ubuntu cannot certify, and rejects skipped or
-uncollected requested files. The jobs print the slowest files and cases and upload sanitized timing
-reports; raw Vitest JSON stays in runner temp because failure messages could contain sensitive data. The Windows E2E job sets
+uncollected requested files. It preflights the ConPTY ownership cases before the long real-Git
+file; that focused probe does not replace the full no-skip run. The jobs print the slowest files
+and cases and upload sanitized timing reports; raw Vitest JSON stays in runner temp because failure
+messages could contain sensitive data. The Windows E2E job sets
 `VOCS_CODE_E2E_WEB_PREBUILT=1` only after `npm run build`, so `e2e.remote-web` consumes the
 validated prebuilt web bundle instead of building it again. Standalone runs still build it.
 The live tiers stay manual.
