@@ -104,6 +104,9 @@ export interface MissionPresetCapabilities {
   runtime?: Pick<HarnessAvailability, 'available' | 'authenticated'>;
   connectionAvailable?: boolean;
   modelAvailable?: boolean;
+  /** The runtime attests model availability on its first reply and stops on any other model, so
+   * an unobserved `modelAvailable` is not a blocker. An observed `false` still is. */
+  modelAttestation?: 'first_response';
   modelInfo?: ModelInfo;
   harnessCapabilities?: Partial<Pick<HarnessCapabilities, 'effort' | 'interrupt'>>;
   controlProtocol?: boolean;
@@ -437,7 +440,7 @@ export function validatePresetEligibility(value: MissionReadonly<ExecutionPreset
   if (cap?.source !== 'runtime') unknown.push('No live runtime evidence; a catalog entry is not proof of availability.');
   if (cap?.runtime?.available !== true) unknown.push('Runtime presence has not been verified.');
   if (cap?.connectionAvailable !== true) unknown.push('Connection/account availability has not been verified.');
-  if (cap?.modelAvailable !== true) unknown.push('Model availability has not been verified.');
+  if (cap?.modelAvailable !== true && !(cap?.source === 'runtime' && cap.modelAttestation === 'first_response')) unknown.push('Model availability has not been verified.');
   if (cap?.projectAllowed !== true) unknown.push('Project permission/data rules have not been verified.');
   return unknown.length ? finish('unverified', [...new Set(unknown)]) : finish('available', []);
 }
