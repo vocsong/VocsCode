@@ -253,34 +253,34 @@ describe('Mission Settings user flows', () => {
     expect(saved.mission?.limits.maxConcurrentWorkersPerMission).toBe(2);
   });
 
-  it('states what can run a Mission, offers Pi and labels other harnesses without rewriting a saved preset', async () => {
+  it('states what can run a Mission, offers Pi and Claude and labels other harnesses without rewriting a saved preset', async () => {
     const mission = createDefaultMissionConfig();
-    mission.presets.push({ id: 'saved-claude', revision: 3, name: 'Saved Claude', harnessId: 'claude', model: { provider: 'account-two', model: 'engine' }, reasoning: { kind: 'default' }, enabled: true });
+    mission.presets.push({ id: 'saved-codex', revision: 3, name: 'Saved Codex', harnessId: 'codex', model: { provider: 'account-two', model: 'engine' }, reasoning: { kind: 'default' }, enabled: true });
     saved = { ...saved, mission };
     useStore.setState({ settings: saved });
     open();
-    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi presets on Windows.');
+    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi and Claude Agent SDK presets on Windows.');
     expect(screen.queryByText(/not enabled in this phase/)).toBeNull();
     expect(screen.getByText(/Saving never starts a Mission: start one from New Session → Mission, or type \/mission/)).toBeTruthy();
-    const card = screen.getByRole('region', { name: 'Preset Saved Claude' });
+    const card = screen.getByRole('region', { name: 'Preset Saved Codex' });
     expect(within(card).getByText('Not supported for Missions yet')).toBeTruthy();
-    expect(within(card).getByText(/Claude Agent SDK presets are not supported for Missions yet/)).toBeTruthy();
+    expect(within(card).getByText(/Codex \(app-server\) presets are not supported for Missions yet/)).toBeTruthy();
     openLibrary();
     fireEvent.click(screen.getByRole('button', { name: 'New preset' }));
     const harness = screen.getByLabelText('Harness') as HTMLSelectElement;
     expect(harness.value).toBe('pi');
     expect([...harness.options].map((option) => option.textContent)).toEqual([
-      'Pi', 'Claude Agent SDK — not supported for Missions yet', 'Codex (app-server) — not supported for Missions yet', 'Codex (exec SDK) — not supported for Missions yet',
+      'Pi', 'Claude Agent SDK', 'Codex (app-server) — not supported for Missions yet', 'Codex (exec SDK) — not supported for Missions yet',
       'Cursor — not supported for Missions yet', 'ACP agent (DeepSeek Harness, ...) — not supported for Missions yet', 'Native loop — not supported for Missions yet'
     ]);
     fireEvent.click(screen.getByRole('button', { name: 'Cancel preset edit' }));
     // Editing a saved unsupported preset keeps its harness; nothing is silently rewritten to Pi.
-    fireEvent.click(screen.getByRole('button', { name: 'Edit Saved Claude' }));
-    expect((screen.getByLabelText('Harness') as HTMLSelectElement).value).toBe('claude');
-    change('Preset name', 'Saved Claude, renamed');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Saved Codex' }));
+    expect((screen.getByLabelText('Harness') as HTMLSelectElement).value).toBe('codex');
+    change('Preset name', 'Saved Codex, renamed');
     fireEvent.click(screen.getByRole('button', { name: 'Apply preset' }));
     await save();
-    expect(saved.mission?.presets).toEqual([expect.objectContaining({ id: 'saved-claude', name: 'Saved Claude, renamed', harnessId: 'claude', model: { provider: 'account-two', model: 'engine' } })]);
+    expect(saved.mission?.presets).toEqual([expect.objectContaining({ id: 'saved-codex', name: 'Saved Codex, renamed', harnessId: 'codex', model: { provider: 'account-two', model: 'engine' } })]);
   });
 
   it('shows an invalid incoming config diagnostic instead of treating it as executable or silently saving defaults', () => {

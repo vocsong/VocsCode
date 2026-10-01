@@ -254,14 +254,15 @@ export function effortOptionsFor(harness: HarnessDescriptor, model: Pick<ModelIn
 }
 
 /**
- * Mission execution support today. Only managed Pi passes Mission readiness, and only on Windows,
- * where its process-tree ownership is proven. Claude reports its control bridge unverified and the
- * other adapters have no Mission readiness, so a Mission that uses them stops at a blocker. The UI
- * says so up front; saved presets for other harnesses are kept, never rewritten.
+ * Mission execution support today, Windows only (host checks run in Job-owned process trees). Pi
+ * and Claude pass Mission readiness; Claude's model availability is attested by its first reply,
+ * and only Pi has restart-ownership receipts. The other adapters have no Mission readiness, so a
+ * Mission that uses them stops at a blocker. The UI says so up front; saved presets for other
+ * harnesses are kept, never rewritten.
  */
-export const MISSION_SUPPORTED_HARNESSES: readonly HarnessId[] = ['pi'];
+export const MISSION_SUPPORTED_HARNESSES: readonly HarnessId[] = ['pi', 'claude'];
 export const MISSION_SUPPORTED_PLATFORMS: readonly string[] = ['win32'];
-export const MISSION_SUPPORT_SUMMARY = 'Missions are experimental. Supported today: Pi presets on Windows.';
+export const MISSION_SUPPORT_SUMMARY = 'Missions are experimental. Supported today: Pi and Claude Agent SDK presets on Windows.';
 export const MISSION_UNSUPPORTED_PLATFORM = 'Missions cannot run on this platform yet.';
 export const MISSION_HARNESS_UNSUPPORTED_LABEL = 'not supported for Missions yet';
 export function isMissionHarnessSupported(id: HarnessId): boolean {

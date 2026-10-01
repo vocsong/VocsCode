@@ -375,16 +375,16 @@ describe('Mission launch and controls', () => {
   it('states the Mission support boundary and flags a principal engineer that cannot run one', () => {
     useStore.setState({ newSessionKind: 'mission' });
     const ui = render(<NewSessionDialog />);
-    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi presets on Windows.');
+    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi and Claude Agent SDK presets on Windows.');
     expect(screen.getByRole('option', { name: 'Project default · Principal engineer · not supported for Missions yet' })).toBeTruthy();
-    expect(screen.getByText(/Native loop presets are not supported for Missions yet\. A Mission that uses one stops at a blocker before any work; choose a Pi preset\./)).toBeTruthy();
+    expect(screen.getByText(/Native loop presets are not supported for Missions yet\. A Mission that uses one stops at a blocker before any work; choose a Pi or Claude Agent SDK preset\./)).toBeTruthy();
     ui.unmount();
-    const pi = { ...record.leadPreset, harnessId: 'pi' as const };
-    settings.mission = { ...record.config, presets: [pi] };
+    const claude = { ...record.leadPreset, harnessId: 'claude' as const };
+    settings.mission = { ...record.config, presets: [claude] };
     useStore.setState({ settings: { ...settings } });
     apiMode.platform = 'darwin';
     render(<NewSessionDialog />);
-    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi presets on Windows. Missions cannot run on this platform yet.');
+    expect(screen.getByTestId('mission-support').textContent).toBe('Missions are experimental. Supported today: Pi and Claude Agent SDK presets on Windows. Missions cannot run on this platform yet.');
     expect(screen.getByRole('option', { name: 'Project default · Principal engineer' })).toBeTruthy();
     expect(screen.queryByText(/not supported for Missions yet/)).toBeNull();
   });

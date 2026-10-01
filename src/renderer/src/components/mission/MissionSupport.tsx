@@ -1,7 +1,7 @@
 /** What can actually run a Mission today, said before anyone configures or launches one. */
 import React, { useEffect, useState } from 'react';
 import type { HarnessId } from '../../../../shared/types';
-import { HARNESS_BY_ID, isMissionHarnessSupported, MISSION_SUPPORT_SUMMARY, MISSION_SUPPORTED_PLATFORMS, MISSION_UNSUPPORTED_PLATFORM } from '../../../../shared/harness-meta';
+import { HARNESS_BY_ID, isMissionHarnessSupported, MISSION_SUPPORT_SUMMARY, MISSION_SUPPORTED_HARNESSES, MISSION_SUPPORTED_PLATFORMS, MISSION_UNSUPPORTED_PLATFORM } from '../../../../shared/harness-meta';
 import { invoke, platform } from '../../api';
 import './mission.css';
 
@@ -31,5 +31,5 @@ export function MissionSupportNotice() {
 /** Plain words for a preset whose harness cannot pass Mission readiness yet. */
 export function missionHarnessWarning(harnessId: HarnessId): string | undefined {
   return isMissionHarnessSupported(harnessId) ? undefined
-    : `${HARNESS_BY_ID[harnessId].name} presets are not supported for Missions yet. A Mission that uses one stops at a blocker before any work; choose a Pi preset.`;
+    : `${HARNESS_BY_ID[harnessId].name} presets are not supported for Missions yet. A Mission that uses one stops at a blocker before any work; choose a ${MISSION_SUPPORTED_HARNESSES.map((id) => HARNESS_BY_ID[id].name).join(' or ')} preset.`;
 }

@@ -5,6 +5,7 @@ import {
   query,
   createSdkMcpServer,
   tool as sdkTool,
+  type AccountInfo,
   type CanUseTool,
   type HookCallback,
   type ModelUsage,
@@ -18,6 +19,7 @@ import {
   type SlashCommand
 } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import { isEffortLevel } from '../../shared/harness-meta';
 import { z } from 'zod';
 import { PiMcpConnection } from '../../../resources/pi/mcp-client';
 import { isMissionCoordinationTool, MISSION_SERVER_ID, missionToolDenial, missionCommandDenial, missionToolSubset } from '../../../resources/pi/vocs-code-mission';
@@ -98,6 +100,30 @@ const READ_ONLY_TOOLS = new Set([
   'ReadMcpResourceTool',
   'Skill'
 ]);
+
+/** `get_settings` → `applied`: what the next request will send, after env overrides, org caps and
+ * model-support downgrades. The installed SDK implements `getSettings()` but does not declare it. */
+interface ClaudeAppliedSettings {
+  applied?: { model?: unknown; effort?: unknown; advisor?: unknown; ultracode?: unknown };
+}
+
+/** Whether Claude Code reports a credential it will send. Cloud backends (Bedrock, Vertex, ...)
+ * authenticate outside the CLI, so their account fields stay unknown rather than absent. */
+function claudeCredentialReported(account: AccountInfo | undefined): boolean | undefined {
+  if (!account) return undefined;
+  if (account.apiProvider === 'gateway') return true;
+  if (account.apiProvider && account.apiProvider !== 'firstParty') return undefined;
+  const source = (value: string | undefined) => !!value && value !== 'none';
+  return !!account.email || source(account.apiKeySource) || source(account.tokenSource);
+}
+
+/** A reply names the model the API served: the requested id without Claude Code's `[1m]`-style
+ * context suffix, or an alias resolved to its dated release. */
+function sameClaudeModel(replied: string, requested: string): boolean {
+  const bare = (id: string) => id.replace(/\[[^\]]*\]$/, '');
+  const a = bare(replied), b = bare(requested);
+  return a === b || a.startsWith(`${b}-`) && /^\d{8}$/.test(a.slice(b.length + 1));
+}
 
 /** Slash command names as the user types them — aliases included, lower-cased and de-duplicated. */
 function commandNames(commands: readonly SlashCommand[]): string[] {
@@ -208,9 +234,17 @@ export class ClaudeAdapter implements HarnessAdapter {
   private missionCoordination = new Set<string>();
   private missionReady = false;
   private missionStreamEnded = false;
-  /** system/init is the only public SDK observation of effective model, effort and tool names.
-   * It normally arrives with the first turn, not the prompt-free initialize control response. */
-  private missionObserved: Pick<MissionReadiness, 'model' | 'effort' | 'tools'> | null = null;
+  /** Tool names from system/init, which arrives with the first turn rather than at startup. */
+  private missionObservedTools: string[] | null = null;
+  /** The credential the initialize response reported; configured, not yet proven to work. */
+  private missionAccount: AccountInfo | undefined;
+  /** Applied model at the last readiness check. Every main-thread reply must come from it. */
+  private missionModel: string | undefined;
+  /** The API served a reply from `missionModel`. Before that its availability is attested by the
+   * first reply, and a failed model or credential ends that attestation as unavailable. */
+  private missionModelAttested = false;
+  private missionModelUnavailable = false;
+  private missionCredentialRejected = false;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
@@ -376,6 +410,7 @@ export class ClaudeAdapter implements HarnessAdapter {
         if (typeof this.q.initializationResult !== 'function') throw new Error('Mission SDK hook initialization is unverified.');
         const initialization = await withTimeout(this.q.initializationResult(), 60_000, 'Mission SDK initialization');
         if (initialization?.hooks_applied !== true) throw new Error('Mission SDK hook registration is unverified or was refused.');
+        this.missionAccount = initialization.account;
         const statuses = await withTimeout(this.q.mcpServerStatus(), 60_000, 'Mission MCP readiness');
         const bridge = statuses.find((entry) => entry.name === MISSION_SERVER_ID && entry.source === 'sdk');
         if (bridge?.status !== 'connected') throw new Error('Required Mission SDK bridge is not connected.');
@@ -398,18 +433,56 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   async missionReadiness(): Promise<MissionReadiness> {
-    if (!this.ctx.session().mission || !this.q || !this.missionReady || this.missionStreamEnded) {
-      return { ready: false, tools: [], reason: 'Managed Claude SDK initialization/control bridge is unverified.' };
+    const q = this.q;
+    const unverified = (reason: string): MissionReadiness => ({ ready: false, tools: [], reason });
+    if (!this.ctx.session().mission || !q || !this.missionReady || this.missionStreamEnded) return unverified('Managed Claude SDK initialization/control bridge is unverified.');
+    // Model and effort come from the CLI's applied settings, never from config or the catalog.
+    // Neither supportedModels() nor a context-usage count rejects a model the API would refuse, so
+    // availability is attested by the first reply (see attestMissionModel), never by a sacrificial prompt.
+    const getSettings = (q as Query & { getSettings?: () => Promise<ClaudeAppliedSettings> }).getSettings;
+    if (typeof getSettings !== 'function') return unverified('This Claude Code runtime cannot report its applied model and effort without a prompt.');
+    let applied: ClaudeAppliedSettings['applied'];
+    try { applied = (await withTimeout(getSettings.call(q), 20_000, 'Mission Claude settings'))?.applied; }
+    catch (e) { return unverified(`Claude applied settings were not observed: ${errorMessage(e)}`); }
+    if (this.q !== q || !this.missionReady || this.missionStreamEnded) return unverified('Managed Claude readiness became stale.');
+    const model = typeof applied?.model === 'string' && applied.model ? applied.model : undefined;
+    if (!model) return unverified('Claude effective model was not observed.');
+    // Either would put a second model or an orchestration mode into turns the preset pins.
+    if (applied?.advisor) return unverified('Claude Code has an advisor model configured; a Mission runs only its preset model. Remove advisorModel from the Claude settings.');
+    if (applied?.ultracode === true) return unverified('Claude Code ultracode is on; a Mission owns effort and orchestration. Turn ultracode off in the Claude settings.');
+    if (this.missionModel !== model) {
+      this.missionModel = model;
+      this.missionModelAttested = false;
+      this.missionModelUnavailable = false;
     }
-    // The installed SDK's initialize response contains a catalog and account labels, not the
-    // selected model/effort or authenticated model availability. Do not send a sacrificial prompt,
-    // promote supportedModels()/config into proof, or infer authentication from any stored key.
-    // Until a prompt-free API proves those facts this driver remains unverified for Mission dispatch.
-    const observed = this.missionObserved;
-    return { ready: false, tools: observed?.tools.filter((name) => this.missionAllowed.has(name)) ?? [],
-      ...(observed?.model ? { model: observed.model } : {}), ...(observed?.effort ? { effort: observed.effort } : {}),
-      reason: observed?.model ? 'Claude model/provider availability is unverified by its prompt-free SDK control protocol.'
-        : 'Claude effective model and tool inventory were not observed before a prompt; Mission support is unverified.' };
+    const effort = isEffortLevel(applied?.effort) ? applied.effort : undefined;
+    const connectionAvailable = this.missionCredentialRejected ? false : claudeCredentialReported(this.missionAccount);
+    // system/init lists the loaded tools once a turn has run; before it, the enforced allowlist.
+    const tools = [...this.missionAllowed].filter((name) => !this.missionObservedTools || this.missionObservedTools.includes(name));
+    return {
+      ready: true, tools, model: { provider: this.providerId ?? 'anthropic', model }, ...(effort ? { effort } : {}),
+      ...(connectionAvailable !== undefined ? { connectionAvailable } : {}),
+      ...(this.missionModelUnavailable ? { modelAvailable: false } : this.missionModelAttested ? { modelAvailable: true } : { modelAttestation: 'first_response' as const }),
+    };
+  }
+
+  /** A Mission turn runs only on the model readiness observed. A main-thread reply from another
+   * model stops the runtime before any further turn; the first matching reply proves availability. */
+  private attestMissionModel(msg: { message: { model?: string }; error?: string }): void {
+    if (msg.error === 'model_not_found') this.missionModelUnavailable = true;
+    if (msg.error === 'authentication_failed' || msg.error === 'oauth_org_not_allowed' || msg.error === 'account_on_hold' || msg.error === 'cloud_credential_error') this.missionCredentialRejected = true;
+    const replied = msg.message.model;
+    // Claude Code labels its own error and interruption notices `<synthetic>`; a failed request
+    // settles as a failed turn, so it neither proves nor disproves the model.
+    if (!replied || replied === '<synthetic>' || !this.missionModel) return;
+    if (sameClaudeModel(replied, this.missionModel)) {
+      this.missionModelAttested = true;
+      return;
+    }
+    this.missionReady = false;
+    this.missionModelAttested = false;
+    this.ctx.emit({ type: 'error', message: `Claude answered with ${replied}, but this Mission preset requires ${this.missionModel}. The runtime was stopped so no further turn runs on a different model.`, fatal: true });
+    void this.q?.interrupt().catch(() => undefined);
   }
 
   private missionDenial(toolName: string, input: Record<string, unknown>, server?: { name: string; source: string }): string | undefined {
@@ -711,10 +784,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       case 'system': {
         const subtype = (msg as { subtype?: string }).subtype;
         if (msg.subtype === 'init') {
-          if (this.ctx.session().mission) this.missionObserved = {
-            ...(msg.model ? { model: { provider: this.providerId ?? 'anthropic', model: msg.model } } : {}),
-            ...(msg.effort ? { effort: msg.effort } : {}), tools: [...msg.tools],
-          };
+          if (this.ctx.session().mission) this.missionObservedTools = [...msg.tools];
           this.sessionId = msg.session_id;
           this.ctx.updateRef({ claudeSessionId: msg.session_id });
           if (msg.model) this.ctx.updateMeta({ activeModel: { provider: this.providerId ?? 'anthropic', model: msg.model } });
@@ -783,6 +853,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       }
       case 'assistant': {
         this.markTurnStarted();
+        if (this.ctx.session().mission && !msg.parent_tool_use_id) this.attestMissionModel(msg);
         const content = (msg.message.content ?? []) as ContentBlockLike[];
         // The child's own transcript lives in its run, never in the parent's: this message is one
         // the subagent produced, so every block belongs to the delegation, not to the answer.
@@ -1114,7 +1185,12 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   async dispose(): Promise<void> {
     this.missionReady = false;
-    this.missionObserved = null;
+    this.missionObservedTools = null;
+    this.missionAccount = undefined;
+    this.missionModel = undefined;
+    this.missionModelAttested = false;
+    this.missionModelUnavailable = false;
+    this.missionCredentialRejected = false;
     this.missionAllowed.clear();
     this.missionCoordination.clear();
     this.missionConnection?.close();
