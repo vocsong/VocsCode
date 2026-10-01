@@ -54,7 +54,7 @@ describe.runIf(enabled)('Mission settings UI', () => {
     const readSettings = async (): Promise<AppSettings> => JSON.parse(await fs.readFile(settingsPath, 'utf8'));
     let win = await launch(userData);
     // Honest support boundary for testers, and no stale "launch is not enabled" claim.
-    await win.getByTestId('mission-support').getByText('Missions are experimental. Supported today: Pi presets on Windows.', { exact: true }).waitFor();
+    await win.getByTestId('mission-support').getByText('Missions are experimental. Supported today: Pi and Claude Agent SDK presets on Windows.', { exact: true }).waitFor();
     expect(await win.getByText(/not enabled in this phase/).count()).toBe(0);
     expect(await win.getByRole('region', { name: 'Tier 5', exact: true }).getByRole('button', { name: 'Remove Engineer from T5' }).count()).toBe(1);
     expect(await win.getByRole('region', { name: 'Tier 3', exact: true }).getByRole('button', { name: 'Remove Engineer from T3' }).count()).toBe(1);

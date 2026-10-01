@@ -218,6 +218,16 @@ describe('honest Mission capability states and effort support', () => {
     expect(() => resolveMissionConfig(config(), undefined, undefined, evidence({ source: 'catalog' }))).toThrow(/Unverified/);
   });
 
+  it('accepts first-reply model attestation only from live runtime evidence, never over an observed unavailable model', () => {
+    const attested = evidence({ modelAvailable: undefined, modelAttestation: 'first_response' });
+    expect(validatePresetEligibility(preset(), { role: 'lead', capabilities: attested })).toEqual({ status: 'available', eligible: true, reasons: [] });
+    expect(validatePresetEligibility(preset(), { capabilities: evidence({ modelAvailable: undefined }) })).toMatchObject({ status: 'unverified', reasons: ['Model availability has not been verified.'] });
+    expect(validatePresetEligibility(preset(), { capabilities: evidence({ source: 'catalog', modelAvailable: undefined, modelAttestation: 'first_response' }) }).status).toBe('unverified');
+    expect(validatePresetEligibility(preset(), { capabilities: evidence({ modelAvailable: false, modelAttestation: 'first_response' }) })).toMatchObject({ status: 'unavailable', reasons: ['The selected model is unavailable.'] });
+    // The attestation covers only the model; an unknown connection still blocks.
+    expect(validatePresetEligibility(preset(), { capabilities: evidence({ modelAvailable: undefined, modelAttestation: 'first_response', connectionAvailable: undefined }) }).status).toBe('unverified');
+  });
+
   it.each([
     { runtime: { available: false } }, { runtime: { available: true, authenticated: false } },
     { connectionAvailable: false }, { modelAvailable: false }, { projectAllowed: false }

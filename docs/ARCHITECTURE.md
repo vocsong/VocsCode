@@ -145,7 +145,7 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 
 [Mission guide](MISSIONS.md) · [status and support matrix](MISSION-STATUS.md) · [specification](MISSION-SPEC-v0.2.md)
 
-Missions are experimental and run only with Pi presets on Windows. The harness matrix above
+Missions are experimental and run only with Pi and Claude Agent SDK presets on Windows. The harness matrix above
 describes ordinary sessions and says nothing about Mission support.
 
 `mission/runtime.ts` composes the privileged coordinator at desktop startup. `MissionService`

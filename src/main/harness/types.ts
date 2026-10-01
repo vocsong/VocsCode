@@ -73,6 +73,9 @@ export interface MissionReadiness {
   /** The exact model/connection is available in this runtime; absent means unverified. */
   modelAvailable?: boolean;
   connectionAvailable?: boolean;
+  /** Model availability is not observable without a prompt. The adapter proves it from the first
+   * reply and stops the runtime (a fatal error) on a reply from any other model. */
+  modelAttestation?: 'first_response';
 }
 
 export interface HarnessAdapter {
