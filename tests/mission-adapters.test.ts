@@ -17,10 +17,12 @@ import { ClaudeAdapter } from '../src/main/harness/claude';
 import { gateAction, isTrustedMissionCoordination } from '../src/main/harness/permissions';
 import { closeMcpBridge, loadMcpBridge, mcpReadOnlyToolNames } from '../resources/pi/vocs-code-mcp';
 import { MISSION_PI_CORE_TOOLS } from '../resources/pi/vocs-code-mission';
-import { deferred } from '../src/main/util/async';
+import { AsyncQueue, deferred } from '../src/main/util/async';
 import { STATIC_MODELS_BY_PROVIDER } from '../src/main/models/static-models';
 
 const sdk = vi.hoisted(() => ({ query: vi.fn(), createSdkMcpServer: vi.fn(), tool: vi.fn() }));
+/** The scripted Claude Code process: what get_settings applies, the initialize account, and the message stream. */
+const claudeRuntime = vi.hoisted(() => ({ applied: {} as Record<string, unknown>, account: {} as Record<string, unknown>, stream: null as { push(message: unknown): void } | null, interrupt: vi.fn(async () => {}) }));
 vi.mock('@anthropic-ai/claude-agent-sdk', () => sdk);
 const spawn = vi.hoisted(() => ({ spawnTool: vi.fn(), shutdownChild: vi.fn(), usesWindowsCommandShim: () => false }));
 vi.mock('../src/main/harness/spawn', () => spawn);
@@ -41,13 +43,19 @@ const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
 beforeEach(() => {
   sdk.tool.mockImplementation((name, description, inputSchema, handler) => ({ name, description, inputSchema, handler }));
   sdk.createSdkMcpServer.mockImplementation(({ name }) => ({ type: 'sdk', name, instance: {} }));
+  claudeRuntime.applied = { model: 'fixed-model', effort: 'high', advisor: null, ultracode: false };
+  claudeRuntime.account = { email: 'owner@example.test', apiProvider: 'firstParty' };
+  claudeRuntime.interrupt.mockImplementation(async () => {});
   sdk.query.mockImplementation(() => {
-    const closed = deferred<void>();
+    const stream = new AsyncQueue<unknown>();
+    claudeRuntime.stream = stream;
     const bridgeTools = sdk.tool.mock.results.map((entry) => ({ name: entry.value.name }));
     return {
-      [Symbol.asyncIterator]: async function* () { await closed.promise; }, close: () => closed.resolve(), interrupt: vi.fn(), setPermissionMode: vi.fn(),
-      initializationResult: async () => ({ hooks_applied: true, models: [{ value: 'fixed-model' }], account: {} }),
+      [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](), close: () => stream.close(), interrupt: claudeRuntime.interrupt, setPermissionMode: vi.fn(),
+      initializationResult: async () => ({ hooks_applied: true, models: [{ value: 'fixed-model' }], account: claudeRuntime.account }),
       mcpServerStatus: async () => [{ name: 'vocs-mission', source: 'sdk', status: 'connected', tools: bridgeTools }],
+      getSettings: async () => ({ effective: {}, sources: [], applied: claudeRuntime.applied }),
+      supportedModels: async () => [], supportedCommands: async () => [],
     };
   });
 });
@@ -467,16 +475,64 @@ describe('managed Mission adapter boundaries', () => {
     expect(h.events.filter((event) => event.type === 'status' && event.status === 'idle')).toHaveLength(0);
   });
 
-  it('Claude SDK initialization and a connected bridge do not certify unknown effective model or provider availability', async () => {
+  it('Claude reports its applied model, effort and credential without a prompt, and attests the model on the first reply', async () => {
     const h = await claude();
-    h.meta.activeModel = h.meta.config.model; h.meta.activeEffort = 'high';
+    expect(sdk.query.mock.calls.at(-1)![0].options.model).toBe('fixed-model');
     const readiness = await h.adapter.missionReadiness();
-    expect(readiness.ready).toBe(false);
-    expect(readiness.model).toBeUndefined(); expect(readiness.effort).toBeUndefined();
-    expect(readiness.modelAvailable).not.toBe(true); expect(readiness.connectionAvailable).not.toBe(true);
-    expect(readiness.tools).toEqual([]);
-    await expect(h.adapter.send({ text: 'no speculative model call' })).rejects.toThrow(/unverified|not observed/i);
+    expect(readiness).toEqual({
+      ready: true, tools: expect.arrayContaining(['Read', 'Edit', 'mcp__vocs-mission__mission_read', 'mcp__vocs-mission__mission_report']),
+      model: { provider: 'anthropic', model: 'fixed-model' }, effort: 'high', connectionAvailable: true, modelAttestation: 'first_response',
+    });
+    expect(readiness.tools).not.toContain('Agent');
+    // The first main-thread reply from the applied model (the API drops Claude Code's context suffix) proves availability.
+    claudeRuntime.stream!.push({ type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', model: 'fixed-model', content: [{ type: 'text', text: 'working' }] } });
+    await vi.waitFor(async () => expect(await h.adapter.missionReadiness()).toMatchObject({ ready: true, modelAvailable: true }));
+    expect(await h.adapter.missionReadiness()).not.toHaveProperty('modelAttestation');
+    expect(h.events.filter((event) => event.type === 'error')).toEqual([]);
+  });
+
+  it('Claude stops a Mission runtime whose reply comes from a model other than the one readiness observed', async () => {
+    const h = await claude();
+    await h.adapter.missionReadiness();
+    claudeRuntime.stream!.push({ type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', model: 'other-model', content: [{ type: 'text', text: 'hi' }] } });
+    await vi.waitFor(() => expect(h.events.filter((event) => event.type === 'error')).toEqual([expect.objectContaining({ fatal: true, message: expect.stringContaining('answered with other-model') })]));
+    expect(claudeRuntime.interrupt).toHaveBeenCalledTimes(1);
+    expect(await h.adapter.missionReadiness()).toMatchObject({ ready: false });
+    await expect(h.adapter.send({ text: 'no further turn' })).rejects.toThrow(/unverified/i);
+  });
+
+  it.each([
+    ['model_not_found', { modelAvailable: false }],
+    ['authentication_failed', { connectionAvailable: false, modelAttestation: 'first_response' }],
+  ])('Claude turns a failed first reply (%s) into observed unavailability, not attestation', async (error, observed) => {
+    const h = await claude();
+    await h.adapter.missionReadiness();
+    claudeRuntime.stream!.push({ type: 'assistant', parent_tool_use_id: null, error, message: { id: 'm1', model: '<synthetic>', content: [{ type: 'text', text: 'There is an issue with the selected model.' }] } });
+    await vi.waitFor(async () => expect(await h.adapter.missionReadiness()).toMatchObject({ ready: true, ...observed }));
+    expect(await h.adapter.missionReadiness()).not.toMatchObject({ modelAvailable: true });
+    expect(h.events.filter((event) => event.type === 'error')).toEqual([]);
+  });
+
+  it.each([
+    ['a runtime without get_settings', () => { sdk.query.mockImplementationOnce((...args: unknown[]) => { const q = sdk.query.getMockImplementation()!(...args); delete q.getSettings; return q; }); }, /cannot report its applied model/],
+    ['no applied model', () => { claudeRuntime.applied = { model: '', effort: 'high' }; }, /effective model was not observed/],
+    ['an advisor model', () => { claudeRuntime.applied = { ...claudeRuntime.applied, advisor: 'other-model' }; }, /advisor model/],
+    ['ultracode', () => { claudeRuntime.applied = { ...claudeRuntime.applied, ultracode: true }; }, /ultracode/],
+  ])('Claude refuses Mission dispatch with %s, before any model prompt', async (_name, arrange, reason) => {
+    arrange();
+    const h = await claude();
+    expect(await h.adapter.missionReadiness()).toMatchObject({ ready: false, tools: [], reason: expect.stringMatching(reason) });
+    await expect(h.adapter.send({ text: 'no speculative model call' })).rejects.toThrow(reason);
     expect(h.adapter.busy).toBe(false);
+  });
+
+  it.each([
+    [{}, false], [{ email: 'owner@example.test' }, true], [{ apiKeySource: 'ANTHROPIC_API_KEY' }, true], [{ apiKeySource: 'none' }, false],
+    [{ apiProvider: 'gateway' }, true], [{ apiProvider: 'bedrock' }, undefined],
+  ])('Claude reads connection availability %j from the credential Claude Code reports', async (account, available) => {
+    claudeRuntime.account = account;
+    const h = await claude();
+    expect((await h.adapter.missionReadiness()).connectionAvailable).toBe(available);
   });
 
   it.each([undefined, false])('Claude refuses unknown/unapplied SDK hook registration (%s) before any model prompt', async (hooksApplied) => {
