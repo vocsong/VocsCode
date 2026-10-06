@@ -96,7 +96,11 @@ Without them, the fallback for the build alone is Actions tab → **release** �
 
 ## Signatures
 
-Installers are unsigned. Windows SmartScreen and macOS Gatekeeper show first-run warnings — the README tells users how to get past them. Adding signing certificates later doesn't change this flow; it only removes the warnings.
+No installer is signed with a publisher certificate. Windows SmartScreen and macOS Gatekeeper show first-run warnings — the README tells users how to get past them. Adding signing certificates later doesn't change this flow; it only removes the warnings.
+
+macOS builds are **ad-hoc signed** (`mac.identity: "-"` in `electron-builder.yml`), not notarized. Left unsigned, electron-builder ships the Electron binary's leftover linker signature, which fails `codesign --verify`; Gatekeeper then reports a quarantined download as "damaged and can't be opened" and offers no way past it. An ad-hoc signature is valid, so Gatekeeper shows its ordinary "could not verify" prompt and **Privacy & Security → Open Anyway** works. `hardenedRuntime` is off because, with an ad-hoc identity, its library validation would stop the app launching. Check a local build with `codesign --verify --deep --strict -v "dist/mac-arm64/Vocs Code.app"`.
+
+The real fix is a Developer ID certificate plus notarization: it needs the maintainer's paid Apple Developer account and its credentials as CI secrets, and then `mac.identity` goes back to automatic discovery with `hardenedRuntime` on. Until then, mac auto-update stays best-effort (see [In-app auto-update](#in-app-auto-update)).
 
 ## Local sanity check before shipping
 

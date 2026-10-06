@@ -55,6 +55,12 @@ mac:
       arch: [x64, arm64]
   category: public.app-category.developer-tools
   artifactName: Vocs-Code-${version}-mac-${arch}.${ext}
+  # No Developer ID yet. Without a signature electron-builder ships Electron's leftover linker
+  # signature, which fails codesign --verify, so Gatekeeper calls the app "damaged" with no way past.
+  # An ad-hoc signature is valid, so Gatekeeper offers Privacy & Security → Open Anyway instead.
+  # Hardened runtime is off: with an ad-hoc identity its library validation stops the app launching.
+  identity: "-"
+  hardenedRuntime: false
 linux:
   icon: resources/icons/vocs-code.png
   target: [AppImage]
