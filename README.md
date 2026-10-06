@@ -15,7 +15,25 @@ Grab the latest installer from [Releases](https://github.com/vocsong/VocsCode/re
 | macOS (Intel) | `Vocs-Code-<version>-mac-x64.dmg` |
 | Linux | `Vocs-Code-<version>-linux-x86_64.AppImage` |
 
-Installers are currently unsigned, so expect one first-run prompt: Windows SmartScreen → **More info → Run anyway**; macOS → right-click the app → **Open** the first time.
+Installers are not yet signed with a publisher certificate, so expect one first-run prompt:
+
+- **Windows** — SmartScreen → **More info → Run anyway**.
+- **macOS** — Apple has not verified the app, so the first open takes a trip through System Settings. Right-click → **Open** no longer gets past this on macOS 15 and later.
+  1. Opening the app shows **"Vocs Code.app" Not Opened** with only **Move to Trash** and **Done**. Click **Done**.
+
+     <img src="docs/images/macos-not-opened.png" alt="macOS dialog: &quot;Vocs Code.app&quot; Not Opened, with Move to Trash and Done buttons" width="260">
+  2. Open **System Settings → Privacy & Security** and scroll down to **Security**. Next to **"Vocs Code.app" was blocked to protect your Mac**, click **Open Anyway**. The button stays there for about an hour after the blocked open.
+
+     <img src="docs/images/macos-privacy-security-open-anyway.png" alt="System Settings, Privacy &amp; Security: &quot;Vocs Code.app&quot; was blocked to protect your Mac, with an Open Anyway button" width="520">
+  3. macOS asks once more. Click **Open Anyway** — not the highlighted **Move to Trash** — and enter your password if asked. Later opens go straight in.
+
+     <img src="docs/images/macos-open-anyway-confirm.png" alt="macOS dialog: Open &quot;Vocs Code.app&quot;?, with Move to Trash, Open Anyway and Done buttons" width="260">
+
+  If **Open Anyway** never appears, clear the download quarantine flag from Terminal instead — this skips Apple's malware check, so only do it for a build downloaded from this repository's Releases page:
+
+  ```bash
+  xattr -dr com.apple.quarantine "/Applications/Vocs Code.app"
+  ```
 
 On first launch the app starts with no agent configured — open **Settings → Harnesses** to see which runtimes were detected, install missing ones in one click, and add an API key. Keys are stored in your OS keychain, never in this repository.
 
