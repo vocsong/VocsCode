@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { listWorkspaceFiles, readWorkspaceFile } from '../src/main/workspace-files';
+import { listWorkspaceFiles, MAX_IMAGE_BYTES, readWorkspaceFile, readWorkspaceImage } from '../src/main/workspace-files';
 
 const tempDirs: string[] = [];
 
@@ -108,5 +108,42 @@ describe('readWorkspaceFile', () => {
     const clampedRead = await readWorkspaceFile(root, 'clamped.txt', 3_000_000);
     expect(clampedRead.content).toHaveLength(2_000_000);
     expect(clampedRead.truncated).toBe(true);
+  });
+});
+
+describe('readWorkspaceImage', () => {
+  // A 1x1 transparent PNG: real image bytes that a UTF-8 decode would mangle.
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+
+  it('returns the exact bytes as base64 with the MIME type of the extension', async () => {
+    const { root } = workspace();
+    await fs.mkdir(path.join(root, 'runs'), { recursive: true });
+    await fs.writeFile(path.join(root, 'runs', 'chart.PNG'), PNG);
+
+    const image = await readWorkspaceImage(root, path.join('runs', 'chart.PNG'));
+    expect(image).toEqual({ mimeType: 'image/png', data: PNG.toString('base64'), size: PNG.length, tooLarge: false });
+    expect(Buffer.from(image!.data, 'base64').equals(PNG)).toBe(true);
+  });
+
+  it('refuses non-image paths and images outside the workspace', async () => {
+    const { root, sibling } = workspace();
+    await fs.mkdir(root, { recursive: true });
+    await fs.mkdir(sibling);
+    await fs.writeFile(path.join(root, 'notes.txt'), 'text');
+    await fs.writeFile(path.join(sibling, 'outside.png'), PNG);
+
+    await expect(readWorkspaceImage(root, 'notes.txt')).resolves.toBeNull();
+    await expect(readWorkspaceImage(root, path.join('..', 'proj2', 'outside.png'))).resolves.toBeNull();
+    await expect(readWorkspaceImage(root, path.join(sibling, 'outside.png'))).resolves.toBeNull();
+  });
+
+  it('reports an image over the cap without sending its bytes', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root, { recursive: true });
+    const big = path.join(root, 'huge.png');
+    await fs.writeFile(big, PNG);
+    await fs.truncate(big, MAX_IMAGE_BYTES + 1);
+
+    await expect(readWorkspaceImage(root, 'huge.png')).resolves.toEqual({ mimeType: 'image/png', data: '', size: MAX_IMAGE_BYTES + 1, tooLarge: true });
   });
 });
