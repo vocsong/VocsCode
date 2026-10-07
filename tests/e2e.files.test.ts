@@ -31,6 +31,8 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     await fs.mkdir(userData, { recursive: true });
     const body = Array.from({ length: 400 }, (_, i) => `export const line${i + 1} = ${i + 1};`).join('\n') + '\n';
     await fs.writeFile(path.join(project, 'src', 'hello.ts'), body);
+    // A 1x1 PNG beside it: the panel must draw it, not dump its bytes as text.
+    await fs.writeFile(path.join(project, 'src', 'pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
     const sid = 's_file_e2e';
@@ -101,5 +103,15 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     expect(await win.locator('.transcript-row').count()).toBeLessThan(80);
     await match.getByRole('link', { name: 'src/hello.ts:300' }).click();
     expect(await win.locator('.file-preview pre').innerText()).toBe(body);
+
+    // Back to the folder listing, then open the PNG: it renders as a decoded picture.
+    await win.locator('.file-preview-head button[title="Close preview"]').click();
+    await win.locator('.file-list .file-row', { hasText: 'pixel.png' }).click();
+    await win.waitForSelector('.file-preview-head .mono:has-text("src/pixel.png")', { timeout: 10_000 });
+    const img = win.locator('.file-preview .file-image img');
+    await img.waitFor({ timeout: 10_000 });
+    await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 10_000 }).toBe(1);
+    expect(await win.locator('.file-preview pre').count()).toBe(0);
+    await win.screenshot({ path: path.join(shots, 'files-02-image.png') });
   }, 180_000);
 });

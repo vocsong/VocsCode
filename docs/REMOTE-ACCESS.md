@@ -169,7 +169,7 @@ interface Transport {
   guessed at.
 
 **Filtered surface.** Remote gets: `sessions:*`, `approvals:respond`, read-mostly
-`git:*`, `fs:list/search/read`, `analytics:*`, `skills:list/read`,
+`git:*`, `fs:list/search/read/readImage`, `analytics:*`, `skills:list/read`,
 `harness:availability/models`, `desktop:focus` (which session the desktop window is on, read-only),
 and the read-only terminal view `terminal:list/screen` (P3.5,
 step one: plain text, never attached, resized or typed into). Excluded or remapped: `window:*`,

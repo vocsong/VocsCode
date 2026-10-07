@@ -45,7 +45,7 @@ import type { RemoteHost } from './remote/host';
 import type { DesktopFocusTracker } from './desktop-focus';
 import { relayUrl, signInAvailable } from './remote/relay-url';
 import { transcriptPage } from '../shared/transcript-page';
-import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
+import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceImage } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
 
@@ -1490,6 +1490,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return out;
   });
   handle('fs:read', async ({ sessionId, path: p, maxBytes, missionWorkspaceId }) => readWorkspaceFile((await missionReadScope(sessionId, missionWorkspaceId)).cwd, p, maxBytes));
+  handle('fs:readImage', async ({ sessionId, path: p, missionWorkspaceId }) => readWorkspaceImage((await missionReadScope(sessionId, missionWorkspaceId)).cwd, p));
 
   // Layer 2 project knowledge. Every channel resolves its scope from the session, never from a
   // renderer-supplied path, so a client cannot read or write another project's wiki.
