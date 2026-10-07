@@ -8,6 +8,8 @@ import type { MissionRecord } from '../../shared/mission';
 import { resolveNewSessionDefaults } from '../../shared/session-defaults';
 import { invoke, on, canInvoke } from './api';
 import { recencyAt, sortSessionRows } from './sessionOrder';
+import * as panes from './panes';
+import type { DropZone, PaneLayout, PaneOrientation, PaneSide } from './panes';
 
 export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
 /** The Git panel's inner view: the repo, its worktrees, or the two GitHub lists. */
@@ -58,7 +60,10 @@ interface State {
   missionInspector: { missionId: string; sessionId: string; itemId?: string } | null;
   newSessionKind: 'normal' | 'mission';
   newMissionSourceId: string | null;
+  /** The active pane's session; every global panel follows it. Kept equal to `layout`'s active pane. */
   activeId: string | null;
+  /** The split conversation workspace (panes.ts); a single pane is the app as it always was. */
+  layout: PaneLayout;
   transcripts: Record<string, TranscriptItem[]>;
   loaded: Record<string, boolean>;
   /** Last transcript load failure per session; the transcript pane offers a retry instead of spinning forever. */
@@ -141,7 +146,17 @@ interface State {
   historyIndex: number;
 
   boot(): Promise<void>;
+  /** Opens a session in the active pane, or focuses the pane already showing it. */
   setActive(id: string | null): Promise<void>;
+  /** Makes a pane active, so its session becomes the context for the global panels. */
+  focusPane(paneId: string): void;
+  /** Splits a pane (the active one by default); the new pane is active and shows `sessionId` or a picker. */
+  splitPane(orientation: PaneOrientation, opts?: { paneId?: string; sessionId?: string | null; side?: PaneSide }): void;
+  /** Removes a pane from the split. Its session keeps running and stays in the sidebar. */
+  closePane(paneId: string): void;
+  /** A session dragged onto a pane: shown in it (`center`) or in a new pane on that edge. */
+  dropSession(paneId: string, zone: DropZone, sessionId: string): void;
+  resizePanes(sizes: number[]): void;
   /** `force` reloads a transcript that is already marked loaded (resync); items stay until it lands. */
   loadTranscript(id: string, force?: boolean): Promise<void>;
   /** Prepends the page before a paged transcript's first item (web shells). */
@@ -335,6 +350,21 @@ function markPanelBottomOpened(list: PanelBottomTab[], tab: PanelBottomTab): Pan
   return list.includes(tab) ? list : [...list, tab];
 }
 
+/** Off until the desktop boot has restored the last split, so the initial empty layout never overwrites it. */
+let persistLayout = false;
+
+/** Installs a restored split: every pane's transcript loads, the active one becomes the context. */
+async function applyLayout(set: Setter, get: Getter, layout: PaneLayout): Promise<void> {
+  const activeId = panes.activePane(layout).sessionId;
+  set({ layout, activeId, view: 'chat' });
+  pushHistory(set, get, { view: 'chat', sessionId: activeId });
+  for (const pane of layout.panes) {
+    const session = pane.sessionId ? get().sessions.find((s) => s.id === pane.sessionId) : undefined;
+    if (session?.mission) void get().loadMission(session.mission.missionId);
+  }
+  await Promise.all(layout.panes.map((p) => (p.sessionId ? get().loadTranscript(p.sessionId) : undefined)));
+}
+
 export const useStore = create<State>((set, get) => ({
   booted: false,
   bootError: null,
@@ -346,6 +376,7 @@ export const useStore = create<State>((set, get) => ({
   newSessionKind: 'normal',
   newMissionSourceId: null,
   activeId: null,
+  layout: panes.singlePaneLayout(),
   transcripts: {},
   loaded: {},
   transcriptErrors: {},
@@ -428,7 +459,14 @@ export const useStore = create<State>((set, get) => ({
         if (canInvoke('desktop:focus')) void invoke('desktop:focus', undefined).then((focus) => set({ desktopFocus: focus })).catch(() => undefined);
         if (canInvoke('missions:list')) void invoke('missions:list', undefined).then((records) => records.forEach((record) => get().setMission(record))).catch(() => undefined);
         const first = sessions.find((s) => !s.archived && s.mission?.role !== 'worker');
-        if (first && storeOptions.openFirstSessionOnBoot !== false) await get().setActive(first.id);
+        if (storeOptions.openFirstSessionOnBoot !== false) {
+          // A split from the last run comes back when its sessions still exist; otherwise the first
+          // session opens exactly as it did before split view existed.
+          const restored = panes.restoreLayout(panes.loadStoredLayout(), (id) => sessions.some((s) => s.id === id && !s.archived && s.mission?.role !== 'worker'));
+          if (restored && restored.panes.length > 1) await applyLayout(set, get, restored);
+          else if (first) await get().setActive(first.id);
+          persistLayout = true;
+        }
         // Availability probes spawn one subprocess per harness; kicking them off right as the
         // window opens competes with the first git calls and stalls startup under antivirus.
         // On-demand refreshes (dialogs, settings, fork menus) stay immediate.
@@ -455,9 +493,52 @@ export const useStore = create<State>((set, get) => ({
       return;
     }
     if (target?.mission) void get().loadMission(target.mission.missionId);
-    set({ activeId: id, view: 'chat' });
+    set((s) => ({ activeId: id, view: 'chat', layout: panes.openSession(s.layout, id) }));
     pushHistory(set, get, { view: 'chat', sessionId: id });
     if (id) await get().loadTranscript(id);
+  },
+
+  focusPane(paneId) {
+    const layout = panes.focusPane(get().layout, paneId);
+    if (layout === get().layout) return;
+    const sessionId = panes.activePane(layout).sessionId;
+    // Both panes are mounted and loaded already: focusing only moves the context, nothing reloads.
+    set({ layout, activeId: sessionId });
+    pushHistory(set, get, { view: 'chat', sessionId });
+  },
+
+  splitPane(orientation, opts = {}) {
+    const current = get().layout;
+    const layout = panes.splitPane(current, opts.paneId ?? current.activePaneId, orientation, opts.sessionId ?? null, opts.side);
+    if (layout === current) return;
+    const sessionId = panes.activePane(layout).sessionId;
+    set({ layout, activeId: sessionId, view: 'chat' });
+    if (sessionId) {
+      pushHistory(set, get, { view: 'chat', sessionId });
+      void get().loadTranscript(sessionId).catch(toastError);
+    }
+  },
+
+  closePane(paneId) {
+    const layout = panes.closePane(get().layout, paneId);
+    if (layout === get().layout) return;
+    set({ layout, activeId: panes.activePane(layout).sessionId });
+  },
+
+  dropSession(paneId, zone, sessionId) {
+    const target = get().sessions.find((s) => s.id === sessionId);
+    if (!target || target.mission?.role === 'worker') return;
+    const layout = panes.applyDrop(get().layout, paneId, zone, sessionId);
+    if (layout === get().layout) return;
+    if (target.mission) void get().loadMission(target.mission.missionId);
+    set({ layout, activeId: sessionId, view: 'chat' });
+    pushHistory(set, get, { view: 'chat', sessionId });
+    void get().loadTranscript(sessionId).catch(toastError);
+  },
+
+  resizePanes(sizes) {
+    const layout = panes.resizePanes(get().layout, sizes);
+    if (layout !== get().layout) set({ layout });
   },
 
   async navBack() {
@@ -590,6 +671,7 @@ export const useStore = create<State>((set, get) => ({
       settings: null,
       sessions: [],
       activeId: null,
+      layout: panes.singlePaneLayout(),
       transcripts: {},
       loaded: {},
       transcriptErrors: {},
@@ -750,6 +832,8 @@ export const useStore = create<State>((set, get) => ({
     let replacement: SessionMeta | undefined;
     let departedTitle: string | undefined;
     let departedArchived = false;
+    /** A pane left waiting for a pick after its neighbour closed, filled the way a lone pane would be. */
+    let refilled: string | undefined;
     set((s) => {
       const removed = new Set<string>();
       for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
@@ -773,7 +857,30 @@ export const useStore = create<State>((set, get) => ({
         departedArchived = !!after?.archived;
         replacement = replacementFor(s.sessions, sessions, activeId);
       }
-      if (removed.size === 0 && !activeRemoved) return { sessions };
+      // Any pane whose session left closes; the last pane takes the replacement instead.
+      const departed = (id: string) => {
+        const was = s.sessions.find((x) => x.id === id);
+        const now = sessions.find((x) => x.id === id);
+        return !now || now.mission?.role === 'worker' || (!was?.archived && !!now.archived);
+      };
+      let layout = panes.withoutSessions(s.layout, departed, activeRemoved ? replacement?.id ?? null : null);
+      if (layout.panes.length < s.layout.panes.length) {
+        // A pane closed and its neighbour took over. A neighbour still waiting for a pick gets the
+        // sidebar's replacement, exactly as a lone pane would, rather than leaving an empty screen.
+        const next = panes.activePane(layout).sessionId;
+        if (next) {
+          if (activeRemoved) replacement = sessions.find((x) => x.id === next);
+        } else {
+          const gone = s.layout.panes.find((p) => p.sessionId && departed(p.sessionId))!.sessionId!;
+          const pick = replacement ?? replacementFor(s.sessions, sessions, gone);
+          if (pick && !panes.paneShowing(layout, pick.id)) {
+            layout = panes.openSession(layout, pick.id);
+            if (!activeRemoved) refilled = pick.id;
+          }
+        }
+      }
+      const activeAfter = layout === s.layout ? s.activeId : panes.activePane(layout).sessionId;
+      if (removed.size === 0 && !activeRemoved && layout === s.layout) return { sessions };
       const transcripts = { ...s.transcripts };
       const loaded = { ...s.loaded };
       const transcriptErrors = { ...s.transcriptErrors };
@@ -805,7 +912,8 @@ export const useStore = create<State>((set, get) => ({
         models,
         drafts,
         composerHistory,
-        activeId: activeRemoved ? replacement?.id ?? null : s.activeId
+        layout,
+        activeId: activeAfter
       };
     });
     if (departedTitle) {
@@ -819,6 +927,7 @@ export const useStore = create<State>((set, get) => ({
         get().toast(`Session "${departedTitle}" was ${what}; no active sessions remain.`, 'info');
       }
     }
+    if (refilled) void get().loadTranscript(refilled).catch(toastError);
   },
   setMission(record) {
     set((s) => {
@@ -1062,6 +1171,17 @@ export const useStore = create<State>((set, get) => ({
     set({ composerInsert: null });
   }
 }));
+
+useStore.subscribe((s, prev) => {
+  // `activeId` is the active pane's session. The actions keep the two together; this catches any
+  // other write to `activeId`, so the layout can never show one session while the panels show another.
+  if (s.activeId !== prev.activeId && panes.activePane(s.layout).sessionId !== s.activeId) {
+    useStore.setState({ layout: panes.openSession(s.layout, s.activeId) });
+    return;
+  }
+  // The split is remembered for the next launch; boot turns this on once it has restored the last one.
+  if (persistLayout && s.layout !== prev.layout) panes.saveLayout(s.layout);
+});
 
 /** Reports a rejected fire-and-forget action as an error toast instead of an unhandled rejection. */
 export function toastError(error: unknown): void {

@@ -38,7 +38,8 @@ const EMPTY: never[] = [];
 /** Below this many chunks the reconciliation cost is small enough to skip windowing entirely. */
 const VIRTUALIZE_MIN = 150;
 
-export function Transcript({ session }: { session: SessionMeta }) {
+/** `active` is false for a split pane the user is not working in: it keeps streaming, but window-wide keys skip it. */
+export function Transcript({ session, active = true }: { session: SessionMeta; active?: boolean }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
   const mission = useStore((s) => session.mission?.role === 'lead' ? s.missions[session.mission.missionId] : undefined);
   const loaded = useStore((s) => s.loaded[session.id]);
@@ -52,6 +53,10 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const caps = useTranscriptCapabilities();
   const ref = useRef<HTMLDivElement>(null);
   const [stick, setStick] = useState(true);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  /** How many items the list held when the reader scrolled away from the bottom. */
+  const [unseenFrom, setUnseenFrom] = useState<number | null>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [lightbox, setLightbox] = useState<ImageLightboxState | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -168,7 +173,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Terminal owns Ctrl+F so its find bar opens instead of the transcript finder.
-      if (isTerminalEventTarget(e.target)) return;
+      if (isTerminalEventTarget(e.target) || !activeRef.current) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && !e.shiftKey) {
         // Plain Ctrl+F: find in transcript. Ctrl+Shift+F is the global deep session search.
         e.preventDefault();
@@ -265,6 +270,10 @@ export function Transcript({ session }: { session: SessionMeta }) {
   }, [jump, loaded, session.id]);
 
   const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
+  // Count what arrived since the reader left the bottom; switching sessions in this pane starts over.
+  useEffect(() => setUnseenFrom(stick ? null : (n) => n ?? items.length), [stick]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => setUnseenFrom(null), [session.id]);
+  const unseen = unseenFrom === null ? 0 : Math.max(0, items.length - unseenFrom);
 
   const copyText = async (text: string, what: string) => {
     try {
@@ -354,7 +363,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
       <TranscriptFind open={findOpen} onClose={() => setFindOpen(false)} container={ref} revision={chunks} />
       {!stick && (
         <button type="button" className="jump-bottom" onClick={() => { setStick(true); if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }}>
-          <Icon name="chevron" size={14} /> {pendingApprovals ? `${pendingApprovals} approval pending` : 'Jump to latest'}
+          <Icon name="chevron" size={14} /> {pendingApprovals ? `${pendingApprovals} approval pending` : unseen ? `${unseen} new · Jump to latest` : 'Jump to latest'}
         </button>
       )}
     </div>

@@ -16,6 +16,12 @@ import { parseMissionCommand } from '../../../shared/mission-command';
 import { missionQuestionUsage } from '../../../shared/mission';
 import { commandMission, MISSION_MANAGED_REASON, pauseMissionSession, sendMissionUser } from '../missions';
 
+/** With one pane the composer is the only one; in a split, only the active pane's takes focus and inserts. */
+function ownsComposerFocus(sessionId: string): boolean {
+  const st = useStore.getState();
+  return st.layout.panes.length === 1 || st.activeId === sessionId;
+}
+
 export function Composer({ session }: { session: SessionMeta }) {
   const archived = useStore((s) => session.mission && s.missions[session.mission.missionId]?.archived);
   if (session.mission && (session.archived || archived)) return <div className="pad muted">Archived Mission — read-only. Restore the Mission before messaging the principal engineer.</div>;
@@ -85,9 +91,25 @@ function SessionComposer({ session }: { session: SessionMeta }) {
     el.style.height = Math.min(el.scrollHeight, 320) + 'px';
   }, [text]);
 
+  // A split (or a resized window) narrows the box without changing the text: fit it again.
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let width = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 320) + 'px';
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const el = ref.current;
+    // A pane opening beside the one being typed in must not steal the caret.
+    if (!el || !ownsComposerFocus(session.id)) return;
     el.focus();
     // Put the caret at the end of a restored draft so typing continues where it left off.
     const end = el.value.length;
@@ -101,7 +123,8 @@ function SessionComposer({ session }: { session: SessionMeta }) {
 
   // Text handed over from elsewhere (the terminal's "send to agent") lands below the current draft.
   useEffect(() => {
-    if (!composerInsert) return;
+    // Inserts go to the active session; the composer of another pane leaves them for it.
+    if (!composerInsert || !ownsComposerFocus(session.id)) return;
     const insert = composerInsert.text;
     setText((t) => (t.trim() ? `${t.replace(/\s+$/, '')}\n\n${insert}` : insert));
     clearComposerInsert();
@@ -111,7 +134,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
       el.focus();
       el.setSelectionRange(el.value.length, el.value.length);
     });
-  }, [composerInsert, clearComposerInsert]);
+  }, [composerInsert, clearComposerInsert, session.id]);
 
   useEffect(() => {
     if (!mention) return;
