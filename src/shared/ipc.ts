@@ -67,6 +67,7 @@ import type { ClaudeAgentFileInfo } from './claude-agent-files';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 import type { CreateMissionRequest, MissionControlRequest, MissionRecord } from './mission';
 import type { MissionCommandRequest } from './mission-command';
+import type { WorkspaceImage } from './image-files';
 
 /** Readable text exports fail explicitly rather than silently truncating a saved artifact. */
 export const TEXT_EXPORT_MAX_BYTES = 1024 * 1024;
@@ -378,6 +379,8 @@ export interface IpcContract {
   'fs:list': [{ sessionId: string; relPath?: string; missionWorkspaceId?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number; missionWorkspaceId?: string }, string[]];
   'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean }];
+  /** An image file as base64 for the Files panel preview; null outside the workspace or for a non-image path. */
+  'fs:readImage': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceImage | null];
 
   /** Layer 2 project knowledge for one session's project: pages, proposals and review state. */
   'knowledge:view': [{ sessionId: string }, KnowledgeView];

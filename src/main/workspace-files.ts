@@ -1,10 +1,13 @@
 /** Node-only workspace file listing and bounded reading helpers. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { imageMimeType, type WorkspaceImage } from '../shared/image-files';
 import type { FsEntry } from '../shared/types';
 
 const DEFAULT_MAX_BYTES = 400_000;
 const MAX_BYTES = 2_000_000;
+/** Images travel whole as base64; past this the panel says so instead of shipping the bytes. */
+export const MAX_IMAGE_BYTES = 20_000_000;
 
 function isWithin(root: string, target: string): boolean {
   const relative = path.relative(root, target);
@@ -72,4 +75,17 @@ export async function readWorkspaceFile(root: string, target: string, maxBytes?:
   } finally {
     await handle.close();
   }
+}
+
+/** Reads a workspace image as base64 for the Files panel. Null when the path escapes the
+ *  workspace or is not an image type; `data` is empty when the file is over the size cap. */
+export async function readWorkspaceImage(root: string, target: string): Promise<WorkspaceImage | null> {
+  const mimeType = imageMimeType(target);
+  if (!mimeType) return null;
+  const resolved = await resolveInWorkspace(root, target);
+  if (!resolved) return null;
+  const size = (await fs.stat(resolved.realTarget)).size;
+  if (size > MAX_IMAGE_BYTES) return { mimeType, data: '', size, tooLarge: true };
+  const bytes = await fs.readFile(resolved.realTarget);
+  return { mimeType, data: bytes.toString('base64'), size: bytes.length, tooLarge: false };
 }

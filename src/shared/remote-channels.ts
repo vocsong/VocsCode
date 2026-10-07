@@ -39,6 +39,7 @@ const READ: readonly IpcChannel[] = [
   'fs:list',
   'fs:search',
   'fs:read',
+  'fs:readImage',
   // P3.5, read-only first: list terminals and read a plain-text screen. No input, resize or attach.
   'terminal:list',
   'terminal:screen'
