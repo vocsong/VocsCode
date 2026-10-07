@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FsEntry, SessionMeta } from '../../../shared/types';
 import { nativeGoalCommands } from '../../../shared/goal-driver';
+import { imageMimeType, type WorkspaceImage } from '../../../shared/image-files';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { useGitDiff, useGitSummary } from '../gitReads';
@@ -234,7 +235,8 @@ function ChangesTab({ session }: { session: SessionMeta }) {
 function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missionWorkspaceId?: string }) {
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<FsEntry[]>([]);
-  const [preview, setPreview] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
+  /** `image` is set for image files: they render as a picture, and a null read means it could not be previewed. */
+  const [preview, setPreview] = useState<{ path: string; content: string; truncated: boolean; image?: WorkspaceImage | null } | null>(null);
   /** Markdown files open in rendered preview; the toggle flips back to the raw text. */
   const [mdView, setMdView] = useState(false);
   const mdBody = useRef<HTMLDivElement | null>(null);
@@ -254,7 +256,11 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
     const sid = session.id;
     const seq = ++readSeq.current;
     try {
-      const r = await invoke('fs:read', { sessionId: sid, path: rel, maxBytes: 200_000, ...(session.mission ? { missionWorkspaceId } : {}) });
+      const scope = session.mission ? { missionWorkspaceId } : {};
+      // Image bytes decoded as text are noise, so images take their own read and render as a picture.
+      const r = imageMimeType(rel)
+        ? { content: '', truncated: false, image: await invoke('fs:readImage', { sessionId: sid, path: rel, ...scope }) }
+        : await invoke('fs:read', { sessionId: sid, path: rel, maxBytes: 200_000, ...scope });
       if (liveId.current !== sid || readSeq.current !== seq) return;
       const p = rel.replace(/\\/g, '/');
       setPreview({ path: p, ...r });
@@ -337,6 +343,8 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
       (p, line) => useStore.getState().revealFile(session.id, p, line)
     );
   }, [mdView, mdHtml, session.id]);
+  const image = preview?.image;
+  const imageSrc = useMemo(() => (image && !image.tooLarge ? `data:${image.mimeType};base64,${image.data}` : ''), [image]);
   const crumbs = path.split(/[\\/]/).filter(Boolean);
   return (
     <div className="files">
@@ -364,9 +372,19 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
               />
             )}
             {!session.mission && <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}`, sessionId: session.id })} title="Open in editor" />}
-            <Button size="sm" variant="ghost" icon="x" onClick={() => setPreview(null)} />
+            <Button size="sm" variant="ghost" icon="x" onClick={() => setPreview(null)} title="Close preview" />
           </div>
-          {isMd && mdView ? (
+          {preview.image !== undefined ? (
+            <div className="file-image">
+              {imageSrc ? (
+                <img src={imageSrc} alt={preview.path} />
+              ) : (
+                <span className="muted small">
+                  {image?.tooLarge ? `Image is ${(image.size / 1_000_000).toFixed(1)} MB, too large to preview.` : 'This image could not be previewed.'}
+                </span>
+              )}
+            </div>
+          ) : isMd && mdView ? (
             <div ref={mdBody} className="md file-md" dangerouslySetInnerHTML={{ __html: mdHtml }} />
           ) : (
             <pre className="mono" ref={preBody}>{preview.content}{preview.truncated ? '\n… (truncated)' : ''}</pre>

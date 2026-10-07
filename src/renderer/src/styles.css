@@ -3596,6 +3596,22 @@ body.resizing {
   flex: 1;
   min-height: 0;
 }
+/* Image preview: fit the picture to the panel without upscaling, on a checkerboard so
+   transparent regions read as transparent rather than as the panel background. */
+.file-preview .file-image {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+.file-preview .file-image img {
+  max-width: 100%;
+  height: auto;
+  background: repeating-conic-gradient(var(--border) 0% 25%, transparent 0% 50%) 50% / 16px 16px;
+}
 /* Usage page: a session dashboard inside a narrow column. The chart primitives are the analytics
    ones, so only the panel-scale overrides and the panel-only marks (turn columns, error log) live
    here. Status hues stay reserved for status; mixes use the categorical --chart-N slots. */

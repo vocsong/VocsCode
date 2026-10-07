@@ -146,6 +146,41 @@ describe('file mentions open the Files panel', () => {
     expect(useStore.getState().fileReveal).toBeNull();
   });
 
+  it('previews an image file as a picture instead of decoded text', async () => {
+    useStore.setState({ panelTab: 'files', fileReveal: { sessionId: session.id, path: 'runs/hour_bias/window_bias.png' } });
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'fs:list') return Promise.resolve([]);
+      if (channel === 'fs:readImage') return Promise.resolve({ mimeType: 'image/png', data: 'iVBORw0KGgo=', size: 8, tooLarge: false });
+      return Promise.resolve({ content: '\u0089PNG garbage', truncated: false });
+    });
+
+    const { container } = render(<RightPanel session={session} />);
+
+    const img = await waitFor(() => {
+      const el = container.querySelector('.file-preview .file-image img');
+      expect(el).toBeTruthy();
+      return el as HTMLImageElement;
+    });
+    expect(img.getAttribute('src')).toBe('data:image/png;base64,iVBORw0KGgo=');
+    expect(container.querySelector('.file-preview pre')).toBeNull();
+    expect(invokeMock).toHaveBeenCalledWith('fs:readImage', { sessionId: session.id, path: 'runs/hour_bias/window_bias.png' });
+    expect(invokeMock).not.toHaveBeenCalledWith('fs:read', expect.anything());
+  });
+
+  it('says an oversized image is too large instead of rendering it', async () => {
+    useStore.setState({ panelTab: 'files', fileReveal: { sessionId: session.id, path: 'big.jpg' } });
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'fs:list') return Promise.resolve([]);
+      if (channel === 'fs:readImage') return Promise.resolve({ mimeType: 'image/jpeg', data: '', size: 25_000_000, tooLarge: true });
+      return Promise.resolve({});
+    });
+
+    const { container } = render(<RightPanel session={session} />);
+
+    expect(await screen.findByText('Image is 25.0 MB, too large to preview.')).toBeTruthy();
+    expect(container.querySelector('.file-preview img')).toBeNull();
+  });
+
   it('resolves an absolute mention inside the session folder', async () => {
     useStore.setState({ panelTab: 'files', fileReveal: { sessionId: session.id, path: 'G:/proj/a/src/hello.ts' } });
     invokeMock.mockImplementation((channel: string) => {
