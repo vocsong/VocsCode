@@ -5,6 +5,7 @@ import { HARNESS_BY_ID } from '../../../../shared/harness-meta';
 import { missionFailureLabel, readableMissionText } from '../../../../shared/mission-errors';
 import { controlMission, MISSION_MANAGED_REASON, missionStatusLabel } from '../../missions';
 import { useStore } from '../../store';
+import { activeComposer } from '../../panes';
 import { invoke, isWeb } from '../../api';
 import { fmtCost, fmtTokens } from '../../format';
 import { DiffView } from '../DiffView';
@@ -88,7 +89,7 @@ function MissionDetails({ record }: { record: MissionRecord }) {
     if (record.archived) return;
     void useStore.getState().setActive(record.leadSessionId);
     useStore.getState().insertIntoComposer(`About Mission ${record.id}, ${reference}: `);
-    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus());
+    requestAnimationFrame(() => activeComposer()?.focus());
   };
   return <div className="mission-ui mission-panel pad" data-testid="mission-panel">
     <MissionWorkerApprovals record={record} />

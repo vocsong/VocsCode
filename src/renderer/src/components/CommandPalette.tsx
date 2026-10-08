@@ -5,6 +5,7 @@ import { harnessShort } from '../format';
 import { useStore } from '../store';
 import { isTopLevelSession, MISSION_MANAGED_REASON, pauseMissionSession } from '../missions';
 import { createTerminal } from '../terminal/host';
+import { canSplit } from '../panes';
 import { Icon } from './ui';
 
 
@@ -51,6 +52,22 @@ export function CommandPalette() {
         { id: 'export', label: 'Export transcript as Markdown', icon: 'download', run: () => void invoke('sessions:export', { id: activeId }) },
         { id: 'fork', label: 'Fork session', icon: 'fork', disabled: !!active?.mission, hint: active?.mission ? MISSION_MANAGED_REASON : undefined, run: () => void invoke('sessions:fork', { id: activeId }).then((f) => f && st.setActive(f.id)) },
         { id: 'compact', label: 'Compact context', icon: 'compact', run: () => void invoke('sessions:compact', { id: activeId }) }
+      );
+    }
+    // Split view: the pane commands only appear when they can do something.
+    const layout = st.layout;
+    if (activeId && canSplit(layout)) {
+      base.push(
+        { id: 'split-right', label: 'Split right', hint: 'Ctrl+\\', icon: 'splitRight', run: () => st.splitPane('horizontal') },
+        { id: 'split-down', label: 'Split down', hint: 'Ctrl+Shift+\\', icon: 'splitDown', run: () => st.splitPane('vertical') }
+      );
+    }
+    if (layout.panes.length > 1) {
+      const at = layout.panes.findIndex((p) => p.id === layout.activePaneId);
+      const other = layout.panes[(at + 1) % layout.panes.length]!;
+      base.push(
+        { id: 'pane-next', label: 'Focus other pane', icon: 'layout', run: () => st.focusPane(other.id) },
+        { id: 'pane-close', label: 'Close pane (session keeps running)', icon: 'x', run: () => st.closePane(layout.activePaneId) }
       );
     }
     for (const s of sessions.filter((s) => !s.archived && isTopLevelSession(s))) base.push({ id: `s:${s.id}`, label: s.title, hint: `${harnessShort(s.config.harness)} · ${s.config.projectRoot.split(/[\\/]/).pop()}`, icon: 'sparkles', run: () => void st.setActive(s.id) });

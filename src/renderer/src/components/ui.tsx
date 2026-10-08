@@ -49,6 +49,8 @@ const ICONS: Record<string, string> = {
   eye: 'M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12zm11 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   eyeOff: 'M3 3l18 18M10.6 10.6a3 3 0 0 0 4.2 4.2M9.9 5.1A11 11 0 0 1 12 5c7 0 11 7 11 7a18 18 0 0 1-3.2 4M6.6 6.6A18 18 0 0 0 1 12s4 7 11 7a11 11 0 0 0 4.1-.8',
   layout: 'M3 5h18v14H3zM15 5v14',
+  splitRight: 'M3 5h18v14H3zM12 5v14',
+  splitDown: 'M3 5h18v14H3zM3 12h18',
   sidebar: 'M3 5h18v14H3zM9 5v14',
   arrowUp: 'M12 19V5M5 12l7-7 7 7',
   arrowLeft: 'M19 12H5M12 19l-7-7 7-7',
