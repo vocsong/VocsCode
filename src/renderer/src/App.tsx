@@ -5,8 +5,6 @@ import { useActiveSession, useStore, toastError } from './store';
 import { Vesta } from './components/Vesta';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { CommandPalette } from './components/CommandPalette';
-import { Composer } from './components/Composer';
-import { Header } from './components/Header';
 import { NewSessionDialog } from './components/NewSessionDialog';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { QuickSessionPicker } from './components/QuickSessionPicker';
@@ -16,8 +14,8 @@ import { SettingsView } from './components/SettingsView';
 import { nextFolderTarget, nextSessionTarget, sidebarNavModel, Sidebar } from './components/Sidebar';
 import { McpView } from './components/McpView';
 import { SkillsView } from './components/SkillsView';
+import { SessionPanes } from './components/SessionPanes';
 import { TitleBar } from './components/TitleBar';
-import { Transcript } from './components/Transcript';
 import { Button, ConfirmHost, EmptyState, Icon, Kbd, Spinner } from './components/ui';
 import { ContextMenuHost } from './components/ContextMenu';
 import { handleCustomShortcut } from './shortcuts';
@@ -25,6 +23,7 @@ import { createTerminal } from './terminal/host';
 import { applyTheme } from './theme';
 import { isTopLevelSession, pauseMissionSession } from './missions';
 import { useReportDesktopFocus } from './desktop-focus';
+import { activeComposer } from './panes';
 
 export function App() {
   const booted = useStore((s) => s.booted);
@@ -112,11 +111,15 @@ export function App() {
           e.preventDefault();
           void st.setActive(target.id).catch(toastError);
         }
+      } else if (mod && e.code === 'Backslash' && st.view === 'chat' && st.activeId) {
+        // Ctrl+\ splits the conversation right, Ctrl+Shift+\ down (VS Code's editor split).
+        e.preventDefault();
+        st.splitPane(e.shiftKey ? 'vertical' : 'horizontal');
       } else if (mod && e.code === 'Backquote' && st.activeId && st.view === 'chat') {
         // Ctrl+` toggles focus between the terminal and the composer; Ctrl+Shift+` opens a new terminal.
         e.preventDefault();
         if (e.shiftKey) void createTerminal(st.activeId);
-        else if (st.panelOpen && st.panelTab === 'terminal' && document.activeElement?.closest('.term-view')) document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus();
+        else if (st.panelOpen && st.panelTab === 'terminal' && document.activeElement?.closest('.term-view')) activeComposer()?.focus();
         else {
           st.setPanelTab('terminal');
           st.focusTerminal();
@@ -124,7 +127,7 @@ export function App() {
       } else if (handleCustomShortcut(e)) {
         // A custom shortcut bound in Settings → Shortcuts consumed the key; the fixed
         // shortcuts above keep priority.
-      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && !st.searchOpen && st.activeId) {
+      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && !st.searchOpen) {
         // Escape interrupts the agent only when nothing else would consume it: no open menu, dialog or
         // popover, and focus is on the page body or an empty composer.
         if (document.querySelector('.dropdown-menu, .modal, .popover, .session-rename, .find-bar')) return;
@@ -132,7 +135,11 @@ export function App() {
         const onBody = !el || el === document.body;
         const onEmptyComposer = el?.tagName === 'TEXTAREA' && el.closest('.composer') !== null && !(el as HTMLTextAreaElement).value;
         if (!onBody && !onEmptyComposer) return;
-        const s = st.sessions.find((x) => x.id === st.activeId);
+        // A freshly split pane is empty and holds focus, so `activeId` is null. The turn still
+        // running in the other pane has to stay interruptible from the keyboard.
+        const targetId = st.activeId ?? st.layout.panes.find((p) => p.sessionId)?.sessionId;
+        if (!targetId) return;
+        const s = st.sessions.find((x) => x.id === targetId);
         if (s && (s.status === 'running' || s.status === 'awaiting')) pauseMissionSession(s);
       }
     };
@@ -184,14 +191,8 @@ export function App() {
             <SkillsView />
           ) : view === 'mcp' ? (
             <McpView />
-          ) : session ? (
-            <>
-              <Header session={session} />
-              <Transcript session={session} />
-              <Composer key={session.id} session={session} />
-            </>
           ) : (
-            <div className="main-empty">
+            <SessionPanes empty={<div className="main-empty">
               <EmptyState icon="sparkles" title="Welcome to Vocs Code">
                 <p>One desktop for every coding agent. Pick a harness per session — Claude Agent SDK, Codex, Pi, DeepSeek Harness or any ACP agent, or the built-in loop — and any model it can reach.</p>
                 <div className="row gap8 center">
@@ -206,7 +207,7 @@ export function App() {
                   <Kbd>Ctrl+N</Kbd> new (quick) · <Kbd>Ctrl+Alt+N</Kbd> new in folder · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+Shift+F</Kbd> search · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
                 </p>
               </EmptyState>
-            </div>
+            </div>} />
           )}
         </main>
         {panelOpen && session && view === 'chat' && <RightPanel session={session} />}

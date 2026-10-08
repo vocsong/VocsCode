@@ -186,7 +186,7 @@ export const RESERVED_ACCELS: string[] = [
   'Ctrl+ArrowUp', 'Ctrl+ArrowDown', 'Ctrl+Shift+ArrowUp', 'Ctrl+Shift+ArrowDown',
   'Alt+ArrowLeft', 'Alt+ArrowRight',
   ...['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((d) => `Ctrl+${d}`),
-  'Ctrl+F', 'Ctrl+`', 'Ctrl+Shift+`',
+  'Ctrl+F', 'Ctrl+`', 'Ctrl+Shift+`', 'Ctrl+\\', 'Ctrl+Shift+\\',
   'Ctrl+C', 'Ctrl+V', 'Ctrl+X', 'Ctrl+A', 'Ctrl+Z', 'Ctrl+Y'
 ];
 
@@ -250,6 +250,7 @@ export const BUILTIN_SHORTCUT_GROUPS: BuiltinShortcutGroup[] = [
       { label: 'First session of the previous / next folder', keys: ['Ctrl+Shift+ArrowUp', 'Ctrl+Shift+ArrowDown'] },
       { label: 'Switch to session 1–9', keys: ['Ctrl+1-9'] },
       { label: 'Find in transcript', keys: ['Ctrl+F'] },
+      { label: 'Split the conversation right / down', keys: ['Ctrl+\\', 'Ctrl+Shift+\\'] },
       { label: 'Interrupt current turn', keys: ['Escape'] }
     ]
   },
