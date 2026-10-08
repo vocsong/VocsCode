@@ -9,6 +9,7 @@ import { archiveSession, removeFolder } from '../sessionActions';
 import { isTopLevelSession } from '../missions';
 import { sortSessionRows } from '../sessionOrder';
 import { useStore, toastError } from '../store';
+import { canSplit, paneShowing, SESSION_DRAG_TYPE } from '../panes';
 import { Resizer } from './Resizer';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
 import { FolderBranch } from './FolderBranch';
@@ -105,6 +106,8 @@ export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const settings = useStore((s) => s.settings);
   const activeId = useStore((s) => s.activeId);
+  // Rows another split pane shows get a quieter marker than the active one.
+  const paneSessions = useStore((s) => s.layout.panes.length > 1 ? s.layout.panes : null);
   const setActive = useStore((s) => s.setActive);
   const startNewSession = useStore((s) => s.startNewSession);
   const setView = useStore((s) => s.setView);
@@ -220,7 +223,7 @@ export function Sidebar() {
     const { dragId } = dndRef.current;
     const dragged = dragId ? sessions.find((x) => x.id === dragId) : null;
     const target = sessions.find((x) => x.id === id);
-    if (!dragged || !target?.pinned || target.id === dragId || target.config.projectRoot !== dragged.config.projectRoot) return;
+    if (!dragged?.pinned || !target?.pinned || target.id === dragId || target.config.projectRoot !== dragged.config.projectRoot) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     const rect = e.currentTarget.getBoundingClientRect();
@@ -236,7 +239,7 @@ export function Sidebar() {
     const { dragId, pos } = dndRef.current;
     const dragged = dragId ? sessions.find((x) => x.id === dragId) : null;
     const target = sessions.find((x) => x.id === id);
-    if (dragged && target && target.pinned && target.id !== dragId && target.config.projectRoot === dragged.config.projectRoot) {
+    if (dragged?.pinned && target && target.pinned && target.id !== dragId && target.config.projectRoot === dragged.config.projectRoot) {
       const section = sortSessionRows(sessions.filter((x) => x.config.projectRoot === target.config.projectRoot && !x.archived && isTopLevelSession(x)))
         .filter((x) => x.pinned)
         .map((x) => x.id);
@@ -356,6 +359,7 @@ export function Sidebar() {
                   key={s.id}
                   session={s}
                   active={s.id === activeId && view === 'chat'}
+                  inPane={!!paneSessions && view === 'chat' && s.id !== activeId && paneSessions.some((p) => p.sessionId === s.id)}
                   customLabels={settings?.customLabels ?? []}
                   archiving={!!archiving[s.id]}
                   onSelect={() => void setActive(s.id).catch(toastError)}
@@ -398,9 +402,11 @@ type DndHandlers = {
   drop: (id: string) => void;
 };
 
-function SessionRow({ session: s, active, customLabels, archiving, onSelect, toast, dnd, dndHandlers }: {
+function SessionRow({ session: s, active, inPane = false, customLabels, archiving, onSelect, toast, dnd, dndHandlers }: {
   session: SessionMeta;
   active: boolean;
+  /** Shown in a split pane that is not the active one. */
+  inPane?: boolean;
   customLabels: string[];
   /** An archive request is in flight; the status pill shows a blinking Archiving state meanwhile. */
   archiving: boolean;
@@ -456,9 +462,16 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
     }
     if (nextCustom) void invoke('settings:update', { customLabels: nextCustom });
   };
+  /** "Open to the side": a new pane beside the active one, while there is room for another. */
+  const openToSide = (): ContextMenuItem[] => {
+    const st = useStore.getState();
+    if (s.mission?.role === 'worker' || !canSplit(st.layout) || paneShowing(st.layout, s.id) || !st.activeId) return [];
+    return [{ label: 'Open to the side', icon: 'splitRight', onSelect: () => st.splitPane('horizontal', { sessionId: s.id }) }];
+  };
   /** Right-click menu for a session row; it mirrors the inline actions plus rename and delete. */
   const rowMenu = (): ContextMenuItem[] => [
     ...(active ? [] : [{ label: 'Open session', icon: 'arrowRight', onSelect: onSelect }]),
+    ...openToSide(),
     { label: 'Rename', icon: 'edit', hint: 'Double-click', onSelect: startRename },
     { label: s.pinned ? 'Unpin' : 'Pin to top', icon: s.pinned ? 'pinOff' : 'pin', onSelect: () => void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }) },
     { separator: true },
@@ -468,19 +481,20 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
     { label: s.mission ? 'Mission deletion unavailable — archive retains work' : 'Delete session', icon: 'trash', danger: true, disabled: !!s.mission, onSelect: () => !s.mission && void deleteRow() }
   ];
 
-  // Only pinned rows can be dragged, and only while they are not being renamed.
-  const canDrag = !!s.pinned && !s.archived && !renaming;
+  // Any live row drags into the workspace to open it in a pane; only pinned rows also reorder.
+  const canDrag = !s.archived && !renaming;
   const dragClass = dnd.dragId === s.id ? ' dragging' : '';
   const indicator = dnd.overId === s.id && dnd.dragId && dnd.dragId !== s.id ? (dnd.pos === 'before' ? ' drag-above' : ' drag-below') : '';
   return (
     <div
-      className={`session-row ${active ? 'active' : ''}${dragClass}${indicator}`}
+      className={`session-row ${active ? 'active' : ''}${inPane ? ' in-pane' : ''}${dragClass}${indicator}`}
       data-testid="session-row"
       data-session-id={s.id}
       draggable={canDrag}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', s.id);
+        e.dataTransfer.setData(SESSION_DRAG_TYPE, s.id);
         dndHandlers.start(s.id);
       }}
       onDragEnd={dndHandlers.end}

@@ -14,8 +14,10 @@ import { ForkIntoDropdown } from './ForkInto';
 import { ModelPicker } from './ModelPicker';
 import { MissionHeaderControls, useMission } from './mission/MissionPanel';
 import { openMission } from '../missions';
+import { canSplit } from '../panes';
 
-export function Header({ session }: { session: SessionMeta }) {
+/** `paneId` is the split pane this header sits in; it carries the split and close-pane actions. */
+export function Header({ session, paneId }: { session: SessionMeta; paneId?: string }) {
   const { record: mission, error: missionError } = useMission(session);
   const missions = useStore((s) => s.missions);
   const { models, loading: modelsLoading, error: modelsError } = useSessionModels(session);
@@ -27,6 +29,8 @@ export function Header({ session }: { session: SessionMeta }) {
   const toggleThinking = useStore((s) => s.toggleThinking);
   const changesVersion = useStore((s) => s.changesVersion);
   const providers = useStore((s) => s.settings?.providers) ?? [];
+  const splittable = useStore((s) => canSplit(s.layout));
+  const split = useStore((s) => s.layout.panes.length > 1);
   const { data: summary } = useGitSummary(session.id, changesVersion);
   const branch = summary?.branch;
   const h = HARNESS_BY_ID[session.config.harness];
@@ -64,6 +68,12 @@ export function Header({ session }: { session: SessionMeta }) {
         )}
         {session.statusDetail && busy && <span className="header-status muted">{session.statusDetail}</span>}
         <span className="spacer" />
+        {paneId && splittable && (
+          <Button variant="ghost" size="sm" icon="splitRight" onClick={() => useStore.getState().splitPane('horizontal', { paneId })} title="Split right (Ctrl+\) · Ctrl+Shift+\ splits down" aria-label="Split right" />
+        )}
+        {paneId && split && (
+          <Button variant="ghost" size="sm" icon="x" onClick={() => useStore.getState().closePane(paneId)} title="Close pane — the session keeps running" aria-label="Close pane" />
+        )}
         <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" aria-label="Toggle panel" />
       </div>
 
