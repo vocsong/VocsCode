@@ -326,6 +326,10 @@ type Getter = () => State;
 
 function pushHistory(set: Setter, get: Getter, entry: NavEntry): void {
   if (navigating) return;
+  // An empty pane is not a destination. Recording one would make a later Back replay
+  // `setActive(null)`, which blanks whichever pane is active at that moment instead of
+  // returning to the session the reader came from.
+  if (entry.view === 'chat' && entry.sessionId === null) return;
   const { history, historyIndex } = get();
   const current = history[historyIndex];
   if (current && current.view === entry.view && current.sessionId === entry.sessionId) return;

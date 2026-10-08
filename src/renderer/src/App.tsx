@@ -127,7 +127,7 @@ export function App() {
       } else if (handleCustomShortcut(e)) {
         // A custom shortcut bound in Settings → Shortcuts consumed the key; the fixed
         // shortcuts above keep priority.
-      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && !st.searchOpen && st.activeId) {
+      } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && !st.searchOpen) {
         // Escape interrupts the agent only when nothing else would consume it: no open menu, dialog or
         // popover, and focus is on the page body or an empty composer.
         if (document.querySelector('.dropdown-menu, .modal, .popover, .session-rename, .find-bar')) return;
@@ -135,7 +135,11 @@ export function App() {
         const onBody = !el || el === document.body;
         const onEmptyComposer = el?.tagName === 'TEXTAREA' && el.closest('.composer') !== null && !(el as HTMLTextAreaElement).value;
         if (!onBody && !onEmptyComposer) return;
-        const s = st.sessions.find((x) => x.id === st.activeId);
+        // A freshly split pane is empty and holds focus, so `activeId` is null. The turn still
+        // running in the other pane has to stay interruptible from the keyboard.
+        const targetId = st.activeId ?? st.layout.panes.find((p) => p.sessionId)?.sessionId;
+        if (!targetId) return;
+        const s = st.sessions.find((x) => x.id === targetId);
         if (s && (s.status === 'running' || s.status === 'awaiting')) pauseMissionSession(s);
       }
     };

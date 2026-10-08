@@ -55,8 +55,8 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
   const [stick, setStick] = useState(true);
   const activeRef = useRef(active);
   activeRef.current = active;
-  /** How many items the list held when the reader scrolled away from the bottom. */
-  const [unseenFrom, setUnseenFrom] = useState<number | null>(null);
+  /** The last item the reader had seen when they scrolled away from the bottom. */
+  const [unseenAfter, setUnseenAfter] = useState<string | null>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [lightbox, setLightbox] = useState<ImageLightboxState | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -271,9 +271,15 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
 
   const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
   // Count what arrived since the reader left the bottom; switching sessions in this pane starts over.
-  useEffect(() => setUnseenFrom(stick ? null : (n) => n ?? items.length), [stick]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => setUnseenFrom(null), [session.id]);
-  const unseen = unseenFrom === null ? 0 : Math.max(0, items.length - unseenFrom);
+  // Anchored on the last item seen rather than a length, so `loadEarlier` prepending a page of
+  // history does not read as new arrivals.
+  useEffect(() => setUnseenAfter(stick ? null : (id) => id ?? items[items.length - 1]?.id ?? null), [stick]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => setUnseenAfter(null), [session.id]);
+  const unseen = useMemo(() => {
+    if (unseenAfter === null) return 0;
+    const at = items.findIndex((i) => i.id === unseenAfter);
+    return at < 0 ? 0 : items.length - 1 - at;
+  }, [items, unseenAfter]);
 
   const copyText = async (text: string, what: string) => {
     try {

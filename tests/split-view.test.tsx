@@ -116,6 +116,41 @@ async function splitWithB() {
   await waitFor(() => expect(paneText(1)).toContain('beta question'));
 }
 
+describe('split view, empty pane holding focus', () => {
+  it('leaves Back returning to the previous session rather than blanking the active pane', async () => {
+    render(<App />);
+    fireEvent.click(document.querySelector('[aria-label="Split right"]')!);
+    await waitFor(() => expect(panes()).toHaveLength(2));
+    // Focus the loaded pane, then the empty one: that second hop is what recorded `sessionId: null`.
+    fireEvent.pointerDown(panes()[0]!);
+    await waitFor(() => expect(useStore.getState().activeId).toBe('s_a'));
+    fireEvent.pointerDown(panes()[1]!);
+    await waitFor(() => expect(useStore.getState().activeId).toBeNull());
+    // Fill the pane, so the empty step is now behind the reader in the trail.
+    fireEvent.click(sidebarRow('s_b'));
+    await waitFor(() => expect(useStore.getState().activeId).toBe('s_b'));
+
+    await act(async () => { await useStore.getState().navBack(); });
+    // Without the guard the empty pane was a destination, so Back replayed setActive(null) and
+    // blanked the active pane back to the picker instead of reaching A.
+    expect(useStore.getState().activeId).toBe('s_a');
+    expect(useStore.getState().layout.panes.every((p) => p.sessionId)).toBe(true);
+  });
+
+  it('still interrupts the turn running in the other pane when Escape is pressed', async () => {
+    useStore.setState({ sessions: [{ ...A, status: 'running' }, B] } as never);
+    render(<App />);
+    fireEvent.click(document.querySelector('[aria-label="Split right"]')!);
+    await waitFor(() => expect(panes()).toHaveLength(2));
+    expect(useStore.getState().activeId).toBeNull();
+
+    invoke.mockClear();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    // activeId is null while the fresh pane holds focus; the running session must stay reachable.
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:interrupt', { id: 's_a' }));
+  });
+});
+
 describe('split view', () => {
   it('renders exactly one pane with no split chrome until the user splits', () => {
     render(<App />);
@@ -197,6 +232,25 @@ describe('split view', () => {
     fireEvent.click(panes()[0]!.querySelector('.jump-bottom')!);
     await waitFor(() => expect(panes()[0]!.querySelector('.jump-bottom')).toBeNull());
     expect(left!.scrollTop).toBe(2000);
+  });
+
+  it('does not count a page of earlier history as unseen arrivals', async () => {
+    render(<App />);
+    await splitWithB();
+    const left = panes()[0]!.querySelector<HTMLElement>('.transcript')!;
+    Object.defineProperty(left, 'scrollHeight', { configurable: true, get: () => 2000 });
+    Object.defineProperty(left, 'clientHeight', { configurable: true, get: () => 500 });
+    left.scrollTop = 100;
+    fireEvent.scroll(left);
+    await waitFor(() => expect(panes()[0]!.querySelector('.jump-bottom')?.textContent).toContain('Jump to latest'));
+    // What `loadEarlier` does: a page of older items joins the front of the list. Nothing arrived.
+    act(() => {
+      useStore.setState((s) => ({
+        transcripts: { ...s.transcripts, s_a: [user('old_1', 'older one'), user('old_2', 'older two'), ...(s.transcripts.s_a ?? [])] }
+      }) as never);
+    });
+    await waitFor(() => expect(paneText(0)).toContain('older one'));
+    expect(panes()[0]!.querySelector('.jump-bottom')?.textContent).not.toMatch(/\d+ new/);
   });
 
   it('sends what the user types to the pane it was typed in', async () => {
