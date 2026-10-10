@@ -1,6 +1,7 @@
-/** New session dialog: project directory, harness, model, permission mode and worktree isolation. */
+/** New session dialog: project directory, harness, model, permission mode and worktree isolation (with its branch prefix). */
 import React, { useEffect, useRef, useState } from 'react';
 import type { AppSettings, EffortLevel, FileAttachment, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
+import { branchNameFromText, branchPrefixOptions, branchSlug, normalizeBranchPrefix } from '../../../shared/branch-prefix';
 import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
 import { invoke } from '../api';
@@ -10,6 +11,12 @@ import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
 import { MissionLaunch } from './mission/MissionLaunch';
+
+/** The prefix select's "Custom…" option; never a valid prefix itself (`:` cannot be in a ref). */
+const CUSTOM_PREFIX = ':custom';
+
+/** How long typing must pause before the first prompt is sent to the background model for a branch name. */
+const NAME_SUGGEST_DELAY_MS = 700;
 
 export function NewSessionDialog() {
   const kind = useStore((s) => s.newSessionKind);
@@ -43,6 +50,18 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const [effort, setEffort] = useState<EffortLevel | ''>(initial.effort);
   const [mode, setMode] = useState<PermissionMode>(initial.permissionMode);
   const [useWorktree, setUseWorktree] = useState(initial.useWorktree);
+  // Built-in prefixes, then the user's saved ones; "Custom…" types a new one, saved on start.
+  const prefixOptions = branchPrefixOptions(settings.customBranchPrefixes);
+  const [prefixChoice, setPrefixChoice] = useState(initial.branchPrefix);
+  const [customPrefix, setCustomPrefix] = useState('');
+  // Empty means "derive it from the title or first prompt", the way the main process names it.
+  const [branchName, setBranchName] = useState('');
+  // The folder's local branches; the new branch starts from `base` ('' is the repository's HEAD).
+  const [folderBranches, setFolderBranches] = useState<{ current?: string; branches: string[] }>({ branches: [] });
+  const [base, setBase] = useState('');
+  // The background model's name for the prompt it was asked about; stale once the prompt changes.
+  const [suggested, setSuggested] = useState<{ prompt: string; name: string } | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
   // Undefined until the folder has been probed; worktree isolation is offered only for a repository.
   const [folderIsRepo, setFolderIsRepo] = useState<boolean | undefined>(undefined);
   const [acpAgent, setAcpAgent] = useState(initial.acpAgent ?? settings.acpAgents[0]?.id ?? 'dsh');
@@ -96,6 +115,30 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
     };
   }, [projectRoot]);
 
+  useEffect(() => {
+    if (folderIsRepo !== true) return;
+    let cancelled = false;
+    invoke('git:folderBranches', { projectRoot })
+      .then((r) => {
+        if (cancelled) return;
+        setFolderBranches({ current: r?.current, branches: Array.isArray(r?.branches) ? r.branches : [] });
+        setBase(r?.current ?? '');
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [folderIsRepo, projectRoot]);
+
+  // A picked prefix is the folder's from that moment, whether or not this dialog starts a session.
+  // A typed one is saved when its session starts, so a half-typed prefix never lands in settings.
+  const choosePrefix = (value: string) => {
+    setPrefixChoice(value);
+    const current = useStore.getState().settings;
+    if (value === CUSTOM_PREFIX || !projectRoot || !current) return;
+    void invoke('settings:update', { folderSessionDefaults: withFolderSessionDefaults(current, projectRoot, { branchPrefix: value }) }).catch(() => undefined);
+  };
+
   const descriptor = HARNESSES.find((h) => h.id === harness)!;
   const modes = descriptor.capabilities.permissionModes;
 
@@ -143,7 +186,36 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   // repository simply cannot act on it. Starting waits for the probe, so a fast click cannot submit
   // the preference before it is known to be usable.
   const isolate = useWorktree && folderIsRepo === true;
-  const ready = !!projectRoot && !modelsLoading && folderIsRepo !== undefined;
+  const branchPrefix = prefixChoice === CUSTOM_PREFIX ? normalizeBranchPrefix(customPrefix) : prefixChoice;
+  // An unedited name follows the request's intent: a title word for word, as the user wrote it,
+  // else the model's reading of the first prompt, with the prompt's own words (filler dropped)
+  // standing in until that arrives.
+  const promptText = prompt.trim();
+  const modelName = !title.trim() && suggested?.prompt === promptText ? suggested.name : undefined;
+  const autoSlug = title.trim() ? branchSlug(title) : modelName ?? (promptText ? branchNameFromText(promptText) : undefined);
+  const nameSlug = branchName.trim() ? branchSlug(branchName) : autoSlug;
+  const branchPreview = branchPrefix ? `${branchPrefix}/${nameSlug ?? '<session-name>'}` : undefined;
+
+  // Only asked while the name is the dialog's to choose, and only once typing pauses.
+  const wantsSuggestion = isolate && !branchName.trim() && !title.trim() && promptText.length >= 8;
+  useEffect(() => {
+    if (!wantsSuggestion || suggested?.prompt === promptText) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setSuggesting(true);
+      invoke('git:suggestBranchName', { prompt: promptText, model })
+        .then((r) => !cancelled && r?.name && setSuggested({ prompt: promptText, name: r.name }))
+        .catch(() => undefined)
+        .finally(() => !cancelled && setSuggesting(false));
+    }, NAME_SUGGEST_DELAY_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      setSuggesting(false);
+    };
+  }, [wantsSuggestion, promptText]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const ready = !!projectRoot && !modelsLoading && folderIsRepo !== undefined && (!isolate || !!branchPrefix);
 
   const create = async () => {
     if (modelsLoading) return;
@@ -161,6 +233,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
         effort: noEffort ? null : selectedEffort || undefined,
         permissionMode: mode,
         useWorktree: isolate,
+        branchPrefix: isolate ? branchPrefix : undefined,
         acpAgent: harness === 'acp' ? acpAgent : undefined,
         appendSystemPrompt: appendSystemPrompt.trim() || undefined,
         maxBudgetUsd: maxBudget ? Number(maxBudget) : undefined
@@ -170,7 +243,10 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
       // record is what the next dialog on this project opens on; the app-wide values are kept as
       // they were (effort is shared with live session switches, model with cross-harness forks).
       // A model that takes no effort leaves both remembered efforts as they were.
+      // A typed prefix joins the saved list (newest first, so a full list drops its oldest entry).
+      const newPrefix = isolate && branchPrefix && !prefixOptions.includes(branchPrefix) ? branchPrefix : undefined;
       const remembered: Partial<AppSettings> = {
+        ...(newPrefix ? { customBranchPrefixes: [newPrefix, ...(settings.customBranchPrefixes ?? [])] } : {}),
         defaultHarness: harness,
         defaultPermissionMode: mode,
         defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model },
@@ -180,12 +256,25 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
           ...(noEffort ? {} : { effort: selectedEffort || undefined }),
           permissionMode: mode,
           useWorktree,
+          // The picker is only shown while isolating; a session without a worktree keeps the folder's prefix.
+          ...(isolate && branchPrefix ? { branchPrefix } : {}),
           // Only an ACP session records an agent; another harness must not erase the folder's pick.
           ...(harness === 'acp' ? { acpAgent } : {})
         })
       };
       await (noEffort ? rememberWithoutEffort(remembered) : rememberEffort(selectedEffort || undefined, remembered));
-      const meta = await invoke('sessions:create', { config, title: title.trim() || undefined, initialPrompt: prompt.trim() || undefined, initialImages: images.length ? images : undefined, initialFiles: files.length ? files : undefined, goal: goal.trim() || undefined });
+      const meta = await invoke('sessions:create', {
+        config,
+        title: title.trim() || undefined,
+        initialPrompt: prompt.trim() || undefined,
+        initialImages: images.length ? images : undefined,
+        initialFiles: files.length ? files : undefined,
+        goal: goal.trim() || undefined,
+        // The name is sent as previewed, so the branch is the one the dialog showed; the
+        // checked-out branch is where an unspecified worktree starts anyway.
+        ...(isolate && (branchName.trim() || autoSlug) ? { worktreeName: branchName.trim() || autoSlug } : {}),
+        ...(isolate && base && base !== folderBranches.current ? { worktreeBase: base } : {})
+      });
       close();
       await setActive(meta.id);
     } catch (e) {
@@ -234,7 +323,10 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
       width={860}
       footer={
         <>
-          <span className="muted small">{descriptor.tagline}</span>
+          <span className="muted small ns-summary">
+            {descriptor.name} · {selectedModel?.displayName ?? model?.model ?? (harness === 'acp' ? 'Agent default' : 'Harness default')}
+            {isolate && branchPreview && <> · <code>{branchPreview}</code></>}
+          </span>
           <span className="spacer" />
           <Button variant="ghost" onClick={close}>
             Cancel
@@ -331,19 +423,86 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
           <div className="field-hint">{PERMISSION_MODE_LABELS[mode].description}</div>
           {!descriptor.capabilities.approvals && mode !== 'plan' && <div className="callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
 
+        </section>
+
+        <section className="ns-span2 ns-workspace">
           <Toggle
             checked={isolate}
             onChange={setUseWorktree}
             disabled={folderIsRepo !== true}
             label={
-              <span>
-                Isolate in a git worktree{' '}
-                <span className="muted">
-                  {folderIsRepo === false ? '(unavailable — this folder is not a git repository)' : folderIsRepo === undefined ? '(checking the folder…)' : '(new branch under .vocs-code/worktrees)'}
+              <span className="ns-toggle-text">
+                <span className="ns-toggle-title">Isolate in a git worktree</span>
+                <span className="muted small">
+                  {folderIsRepo === false
+                    ? 'Unavailable — this folder is not a git repository.'
+                    : folderIsRepo === undefined
+                      ? 'Checking the folder…'
+                      : 'Work on a new branch in .vocs-code/worktrees. Your current checkout stays untouched.'}
                 </span>
               </span>
             }
           />
+          {isolate && (
+            <div className="ns-worktree">
+              <div className="ns-worktree-row">
+                <div className="field">
+                  <span className="field-label">New branch</span>
+                  <div className="ns-branch-input">
+                    <select className="ns-branch-prefix" aria-label="Branch prefix" value={prefixChoice} onChange={(e) => choosePrefix(e.target.value)}>
+                      {prefixOptions.map((p) => (
+                        <option key={p} value={p}>
+                          {p}/
+                        </option>
+                      ))}
+                      <option value={CUSTOM_PREFIX}>Custom…</option>
+                    </select>
+                    {prefixChoice === CUSTOM_PREFIX && (
+                      <>
+                        <input
+                          className="ns-branch-custom"
+                          aria-label="Custom branch prefix"
+                          value={customPrefix}
+                          onChange={(e) => setCustomPrefix(e.target.value)}
+                          placeholder="prefix"
+                          autoFocus
+                          // Sized to its text, so the "/" sits right after the prefix like the chip's.
+                          style={{ width: `calc(${Math.max(customPrefix.length, 6)}ch + 12px)` }}
+                        />
+                        <span className="ns-branch-sep" aria-hidden="true">/</span>
+                      </>
+                    )}
+                    <input className="ns-branch-name" aria-label="Branch name" value={branchName} onChange={(e) => setBranchName(e.target.value)} placeholder={autoSlug ?? 'session-name'} />
+                  </div>
+                </div>
+                <Field label="From">
+                  <select aria-label="Base branch" value={base} onChange={(e) => setBase(e.target.value)}>
+                    {!folderBranches.current && <option value="">Current HEAD</option>}
+                    {folderBranches.branches.map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </div>
+              <div className="ns-worktree-hint muted small">
+                {branchPreview ? (
+                  <>
+                    <span className="row gap6">
+                      <Icon name="branch" size={12} /> Creates <code>{branchPreview}</code> in <code>.vocs-code/worktrees/{nameSlug ?? '<session-name>'}</code>
+                      {suggesting && <span className="row gap6" title="Naming the branch from what the first prompt asks for"><Spinner size={10} /> naming from your prompt…</span>}
+                    </span>
+                    {prefixChoice === CUSTOM_PREFIX && <span>The new prefix is saved to your prefixes when the session starts.</span>}
+                  </>
+                ) : customPrefix.trim() ? (
+                  'Not a valid branch prefix: use letters, digits, ".", "_" or "-", with "/" between parts.'
+                ) : (
+                  'Type a prefix, such as bug or team/feat.'
+                )}
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="ns-span2">

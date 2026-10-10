@@ -261,6 +261,22 @@ describe('handler registry', () => {
     expect(await registry.invoke('git:folderIsRepo', { projectRoot: ws })).toEqual({ isRepo: false });
   });
 
+  it('lists a folder\'s local branches for the new worktree only once the app knows the folder', async () => {
+    const repo = tmpDir('branches');
+    for (const args of [['init', '-q', '--initial-branch=main', '.'], ['-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'init'], ['branch', 'develop']]) {
+      const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+      expect(r.status, r.stderr).toBe(0);
+    }
+    const { registry, deps } = stubDeps();
+    await deps.settings.load();
+
+    expect(await registry.invoke('git:folderBranches', { projectRoot: repo })).toEqual({ branches: [] });
+
+    await registry.invoke('settings:update', { folders: [repo, ws] });
+    expect(await registry.invoke('git:folderBranches', { projectRoot: repo })).toEqual({ current: 'main', branches: ['develop', 'main'] });
+    expect(await registry.invoke('git:folderBranches', { projectRoot: ws })).toEqual({ branches: [] });
+  });
+
   it('round-trips settings and pushes settingsChanged', async () => {
     const { registry, deps, pushes } = stubDeps();
     await deps.settings.load();

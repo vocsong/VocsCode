@@ -1025,6 +1025,7 @@ export const useStore = create<State>((set, get) => ({
       effort: defaults.effort || undefined,
       permissionMode: defaults.permissionMode,
       useWorktree: defaults.useWorktree,
+      branchPrefix: defaults.branchPrefix,
       acpAgent: harness === 'acp' ? defaults.acpAgent : undefined
     };
     try {
