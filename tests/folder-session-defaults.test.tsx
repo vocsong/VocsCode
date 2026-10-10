@@ -82,6 +82,7 @@ beforeEach(() => {
     if (channel === 'harness:models') return harnessModels();
     if (channel === 'sessions:create') return createdSession;
     if (channel === 'git:folderIsRepo') return { isRepo: true };
+    if (channel === 'git:folderBranches') return { current: 'main', branches: ['develop', 'main'] };
     return {};
   });
   seedSettings(settingsWith({}));
@@ -188,7 +189,7 @@ describe('per-folder new-session defaults', () => {
     expect(select.value).toBe('vocscode');
     expect([...select.options].map((o) => o.textContent)).toEqual(['vocscode/', 'feat/', 'fix/', 'chore/', 'Custom…']);
     fireEvent.change(select, { target: { value: 'feat' } });
-    expect(screen.getByText(/New branch:/).textContent).toContain('feat/<session-name>');
+    expect(document.querySelector('.ns-worktree-hint')!.textContent).toContain('Creates feat/<session-name> in .vocs-code/worktrees/<session-name>');
     await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
 
@@ -199,6 +200,53 @@ describe('per-folder new-session defaults', () => {
     expect(patch.folderSessionDefaults?.[ROOT]).toMatchObject({ useWorktree: true, branchPrefix: 'feat' });
     // A built-in prefix is never copied into the saved list.
     expect(patch).not.toHaveProperty('customBranchPrefixes');
+  });
+
+  it('remembers a picked prefix for the folder at once, before any session starts', async () => {
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: true }, 'G:/other': { harness: 'native' } } }));
+    render(<NewSessionDialog />);
+
+    fireEvent.change(await screen.findByLabelText('Branch prefix'), { target: { value: 'chore' } });
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('settings:update', { folderSessionDefaults: { [ROOT]: { useWorktree: true, branchPrefix: 'chore' }, 'G:/other': { harness: 'native' } } }));
+    expect(invoke).not.toHaveBeenCalledWith('sessions:create', expect.anything());
+  });
+
+  it('names the branch, picks its base and previews both before starting', async () => {
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: true } } }));
+    render(<NewSessionDialog />);
+
+    // Unedited, the name follows the first prompt the way the main process derives it.
+    fireEvent.change(screen.getByPlaceholderText('What should the agent do?'), { target: { value: 'Fix the login redirect' } });
+    const name = (await screen.findByLabelText('Branch name')) as HTMLInputElement;
+    expect(name.placeholder).toBe('fix-the-login-redirect');
+    const from = screen.getByLabelText('Base branch') as HTMLSelectElement;
+    await waitFor(() => expect(from.value).toBe('main'));
+    expect([...from.options].map((o) => o.value)).toEqual(['develop', 'main']);
+
+    fireEvent.change(name, { target: { value: 'Fix Login Redirect' } });
+    fireEvent.change(from, { target: { value: 'develop' } });
+    const hint = document.querySelector('.ns-worktree-hint')!.textContent;
+    expect(hint).toContain('Creates vocscode/fix-login-redirect in .vocs-code/worktrees/fix-login-redirect');
+    // The footer sums up what Start will create.
+    await waitFor(() => expect(document.querySelector('.ns-summary')!.textContent).toBe('Pi · GLM 5 · vocscode/fix-login-redirect'));
+
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({ worktreeName: 'Fix Login Redirect', worktreeBase: 'develop' })));
+  });
+
+  it('sends no name or base when both are left on their defaults', async () => {
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: true } } }));
+    render(<NewSessionDialog />);
+    await waitFor(() => expect((screen.getByLabelText('Base branch') as HTMLSelectElement).value).toBe('main'));
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
+    const [, req] = invoke.mock.calls.find(([channel]) => channel === 'sessions:create') as [string, Record<string, unknown>];
+    expect(req).not.toHaveProperty('worktreeName');
+    expect(req).not.toHaveProperty('worktreeBase');
   });
 
   it('saves a typed custom prefix so every later dialog offers it', async () => {

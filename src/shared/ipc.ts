@@ -330,6 +330,8 @@ export interface IpcContract {
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   /** Pre-session probe for a folder the dialog is configuring: worktree isolation needs a git repository. */
   'git:folderIsRepo': [{ projectRoot: string }, { isRepo: boolean }];
+  /** Pre-session probe: the folder's local branches, offered as the new worktree branch's starting point. */
+  'git:folderBranches': [{ projectRoot: string }, { current?: string; branches: string[] }];
   'git:summary': [{ sessionId: string }, GitSummary];
   /** A lead defaults to the accepted Mission result; a workspace selector is read-only inspection. */
   'git:diff': [{ sessionId: string; path?: string; staged?: boolean; missionWorkspaceId?: string }, { diff: string; error?: string }];

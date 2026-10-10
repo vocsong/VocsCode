@@ -27,6 +27,7 @@ const READ: readonly IpcChannel[] = [
   'skills:read',
   'git:folderBranch',
   'git:folderIsRepo',
+  'git:folderBranches',
   'git:summary',
   'git:diff',
   'git:branches',

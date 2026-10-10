@@ -1,7 +1,7 @@
 /** Git plumbing behind the Changes panel: status and diff summaries, per-file revert, staging, commits, and isolated worktrees plus the /pr and /merge GitHub flow. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_BRANCH_PREFIX, normalizeBranchPrefix } from '../shared/branch-prefix';
+import { DEFAULT_BRANCH_PREFIX, branchSlug, normalizeBranchPrefix } from '../shared/branch-prefix';
 import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitComment, GitCommentList, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSetupStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import type { Logger } from './log';
@@ -1028,13 +1028,7 @@ export async function gitFetchPrune(cwd: string): Promise<{ ok: boolean; output:
   return { ok: r.code === 0, output: (r.stderr || r.stdout).trim() || 'Up to date.' };
 }
 
-export function slugify(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40) || 'session';
-}
+export const slugify = branchSlug;
 
 /** Keeps the app's `.vocs-code/` folder (worktrees, project wiki) out of git status. */
 export async function excludeVocsCodeDir(root: string): Promise<void> {

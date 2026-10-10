@@ -392,7 +392,7 @@ describe.runIf(enabled)('electron e2e: fork a worktree session', () => {
       await openNewSession(win);
       await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
       const isolate = win.locator('.toggle', { hasText: 'Isolate in a git worktree' });
-      await isolate.locator('.muted', { hasText: 'new branch under' }).waitFor({ timeout: 15_000 });
+      await isolate.locator('.muted', { hasText: 'new branch in' }).waitFor({ timeout: 15_000 });
       await isolate.click();
       await win.locator('select[aria-label="Branch prefix"]').selectOption('feat');
       await win.click('button:has-text("Start session")');

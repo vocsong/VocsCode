@@ -1638,5 +1638,9 @@ export interface CreateSessionRequest {
   goal?: string;
   /** Start the session in a worktree on this existing branch (reusing one when it exists). */
   checkoutBranch?: string;
+  /** With `config.useWorktree`: the name after the branch prefix (slugified); absent derives it from the title or prompt. */
+  worktreeName?: string;
+  /** With `config.useWorktree`: the local branch the new branch starts from; absent is the repository's HEAD. */
+  worktreeBase?: string;
 }
 

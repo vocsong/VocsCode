@@ -44,6 +44,18 @@ export function normalizeCustomBranchPrefixes(stored: unknown): string[] {
   return out;
 }
 
+/**
+ * The branch-name part after the prefix, and the worktree folder name: lowercase words joined by
+ * `-`, at most 40 characters. Shared so the dialog previews the exact name the main process creates.
+ */
+export function branchSlug(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'session';
+}
+
 /** Every prefix a picker offers: the built-in ones, then the user's saved ones. */
 export function branchPrefixOptions(custom: readonly string[] | undefined): string[] {
   return [...BUILTIN_BRANCH_PREFIXES, ...normalizeCustomBranchPrefixes(custom)];

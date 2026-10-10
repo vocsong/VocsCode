@@ -4312,14 +4312,93 @@ body.resizing {
   min-height: 48px;
   max-height: none;
 }
-/* Worktree branch prefix: a short select, with the custom-prefix input taking the rest of the row. */
-.ns-branch-prefix select {
+/* Workspace row: worktree isolation spans both columns below a divider; turning it on opens the
+   branch panel (prefix chip joined to the name, the base branch, and a preview of what is created). */
+.ns-workspace {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.ns-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ns-toggle-title {
+  font-weight: 600;
+}
+.ns-worktree {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+.ns-worktree-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  gap: 12px;
+  align-items: end;
+}
+.ns-worktree .field {
+  margin: 0;
+}
+.ns-branch-input {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.ns-branch-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.ns-branch-input select,
+.ns-branch-input input {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.ns-branch-input select:focus,
+.ns-branch-input input:focus {
+  box-shadow: none;
+}
+.ns-branch-input .ns-branch-prefix {
   flex: 0 0 auto;
   width: auto;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-right: 1px solid var(--border);
+  cursor: pointer;
 }
-.ns-branch-prefix input {
+.ns-branch-input .ns-branch-custom {
+  flex: 0 0 auto;
+  padding-right: 0;
+}
+.ns-branch-sep {
+  align-self: center;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.ns-branch-input .ns-branch-name {
   flex: 1;
-  min-width: 0;
+}
+.ns-worktree-hint {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ns-worktree-hint .row {
+  flex-wrap: wrap;
+}
+.ns-summary code {
+  color: var(--accent);
 }
 .harness-cards {
   display: grid;

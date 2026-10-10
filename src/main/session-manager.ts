@@ -529,7 +529,10 @@ export class SessionManager {
         const branchPrefix = cfg.branchPrefix === undefined ? undefined : normalizeBranchPrefix(cfg.branchPrefix);
         if (cfg.branchPrefix !== undefined && !branchPrefix) throw new Error(`Invalid branch prefix: ${cfg.branchPrefix}`);
         if (branchPrefix) cfg = { ...cfg, branchPrefix };
-        const wt = await createWorktree(cfg.projectRoot, slugify(req.title || req.initialPrompt || id), { branchPrefix });
+        // A leading `-` would reach `git worktree add` as an option, so the base is a plain ref name.
+        if (req.worktreeBase !== undefined && !/^[\w][\w./-]*$/.test(req.worktreeBase)) throw new Error('Invalid base branch');
+        const name = req.worktreeName?.trim() || req.title || req.initialPrompt || id;
+        const wt = await createWorktree(cfg.projectRoot, slugify(name), { branchPrefix, startPoint: req.worktreeBase });
         cwd = wt.path;
         worktreeBranch = wt.branch;
       } else {

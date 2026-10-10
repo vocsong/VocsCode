@@ -130,6 +130,33 @@ describe('worktree isolation at session creation', () => {
     expect(spawnSync('git', ['rev-parse', '--verify', '--quiet', 'refs/heads/vocscode/prefixed-work'], { cwd: projectRoot }).status).not.toBe(0);
   });
 
+  it('names the branch as asked and starts it from the chosen base branch', async () => {
+    const projectRoot = await repoFolder();
+    await runGit(projectRoot, ['checkout', '-qb', 'develop']);
+    await fs.writeFile(path.join(projectRoot, 'develop.txt'), 'from develop\n');
+    await runGit(projectRoot, ['add', 'develop.txt']);
+    await runGit(projectRoot, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'develop work']);
+    // The main checkout is back on main, so only an explicit base reaches develop's commit.
+    await runGit(projectRoot, ['checkout', '-q', 'main']);
+    const manager = await makeManager();
+
+    const meta = await manager.create({ config: { harness: 'native', projectRoot, permissionMode: 'ask', useWorktree: true, branchPrefix: 'feat' }, title: 'ignored title', worktreeName: 'Fix Login Redirect', worktreeBase: 'develop' } as never);
+
+    expect(meta.worktreeBranch).toBe('feat/fix-login-redirect');
+    expect(meta.cwd).toBe(path.join(projectRoot, '.vocs-code', 'worktrees', 'fix-login-redirect'));
+    expect((await fs.readFile(path.join(meta.cwd, 'develop.txt'), 'utf8')).replace(/\r\n/g, '\n')).toBe('from develop\n');
+  });
+
+  it('refuses a base branch that would reach git as an option', async () => {
+    const projectRoot = await repoFolder();
+    const manager = await makeManager();
+
+    await expect(manager.create({ config: { harness: 'native', projectRoot, permissionMode: 'ask', useWorktree: true }, title: 'opt', worktreeBase: '--orphan' } as never)).rejects.toThrow('Invalid base branch');
+
+    expect(manager.list()).toHaveLength(0);
+    expect(await exists(path.join(projectRoot, '.vocs-code', 'worktrees', 'opt'))).toBe(false);
+  });
+
   it('refuses a prefix git cannot take, creating no session, worktree or branch', async () => {
     const projectRoot = await repoFolder();
     const manager = await makeManager();
