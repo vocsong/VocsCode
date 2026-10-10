@@ -388,18 +388,19 @@ describe.runIf(enabled)('electron e2e: fork a worktree session', () => {
       const stored = async (): Promise<SessionMeta[]> => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
       const present = (p: string): Promise<boolean> => fs.stat(p).then(() => true, () => false);
 
-      // A session isolated in a worktree, started from the dialog with no prompt.
+      // A session isolated in a worktree on the feat/ branch prefix, started from the dialog with no prompt.
       await openNewSession(win);
       await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
       const isolate = win.locator('.toggle', { hasText: 'Isolate in a git worktree' });
       await isolate.locator('.muted', { hasText: 'new branch under' }).waitFor({ timeout: 15_000 });
       await isolate.click();
+      await win.locator('select[aria-label="Branch prefix"]').selectOption('feat');
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
 
       await expect.poll(async () => (await stored()).length, { timeout: 20_000 }).toBe(1);
       const src = (await stored())[0];
-      expect(src.worktreeBranch).toBeTruthy();
+      expect(src.worktreeBranch).toMatch(/^feat\//);
       expect(src.cwd).toContain(path.join('.vocs-code', 'worktrees'));
       expect(await present(src.cwd), 'the source worktree exists on disk').toBe(true);
 
@@ -413,7 +414,8 @@ describe.runIf(enabled)('electron e2e: fork a worktree session', () => {
       const fork = (await stored()).find((s) => s.forkedFrom === src.id)!;
       expect(fork.title).toContain('(fork)');
       expect(fork.cwd).not.toBe(src.cwd);
-      expect(fork.worktreeBranch).toBeTruthy();
+      // The fork keeps its source's branch prefix.
+      expect(fork.worktreeBranch).toMatch(/^feat\//);
       expect(fork.worktreeBranch).not.toBe(src.worktreeBranch);
       expect(await present(fork.cwd), 'the fork worktree exists on disk').toBe(true);
 

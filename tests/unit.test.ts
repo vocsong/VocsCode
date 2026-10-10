@@ -410,8 +410,8 @@ describe('settings normalization', () => {
   it('keeps well-formed per-folder new-session defaults and drops malformed ones', () => {
     expect(defaultSettings().folderSessionDefaults).toEqual({});
     const stored = {
-      'G:/a': { harness: 'claude', permissionMode: 'plan', effort: 'high', useWorktree: true, acpAgent: 'dsh', modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } },
-      'G:/b': { harness: 'nope', permissionMode: 'yolo', effort: 'ultra', useWorktree: 'yes', acpAgent: '  ' },
+      'G:/a': { harness: 'claude', permissionMode: 'plan', effort: 'high', useWorktree: true, branchPrefix: 'feat/', acpAgent: 'dsh', modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } },
+      'G:/b': { harness: 'nope', permissionMode: 'yolo', effort: 'ultra', useWorktree: 'yes', branchPrefix: 'bad..prefix', acpAgent: '  ' },
       'G:/c': 'not an object'
     };
     const s = normalizeSettings({ folderSessionDefaults: stored as never });
@@ -421,10 +421,18 @@ describe('settings normalization', () => {
         permissionMode: 'plan',
         effort: 'high',
         useWorktree: true,
+        branchPrefix: 'feat',
         acpAgent: 'dsh',
         modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } }
       }
     });
+  });
+  it('keeps saved custom branch prefixes in their stored form and drops malformed, duplicate and built-in ones', () => {
+    expect(defaultSettings().customBranchPrefixes).toEqual([]);
+    const s = normalizeSettings({ customBranchPrefixes: ['bug/', ' team/feat ', 'bug', 'feat', 'vocscode/', 'a b', 'x..y', 'rel.lock', '/', 3] as never });
+    expect(s.customBranchPrefixes).toEqual(['bug', 'team/feat']);
+    expect(normalizeSettings({ customBranchPrefixes: Array.from({ length: 30 }, (_, i) => `p${i}`) }).customBranchPrefixes).toHaveLength(20);
+    expect(normalizeSettings({ customBranchPrefixes: 'bug' as never }).customBranchPrefixes).toEqual([]);
   });
   it('drops the retired app-wide worktree default so it cannot override a folder', () => {
     const s = normalizeSettings({ defaultUseWorktree: true } as never);

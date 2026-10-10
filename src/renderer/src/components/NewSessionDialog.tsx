@@ -1,6 +1,7 @@
-/** New session dialog: project directory, harness, model, permission mode and worktree isolation. */
+/** New session dialog: project directory, harness, model, permission mode and worktree isolation (with its branch prefix). */
 import React, { useEffect, useRef, useState } from 'react';
 import type { AppSettings, EffortLevel, FileAttachment, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
+import { branchPrefixOptions, normalizeBranchPrefix } from '../../../shared/branch-prefix';
 import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
 import { invoke } from '../api';
@@ -10,6 +11,9 @@ import { useStore } from '../store';
 import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
 import { MissionLaunch } from './mission/MissionLaunch';
+
+/** The prefix select's "Custom…" option; never a valid prefix itself (`:` cannot be in a ref). */
+const CUSTOM_PREFIX = ':custom';
 
 export function NewSessionDialog() {
   const kind = useStore((s) => s.newSessionKind);
@@ -43,6 +47,10 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const [effort, setEffort] = useState<EffortLevel | ''>(initial.effort);
   const [mode, setMode] = useState<PermissionMode>(initial.permissionMode);
   const [useWorktree, setUseWorktree] = useState(initial.useWorktree);
+  // Built-in prefixes, then the user's saved ones; "Custom…" types a new one, saved on start.
+  const prefixOptions = branchPrefixOptions(settings.customBranchPrefixes);
+  const [prefixChoice, setPrefixChoice] = useState(initial.branchPrefix);
+  const [customPrefix, setCustomPrefix] = useState('');
   // Undefined until the folder has been probed; worktree isolation is offered only for a repository.
   const [folderIsRepo, setFolderIsRepo] = useState<boolean | undefined>(undefined);
   const [acpAgent, setAcpAgent] = useState(initial.acpAgent ?? settings.acpAgents[0]?.id ?? 'dsh');
@@ -143,7 +151,8 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   // repository simply cannot act on it. Starting waits for the probe, so a fast click cannot submit
   // the preference before it is known to be usable.
   const isolate = useWorktree && folderIsRepo === true;
-  const ready = !!projectRoot && !modelsLoading && folderIsRepo !== undefined;
+  const branchPrefix = prefixChoice === CUSTOM_PREFIX ? normalizeBranchPrefix(customPrefix) : prefixChoice;
+  const ready = !!projectRoot && !modelsLoading && folderIsRepo !== undefined && (!isolate || !!branchPrefix);
 
   const create = async () => {
     if (modelsLoading) return;
@@ -161,6 +170,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
         effort: noEffort ? null : selectedEffort || undefined,
         permissionMode: mode,
         useWorktree: isolate,
+        branchPrefix: isolate ? branchPrefix : undefined,
         acpAgent: harness === 'acp' ? acpAgent : undefined,
         appendSystemPrompt: appendSystemPrompt.trim() || undefined,
         maxBudgetUsd: maxBudget ? Number(maxBudget) : undefined
@@ -170,7 +180,10 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
       // record is what the next dialog on this project opens on; the app-wide values are kept as
       // they were (effort is shared with live session switches, model with cross-harness forks).
       // A model that takes no effort leaves both remembered efforts as they were.
+      // A typed prefix joins the saved list (newest first, so a full list drops its oldest entry).
+      const newPrefix = isolate && branchPrefix && !prefixOptions.includes(branchPrefix) ? branchPrefix : undefined;
       const remembered: Partial<AppSettings> = {
+        ...(newPrefix ? { customBranchPrefixes: [newPrefix, ...(settings.customBranchPrefixes ?? [])] } : {}),
         defaultHarness: harness,
         defaultPermissionMode: mode,
         defaultModelByHarness: { ...settings.defaultModelByHarness, [harness]: model },
@@ -180,6 +193,8 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
           ...(noEffort ? {} : { effort: selectedEffort || undefined }),
           permissionMode: mode,
           useWorktree,
+          // The picker is only shown while isolating; a session without a worktree keeps the folder's prefix.
+          ...(isolate && branchPrefix ? { branchPrefix } : {}),
           // Only an ACP session records an agent; another harness must not erase the folder's pick.
           ...(harness === 'acp' ? { acpAgent } : {})
         })
@@ -344,6 +359,31 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
               </span>
             }
           />
+          {isolate && (
+            <div className="field ns-branch-prefix">
+              <span className="field-label">Branch prefix</span>
+              <div className="row gap8">
+                <select aria-label="Branch prefix" value={prefixChoice} onChange={(e) => setPrefixChoice(e.target.value)}>
+                  {prefixOptions.map((p) => (
+                    <option key={p} value={p}>
+                      {p}/
+                    </option>
+                  ))}
+                  <option value={CUSTOM_PREFIX}>Custom…</option>
+                </select>
+                {prefixChoice === CUSTOM_PREFIX && (
+                  <input aria-label="Custom branch prefix" value={customPrefix} onChange={(e) => setCustomPrefix(e.target.value)} placeholder="e.g. bug or team/feat" autoFocus />
+                )}
+              </div>
+              <span className="field-hint">
+                {branchPrefix
+                  ? <>New branch: <code>{branchPrefix}/&lt;session-name&gt;</code>{prefixChoice === CUSTOM_PREFIX ? ' — saved to your prefixes when the session starts.' : ''}</>
+                  : customPrefix.trim()
+                    ? 'Not a valid branch prefix: use letters, digits, ".", "_" or "-", with "/" between parts.'
+                    : 'Type a prefix, such as bug or team/feat.'}
+              </span>
+            </div>
+          )}
         </section>
 
         <section className="ns-span2">

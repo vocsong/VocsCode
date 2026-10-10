@@ -348,6 +348,11 @@ export interface SessionConfig {
   permissionMode: PermissionMode;
   /** Run in an isolated git worktree under .vocs-code/worktrees. */
   useWorktree?: boolean;
+  /**
+   * Prefix of the branch a new worktree starts on (`feat` → `feat/<slug>`), stored without the
+   * trailing slash; absent means `vocscode`. Forks of the session reuse it. See shared/branch-prefix.ts.
+   */
+  branchPrefix?: string;
   /** ACP agent preset id (for harness 'acp'). */
   acpAgent?: string;
   /** Free-form system prompt addition where supported. */
@@ -1216,6 +1221,8 @@ export interface FolderSessionDefaults {
   effort?: EffortLevel;
   permissionMode?: PermissionMode;
   useWorktree?: boolean;
+  /** Branch prefix for the folder's worktrees, without the trailing slash. */
+  branchPrefix?: string;
   /** ACP agent id, for harness `acp`. */
   acpAgent?: string;
 }
@@ -1292,6 +1299,8 @@ export interface AppSettings {
   folderStyles?: Record<string, FolderStyle>;
   /** User-added labels offered in the status-label picker alongside the built-in statuses. */
   customLabels?: string[];
+  /** User-added worktree branch prefixes (no trailing slash), offered in every folder after the built-in ones. */
+  customBranchPrefixes?: string[];
   /** Manual sidebar order for project folders; roots not listed sort alphabetically after. */
   folderOrder?: string[];
   /** Project roots whose sidebar folder block is collapsed. */

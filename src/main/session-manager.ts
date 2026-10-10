@@ -24,6 +24,7 @@ import type {
   TranscriptItem,
   UserInput
 } from '../shared/types';
+import { normalizeBranchPrefix } from '../shared/branch-prefix';
 import { autoCompactionThresholdLabel, autoCompactionTokenThreshold, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { nativeGoalCommand } from '../shared/goal-driver';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
@@ -523,7 +524,12 @@ export class SessionManager {
       // than the session: the dialog disables the toggle, but a remembered default (quick session)
       // or a spawned agent's `use_worktree` can still ask for it on a plain folder.
       if (await gitRoot(cfg.projectRoot)) {
-        const wt = await createWorktree(cfg.projectRoot, slugify(req.title || req.initialPrompt || id));
+        // The request comes from the renderer or a spawned agent; a prefix git cannot take is refused
+        // here rather than surfacing as a `git worktree add` failure.
+        const branchPrefix = cfg.branchPrefix === undefined ? undefined : normalizeBranchPrefix(cfg.branchPrefix);
+        if (cfg.branchPrefix !== undefined && !branchPrefix) throw new Error(`Invalid branch prefix: ${cfg.branchPrefix}`);
+        if (branchPrefix) cfg = { ...cfg, branchPrefix };
+        const wt = await createWorktree(cfg.projectRoot, slugify(req.title || req.initialPrompt || id), { branchPrefix });
         cwd = wt.path;
         worktreeBranch = wt.branch;
       } else {
@@ -2486,7 +2492,7 @@ export class SessionManager {
   private async forkWorktree(src: SessionMeta, title: string): Promise<{ path: string; branch: string } | null> {
     if (!src.worktreeBranch) return null;
     try {
-      return await createForkWorktree(src.config.projectRoot, slugify(title), { cwd: src.cwd, branch: src.worktreeBranch });
+      return await createForkWorktree(src.config.projectRoot, slugify(title), { cwd: src.cwd, branch: src.worktreeBranch, branchPrefix: normalizeBranchPrefix(src.config.branchPrefix) });
     } catch (e) {
       this.deps.log('warn', `fork: could not create a worktree from ${src.cwd}: ${errorMessage(e)} — the fork shares the source directory`);
       return null;

@@ -4312,6 +4312,15 @@ body.resizing {
   min-height: 48px;
   max-height: none;
 }
+/* Worktree branch prefix: a short select, with the custom-prefix input taking the rest of the row. */
+.ns-branch-prefix select {
+  flex: 0 0 auto;
+  width: auto;
+}
+.ns-branch-prefix input {
+  flex: 1;
+  min-width: 0;
+}
 .harness-cards {
   display: grid;
   grid-template-columns: 1fr 1fr;

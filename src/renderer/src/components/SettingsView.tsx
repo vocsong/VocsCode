@@ -1,5 +1,6 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
 import React, { useEffect, useRef, useState } from 'react';
+import { BUILTIN_BRANCH_PREFIXES, branchPrefixOptions, normalizeBranchPrefix } from '../../../shared/branch-prefix';
 import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
 import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, HarnessUpdate, ModelInfo, ProviderConfig, ProviderKind, RemoteAuditEntry, RemoteDeviceInfo, RemoteState, SecretStatus, UpdateState } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
@@ -195,11 +196,56 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
         onChange={(v) => update({ goalDefaults: { ...settings.goalDefaults, preferHarness: v } })}
         label="Prefer a harness's own /goal when it has one — the command goes to the harness instead of the app's goal engine"
       />
+      <BranchPrefixFields settings={settings} update={update} />
       <h3>Editor</h3>
       <Field label="Editor command" hint="Used by “Open in editor”. VS Code (code) supports jumping to a line.">
         <input value={settings.binaries.editor ?? ''} placeholder="code" onChange={(e) => update({ binaries: { ...settings.binaries, editor: e.target.value } })} />
       </Field>
     </div>
+  );
+}
+
+/** General → Worktree branches: the saved prefixes every project's New Session dialog offers after the built-in ones. */
+function BranchPrefixFields({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+  const custom = settings.customBranchPrefixes ?? [];
+  const [draft, setDraft] = useState('');
+  const prefix = normalizeBranchPrefix(draft);
+  const taken = !!prefix && branchPrefixOptions(custom).includes(prefix);
+  const add = () => {
+    if (!prefix || taken) return;
+    update({ customBranchPrefixes: [prefix, ...custom] });
+    setDraft('');
+  };
+  return (
+    <>
+      <h3>Worktree branches</h3>
+      <p className="muted small">
+        A session isolated in a git worktree starts on a new branch named <code>prefix/session-name</code>. {BUILTIN_BRANCH_PREFIXES.map((p) => `${p}/`).join(', ')} are always offered; the prefixes
+        below are offered in every project too. A custom prefix typed in the New Session dialog is added here when its session starts.
+      </p>
+      {custom.map((p) => (
+        <div key={p} className="shortcut-row">
+          <code className="shortcut-row-main">{p}/</code>
+          <Button size="sm" variant="ghost" icon="trash" title={`Remove ${p}/`} aria-label={`Remove ${p}/`} onClick={() => update({ customBranchPrefixes: custom.filter((c) => c !== p) })} />
+        </div>
+      ))}
+      <div className="row gap8 shortcut-add">
+        <input
+          aria-label="New branch prefix"
+          value={draft}
+          placeholder="e.g. bug or team/feat"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') add();
+          }}
+        />
+        <Button size="sm" variant="primary" disabled={!prefix || taken} onClick={add}>
+          Add
+        </Button>
+      </div>
+      {draft.trim() && !prefix && <p className="muted small">Not a valid branch prefix: use letters, digits, ".", "_" or "-", with "/" between parts.</p>}
+      {taken && <p className="muted small">{prefix}/ is already offered.</p>}
+    </>
   );
 }
 
