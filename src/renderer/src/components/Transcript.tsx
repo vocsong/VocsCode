@@ -461,6 +461,7 @@ function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, s
       return (
         <div className={`turn-footer turn-${item.status}`}>
           <span>{item.status === 'completed' ? 'Turn complete' : item.status === 'interrupted' ? 'Interrupted' : `Failed${item.error ? `: ${item.error}` : ''}`}</span>
+          <span>· <time dateTime={new Date(item.ts).toISOString()} title={new Date(item.ts).toLocaleString()}>{new Date(item.ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</time></span>
           {item.durationMs ? <span>· {fmtDuration(item.durationMs)}</span> : null}
           {item.usage && (item.usage.inputTokens || item.usage.outputTokens) ? <span>· {fmtTokens(item.usage.inputTokens)} in / {fmtTokens(item.usage.outputTokens)} out</span> : null}
           {item.status === 'completed' && fmtRate(item.usage?.outputTokens, item.durationMs) ? (
