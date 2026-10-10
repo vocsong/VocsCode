@@ -219,7 +219,7 @@ describe('per-folder new-session defaults', () => {
     // Unedited, the name follows the first prompt the way the main process derives it.
     fireEvent.change(screen.getByPlaceholderText('What should the agent do?'), { target: { value: 'Fix the login redirect' } });
     const name = (await screen.findByLabelText('Branch name')) as HTMLInputElement;
-    expect(name.placeholder).toBe('fix-the-login-redirect');
+    expect(name.placeholder).toBe('fix-login-redirect');
     const from = screen.getByLabelText('Base branch') as HTMLSelectElement;
     await waitFor(() => expect(from.value).toBe('main'));
     expect([...from.options].map((o) => o.value)).toEqual(['develop', 'main']);
@@ -234,6 +234,48 @@ describe('per-folder new-session defaults', () => {
     await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({ worktreeName: 'Fix Login Redirect', worktreeBase: 'develop' })));
+  });
+
+  it('names the branch from the model\'s reading of the first prompt, and starts on that name', async () => {
+    const asked: unknown[] = [];
+    invoke.mockImplementation(async (channel: string, args: unknown) => {
+      if (channel === 'harness:models') return harnessModels();
+      if (channel === 'sessions:create') return createdSession;
+      if (channel === 'git:folderIsRepo') return { isRepo: true };
+      if (channel === 'git:folderBranches') return { current: 'main', branches: ['main'] };
+      if (channel === 'git:suggestBranchName') {
+        asked.push(args);
+        return { name: 'oauth-callback-redirect', source: 'model' };
+      }
+      return {};
+    });
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: true } } }));
+    render(<NewSessionDialog />);
+    const prompt = 'Signing in with Google sends people back to the home page';
+    fireEvent.change(screen.getByPlaceholderText('What should the agent do?'), { target: { value: prompt } });
+
+    // The prompt's own words stand in at once; the model's name replaces them when typing pauses.
+    const name = (await screen.findByLabelText('Branch name')) as HTMLInputElement;
+    expect(name.placeholder).toBe('signing-google-sends-people-back');
+    await waitFor(() => expect(name.placeholder).toBe('oauth-callback-redirect'), { timeout: 3000 });
+    expect(asked).toEqual([{ prompt, model: { provider: 'z-ai', model: 'glm-5' } }]);
+    expect(document.querySelector('.ns-worktree-hint')!.textContent).toContain('Creates vocscode/oauth-callback-redirect');
+
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({ worktreeName: 'oauth-callback-redirect' })));
+  });
+
+  it('does not ask the model for a name the user typed or a session that is not isolated', async () => {
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: false } } }));
+    render(<NewSessionDialog />);
+    fireEvent.change(screen.getByPlaceholderText('What should the agent do?'), { target: { value: 'Fix the flaky upload test on CI' } });
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(invoke).not.toHaveBeenCalledWith('git:suggestBranchName', expect.anything());
+
+    fireEvent.click(screen.getByLabelText(/Isolate in a git worktree/));
+    fireEvent.change(await screen.findByLabelText('Branch name'), { target: { value: 'my-own-name' } });
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(invoke).not.toHaveBeenCalledWith('git:suggestBranchName', expect.anything());
   });
 
   it('sends no name or base when both are left on their defaults', async () => {

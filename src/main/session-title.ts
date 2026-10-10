@@ -6,6 +6,7 @@ import { STATIC_MODELS_BY_PROVIDER } from './models/static-models';
 import { resolveProviderApiKey } from './models/providers';
 import { isAnthropicProvider } from './harness/native/drivers';
 import { errorMessage } from './util/async';
+import { sanitizeBranchNameReply } from '../shared/branch-prefix';
 
 /** Sidebar rows stay short: a title is cut to this many words, and never runs past 60 chars. */
 const PLACEHOLDER_WORDS = 6;
@@ -95,6 +96,66 @@ function isTruncated(reason: string | null | undefined): boolean {
 }
 
 /**
+ * One background-model completion of `system` over the opening prompt: the configured utility
+ * model first (then the session's own provider when given), so chores use a cheap model when
+ * possible. Never throws; returns null when no provider is usable, the call fails or times out,
+ * or the reply was cut off by the token budget — a fragment is not an answer. The caller logs the
+ * outcome once, with the reply's stop reason when the wire reports one.
+ */
+async function askBackgroundModel(
+  label: string,
+  system: string,
+  prompt: string,
+  providers: ProviderConfig[],
+  getSecret: (providerId: string) => Promise<string | undefined>,
+  preferred: ModelRef | undefined,
+  log: ((level: 'debug' | 'info' | 'warn' | 'error', message: string) => void) | undefined,
+  timeoutMs: number
+): Promise<{ text: string; stopReason?: string } | null> {
+  const picked = selectBackgroundModel(providers, preferred);
+  if (!picked) {
+    log?.('debug', `${label}: no usable provider, keeping placeholder`);
+    return null;
+  }
+  const { provider, model } = picked;
+  log?.('debug', `${label}: asking ${provider.id}/${model}`);
+  const apiKey = await resolveProviderApiKey(provider, getSecret);
+  const sample = prompt.trim().slice(0, PROMPT_SAMPLE_CHARS);
+  try {
+    const thinks = thinksBeforeAnswering(provider, model);
+    if (isAnthropicProvider(provider)) {
+      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: provider.headers });
+      const msg = await client.messages.create(
+        { model, max_tokens: thinks ? TITLE_REASONING_MAX_TOKENS : TITLE_MAX_TOKENS, system, messages: [{ role: 'user', content: sample }] },
+        { signal: AbortSignal.timeout(timeoutMs) }
+      );
+      if (isTruncated(msg.stop_reason)) {
+        log?.('warn', `${label}: ${provider.id}/${model} ran out of tokens mid-reply, keeping placeholder`);
+        return null;
+      }
+      return { text: msg.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join(' ') };
+    }
+    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: provider.headers });
+    // Reasoning models (o-series, gpt-5) reject max_tokens and spend the budget on thinking
+    // before any text arrives, so they need max_completion_tokens and low effort. Other thinking
+    // models (DeepSeek and friends) take max_tokens but need the same room.
+    const body: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = isReasoningModel(model)
+      ? { model, max_completion_tokens: TITLE_MAX_COMPLETION_TOKENS, reasoning_effort: 'low', messages: [{ role: 'system', content: system }, { role: 'user', content: sample }] }
+      : { model, max_tokens: thinks ? TITLE_REASONING_MAX_TOKENS : TITLE_MAX_TOKENS, messages: [{ role: 'system', content: system }, { role: 'user', content: sample }] };
+    const res = await client.chat.completions.create(body, { signal: AbortSignal.timeout(timeoutMs) });
+    const choice = res.choices[0];
+    if (isTruncated(choice?.finish_reason)) {
+      log?.('warn', `${label}: ${provider.id}/${model} ran out of tokens mid-reply, keeping placeholder`);
+      return null;
+    }
+    return { text: choice?.message?.content ?? '', stopReason: choice?.finish_reason ?? 'unknown' };
+  } catch (e) {
+    log?.('warn', `${label} failed, keeping placeholder: ${errorMessage(e)}`);
+    return null;
+  }
+}
+
+/**
  * One-shot LLM call that names a session from its opening prompt. Never throws:
  * returns null when no provider is usable or the call fails, leaving the
  * truncated-prompt placeholder in place.
@@ -109,49 +170,41 @@ export async function generateSessionTitle(
   preferred?: ModelRef,
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
 ): Promise<string | null> {
-  const picked = selectBackgroundModel(providers, preferred);
-  if (!picked) {
-    log?.('debug', 'session title: no usable provider, keeping placeholder');
-    return null;
-  }
-  const { provider, model } = picked;
-  log?.('debug', `session title: asking ${provider.id}/${model}`);
-  const apiKey = await resolveProviderApiKey(provider, getSecret);
-  const sample = prompt.trim().slice(0, PROMPT_SAMPLE_CHARS);
-  try {
-    const thinks = thinksBeforeAnswering(provider, model);
-    if (isAnthropicProvider(provider)) {
-      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: provider.headers });
-      const msg = await client.messages.create(
-        { model, max_tokens: thinks ? TITLE_REASONING_MAX_TOKENS : TITLE_MAX_TOKENS, system: TITLE_SYSTEM, messages: [{ role: 'user', content: sample }] },
-        { signal: AbortSignal.timeout(TITLE_TIMEOUT_MS) }
-      );
-      if (isTruncated(msg.stop_reason)) {
-        log?.('warn', `session title: ${provider.id}/${model} ran out of tokens mid-title, keeping placeholder`);
-        return null;
-      }
-      const title = sanitizeLlmTitle(msg.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join(' '));
-      log?.('debug', `session title: ${title ? `got "${title}"` : 'no usable reply'}`);
-      return title;
-    }
-    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: provider.headers });
-    // Reasoning models (o-series, gpt-5) reject max_tokens and spend the budget on thinking
-    // before any text arrives, so they need max_completion_tokens and low effort. Other thinking
-    // models (DeepSeek and friends) take max_tokens but need the same room.
-    const body: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = isReasoningModel(model)
-      ? { model, max_completion_tokens: TITLE_MAX_COMPLETION_TOKENS, reasoning_effort: 'low', messages: [{ role: 'system', content: TITLE_SYSTEM }, { role: 'user', content: sample }] }
-      : { model, max_tokens: thinks ? TITLE_REASONING_MAX_TOKENS : TITLE_MAX_TOKENS, messages: [{ role: 'system', content: TITLE_SYSTEM }, { role: 'user', content: sample }] };
-    const res = await client.chat.completions.create(body, { signal: AbortSignal.timeout(TITLE_TIMEOUT_MS) });
-    const choice = res.choices[0];
-    if (isTruncated(choice?.finish_reason)) {
-      log?.('warn', `session title: ${provider.id}/${model} ran out of tokens mid-title, keeping placeholder`);
-      return null;
-    }
-    const title = sanitizeLlmTitle(choice?.message?.content ?? '');
-    log?.('debug', `session title: ${title ? `got "${title}"` : `no usable reply (finish_reason ${choice?.finish_reason ?? 'unknown'})`}`);
-    return title;
-  } catch (e) {
-    log?.('warn', `session title failed, keeping placeholder: ${errorMessage(e)}`);
-    return null;
-  }
+  const reply = await askBackgroundModel('session title', TITLE_SYSTEM, prompt, providers, getSecret, preferred, log, TITLE_TIMEOUT_MS);
+  if (reply === null) return null;
+  const title = sanitizeLlmTitle(reply.text);
+  log?.('debug', `session title: ${title ? `got "${title}"` : `no usable reply${reply.stopReason ? ` (finish_reason ${reply.stopReason})` : ''}`}`);
+  return title;
+}
+
+const BRANCH_SYSTEM = [
+  'You name git branches for coding tasks.',
+  'Reply with only the branch name: 2 to 5 lowercase English words joined by hyphens that capture the intent of the request in the user message, such as fix-login-redirect or add-dark-mode-toggle.',
+  'No type prefix such as feat/ or fix/, no quotes, no explanation.'
+].join(' ');
+
+/**
+ * The dialog waits on this while the user is still choosing, so it gives up much sooner than a
+ * title, which arrives in the sidebar whenever it is ready.
+ */
+const BRANCH_TIMEOUT_MS = 10_000;
+
+/**
+ * A branch name for the intent of the opening prompt (`fix-login-redirect`), from the same
+ * background model that titles sessions; the type prefix is the user's separate choice. Never
+ * throws: null when no model is usable or its reply is not a name, so the caller keeps the
+ * offline name (see branchNameFromText).
+ */
+export async function generateBranchName(
+  prompt: string,
+  providers: ProviderConfig[],
+  getSecret: (providerId: string) => Promise<string | undefined>,
+  preferred?: ModelRef,
+  log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
+): Promise<string | null> {
+  const reply = await askBackgroundModel('branch name', BRANCH_SYSTEM, prompt, providers, getSecret, preferred, log, BRANCH_TIMEOUT_MS);
+  if (reply === null) return null;
+  const name = sanitizeBranchNameReply(reply.text);
+  log?.('debug', `branch name: ${name ? `got "${name}"` : `no usable reply${reply.stopReason ? ` (finish_reason ${reply.stopReason})` : ''}`}`);
+  return name;
 }

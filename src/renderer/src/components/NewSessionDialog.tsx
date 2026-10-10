@@ -1,7 +1,7 @@
 /** New session dialog: project directory, harness, model, permission mode and worktree isolation (with its branch prefix). */
 import React, { useEffect, useRef, useState } from 'react';
 import type { AppSettings, EffortLevel, FileAttachment, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
-import { branchPrefixOptions, branchSlug, normalizeBranchPrefix } from '../../../shared/branch-prefix';
+import { branchNameFromText, branchPrefixOptions, branchSlug, normalizeBranchPrefix } from '../../../shared/branch-prefix';
 import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
 import { invoke } from '../api';
@@ -14,6 +14,9 @@ import { MissionLaunch } from './mission/MissionLaunch';
 
 /** The prefix select's "Custom…" option; never a valid prefix itself (`:` cannot be in a ref). */
 const CUSTOM_PREFIX = ':custom';
+
+/** How long typing must pause before the first prompt is sent to the background model for a branch name. */
+const NAME_SUGGEST_DELAY_MS = 700;
 
 export function NewSessionDialog() {
   const kind = useStore((s) => s.newSessionKind);
@@ -56,6 +59,9 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   // The folder's local branches; the new branch starts from `base` ('' is the repository's HEAD).
   const [folderBranches, setFolderBranches] = useState<{ current?: string; branches: string[] }>({ branches: [] });
   const [base, setBase] = useState('');
+  // The background model's name for the prompt it was asked about; stale once the prompt changes.
+  const [suggested, setSuggested] = useState<{ prompt: string; name: string } | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
   // Undefined until the folder has been probed; worktree isolation is offered only for a repository.
   const [folderIsRepo, setFolderIsRepo] = useState<boolean | undefined>(undefined);
   const [acpAgent, setAcpAgent] = useState(initial.acpAgent ?? settings.acpAgents[0]?.id ?? 'dsh');
@@ -181,10 +187,34 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   // the preference before it is known to be usable.
   const isolate = useWorktree && folderIsRepo === true;
   const branchPrefix = prefixChoice === CUSTOM_PREFIX ? normalizeBranchPrefix(customPrefix) : prefixChoice;
-  const derivedName = title.trim() || prompt.trim();
-  const autoSlug = derivedName ? branchSlug(derivedName) : undefined;
+  // An unedited name follows the request's intent: a title word for word, as the user wrote it,
+  // else the model's reading of the first prompt, with the prompt's own words (filler dropped)
+  // standing in until that arrives.
+  const promptText = prompt.trim();
+  const modelName = !title.trim() && suggested?.prompt === promptText ? suggested.name : undefined;
+  const autoSlug = title.trim() ? branchSlug(title) : modelName ?? (promptText ? branchNameFromText(promptText) : undefined);
   const nameSlug = branchName.trim() ? branchSlug(branchName) : autoSlug;
   const branchPreview = branchPrefix ? `${branchPrefix}/${nameSlug ?? '<session-name>'}` : undefined;
+
+  // Only asked while the name is the dialog's to choose, and only once typing pauses.
+  const wantsSuggestion = isolate && !branchName.trim() && !title.trim() && promptText.length >= 8;
+  useEffect(() => {
+    if (!wantsSuggestion || suggested?.prompt === promptText) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setSuggesting(true);
+      invoke('git:suggestBranchName', { prompt: promptText, model })
+        .then((r) => !cancelled && r?.name && setSuggested({ prompt: promptText, name: r.name }))
+        .catch(() => undefined)
+        .finally(() => !cancelled && setSuggesting(false));
+    }, NAME_SUGGEST_DELAY_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      setSuggesting(false);
+    };
+  }, [wantsSuggestion, promptText]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const ready = !!projectRoot && !modelsLoading && folderIsRepo !== undefined && (!isolate || !!branchPrefix);
 
   const create = async () => {
@@ -240,9 +270,9 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
         initialImages: images.length ? images : undefined,
         initialFiles: files.length ? files : undefined,
         goal: goal.trim() || undefined,
-        // Only what differs from the defaults is sent: an unedited name follows the title or
-        // prompt, and the checked-out branch is where an unspecified worktree starts anyway.
-        ...(isolate && branchName.trim() ? { worktreeName: branchName.trim() } : {}),
+        // The name is sent as previewed, so the branch is the one the dialog showed; the
+        // checked-out branch is where an unspecified worktree starts anyway.
+        ...(isolate && (branchName.trim() || autoSlug) ? { worktreeName: branchName.trim() || autoSlug } : {}),
         ...(isolate && base && base !== folderBranches.current ? { worktreeBase: base } : {})
       });
       close();
@@ -461,6 +491,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
                   <>
                     <span className="row gap6">
                       <Icon name="branch" size={12} /> Creates <code>{branchPreview}</code> in <code>.vocs-code/worktrees/{nameSlug ?? '<session-name>'}</code>
+                      {suggesting && <span className="row gap6" title="Naming the branch from what the first prompt asks for"><Spinner size={10} /> naming from your prompt…</span>}
                     </span>
                     {prefixChoice === CUSTOM_PREFIX && <span>The new prefix is saved to your prefixes when the session starts.</span>}
                   </>

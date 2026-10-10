@@ -16,7 +16,7 @@ import { isDangerousCommand } from '../src/main/harness/types';
 import { normalizeSettings, defaultSettings } from '../src/main/settings';
 import type { SettingsStore } from '../src/main/settings';
 import { SessionManager } from '../src/main/session-manager';
-import { generateSessionTitle, sanitizeLlmTitle, titleFromPrompt } from '../src/main/session-title';
+import { generateBranchName, generateSessionTitle, sanitizeLlmTitle, titleFromPrompt } from '../src/main/session-title';
 import type { RuntimeResolver } from '../src/main/runtime';
 import { piHasCredentials } from '../src/main/runtime';
 import { estimateCostUsd, findContextWindow, findPricing } from '../src/main/models/static-models';
@@ -228,6 +228,42 @@ describe('LLM session titles', () => {
       const provider = { id: 'fake', kind: 'anthropic' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [] };
       const title = await generateSessionTitle('there are many warnings today', [provider] as never, getSecret, { provider: 'fake', model: 'claude-x' });
       expect(title).toBeNull();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('names a worktree branch for the intent of the prompt with the same background model', async () => {
+    const seen: { body?: { model?: string; messages?: { role: string; content: string }[] } } = {};
+    const server = await listenOnce((_req, res, body) => {
+      seen.body = JSON.parse(body ?? '{}');
+      res.setHeader('content-type', 'application/json');
+      // The model adds a type prefix and quotes anyway; the user picks the prefix, so it is dropped.
+      res.end(JSON.stringify({ choices: [{ message: { content: '"fix/oauth-callback-redirect"' }, finish_reason: 'stop' }] }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'openai-compatible' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [{ id: 'cheap-flash', name: 'Cheap Flash', provider: 'fake' }] };
+      const prompt = 'Can you please look into why signing in with Google sends people back to the home page';
+      const name = await generateBranchName(prompt, [provider] as never, getSecret, { provider: 'fake', model: 'cheap-flash' });
+      expect(name).toBe('oauth-callback-redirect');
+      expect(seen.body?.model).toBe('cheap-flash');
+      expect(seen.body?.messages?.[0]).toMatchObject({ role: 'system' });
+      expect(seen.body?.messages?.[0].content).toContain('git branches');
+      expect(seen.body?.messages?.[1]).toEqual({ role: 'user', content: prompt });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns no branch name when no model is usable or its reply was cut off', async () => {
+    expect(await generateBranchName('Fix the bug', [], getSecret)).toBeNull();
+    const server = await listenOnce((_req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: 'fix-the' }, finish_reason: 'length' }] }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'openai-compatible' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [] };
+      expect(await generateBranchName('Fix the bug', [provider] as never, getSecret, { provider: 'fake', model: 'cheap-flash' })).toBeNull();
     } finally {
       await server.close();
     }

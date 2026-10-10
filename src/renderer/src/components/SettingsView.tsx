@@ -275,7 +275,7 @@ function BackgroundModelFields({ settings, update }: { settings: AppSettings; up
   const models = providers.filter((p) => p.enabled).flatMap((p) => p.models);
   return (
     <>
-      <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions. Falls back to the session's own model when unset.">
+      <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions and worktree branches. Falls back to the session's own model when unset.">
         {error && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {error}</span></div>}
         <div className="onboarding-model-picker">
           <ModelPicker

@@ -24,7 +24,7 @@ import type {
   TranscriptItem,
   UserInput
 } from '../shared/types';
-import { normalizeBranchPrefix } from '../shared/branch-prefix';
+import { branchNameFromText, branchSlug, normalizeBranchPrefix } from '../shared/branch-prefix';
 import { autoCompactionThresholdLabel, autoCompactionTokenThreshold, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { nativeGoalCommand } from '../shared/goal-driver';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
@@ -47,7 +47,7 @@ import type { SessionStore } from './store';
 import type { AnalyticsStore } from './analytics';
 import { deferred, errorMessage, shortId, type Deferred } from './util/async';
 import { exists, readJson, writeJson } from './util/fs';
-import { generateSessionTitle, titleFromPrompt } from './session-title';
+import { generateBranchName, generateSessionTitle, titleFromPrompt } from './session-title';
 
 export { titleFromPrompt };
 
@@ -531,8 +531,13 @@ export class SessionManager {
         if (branchPrefix) cfg = { ...cfg, branchPrefix };
         // A leading `-` would reach `git worktree add` as an option, so the base is a plain ref name.
         if (req.worktreeBase !== undefined && !/^[\w][\w./-]*$/.test(req.worktreeBase)) throw new Error('Invalid base branch');
-        const name = req.worktreeName?.trim() || req.title || req.initialPrompt || id;
-        const wt = await createWorktree(cfg.projectRoot, slugify(name), { branchPrefix, startPoint: req.worktreeBase });
+        // A name the dialog sent (typed, or suggested from the prompt) and a title the user wrote are
+        // used word for word; a first prompt names the branch by its intent, filler words dropped,
+        // rather than by its first characters.
+        const typed = req.worktreeName?.trim() || req.title?.trim();
+        const prompt = req.initialPrompt?.trim();
+        const name = typed ? branchSlug(typed) : prompt ? branchNameFromText(prompt) : slugify(id);
+        const wt = await createWorktree(cfg.projectRoot, name, { branchPrefix, startPoint: req.worktreeBase });
         cwd = wt.path;
         worktreeBranch = wt.branch;
       } else {
@@ -2386,6 +2391,18 @@ export class SessionManager {
       item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Session moved to ${cwd}${wasRunning ? ' — the harness restarts on the next message.' : '.'}` }
     });
     return meta;
+  }
+
+  /**
+   * A worktree branch name for what the first prompt asks for. The background model that titles
+   * sessions names it when one is usable (the utility model, else the model chosen for the
+   * session); otherwise, or when it fails, the prompt's own words with the filler dropped.
+   */
+  async suggestBranchName(prompt: string, model?: ModelRef): Promise<{ name: string; source: 'model' | 'prompt' }> {
+    const text = prompt.trim().slice(0, 4000);
+    if (!text) return { name: '', source: 'prompt' };
+    const named = await generateBranchName(text, this.settings().providers, this.deps.getSecret, this.settings().utilityModel ?? model, this.deps.log);
+    return named ? { name: named, source: 'model' } : { name: branchNameFromText(text), source: 'prompt' };
   }
 
   async fork(id: string, harness?: HarnessId): Promise<SessionMeta | null> {

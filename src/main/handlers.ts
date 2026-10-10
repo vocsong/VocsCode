@@ -1350,6 +1350,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   // The new-session dialog disables worktree isolation for a folder that has no repository, because
   // `git worktree add` there fails the whole session creation.
   handle('git:folderIsRepo', async ({ projectRoot }) => ({ isRepo: knownFolder(projectRoot) ? !!(await gitRoot(projectRoot)) : false }));
+  handle('git:suggestBranchName', ({ prompt, model }) => sessions.suggestBranchName(typeof prompt === 'string' ? prompt : '', model));
   // What a new worktree branch may start from, chosen in the same dialog.
   handle('git:folderBranches', async ({ projectRoot }) => {
     if (!knownFolder(projectRoot) || !(await gitRoot(projectRoot))) return { branches: [] };

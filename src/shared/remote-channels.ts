@@ -57,6 +57,8 @@ const WRITE: readonly IpcChannel[] = [
   'sessions:interrupt',
   'sessions:stop',
   'sessions:create',
+  // Spends background-model credit, so it is part of starting a session, not of viewing.
+  'git:suggestBranchName',
   'sessions:rename',
   'sessions:setModel',
   'sessions:setEffort',

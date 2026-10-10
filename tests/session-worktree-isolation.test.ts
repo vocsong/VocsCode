@@ -147,6 +147,23 @@ describe('worktree isolation at session creation', () => {
     expect((await fs.readFile(path.join(meta.cwd, 'develop.txt'), 'utf8')).replace(/\r\n/g, '\n')).toBe('from develop\n');
   });
 
+  it('names the branch for what the first prompt asks, not its first characters', async () => {
+    const projectRoot = await repoFolder();
+    const manager = await makeManager();
+
+    // No name from the dialog (a quick session, a spawned agent): the prompt's intent, filler dropped.
+    const meta = await manager.create({ config: { harness: 'native', projectRoot, permissionMode: 'ask', useWorktree: true }, initialPrompt: 'Can you please fix the login redirect when users sign in with Google' } as never);
+
+    expect(meta.worktreeBranch).toBe('vocscode/fix-login-redirect-users-sign');
+  });
+
+  it('suggests the prompt\'s own words as the branch name when no background model is usable', async () => {
+    const manager = await makeManager();
+
+    expect(await manager.suggestBranchName('I want to add a dark mode toggle to the settings page')).toEqual({ name: 'add-dark-mode-toggle-settings', source: 'prompt' });
+    expect(await manager.suggestBranchName('   ')).toEqual({ name: '', source: 'prompt' });
+  });
+
   it('refuses a base branch that would reach git as an option', async () => {
     const projectRoot = await repoFolder();
     const manager = await makeManager();
