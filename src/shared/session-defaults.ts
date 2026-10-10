@@ -1,5 +1,6 @@
 /** What the New Session dialog opens on for one project folder: the folder's own remembered
  *  choices where it has them, the app-wide defaults (Settings) everywhere else. */
+import { DEFAULT_BRANCH_PREFIX, branchPrefixOptions } from './branch-prefix';
 import type { AppSettings, EffortLevel, FolderSessionDefaults, HarnessId, ModelRef, PermissionMode } from './types';
 
 /** The dialog's initial state for a folder; `effort: ''` is the select's "Default" option. */
@@ -9,6 +10,8 @@ export interface NewSessionDefaults {
   effort: EffortLevel | '';
   permissionMode: PermissionMode;
   useWorktree: boolean;
+  /** Branch prefix for a new worktree, without the trailing slash. */
+  branchPrefix: string;
   acpAgent?: string;
 }
 
@@ -34,16 +37,20 @@ export function rememberedModel(settings: AppSettings, root: string | null | und
  *
  * Worktree isolation is the exception: it has no app-wide default left (see FolderSessionDefaults),
  * so a folder with no record — or one that never asked for a worktree — starts without isolation.
+ * Its branch prefix is the folder's while the picker still offers it: a custom prefix removed in
+ * Settings falls back to `vocscode` instead of coming back through the folder's record.
  */
 export function resolveNewSessionDefaults(settings: AppSettings, root: string | null | undefined): NewSessionDefaults {
   const folder = folderSessionDefaults(settings, root);
   const harness = folder?.harness ?? settings.defaultHarness;
+  const prefix = folder?.branchPrefix;
   return {
     harness,
     model: rememberedModel(settings, root, harness),
     effort: (folder?.effort ?? settings.defaultEffort) ?? '',
     permissionMode: folder?.permissionMode ?? settings.defaultPermissionMode,
     useWorktree: folder?.useWorktree ?? false,
+    branchPrefix: prefix && branchPrefixOptions(settings.customBranchPrefixes).includes(prefix) ? prefix : DEFAULT_BRANCH_PREFIX,
     acpAgent: folder?.acpAgent ?? settings.acpAgents[0]?.id
   };
 }

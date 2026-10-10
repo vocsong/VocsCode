@@ -2,7 +2,9 @@
  * The New Session dialog remembers what it was last used with *for that project folder*: enabling
  * worktree isolation in one repository must not switch it on for the next folder, and the other
  * dialog fields (harness, model, permission mode, effort) are the folder's too. A folder with no
- * record yet starts on the app-wide defaults, which is where worktree isolation stays off.
+ * record yet starts on the app-wide defaults, which is where worktree isolation stays off. The
+ * worktree's branch prefix is the folder's too, picked from the built-in prefixes and the user's
+ * saved ones; a prefix typed as Custom… is saved for every project when its session starts.
  */
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -80,6 +82,7 @@ beforeEach(() => {
     if (channel === 'harness:models') return harnessModels();
     if (channel === 'sessions:create') return createdSession;
     if (channel === 'git:folderIsRepo') return { isRepo: true };
+    if (channel === 'git:folderBranches') return { current: 'main', branches: ['develop', 'main'] };
     return {};
   });
   seedSettings(settingsWith({}));
@@ -107,6 +110,7 @@ describe('per-folder new-session defaults', () => {
       effort: 'low',
       permissionMode: 'full-auto',
       useWorktree: true,
+      branchPrefix: 'vocscode',
       acpAgent: undefined
     });
     // A folder with no record at all gets the app-wide defaults, and worktree isolation is off:
@@ -117,8 +121,20 @@ describe('per-folder new-session defaults', () => {
       effort: 'low',
       permissionMode: 'ask',
       useWorktree: false,
+      branchPrefix: 'vocscode',
       acpAgent: undefined
     });
+  });
+
+  it('resolves the folder\'s branch prefix only while it is still offered', () => {
+    const settings = settingsWith({
+      customBranchPrefixes: ['bug'],
+      folderSessionDefaults: { 'G:/feat': { branchPrefix: 'feat' }, 'G:/bug': { branchPrefix: 'bug' }, 'G:/removed': { branchPrefix: 'gone' } }
+    });
+    expect(resolveNewSessionDefaults(settings, 'G:/feat').branchPrefix).toBe('feat');
+    expect(resolveNewSessionDefaults(settings, 'G:/bug').branchPrefix).toBe('bug');
+    // A custom prefix removed from Settings does not come back through a folder's record.
+    expect(resolveNewSessionDefaults(settings, 'G:/removed').branchPrefix).toBe('vocscode');
   });
 
   it('opens the dialog on the folder\'s remembered choices, not on another folder\'s', async () => {
@@ -161,12 +177,171 @@ describe('per-folder new-session defaults', () => {
     const [, patch] = invoke.mock.calls.find(([channel]) => channel === 'settings:update') as [string, { folderSessionDefaults: Record<string, unknown> }];
     expect(patch.folderSessionDefaults).toEqual({
       'G:/other': { harness: 'native', useWorktree: false },
-      [ROOT]: { harness: 'pi', effort: undefined, permissionMode: 'ask', useWorktree: true, modelByHarness: { pi: { provider: 'z-ai', model: 'glm-5' } } }
+      [ROOT]: { harness: 'pi', effort: undefined, permissionMode: 'ask', useWorktree: true, branchPrefix: 'vocscode', modelByHarness: { pi: { provider: 'z-ai', model: 'glm-5' } } }
     });
   });
 
+  it('starts the worktree on the chosen built-in prefix and remembers it for the folder', async () => {
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: true } } }));
+    render(<NewSessionDialog />);
+
+    const select = (await screen.findByLabelText('Branch prefix')) as HTMLSelectElement;
+    expect(select.value).toBe('vocscode');
+    expect([...select.options].map((o) => o.textContent)).toEqual(['vocscode/', 'feat/', 'fix/', 'chore/', 'Custom…']);
+    fireEvent.change(select, { target: { value: 'feat' } });
+    expect(document.querySelector('.ns-worktree-hint')!.textContent).toContain('Creates feat/<session-name> in .vocs-code/worktrees/<session-name>');
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
+    const [, req] = invoke.mock.calls.find(([channel]) => channel === 'sessions:create') as [string, { config: { useWorktree: boolean; branchPrefix?: string } }];
+    expect(req.config).toMatchObject({ useWorktree: true, branchPrefix: 'feat' });
+    const [, patch] = invoke.mock.calls.find(([channel]) => channel === 'settings:update') as [string, Partial<AppSettings>];
+    expect(patch.folderSessionDefaults?.[ROOT]).toMatchObject({ useWorktree: true, branchPrefix: 'feat' });
+    // A built-in prefix is never copied into the saved list.
+    expect(patch).not.toHaveProperty('customBranchPrefixes');
+  });
+
+  it('remembers a picked prefix for the folder at once, before any session starts', async () => {
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: true }, 'G:/other': { harness: 'native' } } }));
+    render(<NewSessionDialog />);
+
+    fireEvent.change(await screen.findByLabelText('Branch prefix'), { target: { value: 'chore' } });
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('settings:update', { folderSessionDefaults: { [ROOT]: { useWorktree: true, branchPrefix: 'chore' }, 'G:/other': { harness: 'native' } } }));
+    expect(invoke).not.toHaveBeenCalledWith('sessions:create', expect.anything());
+  });
+
+  it('names the branch, picks its base and previews both before starting', async () => {
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: true } } }));
+    render(<NewSessionDialog />);
+
+    // Unedited, the name follows the first prompt the way the main process derives it.
+    fireEvent.change(screen.getByPlaceholderText('What should the agent do?'), { target: { value: 'Fix the login redirect' } });
+    const name = (await screen.findByLabelText('Branch name')) as HTMLInputElement;
+    expect(name.placeholder).toBe('fix-login-redirect');
+    const from = screen.getByLabelText('Base branch') as HTMLSelectElement;
+    await waitFor(() => expect(from.value).toBe('main'));
+    expect([...from.options].map((o) => o.value)).toEqual(['develop', 'main']);
+
+    fireEvent.change(name, { target: { value: 'Fix Login Redirect' } });
+    fireEvent.change(from, { target: { value: 'develop' } });
+    const hint = document.querySelector('.ns-worktree-hint')!.textContent;
+    expect(hint).toContain('Creates vocscode/fix-login-redirect in .vocs-code/worktrees/fix-login-redirect');
+    // The footer sums up what Start will create.
+    await waitFor(() => expect(document.querySelector('.ns-summary')!.textContent).toBe('Pi · GLM 5 · vocscode/fix-login-redirect'));
+
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({ worktreeName: 'Fix Login Redirect', worktreeBase: 'develop' })));
+  });
+
+  it('names the branch from the model\'s reading of the first prompt, and starts on that name', async () => {
+    const asked: unknown[] = [];
+    invoke.mockImplementation(async (channel: string, args: unknown) => {
+      if (channel === 'harness:models') return harnessModels();
+      if (channel === 'sessions:create') return createdSession;
+      if (channel === 'git:folderIsRepo') return { isRepo: true };
+      if (channel === 'git:folderBranches') return { current: 'main', branches: ['main'] };
+      if (channel === 'git:suggestBranchName') {
+        asked.push(args);
+        return { name: 'oauth-callback-redirect', source: 'model' };
+      }
+      return {};
+    });
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: true } } }));
+    render(<NewSessionDialog />);
+    const prompt = 'Signing in with Google sends people back to the home page';
+    fireEvent.change(screen.getByPlaceholderText('What should the agent do?'), { target: { value: prompt } });
+
+    // The prompt's own words stand in at once; the model's name replaces them when typing pauses.
+    const name = (await screen.findByLabelText('Branch name')) as HTMLInputElement;
+    expect(name.placeholder).toBe('signing-google-sends-people-back');
+    await waitFor(() => expect(name.placeholder).toBe('oauth-callback-redirect'), { timeout: 3000 });
+    expect(asked).toEqual([{ prompt, model: { provider: 'z-ai', model: 'glm-5' } }]);
+    expect(document.querySelector('.ns-worktree-hint')!.textContent).toContain('Creates vocscode/oauth-callback-redirect');
+
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({ worktreeName: 'oauth-callback-redirect' })));
+  });
+
+  it('does not ask the model for a name the user typed or a session that is not isolated', async () => {
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: false } } }));
+    render(<NewSessionDialog />);
+    fireEvent.change(screen.getByPlaceholderText('What should the agent do?'), { target: { value: 'Fix the flaky upload test on CI' } });
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(invoke).not.toHaveBeenCalledWith('git:suggestBranchName', expect.anything());
+
+    fireEvent.click(screen.getByLabelText(/Isolate in a git worktree/));
+    fireEvent.change(await screen.findByLabelText('Branch name'), { target: { value: 'my-own-name' } });
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(invoke).not.toHaveBeenCalledWith('git:suggestBranchName', expect.anything());
+  });
+
+  it('sends no name or base when both are left on their defaults', async () => {
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: true } } }));
+    render(<NewSessionDialog />);
+    await waitFor(() => expect((screen.getByLabelText('Base branch') as HTMLSelectElement).value).toBe('main'));
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
+    const [, req] = invoke.mock.calls.find(([channel]) => channel === 'sessions:create') as [string, Record<string, unknown>];
+    expect(req).not.toHaveProperty('worktreeName');
+    expect(req).not.toHaveProperty('worktreeBase');
+  });
+
+  it('saves a typed custom prefix so every later dialog offers it', async () => {
+    seedSettings(settingsWith({ customBranchPrefixes: ['ops'], folderSessionDefaults: { [ROOT]: { useWorktree: true } } }));
+    const view = render(<NewSessionDialog />);
+
+    fireEvent.change(await screen.findByLabelText('Branch prefix'), { target: { value: ':custom' } });
+    fireEvent.change(screen.getByLabelText('Custom branch prefix'), { target: { value: 'bug/' } });
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
+    const [, req] = invoke.mock.calls.find(([channel]) => channel === 'sessions:create') as [string, { config: { branchPrefix?: string } }];
+    expect(req.config.branchPrefix).toBe('bug');
+    const [, patch] = invoke.mock.calls.find(([channel]) => channel === 'settings:update') as [string, Partial<AppSettings>];
+    expect(patch.customBranchPrefixes).toEqual(['bug', 'ops']);
+    expect(patch.folderSessionDefaults?.[ROOT]).toMatchObject({ branchPrefix: 'bug' });
+
+    // The next dialog, on the saved settings, lists the new prefix and opens on it.
+    view.unmount();
+    seedSettings(settingsWith({ customBranchPrefixes: patch.customBranchPrefixes, folderSessionDefaults: patch.folderSessionDefaults }));
+    render(<NewSessionDialog />);
+    const select = (await screen.findByLabelText('Branch prefix')) as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual(['vocscode/', 'feat/', 'fix/', 'chore/', 'bug/', 'ops/', 'Custom…']);
+    expect(select.value).toBe('bug');
+  });
+
+  it('will not start on a custom prefix git cannot take', async () => {
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { useWorktree: true } } }));
+    render(<NewSessionDialog />);
+
+    fireEvent.change(await screen.findByLabelText('Branch prefix'), { target: { value: ':custom' } });
+    fireEvent.change(screen.getByLabelText('Custom branch prefix'), { target: { value: 'my feature' } });
+
+    expect(screen.getByText(/Not a valid branch prefix/)).toBeTruthy();
+    const start = screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement;
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('harness:models', expect.anything()));
+    expect(start.disabled).toBe(true);
+    fireEvent.click(start);
+    expect(invoke).not.toHaveBeenCalledWith('sessions:create', expect.anything());
+  });
+
+  it('offers no prefix picker while the session is not isolated', async () => {
+    render(<NewSessionDialog />);
+    const toggle = screen.getByLabelText(/Isolate in a git worktree/) as HTMLInputElement;
+    await waitFor(() => expect(toggle.disabled).toBe(false));
+    expect(screen.queryByLabelText('Branch prefix')).toBeNull();
+    fireEvent.click(toggle);
+    expect(screen.getByLabelText('Branch prefix')).toBeTruthy();
+  });
+
   it('starts a quick session on the folder\'s remembered choices', async () => {
-    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { harness: 'claude', permissionMode: 'plan', useWorktree: true, modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } } } }));
+    seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { harness: 'claude', permissionMode: 'plan', useWorktree: true, branchPrefix: 'chore', modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } } } }));
 
     await useStore.getState().createQuickSession(ROOT, undefined);
 
@@ -178,6 +353,7 @@ describe('per-folder new-session defaults', () => {
         effort: undefined,
         permissionMode: 'plan',
         useWorktree: true,
+        branchPrefix: 'chore',
         acpAgent: undefined
       },
       initialPrompt: undefined,
