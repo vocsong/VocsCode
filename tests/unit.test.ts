@@ -16,7 +16,7 @@ import { isDangerousCommand } from '../src/main/harness/types';
 import { normalizeSettings, defaultSettings } from '../src/main/settings';
 import type { SettingsStore } from '../src/main/settings';
 import { SessionManager } from '../src/main/session-manager';
-import { generateSessionTitle, sanitizeLlmTitle, titleFromPrompt } from '../src/main/session-title';
+import { generateBranchName, generateSessionTitle, sanitizeLlmTitle, titleFromPrompt } from '../src/main/session-title';
 import type { RuntimeResolver } from '../src/main/runtime';
 import { piHasCredentials } from '../src/main/runtime';
 import { estimateCostUsd, findContextWindow, findPricing } from '../src/main/models/static-models';
@@ -233,6 +233,42 @@ describe('LLM session titles', () => {
     }
   });
 
+  it('names a worktree branch for the intent of the prompt with the same background model', async () => {
+    const seen: { body?: { model?: string; messages?: { role: string; content: string }[] } } = {};
+    const server = await listenOnce((_req, res, body) => {
+      seen.body = JSON.parse(body ?? '{}');
+      res.setHeader('content-type', 'application/json');
+      // The model adds a type prefix and quotes anyway; the user picks the prefix, so it is dropped.
+      res.end(JSON.stringify({ choices: [{ message: { content: '"fix/oauth-callback-redirect"' }, finish_reason: 'stop' }] }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'openai-compatible' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [{ id: 'cheap-flash', name: 'Cheap Flash', provider: 'fake' }] };
+      const prompt = 'Can you please look into why signing in with Google sends people back to the home page';
+      const name = await generateBranchName(prompt, [provider] as never, getSecret, { provider: 'fake', model: 'cheap-flash' });
+      expect(name).toBe('oauth-callback-redirect');
+      expect(seen.body?.model).toBe('cheap-flash');
+      expect(seen.body?.messages?.[0]).toMatchObject({ role: 'system' });
+      expect(seen.body?.messages?.[0].content).toContain('git branches');
+      expect(seen.body?.messages?.[1]).toEqual({ role: 'user', content: prompt });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns no branch name when no model is usable or its reply was cut off', async () => {
+    expect(await generateBranchName('Fix the bug', [], getSecret)).toBeNull();
+    const server = await listenOnce((_req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: 'fix-the' }, finish_reason: 'length' }] }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'openai-compatible' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [] };
+      expect(await generateBranchName('Fix the bug', [provider] as never, getSecret, { provider: 'fake', model: 'cheap-flash' })).toBeNull();
+    } finally {
+      await server.close();
+    }
+  });
+
   it('returns null when the reply is leaked DeepSeek tool-call markup, keeping the placeholder', async () => {
     const seen: { model?: unknown } = {};
     const server = await listenOnce((_req, res, body) => {
@@ -410,8 +446,8 @@ describe('settings normalization', () => {
   it('keeps well-formed per-folder new-session defaults and drops malformed ones', () => {
     expect(defaultSettings().folderSessionDefaults).toEqual({});
     const stored = {
-      'G:/a': { harness: 'claude', permissionMode: 'plan', effort: 'high', useWorktree: true, acpAgent: 'dsh', modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } },
-      'G:/b': { harness: 'nope', permissionMode: 'yolo', effort: 'ultra', useWorktree: 'yes', acpAgent: '  ' },
+      'G:/a': { harness: 'claude', permissionMode: 'plan', effort: 'high', useWorktree: true, branchPrefix: 'feat/', acpAgent: 'dsh', modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } },
+      'G:/b': { harness: 'nope', permissionMode: 'yolo', effort: 'ultra', useWorktree: 'yes', branchPrefix: 'bad..prefix', acpAgent: '  ' },
       'G:/c': 'not an object'
     };
     const s = normalizeSettings({ folderSessionDefaults: stored as never });
@@ -421,10 +457,18 @@ describe('settings normalization', () => {
         permissionMode: 'plan',
         effort: 'high',
         useWorktree: true,
+        branchPrefix: 'feat',
         acpAgent: 'dsh',
         modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } }
       }
     });
+  });
+  it('keeps saved custom branch prefixes in their stored form and drops malformed, duplicate and built-in ones', () => {
+    expect(defaultSettings().customBranchPrefixes).toEqual([]);
+    const s = normalizeSettings({ customBranchPrefixes: ['bug/', ' team/feat ', 'bug', 'feat', 'vocscode/', 'a b', 'x..y', 'rel.lock', '/', 3] as never });
+    expect(s.customBranchPrefixes).toEqual(['bug', 'team/feat']);
+    expect(normalizeSettings({ customBranchPrefixes: Array.from({ length: 30 }, (_, i) => `p${i}`) }).customBranchPrefixes).toHaveLength(20);
+    expect(normalizeSettings({ customBranchPrefixes: 'bug' as never }).customBranchPrefixes).toEqual([]);
   });
   it('drops the retired app-wide worktree default so it cannot override a folder', () => {
     const s = normalizeSettings({ defaultUseWorktree: true } as never);

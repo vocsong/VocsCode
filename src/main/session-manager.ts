@@ -24,6 +24,7 @@ import type {
   TranscriptItem,
   UserInput
 } from '../shared/types';
+import { branchNameFromText, branchSlug, normalizeBranchPrefix } from '../shared/branch-prefix';
 import { autoCompactionThresholdLabel, autoCompactionTokenThreshold, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { nativeGoalCommand } from '../shared/goal-driver';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
@@ -46,7 +47,7 @@ import type { SessionStore } from './store';
 import type { AnalyticsStore } from './analytics';
 import { deferred, errorMessage, shortId, type Deferred } from './util/async';
 import { exists, readJson, writeJson } from './util/fs';
-import { generateSessionTitle, titleFromPrompt } from './session-title';
+import { generateBranchName, generateSessionTitle, titleFromPrompt } from './session-title';
 
 export { titleFromPrompt };
 
@@ -523,7 +524,20 @@ export class SessionManager {
       // than the session: the dialog disables the toggle, but a remembered default (quick session)
       // or a spawned agent's `use_worktree` can still ask for it on a plain folder.
       if (await gitRoot(cfg.projectRoot)) {
-        const wt = await createWorktree(cfg.projectRoot, slugify(req.title || req.initialPrompt || id));
+        // The request comes from the renderer or a spawned agent; a prefix git cannot take is refused
+        // here rather than surfacing as a `git worktree add` failure.
+        const branchPrefix = cfg.branchPrefix === undefined ? undefined : normalizeBranchPrefix(cfg.branchPrefix);
+        if (cfg.branchPrefix !== undefined && !branchPrefix) throw new Error(`Invalid branch prefix: ${cfg.branchPrefix}`);
+        if (branchPrefix) cfg = { ...cfg, branchPrefix };
+        // A leading `-` would reach `git worktree add` as an option, so the base is a plain ref name.
+        if (req.worktreeBase !== undefined && !/^[\w][\w./-]*$/.test(req.worktreeBase)) throw new Error('Invalid base branch');
+        // A name the dialog sent (typed, or suggested from the prompt) and a title the user wrote are
+        // used word for word; a first prompt names the branch by its intent, filler words dropped,
+        // rather than by its first characters.
+        const typed = req.worktreeName?.trim() || req.title?.trim();
+        const prompt = req.initialPrompt?.trim();
+        const name = typed ? branchSlug(typed) : prompt ? branchNameFromText(prompt) : slugify(id);
+        const wt = await createWorktree(cfg.projectRoot, name, { branchPrefix, startPoint: req.worktreeBase });
         cwd = wt.path;
         worktreeBranch = wt.branch;
       } else {
@@ -2379,6 +2393,18 @@ export class SessionManager {
     return meta;
   }
 
+  /**
+   * A worktree branch name for what the first prompt asks for. The background model that titles
+   * sessions names it when one is usable (the utility model, else the model chosen for the
+   * session); otherwise, or when it fails, the prompt's own words with the filler dropped.
+   */
+  async suggestBranchName(prompt: string, model?: ModelRef): Promise<{ name: string; source: 'model' | 'prompt' }> {
+    const text = prompt.trim().slice(0, 4000);
+    if (!text) return { name: '', source: 'prompt' };
+    const named = await generateBranchName(text, this.settings().providers, this.deps.getSecret, this.settings().utilityModel ?? model, this.deps.log);
+    return named ? { name: named, source: 'model' } : { name: branchNameFromText(text), source: 'prompt' };
+  }
+
   async fork(id: string, harness?: HarnessId): Promise<SessionMeta | null> {
     this.assertUnmanaged(id);
     const src = this.get(id);
@@ -2486,7 +2512,7 @@ export class SessionManager {
   private async forkWorktree(src: SessionMeta, title: string): Promise<{ path: string; branch: string } | null> {
     if (!src.worktreeBranch) return null;
     try {
-      return await createForkWorktree(src.config.projectRoot, slugify(title), { cwd: src.cwd, branch: src.worktreeBranch });
+      return await createForkWorktree(src.config.projectRoot, slugify(title), { cwd: src.cwd, branch: src.worktreeBranch, branchPrefix: normalizeBranchPrefix(src.config.branchPrefix) });
     } catch (e) {
       this.deps.log('warn', `fork: could not create a worktree from ${src.cwd}: ${errorMessage(e)} — the fork shares the source directory`);
       return null;

@@ -414,7 +414,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       if (typeof projectRoot !== 'string') return undefined;
       return async () => {
         await assertOrdinaryWorkspace(projectRoot);
-        if (req.checkoutBranch) await assertOrdinaryBranch({ cwd: projectRoot, config } as unknown as SessionMeta, [req.checkoutBranch]);
+        // Starting a new worktree branch from a Mission branch is held to the same boundary as checking it out.
+        if (req.checkoutBranch || req.worktreeBase) await assertOrdinaryBranch({ cwd: projectRoot, config } as unknown as SessionMeta, [req.checkoutBranch, req.worktreeBase]);
       };
     }
     if (channel === 'folders:remove') {
@@ -1349,6 +1350,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   // The new-session dialog disables worktree isolation for a folder that has no repository, because
   // `git worktree add` there fails the whole session creation.
   handle('git:folderIsRepo', async ({ projectRoot }) => ({ isRepo: knownFolder(projectRoot) ? !!(await gitRoot(projectRoot)) : false }));
+  handle('git:suggestBranchName', ({ prompt, model }) => sessions.suggestBranchName(typeof prompt === 'string' ? prompt : '', model));
+  // What a new worktree branch may start from, chosen in the same dialog.
+  handle('git:folderBranches', async ({ projectRoot }) => {
+    if (!knownFolder(projectRoot) || !(await gitRoot(projectRoot))) return { branches: [] };
+    const { current, branches } = await gitBranches(projectRoot);
+    return { ...(current ? { current } : {}), branches: branches.map((b) => b.name) };
+  });
   handle('git:summary', ({ sessionId }) => gitSummary(cwdOf(sessionId)));
   handle('git:diff', ({ sessionId, path: p, staged, missionWorkspaceId }) => missionDiff(sessionId, missionWorkspaceId, p, staged));
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));

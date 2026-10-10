@@ -224,7 +224,7 @@ describe('NewSessionDialog', () => {
     render(<NewSessionDialog />);
     const toggle = screen.getByLabelText(/Isolate in a git worktree/) as HTMLInputElement;
     await waitFor(() => expect(toggle.disabled).toBe(false));
-    expect(screen.getByText('(new branch under .vocs-code/worktrees)')).toBeTruthy();
+    expect(screen.getByText('Work on a new branch in .vocs-code/worktrees. Your current checkout stays untouched.')).toBeTruthy();
 
     fireEvent.click(toggle);
     fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
@@ -249,7 +249,7 @@ describe('NewSessionDialog', () => {
     await waitFor(() => expect(toggle.disabled).toBe(true));
     // The remembered default must not survive as a checked-but-unusable toggle.
     expect(toggle.checked).toBe(false);
-    expect(screen.getByText('(unavailable — this folder is not a git repository)')).toBeTruthy();
+    expect(screen.getByText('Unavailable — this folder is not a git repository.')).toBeTruthy();
 
     fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));

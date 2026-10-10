@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, CuaSettings, FolderSessionDefaults, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, PermissionMode, ProviderConfig } from '../shared/types';
 import { MCP_BUILTIN_IDS, isCuaPermissionMode } from '../shared/types';
 import type { KnowledgeSettings } from '../shared/knowledge';
+import { normalizeBranchPrefix, normalizeCustomBranchPrefixes } from '../shared/branch-prefix';
 import { isAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESSES, PERMISSION_MODE_LABELS, isEffortLevel } from '../shared/harness-meta';
 import { pruneModelOverrides } from '../shared/model-overrides';
@@ -233,6 +234,7 @@ export function defaultSettings(): AppSettings {
     folders: [],
     folderStyles: {},
     customLabels: [],
+    customBranchPrefixes: [],
     folderOrder: [],
     collapsedFolders: [],
     customShortcuts: {},
@@ -278,6 +280,8 @@ export function normalizeFolderSessionDefaults(stored: unknown): Record<string, 
     if (isEffortLevel(s.effort)) d.effort = s.effort;
     if (typeof s.permissionMode === 'string' && s.permissionMode in PERMISSION_MODE_LABELS) d.permissionMode = s.permissionMode as PermissionMode;
     if (typeof s.useWorktree === 'boolean') d.useWorktree = s.useWorktree;
+    const branchPrefix = normalizeBranchPrefix(s.branchPrefix);
+    if (branchPrefix) d.branchPrefix = branchPrefix;
     if (typeof s.acpAgent === 'string' && s.acpAgent.trim()) d.acpAgent = s.acpAgent.trim().slice(0, 64);
     if (Object.keys(d).length) out[root] = d;
   }
@@ -468,6 +472,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     gitSetupSkipped: Array.isArray(stored.gitSetupSkipped) ? stored.gitSetupSkipped.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderStyles: normalizeFolderStyles(stored.folderStyles),
     customLabels: normalizeCustomLabels(stored.customLabels),
+    customBranchPrefixes: normalizeCustomBranchPrefixes(stored.customBranchPrefixes),
     customShortcuts: normalizeCustomShortcuts(stored.customShortcuts),
     favoriteModels: Array.isArray(stored.favoriteModels)
       ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')

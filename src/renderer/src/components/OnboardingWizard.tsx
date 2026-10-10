@@ -220,7 +220,7 @@ function UtilityModelStep({ settings, providers, update }: { settings: AppSettin
   return (
     <div>
       <p className="muted">
-        Optional but recommended: pick a cheap, fast model (e.g. a DeepSeek or GLM flash tier) for background tasks like naming sessions. Without one, the session's own
+        Optional but recommended: pick a cheap, fast model (e.g. a DeepSeek or GLM flash tier) for background tasks like naming sessions and worktree branches. Without one, the session's own
         model does these jobs.
       </p>
       <div className="onboarding-model-picker">
