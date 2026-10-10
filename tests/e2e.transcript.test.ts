@@ -27,7 +27,7 @@ afterAll(async () => {
 const SID = 's_transcript_e2e';
 const T = Date.now() - 600_000;
 
-/** One finished turn: commentary, a lone command, a two-command run, a read, and the answer. */
+/** A finished turn with work, followed by a final-only turn with no work to collapse. */
 function transcript(): TranscriptItem[] {
   return [
     { id: 'u1', kind: 'user', ts: T, text: 'Resolve the npm run update EBUSY failure.' },
@@ -80,12 +80,35 @@ function transcript(): TranscriptItem[] {
       text: '## Done\n\n- **Task** — resolved the `npm run update` Electron EBUSY failure.\n- **Files** — no tracked source files changed.',
       phase: 'final'
     },
-    { id: 'turn1', kind: 'turn', ts: T + 8, status: 'completed', durationMs: 197_000, costUsd: 0.04, usage: { inputTokens: 4200, outputTokens: 900 } }
+    { id: 'turn1', kind: 'turn', ts: T + 8, status: 'completed', durationMs: 197_000, costUsd: 0.04, usage: { inputTokens: 4200, outputTokens: 900 } },
+    { id: 'u2', kind: 'user', ts: T + 60_000, text: 'Can I retry the update now?' },
+    { id: 'f2', kind: 'assistant', ts: T + 60_001, text: 'Yes, the orphaned processes are gone. Retry npm run update.', phase: 'final' },
+    { id: 'turn2', kind: 'turn', ts: T + 60_002, status: 'completed' }
   ];
 }
 
+async function completionTimes(win: Page) {
+  const footers = win.locator('.turn-footer.turn-completed');
+  await footers.nth(1).waitFor({ state: 'visible', timeout: 30_000 });
+  expect(await footers.count()).toBe(2);
+  for (let i = 0; i < 2; i++) {
+    expect(await footers.nth(i).innerText()).toContain('Turn complete');
+    await footers.nth(i).locator('time').waitFor({ state: 'visible', timeout: 10_000 });
+  }
+  const actual = await footers.locator('time').evaluateAll((elements) => elements.map((element) => ({
+    dateTime: element.getAttribute('datetime'),
+    text: (element as HTMLElement).innerText
+  })));
+  const expected = await win.evaluate((timestamps) => timestamps.map((ts) => ({
+    dateTime: new Date(ts).toISOString(),
+    text: new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+  })), [T + 8, T + 60_002]);
+  expect(actual).toEqual(expected);
+  return actual;
+}
+
 describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
-  it('keeps the answer visible, opens work on demand, and expands a command into its shell', async () => {
+  it('keeps answers visible, expands work and commands, and preserves completion times after restart', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-transcript-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -102,19 +125,20 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
       cwd: project,
       status: 'idle',
       harnessRef: {},
-      usage: { inputTokens: 4200, outputTokens: 900, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0.04, turns: 1 }
+      usage: { inputTokens: 4200, outputTokens: 900, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0.04, turns: 2 }
     };
     await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
     await fs.mkdir(path.join(userData, 'sessions', SID), { recursive: true });
     await fs.writeFile(path.join(userData, 'sessions', SID, 'transcript.jsonl'), transcript().map((i) => JSON.stringify(i)).join('\n') + '\n');
 
     const packaged = process.env.HARNESS_E2E_EXE;
-    app = await electron.launch({
+    const launchOptions = {
       executablePath: packaged || (require('electron') as string),
       args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
       env: isolatedEnv(userData),
       timeout: 60_000
-    });
+    };
+    app = await electron.launch(launchOptions);
     const win: Page = await app.firstWindow();
     await win.waitForSelector('.brand', { timeout: 60_000 });
     await expectQuietWindow(app);
@@ -123,7 +147,10 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     // Collapsed: the answer and the worked header are on screen, the work itself is not.
     await win.waitForSelector('.work-head', { timeout: 30_000 });
     expect(await win.locator('.work-head').innerText()).toContain('Worked for 3m 17s');
-    expect(await win.locator('.msg-assistant .md').innerText()).toContain('Done');
+    expect(await win.locator('.msg-assistant .md').first().innerText()).toContain('Done');
+    expect(await win.locator('.msg-assistant .md').nth(1).innerText()).toContain('Retry npm run update');
+    expect(await win.locator('.work-head').count()).toBe(1);
+    const originalTimes = await completionTimes(win);
     expect(await win.locator('.tool-card').count()).toBe(0);
     expect(await win.locator('.thinking-toggle').count()).toBe(0);
     await win.screenshot({ path: path.join(shots, 'transcript-01-collapsed.png') });
@@ -153,5 +180,14 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     // Thinking opens on its own click, not with the work group.
     await win.locator('.thinking-toggle').click();
     expect(await win.locator('.thinking-body').innerText()).toContain('Enumerate electron processes');
-  }, 120_000);
+
+    // Quit the Electron process completely, then reopen the same on-disk session without reseeding.
+    await app.close();
+    app = null;
+    app = await electron.launch(launchOptions);
+    const reopened: Page = await app.firstWindow();
+    await reopened.waitForSelector('.brand', { timeout: 60_000 });
+    await expectQuietWindow(app);
+    expect(await completionTimes(reopened)).toEqual(originalTimes);
+  }, 180_000);
 });
