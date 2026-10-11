@@ -5,8 +5,8 @@ design and decisions of record** — this file is the working backlog: what is l
 what to do next, in what order, and how each piece is verified. Update it as workstreams land;
 do not restate the design here.
 
-Last reviewed 2026-09-26, after the account-isolation release (v0.7.0) was deployed to
-`code.vocs.io`.
+Last reviewed 2026-10-11, after the read/write terminal (P3.5) landed on `develop`; production was
+last deployed with the account-isolation release (v0.7.0) on 2026-09-26.
 
 ## 1. Status snapshot
 
@@ -48,7 +48,7 @@ the deployed smoke.
 | §2.6 QR pairing | In-house QR encoder (no runtime dependency) in Settings; link follows the configured relay | — |
 | §2.6 Multi-host UI | Several computers per browser, switcher with live presence, Add a computer, unpair revokes at the relay | — |
 | §2.6 Mirror polish | Tail-first transcripts with Load earlier; relay copies of deleted or aged-out sessions removed; per-host catalogue (no blob loads); blobs sized to the 2 MB Durable Object value limit | — |
-| §2.6 P3.5 terminal | Read-only first: plain-text terminal view polled while open; nothing typed, resized or attached | read/write: input, streaming output, coalescing, ack windows, snapshot-on-reconnect mid-PTY (next phase) |
+| §2.6 P3.5 terminal | Read-only first; then read/write on `develop`: per-browser streams, input, open a terminal, coalescing, an ack window that resyncs instead of pausing the shell, snapshot on reconnect; the desktop keeps resize | ships with the next release: the web shell is relay assets, so the release's relay deploy carries it; a desktop older than it answers the live view with "update this computer" |
 | §2.7 Multi-account isolation | **Live 2026-09-26**: one Hub DO per GitHub subject, owner-session assertions, per-tenant enrollment binding, same-account claims/polls, and browser vault partitioning; the incumbent stays `vocs-v1`, so existing devices keep working | Two-account live check, then onboard allowlisted GitHub users and flip `remote.status` to `live` in vocs.io `code/src/data/code.ts` (**user**) |
 
 **Status: per-account isolation live (v0.7.0, 2026-09-26).** The relay and the landing are both
@@ -220,9 +220,18 @@ unvalidated names and keys.
   which are online from the relay's presence, adds computers and unpairs one at a time.
 - **Mirror polish — done.** Tail-first transcripts, cleanup of deleted sessions, no O(sessions)
   blob loads per write.
-- **P3.5 terminal over WAN — read-only done.** Next: read/write — input, streaming output with
-  coalescing, larger ack windows, snapshot-on-reconnect mid-PTY, and whether a remote viewer may
-  resize.
+- **P3.5 terminal over WAN — done.** Read-only first, then read/write: a browser watches a
+  terminal (snapshot, then output coalesced for 25 ms, sealed to it alone), types into it and may
+  open a new one; view-only mode keeps watching and refuses typing. A viewer past its 256 K
+  character window is resynced with a snapshot instead of pausing the shell, and every reconnect
+  re-watches from a snapshot. **Decided: a remote viewer never resizes** — the desktop owns its
+  terminals' geometry, the browser renders at it with a Fit-width zoom. Design:
+  [REMOTE-ACCESS.md §5](./REMOTE-ACCESS.md#5-protocol--transport). Verified by
+  `tests/remote-terminal-streams.test.ts` (real TerminalManager), `tests/remote-e2e.test.ts` (e2e over
+  the fake relay), `tests/web-terminal.test.ts` and `e2e.remote-web` (a real browser under the CSP).
+- **Fixed with it:** after the first pairing enrolled the desktop, the old socket's close scheduled a
+  second reconnect three seconds later that replaced the healthy socket and stranded any browser
+  that had just connected; the late reconnect now stands down when a socket is open or opening.
 
 ### 2.7 Productization / cloud track (separate program)
 
@@ -251,7 +260,7 @@ unvalidated names and keys.
    its own before adding further logins.
 6. **`workers_dev: false`** is included in the relay config so `/app` and account routes cannot
    bypass the landing gate; verify the deployed hostname is unavailable after the release.
-7. **P3.5 read/write terminal.**
+7. ~~**P3.5 read/write terminal.**~~ — on `develop`; ships with the next release.
 8. **Productization:** signup, billing, email auth and account recovery remain deferred.
 
 ## 4. Decisions

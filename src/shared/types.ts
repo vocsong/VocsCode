@@ -1575,7 +1575,11 @@ export type RemoteAuditAction =
   | 'client-disconnect'
   | 'handshake-failed'
   | 'channel-refused'
-  | 'view-only-blocked';
+  | 'view-only-blocked'
+  /** A browser's first keystroke into a terminal during one connection (P3.5), not every one. */
+  | 'terminal-input'
+  /** A browser opened a new terminal for a session. */
+  | 'terminal-create';
 
 /** One audit-trail line; `device` is the id the event concerns, when there is one. */
 export interface RemoteAuditEntry {

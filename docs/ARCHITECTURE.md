@@ -45,7 +45,8 @@ src/web           the browser shell at code.vocs.io/app (plain Vite build into r
   transport/      RelayTransport (window.harness over the e2e session, local `can` gate) + mirror backend + IndexedDB vault
   shell/          WebApp root, connection state, account probe, viewport keyboard inset
   screens/        pairing, Connect with GitHub, sessions home, one session
-  sheets/         bottom sheets: computers, devices, new session, read-only terminal
+  sheets/         bottom sheets: computers, devices, new session, terminal
+  terminal/       the live terminal: stream controller, headless-xterm screen model, key mapping, view
   components/     web composer, session header, status chip, connection banner
 resources/pi      extensions loaded into pi at spawn time: approvals, tools, subagents, the MCP bridge and,
                   for Mission-managed sessions only, vocs-code-mission.ts

@@ -152,9 +152,9 @@ interface Transport {
 - `RemoteTransport` = WebSocket, JSON frames `{ id, channel, payload }` with response
   correlation; push channels arrive as server-initiated frames — only the remote push surface
   (`push:sessionEvent`, `push:sessionsChanged`, `push:settingsChanged`, `push:remotePolicy`,
-  `push:desktopFocus`); PTY
-  output, the assistant panel and the desktop's own remote state (which carries the live pairing
-  code) never leave the machine.
+  `push:desktopFocus`); raw PTY output, the assistant panel and the desktop's own remote state
+  (which carries the live pairing code) never leave the machine. A terminal a browser watches
+  reaches that browser alone, as `push:remoteTerminal` frames sealed to it (P3.5, below).
 - **Addressing:** relay frames carry a target host id — an account may pair several
   desktops, and the web client names the host it wants per connection/session. Hosts
   connect outbound and stay addressable by their device id; one host offline does not
@@ -171,10 +171,44 @@ interface Transport {
 **Filtered surface.** Remote gets: `sessions:*`, `approvals:respond`, read-mostly
 `git:*`, `fs:list/search/read/readImage`, `analytics:*`, `skills:list/read`,
 `harness:availability/models`, `desktop:focus` (which session the desktop window is on, read-only),
-and the read-only terminal view `terminal:list/screen` (P3.5,
-step one: plain text, never attached, resized or typed into). Excluded or remapped: `window:*`,
-`app:pickFolder`, `app:openPath`, `app:openInEditor`, `secrets:*`, `dialog` flows, terminal
-input. The web client never touches or needs API keys.
+and the terminal (P3.5): `terminal:list/screen` and `terminal:watch/unwatch/watchAck` on the read
+half, `terminal:input` and `terminal:create` on the write half, so view-only mode lets a browser
+watch but not type. Excluded or remapped: `window:*`, `app:pickFolder`, `app:openPath`,
+`app:openInEditor`, `secrets:*`, `dialog` flows, and terminal resize, attach, kill, close, restart,
+clear and rename — the desktop owns its terminals' geometry and lifetime. The web client never
+touches or needs API keys.
+
+**Terminal over the relay (P3.5).** The remote host serves `terminal:watch/unwatch/watchAck` itself,
+not the handler registry, because the answer depends on which browser asked
+(`src/main/remote/terminal-streams.ts`, constants in `src/shared/remote-terminal.ts`):
+
+- **Watching is not attaching.** A watch registers a viewer on the desktop's headless screen mirror
+  and answers a serialized snapshot at the desktop's geometry, with the seq of the last chunk in it.
+  The viewer never touches the desktop renderer's attach or flow control, and never resizes: the
+  browser renders at the desktop's columns and rows (with a "Fit width" zoom).
+- **Exactly once across the snapshot.** The viewer is registered before the snapshot is taken, and
+  the snapshot is serialized inside the callback of an empty write, so it holds chunks `1..seq`
+  exactly; output fed in between follows as `data` frames above that floor.
+- **Coalescing and a window, never back-pressure.** Output is coalesced for 25 ms into frames of at
+  most 32 K characters. A viewer may hold 256 K characters unacknowledged (it acks every 32 K or
+  250 ms); past that the desktop stops streaming to it — it never pauses the shell, so a slow phone
+  cannot stall the terminal the desktop is using — and sends one fresh `reset` snapshot once the
+  viewer has acknowledged everything. A desktop clear also resyncs; a closed tab sends `closed`.
+- **Reconnect mid-PTY = snapshot.** Streams die with the browser's e2e session (left, re-handshook,
+  revoked, relay socket closed, remote access disabled). The browser re-watches when it is back
+  online and gets the whole screen again instead of a guessed-at backlog.
+- **Bounded snapshots.** History steps down (1000, 300, 100, 0 lines) until the JSON-encoded
+  snapshot fits 600 KiB, inside the relay's 1 MiB frame once sealed.
+- **Input** is batched by the browser (16 ms) and sent in order through the registry's
+  `terminal:input`, so the Mission terminal guards apply exactly as to desktop keystrokes. The host
+  refuses anything over 64 KiB and audits a browser's first keystroke into a terminal per connection
+  (`terminal-input`) and every terminal it opens (`terminal-create`).
+- **Rendering under the CSP.** The app's `style-src 'self'` rules out xterm's DOM renderer (it
+  injects `<style>` elements). The browser parses output with `@xterm/headless` and draws rows of
+  spans whose colors are CSSOM style properties, which the policy allows. Keys map to xterm
+  sequences (application cursor mode, bracketed paste); phones get a line field and a key strip
+  (Esc, Tab, ^C, ^D, arrows). A restored tab whose shell has not started yet buffers input until it
+  is opened on the desktop.
 
 **Sizing and projection.** Every pushed event carries a monotonic `seq`; a transcript window
 reports the floor it reflects, so a client takes a snapshot and then applies only later events.
@@ -297,7 +331,8 @@ are not live until a release ships them.
 smoke passed against `code.vocs.io`): the proof-of-possession token model; non-extractable browser
 keys; per-account device caps; the kill switch; mirror re-keying on revocation; QR pairing; the
 multi-computer web client; tail-first transcripts; a read-only terminal view (P3.5, step one); edge
-rate limits; and the landing's GitHub login gate.
+rate limits; and the landing's GitHub login gate. The read/write terminal (P3.5, step two) followed
+on `develop` and ships with the next release.
 
 **Live since 2026-09-26** (v0.7.0; the relay deployed by the approved `deploy-relay` run
 36263306950, the landing promoted to production right after): the React web shell that replaced the
@@ -487,8 +522,8 @@ proves the device.
 - **Confirm dialog:** account, device name, browser/OS, Allow / Deny — mirrors the
   existing approval-prompt styling (§5 of the approval flow, same pattern).
 - **Web:** the landing's GitHub login precedes `/app`; today code entry, waiting-for-approval, a computer switcher
-  with online state, Add a computer, device management and a read-only terminal view are in the
-  web client.
+  with online state, Add a computer, device management and a live terminal (watch, type, open a
+  new one) are in the web client.
 
 ### 6.8 Approvals ride signed, encrypted frames
 
@@ -541,9 +576,9 @@ security bar must go up, not sideways:
 3. **Desktop offline.** Interactive features die gracefully; to make the web useful
    while offline, mirror encrypted transcripts to relay storage (opt-in) for read-only
    browsing. This is the main "make it feel always-on" investment.
-4. **Terminal over WAN** (deferred to P3.5 — chat-first launch, §11). String frames +
-   seq + ack flow control exist, but WAN latency and reconnect-mid-PTY need tuning
-   (coalescing, larger ack windows, snapshot-on-reconnect).
+4. **Terminal over WAN** (P3.5, done): per-browser streams with 25 ms coalescing, a 256 K
+   character ack window that resyncs with a snapshot instead of pausing the shell, and a fresh
+   snapshot on every reconnect (§5, Terminal over the relay).
 5. **Transcript replay size.** The web client loads transcripts tail-first
    (`sessions:transcriptPage`, newest 200 items, Load earlier on demand), serves each page
    trimmed to a byte budget that fits the relay frame, and follows a streaming turn by applying
@@ -584,11 +619,12 @@ Assumes one engineer + agent assist; weeks are rough, sequencing matters more th
 **Relay MVP → beta: roughly 8–11 weeks (chat-first; terminal lands in P3.5 after).**
 Cloud workspaces: separate track afterward.
 
-**Status:** P0–P4 and P3.5 read-only are implemented, and the P2 account routing boundary is live
+**Status:** P0–P4 and P3.5 (read-only, then read/write) are implemented, and the P2 account routing boundary is live
 (v0.7.0, 2026-09-26): allowlisted GitHub subjects get separate Hub DOs, enrollment grants resolve to
 the signed-in account, browser claims/polls require that account, and the web vault is partitioned.
 The remaining P2 work is operational: run the live smoke and the two-account check before other
-logins are added. Read/write terminal remains the next remote-access feature.
+logins are added. With the read/write terminal in, the remaining remote-access work is
+operational (the two-account check, then onboarding) and the productization track.
 
 ## 11. Decisions and open questions
 
@@ -659,7 +695,7 @@ Pairing-level questions from §6.9:
   at productization.
 
 **Open today:** the coordinated production rollout of this per-account relay release and landing
-assertion secret, the multi-account deployed smoke, and interactive terminal read/write. The OAuth
+assertion secret and the multi-account deployed smoke. The OAuth
 gate itself is live. See [the roadmap](./REMOTE-ACCESS-ROADMAP.md) for release order; the original
 P0 sketch (§12) is historical.
 

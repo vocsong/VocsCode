@@ -65,6 +65,7 @@ import type { AgentFileFields, ParsedAgentFile } from './agent-files';
 import type { ProjectAgentInfo } from './agent-info';
 import type { ClaudeAgentFileInfo } from './claude-agent-files';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
+import type { RemoteTerminalFrame, RemoteTerminalSnapshot } from './remote-terminal';
 import type { CreateMissionRequest, MissionControlRequest, MissionRecord } from './mission';
 import type { MissionCommandRequest } from './mission-command';
 import type { WorkspaceImage } from './image-files';
@@ -424,6 +425,13 @@ export interface IpcContract {
   'terminal:close': [{ terminalId: string }, void];
   'terminal:clear': [{ terminalId: string }, void];
   'terminal:rename': [{ terminalId: string; title: string }, TerminalInfo];
+  /** Remote P3.5, served by the remote host (it needs the caller): stream one terminal to this
+   *  browser. Answers the current screen; output follows as `push:remoteTerminal` frames. */
+  'terminal:watch': [{ terminalId: string }, RemoteTerminalSnapshot];
+  'terminal:unwatch': [{ terminalId: string }, void];
+  /** The browser consumed `chars` of streamed output and, with `snapshot`, applied the snapshot of
+   *  that seq; past its window it gets a fresh snapshot once it has acknowledged both. */
+  'terminal:watchAck': [{ terminalId: string; chars: number; snapshot?: number }, void];
 }
 
 export type IpcChannel = keyof IpcContract;
@@ -462,6 +470,8 @@ export type PushPayloads = {
   'push:desktopFocus': DesktopFocus;
   /** Remote-only: the view-only policy, pushed to paired browsers over the e2e session. */
   'push:remotePolicy': { viewOnly: boolean };
+  /** Remote-only: output of a terminal this browser watches, sealed to it alone (never broadcast). */
+  'push:remoteTerminal': RemoteTerminalFrame;
   'push:updateState': UpdateState;
 };
 

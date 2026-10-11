@@ -388,7 +388,9 @@ async function main(): Promise<void> {
     // Read live: toggling view-only must apply to an already-connected browser without a reconnect.
     viewOnly: () => settings.get().remote?.viewOnly === true,
     // A re-keyed mirror must be re-sealed: the relay copy under the old key was just dropped.
-    onMirrorRotated: () => remoteMirror?.sync()
+    onMirrorRotated: () => remoteMirror?.sync(),
+    // P3.5: a paired browser streams a terminal it watches; it never attaches the desktop's view.
+    terminals: () => terminals
   });
 
   // Offline mirror (P4): the desktop seals transcript snapshots for paired browsers to read while
