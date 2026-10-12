@@ -331,8 +331,8 @@ are not live until a release ships them.
 smoke passed against `code.vocs.io`): the proof-of-possession token model; non-extractable browser
 keys; per-account device caps; the kill switch; mirror re-keying on revocation; QR pairing; the
 multi-computer web client; tail-first transcripts; a read-only terminal view (P3.5, step one); edge
-rate limits; and the landing's GitHub login gate. The read/write terminal (P3.5, step two) followed
-on `develop` and ships with the next release.
+rate limits; and the landing's GitHub login gate. The read/write terminal (P3.5, step two) went
+live with v0.8.0 on 2026-10-12.
 
 **Live since 2026-09-26** (v0.7.0; the relay deployed by the approved `deploy-relay` run
 36263306950, the landing promoted to production right after): the React web shell that replaced the
