@@ -220,8 +220,10 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await pickHarness(win, /^Claude Agent SDK$/);
     const picker = win.locator('.ns-col-model .model-picker');
     await picker.locator('.mp-row').first().waitFor({ timeout: 60_000 });
-    await expect.poll(async () => picker.locator('.mp-name[title="anthropic/claude-opus-5-5[1m]"]').count(), { timeout: 20_000 }).toBe(1);
-    await expect.poll(async () => picker.locator('.mp-row:has(.mp-name[title="anthropic/claude-opus-5-5[1m]"])').innerText(), { timeout: 20_000 }).toContain('Opus 5.5');
+    // The bundled runtime's own catalog (Agent SDK 0.3.285 reports Opus 5.5 as `claude-opus-5-5`;
+    // 0.3.280 reported `claude-opus-5-5[1m]`).
+    await expect.poll(async () => picker.locator('.mp-name[title="anthropic/claude-opus-5-5"]').count(), { timeout: 20_000 }).toBe(1);
+    await expect.poll(async () => picker.locator('.mp-row:has(.mp-name[title="anthropic/claude-opus-5-5"])').innerText(), { timeout: 20_000 }).toContain('Opus 5.5');
     await expect.poll(async () => picker.locator('.mp-name[title="zai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
     await expect.poll(async () => picker.locator('.mp-name[title="openrouter/z-ai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
 
@@ -238,10 +240,14 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await expect.poll(activeIds, { timeout: 10_000 }).toEqual([expect.stringMatching(/^anthropic\/claude-/)]);
     expect(await picker.locator('.mp-row.active').innerText()).toContain('(recommended)');
 
-    // A newly advertised Claude model is selectable under its explicit id, whether or not it is
-    // today's recommendation.
-    await pickModel(win, 'anthropic/claude-opus-5-5[1m]');
-    await expect.poll(async () => picker.locator('.mp-row.active .mp-name[title="anthropic/claude-opus-5-5[1m]"]').count(), { timeout: 10_000 }).toBe(1);
+    // Any other advertised Claude model is selectable under its explicit id, not only today's
+    // recommendation. Read from the catalog, so the step keeps testing a switch whatever ids the
+    // next runtime reports.
+    const [recommended] = await activeIds();
+    const other = catalogIds.find((id) => id?.startsWith('anthropic/claude-') && id !== recommended);
+    expect(other, 'the runtime lists a second Claude model').toBeTruthy();
+    await pickModel(win, other!);
+    await expect.poll(activeIds, { timeout: 10_000 }).toEqual([other]);
 
     // The dialog starts on a listed model only: the header accepts a typed custom id after start,
     // but here the search must not offer one, so it can never leak into a new session's config.
