@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.8.0](https://github.com/vocsong/VocsCode/compare/v0.7.0...v0.8.0) (2026-10-12)
+
+
+### Features
+
+* attach non-image files to session messages ([#436](https://github.com/vocsong/VocsCode/issues/436)) ([9ca8f76](https://github.com/vocsong/VocsCode/commit/9ca8f760cfad70e91cb09ebab2e7a436e947236a))
+* **files:** preview image files as pictures in the Files tab ([#447](https://github.com/vocsong/VocsCode/issues/447)) ([e8b1ef8](https://github.com/vocsong/VocsCode/commit/e8b1ef811b901a1c3c49907fe48fad2986057934))
+* **harness:** check harness CLIs for updates and update them from Settings ([#430](https://github.com/vocsong/VocsCode/issues/430)) ([24d2dbf](https://github.com/vocsong/VocsCode/commit/24d2dbf2296cd49330a538938144e357968d3590))
+* **mission:** add models directly to tier pools ([#435](https://github.com/vocsong/VocsCode/issues/435)) ([3edd56a](https://github.com/vocsong/VocsCode/commit/3edd56aabe46218757747c71db864cdf9415b404))
+* **mission:** run Missions on Claude Agent SDK presets ([#444](https://github.com/vocsong/VocsCode/issues/444)) ([4683d75](https://github.com/vocsong/VocsCode/commit/4683d75202ac6e1449fb0eadac22363c19e7484a))
+* **remote:** stream and type into desktop terminals from the browser ([#450](https://github.com/vocsong/VocsCode/issues/450)) ([2f5335f](https://github.com/vocsong/VocsCode/commit/2f5335f941ba42aa0616430ddcff24a636e67cbb))
+* **renderer:** split the conversation workspace into side-by-side session panes ([#446](https://github.com/vocsong/VocsCode/issues/446)) ([d93c876](https://github.com/vocsong/VocsCode/commit/d93c8769af6b2eedb87fe9fae59b87894f99722b))
+* **settings:** add an app-owned instruction layer for every harness ([#438](https://github.com/vocsong/VocsCode/issues/438)) ([3db77fc](https://github.com/vocsong/VocsCode/commit/3db77fc7e7188ac8fe8a549b2d0c9d19bc32d5e4))
+* Show a timestamp for every completed turn ([#448](https://github.com/vocsong/VocsCode/issues/448)) ([681d65e](https://github.com/vocsong/VocsCode/commit/681d65e443e8398b31044319b17eca2208e084c4))
+* **web:** give code.vocs.io/app the landing's identity and fix the phone and desktop layouts ([#451](https://github.com/vocsong/VocsCode/issues/451)) ([16f4594](https://github.com/vocsong/VocsCode/commit/16f459452c9b8d420fa8ac7566495ae76df27fdc))
+* **worktree:** choose the branch prefix, name and base for isolated sessions ([#449](https://github.com/vocsong/VocsCode/issues/449)) ([c43c01e](https://github.com/vocsong/VocsCode/commit/c43c01ee287739cfff30243bf5db67dd8dc46df7))
+
+
+### Bug Fixes
+
+* **claude:** reject Windows command shims for SDK sessions ([#440](https://github.com/vocsong/VocsCode/issues/440)) ([c2d1081](https://github.com/vocsong/VocsCode/commit/c2d108147405f97799ae4bfa00162fbd224245de))
+* **mac:** ad-hoc sign the app so Gatekeeper offers Open Anyway, not "damaged" ([#445](https://github.com/vocsong/VocsCode/issues/445)) ([f699b6f](https://github.com/vocsong/VocsCode/commit/f699b6fc209e40548859ced97cb14e147aed2cbf))
+* **mission:** give a cold Windows Job supervisor two minutes to start, not 30 s ([#454](https://github.com/vocsong/VocsCode/issues/454)) ([d45d85b](https://github.com/vocsong/VocsCode/commit/d45d85b7cba28fcbfa36832f68a9dd0629ed4190))
+
 ## [0.7.0](https://github.com/vocsong/VocsCode/compare/v0.6.0...v0.7.0) (2026-09-26)
 
 
