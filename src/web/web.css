@@ -2,6 +2,57 @@
    tool cards, approvals and controls). Mobile-first: everything is sized for a phone and widens at
    900px. No inline styles anywhere: the /app CSP has no style-src 'unsafe-inline'. */
 
+/* --- Identity: the code.vocs.io palette ------------------------------------------------------
+   The landing's warm paper and ink, so the app and the page around it read as one product. Same
+   token names as the renderer's styles.css (loaded first), so the reused transcript, tool cards
+   and approvals pick it up unchanged; the dark block follows the system setting. */
+
+:root:not([data-theme]) {
+  --bg: #f6f5f0;
+  --bg-elev: #fdfcf8;
+  --bg-sunken: #edebe4;
+  --bg-hover: rgba(26, 26, 23, 0.05);
+  --bg-active: rgba(26, 26, 23, 0.09);
+  --fg: #1a1a17;
+  --fg-muted: #65635b;
+  --fg-faint: #9b988e;
+  --border: #e2dfd5;
+  --border-strong: #cdc9bd;
+  --accent: #1a1a17;
+  --accent-fg: #f6f5f0;
+  --green: #2e8b57;
+  --amber: #b7791f;
+  --red: #c8372d;
+  --blue: #2f6fed;
+  --user-bubble: #ebe8de;
+  --shadow: 0 12px 32px rgba(26, 26, 23, 0.1);
+  --w-live: #2e8b57;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #121210;
+    --bg-elev: #1a1a17;
+    --bg-sunken: #0c0c0b;
+    --bg-hover: rgba(236, 235, 228, 0.06);
+    --bg-active: rgba(236, 235, 228, 0.1);
+    --fg: #ecebe4;
+    --fg-muted: #a5a299;
+    --fg-faint: #6f6c63;
+    --border: #2a2925;
+    --border-strong: #3b3934;
+    --accent: #ecebe4;
+    --accent-fg: #121210;
+    --green: #4cc38a;
+    --amber: #e3ab4f;
+    --red: #ff6b6e;
+    --blue: #6ea0ff;
+    --user-bubble: #25241f;
+    --shadow: 0 12px 36px rgba(0, 0, 0, 0.55);
+    --w-live: #4cc38a;
+  }
+}
+
 html,
 body,
 #root {
@@ -54,22 +105,167 @@ button {
 }
 
 .w-card {
-  width: min(560px, 100%);
+  width: min(480px, 100%);
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 16px;
-  padding: 20px;
+  padding: 24px 22px;
   box-shadow: var(--shadow);
+  box-sizing: border-box;
+}
+
+/* The wordmark, as on the landing: "VOCS CODE." */
+.w-brand {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.w-brand::after {
+  content: '.';
+}
+
+.w-screen-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: min(480px, 100%);
+  margin: 0 auto 18px;
+}
+
+.w-screen-inner {
+  width: min(480px, 100%);
+  margin: 0 auto;
+}
+
+.w-lead {
+  color: var(--fg-muted);
+  font-size: 15px;
+  line-height: 1.5;
+  margin: 0 0 4px;
+}
+
+.w-pair-code input {
+  font-family: var(--mono);
+  font-size: 22px !important;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+.w-block {
+  width: 100%;
+  justify-content: center;
+}
+
+.w-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.w-divider::before,
+.w-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.w-help summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 14px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.w-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
+.w-account form {
+  margin: 0;
+}
+
+.w-wait {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+}
+
+.w-wait-ring {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--fg);
+  animation: w-spin 0.9s linear infinite;
+  margin: 6px 0 4px;
+}
+
+@keyframes w-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .w-wait-ring { animation: none; }
 }
 
 .w-card h1 {
   margin: 0 0 8px;
-  font-size: 20px;
+  font-size: 26px;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+
+/* The landing's small mono caps: section labels, eyebrows, field labels. */
+.w-label,
+.w-section h2,
+.w-card h2,
+.w-app .field > span:first-child,
+.w-app .field-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+
+.w-app .btn {
+  border-radius: 10px;
+}
+
+.w-app .btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
 }
 
 .w-card h2 {
-  font-size: 15px;
-  margin: 16px 0 8px;
+  margin: 22px 0 8px;
 }
 
 .w-steps {
@@ -159,24 +355,65 @@ button {
 .w-topbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 10px;
+  padding: 6px 12px;
+  padding-top: calc(6px + env(safe-area-inset-top));
   min-height: 56px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-elev);
+  background: var(--bg);
+}
+
+.w-topbar .w-brand {
+  margin-right: 2px;
+}
+
+.w-topbar-spacer {
+  flex: 1;
+}
+
+.w-topbar .btn-ghost {
+  color: var(--fg);
+}
+
+.w-sheet:focus {
+  outline: none;
+}
+
+.w-follow-row .toggle {
+  width: 100%;
+  justify-content: space-between;
+  flex-direction: row-reverse;
+}
+
+.w-menu-hint {
+  margin: -6px 0 6px;
+  font-size: 13px;
 }
 
 .w-computer {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 44px;
-  border: 0;
-  background: none;
+  min-height: 40px;
+  min-width: 0;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
   color: var(--fg);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.w-computer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.w-computer:hover {
+  border-color: var(--border-strong);
 }
 
 .w-computer-off {
@@ -194,7 +431,8 @@ button {
 }
 
 .w-dot.is-online {
-  background: var(--green);
+  background: var(--w-live);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--w-live) 22%, transparent);
 }
 
 .w-dot.is-connecting,
@@ -240,7 +478,9 @@ button {
 }
 
 .w-home-head h1 {
-  font-size: 20px;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+  font-weight: 600;
   margin: 4px 0;
 }
 
@@ -267,7 +507,7 @@ button {
   align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 64px;
+  min-height: 60px;
   padding: 10px 12px;
   margin-bottom: 6px;
   border: 1px solid var(--border);
@@ -276,6 +516,23 @@ button {
   color: var(--fg);
   text-align: left;
   cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.w-session-row:hover {
+  border-color: var(--border-strong);
+}
+
+.w-session-row.is-active {
+  border-color: var(--fg);
+  background: var(--bg-sunken);
+}
+
+.w-session-row:focus-visible,
+.w-computer:focus-visible,
+.w-chip:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
 }
 
 .w-session-row-main {
@@ -320,6 +577,34 @@ button {
   flex: 1;
   display: flex;
   min-height: 0;
+  min-width: 0;
+}
+
+/* Nothing selected on a wide screen: say what the empty pane is for. */
+.w-placeholder {
+  flex: 1;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px;
+  text-align: center;
+  color: var(--fg-muted);
+}
+
+.w-placeholder h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: 20px;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+
+.w-placeholder p {
+  margin: 0;
+  max-width: 340px;
+  line-height: 1.5;
 }
 
 @media (max-width: 899px) {
@@ -349,11 +634,7 @@ button {
 }
 
 .w-section h2 {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--fg-muted);
-  margin: 0 0 6px;
+  margin: 0 0 8px;
 }
 
 .w-section details summary {
@@ -368,8 +649,9 @@ button {
   align-items: center;
   gap: 10px;
   padding: 12px;
-  border: 1px solid var(--accent);
-  background: var(--accent-soft);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--w-live);
+  background: var(--bg-elev);
   border-radius: 12px;
 }
 
@@ -473,6 +755,14 @@ button {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Without this a wide code block or table widens the whole page past a phone's screen. */
+  min-width: 0;
+}
+
+.w-session .transcript-wrap,
+.w-session .transcript {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .w-session-head {
@@ -521,8 +811,9 @@ button {
 
 .w-composer-row {
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   width: 100%;
   min-width: 0;
 }
@@ -566,20 +857,32 @@ button {
 
 .w-composer textarea {
   min-width: 0;
-  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   resize: none;
-  padding: 10px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--bg);
   color: var(--fg);
+  line-height: 1.4;
+  max-height: 40vh;
+}
+
+.w-composer textarea:focus {
+  outline: none;
+  border-color: var(--fg);
 }
 
 .w-composer-actions {
   display: flex;
+  align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  justify-content: flex-end;
+}
+
+.w-composer-actions > :first-of-type {
+  margin-right: auto;
 }
 
 .w-composer-blocked {
@@ -768,12 +1071,68 @@ button {
 
 /* --- Toasts ---------------------------------------------------------------------- */
 
+/* In the layout flow, under the top bar: a toast pushes content down for a few seconds instead of
+   covering the controls under it (it used to hide the session header and the composer actions). */
+.w-app > .w-toasts {
+  order: 1;
+}
+
+.w-app > .w-main {
+  order: 2;
+}
+
+.w-nudge {
+  order: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--amber) 12%, var(--bg));
+}
+
+.w-nudge-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  min-width: 0;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.w-nudge-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--amber);
+  flex: none;
+}
+
+.w-nudge-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.w-nudge-cta {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
 .w-toasts {
-  position: fixed;
-  left: 12px;
-  right: 12px;
-  bottom: calc(12px + env(safe-area-inset-bottom));
-  z-index: 50;
+  position: relative;
+  padding: 6px 12px 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -782,6 +1141,10 @@ button {
 
 .w-toast {
   pointer-events: auto;
+  max-width: 520px;
+  align-self: center;
+  width: 100%;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -802,9 +1165,8 @@ button {
 /* --- Wide screens: a session list column beside the session ---------------------------------- */
 
 @media (min-width: 900px) {
-  .w-app[data-connection] {
-    display: grid;
-    grid-template-rows: auto auto 1fr;
+  .w-main:not([data-has-session]) .w-placeholder {
+    display: flex;
   }
 
   .w-sheet-backdrop {
