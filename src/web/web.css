@@ -685,15 +685,85 @@ button {
   font-size: 12px;
 }
 
-.w-terminal {
+/* --- Terminal (P3.5): drawn rows from a headless xterm; colors arrive as inline CSSOM styles --- */
+
+.w-term-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.w-term {
   font-family: var(--mono);
-  font-size: 12px;
-  background: var(--bg-sunken);
+  line-height: 1.25;
   border-radius: 10px;
   padding: 10px;
-  max-height: 40vh;
+  height: 46vh;
   overflow: auto;
-  white-space: pre-wrap;
+  white-space: pre;
+  outline: none;
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+}
+
+.w-term:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.w-term-row {
+  min-height: 1.25em;
+}
+
+.w-term-b { font-weight: 700; }
+.w-term-d { opacity: 0.6; }
+.w-term-i { font-style: italic; }
+.w-term-u { text-decoration: underline; }
+.w-term-s { text-decoration: line-through; }
+.w-term-u.w-term-s { text-decoration: underline line-through; }
+
+.w-term-cursor {
+  outline: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.w-term-tools {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.w-term-key {
+  min-width: 44px;
+  font-family: var(--mono);
+}
+
+.w-term-line {
+  display: flex;
+  gap: 6px;
+}
+
+.w-term-line input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 16px; /* under 16px, iOS zooms the page on focus */
+}
+
+.w-term-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.w-term-head .w-select {
+  flex: 1;
 }
 
 /* --- Toasts ---------------------------------------------------------------------- */

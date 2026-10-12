@@ -15,7 +15,7 @@ import type { SecretStore } from '../src/main/secrets';
 import type { SessionManager } from '../src/main/session-manager';
 import type { TerminalManager } from '../src/main/terminal';
 import { MAX_WS_FRAME_BYTES } from '../relay/src/hub';
-import { REMOTE_CHANNELS, REMOTE_FRAME_MAX_BYTES } from '../src/shared/remote-channels';
+import { REMOTE_CHANNELS, REMOTE_FRAME_MAX_BYTES, REMOTE_HOST_CHANNELS, REMOTE_READ_CHANNELS } from '../src/shared/remote-channels';
 
 const dirs: string[] = [];
 function tmpDir(prefix: string): string {
@@ -69,7 +69,22 @@ describe('remote channel manifest', () => {
   it('registers every channel a paired browser may invoke', () => {
     const registered = new Set<string>(stubRegistry().channels());
     for (const channel of REMOTE_CHANNELS) {
+      // The remote host answers these itself (they depend on which browser asked); a registry
+      // handler of the same name would never be reached remotely and would mislead.
+      if (REMOTE_HOST_CHANNELS.has(channel)) {
+        expect(registered.has(channel), `${channel} is served by the remote host, not the registry`).toBe(false);
+        continue;
+      }
       expect(registered.has(channel), `${channel} is remote but no handler serves it`).toBe(true);
+    }
+  });
+
+  it('keeps host-served channels on the remote surface, in the read half', () => {
+    // Watching a terminal is reading it; tests/remote-e2e.test.ts drives each one over e2e.
+    expect([...REMOTE_HOST_CHANNELS].sort()).toEqual(['terminal:unwatch', 'terminal:watch', 'terminal:watchAck']);
+    for (const channel of REMOTE_HOST_CHANNELS) {
+      expect(REMOTE_CHANNELS.has(channel)).toBe(true);
+      expect(REMOTE_READ_CHANNELS.has(channel)).toBe(true);
     }
   });
 

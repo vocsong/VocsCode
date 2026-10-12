@@ -116,7 +116,7 @@ secret.
 - `src/web-client.ts` — the browser-side pairing, tokens, vault and e2e transport (DOM-free, unit-tested)
 - `src/page.ts` — the web page logic (bundled to `app/app.js` via `npm run relay:page` at the repo root)
 - `public/app/` — the static web client, served at `/app` (pairing, computer switcher, sessions,
-  transcripts, approvals, read-only terminal)
+  transcripts, approvals, a live terminal)
 
 ## Local development
 

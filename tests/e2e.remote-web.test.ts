@@ -3,7 +3,8 @@
  * running locally in workerd, with real desktop hosts in this process approving the pairings. It is
  * the only suite that runs the shell itself: the native WebSocket, IndexedDB holding non-extractable
  * keys across a reload, the static CSP, the pairing link, streaming deltas with their sequence
- * floor, a signed approval, the computer switcher, unpair, and the phone layout.
+ * floor, a signed approval, a streamed terminal typed into, the computer switcher, unpair, and the
+ * phone layout.
  * Gated by VOCS_CODE_E2E_UI=1 (the e2e guard sets it); needs no app build and no account, but does
  * build the web bundle (src/web) in beforeAll unless a validated CI prebuild is opted in.
  */
@@ -16,6 +17,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { RemoteHost } from '../src/main/remote/host';
 import type { HandlerRegistry } from '../src/main/handlers';
+import type { TerminalWatcher } from '../src/main/terminal';
 import { isolatedEnv } from './e2e-ui';
 import { startLocalRelay, type LocalRelay } from './support/local-relay';
 import { startTestLanding, TEST_SESSION_COOKIE, type TestLanding } from './support/test-landing';
@@ -138,12 +140,37 @@ interface Desk {
   approvals: unknown[];
   items: TranscriptItem[];
   focus: string;
+  /** What browsers typed into this desk's terminal. */
+  typed: string[];
+  /** Feeds PTY output to every browser watching this desk's terminal. */
+  emit: (data: string) => void;
 }
 
 async function desk(name: string, origin: string, enrollToken: string, opts: { enable?: boolean; items?: TranscriptItem[]; focus?: string } = {}): Promise<Desk> {
   const sent: unknown[] = [];
   const approvals: unknown[] = [];
+  const typed: string[] = [];
   const secrets = new Map<string, string>();
+  // One live terminal (P3.5): a snapshot, then whatever `emit` feeds to its watchers.
+  const terminalId = `${name}-t1`;
+  const terminalInfo = { id: terminalId, sessionId: `${name}-s1`, title: 'build', shell: 'bash' as const, shellName: 'bash', cwd: '/repo', createdAt: 1, pid: 4242 };
+  const watchers = new Set<TerminalWatcher>();
+  let terminalSeq = 1;
+  const terminals = {
+    list: () => [terminalInfo],
+    watch: (_id: string, watcher: TerminalWatcher) => {
+      watchers.add(watcher);
+      return () => void watchers.delete(watcher);
+    },
+    snapshot: async (id: string) => {
+      if (id !== terminalId) throw new Error('Terminal not found');
+      return { snapshot: `$ npm test\r\n\x1b[32m${name} terminal says hi\x1b[0m\r\n$ `, seq: terminalSeq, cols: 60, rows: 12, info: terminalInfo };
+    }
+  };
+  const emit = (data: string) => {
+    terminalSeq++;
+    for (const watcher of [...watchers]) watcher.data(terminalSeq, data);
+  };
   const second = `${name}-s2`;
   const items = opts.items ?? [
     { id: 'm1', kind: 'user', ts: 1, text: `hello ${name}` },
@@ -168,9 +195,10 @@ async function desk(name: string, origin: string, enrollToken: string, opts: { e
           approvals.push(request);
           return undefined;
         case 'terminal:list':
-          return [{ id: `${name}-t1`, sessionId: `${name}-s1`, title: 'build', shell: 'bash', shellName: 'bash', cwd: '/repo', createdAt: 1 }];
-        case 'terminal:screen':
-          return { info: { id: `${name}-t1` }, lines: ['$ npm test', `${name} terminal says hi`], seq: 1 };
+          return [terminalInfo];
+        case 'terminal:input':
+          typed.push((request as { data: string }).data);
+          return undefined;
         default:
           throw new Error(`unexpected channel ${channel}`);
       }
@@ -181,11 +209,12 @@ async function desk(name: string, origin: string, enrollToken: string, opts: { e
     secrets: { get: async (k) => secrets.get(k), set: async (k, v) => void secrets.set(k, v) },
     pushState: () => undefined,
     log: () => undefined,
-    broadcast: () => undefined
+    broadcast: () => undefined,
+    terminals: () => terminals
   });
   hosts.push(host);
   if (opts.enable !== false) await host.enable(origin, enrollToken);
-  return { host, sent, approvals, items, focus: opts.focus ?? `${name}-s1` };
+  return { host, sent, approvals, items, focus: opts.focus ?? `${name}-s1`, typed, emit };
 }
 
 /** Pushes a session event the way SessionManager does, with a sequence the client can order. */
@@ -272,10 +301,22 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     await expect.poll(() => work.approvals.length, { timeout: 20_000 }).toBe(1);
     expect(work.approvals[0]).toMatchObject({ sessionId: 'Work-s1', requestId: 'ap1', decision: { optionId: 'acp-allow-once' } });
 
-    // The read-only terminal sheet follows the session.
+    // The terminal sheet streams the session's terminal live and types into it (P3.5).
     await page.getByRole('button', { name: 'Session actions' }).click();
     await page.getByRole('button', { name: 'Terminal' }).click();
-    await page.getByText('Work terminal says hi').waitFor({ timeout: 20_000 });
+    const terminal = page.locator('[data-testid="remote-terminal"]');
+    await terminal.getByText('Work terminal says hi').waitFor({ timeout: 20_000 });
+    // ANSI colors arrive as CSSOM styles: no injected stylesheet, so the CSP stays intact.
+    expect(await terminal.getByText('Work terminal says hi').evaluate((el) => getComputedStyle(el).color)).not.toBe(await terminal.evaluate((el) => getComputedStyle(el).color));
+    work.emit('\x1b[1mstreamed\x1b[0m from the desk\r\n$ ');
+    await terminal.getByText('from the desk').waitFor({ timeout: 20_000 });
+    // A command from the phone line field, then a hardware Ctrl+C on the view itself.
+    await page.locator('input[aria-label="Terminal input"]').fill('ls -la');
+    await page.getByRole('button', { name: 'Run' }).click();
+    await expect.poll(() => work.typed.join(''), { timeout: 20_000 }).toBe('ls -la\r');
+    await terminal.focus();
+    await page.keyboard.press('Control+C');
+    await expect.poll(() => work.typed.join(''), { timeout: 20_000 }).toBe('ls -la\r\x03');
     await page.locator('.w-sheet-backdrop').click({ position: { x: 8, y: 8 } });
     await expect.poll(() => page.locator('.w-sheet-backdrop').count()).toBe(0);
 
