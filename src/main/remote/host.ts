@@ -7,13 +7,15 @@ import os from 'node:os';
 import { WebSocket } from 'ws';
 import { enrollTokenContext, generateIdentity, hostAccept, openFrame, openSealedToKey, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob, type SealedToKey } from '../../shared/crypto';
 import { connectCheckCode, connectLink } from '../../shared/pairing';
-import { isRemoteChannel, isRemotePushChannel, isRemoteReadChannel, REMOTE_FRAME_MAX_BYTES } from '../../shared/remote-channels';
+import { isRemoteChannel, isRemoteHostChannel, isRemotePushChannel, isRemoteReadChannel, REMOTE_FRAME_MAX_BYTES } from '../../shared/remote-channels';
+import { REMOTE_TERMINAL_INPUT_MAX, type RemoteTerminalFrame } from '../../shared/remote-terminal';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
 import type { Logger } from '../log';
 import type { RemoteAudit } from './audit';
 import { projectRemoteValue } from './project';
+import { RemoteTerminalStreams, type TerminalSource } from './terminal-streams';
 
 /** The remote channel manifest (docs/REMOTE-ACCESS.md §5) lives in src/shared/remote-channels.ts
  *  so the web shell imports the same allowlist it is held to. Re-exported because desktop callers
@@ -93,6 +95,14 @@ export class RemoteHost {
   /** The short-lived relay access token (§6.2), in memory only. */
   private access: { token: string; expiresAt: number; deviceId: string } | null = null;
   private refreshing: Promise<string> | null = null;
+  /** A connect is between its start and opening its socket (it may be buying an access token). */
+  private connectInFlight = false;
+  private connectAttempt = 0;
+  /** Terminals streamed to paired browsers (P3.5), each to the browser that watches it. */
+  private readonly terminalStreams: RemoteTerminalStreams;
+  /** Terminals each connected browser has typed into, so the audit trail records the first
+   *  keystroke of a connection rather than every one. */
+  private readonly typedInto = new Map<string, Set<string>>();
 
   constructor(
     private readonly deps: {
@@ -108,8 +118,27 @@ export class RemoteHost {
       viewOnly?: () => boolean;
       /** The mirror key changed (a browser holding it lost its pairing): re-seal and re-upload. */
       onMirrorRotated?: () => void;
+      /** P3.5: the terminals a browser may watch; absent when terminals are unavailable. */
+      terminals?: () => TerminalSource | null;
     }
-  ) {}
+  ) {
+    this.terminalStreams = new RemoteTerminalStreams({
+      source: () => this.deps.terminals?.() ?? null,
+      send: (clientId, frame: RemoteTerminalFrame) => this.sendTo(clientId, { type: 'push', channel: 'push:remoteTerminal', payload: frame }),
+      log: (level, message) => this.deps.log(level, message)
+    });
+  }
+
+  /** A browser's e2e session ended: stop everything streamed to it. */
+  private forgetClient(clientId: string): void {
+    this.terminalStreams.dropClient(clientId);
+    this.typedInto.delete(clientId);
+  }
+
+  private forgetAllClients(): void {
+    this.terminalStreams.dropAll();
+    this.typedInto.clear();
+  }
 
   state(): RemoteState {
     return {
@@ -183,6 +212,7 @@ export class RemoteHost {
     this.ws?.close();
     this.ws = null;
     this.sessions.clear();
+    this.forgetAllClients();
     this.incoming.clear();
     this.status = 'off';
     this.detail = undefined;
@@ -469,7 +499,10 @@ export class RemoteHost {
   /** Forget paired browsers that lost their pairing, and re-key the mirror they could read. */
   private async dropClients(creds: HostCredentials, ids: string[], why: string): Promise<void> {
     const dropped = ids.filter((id) => creds.clients[id]);
-    for (const id of ids) this.sessions.delete(id);
+    for (const id of ids) {
+      this.sessions.delete(id);
+      this.forgetClient(id);
+    }
     if (!dropped.length) {
       this.push();
       return;
@@ -510,7 +543,12 @@ export class RemoteHost {
   private scheduleReconnect(): void {
     const gen = this.generation;
     setTimeout(() => {
-      if (gen === this.generation) void this.connect();
+      // Something else may have reconnected meanwhile (enrollment reconnects at once, while the
+      // old socket's close still schedules this): a second connect would replace a healthy
+      // socket and strand every browser that just handshook over it.
+      if (gen !== this.generation || this.connectInFlight) return;
+      if (this.ws && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) return;
+      void this.connect();
     }, RECONNECT_MS);
   }
 
@@ -530,6 +568,17 @@ export class RemoteHost {
   }
 
   private async connect(): Promise<void> {
+    const attempt = ++this.connectAttempt;
+    this.connectInFlight = true;
+    try {
+      await this.openSocket();
+    } finally {
+      // A superseded attempt finishing late must not clear a newer one's flag.
+      if (attempt === this.connectAttempt) this.connectInFlight = false;
+    }
+  }
+
+  private async openSocket(): Promise<void> {
     const creds = this.creds;
     if (!creds) return;
     const gen = this.generation;
@@ -588,6 +637,7 @@ export class RemoteHost {
       this.ws = null;
       const dropped = [...this.sessions.keys()];
       this.sessions.clear();
+      this.forgetAllClients();
       this.incoming.clear();
       for (const client of dropped) this.deps.audit?.record('client-disconnect', { device: client });
       if (this.status !== 'off') {
@@ -684,6 +734,7 @@ export class RemoteHost {
       }
       case 'client.gone': {
         if (msg.client) this.enqueue(String(msg.client), socket, async () => {
+          this.forgetClient(String(msg.client));
           if (this.sessions.delete(String(msg.client))) {
             this.deps.log('info', `remote: client ${msg.client} disconnected (${this.sessions.size} online)`);
             this.deps.audit?.record('client-disconnect', { device: String(msg.client) });
@@ -721,6 +772,8 @@ export class RemoteHost {
     try {
       const session = await hostAccept(this.creds.identity, payload as never, expected);
       if (!socket || this.ws !== socket || this.creds?.clients[from] !== expected) return;
+      // A fresh handshake is a reconnect: the browser re-watches what it still shows.
+      this.forgetClient(from);
       this.sessions.set(from, { key: session.key, salt: session.salt, out: 0, inSeq: -1, outgoing: Promise.resolve(), identity: expected });
       this.ws?.send(JSON.stringify({ t: 'hs', to: from, seq: 0, payload: session.reply }));
       this.deps.log('info', `remote: client ${from} connected (${this.sessions.size} online)`);
@@ -770,11 +823,15 @@ export class RemoteHost {
         return;
       }
       try {
-        const value = projectRemoteValue(await this.deps.registry().invoke(inner.channel, inner.request));
+        const value = projectRemoteValue(isRemoteHostChannel(inner.channel)
+          ? await this.serveHostChannel(from, inner.channel, inner.request)
+          : await this.dispatch(from, inner.channel, inner.request));
         const outcome = await this.sendTo(from, { type: 'result', id: inner.id, ok: true, value });
         if (outcome === 'oversize') {
           // The relay would drop the frame silently and leave the client waiting out its timeout.
           this.deps.log('warn', `remote: ${inner.channel} response for ${from} exceeded the relay frame limit`);
+          // A watch whose snapshot never arrived must not keep streaming against it.
+          if (inner.channel === 'terminal:watch') this.terminalStreams.unwatch(from, (value as { terminalId?: string } | null)?.terminalId ?? '');
           await this.sendTo(from, { type: 'result', id: inner.id, ok: false, error: 'response too large' });
         }
       } catch (e) {
@@ -786,6 +843,54 @@ export class RemoteHost {
       // Duplicate hello (client retry): re-run the handshake to refresh the session.
       await this.onHandshake(from, inner);
     }
+  }
+
+  /** Channels whose answer depends on the caller (P3.5 terminal streams). */
+  private async serveHostChannel(from: string, channel: string, request: unknown): Promise<unknown> {
+    const req = (request && typeof request === 'object' ? request : {}) as { terminalId?: unknown; chars?: unknown; snapshot?: unknown };
+    const terminalId = typeof req.terminalId === 'string' ? req.terminalId : '';
+    if (!terminalId) throw new Error('terminalId is required');
+    switch (channel) {
+      case 'terminal:watch':
+        return this.terminalStreams.watch(from, terminalId);
+      case 'terminal:unwatch':
+        this.terminalStreams.unwatch(from, terminalId);
+        return undefined;
+      case 'terminal:watchAck':
+        this.terminalStreams.ack(from, terminalId, typeof req.chars === 'number' ? req.chars : 0, typeof req.snapshot === 'number' ? req.snapshot : undefined);
+        return undefined;
+      default:
+        throw new Error('channel not available remotely');
+    }
+  }
+
+  /** A registry channel on behalf of a browser. Terminal writes are bounded and audited here: the
+   *  registry's own Mission terminal guards still decide whether they reach the shell. */
+  private async dispatch(from: string, channel: string, request: unknown): Promise<unknown> {
+    if (channel === 'terminal:input') {
+      const req = (request && typeof request === 'object' ? request : {}) as { terminalId?: unknown; data?: unknown };
+      if (typeof req.terminalId !== 'string' || typeof req.data !== 'string') throw new Error('terminalId and data are required');
+      if (req.data.length > REMOTE_TERMINAL_INPUT_MAX) throw new Error('input too large');
+      // Only a running shell takes remote keystrokes: a restored tab would queue them, unseen, until
+      // someone opens it on the desktop, and an unknown id must not grow the audit bookkeeping.
+      const info = this.deps.terminals?.()?.list().find((t) => t.id === req.terminalId);
+      if (!info) throw new Error('Terminal not found');
+      if (!info.pid) throw new Error(info.restored && !info.exit ? "This terminal's shell starts when it is opened on the computer" : "This terminal's shell has exited");
+      let typed = this.typedInto.get(from);
+      if (!typed) this.typedInto.set(from, (typed = new Set()));
+      if (!typed.has(req.terminalId)) {
+        typed.add(req.terminalId);
+        this.deps.log('info', `remote: ${from} is typing into terminal ${req.terminalId}`);
+        this.deps.audit?.record('terminal-input', { device: from, detail: req.terminalId });
+      }
+    }
+    const value = await this.deps.registry().invoke(channel, request);
+    if (channel === 'terminal:create') {
+      const id = (value as { id?: string } | null)?.id;
+      this.deps.log('info', `remote: ${from} opened terminal ${id ?? '?'}`);
+      this.deps.audit?.record('terminal-create', { device: from, detail: id });
+    }
+    return value;
   }
 
   /** One sealed frame's fate: 'oversize' means it was refused unsent because the relay would have

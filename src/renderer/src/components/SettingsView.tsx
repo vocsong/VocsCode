@@ -1344,7 +1344,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
       {error && <p className="small" style={{ color: 'var(--red, #d00)' }}>{error}</p>}
 
       {config.enabled && (
-        <Field label="View-only mode" hint="Paired browsers can browse sessions, transcripts, files and git, but cannot send prompts, approve actions or change anything. Refused attempts still appear below.">
+        <Field label="View-only mode" hint="Paired browsers can browse sessions, transcripts, files and git, and watch terminals, but cannot send prompts, approve actions, type into terminals or change anything. Refused attempts still appear below.">
           <Toggle
             checked={config.viewOnly === true}
             disabled={busy}

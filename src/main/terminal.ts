@@ -216,6 +216,27 @@ export interface TerminalManagerDeps {
   spawn?: PtySpawn;
 }
 
+/** A remote viewer of one terminal (docs/REMOTE-ACCESS.md P3.5): it sees every chunk the screen
+ *  mirror sees, independent of the desktop renderer's attach and flow control, so a slow viewer
+ *  can never pause the shell the desktop is using. */
+export interface TerminalWatcher {
+  /** One PTY chunk; `seq` orders it against a snapshot, exactly like `push:terminalData`. */
+  data(seq: number, data: string): void;
+  /** The desktop resized the terminal; a viewer renders at the desktop's geometry. */
+  resize(cols: number, rows: number): void;
+  /** The screen was cleared (`closed` false: take a fresh snapshot) or the tab is gone. */
+  reset(closed: boolean): void;
+}
+
+/** The screen as it is right now plus the seq of the last chunk in it, at the desktop's geometry. */
+export interface TerminalSnapshot {
+  snapshot: string;
+  seq: number;
+  cols: number;
+  rows: number;
+  info: TerminalInfo;
+}
+
 export interface TerminalActivity {
   terminalId: string;
   sessionId: string;
@@ -274,6 +295,11 @@ interface Term {
   /** Input that arrived before a restored tab's shell started; flushed into the PTY at spawn. */
   pendingInput: string[];
   disposables: { dispose(): void }[];
+  /** Remote viewers (P3.5); they never touch `attached`, `unacked` or `paused`. */
+  watchers: Set<TerminalWatcher>;
+  /** Settles pending snapshots when the tab closes, since a disposed screen never drains. */
+  closed: Promise<never>;
+  markClosed: () => void;
 }
 
 export class TerminalManager {
@@ -389,6 +415,34 @@ export class TerminalManager {
     return { info: { ...t.info }, lines, seq: t.seq };
   }
 
+  /**
+   * Adds a remote viewer. Register it before taking a snapshot: chunks fed in between reach the
+   * watcher with a seq above the snapshot's, so the viewer applies exactly what the snapshot lacks.
+   * Returns the function that removes it.
+   */
+  watch(id: string, watcher: TerminalWatcher): () => void {
+    const t = this.must(id);
+    t.watchers.add(watcher);
+    return () => { t.watchers.delete(watcher); };
+  }
+
+  /**
+   * A remote viewer's snapshot: serialized at the moment every chunk up to `seq` has been parsed,
+   * without pausing the shell or touching the desktop renderer's attach. `scrollback` bounds the
+   * history so it fits a relay frame. Never spawns a restored tab's shell.
+   */
+  async snapshot(id: string, scrollback: number): Promise<TerminalSnapshot> {
+    const t = this.must(id);
+    const seq = t.seq;
+    // The callback of an empty write runs right after every earlier chunk is parsed and before any
+    // later one, so the serialized screen holds chunks 1..seq exactly.
+    const snapshot = await Promise.race([
+      new Promise<string>((resolve) => t.screen.write('', () => resolve(t.serializer.serialize({ scrollback: Math.max(0, Math.floor(scrollback)) })))),
+      t.closed
+    ]);
+    return { snapshot, seq, cols: t.cols, rows: t.rows, info: { ...t.info } };
+  }
+
   detach(id: string): void {
     const t = this.terms.get(id);
     if (t) this.release(t);
@@ -416,6 +470,7 @@ export class TerminalManager {
     t.cols = cols;
     t.rows = rows;
     t.screen.resize(cols, rows);
+    this.notify(t, (w) => w.resize(cols, rows));
     try {
       t.pty?.resize(cols, rows);
     } catch {
@@ -474,6 +529,9 @@ export class TerminalManager {
     this.attachChains.delete(id);
     t.attached = false;
     t.gen++;
+    t.markClosed();
+    this.notify(t, (w) => w.reset(true));
+    t.watchers.clear();
     for (const r of this.resources) if (r.activity.terminalId === id) void this.stopResource(r).catch(() => undefined);
     for (const d of t.disposables) d.dispose();
     t.screen.dispose();
@@ -483,7 +541,9 @@ export class TerminalManager {
   }
 
   clear(id: string): void {
-    this.must(id).screen.clear();
+    const t = this.must(id);
+    t.screen.clear();
+    this.notify(t, (w) => w.reset(false));
   }
 
   rename(id: string, title: string): TerminalInfo {
@@ -708,7 +768,10 @@ export class TerminalManager {
     const screen = new HeadlessTerminal({ cols, rows, scrollback: this.deps.settings().scrollback, allowProposedApi: true });
     const serializer = new SerializeAddon();
     screen.loadAddon(serializer);
-    const t: Term = { info, pty: null, shellFile: '', gen: 0, screen, serializer, cols, rows, seq: 0, attached: false, unacked: 0, paused: false, pendingInput: [], disposables: [] };
+    let markClosed = (): void => undefined;
+    const closed = new Promise<never>((_, reject) => { markClosed = () => reject(new Error('Terminal not found')); });
+    closed.catch(() => undefined); // nobody may be waiting on a snapshot when the tab closes
+    const t: Term = { info, pty: null, shellFile: '', gen: 0, screen, serializer, cols, rows, seq: 0, attached: false, unacked: 0, paused: false, pendingInput: [], disposables: [], watchers: new Set(), closed, markClosed };
     t.disposables.push(
       screen.onTitleChange((raw) => {
         if (t.info.customTitle) return;
@@ -1005,12 +1068,24 @@ export class TerminalManager {
   private feed(t: Term, data: string): void {
     t.seq++;
     t.screen.write(data);
+    if (t.watchers.size) this.notify(t, (w) => w.data(t.seq, data));
     if (!t.attached) return;
     this.deps.push('push:terminalData', { terminalId: t.info.id, seq: t.seq, data });
     t.unacked += data.length;
     if (!t.paused && t.unacked > FLOW_HIGH_WATER && t.pty) {
       t.paused = true;
       t.pty.pause();
+    }
+  }
+
+  /** A throwing remote viewer must not break the PTY's data path or the desktop's own view. */
+  private notify(t: Term, call: (w: TerminalWatcher) => void): void {
+    for (const w of [...t.watchers]) {
+      try {
+        call(w);
+      } catch (e) {
+        this.deps.log('warn', `terminal ${t.info.id}: a remote viewer failed: ${errorMessage(e)}`);
+      }
     }
   }
 

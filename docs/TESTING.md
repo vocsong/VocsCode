@@ -57,7 +57,8 @@ sockets: pairing, the sealed credential, proof-of-possession tokens, handshake, 
 revocation. It is what found a refused request's unread body ending a `wrangler dev` session and a
 revocation answering 500, which no fake could. `e2e.remote-web` (in `test:e2e:ci`) loads the web
 app in Electron's Chromium from that local relay: the native WebSocket, IndexedDB keys across a
-reload, the static CSP, the pairing link, the computer switcher, the read-only terminal and unpair;
+reload, the static CSP, the pairing link, the computer switcher, a streamed terminal typed into and
+unpair;
 and, through `tests/support/test-landing.ts` (a stand-in for the landing that signs per-account
 assertions, gates owner routes and isolates accounts), Connect with GitHub, account switching and
 pairing from the signed-in computer list. `e2e.remote` drives the desktop side of the same flow in
@@ -151,7 +152,8 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 | Project knowledge (wiki store, docs scan, distillation, PR reflection, relation graph), `src/main/knowledge/**`, `resources/mcp/vocs-memory.mjs` | `e2e.knowledge` |
 | The app's instruction layer (`src/main/app-instructions.ts`, Settings → Instructions, `harness/system-prompt.ts`, `session-manager.ts` first-message priming) | `tests/app-instructions.test.ts`, `tests/claude-project-instructions.test.ts`, `tests/pi-startup-compatibility.test.ts`, `tests/fork-context.test.ts`, `tests/handler-registry.test.ts` + `e2e.instructions` |
 | MCP layer (`src/main/mcp/**`), built-in servers, computer use (`mcp/cua.ts`, `cua-preview.ts`, `CuaCard.tsx`, `DesktopTab.tsx`) | `tests/mcp.test.ts`, `tests/mcp-gitnexus.test.ts`, `tests/mcp-client.test.ts`, `tests/cua.test.ts`, `tests/cua-preview.test.ts`, `tests/cua-card.test.tsx`, `tests/desktop-tab.test.tsx`, `tests/right-panel-bottom.test.tsx` |
-| Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy, the pairing QR (`shared/qr.ts`, `PairingQr.tsx`) | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/remote-host-lifecycle.test.ts`, `tests/web-client.test.ts`, `tests/remote-ui.test.tsx`, `tests/qr.test.ts` |
+| Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy, the pairing QR (`shared/qr.ts`, `PairingQr.tsx`) | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/remote-host-lifecycle.test.ts`, `tests/remote-e2e.test.ts`, `tests/web-client.test.ts`, `tests/remote-ui.test.tsx`, `tests/qr.test.ts` |
+| Remote terminal (P3.5): `src/main/remote/terminal-streams.ts`, `TerminalManager.watch/snapshot`, `shared/remote-terminal.ts`, `src/web/terminal/**`, `src/web/sheets/TerminalSheet.tsx` | `tests/remote-terminal-streams.test.ts`, `tests/remote-e2e.test.ts`, `tests/web-terminal.test.ts`, `tests/web-terminal-sheet.test.tsx`, `tests/terminal.test.ts` + `e2e.remote-web` |
 | Relay routing, accounts, auth, tokens or rate limiting (`relay/src/{account,core,routes,edge,rate}.ts`) | `tests/relay-account.test.ts`, `tests/relay-core.test.ts`, `tests/relay-routes.test.ts`, `tests/relay-edge.test.ts` + `tests/remote-e2e.test.ts`, `tests/remote-workerd.test.ts`, `test:relay-do`, `e2e.remote` |
 | Web shell, relay web client and the account-partitioned browser vault (`src/web/**`, `vite.config.web.ts`, `relay/src/web-client.ts`, `relay/public/_headers`) | `tests/web-transport.test.ts`, `tests/web-router.test.ts`, `tests/web-shell.test.tsx`, `tests/web-bundle.test.ts`, `tests/web-client.test.ts`, `tests/browser-socket.test.ts`, `tests/relay-page-layout.test.ts` + `e2e.remote-web` (a real browser; also checks the CSP and account switching); renderer-core changes it drives also run `npm run test:e2e:ci` |
 | Relay Durable Object and frame routing (`relay/src/{worker,hub}.ts`, socket lifecycle/tags/queues) | `test:relay-do`, `tests/remote-workerd.test.ts` + `test:remote-live` against the deployed origin after deploy |

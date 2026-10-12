@@ -41,9 +41,13 @@ const READ: readonly IpcChannel[] = [
   'fs:search',
   'fs:read',
   'fs:readImage',
-  // P3.5, read-only first: list terminals and read a plain-text screen. No input, resize or attach.
+  // P3.5: list terminals, read a plain-text screen, and stream one to this browser. Watching never
+  // attaches, resizes or pauses the desktop's terminal; typing into it is the write half.
   'terminal:list',
-  'terminal:screen'
+  'terminal:screen',
+  'terminal:watch',
+  'terminal:unwatch',
+  'terminal:watchAck'
 ];
 
 /** Interactive P3: chat send/interrupt/stop, session lifecycle and per-session model controls.
@@ -63,13 +67,23 @@ const WRITE: readonly IpcChannel[] = [
   'sessions:setModel',
   'sessions:setEffort',
   'sessions:setPermissionMode',
-  'approvals:respond'
+  'approvals:respond',
+  // P3.5 read/write: type into a session's terminal or open a new one for it. Both pass the same
+  // Mission terminal guards as the desktop's own keystrokes. Resize, kill and close stay local:
+  // the desktop owns its terminals' geometry and lifetime.
+  'terminal:input',
+  'terminal:create'
 ];
 
-/** Push channels a paired browser receives: the ones the remote surface consumes. Everything else
- *  the desktop pushes stays on this machine — terminal output (not remote until P3.5), the
- *  assistant panel, update prompts, and push:remoteState, which carries the live pairing code
- *  and pending pairing requests. */
+/** Remote channels the remote host serves itself rather than the handler registry, because the
+ *  answer depends on which browser asked: a watched terminal streams to that browser alone. */
+const HOST: readonly IpcChannel[] = ['terminal:watch', 'terminal:unwatch', 'terminal:watchAck'];
+
+/** Push channels broadcast to every paired browser: the ones the remote surface consumes.
+ *  Everything else the desktop pushes stays on this machine — raw terminal output (a watched
+ *  terminal reaches only its watcher, as push:remoteTerminal sealed to it), the assistant panel,
+ *  update prompts, and push:remoteState, which carries the live pairing code and pending pairing
+ *  requests. */
 const PUSH: readonly PushChannel[] = ['push:sessionEvent', 'push:sessionsChanged',
   // Mission records contain public coordination state, not broker credentials or provider keys.
   'push:missionsChanged',
@@ -84,6 +98,7 @@ export const REMOTE_CHANNELS: ReadonlySet<IpcChannel> = lookup([...READ, ...WRIT
 export const REMOTE_READ_CHANNELS: ReadonlySet<IpcChannel> = lookup(READ);
 export const REMOTE_WRITE_CHANNELS: ReadonlySet<IpcChannel> = lookup(WRITE);
 export const REMOTE_PUSH_CHANNELS: ReadonlySet<PushChannel> = lookup(PUSH);
+export const REMOTE_HOST_CHANNELS: ReadonlySet<IpcChannel> = lookup(HOST);
 
 /** Channel names arrive as plain strings off the relay, so the predicates — not `.has()` at the
  *  call site — are the boundary that narrows them to the contract. */
@@ -93,6 +108,10 @@ export function isRemoteChannel(channel: string): channel is IpcChannel {
 
 export function isRemoteReadChannel(channel: string): channel is IpcChannel {
   return (REMOTE_READ_CHANNELS as ReadonlySet<string>).has(channel);
+}
+
+export function isRemoteHostChannel(channel: string): channel is IpcChannel {
+  return (REMOTE_HOST_CHANNELS as ReadonlySet<string>).has(channel);
 }
 
 export function isRemotePushChannel(channel: string): channel is PushChannel {
