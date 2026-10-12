@@ -219,7 +219,7 @@ describe('signed-in owner', () => {
     mount({ client, transport, account: SIGNED_IN });
     await rtl.waitFor(() => expect(rtl.screen.getByTestId('computers')).toBeTruthy());
     rtl.fireEvent.click(rtl.screen.getByRole('button', { name: 'Menu' }));
-    await rtl.waitFor(() => expect(rtl.screen.getByText('@vocs')).toBeTruthy());
+    await rtl.waitFor(() => expect(rtl.screen.getByText('Signed in as @vocs')).toBeTruthy());
     expect(rtl.screen.getByText('Sign out of GitHub')).toBeTruthy();
   });
 

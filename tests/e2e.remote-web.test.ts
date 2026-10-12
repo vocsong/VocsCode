@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { RemoteHost } from '../src/main/remote/host';
+import { suggestedName } from '../src/web/device-name';
 import type { HandlerRegistry } from '../src/main/handlers';
 import type { TerminalWatcher } from '../src/main/terminal';
 import { isolatedEnv } from './e2e-ui';
@@ -430,7 +431,7 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     await page.getByRole('button', { name: 'Menu' }).click();
     await page.getByRole('button', { name: 'Add a computer' }).click();
     const row = page.locator('.w-list-row', { hasText: 'Lab PC' });
-    await expect.poll(() => row.textContent(), { timeout: 20_000 }).toContain('online');
+    await expect.poll(() => row.textContent(), { timeout: 20_000 }).toContain('Online');
     await page.locator('[data-testid="pair-name"]').fill('Signed-in Chromium 2');
     await row.locator('[data-testid="owner-pair"]').click();
     await approve(lab.host, 'Signed-in Chromium 2');
@@ -455,7 +456,8 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     const { app, page } = await launchBrowser(`${landing.origin}/app/?code=${code}`, TEST_SESSION_COOKIE);
     await expect.poll(() => page.locator('[data-testid="pair-code"]').inputValue(), { timeout: 30_000 }).toBe(code);
     await page.locator('[data-testid="pair-submit"]').click();
-    await approve(phone.host, 'Browser');
+    // Unnamed, the browser pairs under its browser and platform, so the Allow prompt can tell it apart.
+    await approve(phone.host, suggestedName(await page.evaluate(() => navigator.userAgent)));
     await expect.poll(() => page.locator('.w-app').getAttribute('data-connection'), { timeout: 30_000 }).toBe('online');
 
     // A phone viewport: 390x844, as a real device reports it.
@@ -470,6 +472,18 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
 
     const overflow = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth }));
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.innerWidth + 1);
+    // .w-app clips its overflow, so the page width alone cannot see a pane wider than the phone:
+    // the session pane and every control a thumb needs must lie inside the screen.
+    const outside = await page.evaluate(() => {
+      const selectors = ['.w-session', '.w-session-head [aria-label="Back to sessions"]', '.w-session-head [aria-label="Session actions"]', 'textarea[aria-label="Message"]', '[aria-label="Attach files"]', '[data-testid="session-controls"]'];
+      return selectors.flatMap((selector) => {
+        const el = document.querySelector(selector);
+        if (!el) return [`${selector}: missing`];
+        const box = el.getBoundingClientRect();
+        return box.left < -1 || box.right > window.innerWidth + 1 ? [`${selector}: ${Math.round(box.left)}..${Math.round(box.right)}`] : [];
+      });
+    });
+    expect(outside).toEqual([]);
 
     // The control chips are reachable under the header.
     await expect.poll(async () => page.locator('[data-testid="session-controls"] button').count(), { timeout: 20_000 }).toBeGreaterThan(2);

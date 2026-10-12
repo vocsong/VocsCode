@@ -56,14 +56,36 @@ describe('sessions home', () => {
     expect(archived).toBeTruthy();
   });
 
+  it('offers a session that needs a person as a strip that opens it, and drops the strip once opened', async () => {
+    await mountHome();
+    const nudge = await rtl.screen.findByTestId('approval-nudge');
+    expect(nudge.textContent).toContain('Waiting one');
+    expect(nudge.textContent).toContain('needs you');
+    rtl.fireEvent.click(rtl.within(nudge).getByText('Review'));
+    await rtl.waitFor(() => expect(window.location.hash).toContain('s2'));
+    await rtl.waitFor(() => expect(rtl.screen.queryByTestId('approval-nudge')).toBeNull());
+  });
+
+  it('shows what the empty pane is for until a session is picked', async () => {
+    window.history.replaceState(null, '', '/'); // no session route left over from another test
+    await mountHome();
+    // The shell first opens the session the desktop is on; back on the list, the pane is empty.
+    rtl.fireEvent.click(await rtl.screen.findByRole('button', { name: 'Back to sessions' }));
+    const placeholder = await rtl.screen.findByTestId('session-placeholder');
+    expect(placeholder.textContent).toContain('Pick a session');
+    expect(rtl.within(placeholder).getByRole('button', { name: 'New session' })).toBeTruthy();
+  });
+
   it('continues the desktop session and filters the rest', async () => {
     await mountHome();
     rtl.fireEvent.click(rtl.screen.getByRole('button', { name: 'Continue' }));
     await rtl.waitFor(() => expect(rtl.screen.getAllByText('Desktop session').length).toBeGreaterThan(1));
 
     rtl.fireEvent.change(rtl.screen.getByLabelText('Filter sessions'), { target: { value: 'other' } });
-    await rtl.waitFor(() => expect(rtl.screen.queryByText('Waiting one')).toBeNull());
-    expect(rtl.screen.getByText('Other folder one')).toBeTruthy();
+    // The list filters; the approval nudge above it may still name the waiting session.
+    const list = () => rtl.within(rtl.screen.getByTestId('session-list'));
+    await rtl.waitFor(() => expect(list().queryByText('Waiting one')).toBeNull());
+    expect(list().getByText('Other folder one')).toBeTruthy();
     rtl.fireEvent.change(rtl.screen.getByLabelText('Filter sessions'), { target: { value: 'nothing-matches' } });
     await rtl.waitFor(() => expect(rtl.screen.getByText('No sessions match.')).toBeTruthy());
   });
