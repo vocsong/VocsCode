@@ -125,7 +125,7 @@ jobs:
       - name: Execute Windows-only boundaries
         shell: bash
         run: |
-          files=(tests/mission-check-job.test.ts tests/mission-terminal-windows.test.ts tests/mission-receipt-recovery.test.ts tests/mission-restart-recovery.test.ts tests/mission-pi-recovery.test.ts tests/mission-pi-process.test.ts tests/mission-git-boundary.test.ts tests/new-session-dialog.test.tsx tests/mcp-client.test.ts)
+          files=(tests/mission-check-job.test.ts tests/mission-check-startup.test.ts tests/mission-terminal-windows.test.ts tests/mission-receipt-recovery.test.ts tests/mission-restart-recovery.test.ts tests/mission-pi-recovery.test.ts tests/mission-pi-process.test.ts tests/mission-git-boundary.test.ts tests/new-session-dialog.test.tsx tests/mcp-client.test.ts)
           npx vitest run "${files[@]}" --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/windows-offline-report.json"
           node scripts/test-report-check.mjs "$RUNNER_TEMP/windows-offline-report.json" "${files[@]}"
       - run: node scripts/test-metrics.mjs "${{ runner.temp }}/windows-offline-report.json" windows-offline tests/artifacts/windows-offline-metrics.json
