@@ -5,8 +5,9 @@ design and decisions of record** — this file is the working backlog: what is l
 what to do next, in what order, and how each piece is verified. Update it as workstreams land;
 do not restate the design here.
 
-Last reviewed 2026-10-11, after the read/write terminal (P3.5) landed on `develop`; production was
-last deployed with the account-isolation release (v0.7.0) on 2026-09-26.
+Last reviewed 2026-10-12, after v0.8.0 was released and deployed to `code.vocs.io`: the read/write
+terminal (P3.5), the web shell redesign, and the landing's private-beta sign-in, one-click downloads
+and branded sign-in errors.
 
 ## 1. Status snapshot
 
@@ -48,7 +49,7 @@ the deployed smoke.
 | §2.6 QR pairing | In-house QR encoder (no runtime dependency) in Settings; link follows the configured relay | — |
 | §2.6 Multi-host UI | Several computers per browser, switcher with live presence, Add a computer, unpair revokes at the relay | — |
 | §2.6 Mirror polish | Tail-first transcripts with Load earlier; relay copies of deleted or aged-out sessions removed; per-host catalogue (no blob loads); blobs sized to the 2 MB Durable Object value limit | — |
-| §2.6 P3.5 terminal | Read-only first; then read/write on `develop`: per-browser streams, input, open a terminal, coalescing, an ack window that resyncs instead of pausing the shell, snapshot on reconnect; the desktop keeps resize | ships with the next release: the web shell is relay assets, so the release's relay deploy carries it; a desktop older than it answers the live view with "update this computer" |
+| §2.6 P3.5 terminal | Read-only first; then read/write on `develop`: per-browser streams, input, open a terminal, coalescing, an ack window that resyncs instead of pausing the shell, snapshot on reconnect; the desktop keeps resize | **Live (v0.8.0, 2026-10-12)**; a desktop older than v0.8.0 answers the live view with "update this computer" |
 | §2.7 Multi-account isolation | **Live 2026-09-26**: one Hub DO per GitHub subject, owner-session assertions, per-tenant enrollment binding, same-account claims/polls, and browser vault partitioning; the incumbent stays `vocs-v1`, so existing devices keep working | Two-account live check, then onboard allowlisted GitHub users and flip `remote.status` to `live` in vocs.io `code/src/data/code.ts` (**user**) |
 
 **Status: per-account isolation live (v0.7.0, 2026-09-26).** The relay and the landing are both
@@ -58,6 +59,14 @@ gate no longer falls back to legacy code pairing in production. Do not add anoth
 until the two-account live check passes.
 
 ### Web-shell overhaul (live)
+
+**v0.8.0 identity pass (live 2026-10-12):** the shell now uses the landing's palette (warm paper
+and ink, with a dark version), mono labels and the wordmark. Phone and desktop layouts are fixed
+(the session pane no longer overflows a phone, and the desktop fills the window). A background
+session that needs a person shows a tap-to-open strip, toasts stay in the layout flow, and the empty
+pane explains itself. Pairing is redesigned, with the browser named after its browser and platform.
+Sheets close on Escape. The client now acts on the relay's `host.gone`, so a desktop that quits
+shows as offline at once, and a connect to an offline desktop fails fast.
 
 `relay/src/page.ts`'s hand-written DOM page is replaced by a React shell in `src/web/`, built by
 plain Vite into the same `relay/public/app/` (`npm run build:web`; the committed bundle and
@@ -260,7 +269,7 @@ unvalidated names and keys.
    its own before adding further logins.
 6. **`workers_dev: false`** is included in the relay config so `/app` and account routes cannot
    bypass the landing gate; verify the deployed hostname is unavailable after the release.
-7. ~~**P3.5 read/write terminal.**~~ — on `develop`; ships with the next release.
+7. ~~**P3.5 read/write terminal.**~~ — live in v0.8.0 (2026-10-12).
 8. **Productization:** signup, billing, email auth and account recovery remain deferred.
 
 ## 4. Decisions
