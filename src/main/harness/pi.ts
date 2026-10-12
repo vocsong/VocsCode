@@ -7,7 +7,7 @@ import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { modelName } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { quoteWin, shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
-import { launchOwnedWindowsJob, spawnIndependentWindowsSupervisor, windowsJobCommandLine, type OwnedWindowsJob } from '../owned-windows-job';
+import { launchOwnedWindowsJob, spawnIndependentWindowsSupervisor, windowsJobCommandLine, WINDOWS_SUPERVISOR_STARTUP_MS, type OwnedWindowsJob } from '../owned-windows-job';
 import { which } from '../runtime';
 import { createManagedPiOwnershipIntent, inspectManagedPiOwnership, recordUnlaunchedManagedPiIntent, type ManagedPiOwnershipIntent } from './pi-ownership';
 import { sessionAppendPrompt } from './system-prompt';
@@ -464,7 +464,7 @@ export class PiAdapter implements HarnessAdapter {
         executable: shim ? shell : executable,
         args: shim ? [] : args,
         ...(shim ? { commandLine: `${windowsJobCommandLine(shell, ['/d', '/s', '/c'])} "${[quoteWin(executable), ...args.map(quoteWin)].join(' ')}"` } : {}),
-        cwd, helperPath: this.ctx.runtime.resource('mission', 'windows-check-job.ps1'), startupTimeoutMs: 15_000,
+        cwd, helperPath: this.ctx.runtime.resource('mission', 'windows-check-job.ps1'), startupTimeoutMs: WINDOWS_SUPERVISOR_STARTUP_MS,
         launch: (file, argv) => spawnIndependentWindowsSupervisor(file, argv, { cwd, env }),
         observeExit: (process, exited) => { process.once('close', exited); process.once('error', exited); },
       });
