@@ -46,14 +46,14 @@ function renderControls(patch: Parameters<typeof session>[2] = {}) {
 describe('session control sheets', () => {
   it('switches the model through sessions:setModel', async () => {
     renderControls();
-    rtl.fireEvent.click(rtl.screen.getByRole('button', { name: /default model/ }));
+    rtl.fireEvent.click(rtl.screen.getByRole('button', { name: /Default model/ }));
     rtl.fireEvent.click(await rtl.screen.findByRole('button', { name: /claude-opus-5/ }));
     await rtl.waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:setModel', { id: 's1', model: { provider: 'anthropic', model: 'claude-opus-5' } }));
   });
 
   it('changes effort and remembers the choice', async () => {
     renderControls();
-    rtl.fireEvent.click(rtl.screen.getByRole('button', { name: 'effort' }));
+    rtl.fireEvent.click(rtl.screen.getByRole('button', { name: 'Effort' }));
     rtl.fireEvent.click(await rtl.screen.findByRole('button', { name: 'high' }));
     await rtl.waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:setEffort', { id: 's1', effort: 'high' }));
     expect(invoke).toHaveBeenCalledWith('settings:update', expect.objectContaining({ defaultEffort: 'high' }));

@@ -60,6 +60,39 @@ describe('relay web client (browser-side protocol)', () => {
     };
   }
 
+  it('notices at once when its computer goes offline, and fails a connect to an offline computer fast', async () => {
+    const registry = { channels: () => [], invoke: async () => [] } as unknown as HandlerRegistry;
+    const host = new RemoteHost({
+      registry: () => registry,
+      secrets: { get: async () => undefined, set: async () => undefined },
+      pushState: () => undefined,
+      log: () => undefined,
+      broadcast: () => undefined
+    });
+    await host.enable(`http://127.0.0.1:${port}`, ENROLL);
+    const { code } = await host.startPairing('Laptop');
+    const client = new RelayClient({ vault: memoryVault(), wsFactory });
+    const pairing = client.pair({ relayBase: `http://127.0.0.1:${port}`, code, deviceName: 'Phone' });
+    for (let i = 0; i < 40 && !host.state().pendingRequest; i++) await sleep(100);
+    await host.respondPairing('approve');
+    await pairing;
+    await sleep(500); // the desktop reconnects under its new device token after enrolling
+    let dropped = 0;
+    await client.connect(() => void dropped++);
+    expect(await client.invoke('sessions:list', undefined)).toEqual([]);
+
+    // The desktop quits: the relay says so, and the browser drops the session right away instead of
+    // showing the computer online until a request times out.
+    await host.disable();
+    await expect.poll(() => dropped, { timeout: 3000 }).toBe(1);
+    expect(client.isConnected()).toBe(false);
+
+    // Connecting while it is still away fails with a reason, well before the 10 s handshake timeout.
+    const started = Date.now();
+    await expect(client.connect(() => undefined)).rejects.toThrow('the computer is offline');
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
   it('pairs via the browser flow, handshakes and serves read-only invokes', async () => {    // Desktop side (as in remote-e2e.test.ts).
     const calls: string[] = [];
     const registry = {

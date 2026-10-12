@@ -141,9 +141,9 @@ export function SessionControls({ session }: { session: SessionMeta }) {
   };
   return (
     <div className="w-controls" data-testid="session-controls">
-      <button type="button" className="w-chip" disabled={!writeAllowed} onClick={action('model')}>{modelRefName(current) ?? 'default model'}</button>
+      <button type="button" className="w-chip" disabled={!writeAllowed} onClick={action('model')}>{modelRefName(current) ?? 'Default model'}</button>
       {effortOptions(session, info).length > 0 && (
-        <button type="button" className="w-chip" disabled={!writeAllowed} onClick={action('effort')}>{session.activeEffort ?? session.config.effort ?? 'effort'}</button>
+        <button type="button" className="w-chip" disabled={!writeAllowed} onClick={action('effort')}>{session.activeEffort ?? session.config.effort ?? 'Effort'}</button>
       )}
       <button type="button" className="w-chip" disabled={!writeAllowed} onClick={action('permission')}>{PERMISSION_MODE_LABELS[session.config.permissionMode].short}</button>
       <button type="button" className="w-chip" onClick={() => setSheet('usage')}>{fmtCost(session.usage.costUsd)}</button>

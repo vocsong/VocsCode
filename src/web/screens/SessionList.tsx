@@ -8,7 +8,7 @@ import { useStore } from '@renderer/store';
 import type { SessionMeta } from '@shared/types';
 import { StatusChip } from '../components/StatusChip';
 
-export function SessionList({ focus, onNew, onOpen }: { focus: string | null; onNew: () => void; onOpen: (id: string) => void }) {
+export function SessionList({ focus, active = null, onNew, onOpen }: { focus: string | null; active?: string | null; onNew: () => void; onOpen: (id: string) => void }) {
   const sessions = useStore((s) => s.sessions);
   const [filter, setFilter] = useState('');
   const [archivedOpen, setArchivedOpen] = useState(false);
@@ -30,7 +30,7 @@ export function SessionList({ focus, onNew, onOpen }: { focus: string | null; on
 
   const row = (s: SessionMeta) => (
     <li key={s.id}>
-      <button type="button" className="w-session-row" data-testid="session-row" data-session-id={s.id} onClick={() => onOpen(s.id)}>
+      <button type="button" className={`w-session-row${s.id === active ? ' is-active' : ''}`} aria-current={s.id === active ? 'page' : undefined} data-testid="session-row" data-session-id={s.id} onClick={() => onOpen(s.id)}>
         <span className="w-session-row-main">
           <span className="w-session-row-title">{s.title}</span>
           <span className="w-session-row-meta">{harnessShort(s.config.harness)} · {relTime(s.updatedAt)}</span>

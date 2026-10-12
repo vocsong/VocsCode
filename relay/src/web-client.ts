@@ -445,10 +445,21 @@ export class RelayClient {
   }
 
   private onMessage(raw: string): void {
-    let msg: { t?: string; payload?: unknown };
+    let msg: { t?: string; payload?: unknown; host?: unknown };
     try {
-      msg = JSON.parse(raw) as { t?: string; payload?: unknown };
+      msg = JSON.parse(raw) as { t?: string; payload?: unknown; host?: unknown };
     } catch {
+      return;
+    }
+    // The relay says this computer is not (or no longer) connected: a handshake would only time
+    // out and invokes would hang, so end the session now. Closing the socket takes the normal drop
+    // path, which tells the transport to show the computer offline (or its mirror) and retry.
+    if (msg.t === 'host.gone' && typeof msg.host === 'string' && msg.host === this.creds?.hostDeviceId) {
+      if (this.hsWaiter) {
+        this.hsWaiter.reject(new Error('the computer is offline'));
+        this.hsWaiter = null;
+      }
+      this.socket?.close();
       return;
     }
     if (msg.t === 'hs' && this.hsWaiter) {
