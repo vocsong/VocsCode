@@ -11,8 +11,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const root = path.resolve(import.meta.dirname, '..');
 let out = '';
+/** The entry chunk index.html loads: everything a visitor downloads before opening anything. */
 let js = '';
 let css = '';
+/** Chunks loaded on demand (today: the terminal view and its headless parser), by file name. */
+let lazy = new Map<string, string>();
 
 beforeAll(() => {
   out = mkdtempSync(path.join(os.tmpdir(), 'vocs-web-bundle-'));
@@ -24,8 +27,13 @@ beforeAll(() => {
   if (result.status !== 0) throw new Error(`vite build failed (${result.status}):\n${result.stderr || result.stdout}`);
   const assets = path.join(out, 'assets');
   const files = readdirSync(assets);
-  js = readFileSync(path.join(assets, files.find((f) => f.endsWith('.js'))!), 'utf8');
+  // The entry is the script index.html names, not whichever chunk the platform lists first
+  // (Linux sorts `TerminalView-*` ahead of `index-*`; Windows does not).
+  const entry = /<script[^>]*\bsrc="\/app\/assets\/([^"]+\.js)"/.exec(readFileSync(path.join(out, 'index.html'), 'utf8'))?.[1];
+  if (!entry) throw new Error('index.html names no entry script');
+  js = readFileSync(path.join(assets, entry), 'utf8');
   css = readFileSync(path.join(assets, files.find((f) => f.endsWith('.css'))!), 'utf8');
+  lazy = new Map(files.filter((f) => f.endsWith('.js') && f !== entry).map((f) => [f, readFileSync(path.join(assets, f), 'utf8')]));
 });
 
 afterAll(() => {
@@ -43,14 +51,20 @@ describe('web bundle', () => {
   });
 
   it('contains no desktop-only or dynamic-eval code', () => {
-    const bundle = `${js}\n${css}`;
-    expect(bundle).not.toMatch(/\beval\s*\(/);
-    expect(bundle).not.toContain('new Function');
-    expect(bundle).not.toContain('ENROLL');
-    // CSS may carry inert `.xterm` selectors from the shared stylesheet; the terminal library
-    // itself, and anything Electron, must not be in the JavaScript.
+    for (const [name, code] of [['entry', `${js}\n${css}`] as const, ...lazy]) {
+      expect(code, name).not.toMatch(/\beval\s*\(/);
+      expect(code, name).not.toContain('new Function');
+      expect(code, name).not.toContain('ENROLL');
+      expect(code, name).not.toContain('electron');
+    }
+    // CSS may carry inert `.xterm` selectors from the shared stylesheet. The entry a visitor loads
+    // carries no terminal code at all: the remote terminal's headless parser arrives only when a
+    // terminal is opened (P3.5), and the desktop's DOM renderer and addons never ship.
     expect(js.toLowerCase()).not.toContain('xterm');
-    expect(js).not.toContain('electron');
+    for (const [name, code] of lazy) {
+      if (code.toLowerCase().includes('xterm')) expect(name, 'only the terminal view and its parser may carry xterm').toMatch(/^(TerminalView|xterm-headless)-/);
+      expect(code, name).not.toMatch(/addon-webgl|addon-fit|WebglAddon|xterm-screen/);
+    }
   });
 
   it('stays inside the size budget', () => {
@@ -59,6 +73,9 @@ describe('web bundle', () => {
     // Budget: ~180 KB JS (hard fail above 220) and ~35 KB CSS; report the actuals on failure.
     expect(jsKb, `web JS gzip ${jsKb.toFixed(1)} KB`).toBeLessThan(220);
     expect(cssKb, `web CSS gzip ${cssKb.toFixed(1)} KB`).toBeLessThan(35);
+    // On-demand chunks have their own budget, so the terminal cannot quietly grow without bound.
+    const lazyKb = gzipSync([...lazy.values()].join('\n')).length / 1024;
+    expect(lazyKb, `web on-demand JS gzip ${lazyKb.toFixed(1)} KB`).toBeLessThan(80);
   });
 
   it('declares the shell script as the Vite module entry', () => {
