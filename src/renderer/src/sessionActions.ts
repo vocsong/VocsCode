@@ -62,6 +62,12 @@ export async function setSessionEffort(id: string, effort: EffortLevel, toast: T
   }
 }
 
+/** Publish only the server-confirmed request and effective status, never an optimistic Fast state. */
+export async function setSessionFastMode(id: string, enabled: boolean): Promise<void> {
+  const meta = await invoke('sessions:setFastMode', { id, enabled });
+  useStore.setState((s) => ({ sessions: s.sessions.map((session) => session.id === id ? meta : session) }));
+}
+
 /** Archive like the sidebar row does: a worktree is removed after confirmation; uncommitted changes block, then force. */
 export async function archiveSession(s: SessionMeta, toast: Toast) {
   if (s.archived || useStore.getState().archiving[s.id]) return;

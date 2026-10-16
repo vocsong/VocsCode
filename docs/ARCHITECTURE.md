@@ -87,6 +87,22 @@ so a Claude row without them becomes `[]` only when another row in the same `sup
 answer carries them; a runtime that reports them on no row leaves every model unknown. An ACP effort
 option with no level the app models stays unknown too.
 
+**Fast mode is a separate, per-session premium-speed preference**, not a reasoning level. The
+New Session dialog and message header expose `SessionConfig.fastMode` (off by default), with a
+cost warning before opt-in. `shared/fast-mode.ts` limits candidates to first-party OpenAI GPT-5/6
+(excluding Spark) and supported Anthropic Opus models; gateways, Cursor, ACP and Mission presets
+are not supported. Account entitlement is still the provider's decision. Idle-session changes go
+through `sessions:setFastMode`; the manager refuses busy transitions and rolls back failed writes.
+A model switch to an incompatible route requires turning Fast mode off first. Same-harness forks
+retain the preference; cross-harness forks start at standard speed.
+
+Adapters translate the preference at their own boundary: Codex uses `serviceTier`/`service_tier`,
+Claude explicitly opts in through SDK settings/flag settings, the native loop sends the provider's
+speed field, and Pi's bundled fast-mode extension modifies provider payloads and Anthropic beta
+headers. `SessionMeta.fastModeStatus` is observational: `requested` is not `on`. Only provider/runtime
+evidence may report `on`, `cooldown` or `unavailable`; restart and fork reset stale observations.
+No adapter changes reasoning effort or silently retries a failed premium request at another tier.
+
 Both Codex harnesses discover their pre-session models through a short-lived app-server probe,
 following every `model/list` page rather than treating the bundled catalog as authoritative. The
 active app-server uses the same paginated discovery, and exec SDK model listing uses the one-shot

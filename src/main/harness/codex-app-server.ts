@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
+import { fastModeSupport } from '../../shared/fast-mode';
 import { isCodexBuiltinProvider, isOpenAiWireProvider } from '../../shared/providers';
 import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -11,6 +12,7 @@ import { toCodex } from '../mcp/effective';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY } from './permissions';
 import { spawnTool } from './spawn';
+import { fastModePricing } from './native/fast-mode-pricing';
 import type { HarnessAdapter, HarnessContext } from './types';
 
 /* ---- Minimal protocol shapes (from `codex app-server generate-ts`) ---- */
@@ -30,6 +32,8 @@ interface CodexModel {
   defaultReasoningEffort: string;
   inputModalities: string[];
   isDefault: boolean;
+  serviceTiers?: { id: string }[];
+  additionalSpeedTiers?: string[];
 }
 
 type ThreadItem =
@@ -98,6 +102,11 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   private model: string | undefined;
   private modelProvider: string | undefined;
   private effort: EffortLevel | undefined;
+  private fastMode = false;
+  private fastModeModel: ModelRef | undefined;
+  private speedTiers = new Map<string, string[]>();
+  private serviceTier = 'default';
+  private unknownFastCostReported = false;
   private items = new Map<string, TranscriptItem>();
   private fileChangeItems = new Map<string, FileChange[]>();
   /** Exact command lines the user approved "for session"; Codex keeps its own per-command memory too. */
@@ -146,10 +155,17 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       if (custom) env[provider.envKey] = custom;
     }
     this.ctx.log('info', `spawning codex app-server: ${bin.path} (${bin.source} runtime) in ${meta.cwd}`);
-    const child = spawnTool(bin.path, ['app-server'], { cwd: meta.cwd, env });
+    // Enable the protocol feature, not paid service: each thread/turn explicitly chooses its tier.
+    const child = spawnTool(bin.path, ['app-server', '-c', 'features.fast_mode=true'], { cwd: meta.cwd, env });
     this.rpc = new JsonRpcStdioClient(child);
     try {
-      this.rpc.onStderr = (l) => this.ctx.log('debug', `[codex] ${l}`);
+      this.rpc.onStderr = (l) => {
+        this.ctx.log('debug', `[codex] ${l}`);
+        if (this.fastMode && /configured tier.*not advertised|fast.*(?:disabled|unavailable)|service.tier.*(?:ignored|unsupported)/i.test(l)) {
+          this.serviceTier = 'default';
+          this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: l } });
+        }
+      };
       this.rpc.onClose = (code) => {
         this.compactionWaiter?.reject(new Error(`Codex stopped during context compaction (${code}).`));
         this._busy = false;
@@ -170,15 +186,28 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.model = meta.config.model?.model || meta.activeModel?.model;
       this.modelProvider = provider?.id;
       this.effort = this.ctx.effort();
+      this.fastModeModel = meta.config.model ?? meta.activeModel;
+      this.fastMode = meta.config.fastMode === true && !meta.mission;
+      // Prefer the runtime's exact advertised capabilities over our conservative model candidates.
+      if (this.fastMode && !provider) {
+        await this.listModels();
+        if (!this.model) {
+          this.model = this.models.find((entry) => entry.isDefault)?.id;
+          if (this.model) this.fastModeModel = { provider: 'openai', model: this.model };
+        }
+      }
+      this.reportFastMode();
+      const fast = this.fastMode && this.fastModeCapability().supported;
       const mode = this.ctx.permissionMode();
       const common: Record<string, unknown> = {
         model: this.model ?? null,
         modelProvider: this.modelProvider ?? null,
+        serviceTier: fast ? this.fastServiceTier() : 'default',
         cwd: meta.cwd,
         approvalPolicy: approvalPolicyFor(mode),
         sandbox: sandboxModeFor(mode)
       };
-      const config: Record<string, unknown> = {};
+      const config: Record<string, unknown> = { features: { fast_mode: true }, service_tier: fast ? this.fastServiceTier() : 'default' };
       if (provider) {
         config.model_providers = {
           [provider.id]: { name: provider.name, base_url: provider.baseUrl, env_key: provider.envKey, wire_api: provider.wireApi }
@@ -195,7 +224,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const mcpServers = toCodex(mcp, 'inline', { owned: this.ctx.ownedMcpIds() }).config;
       if (Object.keys(mcpServers).length) config.mcp_servers = mcpServers;
       if (Object.keys(config).length) common.config = config;
-      let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null };
+      let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null; serviceTier?: string | null };
       if (meta.harnessRef.codexThreadId) {
         try {
           res = await withTimeout(this.rpc.request('thread/resume', { threadId: meta.harnessRef.codexThreadId, ...common }), 30_000, 'thread/resume');
@@ -207,6 +236,12 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         res = await withTimeout(this.rpc.request('thread/start', common), 30_000, 'thread/start');
       }
       this.threadId = res.thread.id;
+      this.serviceTier = res.serviceTier ?? (fast ? this.fastServiceTier() : 'default');
+      this.fastModeModel = { provider: res.modelProvider || 'openai', model: res.model };
+      this.reportFastMode();
+      if (fast && res.serviceTier !== undefined && res.serviceTier !== 'fast' && res.serviceTier !== 'priority') {
+        this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: 'Codex did not accept a Fast service tier.' } });
+      }
       this.ctx.updateRef({ codexThreadId: this.threadId });
       this.ctx.updateMeta({
         activeModel: { provider: res.modelProvider || 'openai', model: res.model },
@@ -225,6 +260,14 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   private wireNotifications(rpc: JsonRpcStdioClient): void {
+    // Settings acknowledge the configured tier, not the tier actually served by the API.
+    rpc.onNotification('thread/settings/updated', (p) => {
+      const n = p as { threadId?: string; threadSettings?: { serviceTier?: string | null } };
+      if (n.threadId === this.threadId && n.threadSettings?.serviceTier !== undefined) this.serviceTier = n.threadSettings.serviceTier ?? 'default';
+      if (n.threadId === this.threadId && this.fastMode && n.threadSettings?.serviceTier !== undefined && n.threadSettings.serviceTier !== 'fast' && n.threadSettings.serviceTier !== 'priority') {
+        this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: `Codex selected service tier: ${n.threadSettings.serviceTier ?? 'default'}` } });
+      }
+    });
     rpc.onNotification('turn/started', (p) => {
       const n = p as { turn: { id: string } };
       this.turnId = n.turn.id;
@@ -295,6 +338,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.turnId = null;
       for (const item of this.items.values()) if (item.kind === 'assistant' && item.streaming) this.ctx.emit({ type: 'item.upsert', item: { ...item, streaming: false } });
       const status = n.turn.status === 'failed' ? 'failed' : n.turn.status === 'interrupted' ? 'interrupted' : 'completed';
+      if (this.fastMode && status === 'failed') this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: n.turn.error?.message ?? 'Codex turn failed.' } });
       const completed = this.usage.finishTurn();
       this.ctx.emit({ type: 'usage', totals: completed.totals });
       const usage = completed.usage;
@@ -339,11 +383,19 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       };
       // Spend is additive and never reconciled: Codex reports no cost to reconcile it against, and
       // money spent at an earlier model's rate stays spent.
-      this.usage.addUsage({ costUsd: estimateCostUsd(findPricing(this.modelProvider ?? 'openai', this.model ?? '', this.models), added) });
+      const fast = this.fastMode && (this.serviceTier === 'fast' || this.serviceTier === 'priority');
+      const model = this.model ?? this.fastModeModel?.model ?? '';
+      const pricing = fast ? fastModePricing(model, added.inputTokens + added.cacheReadTokens + added.cacheWriteTokens) : findPricing(this.modelProvider ?? 'openai', model, this.models);
+      if (fast && !pricing && !this.unknownFastCostReported) {
+        this.unknownFastCostReported = true;
+        this.info('Fast-mode pricing is unavailable for this model/context. Reported spend excludes these requests; check the provider bill for the full cost.', 'warn');
+      }
+      this.usage.addUsage({ costUsd: estimateCostUsd(pricing, added) });
       this.ctx.emit({ type: 'usage', totals: this.usage.snapshot() });
     });
     rpc.onNotification('error', (p) => {
       const n = p as { error: { message: string }; willRetry: boolean };
+      if (this.fastMode && !n.willRetry) this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: n.error.message } });
       this.info(`${n.error.message}${n.willRetry ? ' (retrying)' : ''}`, n.willRetry ? 'warn' : 'error');
     });
     rpc.onNotification('warning', (p) => this.ctx.log('warn', `[codex] ${JSON.stringify(p)}`));
@@ -636,8 +688,12 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       approvalPolicy: approvalPolicyFor(mode),
       sandboxPolicy: sandboxPolicyFor(mode, this.ctx.session().cwd),
       model: this.model ?? null,
-      effort: this.effort ?? null
+      effort: this.effort ?? null,
+      serviceTier: this.fastMode && this.fastModeCapability().supported ? this.fastServiceTier() : 'default'
     };
+    this.reportFastMode();
+    this.serviceTier = String(params.serviceTier);
+    this.unknownFastCostReported = false;
     this._busy = true;
     this.turnStartedAt = Date.now();
     this.usage.beginTurn();
@@ -651,6 +707,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       if (this._busy) this.turnId = res.turn.id;
     } catch (e) {
       this._busy = false;
+      if (this.fastMode) this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: errorMessage(e) } });
       this.ctx.emit({ type: 'status', status: 'idle' });
       throw e;
     }
@@ -665,10 +722,45 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     }
   }
 
+  private fastModeCapability() {
+    if (this.resolveCodexProvider()) return { supported: false, reason: 'Fast mode is unavailable on custom Codex provider routes.' };
+    const model = this.fastModeModel?.model ?? this.models.find((entry) => entry.isDefault)?.id;
+    if (model && this.speedTiers.size && !this.models.some((entry) => entry.id === model)) return { supported: false, reason: 'The selected model is not in this Codex runtime’s available model catalog.' };
+    const tiers = model ? this.speedTiers.get(model) : undefined;
+    if (tiers && !tiers.includes('fast') && !tiers.includes('priority')) return { supported: false, reason: 'This Codex runtime does not advertise a Fast service tier for the selected model.' };
+    return fastModeSupport(this.id, this.fastModeModel, this.ctx.settings().providers);
+  }
+
+  private fastServiceTier(): string {
+    const model = this.fastModeModel?.model ?? this.models.find((entry) => entry.isDefault)?.id;
+    return model && this.speedTiers.get(model)?.includes('priority') ? 'priority' : 'fast';
+  }
+
+  private reportFastMode(): void {
+    if (!this.fastMode) {
+      this.ctx.updateMeta({ fastModeStatus: { state: 'off' } });
+      return;
+    }
+    const support = this.fastModeCapability();
+    this.ctx.updateMeta({ fastModeStatus: !this.fastMode ? { state: 'off' } : support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
+  }
+
+  async setFastMode(enabled: boolean): Promise<void> {
+    if (enabled && this.ctx.session().mission) throw new Error('Fast mode is unavailable for Missions.');
+    if (enabled) await this.listModels();
+    const support = this.fastModeCapability();
+    if (enabled && !support.supported) throw new Error(support.reason);
+    if (!this.rpc || !this.threadId) throw new Error('Codex thread is not ready.');
+    this.fastMode = enabled;
+    this.ctx.updateMeta({ fastModeStatus: { state: enabled ? 'requested' : 'off' } });
+  }
+
   async setModel(model: ModelRef): Promise<void> {
     this.model = model.model;
     if (model.provider && model.provider !== 'openai' && model.provider !== 'codex') this.modelProvider = model.provider;
+    this.fastModeModel = model;
     this.ctx.updateMeta({ activeModel: model });
+    this.reportFastMode();
   }
 
   async setEffort(effort: EffortLevel): Promise<void> {
@@ -706,7 +798,10 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     }
     if (!this.rpc) return CODEX_STATIC_MODELS;
     try {
-      this.models = await readCodexModelCatalog(this.rpc);
+      this.models = await readCodexModelCatalog(this.rpc, (model) => {
+        const tiers = model.serviceTiers?.map((tier) => tier.id) ?? model.additionalSpeedTiers;
+        if (tiers) this.speedTiers.set(model.model, tiers);
+      });
       return this.models.length ? this.models : CODEX_STATIC_MODELS;
     } catch (e) {
       this.ctx.log('warn', `model/list failed: ${errorMessage(e)}`);
@@ -746,7 +841,7 @@ export function codexModelToInfo(m: CodexModel, provider = 'openai'): ModelInfo 
 }
 
 /** Read every visible-model page, within one deadline; never serve a silently truncated catalog. */
-async function readCodexModelCatalog(rpc: JsonRpcStdioClient): Promise<ModelInfo[]> {
+async function readCodexModelCatalog(rpc: JsonRpcStdioClient, observe?: (model: CodexModel) => void): Promise<ModelInfo[]> {
   const deadline = Date.now() + 20_000;
   const seen = new Set<string>();
   const models = new Map<string, ModelInfo>();
@@ -759,7 +854,10 @@ async function readCodexModelCatalog(rpc: JsonRpcStdioClient): Promise<ModelInfo
       remaining,
       'model/list'
     );
-    for (const model of page.data) models.set(model.model, codexModelToInfo(model));
+    for (const model of page.data) {
+      observe?.(model);
+      models.set(model.model, codexModelToInfo(model));
+    }
     cursor = page.nextCursor ?? undefined;
     if (cursor) {
       if (seen.has(cursor)) throw new Error('model/list repeated a pagination cursor');
@@ -772,12 +870,12 @@ async function readCodexModelCatalog(rpc: JsonRpcStdioClient): Promise<ModelInfo
 /**
  * One-shot model listing without a session: spawn app-server, initialize, model/list, exit.
  */
-export async function listCodexModels(codexPath: string): Promise<ModelInfo[]> {
+export async function listCodexModels(codexPath: string, observe?: (model: CodexModel) => void): Promise<ModelInfo[]> {
   const child = spawnTool(codexPath, ['app-server']);
   const rpc = new JsonRpcStdioClient(child);
   try {
     await withTimeout(rpc.request('initialize', { clientInfo: { name: 'vocs-code', title: 'Vocs Code', version: '0.1.0' }, capabilities: { experimentalApi: false, requestAttestation: false } }), 20_000, 'initialize');
-    return await readCodexModelCatalog(rpc);
+    return await readCodexModelCatalog(rpc, observe);
   } finally {
     await rpc.close();
   }

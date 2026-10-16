@@ -138,6 +138,17 @@ describe('handler registry', () => {
     }
   });
 
+  it('validates Fast mode requests before dispatch and refuses unknown sessions', async () => {
+    const setFastMode = vi.fn(async () => ({ id: 's_test' }));
+    const { registry } = stubDeps({ sessions: { list: () => [], get: (id: string) => id === 's_test' ? { id } : undefined, setFastMode } as unknown as SessionManager });
+    for (const request of [{ id: '../escape', enabled: true }, { id: 's_test', enabled: 'yes' }, { id: 's_test', enabled: true, extra: 1 }, { id: 'missing', enabled: true }]) {
+      await expect(registry.invoke('sessions:setFastMode', request)).rejects.toThrow();
+    }
+    expect(setFastMode).not.toHaveBeenCalled();
+    await expect(registry.invoke('sessions:setFastMode', { id: 's_test', enabled: true })).resolves.toEqual({ id: 's_test' });
+    expect(setFastMode.mock.calls).toEqual([['s_test', true]]);
+  });
+
   it('returns the transcript page with its event floor, and rejects an unknown session', async () => {
     const items: TranscriptItem[] = [{ id: 'a', kind: 'info', ts: 1, level: 'info', text: 'hi' }];
     const { registry } = stubDeps({

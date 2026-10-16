@@ -27,6 +27,7 @@ import type {
 import { branchNameFromText, branchSlug, normalizeBranchPrefix } from '../shared/branch-prefix';
 import { autoCompactionThresholdLabel, autoCompactionTokenThreshold, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { nativeGoalCommand } from '../shared/goal-driver';
+import { fastModeSupport } from '../shared/fast-mode';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { modelName } from '../shared/model-names';
 import { skillInstalled } from './skills';
@@ -206,6 +207,10 @@ export class SessionManager {
   private static readonly GIT_STATE_RECHECK_MS = 120_000;
 
   private active = new Map<string, ActiveSession>();
+  /** No turn or second settings change may race a premium-speed transition. */
+  private fastModeUpdates = new Set<string>();
+  /** Reserve send-first dispatches before startup/preamble awaits expose an idle gap. */
+  private configDispatches = new Map<string, number>();
   /** Last runtime created per session. An ordinary runtime is fenced only once a newer one exists. */
   private runtimeSeq = new Map<string, number>();
   /** Ordinary runtimes still disposing after Stop released their session. Mission admission only:
@@ -503,7 +508,13 @@ export class SessionManager {
 
   async create(req: CreateSessionRequest): Promise<SessionMeta> {
     const id = shortId('s_');
-    let cfg = req.config;
+    if (req.config.fastMode !== undefined && typeof req.config.fastMode !== 'boolean') throw new Error('Fast mode must be a boolean');
+    const settings = this.settings();
+    let cfg = { ...req.config, fastMode: req.config.fastMode === true };
+    if (cfg.fastMode) {
+      const support = fastModeSupport(cfg.harness, cfg.model ?? settings.defaultModelByHarness[cfg.harness], settings.providers);
+      if (!support.supported || cfg.codexModelProvider) throw new Error(support.reason ?? 'Fast mode is not supported by this custom Codex provider.');
+    }
     let cwd = cfg.projectRoot;
     let worktreeBranch: string | undefined;
     if (req.checkoutBranch) {
@@ -570,6 +581,7 @@ export class SessionManager {
       usage: emptyUsage(),
       activeModel: cfg.model ?? s.defaultModelByHarness[cfg.harness],
       activeEffort: cfg.effort ?? undefined,
+      fastModeStatus: { state: cfg.fastMode ? 'requested' : 'off' },
       queued: 0
     };
     // A harness with no system prompt of its own takes the app's instruction layer on its first
@@ -639,6 +651,7 @@ export class SessionManager {
     this.deps.store.sessionDir(managed.id); // Validate the preallocated id before any write.
     if (!path.isAbsolute(managed.cwd)) throw new Error('Mission workspace path must be absolute');
     if (!Number.isSafeInteger(managed.ownership.generation) || managed.ownership.generation < 0) throw new Error('Invalid Mission generation');
+    if (req.config.fastMode) throw new Error('Mission presets do not support Fast mode.');
     const descriptor = {
       title: req.title?.trim() || 'New session', config: req.config, cwd: managed.cwd,
       worktreeBranch: managed.worktreeBranch, mission: managed.ownership,
@@ -1001,6 +1014,7 @@ export class SessionManager {
   }
 
   private async ensureActive(id: string): Promise<ActiveSession> {
+    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
     const existing = this.active.get(id);
     if (existing) {
       if (existing.tearingDown || existing.uncertain) throw new Error('Session runtime is stopping or uncertain');
@@ -1021,6 +1035,7 @@ export class SessionManager {
       await this.applyGoalDriver(meta);
       this.schedulePersist(meta);
     }
+    meta.fastModeStatus = { state: meta.config.fastMode ? 'requested' : 'off' };
     const generation = meta.mission?.generation;
     const managed = !!meta.mission;
     const seq = (this.runtimeSeq.get(id) ?? 0) + 1;
@@ -1183,6 +1198,7 @@ export class SessionManager {
   private async sendAs(id: string, input: UserInput, source: 'user' | 'goal' | 'mission', generation?: number): Promise<void> {
     const meta = source === 'mission' ? this.managedMeta(id, generation!) : this.get(id);
     if (!meta) throw new Error('Session not found');
+    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
     if (source !== 'mission') this.assertUnmanaged(id);
     // A Mission owns its own immutable user-input receipts; ordinary file uploads cannot bypass them.
     if (source === 'mission' && input.files?.length) throw new Error('Mission file attachments are not supported.');
@@ -1253,6 +1269,18 @@ export class SessionManager {
   }
 
   private async dispatchInput(id: string, input: UserInput, generation?: number): Promise<void> {
+    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
+    this.configDispatches.set(id, (this.configDispatches.get(id) ?? 0) + 1);
+    try {
+      await this.dispatchReservedInput(id, input, generation);
+    } finally {
+      const count = (this.configDispatches.get(id) ?? 1) - 1;
+      if (count) this.configDispatches.set(id, count);
+      else this.configDispatches.delete(id);
+    }
+  }
+
+  private async dispatchReservedInput(id: string, input: UserInput, generation?: number): Promise<void> {
     const assertGeneration = () => {
       if (generation === undefined) return;
       this.managedMeta(id, generation);
@@ -1610,16 +1638,27 @@ export class SessionManager {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
+    if (meta.config.fastMode && !fastModeSupport(meta.config.harness, model, this.settings().providers).supported) {
+      throw new Error('Turn off Fast mode before switching to this model.');
+    }
+    if (this.configDispatches.has(id)) throw new Error('Wait for the current message to be accepted before switching models.');
     const active = this.active.get(id);
-    // Do not publish or persist the requested model until the harness accepts the switch.
-    if (active) await active.adapter.setModel(model);
-    this.deps.log('info', `[${id}] model ${describeModel(meta.activeModel)} → ${describeModel(model)}${active ? '' : ' (applies at next start)'}`);
-    meta.config.model = model;
-    meta.activeModel = model;
-    this.deps.analytics.touchSession(meta);
-    await this.deps.store.upsert(meta);
-    this.pushSessions();
-    return meta;
+    this.fastModeUpdates.add(id);
+    try {
+      // Do not publish or persist the requested model until the harness accepts the switch.
+      if (active) await active.adapter.setModel(model);
+      if (this.get(id) !== meta || this.active.get(id) !== active) throw new Error('Session runtime changed during the model update.');
+      this.deps.log('info', `[${id}] model ${describeModel(meta.activeModel)} → ${describeModel(model)}${active ? '' : ' (applies at next start)'}`);
+      meta.config.model = model;
+      meta.activeModel = model;
+      this.deps.analytics.touchSession(meta);
+      await this.deps.store.upsert(meta);
+      this.pushSessions();
+      return meta;
+    } finally {
+      this.fastModeUpdates.delete(id);
+    }
   }
 
   async setEffort(id: string, effort: EffortLevel): Promise<SessionMeta> {
@@ -1634,6 +1673,58 @@ export class SessionManager {
     await this.deps.store.upsert(meta);
     this.pushSessions();
     return meta;
+  }
+
+  async setFastMode(id: string, enabled: boolean): Promise<SessionMeta> {
+    this.assertUnmanaged(id);
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (typeof enabled !== 'boolean') throw new Error('Fast mode must be a boolean');
+    if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
+    const active = this.active.get(id);
+    const activity = this.activity(id);
+    if (this.configDispatches.has(id) || active?.starting || activity.turn || activity.tools || activity.nativeChildren || activity.approvals || activity.compacting || activity.queued || activity.tearingDown || activity.uncertain) {
+      throw new Error('Wait for the session to be idle before changing Fast mode.');
+    }
+    if (enabled) {
+      const support = fastModeSupport(meta.config.harness, meta.activeModel ?? meta.config.model, this.settings().providers);
+      if (!support.supported || meta.config.codexModelProvider) throw new Error(support.reason ?? 'Fast mode is not supported by this custom Codex provider.');
+      if (active && !active.adapter.setFastMode) throw new Error('This runtime cannot change Fast mode.');
+    }
+    const previous = meta.config.fastMode;
+    const status = meta.fastModeStatus;
+    this.fastModeUpdates.add(id);
+    let applied = false;
+    try {
+      if (active?.adapter.setFastMode) {
+        await active.adapter.setFastMode(enabled);
+        applied = true;
+      }
+      if (this.get(id) !== meta || this.active.get(id) !== active) throw new Error('Session runtime changed during the Fast mode update.');
+      meta.config.fastMode = enabled;
+      if (!active || meta.fastModeStatus === status) meta.fastModeStatus = { state: enabled ? 'requested' : 'off' };
+      await this.deps.store.upsert(meta);
+      this.deps.log('info', `[${id}] Fast mode ${enabled ? 'requested' : 'off'}`);
+      this.pushSessions();
+      return meta;
+    } catch (error) {
+      meta.config.fastMode = previous;
+      if (applied && this.active.get(id) === active) {
+        try {
+          await active!.adapter.setFastMode!(previous === true);
+        } catch {
+          // If rollback cannot prove the old billing preference, stop rather than send another turn.
+          await this.stopOrdinary(id);
+        }
+      }
+      // Re-applying the old preference is not evidence that its old tier is active again.
+      meta.fastModeStatus = applied ? { state: previous ? 'requested' : 'off' } : status;
+      if (this.get(id) === meta) await this.deps.store.upsert(meta).catch(() => undefined);
+      this.pushSessions();
+      throw error;
+    } finally {
+      this.fastModeUpdates.delete(id);
+    }
   }
 
   async setPermissionMode(id: string, mode: PermissionMode): Promise<SessionMeta> {
@@ -2429,6 +2520,7 @@ export class SessionManager {
       updatedAt: Date.now(),
       status: 'idle',
       statusDetail: undefined,
+      fastModeStatus: { state: !cross && src.config.fastMode ? 'requested' : 'off' },
       queued: 0,
       // A fork carries the conversation, not the ledger. The source's totals describe work this
       // session did not do, and inheriting them charges the same dollars to two sessions — which
@@ -2461,6 +2553,7 @@ export class SessionManager {
         model: s.defaultModelByHarness[target],
         acpAgent: undefined,
         codexModelProvider: undefined,
+        fastMode: false,
         useWorktree: !!own
       };
       meta.activeModel = meta.config.model;

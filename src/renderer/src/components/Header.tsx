@@ -12,6 +12,7 @@ import { useStore } from '../store';
 import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
 import { ForkIntoDropdown } from './ForkInto';
 import { ModelPicker } from './ModelPicker';
+import { FastModePill } from './FastModePill';
 import { MissionHeaderControls, useMission } from './mission/MissionPanel';
 import { openMission } from '../missions';
 import { canSplit } from '../panes';
@@ -127,6 +128,8 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
             <Icon name="brain" size={13} /> effort
           </button>
         )}
+
+        <FastModePill key={session.id} session={session} />
 
         <Dropdown align="right" width={300} trigger={(open) => <button type="button" className={`pill mode-${mode} ${open ? 'open' : ''}`} title={PERMISSION_MODE_LABELS[mode].description}><Icon name="shield" size={13} /> {PERMISSION_MODE_LABELS[mode].short} <Icon name="chevron" size={12} /></button>}>
           {(close) => (

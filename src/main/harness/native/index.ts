@@ -1,6 +1,7 @@
 /** Built-in agent loop adapter: drives a provider directly and runs the local tool set, with approvals gated in-process. */
 import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UserInput } from '../../../shared/types';
 import { modelName } from '../../../shared/model-names';
+import { fastModeSupport } from '../../../shared/fast-mode';
 import { errorMessage, shortId, truncate } from '../../util/async';
 import { TurnUsageTracker } from '../../util/turn-usage';
 import { estimateCostUsd, findContextWindow, findPricing, STATIC_MODELS_BY_PROVIDER } from '../../models/static-models';
@@ -11,6 +12,7 @@ import type { HarnessAdapter, HarnessContext } from '../types';
 import { anthropicStep, isAnthropicProvider, openaiStep, type NativeMessage, type StepResult } from './drivers';
 import { NativeMcpSession } from './mcp-tools';
 import { buildSystemPrompt } from './prompt';
+import { fastModePricing } from './fast-mode-pricing';
 import {
   NATIVE_TOOLS,
   editFileTool,
@@ -48,6 +50,7 @@ export class NativeAdapter implements HarnessAdapter {
   private steer: UserInput[] = [];
   private model: ModelRef | null = null;
   private effort: EffortLevel | undefined;
+  private fastMode = false;
   private sessionAllowed = new Set<string>();
   // Intentionally never persisted: resumed sessions must re-read before changing files.
   private readVersions = new Map<string, { fingerprint: string; total: number; ranges: [number, number][] }>();
@@ -77,6 +80,8 @@ export class NativeAdapter implements HarnessAdapter {
     }
     this.model = meta.activeModel ?? meta.config.model ?? this.defaultModel();
     this.effort = this.ctx.effort();
+    this.fastMode = meta.config.fastMode === true && !meta.mission;
+    this.reportFastMode();
     this.ctx.log('info', `native loop: model=${this.model ? modelName(this.model.provider, this.model.model) : 'none configured'}${this.effort ? ` effort=${this.effort}` : ''}, ${this.history.length} history message(s) restored`);
     if (!this.model) this.ctx.log('warn', 'native loop has no usable model: no enabled provider with a key; the first message will fail');
     if (this.model) this.ctx.updateMeta({ activeModel: this.model });
@@ -180,6 +185,8 @@ export class NativeAdapter implements HarnessAdapter {
     this.usage.beginTurn();
     const turnUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
     let turnCost = 0;
+    let unknownFastCostReported = false;
+    this.reportFastMode();
     let status: 'completed' | 'interrupted' | 'failed' = 'completed';
     let error: string | undefined;
     this.ctx.emit({ type: 'status', status: 'running' });
@@ -216,6 +223,8 @@ export class NativeAdapter implements HarnessAdapter {
           history: this.history,
           tools: this.ctx.permissionMode() === 'plan' ? this.allTools().filter((t) => !t.mutating) : this.allTools(),
           effort: this.effort,
+          fastMode: this.fastMode && fastModeSupport(this.id, model, this.ctx.settings().providers).supported,
+          onFastMode: (fast: boolean, detail?: string) => this.ctx.updateMeta({ fastModeStatus: { state: fast ? 'on' : 'unavailable', detail } }),
           signal,
           sessionId: this.ctx.session().id,
           onText: (d: string) => {
@@ -242,7 +251,13 @@ export class NativeAdapter implements HarnessAdapter {
         turnUsage.cacheReadTokens += result.usage.cacheReadTokens;
         turnUsage.cacheWriteTokens += result.usage.cacheWriteTokens;
         turnUsage.reasoningTokens += result.usage.reasoningTokens;
-        const stepCost = estimateCostUsd(pricing, { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, cacheWriteTokens: result.usage.cacheWriteTokens });
+        const billedFast = result.fastMode ?? params.fastMode;
+        const stepPricing = billedFast ? fastModePricing(model.model, result.usage.inputTokens + result.usage.cacheReadTokens + result.usage.cacheWriteTokens) : pricing;
+        if (billedFast && !stepPricing && !unknownFastCostReported) {
+          unknownFastCostReported = true;
+          this.ctx.emit({ type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'warn', text: 'Fast-mode pricing is unavailable for this model/context. Reported spend excludes these requests; check the provider bill for the full cost.' } });
+        }
+        const stepCost = estimateCostUsd(stepPricing, { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, cacheWriteTokens: result.usage.cacheWriteTokens });
         turnCost += stepCost;
         this.usage.addUsage({ ...result.usage, costUsd: stepCost });
         this.usage.setCumulative({ contextTokens: result.usage.inputTokens + result.usage.cacheReadTokens + result.usage.cacheWriteTokens + result.usage.outputTokens });
@@ -275,6 +290,7 @@ export class NativeAdapter implements HarnessAdapter {
       else {
         status = 'failed';
         error = errorMessage(e);
+        if (this.fastMode) this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: error } });
         this.ctx.emit({ type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'error', text: error } });
       }
     } finally {
@@ -469,9 +485,23 @@ export class NativeAdapter implements HarnessAdapter {
     this.abort?.abort();
   }
 
+  private reportFastMode(): void {
+    const support = fastModeSupport(this.id, this.model ?? undefined, this.ctx.settings().providers);
+    this.ctx.updateMeta({ fastModeStatus: !this.fastMode ? { state: 'off' } : support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
+  }
+
+  async setFastMode(enabled: boolean): Promise<void> {
+    if (enabled && this.ctx.session().mission) throw new Error('Fast mode is unavailable for Missions.');
+    const support = fastModeSupport(this.id, this.model ?? undefined, this.ctx.settings().providers);
+    if (enabled && !support.supported) throw new Error(support.reason);
+    this.fastMode = enabled;
+    this.reportFastMode();
+  }
+
   async setModel(model: ModelRef): Promise<void> {
     this.model = model;
     this.ctx.updateMeta({ activeModel: model });
+    this.reportFastMode();
   }
 
   async setEffort(effort: EffortLevel): Promise<void> {
