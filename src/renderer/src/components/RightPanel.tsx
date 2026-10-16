@@ -15,6 +15,7 @@ import { GitSetup } from './GitSetup';
 import { McpTab } from './McpTab';
 import { DesktopTab } from './DesktopTab';
 import { KnowledgeTab } from './KnowledgeTab';
+import { ProcessesTab } from './ProcessesTab';
 import { Resizer, SplitResizer } from './Resizer';
 import { SessionUsage } from './SessionUsage';
 import { SubagentsTab } from './SubagentsTab';
@@ -40,7 +41,8 @@ const BOTTOM_TABS: { id: PanelBottomTab; label: string; icon: string }[] = [
   { id: 'mcp', label: 'MCP', icon: 'server' },
   { id: 'desktop', label: 'Desktop', icon: 'cpu' },
   { id: 'subagents', label: 'Subagents', icon: 'fork' },
-  { id: 'knowledge', label: 'Knowledge', icon: 'book' }
+  { id: 'knowledge', label: 'Knowledge', icon: 'book' },
+  { id: 'processes', label: 'Processes', icon: 'activity' }
 ];
 
 export function RightPanel({ session }: { session: SessionMeta }) {
@@ -67,6 +69,8 @@ export function RightPanel({ session }: { session: SessionMeta }) {
   // already-opened tabs lives in the store so leaving the chat view (which unmounts this panel) and
   // coming back does not blank the half's still-selected tab.
   const opened = useStore((s) => s.panelBottomOpened);
+  // Left-behind processes are flagged on the tab itself: the point is that they cannot go unnoticed.
+  const orphanedProcesses = useStore((s) => s.processSummary?.orphaned ?? 0);
   return (
     <aside className="panel">
       <div className="panel-section panel-top">
@@ -96,6 +100,11 @@ export function RightPanel({ session }: { session: SessionMeta }) {
           {BOTTOM_TABS.filter((t) => !session.mission || t.id !== 'subagents').map((t) => (
             <button key={t.id} type="button" className={`panel-tab ${bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
               <Icon name={t.icon} size={13} /> {t.label}
+              {t.id === 'processes' && orphanedProcesses > 0 && (
+                <span className="panel-tab-count warn" data-testid="processes-orphaned-count" title={`${orphanedProcesses} process${orphanedProcesses === 1 ? '' : 'es'} left behind`}>
+                  {orphanedProcesses}
+                </span>
+              )}
             </button>
           ))}
           <span className="spacer" />
@@ -105,6 +114,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
           {bottomTab === 'desktop' && opened.includes('desktop') && <DesktopTab session={session} />}
           {bottomTab === 'subagents' && opened.includes('subagents') && (session.mission ? <div className="pad muted">Managed specialists are in the Mission panel. Native subagent controls are unavailable here.</div> : <SubagentsTab session={session} />)}
           {bottomTab === 'knowledge' && opened.includes('knowledge') && <KnowledgeTab session={session} />}
+          {bottomTab === 'processes' && opened.includes('processes') && <ProcessesTab session={session} />}
         </div>
       </div>
       <Resizer target="panel" />

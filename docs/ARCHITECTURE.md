@@ -20,6 +20,9 @@ src/main
                   workspaces, verification, delivery and restart recovery (docs/MISSIONS.md)
   owned-windows-job.ts + terminal-process.ts   Windows Job Object supervisor that proves a process
                   tree has ended (resources/mission/windows-check-job.ps1)
+  process-tracker.ts + process-snapshot.ts + process-context.ts   the Processes panel: every process
+                  the app started (sampled tree under main, saved for the next run), who it works for, and ending it;
+                  the Windows table reader is resources/processes/windows-process-snapshot.ps1
   models/         provider clients and model discovery, with offline catalogs and pricing
   util/           fs and async helpers shared by the adapters (no Electron imports)
   session-manager.ts  sessions, transcripts, approvals, goals, worktrees
@@ -51,6 +54,7 @@ src/web           the browser shell at code.vocs.io/app (plain Vite build into r
 resources/pi      extensions loaded into pi at spawn time: approvals, tools, subagents, the MCP bridge and,
                   for Mission-managed sessions only, vocs-code-mission.ts
 resources/mission the Windows Job Object helper (windows-check-job.ps1) shared by Mission checks and owned processes
+resources/processes the read-only Windows process-table reader (Toolhelp snapshot) behind the Processes panel
 tests             unit + format + review-fixes run offline; smoke and e2e are opt-in
 ```
 
@@ -155,6 +159,7 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - Split view: panes are views, not sessions. `store.layout` names a session per pane; transcripts, drafts, streaming and the agent process stay keyed by session, so a session on screen twice, or a pane that starts a process, cannot exist. `activeId` is always the active pane's session (a store subscription enforces it), which is how the global panels — Changes, Files, Git, Goal, Usage, Terminal — follow the active pane without knowing panes exist. Window-wide keys (Ctrl+F, terminal-to-composer inserts, composer focus) act on the active pane only. A split is remembered in the renderer's `localStorage`; a single pane leaves nothing behind, so the one-pane boot is unchanged.
 - The terminal lives in the main process; the renderer re-attaches to snapshots and never owns PTY lifetime.
 - Local images in assistant Markdown resolve against that session's checkout (`cwd`, not the main project root or renderer URL). Sanitized HTML carries inert references; the desktop loads bounded image bytes through the existing session-scoped `fs:readImage` handler, which also rejects symlink escapes. Never loosen the Markdown URI allowlist or CSP to expose filesystem paths. Missing, oversized and denied images show an unavailable caption; web Markdown continues to omit images.
+- Every process the app starts is tracked for the Processes panel without the spawning code knowing about it. `SessionManager` wraps each adapter in `ownedAdapter`, so a ChildProcess created during any adapter call (an SDK's CLI, MCP servers, tool shells) is claimed for that session through Node's `child_process` diagnostics channel; terminals come from `TerminalManager.activity()`; descendants inherit the owner. An app-wide process that a session's call may start lazily must be spawned under `withProcessOwner({ label })` (as the shared GitNexus server and Vesta are), or it is attributed to whichever session asked first. Processes are named by PID *and* creation time everywhere; ending one re-checks a fresh sample, and the panel is desktop-only (not a remote channel).
 - API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo.
 - Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.
 - Sessions must resume after restart for every harness; keep that path working when touching persistence.

@@ -7,6 +7,7 @@
 import type { ChildProcess } from 'node:child_process';
 import net from 'node:net';
 import { killTree, spawnTool } from '../harness/spawn';
+import { withProcessOwner } from '../process-context';
 
 export interface SharedGitnexusOptions {
   /** `gitnexus`, or a resolved absolute path. */
@@ -88,7 +89,8 @@ export class SharedGitnexusServer {
     let child: ChildProcess;
     try {
       // `gitnexus` on PATH is an npm `.cmd` shim on Windows; a bare spawn of one throws EINVAL.
-      child = spawnTool(this.opts.command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: process.env });
+      // App-wide, even when a session's start is what first asks for it.
+      child = withProcessOwner({ label: 'GitNexus server' }, () => spawnTool(this.opts.command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: process.env }));
     } catch (e) {
       this.opts.log?.('warn', `gitnexus shared: could not start (${e instanceof Error ? e.message : String(e)})`);
       return null;
