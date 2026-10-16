@@ -192,6 +192,9 @@ Beyond the ordinary regression test, these areas carry a required test shape:
 
 ```bash
 HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=codex,codex-exec,cursor,pi,claude,acp,native,native-tools npx vitest run tests/smoke.live.test.ts
+# Fast opt-in, on a model this account's runtime actually advertises (premium usage).
+HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=codex,codex-exec,pi HARNESS_SMOKE_MODEL=gpt-6-astra HARNESS_SMOKE_FAST_MODE=1 npx vitest run tests/smoke.live.test.ts
+HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=claude HARNESS_SMOKE_MODEL=claude-opus-5 HARNESS_SMOKE_FAST_MODE=1 npx vitest run tests/smoke.live.test.ts
 # ACP against a different agent preset (dsh is the default)
 HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=acp HARNESS_SMOKE_ACP_AGENT=claude-agent-acp npx vitest run tests/smoke.live.test.ts
 HARNESS_SMOKE=1 HARNESS_SMOKE_RESUME=1 HARNESS_SMOKE_ONLY=codex,pi npx vitest run tests/smoke.live.test.ts  # resume round-trips (two turns per harness)
@@ -204,6 +207,14 @@ require an exact successful response, one completed turn, a final idle status, a
 outcome; requested but unavailable harnesses fail loudly instead of reporting a green skipped run.
 The live suites need the corresponding runtime installed and logged in, and they spend real API
 credit. If the runtime is unavailable, leave the PR open and explain why verification is incomplete.
+
+`HARNESS_SMOKE_MODEL` overrides the model without editing the user's CLI configuration; use an
+account-advertised id. `HARNESS_SMOKE_FAST_MODE=1` explicitly requests premium speed and refuses
+an observed standard fallback or unavailable state. `requested` is accepted only where the runtime
+cannot report the actual served tier, not treated as proof of activation. Provider/account failures
+stay failures, including Claude organizations without Fast permission. Offline Fast coverage lives
+in `session-fast-mode`, `fast-mode-adapters`, `pi-fast-mode`, `fast-mode-ui` and the registered
+handler tests; `e2e.models` drives both user controls and persistence without spending credit.
 
 The Mission demonstrations (spec §22.5) have their own live driver. It runs a real Pi runtime with
 no mocks, retains its artifacts outside the checkout, and never retries automatically:

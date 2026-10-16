@@ -253,6 +253,7 @@ describe('managed Mission adapter boundaries', () => {
     expect([file, argv]).toEqual(['mission-adapter-supervisor-fixture', []]);
     expect(options).toEqual({ cwd: h.root, env: expect.any(Object) });
     expect(args).toContain('--no-extensions');
+    expect(options.env.VOCS_CODE_FAST_MODE).toBe('0');
     expect(args.filter((value: string) => value.endsWith('.ts')).map((value: string) => path.basename(value))).toEqual(['vocs-code-mission.ts', 'vocs-code-approvals.ts', 'vocs-code-tools.ts', 'vocs-code-mcp.ts']);
     expect(args).toContain('PROJECT_INSTRUCTIONS_PRESERVED');
     expect(args).not.toContain('--no-context-files');

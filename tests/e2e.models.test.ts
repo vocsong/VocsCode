@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { ProviderConfig, SessionMeta } from '../src/shared/types';
+import { FAST_MODE_COST_WARNING } from '../src/shared/fast-mode';
 import { openNewSession, pickModel, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -63,8 +64,9 @@ async function launch(userData: string): Promise<Page> {
   env.CLAUDE_CONFIG_DIR = path.join(userData, 'claude');
   // requestSingleInstanceLock() runs before VOCS_CODE_USER_DATA is applied, so a run started while
   // the app is open would exit silently; --user-data-dir is a Chromium switch and lands earlier.
-  const args = [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`];
-  const app = await electron.launch({ executablePath: require('electron') as string, args, env, timeout: 60_000 });
+  const packaged = process.env.HARNESS_E2E_EXE;
+  const args = [...(packaged ? [] : [path.join(root, 'out', 'main', 'index.js')]), `--user-data-dir=${userData}`];
+  const app = await electron.launch({ executablePath: packaged || (require('electron') as string), args, env, timeout: 60_000 });
   apps.push(app);
   const win: Page = await app.firstWindow();
   await win.waitForSelector('.brand', { timeout: 60_000 });
@@ -72,6 +74,69 @@ async function launch(userData: string): Promise<Page> {
 }
 
 describe.runIf(enabled)('model picker before the first message', () => {
+  it('creates a Fast request and changes it in the message header without claiming an effective fast tier', async () => {
+    const tmp = path.join(os.tmpdir(), `vocs-code-fast-mode-${Date.now()}`);
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    // Explicit catalog and no key: this covers controls and persistence, never a paid turn.
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+      defaultHarness: 'native',
+      defaultEffort: 'high',
+      defaultModelByHarness: { native: { provider: 'openai', model: 'gpt-5.4' } },
+      providers: [{ id: 'openai', enabled: true, hasApiKey: false, models: [
+        { provider: 'openai', id: 'gpt-5.4', displayName: 'GPT 5.4' },
+        { provider: 'openai', id: 'gpt-4.1', displayName: 'GPT 4.1' }
+      ] }]
+    }), 'utf8');
+
+    const win = await launch(userData);
+    await openNewSession(win);
+    await pickModel(win, 'openai/gpt-5.4');
+    const creationToggle = win.getByRole('checkbox', { name: 'Fast mode', exact: true });
+    expect(await creationToggle.isChecked()).toBe(false);
+    expect(await win.getByText(FAST_MODE_COST_WARNING, { exact: true }).isVisible()).toBe(true);
+    await creationToggle.locator('..').click();
+    expect(await creationToggle.isChecked()).toBe(true);
+    await pickModel(win, 'openai/gpt-4.1');
+    expect(await creationToggle.isDisabled()).toBe(true);
+    expect(await creationToggle.isChecked()).toBe(false);
+    await pickModel(win, 'openai/gpt-5.4');
+    expect(await creationToggle.isChecked()).toBe(false);
+    await creationToggle.locator('..').click();
+    expect(await creationToggle.isChecked()).toBe(true);
+    await win.getByRole('button', { name: /Start session/ }).click();
+
+    const toggle = win.getByRole('switch', { name: 'Request Fast mode' });
+    await toggle.waitFor({ timeout: 60_000 });
+    expect(await toggle.getAttribute('aria-checked')).toBe('true');
+    expect(await toggle.innerText()).toContain('requested');
+    const saved = async () => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
+    await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
+    expect((await saved())[0].config.effort).toBe('high');
+
+    await toggle.click();
+    await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('false');
+    expect(await toggle.innerText()).toContain('off');
+    await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(false);
+    await toggle.click();
+    const confirm = win.getByRole('button', { name: 'Enable Fast mode', exact: true });
+    await confirm.waitFor();
+    expect(await win.getByText(FAST_MODE_COST_WARNING, { exact: true }).isVisible()).toBe(true);
+    expect(await toggle.getAttribute('aria-checked')).toBe('false');
+    await confirm.click();
+    await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('true');
+    expect(await toggle.innerText()).toContain('requested');
+    await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
+    const stored = await saved();
+    expect(stored).toHaveLength(1);
+    expect(stored[0].config.effort).toBe('high');
+    expect(stored[0].status).toBe('idle');
+    expect(stored[0].usage.turns).toBe(0);
+    expect(await win.locator('.transcript .item').count()).toBe(0);
+  }, 180_000);
+
   it('lists models on a session whose harness has not been started', async () => {
     const tmp = path.join(os.tmpdir(), `vocs-code-models-${Date.now()}`);
     const userData = path.join(tmp, 'userData');

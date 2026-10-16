@@ -50,6 +50,9 @@ function buildRenderer(fileLinks: boolean, web: boolean): RendererObject {
     image({ href, title, text }) {
       // A remote page must not fetch images from arbitrary hosts; drop them entirely.
       if (web) return '';
+      // Transcript images are inert until the assistant resolves them in its own workspace.
+      // Never put local paths (or arbitrary URL schemes) into a browser image request.
+      if (fileLinks) return `<span data-local-image="${escapeHtml(href ?? '')}" data-image-alt="${escapeHtml(text)}">${escapeHtml(text || 'Image')} (image unavailable)</span>`;
       return `<img src="${escapeHtml(href ?? '')}" alt="${escapeHtml(text)}"${title ? ` title="${escapeHtml(title)}"` : ''}>`;
     }
   };
@@ -101,7 +104,7 @@ export function renderMarkdown(md: string, opts: MarkdownOptions = {}): string {
     // Attributes the narrowed ALLOWED_URI_REGEXP would otherwise treat as URI-valued and drop:
     // none of the three is a URI, so they need the URI check waived by name.
     ADD_URI_SAFE_ATTR: ['tabindex', 'target', 'rel'],
-    FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'input'],
+    FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'input', ...(web ? ['img', 'image', 'feimage'] : [])],
     ALLOWED_URI_REGEXP: /^https?:\/\//i
   });
   if (key !== undefined) {

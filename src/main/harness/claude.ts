@@ -20,6 +20,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
+import { fastModeSupport } from '../../shared/fast-mode';
 import { z } from 'zod';
 import { PiMcpConnection } from '../../../resources/pi/mcp-client';
 import { isMissionCoordinationTool, MISSION_SERVER_ID, missionToolDenial, missionCommandDenial, missionToolSubset } from '../../../resources/pi/vocs-code-mission';
@@ -201,6 +202,8 @@ function counterDelta(previous: number, current: number): number {
 export class ClaudeAdapter implements HarnessAdapter {
   readonly id = 'claude' as const;
   private q: Query | null = null;
+  private fastMode = false;
+  private fastModeModel: ModelRef | undefined;
   private input = new AsyncQueue<SDKUserMessage>();
   private abort = new AbortController();
   private pump: Promise<void> | null = null;
@@ -302,6 +305,8 @@ export class ClaudeAdapter implements HarnessAdapter {
       env,
       abortController: this.abort,
       settingSources: s.claude.settingSources,
+      // Flag-tier settings are an explicit SDK opt-in; never inherit a paid user preference.
+      settings: { fastMode: this.fastMode && fastModeSupport(this.id, this.fastModeModel, s.providers).supported },
       systemPrompt: append
         ? { type: 'preset', preset: 'claude_code', append }
         : { type: 'preset', preset: 'claude_code' },
@@ -334,6 +339,11 @@ export class ClaudeAdapter implements HarnessAdapter {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    const meta = this.ctx.session();
+    this.fastModeModel = meta.config.model ?? meta.activeModel;
+    this.fastMode = meta.config.fastMode === true && !meta.mission;
+    const support = fastModeSupport(this.id, this.fastModeModel, this.ctx.settings().providers);
+    this.ctx.updateMeta({ fastModeStatus: !this.fastMode ? { state: 'off' } : support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
     const options = await this.buildOptions();
     // `strictMcpConfig` stays unset on purpose: the user's own ~/.claude.json and plugin servers
     // must keep working alongside the ones this app injects. With 'project' in settingSources
@@ -402,6 +412,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       this.missionReady = false;
       this.missionStreamEnded = true;
       this.compactionWaiter?.reject(e instanceof Error ? e : new Error(errorMessage(e)));
+      if (this.fastMode) this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: errorMessage(e) } });
       this.ctx.emit({ type: 'error', message: `Claude harness stopped: ${errorMessage(e)}`, fatal: true });
       this.ctx.emit({ type: 'status', status: 'error', detail: errorMessage(e) });
     });
@@ -780,6 +791,15 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   private handle(msg: SDKMessage, q: Query): void {
+    // State is reported on init, status and result messages. A request is not proof of activation.
+    const fast = msg as { fast_mode_state?: string; fast_mode_disabled_reason?: string; parent_tool_use_id?: string | null };
+    if (!fast.parent_tool_use_id && this.fastMode && (fast.fast_mode_state || fast.fast_mode_disabled_reason)) {
+      const reason = fast.fast_mode_disabled_reason;
+      this.ctx.updateMeta({ fastModeStatus: {
+        state: fast.fast_mode_state === 'cooldown' ? 'cooldown' : reason ? reason === 'pending' ? 'requested' : 'unavailable' : fast.fast_mode_state === 'on' ? 'on' : 'off',
+        ...(reason ? { detail: reason } : {})
+      } });
+    }
     switch (msg.type) {
       case 'system': {
         const subtype = (msg as { subtype?: string }).subtype;
@@ -951,6 +971,11 @@ export class ClaudeAdapter implements HarnessAdapter {
         const turnCost = turnUsage?.costUsd ?? 0;
         const turnMsg = msg as { is_error?: boolean; terminal_reason?: string };
         const isError = turnMsg.is_error || msg.subtype !== 'success';
+        const errors = msg as { result?: string; errors?: string[]; fast_mode_state?: string; fast_mode_disabled_reason?: string };
+        const detail = [errors.result, ...(errors.errors ?? [])].filter(Boolean).join('; ');
+        if (this.fastMode && isError && !errors.fast_mode_state && !errors.fast_mode_disabled_reason && /fast.?mode|service.?tier|fast.*speed|rate.?limit/i.test(detail)) {
+          this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail } });
+        }
         const interrupted = turnMsg.terminal_reason === 'aborted_streaming' || turnMsg.terminal_reason === 'aborted_tools';
         const status = interrupted ? 'interrupted' : isError ? 'failed' : 'completed';
         // The turn is as long as the app watched it, the way every other harness reports it and the
@@ -1058,6 +1083,10 @@ export class ClaudeAdapter implements HarnessAdapter {
       priority: input.mode === 'steer' ? 'now' : input.mode === 'queue' ? 'next' : undefined
     } as unknown as SDKUserMessage;
     if (!this._busy) {
+      if (this.fastMode) {
+        const support = fastModeSupport(this.id, this.fastModeModel, this.ctx.settings().providers);
+        this.ctx.updateMeta({ fastModeStatus: support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
+      }
       this._busy = true;
       this.usage.beginTurn();
       this.turnStartedAt = Date.now();
@@ -1074,6 +1103,16 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
   }
 
+  async setFastMode(enabled: boolean): Promise<void> {
+    if (enabled && this.ctx.session().mission) throw new Error('Fast mode is unavailable for Missions.');
+    const support = fastModeSupport(this.id, this.fastModeModel, this.ctx.settings().providers);
+    if (enabled && !support.supported) throw new Error(support.reason);
+    if (!this.q || typeof this.q.applyFlagSettings !== 'function') throw new Error('This Claude runtime cannot change Fast mode.');
+    await this.q.applyFlagSettings({ fastMode: enabled });
+    this.fastMode = enabled;
+    this.ctx.updateMeta({ fastModeStatus: { state: enabled ? 'requested' : 'off' } });
+  }
+
   async setModel(model: ModelRef): Promise<void> {
     if (this.ctx.session().mission) throw new Error('Mission presets are fixed for the attempt.');
     // The SDK process keeps one endpoint for its lifetime; a model from another provider would be
@@ -1081,8 +1120,13 @@ export class ClaudeAdapter implements HarnessAdapter {
     if (this.providerId && model.provider !== this.providerId) {
       throw new Error(`This session runs on the ${this.providerId} endpoint. Start a new session to use models from ${model.provider}.`);
     }
+    // Remove a paid flag before moving to an unsupported model, even if the account would ignore it.
+    const support = fastModeSupport(this.id, model, this.ctx.settings().providers);
+    if (this.fastMode && !support.supported) await this.q?.applyFlagSettings({ fastMode: false });
     await this.q?.setModel(model.model);
-    this.ctx.updateMeta({ activeModel: model });
+    this.fastModeModel = model;
+    if (this.fastMode && support.supported) await this.q?.applyFlagSettings({ fastMode: true });
+    this.ctx.updateMeta({ activeModel: model, fastModeStatus: !this.fastMode ? { state: 'off' } : support.supported ? { state: 'requested' } : { state: 'unavailable', detail: support.reason } });
   }
 
   async setEffort(effort: EffortLevel): Promise<void> {

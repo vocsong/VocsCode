@@ -56,7 +56,7 @@ export interface HarnessContext {
   requestApproval(draft: ApprovalDraft): Promise<ApprovalDecision>;
   updateRef(patch: Partial<HarnessRef>): void;
   updateMeta(
-    patch: Partial<Pick<SessionMeta, 'activeModel' | 'activeEffort' | 'title' | 'queued' | 'statusDetail' | 'harnessCommands'>>
+    patch: Partial<Pick<SessionMeta, 'activeModel' | 'activeEffort' | 'fastModeStatus' | 'title' | 'queued' | 'statusDetail' | 'harnessCommands'>>
   ): void;
   log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void;
   readJson<T>(name: string): Promise<T | null>;
@@ -97,6 +97,8 @@ export interface HarnessAdapter {
   interrupt(): Promise<void>;
   setModel(model: ModelRef): Promise<void>;
   setEffort(effort: EffortLevel): Promise<void>;
+  /** Changes the next request's premium speed preference; callers must wait for an idle runtime. */
+  setFastMode?(enabled: boolean): Promise<void>;
   setPermissionMode(mode: PermissionMode): Promise<void>;
   /** False means the adapter accepted the request but had too little context to reduce. */
   compact?(): Promise<boolean | void>;
