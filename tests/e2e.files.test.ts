@@ -7,10 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
-import { seedSettings } from './e2e-ui';
+import { isolatedEnv, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -18,11 +18,66 @@ const require = createRequire(import.meta.url);
 const shots = path.join(root, 'tests', 'artifacts');
 let app: ElectronApplication | null = null;
 
-afterAll(async () => {
+afterEach(async () => {
   await app?.close().catch(() => undefined);
+  app = null;
 });
 
 describe.runIf(enabled)('file mentions open in the Files panel', () => {
+  it('decodes inline Markdown screenshots from the session checkout without broken-image fallbacks', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-inline-images-'));
+    const userData = path.join(tmp, 'profile');
+    const project = path.join(tmp, 'project');
+    const checkout = path.join(tmp, 'checkout');
+    const imageDir = path.join(checkout, 'tests', 'artifacts');
+    await fs.mkdir(imageDir, { recursive: true });
+    await fs.mkdir(project);
+    await fs.mkdir(userData);
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    const imagePath = path.join(imageDir, 'shot with spaces.png');
+    await fs.writeFile(imagePath, Buffer.from(png, 'base64'));
+    await fs.writeFile(path.join(tmp, 'outside.png'), Buffer.from(png, 'base64'));
+    await fs.writeFile(path.join(checkout, '.env'), 'DO_NOT_RENDER_THIS_SECRET');
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    const sid = 's_inline_images';
+    const meta: SessionMeta = {
+      id: sid, title: 'Inline screenshots', createdAt: 1, updatedAt: 1,
+      config: { harness: 'native', projectRoot: project, permissionMode: 'ask' },
+      cwd: checkout, status: 'idle', harnessRef: {}, queued: 0,
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
+    };
+    const text = [
+      '**Relative screenshot**', '![Relative screenshot](tests/artifacts/shot%20with%20spaces.png)',
+      '**Absolute screenshot**', `![Absolute screenshot](<${imagePath.replace(/\\/g, '/')}>)`,
+      '![Missing screenshot](tests/artifacts/missing.png)',
+      '![Outside screenshot](../outside.png)',
+      '![Not an image](.env)',
+    ].join('\n\n');
+    const item: TranscriptItem = { id: 'answer', kind: 'assistant', ts: 1, text };
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([meta]));
+    await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
+    await fs.writeFile(path.join(userData, 'sessions', sid, 'transcript.jsonl'), JSON.stringify(item) + '\n');
+    const packaged = process.env.HARNESS_E2E_EXE;
+    app = await electron.launch({
+      executablePath: packaged || (require('electron') as string),
+      args: [...(packaged ? [] : [path.join(root, 'out', 'main', 'index.js')]), `--user-data-dir=${userData}`],
+      env: isolatedEnv(userData), timeout: 60_000,
+    });
+    const win = await app.firstWindow();
+    for (const name of ['Relative screenshot', 'Absolute screenshot']) {
+      const image = win.getByRole('img', { name, exact: true });
+      await image.waitFor({ timeout: 15_000 });
+      await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 15_000 }).toBe(1);
+      expect(await image.getAttribute('src')).toBe(`data:image/png;base64,${png}`);
+    }
+    const message = win.locator('[data-item-id="answer"]');
+    expect(await message.getByRole('img').count()).toBe(2);
+    expect(await message.innerText()).not.toContain('DO_NOT_RENDER_THIS_SECRET');
+    await expect.poll(() => message.innerText(), { timeout: 15_000 }).toMatch(/unavailable/i);
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'files-03-inline-images.png') });
+  }, 120_000);
+
   it('clicking a file path in a reply previews that file', async () => {
     const tmp = path.join(os.tmpdir(), `vocs-code-files-${Date.now()}`);
     const userData = path.join(tmp, 'userData');

@@ -8,6 +8,7 @@ import { useStore } from '../store';
 import { MISSION_MANAGED_REASON } from '../missions';
 import { chunkKey, estimateChunkHeight, windowRange, type RenderChunk } from '../transcript-window';
 import { useStreamingMarkdown } from '../use-streaming-markdown';
+import { useMarkdownImages } from '../use-markdown-images';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
 import { DiffView } from './DiffView';
 import { ImageLightbox, type LightboxImage } from './ImageLightbox';
@@ -446,7 +447,7 @@ function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, s
     case 'user':
       return <UserMessage item={item} sessionId={sessionId} canEdit={canEdit} onImageExpand={onImageExpand} />;
     case 'assistant':
-      return <AssistantMessage item={item} showThinking={showThinking} />;
+      return <AssistantMessage item={item} sessionId={sessionId} showThinking={showThinking} />;
     case 'tool':
       return <ToolCard item={item} sessionId={sessionId} />;
     case 'approval':
@@ -580,9 +581,11 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
   );
 }
 
-function AssistantMessage({ item, showThinking }: { item: Extract<TranscriptItem, { kind: 'assistant' }>; showThinking: boolean }) {
+function AssistantMessage({ item, sessionId, showThinking }: { item: Extract<TranscriptItem, { kind: 'assistant' }>; sessionId: string; showThinking: boolean }) {
   const [open, setOpen] = useState(false);
   const html = useStreamingMarkdown(item.text, item.streaming);
+  const cwd = useStore((s) => s.sessions.find((session) => session.id === sessionId)?.cwd);
+  const body = useMarkdownImages(html, sessionId, cwd);
   // With thinking hidden a thinking-only item has nothing left to show; rendering it anyway would
   // leave an empty row in the transcript.
   if (!item.text && !(item.thinking && showThinking)) return null;
@@ -597,7 +600,7 @@ function AssistantMessage({ item, showThinking }: { item: Extract<TranscriptItem
           {(open || onlyThinking) && <div className="thinking-body">{item.thinking}</div>}
         </div>
       )}
-      {item.text && <div className={`md ${item.streaming ? 'streaming' : ''}`} dangerouslySetInnerHTML={{ __html: html }} />}
+      {item.text && <div key={`${sessionId}:${cwd}`} ref={body} className={`md ${item.streaming ? 'streaming' : ''}`} dangerouslySetInnerHTML={{ __html: html }} />}
       {item.phase === 'plan' && <Badge tone="purple">plan</Badge>}
     </div>
   );
