@@ -32,6 +32,7 @@ import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { modelName } from '../shared/model-names';
 import { skillInstalled } from './skills';
 import { createAdapter } from './harness/registry';
+import { ownedAdapter } from './process-context';
 import { renderForkContext } from './fork-context';
 import { promptWithFiles, retainMessageFiles } from './message-files';
 import { builtinServerIds, resolveForSession } from './mcp';
@@ -1049,7 +1050,9 @@ export class SessionManager {
       : () => this.runtimeSeq.get(id) === seq && this.get(id)?.mission?.generation === generation;
     const live = () => current() && !active.tearingDown;
     const ctx = this.buildContext(meta, id, current);
-    const adapter = createAdapter(meta.config.harness, ctx);
+    // Every adapter call runs as this session, so whatever the harness spawns (its CLI, MCP servers,
+    // tool shells) is attributed to it in the Processes panel.
+    const adapter = ownedAdapter(createAdapter(meta.config.harness, ctx), { sessionId: id });
     active = {
       adapter,
       turnPending: false,

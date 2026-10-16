@@ -1,6 +1,6 @@
 /** Binds the transport-agnostic handler registry (handlers.ts) to Electron's ipcMain and pushes events to the renderer window. */
 import { BrowserWindow, app, dialog, ipcMain, shell } from 'electron';
-import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry, type MissionHandlerService } from './handlers';
+import { createHandlerRegistry, type DesktopBridge, type HandlerDeps, type HandlerRegistry, type MissionHandlerService } from './handlers';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
 import type { RuntimeResolver } from './runtime';
@@ -38,6 +38,8 @@ export interface IpcDeps {
   remoteMirror?: { sync(): void; disable(): void };
   /** In-app auto-update (issue #198); present only in packaged builds. */
   updater?: UpdateService;
+  /** Every process the app started (the Processes panel), wired in index.ts. */
+  processes?: HandlerDeps['processes'];
   /** Extra push sink for non-window clients (the localhost web server today, the relay later). */
   broadcast?: (channel: string, payload: unknown) => void;
   getWindow: () => BrowserWindow | null;
@@ -127,6 +129,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     desktopFocus: deps.desktopFocus,
     remoteMirror: deps.remoteMirror,
     updater: deps.updater,
+    processes: deps.processes,
     log: deps.log,
     push: (channel, payload) => {
       pushToRenderer(deps.getWindow(), channel, payload);

@@ -1,6 +1,7 @@
 /** Electron entry point: app lifecycle, window creation, logging, and the headless debug hooks documented in the README. */
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, screen, shell } from 'electron';
@@ -27,6 +28,8 @@ import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
 import { MissionRuntime } from './mission/runtime';
 import { ordinaryProcessOwnership as ordinaryOwnershipEnabled, ownedWindowsJobProbe } from './owned-windows-job';
+import { createProcessSource } from './process-snapshot';
+import { ProcessTracker } from './process-tracker';
 import { SettingsStore } from './settings';
 import { AppInstructions } from './app-instructions';
 import { SessionStore } from './store';
@@ -332,6 +335,24 @@ async function main(): Promise<void> {
   });
   sessionsChangedHooks.push(() => desktopFocus.reconcile());
 
+  // The Processes panel: every process the app starts, through any session, terminal or tool. It
+  // observes spawns from here on, before a session, server or shell can start one, and saves what
+  // it tracks so the next launch can find anything this run leaves behind.
+  const processes = new ProcessTracker({
+    source: createProcessSource(runtime.resource('processes', 'windows-process-snapshot.ps1')),
+    rootPid: process.pid,
+    internalPids: () => app.getAppMetrics().map((metric) => metric.pid),
+    terminalRoots: () => {
+      const titles = new Map((terminals?.list() ?? []).map((t) => [t.id, t.title]));
+      return (terminals?.activity() ?? []).map((a) => ({ pid: a.pid, sessionId: a.sessionId, terminalId: a.terminalId, title: titles.get(a.terminalId) }));
+    },
+    registryFile: path.join(userData, 'processes.json'),
+    cpuCount: os.availableParallelism(),
+    onSummary: (summary) => pushAll(PUSH_CHANNELS.processSummary, summary),
+    log
+  });
+  processes.start();
+
   // In-app auto-update (issue #198): packaged builds only — never in dev, and opt-out for e2e runs.
   // The startup check is deferred a beat so the first paint and git reads do not share its network.
   if (app.isPackaged && !process.env.VOCS_CODE_UPDATER_DISABLE) {
@@ -420,6 +441,7 @@ async function main(): Promise<void> {
     desktopFocus,
     remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },
     updater: updater ?? undefined,
+    processes,
     broadcast: (channel, payload) => {
       webServer?.broadcast(channel, payload);
     },
@@ -525,7 +547,8 @@ async function main(): Promise<void> {
       safe('search close', search?.close()),
       safe('web server stop', webServer?.stop()),
       safe('vesta shutdown', registry.shutdown()),
-      safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop()))
+      safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop())),
+      safe('process tracker close', processes.close())
     ]);
     const cap = new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 4000));
     void Promise.race([shutdown.then(() => false), cap]).then((timedOut) => {

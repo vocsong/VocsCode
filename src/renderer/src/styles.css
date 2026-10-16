@@ -7265,3 +7265,126 @@ body.resizing {
   align-items: center;
   gap: 6px;
 }
+
+/* Processes tab: every process the app started, grouped by who it works for. */
+.panel-tab-count {
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.panel-tab-count.warn {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.processes {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.processes .panel-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--fg-muted);
+}
+.processes .callout {
+  margin: 8px;
+}
+.process-group {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+.process-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  min-width: 0;
+}
+.process-group-orphaned .process-group-head {
+  background: var(--amber-soft);
+}
+.process-group-orphaned .process-group-head > .icon {
+  color: var(--amber);
+}
+.process-group-label {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.process-group-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.process-session-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.process-session-link:hover {
+  text-decoration: underline;
+}
+.process-group-detail {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.process-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 4px;
+}
+.process-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px 3px 8px;
+  min-width: 0;
+}
+.process-row:hover {
+  background: var(--bg-hover);
+}
+.process-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.process-name {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.process-meta {
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.process-stats {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.process-row .process-stats {
+  width: 48px;
+  text-align: right;
+}

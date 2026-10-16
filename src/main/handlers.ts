@@ -43,6 +43,7 @@ import { AppInstructions } from './app-instructions';
 import type { TerminalManager } from './terminal';
 import type { RemoteHost } from './remote/host';
 import type { DesktopFocusTracker } from './desktop-focus';
+import type { ProcessTracker } from './process-tracker';
 import { relayUrl, signInAvailable } from './remote/relay-url';
 import { transcriptPage } from '../shared/transcript-page';
 import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceImage } from './workspace-files';
@@ -116,6 +117,8 @@ export interface HandlerDeps {
   appInstructions?: AppInstructions;
   /** In-app auto-update (issue #198); absent in dev and other unpackaged runs. */
   updater?: UpdateService;
+  /** Every process the app started (the Processes panel); absent in tests that do not sample. */
+  processes?: Pick<ProcessTracker, 'list' | 'end'>;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Push an async event to the connected client (the window today, remote clients later). */
   push: (channel: string, payload: unknown) => void;
@@ -983,6 +986,15 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const cuaPreview = new CuaPreviewSession();
   handle('cua:status', () => cuaStatus(settings.get()));
   handle('cua:preview', () => cuaPreview.capture(settings.get()));
+
+  // The Processes panel. Ending is validated by the tracker against a fresh sample, so a stale row
+  // or a reused PID can never end a process the app did not start.
+  handle('processes:list', () => deps.processes?.list() ?? { sampledAt: Date.now(), processes: [], error: 'Process tracking is not running.' });
+  handle('processes:end', ({ targets }) => {
+    if (!deps.processes) return { ended: 0, failed: [] };
+    const valid = (Array.isArray(targets) ? targets : []).filter((t) => Number.isInteger(t?.pid) && t.pid > 0 && Number.isFinite(t?.startedAt));
+    return deps.processes.end(valid);
+  });
   // The built-in's "Test connection": a real MCP handshake against `cua-driver mcp`, the same
   // thing the user-server rows offer, so an install that lies about its tools is visible.
   handle('cua:test', async () => {

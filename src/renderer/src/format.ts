@@ -85,3 +85,22 @@ export function harnessTone(id: string): 'neutral' | 'green' | 'amber' | 'red' |
   };
   return tones[id] ?? 'neutral';
 }
+
+/** A byte count as `512 KB`, `48 MB` or `1.2 GB`. */
+export function fmtBytes(n: number | undefined): string {
+  if (!n || n < 0) return '0 MB';
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  if (n < 1024 ** 3) return `${Math.round(n / 1024 ** 2)} MB`;
+  return `${(n / 1024 ** 3).toFixed(1)} GB`;
+}
+
+/** How long something has been running, coarsely: `45s`, `12m`, `3h 5m`, `2d 4h`. */
+export function fmtUptime(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
