@@ -58,6 +58,8 @@ export class SessionStore {
         reset++;
       }
       s.queued = 0;
+      // A previous process's tier observation is never evidence for a resumed request.
+      if (s.fastModeStatus || s.config?.fastMode === true) s.fastModeStatus = { state: s.config?.fastMode === true ? 'requested' : 'off' };
     }
     this.log('info', `loaded ${this.sessions.length} session(s)${reset ? `; ${reset} were still running at the last shutdown and are now idle` : ''}`);
     return this.sessions;

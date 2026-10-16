@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { EffortLevel, ImageAttachment, ProviderConfig } from '../../../shared/types';
 import type { NativeToolDef } from './tools';
+import { fastModeSupport } from '../../../shared/fast-mode';
 
 /** Provider-neutral conversation history for the native harness. */
 export type NativeMessage =
@@ -32,6 +33,8 @@ export interface StepResult {
   toolCalls: { id: string; name: string; args: Record<string, unknown> }[];
   usage: StepUsage;
   stopReason: string;
+  /** Observed speed where reported; otherwise the requested tier for conservative cost estimates. */
+  fastMode?: boolean;
   /** Provider-native assistant content to replay verbatim (Anthropic thinking signatures). */
   rawContent?: unknown[];
 }
@@ -44,6 +47,9 @@ export interface StepParams {
   history: NativeMessage[];
   tools: NativeToolDef[];
   effort?: EffortLevel;
+  fastMode?: boolean;
+  /** Only called when the provider actually reports the speed used. */
+  onFastMode?: (fast: boolean, detail?: string) => void;
   signal: AbortSignal;
   /** Stable id for this conversation, forwarded to gateways that route or cache by session. */
   sessionId?: string;
@@ -116,7 +122,8 @@ export async function anthropicStep(p: StepParams): Promise<StepResult> {
   const client = new Anthropic({ apiKey: p.apiKey, baseURL: p.provider.baseUrl, maxRetries: 2, defaultHeaders: p.provider.headers });
   const tools: Anthropic.Tool[] = p.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters as Anthropic.Tool.InputSchema }));
   const adaptive = supportsAdaptiveThinking(p.model);
-  const body: Anthropic.MessageCreateParamsStreaming = {
+  const fast = p.fastMode === true && fastModeSupport('native', { provider: p.provider.id, model: p.model }, [p.provider]).supported;
+  const body: Anthropic.MessageCreateParamsStreaming & Record<string, unknown> = {
     model: p.model,
     max_tokens: adaptive ? 32_000 : 8192,
     system: [{ type: 'text', text: p.system, cache_control: { type: 'ephemeral' } }],
@@ -128,7 +135,9 @@ export async function anthropicStep(p: StepParams): Promise<StepResult> {
     (body as unknown as Record<string, unknown>).thinking = { type: 'adaptive', display: 'summarized' };
     if (p.effort && p.effort !== 'minimal') (body as unknown as Record<string, unknown>).output_config = { effort: p.effort };
   }
-  const stream = client.messages.stream(body, { signal: p.signal });
+  if (fast) body.speed = 'fast';
+  const beta = Object.entries(p.provider.headers ?? {}).find(([key]) => key.toLowerCase() === 'anthropic-beta')?.[1];
+  const stream = client.messages.stream(body, { signal: p.signal, ...(fast ? { headers: { 'anthropic-beta': [beta, 'fast-mode-2026-02-01'].filter(Boolean).join(',') } } : {}) });
   for await (const ev of stream) {
     if (ev.type === 'content_block_delta') {
       if (ev.delta.type === 'text_delta') p.onText(ev.delta.text);
@@ -136,6 +145,8 @@ export async function anthropicStep(p: StepParams): Promise<StepResult> {
     }
   }
   const msg = await stream.finalMessage();
+  const speed = (msg.usage as unknown as { speed?: string }).speed;
+  if (fast && speed) p.onFastMode?.(speed === 'fast', `Anthropic reported speed: ${speed}`);
   const result: StepResult = {
     text: '',
     reasoning: '',
@@ -148,6 +159,7 @@ export async function anthropicStep(p: StepParams): Promise<StepResult> {
       reasoningTokens: 0
     },
     stopReason: msg.stop_reason ?? 'end_turn',
+    fastMode: fast && (speed ? speed === 'fast' : true),
     rawContent: msg.content as unknown[]
   };
   for (const block of msg.content) {
@@ -216,11 +228,21 @@ export async function openaiStep(p: StepParams): Promise<StepResult> {
   // its own: folding it into `high` (75) silently drops the top tier the user asked for.
   if (isDeepSeek && p.provider.kind !== 'openrouter' && p.effort) body.reasoning_effort = p.effort === 'xhigh' ? 'high' : p.effort === 'minimal' ? 'low' : p.effort;
   if (p.provider.kind === 'openrouter') body.usage = { include: true };
+  const supported = fastModeSupport('native', { provider: p.provider.id, model: p.model }, [p.provider]).supported;
+  const fast = p.fastMode === true && supported;
+  // Omission defaults to auto, which can inherit a project's paid priority tier.
+  if (supported) body.service_tier = fast ? 'fast' : 'default';
 
   const stream = await client.chat.completions.create(body, { signal: p.signal });
-  const result: StepResult = { text: '', reasoning: '', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 }, stopReason: 'stop' };
+  const result: StepResult = { text: '', reasoning: '', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 }, stopReason: 'stop', fastMode: fast };
   const partialCalls = new Map<number, { id: string; name: string; args: string }>();
   for await (const chunk of stream) {
+    const tier = (chunk as unknown as { service_tier?: string | null }).service_tier;
+    // OpenAI documents that fast requests are acknowledged as priority in responses.
+    if (fast && tier) {
+      result.fastMode = tier === 'fast' || tier === 'priority';
+      p.onFastMode?.(result.fastMode, `OpenAI reported service tier: ${tier}`);
+    }
     const choice = chunk.choices?.[0];
     if (choice) {
       const delta = choice.delta as OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning_content?: string; reasoning?: string };

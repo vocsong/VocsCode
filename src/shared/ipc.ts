@@ -282,6 +282,7 @@ export interface IpcContract {
   'sessions:stop': [{ id: string }, void];
   'sessions:setModel': [{ id: string; model: ModelRef }, SessionMeta];
   'sessions:setEffort': [{ id: string; effort: EffortLevel }, SessionMeta];
+  'sessions:setFastMode': [{ id: string; enabled: boolean }, SessionMeta];
   'sessions:setPermissionMode': [{ id: string; mode: PermissionMode }, SessionMeta];
   'sessions:compact': [{ id: string }, { ok: boolean; detail?: string }];
   'sessions:clearTranscript': [{ id: string }, void];

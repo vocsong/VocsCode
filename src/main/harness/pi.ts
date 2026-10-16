@@ -14,10 +14,13 @@ import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext, MissionReadiness } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 import { MISSION_SERVER_ID } from '../../../resources/pi/vocs-code-mission';
+import { PI_FAST_MODE_COMMAND, PI_FAST_MODE_MARKER } from '../../../resources/pi/vocs-code-fast-mode';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { installPiAgentOverrides } from '../pi-agents';
 import { mergePiCatalog } from '../models/pi-catalog';
+import { estimateCostUsd } from '../models/static-models';
+import { fastModePricing } from './native/fast-mode-pricing';
 
 export const PI_APPROVAL_MARKER = 'VCODE_APPROVAL::';
 const PI_BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
@@ -204,6 +207,15 @@ export class PiAdapter implements HarnessAdapter {
   private extensionCapabilities = new Set<string>();
   private extensionFailure: string | null = null;
   private effortFile: string | null = null;
+  private fastModeRequested = false;
+  /** Only the nonce-bound extension's endpoint-checked runtime model can select Fast pricing. */
+  private fastModeEffectiveModel: ModelRef | undefined;
+  private streamFastModeModel: ModelRef | undefined;
+  /** Additive premium above Pi's standard-rate cumulative session cost, including earlier turns. */
+  private fastModeCostAdjustment = 0;
+  private readonly unknownFastCostReported = new Set<string>();
+  private fastModeRevision = 0;
+  private fastModeChange: { requestId: string; revision: number; enabled: boolean; ack: Deferred<void> } | null = null;
   private missionSecrets: string[] = [];
   /** Only the nonce-bound gate can report the active managed surface. Never the configured list. */
   private missionTools: string[] = [];
@@ -271,6 +283,10 @@ export class PiAdapter implements HarnessAdapter {
     const meta = this.ctx.session();
     const s = this.ctx.settings();
     const mission = meta.mission;
+    this.fastModeRequested = !mission && meta.config.fastMode === true;
+    this.fastModeRevision = 0;
+    this.fastModeChange = null;
+    this.ctx.updateMeta({ fastModeStatus: { state: this.fastModeRequested ? 'requested' : 'off' } });
     // A POSIX process group does not contain detached/setsid descendants. Refuse managed startup
     // until an equivalent ownership proof exists; ordinary Pi remains available everywhere.
     if (mission && process.platform !== 'win32') throw new Error('Managed Pi process-tree ownership is unverified on this platform.');
@@ -322,7 +338,7 @@ export class PiAdapter implements HarnessAdapter {
       this.missionSecrets = missionServers.flatMap((server) => Object.values(server.def.headers ?? {}).flatMap((value) => [value, value.replace(/^Bearer /, '')]));
       const args = ['--mode', 'rpc',
         ...(mission ? ['--no-extensions', '--no-approve', '-e', this.ctx.runtime.resource('pi', 'vocs-code-mission.ts')] : []),
-        '-e', ext, '-e', toolsExt, ...(!mission ? ['-e', subagentsExt] : []), '--session-dir', sessionDir];
+        '-e', ext, '-e', toolsExt, ...(!mission ? ['-e', this.ctx.runtime.resource('pi', 'vocs-code-fast-mode.ts'), '-e', subagentsExt] : []), '--session-dir', sessionDir];
       let mcpConfigFile: string | null = null;
       if (mcpServers.length) {
         args.push('-e', mcpExt);
@@ -354,6 +370,8 @@ export class PiAdapter implements HarnessAdapter {
       // Managed presets use Pi's actual thinking selection, never a catalog-driven payload override.
       await this.writeEffortConfig(mission ? undefined : intendedEffort, meta.config.model);
       const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE_SUBAGENT_DIR: path.join(sessionDir, 'subagents'), VOCS_CODE_PROJECT_ROOT: meta.config.projectRoot, VOCS_CODE: '1' };
+      // Explicit on every launch: resume and inherited parent env cannot restore stale Fast mode.
+      env.VOCS_CODE_FAST_MODE = this.fastModeRequested ? '1' : '0';
       // Never inherit another session's broker capability, mode or MCP config.
       delete env.VOCS_CODE_MISSION_POLICY;
       delete env.VOCS_CODE_MCP_EPHEMERAL;
@@ -421,6 +439,7 @@ export class PiAdapter implements HarnessAdapter {
       this._busy = false;
       for (const d of this.pending.values()) d.reject(new Error(`pi exited (${code})`));
       this.pending.clear();
+      this.fastModeChange?.ack.reject(new Error(`pi exited (${code})`));
       this.ctx.emit({ type: 'status', status: 'stopped', detail: `pi exited (${code})` });
     });
     child.on('error', (e) => { if (this.child === child) this.ctx.emit({ type: 'error', message: `pi failed to start: ${errorMessage(e)}`, fatal: true }); });
@@ -485,6 +504,7 @@ export class PiAdapter implements HarnessAdapter {
 
   private assertExtensionsReady(): void {
     const required = this.ctx.session().mission ? ['approvals', 'tools', 'mcp', 'mission'] : ['approvals', 'tools', 'subagents'];
+    if (this.fastModeRequested) required.push('fast-mode');
     const missing = required.filter((capability) => !this.extensionCapabilities.has(capability));
     if (this.extensionFailure || missing.length) {
       throw new Error(`Incompatible Pi runtime: Vocs Code requires working approvals and tool compatibility extensions (Pi 0.85.1 APIs). ${this.extensionFailure ?? `Missing readiness: ${missing.join(', ')}.`} Update Pi or disable conflicting extensions; no prompt was sent.`);
@@ -602,6 +622,8 @@ export class PiAdapter implements HarnessAdapter {
         if (msg?.role === 'assistant') {
           // Pi's streaming usage is cumulative for one assistant message, not the whole session.
           this.streamUsage = null;
+          const effective = this.fastModeRequested ? this.fastModeEffectiveModel : undefined;
+          this.streamFastModeModel = effective && (!msg.provider || msg.provider === effective.provider) && (!msg.model || msg.model === effective.model) ? effective : undefined;
           this.currentAssistant = { id: shortId('a_'), kind: 'assistant', ts: Date.now(), text: '', thinking: '', streaming: true, model: msg.model };
           this.ctx.emit({ type: 'item.upsert', item: { ...this.currentAssistant } });
         }
@@ -638,8 +660,9 @@ export class PiAdapter implements HarnessAdapter {
           return;
         }
         if (msg?.role === 'assistant') {
-          this.reportPiUsage(msg.usage);
+          this.reportPiUsage(msg.usage, true);
           this.streamUsage = null;
+          this.streamFastModeModel = undefined;
           this.lastStopReason = msg.stopReason ?? null;
           this.lastErrorMessage = msg.errorMessage ?? null;
         }
@@ -722,6 +745,10 @@ export class PiAdapter implements HarnessAdapter {
       }
       case 'extension_error': {
         const e = ev as { extensionPath?: string; error?: string };
+        if (e.extensionPath === `command:${PI_FAST_MODE_COMMAND}` || e.extensionPath && /vocs-code-fast-mode\.[cm]?[jt]s$/.test(e.extensionPath)) {
+          this.fastModeChange?.ack.reject(new Error(e.error ?? 'Pi Fast mode extension failed.'));
+          this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: 'Pi Fast mode extension failed.' } });
+        }
         if (!e.extensionPath || /vocs-code-(?:tools|approvals|subagents|mission|mcp)\.[cm]?[jt]s$/.test(e.extensionPath)) {
           this.extensionFailure = e.error ?? 'Required Pi extension failed.';
           this.extensionCapabilities.clear();
@@ -956,9 +983,29 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   /** Applies the latest per-assistant usage snapshot and publishes a throttled live session update. */
-  private reportPiUsage(raw: unknown): void {
+  private reportPiUsage(raw: unknown, final = false): void {
     const current = piStreamUsage(raw);
     if (!current) return;
+    // Price the completed request, not growing partial input (long-context rates can differ).
+    // Pi exposes no response tier; this is a requested-service estimate, not confirmed billing.
+    const model = final ? this.streamFastModeModel : undefined;
+    if (model) {
+      const pricing = model.provider === 'openai' || model.provider === 'anthropic'
+        ? fastModePricing(model.model, current.input + current.cacheRead + current.cacheWrite) : undefined;
+      // Pi does not expose cache TTL; Anthropic cache writes use the five-minute estimate.
+      if (pricing && (!current.cacheWrite || pricing.cacheWrite !== undefined)) {
+        const estimate = estimateCostUsd(pricing, { inputTokens: current.input, outputTokens: current.output, cacheReadTokens: current.cacheRead, cacheWriteTokens: current.cacheWrite });
+        const premium = Math.max(0, estimate - current.cost);
+        current.cost += premium;
+        this.fastModeCostAdjustment += premium;
+      } else {
+        const key = `${model.provider}/${model.model}`;
+        if (!this.unknownFastCostReported.has(key)) {
+          this.unknownFastCostReported.add(key);
+          this.info('Pi Fast pricing is unavailable for this model/context. Reported spend retains Pi\'s standard-rate estimate, excludes any unknown Fast premium, and is not the full bill. Check provider billing.', 'warn');
+        }
+      }
+    }
     const delta = piUsageDelta(this.streamUsage, current);
     this.streamUsage = current;
     if (!hasPiUsage(delta)) return;
@@ -1075,12 +1122,33 @@ export class PiAdapter implements HarnessAdapter {
       this.handleSubagentEvent(message.slice(PI_SUBAGENT_MARKER.length));
       return true;
     }
-    const marker = [PI_READY_MARKER, PI_EXTENSION_ERROR_MARKER, PI_TOOL_INPUT_MARKER].find((prefix) => message.startsWith(prefix));
+    const marker = [PI_READY_MARKER, PI_EXTENSION_ERROR_MARKER, PI_TOOL_INPUT_MARKER, PI_FAST_MODE_MARKER].find((prefix) => message.startsWith(prefix));
     if (!marker) return false;
     try {
       const payload = JSON.parse(message.slice(marker.length)) as Record<string, unknown>;
       if (!payload || payload.version !== 1 || !this.extensionNonce || payload.nonce !== this.extensionNonce) return true;
-      if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents' || payload.capability === 'mission' || payload.capability === 'mcp')) {
+      if (marker === PI_FAST_MODE_MARKER) {
+        const change = this.fastModeChange;
+        const acknowledged = !!change && payload.requestId === change.requestId && payload.revision === change.revision && payload.enabled === change.enabled;
+        const current = payload.revision === this.fastModeRevision && payload.enabled === this.fastModeRequested;
+        if ((!acknowledged && !current) || !['off', 'requested', 'unavailable', 'cooldown'].includes(String(payload.state)) ||
+            (payload.enabled === false) !== (payload.state === 'off')) return true;
+        if (acknowledged) {
+          this.fastModeRequested = change!.enabled;
+          this.fastModeRevision = change!.revision;
+          change!.ack.resolve();
+        }
+        const effective = payload.effectiveModel as Partial<ModelRef> | undefined;
+        this.fastModeEffectiveModel = effective && typeof effective.provider === 'string' && typeof effective.model === 'string'
+          ? { provider: effective.provider, model: effective.model } : undefined;
+        let detail = typeof payload.detail === 'string' ? payload.detail : undefined;
+        if (payload.enabled && this.fastModeEffectiveModel) {
+          const model = this.fastModeEffectiveModel;
+          const priced = (model.provider === 'openai' || model.provider === 'anthropic') && fastModePricing(model.model, 0);
+          detail = `${detail ?? ''} ${priced ? 'Completed-request costs estimate requested Fast rates, not confirmed billing; Anthropic cache writes assume five-minute TTL.' : 'Fast pricing is unavailable; Pi standard-rate estimates exclude any unknown premium. Check provider billing.'}`.trim();
+        }
+        this.ctx.updateMeta({ fastModeStatus: { state: payload.state as 'off' | 'requested' | 'unavailable' | 'cooldown', ...(detail ? { detail } : {}) } });
+      } else if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents' || payload.capability === 'mission' || payload.capability === 'mcp' || payload.capability === 'fast-mode')) {
         if (payload.ready === false) this.extensionCapabilities.delete(payload.capability);
         else this.extensionCapabilities.add(payload.capability);
         if (payload.capability === 'mission') {
@@ -1143,7 +1211,8 @@ export class PiAdapter implements HarnessAdapter {
         outputTokens: t.output,
         cacheReadTokens: t.cacheRead,
         cacheWriteTokens: t.cacheWrite,
-        costUsd: stats.cost,
+        // Pi's stats remain standard-rate. Keep all locally estimated premiums across toggles.
+        costUsd: typeof stats.cost === 'number' ? stats.cost + this.fastModeCostAdjustment : undefined,
         contextTokens: stats.contextUsage?.tokens,
         contextWindow: stats.contextUsage?.contextWindow
       });
@@ -1247,6 +1316,32 @@ export class PiAdapter implements HarnessAdapter {
     await this.writeEffortConfig(this.ctx.effort(), model);
   }
 
+  async setFastMode(enabled: boolean): Promise<void> {
+    if (typeof enabled !== 'boolean') throw new Error('Pi Fast mode must be a boolean.');
+    if (this.ctx.session().mission) throw new Error('Mission presets are fixed for the attempt.');
+    if (this._busy || this.fastModeChange) throw new Error('Pi Fast mode can only change while idle.');
+    if (!this.child || this.exited) throw new Error('pi process is not running');
+    if (!this.extensionCapabilities.has('fast-mode')) throw new Error('Pi Fast mode extension is unavailable. Update Pi and restart the session.');
+    const change = { requestId: randomUUID(), revision: this.fastModeRevision + 1, enabled, ack: deferred<void>() };
+    this.fastModeChange = change;
+    try {
+      // prompt executes an extension command without adding a user/model turn. RPC success alone
+      // is insufficient: require the exact nonce/revision acknowledgement from our extension.
+      await withTimeout(Promise.all([
+        this.request('prompt', { message: `/${PI_FAST_MODE_COMMAND} ${JSON.stringify({ nonce: this.extensionNonce, requestId: change.requestId, revision: change.revision, enabled })}` }),
+        change.ack.promise
+      ]), 10_000, 'Pi Fast mode acknowledgement');
+    } catch (error) {
+      this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: 'Pi Fast mode change was not confirmed. Restart the session before retrying.' } });
+      // An acknowledgement can be lost after mutation. Never let an unconfirmed paid tier serve
+      // another turn; the next launch reconstructs the last committed preference from config.
+      await this.dispose();
+      throw error;
+    } finally {
+      this.fastModeChange = null;
+    }
+  }
+
   async setEffort(effort: EffortLevel): Promise<void> {
     if (this.ctx.session().mission) throw new Error('Mission presets are fixed for the attempt.');
     await this.request('set_thinking_level', { level: piThinkingLevel(effort) });
@@ -1308,6 +1403,7 @@ export class PiAdapter implements HarnessAdapter {
     this.extensionCapabilities.clear();
     this.missionTools = [];
     this.declinedTools.clear();
+    this.fastModeChange?.ack.reject(new Error('Pi stopped before Fast mode was confirmed.'));
     const child = this.child;
     if (this.ctx.session().mission) {
       this.missionStopping = true;

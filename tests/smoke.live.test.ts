@@ -44,7 +44,14 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
     title: 'smoke',
     createdAt: Date.now(),
     updatedAt: Date.now(),
-    config: { harness, projectRoot: cwd, permissionMode: 'auto', ...extra },
+    config: {
+      harness, projectRoot: cwd, permissionMode: 'auto', ...extra,
+      ...(process.env.HARNESS_SMOKE_FAST_MODE === '1' ? { fastMode: true } : {}),
+      ...(process.env.HARNESS_SMOKE_MODEL ? { model: {
+        provider: extra.model?.provider ?? (harness === 'pi' ? 'openai-codex' : harness === 'claude' ? 'anthropic' : 'openai'),
+        model: process.env.HARNESS_SMOKE_MODEL,
+      } } : {}),
+    },
     cwd,
     status: 'idle',
     harnessRef: {},
@@ -96,6 +103,12 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
         clearTimeout(t);
         resolve();
       };
+    }).then(() => {
+      if (meta.config.fastMode) {
+        // A successful standard-speed fallback is not a passing Fast request. Requested means
+        // the runtime cannot expose actual service; never promote it to confirmed "on" here.
+        expect(['requested', 'on'], meta.fastModeStatus?.detail).toContain(meta.fastModeStatus?.state);
+      }
     });
   return { ctx, meta, events, items, waitTurn };
 }

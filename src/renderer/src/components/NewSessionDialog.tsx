@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { AppSettings, EffortLevel, FileAttachment, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { branchNameFromText, branchPrefixOptions, branchSlug, normalizeBranchPrefix } from '../../../shared/branch-prefix';
 import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
+import { FAST_MODE_COST_WARNING, fastModeSupport } from '../../../shared/fast-mode';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
 import { invoke } from '../api';
 import { FileAttachmentChips, readAttachments } from '../attachments';
@@ -48,6 +49,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const [modelsError, setModelsError] = useState<string | undefined>();
   const [model, setModel] = useState<ModelRef | undefined>(initial.model);
   const [effort, setEffort] = useState<EffortLevel | ''>(initial.effort);
+  const [fastMode, setFastMode] = useState(false);
   const [mode, setMode] = useState<PermissionMode>(initial.permissionMode);
   const [useWorktree, setUseWorktree] = useState(initial.useWorktree);
   // Built-in prefixes, then the user's saved ones; "Custom…" types a new one, saved on start.
@@ -172,6 +174,11 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
 
   const selectedModel = models.find((m) => model && m.id === model.model && m.provider === model.provider);
   const effortOptions = effortOptionsFor(descriptor, selectedModel);
+  // Use the selected ref, not catalog metadata: a custom or remembered id may not be listed.
+  const fastSupport = fastModeSupport(harness, model, settings.providers);
+  useEffect(() => {
+    if (!fastSupport.supported) setFastMode(false);
+  }, [harness, model?.provider, model?.model, fastSupport.supported]);
   // A model that takes no effort disables the control and submits none; the remembered effort is
   // kept for the next model that has one.
   const noEffort = effortOptions.length === 0;
@@ -231,6 +238,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
         model,
         // undefined inherits the app preference in the main process; null explicitly omits it.
         effort: noEffort ? null : selectedEffort || undefined,
+        fastMode: fastSupport.supported && fastMode,
         permissionMode: mode,
         useWorktree: isolate,
         branchPrefix: isolate ? branchPrefix : undefined,
@@ -421,6 +429,11 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
             </Field>
           </div>
           <div className="field-hint">{PERMISSION_MODE_LABELS[mode].description}</div>
+          <div className="field">
+            <Toggle checked={fastSupport.supported && fastMode} onChange={setFastMode} disabled={creating || modelsLoading || !fastSupport.supported} label="Fast mode" />
+            <span className="field-hint">{FAST_MODE_COST_WARNING}</span>
+            {!fastSupport.supported && <span className="field-hint">{fastSupport.reason ?? 'Fast mode is not supported on this route.'}</span>}
+          </div>
           {!descriptor.capabilities.approvals && mode !== 'plan' && <div className="callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
 
         </section>

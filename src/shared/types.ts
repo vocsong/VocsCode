@@ -37,6 +37,12 @@ export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-au
 
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
+/** Provider-observed speed, distinct from the user's requested preference. */
+export interface FastModeStatus {
+  state: 'off' | 'requested' | 'on' | 'unavailable' | 'cooldown';
+  detail?: string;
+}
+
 export type AutoCompactionThreshold = '50%' | '75%' | '90%' | '100k' | '250k' | '500k' | '750k' | '1m';
 
 export type SessionStatus = 'idle' | 'starting' | 'running' | 'awaiting' | 'error' | 'stopped' | 'pr' | 'merged';
@@ -345,6 +351,8 @@ export interface SessionConfig {
   model?: ModelRef;
   /** null explicitly omits effort; undefined inherits the app preference. Survives restart. */
   effort?: EffortLevel | null;
+  /** Opt-in premium inference speed; never changes reasoning effort. Absent means standard. */
+  fastMode?: boolean;
   permissionMode: PermissionMode;
   /** Run in an isolated git worktree under .vocs-code/worktrees. */
   useWorktree?: boolean;
@@ -850,6 +858,8 @@ export interface SessionMeta {
   /** Current model as reported by the harness (may differ from config after live switch). */
   activeModel?: ModelRef;
   activeEffort?: EffortLevel;
+  /** Reset on restart/fork; a saved preference is not proof of an active provider tier. */
+  fastModeStatus?: FastModeStatus;
   /**
    * Commands the running harness accepts itself — Claude's slash command names and their aliases, as
    * advertised by the CLI. Reported by the adapter at startup and on every later change, so `/goal`

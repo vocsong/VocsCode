@@ -87,6 +87,22 @@ so a Claude row without them becomes `[]` only when another row in the same `sup
 answer carries them; a runtime that reports them on no row leaves every model unknown. An ACP effort
 option with no level the app models stays unknown too.
 
+**Fast mode is a separate, per-session premium-speed preference**, not a reasoning level. The
+New Session dialog and message header expose `SessionConfig.fastMode` (off by default), with a
+cost warning before opt-in. `shared/fast-mode.ts` limits candidates to first-party OpenAI GPT-5/6
+(excluding Spark) and supported Anthropic Opus models; gateways, Cursor, ACP and Mission presets
+are not supported. Account entitlement is still the provider's decision. Idle-session changes go
+through `sessions:setFastMode`; the manager refuses busy transitions and rolls back failed writes.
+A model switch to an incompatible route requires turning Fast mode off first. Same-harness forks
+retain the preference; cross-harness forks start at standard speed.
+
+Adapters translate the preference at their own boundary: Codex uses `serviceTier`/`service_tier`,
+Claude explicitly opts in through SDK settings/flag settings, the native loop sends the provider's
+speed field, and Pi's bundled fast-mode extension modifies provider payloads and Anthropic beta
+headers. `SessionMeta.fastModeStatus` is observational: `requested` is not `on`. Only provider/runtime
+evidence may report `on`, `cooldown` or `unavailable`; restart and fork reset stale observations.
+No adapter changes reasoning effort or silently retries a failed premium request at another tier.
+
 Both Codex harnesses discover their pre-session models through a short-lived app-server probe,
 following every `model/list` page rather than treating the bundled catalog as authoritative. The
 active app-server uses the same paginated discovery, and exec SDK model listing uses the one-shot
@@ -138,6 +154,7 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - The app's own instruction layer is user-scoped and additive (`src/main/app-instructions.ts`, one file per scope under `<userData>/instructions/`): `global.md` is added to every session and a harness family's file (`pi.md`, `claude.md`, `codex.md`, …) after it, never instead of it. It is *not* a harness's global file — `APPEND_SYSTEM.md`, `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` stay untouched and keep applying through their own engine, and this layer can only add to the engine's prompt, never override it. Delivery follows the capability: the three harnesses with `systemPrompt: true` (pi, claude, native) get it through `sessionAppendPrompt`, and the rest through `SessionManager.withSessionPreamble` on their first message (`pendingAppInstructions`), because their engines own the prompt.
 - Split view: panes are views, not sessions. `store.layout` names a session per pane; transcripts, drafts, streaming and the agent process stay keyed by session, so a session on screen twice, or a pane that starts a process, cannot exist. `activeId` is always the active pane's session (a store subscription enforces it), which is how the global panels — Changes, Files, Git, Goal, Usage, Terminal — follow the active pane without knowing panes exist. Window-wide keys (Ctrl+F, terminal-to-composer inserts, composer focus) act on the active pane only. A split is remembered in the renderer's `localStorage`; a single pane leaves nothing behind, so the one-pane boot is unchanged.
 - The terminal lives in the main process; the renderer re-attaches to snapshots and never owns PTY lifetime.
+- Local images in assistant Markdown resolve against that session's checkout (`cwd`, not the main project root or renderer URL). Sanitized HTML carries inert references; the desktop loads bounded image bytes through the existing session-scoped `fs:readImage` handler, which also rejects symlink escapes. Never loosen the Markdown URI allowlist or CSP to expose filesystem paths. Missing, oversized and denied images show an unavailable caption; web Markdown continues to omit images.
 - API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`) — never in settings, logs, transcripts, or the repo.
 - Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.
 - Sessions must resume after restart for every harness; keep that path working when touching persistence.
