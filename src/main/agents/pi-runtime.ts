@@ -12,6 +12,7 @@ import path from 'node:path';
 import type { ImageAttachment, ModelRef } from '../../shared/types';
 import { deferred, errorMessage, LineSplitter, withTimeout, type Deferred } from '../util/async';
 import { shutdownChild, spawnTool } from '../harness/spawn';
+import { withProcessOwner } from '../process-context';
 
 /** Marker the bridge extension puts in the `select` title; the resource holds its own copy. */
 const VESTA_CALL_MARKER = 'VCODE_VESTA_CALL::';
@@ -220,7 +221,7 @@ export class PiAgentRuntime implements VestaRuntime {
       VOCS_CODE_VESTA_PROMPT: promptFile
     };
     this.opts.log('info', `spawning pi for Vesta: ${this.opts.bin} in ${this.opts.cwd}`);
-    const child = (this.opts.spawn ?? spawnTool)(this.opts.bin, args, { cwd: this.opts.cwd, env });
+    const child = withProcessOwner({ label: 'Vesta' }, () => (this.opts.spawn ?? spawnTool)(this.opts.bin, args, { cwd: this.opts.cwd, env }));
     this.child = child;
     const splitter = new LineSplitter((line) => this.handleLine(line));
     child.stdout?.on('data', (d: Buffer) => splitter.push(d));

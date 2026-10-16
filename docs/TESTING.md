@@ -85,7 +85,7 @@ credentials or deployment are available, report the live tier as unverified.
 ## Opt-in Electron suites (no provider key)
 
 ```bash
-npm run build && npm run test:e2e:ci       # all twenty-one no-provider suites; fails if any reports skipped
+npm run build && npm run test:e2e:ci       # all twenty-two no-provider suites; fails if any reports skipped
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:themes
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:models
@@ -104,6 +104,7 @@ npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.transcript.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.mission-settings.test.ts tests/e2e.mission.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.layout.test.ts tests/e2e.subagents.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.split.test.ts
+npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.processes.test.ts
 npm run build && HARNESS_E2E=1 npm run test:e2e:terminal
 # Vesta on the real pi runtime, offline scripted model (installed Pi 0.85.1; HARNESS_E2E_EXE for the packaged app).
 npm run build && VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/e2e.vesta.test.ts
@@ -114,8 +115,8 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.subagents.test.ts
 ```
 
-`npm run test:e2e:ci` runs twenty-one no-provider suites (including `e2e.layout`, `e2e.split` and the seeded
-`e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
+`npm run test:e2e:ci` runs twenty-two no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes` and the
+seeded `e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
 `e2e.subagents` is registered only with `VOCS_CODE_PI_INTEGRATION=1` and remains opt-in. The
 `tests/test-inventory.test.ts` gate requires every `e2e.*.test.ts` file to be in that CI list or
 explicitly classified as requiring a provider, installed Pi, or packaged app.
@@ -159,6 +160,7 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 | Relay Durable Object and frame routing (`relay/src/{worker,hub}.ts`, socket lifecycle/tags/queues) | `test:relay-do`, `tests/remote-workerd.test.ts` + `test:remote-live` against the deployed origin after deploy |
 | Split view — panes, the active pane, the divider, drag-to-split, layout restore (`panes.ts`, `components/SessionPanes.tsx`, the `layout`/`activeId` pair in `store.ts`) | `tests/session-panes.test.ts`, `tests/split-view.test.tsx` + `e2e.split` |
 | Transcript rendering — message rows, work/command collapse groups, tool cards, shell panels (`components/Transcript.tsx`, `transcript-window.ts`) | `tests/tool-group.test.tsx`, `tests/transcript-window.test.ts`, `tests/transcript-virtual.test.tsx` + `e2e.transcript` |
+| Processes panel — process tracking, attribution and ending (`process-tracker.ts`, `process-snapshot.ts`, `process-context.ts`, `resources/processes/**`, `shared/processes.ts`, `ProcessesTab.tsx`) | `tests/process-tracker.test.ts`, `tests/process-snapshot.test.ts` (its real-reader case runs on the platform it belongs to, so ubuntu CI never runs the Windows one), `tests/process-context.test.ts`, `tests/session-process-owner.test.ts`, `tests/processes-shared.test.ts`, `tests/processes-tab.test.tsx` + `e2e.processes` |
 | Anything else under `src/renderer/**` | `npm run test:e2e:ci` |
 
 `.github/workflows/ci.yml` keeps develop PRs to typecheck, a reviewed fast Vitest allowlist

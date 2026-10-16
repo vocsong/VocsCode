@@ -5,6 +5,7 @@ import { EMPTY_AGENT_STATE } from '../../shared/agent';
 import type { AppSettings, DesktopFocus, HarnessAvailability, HarnessId, ImageAttachment, FileAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import type { MissionRecord } from '../../shared/mission';
+import type { ProcessSummary } from '../../shared/processes';
 import { resolveNewSessionDefaults } from '../../shared/session-defaults';
 import { invoke, on, canInvoke } from './api';
 import { recencyAt, sortSessionRows } from './sessionOrder';
@@ -15,7 +16,7 @@ export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'te
 /** The Git panel's inner view: the repo, its worktrees, or the two GitHub lists. */
 export type GitPanelView = 'branches' | 'worktrees' | 'prs' | 'issues';
 /** The panel's lower half: live session services rather than workspace views. */
-export type PanelBottomTab = 'mcp' | 'subagents' | 'knowledge' | 'desktop';
+export type PanelBottomTab = 'mcp' | 'subagents' | 'knowledge' | 'desktop' | 'processes';
 export type View = 'chat' | 'settings' | 'analytics' | 'skills' | 'mcp';
 export type AnalyticsTab = 'overview' | 'spend' | 'tokens' | 'activity' | 'tools' | 'code' | 'reliability' | 'sessions';
 /** Days in the analytics range; 0 is all time. */
@@ -134,6 +135,8 @@ interface State {
   agent: AgentState;
   /** In-app auto-update state (issue #198); idle (never transitions) in dev and web builds. */
   updateState: UpdateState;
+  /** Tracked process counts, pushed as they change, for the Processes tab badge. */
+  processSummary: ProcessSummary | null;
   /** Where the desktop window is looking, from desktop:focus / push:desktopFocus. */
   desktopFocus: DesktopFocus | null;
   /** The host's remote policy, pushed over the e2e session; view-only gates write controls. */
@@ -419,6 +422,7 @@ export const useStore = create<State>((set, get) => ({
   showThinking: true,
   agent: EMPTY_AGENT_STATE,
   updateState: { status: 'idle' },
+  processSummary: null,
   desktopFocus: null,
   remoteAccess: { viewOnly: false },
   agentPrefill: null,
@@ -444,6 +448,7 @@ export const useStore = create<State>((set, get) => ({
           on('push:terminalsChanged', (list) => get().setTerminals(list));
           on('push:agentState', (s) => get().setAgentState(s));
           on('push:updateState', (s) => set({ updateState: s }));
+          on('push:processSummary', (summary) => set({ processSummary: summary }));
           on('push:desktopFocus', (focus) => set({ desktopFocus: focus }));
           on('push:remotePolicy', ({ viewOnly }) => set({ remoteAccess: { viewOnly } }));
           subscribed = true;

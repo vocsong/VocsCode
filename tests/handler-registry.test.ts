@@ -10,6 +10,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry } from '../src/main/handlers';
 import { PUSH_CHANNELS } from '../src/shared/ipc';
 import { agentChannels } from '../src/shared/agent-manifest';
+import { isRemoteChannel, isRemotePushChannel } from '../src/shared/remote-channels';
 import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
@@ -186,6 +187,23 @@ describe('handler registry', () => {
     const { registry } = stubDeps();
     const channels = registry.channels();
     for (const c of agentChannels()) expect(channels, `${c} is on the agent allowlist but not registered`).toContain(c);
+  });
+
+  it('serves the Processes panel to the desktop only, and hands the tracker only well-formed targets', async () => {
+    const end = vi.fn(async () => ({ ended: 1, failed: [] }));
+    const list = vi.fn(async () => ({ sampledAt: 1, processes: [] }));
+    const { registry } = stubDeps({ processes: { list, end } });
+    expect(await registry.invoke('processes:list', undefined)).toEqual({ sampledAt: 1, processes: [] });
+    await registry.invoke('processes:end', { targets: [{ pid: 42, startedAt: 7 }, { pid: -1, startedAt: 7 }, { pid: 1.5, startedAt: 7 }, { pid: 43 }, null] });
+    expect(end).toHaveBeenCalledWith([{ pid: 42, startedAt: 7 }]);
+    // Ending processes is a local action: a paired browser can neither list nor end them.
+    expect(isRemoteChannel('processes:list')).toBe(false);
+    expect(isRemoteChannel('processes:end')).toBe(false);
+    expect(isRemotePushChannel(PUSH_CHANNELS.processSummary)).toBe(false);
+    expect(agentChannels()).not.toContain('processes:end');
+    // Without a tracker (tests, a host that does not sample) the panel says so instead of failing.
+    const bare = stubDeps().registry;
+    expect(await bare.invoke('processes:list', undefined)).toMatchObject({ processes: [], error: 'Process tracking is not running.' });
   });
 
   it('rejects an empty MCP import with an actionable message and no settings write', async () => {

@@ -69,6 +69,7 @@ import type { RemoteTerminalFrame, RemoteTerminalSnapshot } from './remote-termi
 import type { CreateMissionRequest, MissionControlRequest, MissionRecord } from './mission';
 import type { MissionCommandRequest } from './mission-command';
 import type { WorkspaceImage } from './image-files';
+import type { ProcessEndResult, ProcessList, ProcessSummary, ProcessTarget } from './processes';
 
 /** Readable text exports fail explicitly rather than silently truncating a saved artifact. */
 export const TEXT_EXPORT_MAX_BYTES = 1024 * 1024;
@@ -225,6 +226,10 @@ export interface IpcContract {
   'cua:test': [void, McpInspectResult];
   /** Runs Cua Driver's official installer after an explicit confirmation. */
   'cua:install': [void, CuaInstallResult];
+  /** Every process the app started, through any session, terminal or tool, as last sampled. Desktop only. */
+  'processes:list': [void, ProcessList];
+  /** Ends each target and its whole subtree; only processes in the tracked set can be named. Desktop only. */
+  'processes:end': [{ targets: ProcessTarget[] }, ProcessEndResult];
 
   /** Mission control is user-only; model tools have a separate authenticated transport. */
   'missions:list': [void, MissionRecord[]];
@@ -451,7 +456,8 @@ export const PUSH_CHANNELS = {
   agentState: 'push:agentState',
   remoteState: 'push:remoteState',
   desktopFocus: 'push:desktopFocus',
-  updateState: 'push:updateState'
+  updateState: 'push:updateState',
+  processSummary: 'push:processSummary'
 } as const;
 
 export type PushPayloads = {
@@ -474,6 +480,8 @@ export type PushPayloads = {
   /** Remote-only: output of a terminal this browser watches, sealed to it alone (never broadcast). */
   'push:remoteTerminal': RemoteTerminalFrame;
   'push:updateState': UpdateState;
+  /** Tracked process counts for the Processes tab badge, sent with every background sample. */
+  'push:processSummary': ProcessSummary;
 };
 
 export type PushChannel = keyof PushPayloads;
