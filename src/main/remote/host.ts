@@ -40,10 +40,20 @@ interface HostCredentials {
 /** Refresh the access token this long before it expires. */
 const ACCESS_REFRESH_MARGIN_MS = 60_000;
 const RECONNECT_MS = 3000;
+/** Owner-requested pairings have the same five-minute local decision window as minted codes. */
+const PAIRING_REQUEST_TIMEOUT_MS = 5 * 60_000;
 /** Connect with GitHub: how often to ask whether the owner added this computer, and for how long
  *  (the relay keeps an owner's grant ten minutes). */
 const SIGN_IN_POLL_MS = 2000;
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
+
+interface PendingPairingRequest {
+  code: string;
+  name: string;
+  platform: string;
+  webPub: PublicIdentity;
+  expiresAt: number;
+}
 
 interface Session {
   key: CryptoKey;
@@ -84,7 +94,17 @@ export class RemoteHost {
   private status: RemoteState['status'] = 'off';
   private detail: string | undefined;
   private pairing: { code: string; expiresAt: number } | undefined;
-  private pendingRequest: { code: string; name: string; platform: string; webPub: PublicIdentity } | undefined;
+  private pendingRequest: PendingPairingRequest | undefined;
+  /** Relay correlation alone grants no trust: only this local, request-bound decision can. */
+  private pairingResponse: {
+    request: PendingPairingRequest;
+    webPub: PublicIdentity;
+    decision: 'approve' | 'deny';
+    socket: WebSocket;
+    creds: HostCredentials;
+    sent: boolean;
+  } | undefined;
+  private pairingAttempt = 0;
   /** Connect with GitHub, while the owner has not added this computer yet. */
   private signingIn: { link: string; checkCode: string } | undefined;
   private readonly sessions = new Map<string, Session>();
@@ -216,8 +236,8 @@ export class RemoteHost {
     this.incoming.clear();
     this.status = 'off';
     this.detail = undefined;
-    this.pendingRequest = undefined;
-    this.pairing = undefined;
+    this.pairingAttempt++;
+    this.clearPairing();
     this.signingIn = undefined;
     this.push();
   }
@@ -285,6 +305,9 @@ export class RemoteHost {
   async startPairing(hostName: string): Promise<{ code: string; expiresAt: number }> {
     const creds = this.creds;
     if (!creds) throw new Error('remote access is not enabled');
+    this.clearPairing();
+    const attempt = ++this.pairingAttempt;
+    this.push();
     const init = {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -296,6 +319,7 @@ export class RemoteHost {
     res ??= await fetch(`${this.base()}/v1/pair/start`, { ...init, headers: { ...init.headers, authorization: `Bearer ${creds.enrollToken ?? ''}` } });
     if (!res.ok) throw new Error(`pair/start failed: ${res.status}`);
     const body = (await res.json()) as { code: string; expiresAt: number };
+    if (this.creds !== creds || this.pairingAttempt !== attempt) throw new Error('pairing request cancelled');
     this.pairing = { code: body.code, expiresAt: body.expiresAt };
     this.deps.audit?.record('pair-start');
     this.push();
@@ -308,10 +332,28 @@ export class RemoteHost {
     const pending = this.pendingRequest;
     const socket = this.ws;
     const creds = this.creds;
-    if (!pending || !socket || !creds) return;
-    const signature = await sign(creds.identity, pairingDecisionPayload(pending.code, decision, pending.webPub));
-    if (this.ws === socket && this.creds === creds && this.pendingRequest === pending) {
+    if (!pending || !socket || !creds || socket.readyState !== WebSocket.OPEN) return;
+    if (Date.now() >= pending.expiresAt) {
+      this.clearPairing();
+      this.push();
+      return;
+    }
+    // First decision wins, except that Deny may cancel an Allow still being signed/sent.
+    // Record it before signing so a slower Allow cannot overtake that cancellation.
+    if (this.pairingResponse && (decision === 'approve' || this.pairingResponse.decision === 'deny')) return;
+    const response = { request: pending, webPub: structuredClone(pending.webPub), decision, socket, creds, sent: false };
+    this.pairingResponse = response;
+    try {
+      const signature = await sign(creds.identity, pairingDecisionPayload(pending.code, decision, response.webPub));
+      if (this.pairingResponse !== response || this.ws !== socket || this.creds !== creds ||
+          this.pendingRequest !== pending || socket.readyState !== WebSocket.OPEN || Date.now() >= pending.expiresAt) return;
+      // Arm BEFORE send: an honest relay can answer before this async method completes.
+      response.sent = true;
       socket.send(JSON.stringify({ t: 'pair.respond', code: pending.code, decision, signature }));
+    } catch (error) {
+      if (this.pairingResponse === response) this.clearPairing();
+      this.push();
+      throw error;
     }
   }
 
@@ -358,11 +400,14 @@ export class RemoteHost {
   async revokeAll(): Promise<void> {
     const creds = this.creds;
     if (!creds || !this.enrolled()) throw new Error('remote access is not enrolled with a relay');
+    this.pairingAttempt++;
+    this.clearPairing();
+    this.push();
     const res = await this.relayFetch('/v1/devices/revoke-all', { method: 'POST' });
     if (!res.ok) throw new Error(`revoke all failed: ${res.status}`);
     this.deps.audit?.record('revoke-all');
-    this.pendingRequest = undefined;
-    this.pairing = undefined;
+    this.pairingAttempt++;
+    this.clearPairing();
     await this.dropClients(creds, Object.keys(creds.clients), 'every other device revoked');
     this.push();
   }
@@ -411,6 +456,12 @@ export class RemoteHost {
   }
 
   // --- internals ---
+
+  private clearPairing(): void {
+    this.pendingRequest = undefined;
+    this.pairingResponse = undefined;
+    this.pairing = undefined;
+  }
 
   private push(): void {
     this.deps.pushState();
@@ -486,6 +537,7 @@ export class RemoteHost {
   private async forgetRegistration(creds: HostCredentials, detail: string, rejected?: string): Promise<void> {
     if (this.creds !== creds || (rejected !== undefined && creds.deviceToken !== rejected) || !creds.deviceToken) return;
     delete creds.deviceToken;
+    this.clearPairing();
     this.access = null;
     await this.saveCreds();
     this.detail = detail;
@@ -635,6 +687,9 @@ export class RemoteHost {
       // must not clobber the new connection or wipe live sessions.
       if (this.ws !== ws) return;
       this.ws = null;
+      // Decisions belong to this socket; a minted code remains claimable after reconnect.
+      this.pendingRequest = undefined;
+      this.pairingResponse = undefined;
       const dropped = [...this.sessions.keys()];
       this.sessions.clear();
       this.forgetAllClients();
@@ -665,30 +720,50 @@ export class RemoteHost {
       this.deps.log('debug', 'remote: dropped a non-JSON relay message');
       return;
     }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
     switch (msg.t) {
       case 'pair.request': {
         // Either a code this desktop minted was claimed, or a signed-in owner's browser asked this
         // registered computer by id. Both need the user's Allow here, signed with this key.
-        const minted = !!this.pairing && msg.code === this.pairing.code;
+        const minted = !!this.pairing && msg.code === this.pairing.code && Date.now() < this.pairing.expiresAt;
         const requested = msg.requested === true && this.enrolled();
         if (!this.creds || typeof msg.code !== 'string' || !(minted || requested) ||
             !msg.hostPub || !msg.webPub || stable(msg.hostPub) !== stable(publicOf(this.creds.identity))) return;
-        this.pendingRequest = { code: msg.code, name: String(msg.name ?? ''), platform: String(msg.platform ?? ''), webPub: msg.webPub };
+        this.pairingResponse = undefined;
+        this.pendingRequest = {
+          code: msg.code, name: String(msg.name ?? ''), platform: String(msg.platform ?? ''), webPub: msg.webPub,
+          expiresAt: Math.min(minted ? this.pairing!.expiresAt : Infinity, Date.now() + PAIRING_REQUEST_TIMEOUT_MS)
+        };
         this.deps.log('info', `remote: pairing request from "${this.pendingRequest.name}" (${this.pendingRequest.platform}); awaiting the user's decision`);
         this.deps.audit?.record('pair-request', { detail: `${this.pendingRequest.name} (${this.pendingRequest.platform})` });
         this.push();
         return;
       }
       case 'pair.result': {
-        if (!this.pendingRequest || msg.code !== this.pendingRequest.code) return;
-        this.pendingRequest = undefined;
-        this.pairing = undefined;
+        const response = this.pairingResponse;
+        const creds = this.creds;
+        if (!response?.sent || response.request !== this.pendingRequest || response.socket !== socket ||
+            response.creds !== creds || msg.code !== response.request.code || msg.decision !== response.decision ||
+            Date.now() >= response.request.expiresAt) return;
+        if (msg.decision === 'approve') {
+          if (!creds || typeof msg.hostDeviceId !== 'string' || !msg.hostDeviceId ||
+              typeof msg.webDeviceId !== 'string' || !msg.webDeviceId || !msg.webPub ||
+              stable(msg.webPub) !== stable(response.webPub)) return;
+          // A registered host cannot be moved to another device/account or have its credential
+          // replaced by a pairing result. Re-enrollment alone may supply a new host credential.
+          if (this.enrolled()
+            ? msg.hostDeviceId !== creds.deviceId || (msg.hostToken !== undefined && msg.hostToken !== creds.deviceToken)
+            : typeof msg.hostToken !== 'string' || !msg.hostToken) return;
+          const existing = creds.clients[msg.webDeviceId];
+          if (existing && stable(existing) !== stable(response.webPub)) return;
+        }
+        // Consume before awaiting persistence: duplicate results cannot reuse one human decision.
+        this.clearPairing();
         this.detail = undefined;
         this.deps.log('info', `remote: pairing ${msg.decision === 'approve' ? 'approved' : 'denied'}${msg.webDeviceId ? ` for device ${msg.webDeviceId}` : ''}`);
         this.deps.audit?.record(msg.decision === 'approve' ? 'pair-approve' : 'pair-deny', { device: msg.webDeviceId ? String(msg.webDeviceId) : undefined });
-        const creds = this.creds;
-        if (msg.decision === 'approve' && msg.hostDeviceId && msg.webDeviceId && msg.webPub && creds) {
-          creds.clients[msg.webDeviceId] = msg.webPub;
+        if (msg.decision === 'approve' && msg.hostDeviceId && msg.webDeviceId && creds) {
+          creds.clients[msg.webDeviceId] = response.webPub;
           // The relay mints a host device only when this approval enrolled the desktop; an
           // enrolled desktop keeps its id and token, so browsers paired before stay routable.
           const enrolledNow = !!msg.hostToken && (creds.deviceId !== msg.hostDeviceId || creds.deviceToken !== msg.hostToken);
@@ -697,6 +772,7 @@ export class RemoteHost {
             creds.deviceToken = msg.hostToken;
           }
           await this.saveCreds();
+          if (this.creds !== creds || this.ws !== socket) return;
           if (enrolledNow) {
             // Reconnect under the real device token.
             this.ws?.close();
@@ -709,8 +785,7 @@ export class RemoteHost {
       case 'pair.error': {
         // The relay refused the decision: the request is spent, so do not leave it on screen.
         if (!this.pendingRequest || (msg.code !== undefined && msg.code !== this.pendingRequest.code)) return;
-        this.pendingRequest = undefined;
-        this.pairing = undefined;
+        this.clearPairing();
         this.detail = msg.error === 'device-limit'
           ? 'pairing refused: this account already has the maximum number of paired devices; revoke one first'
           : 'pairing refused by the relay';
