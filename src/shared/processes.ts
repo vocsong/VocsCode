@@ -29,7 +29,10 @@ export interface TrackedProcess {
   /** Resident memory (working set) in bytes. */
   memory?: number;
   owner: ProcessOwner;
-  /** Its Vocs Code parent has exited, so nothing in the app will ever stop it. Set on the whole subtree. */
+  /**
+   * Its Vocs Code parent has exited, so nothing in the app will ever stop it. Set on the whole
+   * subtree. A session's process can be detached on purpose (`Start-Process` of a server window).
+   */
   orphaned?: boolean;
   /** Started by an earlier run of Vocs Code that has since quit or crashed. Implies `orphaned`. */
   previousRun?: boolean;
@@ -216,14 +219,17 @@ export interface ProcessGroup {
 }
 
 function groupOf(p: TrackedProcess): { key: string; kind: ProcessGroupKind; sessionId?: string } {
-  if (p.orphaned) return { key: 'orphaned', kind: 'orphaned' };
+  // A session's detached process stays with the session that started it; only what an earlier run
+  // left, or what no session can claim, is left behind.
+  if (p.previousRun || (p.orphaned && !p.owner.sessionId)) return { key: 'orphaned', kind: 'orphaned' };
   if (p.owner.sessionId) return { key: `session:${p.owner.sessionId}`, kind: 'session', sessionId: p.owner.sessionId };
   return { key: 'app', kind: 'app' };
 }
 
 /**
  * Groups processes for the panel: left-behind processes first (they are the ones to act on), then
- * the active session, then other sessions, then the app's own services. Each group is a forest in
+ * the active session, then other sessions, then the app's own services. A session's detached
+ * processes stay in its group, flagged `orphaned`. Each group is a forest in
  * start order, every child directly under its parent.
  */
 export function groupProcesses(list: TrackedProcess[], activeSessionId?: string): ProcessGroup[] {

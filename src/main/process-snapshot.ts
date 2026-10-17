@@ -27,8 +27,18 @@ export interface ProcessSource {
   snapshot(): Promise<RawProcess[]>;
   /** Command lines for PIDs the snapshot left without one; missing entries could not be read. */
   commandLines(pids: number[]): Promise<Map<number, string>>;
+  /**
+   * Windows only: puts each process into its owner's Job Object, so whatever it starts later stays
+   * attributable after its parent exits. Answers per PID: true, or why it was not adopted.
+   */
+  adopt?(owner: string, targets: { pid: number; startedAt: number }[]): Promise<Map<number, true | string>>;
+  /** Windows only: the live members of each owner's Job. */
+  jobs?(): Promise<Map<string, number[]>>;
   close(): void;
 }
+
+/** Owner keys travel as one protocol token. */
+export const JOB_OWNER = /^[A-Za-z0-9_.-]{1,80}$/;
 
 function int(text: string): number {
   const n = Number(text);
@@ -49,6 +59,28 @@ export function parseWindowsSnapshot(lines: string[]): RawProcess[] {
 }
 
 /** Parses the host's `cmd` reply: pid TAB command line per line. */
+/** Parses the host's `adopt` reply: pid TAB ok, or pid TAB !reason. */
+export function parseAdoptReply(lines: string[]): Map<number, true | string> {
+  const out = new Map<number, true | string>();
+  for (const line of lines) {
+    const [pid, result = ''] = line.split('\t');
+    const n = int(pid);
+    if (n) out.set(n, result === 'ok' ? true : result.replace(/^!/, '') || 'unknown');
+  }
+  return out;
+}
+
+/** Parses the host's `jobs` reply: owner TAB space-separated member PIDs. */
+export function parseJobMembers(lines: string[]): Map<string, number[]> {
+  const out = new Map<string, number[]>();
+  for (const line of lines) {
+    const tab = line.indexOf('\t');
+    if (tab <= 0) continue;
+    out.set(line.slice(0, tab), line.slice(tab + 1).split(' ').map(int).filter((pid) => pid > 0));
+  }
+  return out;
+}
+
 export function parseCommandLines(lines: string[]): Map<number, string> {
   const out = new Map<number, string>();
   for (const line of lines) {
@@ -121,6 +153,20 @@ export class WindowsProcessSource implements ProcessSource {
 
   snapshot(): Promise<RawProcess[]> {
     return this.request('snap').then(parseWindowsSnapshot);
+  }
+
+  async adopt(owner: string, targets: { pid: number; startedAt: number }[]): Promise<Map<number, true | string>> {
+    if (!JOB_OWNER.test(owner)) throw new Error(`Not a job owner key: ${owner}`);
+    const out = new Map<number, true | string>();
+    for (let i = 0; i < targets.length; i += 64) {
+      const items = targets.slice(i, i + 64).map((t) => `${t.pid}:${Math.max(0, Math.round(t.startedAt))}`);
+      for (const [pid, result] of parseAdoptReply(await this.request(`adopt ${owner} ${items.join(' ')}`))) out.set(pid, result);
+    }
+    return out;
+  }
+
+  async jobs(): Promise<Map<string, number[]>> {
+    return parseJobMembers(await this.request('jobs'));
   }
 
   async commandLines(pids: number[]): Promise<Map<number, string>> {

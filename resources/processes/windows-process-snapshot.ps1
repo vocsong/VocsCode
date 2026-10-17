@@ -1,19 +1,49 @@
 # Trusted host resource, never loaded from the workspace. No module/profile or native dependency.
-# A long-lived, read-only process table reader for the Processes panel: one Toolhelp snapshot per
-# request instead of a WMI query (about 30 ms against 350 ms), so the panel can poll cheaply.
+# A long-lived process table reader for the Processes panel: one Toolhelp snapshot per request
+# instead of a WMI query (about 30 ms against 350 ms), so the panel can poll cheaply. It also keeps
+# one Job Object per owner (a session): a process assigned to it keeps every process it later
+# starts in that Job, even one started by a launcher that exits at once (Start-Process from a
+# short-lived tool shell), so the owner is known without a living parent chain. The Jobs set no
+# limits but allow breakaway: they never kill, throttle or confine anything, and closing them
+# (this host exiting) ends nothing.
 # Protocol, one request per stdin line, every reply terminated by a line holding a single '.':
-#   snap            -> pid TAB ppid TAB createdMs TAB cpuMs TAB workingSetBytes TAB exeName
-#   cmd <pid> ...   -> pid TAB commandLine   (only for processes this user may query)
+#   snap                               -> pid TAB ppid TAB createdMs TAB cpuMs TAB workingSetBytes TAB exeName
+#   cmd <pid> ...                      -> pid TAB commandLine   (only for processes this user may query)
+#   adopt <owner> <pid>:<createdMs>... -> pid TAB ok | pid TAB !reason   (createdMs 0: not checked)
+#   jobs                               -> owner TAB pid pid ...   (live members of each owner's Job)
 # A failed request answers '!' followed by the message, then '.'. Nothing here signals a process.
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 
 public static class VocsProcessSnapshot {
+    [StructLayout(LayoutKind.Sequential)] struct BASIC_LIMIT {
+        public long processTime, jobTime; public uint flags; public UIntPtr minWorking, maxWorking;
+        public uint activeLimit; public UIntPtr affinity; public uint priority, scheduling;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct IO_COUNTERS { public ulong readOps, writeOps, otherOps, readBytes, writeBytes, otherBytes; }
+    [StructLayout(LayoutKind.Sequential)] struct EXTENDED_LIMIT {
+        public BASIC_LIMIT basic; public IO_COUNTERS io;
+        public UIntPtr processMemory, jobMemory, peakProcessMemory, peakJobMemory;
+    }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int kind, ref EXTENDED_LIMIT info, int size);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryInformationJobObject(IntPtr job, int kind, IntPtr info, int size, IntPtr returned);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+
+    const int JobObjectBasicProcessIdList = 3;
+    const int JobObjectExtendedLimitInformation = 9;
+    /** Breakaway stays possible, so a program that asks for it (a sandbox, a supervisor) starts as before. */
+    const uint JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x800;
+    const uint PROCESS_TERMINATE = 0x0001;
+    const uint PROCESS_SET_QUOTA = 0x0100;
+    static readonly Dictionary<string, IntPtr> jobs = new Dictionary<string, IntPtr>();
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct PROCESSENTRY32 {
         public uint size; public uint usage; public uint pid; public IntPtr heap; public uint module;
         public uint threads; public uint ppid; public int priority; public uint flags;
@@ -102,6 +132,75 @@ public static class VocsProcessSnapshot {
         }
         return output.ToString();
     }
+
+    static IntPtr JobFor(string owner) {
+        IntPtr job;
+        if (jobs.TryGetValue(owner, out job)) return job;
+        job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        var limit = new EXTENDED_LIMIT();
+        limit.basic.flags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref limit, Marshal.SizeOf(typeof(EXTENDED_LIMIT)))) {
+            int error = Marshal.GetLastWin32Error();
+            CloseHandle(job);
+            throw new System.ComponentModel.Win32Exception(error);
+        }
+        jobs[owner] = job;
+        return job;
+    }
+
+    /** Assigns each process to the owner's Job. A creation time other than 0 must match, so a reused PID is never adopted. */
+    public static string Adopt(string owner, string[] items) {
+        var output = new StringBuilder();
+        IntPtr job = JobFor(owner);
+        foreach (var item in items) {
+            var parts = item.Split(':');
+            uint pid;
+            long expected = 0;
+            if (!uint.TryParse(parts[0], out pid)) continue;
+            if (parts.Length > 1) long.TryParse(parts[1], out expected);
+            IntPtr process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (process == IntPtr.Zero) { output.Append(pid).Append("\t!open ").Append(Marshal.GetLastWin32Error()).Append('\n'); continue; }
+            try {
+                long created, exited, kernel, user;
+                if (expected != 0 && GetProcessTimes(process, out created, out exited, out kernel, out user) && (created - UnixEpochFileTime) / 10000 != expected) {
+                    output.Append(pid).Append("\t!reused\n");
+                    continue;
+                }
+                bool member;
+                if (IsProcessInJob(process, job, out member) && member) { output.Append(pid).Append("\tok\n"); continue; }
+                if (AssignProcessToJobObject(job, process)) output.Append(pid).Append("\tok\n");
+                else output.Append(pid).Append("\t!assign ").Append(Marshal.GetLastWin32Error()).Append('\n');
+            } finally { CloseHandle(process); }
+        }
+        return output.ToString();
+    }
+
+    /** The live members of every owner's Job; an owner with none is left out. */
+    public static string Members() {
+        var output = new StringBuilder();
+        int capacity = 1024;
+        foreach (var entry in jobs) {
+            while (true) {
+                int size = 8 + capacity * IntPtr.Size;
+                IntPtr buffer = Marshal.AllocHGlobal(size);
+                try {
+                    bool ok = QueryInformationJobObject(entry.Value, JobObjectBasicProcessIdList, buffer, size, IntPtr.Zero);
+                    int assigned = Marshal.ReadInt32(buffer, 0), listed = Marshal.ReadInt32(buffer, 4);
+                    if (!ok && assigned > capacity) { capacity = assigned + 64; continue; }
+                    if (!ok || listed == 0) break;
+                    output.Append(Clean(entry.Key)).Append('\t');
+                    for (int i = 0; i < listed; i++) {
+                        if (i > 0) output.Append(' ');
+                        output.Append((long)Marshal.ReadIntPtr(buffer, 8 + i * IntPtr.Size));
+                    }
+                    output.Append('\n');
+                    break;
+                } finally { Marshal.FreeHGlobal(buffer); }
+            }
+        }
+        return output.ToString();
+    }
 }
 '@
 $out = [Console]::Out
@@ -112,7 +211,9 @@ while ($true) {
     $parts = $line.Trim() -split '\s+'
     try {
         if ($parts[0] -eq 'snap') { $out.Write([VocsProcessSnapshot]::Snap()) }
-        elseif ($parts[0] -eq 'cmd') { $out.Write([VocsProcessSnapshot]::CommandLines([string[]]($parts | Select-Object -Skip 1))) }
+        elseif ($parts[0] -eq 'cmd') { $out.Write([VocsProcessSnapshot]::CommandLines([string[]]@($parts | Select-Object -Skip 1))) }
+        elseif ($parts[0] -eq 'adopt' -and $parts.Count -ge 2) { $out.Write([VocsProcessSnapshot]::Adopt($parts[1], [string[]]@($parts | Select-Object -Skip 2))) }
+        elseif ($parts[0] -eq 'jobs') { $out.Write([VocsProcessSnapshot]::Members()) }
         elseif ($parts[0] -eq 'exit') { break }
         elseif ($parts[0]) { $out.Write("!unknown request`n") }
     } catch {

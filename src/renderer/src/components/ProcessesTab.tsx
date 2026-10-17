@@ -1,8 +1,9 @@
 /**
  * The Processes tab: every OS process Vocs Code started — through any session, terminal or tool,
  * in any worktree — in one place, so nothing the app spawned can keep holding CPU and memory
- * unseen. Processes left behind (their Vocs Code parent exited, or an earlier run quit or crashed)
- * come first, then the active session, other sessions and the app's own services. Ending a row
+ * unseen. Processes left behind (by an earlier run, or by nothing a session can claim) come first,
+ * then the active session, other sessions and the app's own services. A session's detached
+ * process (its launcher exited, as with Start-Process) stays in the session's group, flagged. Ending a row
  * ends everything under it; the main process re-checks each target, so a stale row cannot end a
  * process the app did not start.
  */
@@ -134,7 +135,7 @@ export function ProcessesTab({ session }: { session: SessionMeta }) {
           group.kind === 'orphaned' ? 'Left behind' : group.kind === 'app' ? 'Vocs Code' : owner?.title || 'Deleted session';
         const detail =
           group.kind === 'orphaned'
-            ? 'Their Vocs Code parent has exited, so nothing will stop them'
+            ? 'Nothing in Vocs Code will stop these'
             : group.kind === 'app'
               ? 'App services and tools'
               : owner
@@ -181,10 +182,18 @@ export function ProcessesTab({ session }: { session: SessionMeta }) {
                 // A label belongs to the root the app started (a terminal tab, an app service), never to its children.
                 const name = p.owner.label ? (p.owner.terminalId ? `Terminal · ${p.owner.label}` : p.owner.label) : describeProcess(p);
                 const formerOwner = group.kind === 'orphaned' && depth === 0 && p.owner.sessionId ? sessionsById.get(p.owner.sessionId)?.title : undefined;
+                const detached = group.kind === 'session' && p.orphaned && depth === 0;
                 return (
                   <li key={key} className="process-row" style={{ paddingLeft: 8 + Math.min(depth, 6) * 14 }} title={p.command ?? p.name} data-testid="process-row" data-pid={p.pid}>
                     <span className="process-main">
-                      <span className="process-name">{name}</span>
+                      <span className="process-name">
+                        {name}
+                        {detached && (
+                          <span className="process-flag" data-testid="process-detached" title="Its launcher has exited, so stopping the session will not end it">
+                            detached
+                          </span>
+                        )}
+                      </span>
                       <span className="process-meta muted small mono">
                         {p.name} · {p.pid}
                         {p.startedAt ? ` · ${fmtUptime(list.sampledAt - p.startedAt)}` : ''}
