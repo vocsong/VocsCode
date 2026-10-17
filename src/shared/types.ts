@@ -6,6 +6,7 @@ import type { TerminalSettings } from './terminal';
 import type { ThemeId } from './themes';
 import type { ShortcutCommand } from './shortcuts';
 import type { KnowledgeSettings } from './knowledge';
+import type { DictationSettings } from './dictation';
 import type { ReliabilityReport } from './analytics/reliability';
 import type { CodeOutputReport } from './analytics/code-output';
 import type { MissionOwnership } from './mission';
@@ -1336,6 +1337,8 @@ export interface AppSettings {
   gitSetupSkipped?: string[];
   /** Layer 2 project knowledge: always-on digest priming and automatic distillation after git events. */
   knowledge?: KnowledgeSettings;
+  /** Voice to text in the composer: cloud transcription or whisper.cpp on this machine. */
+  dictation?: DictationSettings;
 }
 
 export interface GitFileStatus {

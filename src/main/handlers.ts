@@ -49,6 +49,8 @@ import { transcriptPage } from '../shared/transcript-page';
 import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceImage } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
+import { DictationService } from './dictation/service';
+import { localModel } from '../shared/dictation';
 
 /** Structural dialog options (Electron shapes are cast in ipc.ts, keeping this file Electron-free). */
 export interface OpenDialogOptions {
@@ -119,6 +121,8 @@ export interface HandlerDeps {
   updater?: UpdateService;
   /** Every process the app started (the Processes panel); absent in tests that do not sample. */
   processes?: Pick<ProcessTracker, 'list' | 'end'>;
+  /** Composer dictation; built from userData on first use when absent. */
+  dictation?: DictationService;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Push an async event to the connected client (the window today, remote clients later). */
   push: (channel: string, payload: unknown) => void;
@@ -220,6 +224,15 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   // and a registry that never touches the channels must not need a userData path.
   let defaultAppInstructions: AppInstructions | undefined;
   const appInstructions = (): AppInstructions => (defaultAppInstructions ??= deps.appInstructions ?? new AppInstructions(deps.desktop.userDataPath(), deps.log));
+  let dictationService: DictationService | undefined = deps.dictation;
+  const dictation = (): DictationService =>
+    (dictationService ??= new DictationService({
+      settings,
+      secrets,
+      userData: deps.desktop.userDataPath(),
+      log: deps.log,
+      push: (status) => deps.push(PUSH_CHANNELS.dictationStatus, status)
+    }));
   const handlers = new Map<IpcChannel, (req: never) => unknown>();
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
 
@@ -835,6 +848,18 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     sessions.republishModels();
     return next.modelOverrides;
   });
+
+  handle('dictation:transcribe', ({ audio }) => dictation().transcribe(audio));
+  handle('dictation:cloudModels', ({ provider }) => dictation().cloudModels(String(provider ?? '')));
+  handle('dictation:status', () => dictation().status());
+  handle('dictation:install', () => dictation().install());
+  handle('dictation:cancelInstall', () => dictation().cancelInstall());
+  handle('dictation:removeModel', ({ model }) => {
+    const known = localModel(model);
+    if (!known) throw new Error(`Unknown dictation model ${String(model)}`);
+    return dictation().removeModel(known.id);
+  });
+  handle('dictation:stopLocal', () => dictation().stopLocal());
 
   handle('harness:availability', async (req) => {
     const ids: HarnessId[] = req && 'id' in req && req.id ? [req.id] : HARNESSES.map((h) => h.id);
@@ -1611,7 +1636,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   return {
     channels: () => Array.from(handlers.keys()),
     invoke: invokeChannel,
-    shutdown: () => vesta.dispose()
+    shutdown: async () => {
+      await Promise.all([vesta.dispose(), dictationService?.dispose()]);
+    }
   };
 }
 

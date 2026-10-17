@@ -63,6 +63,9 @@ mac:
   # Hardened runtime is off: with an ad-hoc identity its library validation stops the app launching.
   identity: "-"
   hardenedRuntime: false
+  # Composer dictation records the microphone; macOS refuses the request without a usage string.
+  extendInfo:
+    NSMicrophoneUsageDescription: Vocs Code records your voice only while you dictate into the composer.
 linux:
   icon: resources/icons/vocs-code.png
   target: [AppImage]
