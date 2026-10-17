@@ -5,6 +5,7 @@ import { MCP_BUILTIN_IDS, isCuaPermissionMode } from '../shared/types';
 import type { KnowledgeSettings } from '../shared/knowledge';
 import { normalizeBranchPrefix, normalizeCustomBranchPrefixes } from '../shared/branch-prefix';
 import { isAutoCompactionThreshold } from '../shared/compaction';
+import { DEFAULT_DICTATION, DICTATION_IDLE_MINUTES, localModel, type DictationSettings } from '../shared/dictation';
 import { HARNESSES, PERMISSION_MODE_LABELS, isEffortLevel } from '../shared/harness-meta';
 import { pruneModelOverrides } from '../shared/model-overrides';
 import { applyMissionProjectOverride, createDefaultMissionConfig, MissionConfigError, validateMissionConfig, validateMissionProjectOverride, type MissionCapabilityResolver, type MissionProjectOverride } from '../shared/mission-config';
@@ -225,6 +226,7 @@ export function defaultSettings(): AppSettings {
     cua: { enabled: true, mode: 'standard' },
     mcpProjectState: {},
     knowledge: { prime: true, autoDistill: true },
+    dictation: structuredClone(DEFAULT_DICTATION),
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
     modelOverrides: {},
     sidebarWidth: 280,
@@ -375,6 +377,33 @@ export function normalizeKnowledgeSettings(stored: unknown): KnowledgeSettings {
   return { prime: s.prime !== false, autoDistill: s.autoDistill !== false };
 }
 
+/**
+ * Dictation falls back field by field: only a known engine, compute and catalog model survive, so a
+ * hand-edited settings.json cannot point the local engine at a file the app never verified.
+ */
+export function normalizeDictationSettings(stored: unknown): DictationSettings {
+  const s = stored && typeof stored === 'object' && !Array.isArray(stored) ? (stored as Record<string, unknown>) : {};
+  const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+  const cloud = obj(s.cloud);
+  const local = obj(s.local);
+  const d = DEFAULT_DICTATION;
+  const text = (v: unknown, max: number): string | undefined => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined);
+  const idle = typeof local.idleMinutes === 'number' && (DICTATION_IDLE_MINUTES as readonly number[]).includes(local.idleMinutes) ? local.idleMinutes : d.local.idleMinutes;
+  const language = typeof s.language === 'string' && /^[a-z]{2,3}$/.test(s.language.trim().toLowerCase()) ? s.language.trim().toLowerCase() : '';
+  const provider = text(cloud.provider, 64) ?? d.cloud.provider;
+  return {
+    engine: s.engine === 'local' ? 'local' : 'cloud',
+    // A provider switched without a model keeps an empty model; the service answers with the provider's default.
+    cloud: { provider, model: typeof cloud.model === 'string' ? cloud.model.trim().slice(0, 200) : provider === d.cloud.provider ? d.cloud.model : '' },
+    local: {
+      model: localModel(typeof local.model === 'string' ? local.model : undefined)?.id ?? d.local.model,
+      compute: local.compute === 'gpu' || local.compute === 'cpu' ? local.compute : 'auto',
+      idleMinutes: idle
+    },
+    language
+  };
+}
+
 /** Per-repo MCP switches: string id lists, keyed by absolute project root. */
 export function normalizeMcpProjectState(stored: unknown): Record<string, McpProjectState> {
   if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
@@ -488,6 +517,7 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
       : [],
     mcpProjectState: normalizeMcpProjectState(stored.mcpProjectState),
     knowledge: normalizeKnowledgeSettings(stored.knowledge),
+    dictation: normalizeDictationSettings(stored.dictation),
     providers: [],
     acpAgents: []
   };
