@@ -101,7 +101,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
             <button key={t.id} type="button" className={`panel-tab ${bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
               <Icon name={t.icon} size={13} /> {t.label}
               {t.id === 'processes' && orphanedProcesses > 0 && (
-                <span className="panel-tab-count warn" data-testid="processes-orphaned-count" title={`${orphanedProcesses} process${orphanedProcesses === 1 ? '' : 'es'} left behind`}>
+                <span className="panel-tab-count warn" data-testid="processes-orphaned-count" title={`${orphanedProcesses} process${orphanedProcesses === 1 ? '' : 'es'} running on ${orphanedProcesses === 1 ? 'its' : 'their'} own: nothing in Vocs Code will stop ${orphanedProcesses === 1 ? 'it' : 'them'}`}>
                   {orphanedProcesses}
                 </span>
               )}

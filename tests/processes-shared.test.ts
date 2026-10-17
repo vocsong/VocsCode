@@ -53,11 +53,24 @@ describe('groupProcesses', () => {
         p(10, 1, 100, { owner: { label: 'GitNexus server' } }),
         p(20, 1, 200, { owner: { sessionId: 'other' } }),
         p(30, 1, 300, { owner: { sessionId: 'active' } }),
-        p(40, 99, 50, { owner: { sessionId: 'active' }, orphaned: true })
+        p(40, 99, 50, { owner: { sessionId: 'active' }, orphaned: true, previousRun: true })
       ],
       'active'
     );
     expect(groups.map((g) => g.key)).toEqual(['orphaned', 'session:active', 'session:other', 'app']);
+  });
+
+  it('keeps a session\'s detached process with its session; only unclaimed or earlier-run ones are left behind', () => {
+    const groups = groupProcesses([
+      p(10, 1, 100, { owner: { sessionId: 's1' } }),
+      // Start-Processed by the session: its launcher exited, but the session's Job says whose it is.
+      p(11, 99, 150, { owner: { sessionId: 's1' }, orphaned: true }),
+      p(12, 98, 160, { owner: {}, orphaned: true })
+    ]);
+    expect(groups.map((g) => [g.key, g.rows.map((r) => r.process.pid)])).toEqual([
+      ['orphaned', [12]],
+      ['session:s1', [10, 11]]
+    ]);
   });
 
   it('nests each child under its parent in start order, and sums the group', () => {

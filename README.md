@@ -59,7 +59,7 @@ That installs everything (including dev dependencies, even if your environment s
 
 **Built for long days.** Live model and effort switching, cost and context tracking, a real terminal in the side panel, slash commands and `@file` mentions, and notifications when a turn needs you.
 
-**No forgotten processes.** The side panel's Processes tab lists everything the app has started — agent CLIs, `npm run dev`, batch scripts, terminal shells and the processes those start — grouped by session, with CPU and memory. A process left behind by a session that stopped, or by an earlier run that quit or crashed, is flagged on the tab, and you can end it, its whole tree, or a whole group from there.
+**No forgotten processes.** The side panel's Processes tab lists everything the app has started — agent CLIs, `npm run dev`, batch scripts, terminal shells and the processes those start — grouped by session, with CPU and memory — including what a session started in a window of its own, which stays listed under that session as *detached*. A process left behind by a session that stopped, or by an earlier run that quit or crashed, is flagged on the tab, and you can end it, its whole tree, or a whole group from there.
 
 **MCP where you want it.** Add a server once — globally, or in a repo's `.mcp.json` — and Claude, both Codex adapters, ACP agents and Pi pick it up. Test a server before you rely on it; secrets stay in your keychain, never in the repo. GitNexus ships built in, scoped to each repo's code graph: one shared server serves every session, and each one sees only its own repo's graph. A same-named entry in Codex’s own config is switched off for the session, so the shared server is the only one that runs.
 

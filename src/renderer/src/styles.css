@@ -7477,3 +7477,12 @@ body.resizing {
   width: 48px;
   text-align: right;
 }
+.process-flag {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--amber-soft);
+  color: var(--amber);
+}

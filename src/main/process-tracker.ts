@@ -9,6 +9,10 @@
  * - Orphans: Windows never re-parents, so a process whose Vocs Code parent exited keeps pointing at
  *   a dead PID. A process tracked in the previous sample that the walk no longer reaches, or a new
  *   child of a tracked process that has just died, is kept as orphaned with its whole subtree.
+ * - Detached launches: a session's processes are put into that session's Windows Job Object (as
+ *   soon as a harness CLI is spawned, and on every sample for anything found later). A process they
+ *   start stays in the Job, so one launched through a shell that exits at once (`Start-Process`
+ *   from a tool call) is still the session's, though no sample ever saw its parent.
  * - Earlier runs: the tracked set is saved to disk, so a process still alive from a run that quit
  *   or crashed is found again on the next launch.
  *
@@ -17,7 +21,7 @@
 import type { ProcessEndResult, ProcessList, ProcessOwner, ProcessSummary, ProcessTarget, TrackedProcess } from '../shared/processes';
 import { processKey } from '../shared/processes';
 import { readJson, writeJson } from './util/fs';
-import type { ProcessSource, RawProcess } from './process-snapshot';
+import { JOB_OWNER, type ProcessSource, type RawProcess } from './process-snapshot';
 import { observeOwnedSpawns } from './process-context';
 
 export interface TerminalRoot {
@@ -25,6 +29,8 @@ export interface TerminalRoot {
   sessionId: string;
   terminalId: string;
   title?: string;
+  /** In a Mission-style Job of its own: its tree is never put into a session's Job. */
+  owned?: boolean;
 }
 
 export interface ProcessTrackerOptions {
@@ -48,6 +54,11 @@ export interface ProcessTrackerOptions {
   platform?: NodeJS.Platform;
   /** Whether to observe ChildProcess spawns (tests drive `claim` directly). */
   observeSpawns?: boolean;
+  /**
+   * Whether a session's process may join that session's Job Object. Mission sessions keep the Job
+   * ownership they prove quiescence with and are left out. Defaults to every session-owned process.
+   */
+  adoptable?: (owner: ProcessOwner) => boolean;
 }
 
 interface Claim {
@@ -91,8 +102,11 @@ export class ProcessTracker {
   private latest: { list: ProcessList; tracked: Map<string, TrackedProcess>; raw: RawProcess[] } | null = null;
   private inflight: Promise<ProcessList> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private soonTimer: ReturnType<typeof setTimeout> | null = null;
   private stopObserving: (() => void) | null = null;
   private savedSignature = '';
+  /** Processes the reader refused to put into a Job (another user's, elevated); not retried. */
+  private readonly unadoptable = new Set<string>();
   private loaded: Promise<void> | null = null;
   private closed = false;
 
@@ -114,13 +128,50 @@ export class ProcessTracker {
 
   /** Attributes a process the app just started; bound to its creation time on the next sample. */
   claim(pid: number, owner: ProcessOwner): void {
-    if (pid > 0) this.claims.set(pid, { owner, at: this.now() });
+    if (pid <= 0) return;
+    this.claims.set(pid, { owner, at: this.now() });
+    // Into the session's Job straight away, before the harness has started anything of its own.
+    const job = this.jobKey(owner);
+    if (job) void this.adopt(job, [{ pid, startedAt: 0 }]);
+  }
+
+  /** The Job a process working for `owner` joins, or null when it joins none. */
+  private jobKey(owner: ProcessOwner): string | null {
+    if (!this.opts.source.adopt || !owner.sessionId || !JOB_OWNER.test(owner.sessionId)) return null;
+    return (this.opts.adoptable?.(owner) ?? true) ? owner.sessionId : null;
+  }
+
+  private async adopt(job: string, targets: { pid: number; startedAt: number }[]): Promise<void> {
+    try {
+      const results = await this.opts.source.adopt!(job, targets);
+      for (const target of targets) {
+        const result = results.get(target.pid);
+        if (result === undefined || result === true) continue;
+        if (target.startedAt) this.unadoptable.add(processKey(target));
+        this.opts.log?.('debug', `processes: ${target.pid} stays out of ${job}'s job (${result})`);
+      }
+    } catch (e) {
+      this.opts.log?.('debug', `processes: could not adopt into ${job}'s job (${e instanceof Error ? e.message : String(e)})`);
+    }
   }
 
   /** The latest list, sampling again unless the last sample is still fresh. */
   async list(): Promise<ProcessList> {
     if (this.latest && this.now() - this.latest.list.sampledAt < FRESH_MS) return this.latest.list;
     return this.refresh();
+  }
+
+  /**
+   * Samples shortly, coalescing bursts: a new terminal's shell is not a ChildProcess, so it joins
+   * its session's Job only when a sample finds it, and that should happen before anything is typed.
+   */
+  soon(delayMs = 500): void {
+    if (this.closed || this.soonTimer) return;
+    this.soonTimer = setTimeout(() => {
+      this.soonTimer = null;
+      void this.refresh().catch(() => undefined);
+    }, delayMs);
+    this.soonTimer.unref?.();
   }
 
   refresh(): Promise<ProcessList> {
@@ -205,6 +256,8 @@ export class ProcessTracker {
     this.stopObserving?.();
     this.stopObserving = null;
     if (this.timer) clearInterval(this.timer);
+    if (this.soonTimer) clearTimeout(this.soonTimer);
+    this.soonTimer = null;
     this.timer = null;
     this.opts.source.close();
   }
@@ -235,7 +288,9 @@ export class ProcessTracker {
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e), sampledAt: at, processes: [] };
     }
-    const tracked = this.classify(raw, at);
+    const members = this.opts.source.jobs ? await this.opts.source.jobs().catch(() => new Map<string, number[]>()) : new Map<string, number[]>();
+    const { tracked, sealed } = this.classify(raw, at, members);
+    await this.adoptNew(tracked, members, sealed);
     await this.fillCommands(tracked);
     // Chromium helpers that getAppMetrics did not name (crashpad) carry the app's own image and a --type switch.
     const root = raw.find((p) => p.pid === this.opts.rootPid);
@@ -264,18 +319,40 @@ export class ProcessTracker {
     return list;
   }
 
-  /** The tracked set for one sample: the walk from the app, then orphans and their subtrees. */
-  private classify(raw: RawProcess[], at: number): Map<string, TrackedProcess> {
+  /** Puts every session process not yet in its session's Job into it, so its future children are too. */
+  private async adoptNew(tracked: Map<string, TrackedProcess>, members: Map<string, number[]>, sealed: Set<string>): Promise<void> {
+    const pending = new Map<string, { pid: number; startedAt: number }[]>();
+    for (const [key, p] of tracked) {
+      const job = this.jobKey(p.owner);
+      // What an earlier run left is not this run's session work: it stays left behind.
+      if (!job || p.previousRun || sealed.has(key) || this.unadoptable.has(key) || CONSOLE_HOSTS.has(p.name.toLowerCase())) continue;
+      if (members.get(job)?.includes(p.pid)) continue;
+      if (!pending.has(job)) pending.set(job, []);
+      pending.get(job)!.push({ pid: p.pid, startedAt: p.startedAt });
+    }
+    for (const [job, targets] of pending) await this.adopt(job, targets);
+    for (const key of [...this.unadoptable]) if (!tracked.has(key)) this.unadoptable.delete(key);
+  }
+
+  /**
+   * The tracked set for one sample: the walk from the app, then whatever a session's Job holds that
+   * the walk missed, then orphans and their subtrees. `sealed` is the part no session Job may take.
+   */
+  private classify(raw: RawProcess[], at: number, members: Map<string, number[]> = new Map()): { tracked: Map<string, TrackedProcess>; sealed: Set<string> } {
     const byKey = new Map(raw.map((p) => [processKey(p), p]));
     const children = childMap(raw);
     const internal = new Set([this.opts.rootPid, ...(this.opts.internalPids?.() ?? [])]);
     if (this.opts.source.helperPid) internal.add(this.opts.source.helperPid);
     const terminals = new Map<number, ProcessOwner>();
+    const ownedTerminals = new Set<number>();
     for (const t of this.opts.terminalRoots?.() ?? []) {
-      if (t.pid) terminals.set(t.pid, { sessionId: t.sessionId, terminalId: t.terminalId, label: t.title });
+      if (!t.pid) continue;
+      terminals.set(t.pid, { sessionId: t.sessionId, terminalId: t.terminalId, label: t.title });
+      if (t.owned) ownedTerminals.add(t.pid);
     }
     const tracked = new Map<string, TrackedProcess>();
     const visited = new Set<string>();
+    const sealed = new Set<string>();
 
     const ownerOf = (p: RawProcess, inherited: ProcessOwner): ProcessOwner => {
       const claim = this.claims.get(p.pid);
@@ -286,12 +363,14 @@ export class ProcessTracker {
       return terminals.get(p.pid) ?? inherited;
     };
     const walk = (start: RawProcess, owner: ProcessOwner, flags: { orphaned?: boolean; previousRun?: boolean }, includeStart: boolean) => {
-      const queue: [RawProcess, ProcessOwner][] = [[start, owner]];
+      const queue: [RawProcess, ProcessOwner, boolean][] = [[start, owner, false]];
       while (queue.length) {
-        const [p, inherited] = queue.shift()!;
+        const [p, inherited, inSealed] = queue.shift()!;
         const key = processKey(p);
         if (visited.has(key)) continue;
         visited.add(key);
+        const isSealed = inSealed || ownedTerminals.has(p.pid);
+        if (isSealed) sealed.add(key);
         let own = inherited;
         if (p !== start || includeStart) {
           if (!internal.has(p.pid)) {
@@ -301,7 +380,7 @@ export class ProcessTracker {
         }
         // Children work for the same session or terminal; a label names only the root that was started.
         const forChildren = own.label === undefined ? own : withoutLabel(own);
-        for (const child of children.get(p.pid) ?? []) if (startedUnder(child, p)) queue.push([child, forChildren]);
+        for (const child of children.get(p.pid) ?? []) if (startedUnder(child, p)) queue.push([child, forChildren, isSealed]);
       }
     };
 
@@ -314,6 +393,17 @@ export class ProcessTracker {
       if (live && !visited.has(processKey(live)) && !internal.has(pid)) walk(live, owner, {}, true);
     }
 
+    // In a session's Job but no longer under the app: started through a launcher that has exited.
+    // A Job lists only live members, so a listed PID names that member, not a reused PID.
+    const livePids = new Map(raw.map((p) => [p.pid, p]));
+    for (const [owner, pids] of members) {
+      for (const pid of pids) {
+        const live = livePids.get(pid);
+        if (!live || visited.has(processKey(live)) || internal.has(pid)) continue;
+        const prev = this.known.get(processKey(live));
+        walk(live, prev?.owner ?? { sessionId: owner }, { orphaned: true, previousRun: prev?.previousRun }, true);
+      }
+    }
     // Tracked last time and still alive, but no longer under the app: its parent chain broke.
     for (const [key, prev] of this.known) {
       const live = byKey.get(key);
@@ -332,7 +422,7 @@ export class ProcessTracker {
         walk(p, withoutLabel(parent.owner), { orphaned: true }, true);
       }
     }
-    return tracked;
+    return { tracked, sealed };
   }
 
   /** Windows reads command lines separately; each is read once per process and cached. */

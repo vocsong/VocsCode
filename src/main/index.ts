@@ -344,8 +344,10 @@ async function main(): Promise<void> {
     internalPids: () => app.getAppMetrics().map((metric) => metric.pid),
     terminalRoots: () => {
       const titles = new Map((terminals?.list() ?? []).map((t) => [t.id, t.title]));
-      return (terminals?.activity() ?? []).map((a) => ({ pid: a.pid, sessionId: a.sessionId, terminalId: a.terminalId, title: titles.get(a.terminalId) }));
+      return (terminals?.activity() ?? []).map((a) => ({ pid: a.pid, sessionId: a.sessionId, terminalId: a.terminalId, title: titles.get(a.terminalId), owned: a.managed || !!a.ownershipNonce }));
     },
+    // Mission sessions prove quiescence through Jobs of their own; nothing of theirs joins a session Job.
+    adoptable: (owner) => !owner.sessionId || !sessionsRef.get(owner.sessionId)?.mission,
     registryFile: path.join(userData, 'processes.json'),
     cpuCount: os.availableParallelism(),
     onSummary: (summary) => pushAll(PUSH_CHANNELS.processSummary, summary),
@@ -382,7 +384,11 @@ async function main(): Promise<void> {
     onActivity: (id) => { const missionId = sessionsRef.get(id)?.mission?.missionId; if (missionId) missions?.service.ownedActivityChanged(missionId); },
     ordinaryProcessOwnership,
     windowsJobHelper,
-    push: pushAll,
+    push: (channel, payload) => {
+      pushAll(channel, payload);
+      // A new shell joins its session's process Job at the next sample; make that one soon.
+      if (channel === PUSH_CHANNELS.terminalsChanged) processes.soon();
+    },
     log
   });
   await terminals.load();

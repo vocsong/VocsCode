@@ -3,7 +3,8 @@
  * a process an earlier run left behind (seeded in the saved list) is found on launch, badged on the
  * tab before it is opened, listed as left behind with the session it belonged to, and ended from
  * the panel; a shell opened in the session's terminal is listed under that session and ending its
- * row really ends it. No harness and no provider key is involved. Requires `npm run build`; gated
+ * row really ends it; a process Start-Processed through a launcher that exits at once stays the
+ * session's (flagged detached) and is ended from its row. No harness and no provider key is involved. Requires `npm run build`; gated
  * by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
@@ -22,12 +23,14 @@ const root = path.resolve(__dirname, '..');
 const require = createRequire(import.meta.url);
 let app: ElectronApplication | null = null;
 let leftover: number | null = null;
+let detached: number | null = null;
 
 afterAll(async () => {
   await app?.close().catch(() => undefined);
-  if (leftover) {
+  for (const pid of [leftover, detached]) {
+    if (!pid) continue;
     try {
-      process.kill(leftover);
+      process.kill(pid);
     } catch {
       /* already ended, as the suite expects */
     }
@@ -122,6 +125,22 @@ describe.runIf(enabled)('electron e2e: processes', () => {
     expect(await sessionGroup.innerText()).toContain('Nightly batch');
     const shellPid = Number(await shellRow.getAttribute('data-pid'));
     expect(alive(shellPid)).toBe(true);
+
+    // "Run it in its own window": a short-lived PowerShell Start-Processes a hidden process and
+    // exits, so the process's parent is dead before any sample can see it. The shell was put into
+    // the session's process Job when it was first sampled, so the launch is still the session's.
+    const marker = `vocs-e2e-detached-${Date.now()}`;
+    await win.fill('.composer textarea', `!powershell -NoProfile -Command "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','Start-Sleep 120 # ${marker}'"`);
+    await win.press('.composer textarea', 'Enter');
+    const detachedRow = sessionGroup.locator(`[data-testid="process-row"][title*="${marker}"]`);
+    await detachedRow.waitFor({ timeout: 30_000 });
+    expect(await detachedRow.getByTestId('process-detached').innerText()).toBe('detached');
+    expect(await win.getByTestId('process-group-orphaned').locator(`[title*="${marker}"]`).count(), 'not left behind: it is the session\'s').toBe(0);
+    detached = Number(await detachedRow.getAttribute('data-pid'));
+    expect(alive(detached)).toBe(true);
+    await detachedRow.getByTestId('process-end').click();
+    await expect.poll(() => alive(detached!), { timeout: 20_000 }).toBe(false);
+    await expect.poll(async () => detachedRow.count(), { timeout: 20_000 }).toBe(0);
 
     // Ending the row ends the real shell, and the row goes with it.
     await shellRow.getByTestId('process-end').click();
