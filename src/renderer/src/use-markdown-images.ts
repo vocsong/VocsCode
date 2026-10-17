@@ -3,6 +3,7 @@ import { useLayoutEffect, useMemo, useRef } from 'react';
 import { imageMimeType, type WorkspaceImage } from '../../shared/image-files';
 import { invoke, isWeb } from './api';
 import { workspaceRelativePath } from './file-refs';
+import type { LightboxImage } from './components/ImageLightbox';
 
 // Automatic previews are deliberately smaller than the manual Files preview's 20 MB cap.
 // Keep failures too: a growing stream must not repeatedly read the same oversized file.
@@ -26,7 +27,7 @@ function dataSource(image: WorkspaceImage | null, path: string): string | null {
   return `data:${image.mimeType};base64,${image.data}`;
 }
 
-export function useMarkdownImages(html: string, sessionId: string, cwd: string | undefined) {
+export function useMarkdownImages(html: string, sessionId: string, cwd: string | undefined, onImageExpand: (images: LightboxImage[], index: number) => void) {
   const root = useRef<HTMLDivElement>(null);
   const scope = useMemo(() => ({ cache: new Map<string, Promise<string | null>>(), chars: 0, active: true, generation: 0, queue: Promise.resolve() }), [sessionId, cwd]);
   useLayoutEffect(() => {
@@ -80,10 +81,31 @@ export function useMarkdownImages(html: string, sessionId: string, cwd: string |
           unavailable();
         };
         image.src = src;
-        placeholder.replaceChildren(image);
+        image.draggable = false;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'msg-image-btn';
+        button.setAttribute('aria-label', `Preview ${alt}`);
+        button.title = 'View full image';
+        button.onclick = (event) => {
+          // A screenshot can itself be a link; previewing must not activate its parent.
+          event.preventDefault();
+          event.stopPropagation();
+          if (!live || !scope.active) return;
+          // Read the current DOM order, not async completion order or an older streaming prefix.
+          const images = Array.from(body.querySelectorAll<HTMLImageElement>('[data-local-image] .msg-image-btn img'));
+          const index = images.indexOf(image);
+          if (index >= 0) onImageExpand(images.map((img) => ({ src: img.src, name: img.alt })), index);
+        };
+        button.onkeydown = (event) => {
+          // Keep native button activation, but bypass delegated file-link keyboard handlers.
+          if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+        };
+        button.append(image);
+        placeholder.replaceChildren(button);
       });
     }
     return () => { live = false; };
-  }, [html, scope, sessionId, cwd]);
+  }, [html, scope, sessionId, cwd, onImageExpand]);
   return root;
 }
