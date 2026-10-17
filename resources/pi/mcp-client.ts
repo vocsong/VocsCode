@@ -27,8 +27,9 @@ export interface PiMcpTool {
   readOnly?: boolean;
 }
 
+/** Pi's model-facing tool result content: text or base64 image blocks. */
 export interface PiMcpCallResult {
-  content: { type: string; text?: string }[];
+  content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string; text?: never })[];
   isError?: boolean;
 }
 
@@ -274,10 +275,16 @@ export class PiMcpConnection {
   async callTool(name: string, args: Record<string, unknown>): Promise<PiMcpCallResult> {
     const result = (await this.request('tools/call', { name, arguments: args ?? {} })) as { content?: unknown; isError?: unknown } | undefined;
     const raw = Array.isArray(result?.content) ? result.content : [];
-    const content = raw.flatMap((entry): { type: string; text?: string }[] => {
-      if (!entry || typeof entry !== 'object') return [];
-      const item = entry as { type?: unknown; text?: unknown };
-      return [{ type: typeof item.type === 'string' ? item.type : 'text', text: typeof item.text === 'string' ? item.text : undefined }];
+    const content = raw.map((entry): PiMcpCallResult['content'][number] => {
+      const source = `MCP tool "${name}" from "${this.cfg.id}"`;
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`${source} returned an invalid content block`);
+      const item = entry as { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown };
+      if (item.type === 'text' && typeof item.text === 'string') return { type: 'text', text: item.text };
+      if (item.type === 'image' && typeof item.data === 'string' && typeof item.mimeType === 'string') {
+        return { type: 'image', data: item.data, mimeType: item.mimeType };
+      }
+      if (item.type === 'text' || item.type === 'image') throw new Error(`${source} returned a malformed ${item.type} content block`);
+      throw new Error(`${source} returned unsupported content type "${String(item.type)}"; the pi MCP bridge supports only text and image blocks`);
     });
     return { content, isError: !!result?.isError };
   }

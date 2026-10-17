@@ -12,11 +12,11 @@
 
 import { readFileSync } from 'node:fs';
 import { stripVTControlCharacters } from 'node:util';
-import { PiMcpConnection, type PiMcpServerConfig, type PiMcpTool } from './mcp-client';
+import { PiMcpConnection, type PiMcpCallResult, type PiMcpServerConfig, type PiMcpTool } from './mcp-client';
 import { isMissionCoordinationTool, MISSION_SERVER_ID } from './vocs-code-mission';
 
 interface PiToolResult {
-  content: { type: string; text?: string }[];
+  content: PiMcpCallResult['content'];
   details?: Record<string, unknown>;
 }
 
@@ -274,7 +274,7 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
             throw error;
           }
           if (result.isError) {
-            const text = result.content.map((part) => part.text ?? '').filter(Boolean).join('\n') || 'MCP tool ' + tool.name + ' failed';
+            const text = result.content.map((part) => part.type === 'text' ? part.text : '').filter(Boolean).join('\n') || 'MCP tool ' + tool.name + ' failed';
             throw mission ? missionRequestFailure(text, cfg.headers) : new Error(text);
           }
           return { content: result.content, details: { server: cfg.id, tool: tool.name } };

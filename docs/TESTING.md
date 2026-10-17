@@ -244,8 +244,23 @@ native modules, bundled runtime resources, or production startup:
 npm run dist:dir && HARNESS_E2E=1 HARNESS_E2E_EXE="$PWD/dist/win-unpacked/Vocs Code.exe" npx vitest run tests/e2e.terminal.test.ts
 ```
 
-At minimum, verify packaged startup and the affected feature; terminal-only coverage does not prove
-every unpacked SDK or copied resource loads.
+The Windows `packaged-smoke` CI job runs after the full offline and no-provider E2E gates on PRs
+to `master`, pushes to `master`, and manual CI dispatches — not routine develop PRs. It builds an
+unpublished unpacked app and runs `e2e.packaged` through the no-skip guard. The suite uses a fresh
+user-data directory, disables the live updater, and checks the packaged identity, renderer paint,
+preload/core IPC (`app:info`, `sessions:list`), and a clean process exit, with bounded timeouts.
+Failure screenshots and main/renderer logs are uploaded as `packaged-smoke-failure`.
+
+```bash
+npm run dist:dir -- --publish never
+HARNESS_E2E_EXE="$PWD/dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mjs tests/e2e.packaged.test.ts
+```
+
+This checks startup under the packaged layout, not installer UX, code signing or notarization,
+every bundled SDK/resource, or an actual updater install. Tag-triggered `release.yml` publication
+is a separate workflow; this gate does not make it depend on a successful CI run.
+At minimum, also verify the affected feature; terminal-only coverage does not prove every unpacked
+SDK or copied resource loads.
 
 ## Keeping the suites alive
 

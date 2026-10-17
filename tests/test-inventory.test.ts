@@ -8,6 +8,7 @@ const root = path.resolve(import.meta.dirname, '..');
 const excluded: Record<string, string> = {
   'e2e.approval.test.ts': 'live provider approval',
   'e2e.electron.test.ts': 'live provider session',
+  'e2e.packaged.test.ts': 'Windows unpacked app, dedicated release-tier CI job',
   'e2e.pi-tools.test.ts': 'installed Pi offline runtime',
   'e2e.update.test.ts': 'packaged app and staged update feed',
   'e2e.vesta.test.ts': 'installed Pi offline runtime',

@@ -295,6 +295,100 @@ describe('vocsCodeMcp extension', () => {
   }, 60_000);
 });
 
+describe('MCP image content at extension execute', () => {
+  const image = {
+    type: 'image' as const,
+    data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aRZkAAAAASUVORK5CYII=',
+    mimeType: 'image/png'
+  };
+
+  async function contentTool(result: { content: unknown[]; isError?: boolean }) {
+    const calls: CallToolRequest['params'][] = [];
+    // Raw JSON-RPC also permits malformed server replies to reach the client decoder.
+    const http = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (request.id === undefined) { res.writeHead(204).end(); return; }
+      let reply: unknown;
+      if (request.method === 'initialize') reply = { protocolVersion: '2024-11-05', serverInfo: { name: 'content-fixture', version: '1' }, capabilities: { tools: {} } };
+      else if (request.method === 'tools/list') reply = { tools: [{ name: 'capture', inputSchema: { type: 'object', properties: {} } }] };
+      else if (request.method === 'tools/call') { calls.push(request.params); reply = result; }
+      else { res.writeHead(400).end(); return; }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: reply }));
+    });
+    await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve));
+    const dir = await mkdtemp(path.join(tmpdir(), 'vocs-pi-mcp-content-'));
+    const def = { id: 'content', transport: 'http' as const, url: `http://127.0.0.1:${(http.address() as AddressInfo).port}/mcp` };
+    const configPath = path.join(dir, 'mcp.json');
+    const close = async () => {
+      closeMcpBridge();
+      await new Promise<void>((resolve) => { http.closeAllConnections(); http.close(() => resolve()); });
+      await rm(dir, { recursive: true, force: true });
+    };
+    try {
+      await writeFile(configPath, JSON.stringify({ servers: [def] }));
+      process.env.VOCS_CODE_MCP_CONFIG = configPath;
+      const { pi, tools } = makePi();
+      await vocsCodeMcp(pi);
+      return { def, tool: tools.find((tool) => tool.name === 'mcp__content__capture')!, calls, close };
+    } catch (error) {
+      await close();
+      throw error;
+    }
+  }
+
+  it.each([
+    { label: 'image-only', content: [image] },
+    { label: 'mixed text and images', content: [{ type: 'text' as const, text: 'before\nimage' }, image, { type: 'text' as const, text: '' }, { ...image, mimeType: 'image/jpeg', data: '/9j/2Q==' }, { type: 'text' as const, text: 'after' }] }
+  ])('preserves every $label block in order with complete image data and MIME type', async ({ content }) => {
+    const fixture = await contentTool({ content });
+    try {
+      await expect(fixture.tool.execute('image', {})).resolves.toEqual({ content, details: { server: 'content', tool: 'capture' } });
+      expect(fixture.calls).toEqual([{ name: 'capture', arguments: {} }]);
+    } finally { await fixture.close(); }
+  });
+
+  it.each([
+    { content: [image], message: 'MCP tool capture failed' },
+    { content: [image, { type: 'text' as const, text: 'capture failed' }], message: 'capture failed' }
+  ])('keeps image-bearing tool errors failed: $message', async ({ content, message }) => {
+    const fixture = await contentTool({ content, isError: true });
+    const connection = await PiMcpConnection.connect(fixture.def);
+    try {
+      await expect(connection.callTool('capture', {})).resolves.toEqual({ content, isError: true });
+      await expect(fixture.tool.execute('image-error', {})).rejects.toThrow(message);
+      expect(fixture.calls).toEqual([{ name: 'capture', arguments: {} }, { name: 'capture', arguments: {} }]);
+    } finally { connection.close(); await fixture.close(); }
+  });
+
+  it.each([
+    { type: 'audio' as const, data: 'YXVkaW8=', mimeType: 'audio/wav' },
+    { type: 'resource' as const, resource: { uri: 'file:///fixture.txt', text: 'resource text' } },
+    { type: 'resource_link' as const, uri: 'file:///fixture.txt', name: 'fixture.txt' }
+  ])('explicitly rejects unsupported $type blocks instead of losing their content', async (block) => {
+    const fixture = await contentTool({ content: [{ type: 'text', text: 'partial result' }, block] });
+    try {
+      await expect(fixture.tool.execute('unsupported', {})).rejects.toThrow(`unsupported content type "${block.type}"`);
+      expect(fixture.calls).toHaveLength(1);
+    } finally { await fixture.close(); }
+  });
+
+  it.each([
+    { label: 'missing image data', block: { type: 'image', mimeType: 'image/png' }, message: 'malformed image content block' },
+    { label: 'missing MIME type', block: { type: 'image', data: image.data }, message: 'malformed image content block' },
+    { label: 'non-string image data', block: { type: 'image', data: 123, mimeType: 'image/png' }, message: 'malformed image content block' },
+    { label: 'missing text', block: { type: 'text' }, message: 'malformed text content block' },
+    { label: 'null block', block: null, message: 'invalid content block' }
+  ])('explicitly rejects $label instead of returning partial success', async ({ block, message }) => {
+    const fixture = await contentTool({ content: [{ type: 'text', text: 'partial result' }, block] });
+    try {
+      await expect(fixture.tool.execute('malformed', {})).rejects.toThrow(message);
+      expect(fixture.calls).toHaveLength(1);
+    } finally { await fixture.close(); }
+  });
+});
+
 describe('managed Mission MCP errors at extension execute', () => {
   it('surfaces the live required-criterion rejection from an SDK InvalidParams response and keeps reads usable', async () => {
     const record = missionFixture({ revision: 12 });
