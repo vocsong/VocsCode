@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
 import { Transcript } from '../src/renderer/src/components/Transcript';
 import { useStore } from '../src/renderer/src/store';
@@ -68,6 +69,93 @@ describe('assistant workspace markdown images', () => {
     expect(container.querySelector('img')?.style.height).toBe('auto');
     // The parser cache contains only the inert placeholder, never session data.
     expect(renderMarkdown(`![New Session](${href})`, { fileLinks: true })).not.toContain('base64');
+  });
+
+  it('opens the clicked image in the full preview and navigates only available images in message order', async () => {
+    invoke.mockResolvedValueOnce(null).mockResolvedValueOnce(image).mockResolvedValueOnce({ ...image, data: 'bmV3' });
+    mount('![Missing](missing.png)\n\n![First](one.png)\n\n![Second](two.png)');
+    const preview = await screen.findByRole('button', { name: 'Preview Second' });
+    expect(screen.queryByRole('button', { name: 'Preview Missing' })).toBeNull();
+    fireEvent.click(within(preview).getByRole('img'));
+    const dialog = screen.getByRole('dialog', { name: 'Image preview' });
+    expect(within(dialog).getByRole('img').getAttribute('src')).toBe('data:image/png;base64,bmV3');
+    expect(within(dialog).getByText('Second (2/2)')).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('img'));
+    expect(screen.getByRole('dialog')).toBe(dialog);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Previous image' }));
+    expect(within(dialog).getByRole('img').getAttribute('src')).toBe('data:image/png;base64,aGVsbG8=');
+    expect(within(dialog).getByText('First (1/2)')).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(within(dialog).getByText('Second (2/2)')).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview First' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close image preview' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent.click(preview);
+    fireEvent.click(screen.getByRole('dialog'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(reads()).toHaveLength(3);
+  });
+
+  it.each(['{Enter}', ' '])('previews a linked image with %s without opening its enclosing link', async (key) => {
+    const user = userEvent.setup();
+    useStore.setState({ fileReveal: null });
+    mount('<a data-file="notes.md" role="link" tabindex="0">![Linked screenshot](shot.png)</a>');
+    const preview = await screen.findByRole('button', { name: 'Preview Linked screenshot' });
+    preview.focus();
+    await user.keyboard(key);
+    expect(screen.getByRole('dialog', { name: 'Image preview' })).toBeTruthy();
+    const close = screen.getByRole('button', { name: 'Close image preview' });
+    expect(document.activeElement).toBe(close);
+    await user.tab();
+    expect(document.activeElement).toBe(close);
+    expect(useStore.getState().fileReveal).toBeNull();
+    expect(invoke.mock.calls.every(([channel]) => channel === 'fs:readImage')).toBe(true);
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(preview);
+    await user.click(preview);
+    expect(screen.getByRole('dialog', { name: 'Image preview' })).toBeTruthy();
+    expect(useStore.getState().fileReveal).toBeNull();
+    expect(reads()).toHaveLength(1);
+  });
+
+  it('previews the current streamed image after HTML replacement without rereading it', async () => {
+    mount('![Old caption](shot.png)', session(), true);
+    await screen.findByRole('button', { name: 'Preview Old caption' });
+    update('![New caption](./shot.png)\n\nThe final answer.');
+    fireEvent.click(await screen.findByRole('button', { name: 'Preview New caption' }));
+    const dialog = screen.getByRole('dialog', { name: 'Image preview' });
+    expect(within(dialog).getByRole('img', { name: 'New caption' }).getAttribute('src')).toBe('data:image/png;base64,aGVsbG8=');
+    expect(within(dialog).queryByRole('button', { name: 'Next image' })).toBeNull();
+    expect(reads()).toHaveLength(1);
+  });
+
+  it('keeps the gallery scoped to the clicked message rather than the whole transcript', async () => {
+    const { container } = mount('![First message](one.png)');
+    await screen.findByRole('button', { name: 'Preview First message' });
+    act(() => useStore.setState((state) => ({ transcripts: { worktree: [...state.transcripts.worktree!, { ...answer('![Other message](two.png)'), id: 'other-answer' }] } })));
+    await screen.findByRole('button', { name: 'Preview Other message' });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview First message' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('img', { name: 'First message' })).toBeTruthy();
+    expect(within(dialog).queryByRole('button', { name: 'Next image' })).toBeNull();
+    expect(container.querySelectorAll('.md img')).toHaveLength(2);
+    expect(reads()).toHaveLength(2);
+  });
+
+  it('restores keyboard focus to a replaced screenshot trigger when streaming continues during preview', async () => {
+    const user = userEvent.setup();
+    mount('![Old caption](shot.png)', session(), true);
+    await user.click(await screen.findByRole('button', { name: 'Preview Old caption' }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    update('![New caption](./shot.png)\n\nMore streamed text.');
+    const replacement = await screen.findByRole('button', { name: 'Preview New caption' });
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(replacement);
+    expect(reads()).toHaveLength(1);
   });
 
   it('denies non-images, traversal, outside absolute paths, URLs and custom schemes before IPC', async () => {

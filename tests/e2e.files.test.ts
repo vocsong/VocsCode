@@ -24,7 +24,7 @@ afterEach(async () => {
 });
 
 describe.runIf(enabled)('file mentions open in the Files panel', () => {
-  it('decodes inline Markdown screenshots from the session checkout without broken-image fallbacks', async () => {
+  it('decodes and previews inline Markdown screenshots from the session checkout without activating enclosing links', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-inline-images-'));
     const userData = path.join(tmp, 'profile');
     const project = path.join(tmp, 'project');
@@ -34,10 +34,14 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     await fs.mkdir(project);
     await fs.mkdir(userData);
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    const absolutePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
     const imagePath = path.join(imageDir, 'shot with spaces.png');
+    const absoluteImagePath = path.join(imageDir, 'absolute shot.png');
     await fs.writeFile(imagePath, Buffer.from(png, 'base64'));
+    await fs.writeFile(absoluteImagePath, Buffer.from(absolutePng, 'base64'));
     await fs.writeFile(path.join(tmp, 'outside.png'), Buffer.from(png, 'base64'));
     await fs.writeFile(path.join(checkout, '.env'), 'DO_NOT_RENDER_THIS_SECRET');
+    await fs.writeFile(path.join(checkout, 'README.md'), 'An image preview must not open this file.');
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
     const sid = 's_inline_images';
     const meta: SessionMeta = {
@@ -48,7 +52,8 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     };
     const text = [
       '**Relative screenshot**', '![Relative screenshot](tests/artifacts/shot%20with%20spaces.png)',
-      '**Absolute screenshot**', `![Absolute screenshot](<${imagePath.replace(/\\/g, '/')}>)`,
+      '**Absolute screenshot**', `![Absolute screenshot](<${absoluteImagePath.replace(/\\/g, '/')}>)`,
+      '<a class="file-ref" data-file="README.md" role="link" tabindex="0">![Linked screenshot](tests/artifacts/shot%20with%20spaces.png)</a>',
       '![Missing screenshot](tests/artifacts/missing.png)',
       '![Outside screenshot](../outside.png)',
       '![Not an image](.env)',
@@ -64,16 +69,52 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
       env: isolatedEnv(userData), timeout: 60_000,
     });
     const win = await app.firstWindow();
-    for (const name of ['Relative screenshot', 'Absolute screenshot']) {
+    for (const [name, data] of [['Relative screenshot', png], ['Absolute screenshot', absolutePng], ['Linked screenshot', png]]) {
       const image = win.getByRole('img', { name, exact: true });
       await image.waitFor({ timeout: 15_000 });
       await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 15_000 }).toBe(1);
-      expect(await image.getAttribute('src')).toBe(`data:image/png;base64,${png}`);
+      expect(await image.getAttribute('src')).toBe(`data:image/png;base64,${data}`);
     }
     const message = win.locator('[data-item-id="answer"]');
-    expect(await message.getByRole('img').count()).toBe(2);
+    expect(await message.getByRole('img').count()).toBe(3);
     expect(await message.innerText()).not.toContain('DO_NOT_RENDER_THIS_SECRET');
     await expect.poll(() => message.innerText(), { timeout: 15_000 }).toMatch(/unavailable/i);
+
+    const preview = win.getByRole('dialog', { name: 'Image preview', exact: true });
+    const expectPreview = async (name: string, data: string) => {
+      await preview.waitFor({ state: 'visible', timeout: 10_000 });
+      const image = preview.getByRole('img', { name, exact: true });
+      await image.waitFor({ state: 'visible', timeout: 10_000 });
+      await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 10_000 }).toBe(1);
+      expect(await image.getAttribute('src')).toBe(`data:image/png;base64,${data}`);
+      expect(await preview.getByRole('img').count()).toBe(1);
+    };
+
+    await message.getByRole('button', { name: 'Preview Relative screenshot', exact: true }).click();
+    await expectPreview('Relative screenshot', png);
+    await preview.getByRole('button', { name: 'Next image', exact: true }).click();
+    await expectPreview('Absolute screenshot', absolutePng);
+    await preview.getByRole('button', { name: 'Previous image', exact: true }).click();
+    await expectPreview('Relative screenshot', png);
+    await win.keyboard.press('Escape');
+    await preview.waitFor({ state: 'hidden', timeout: 10_000 });
+
+    await message.getByRole('button', { name: 'Preview Absolute screenshot', exact: true }).click();
+    await expectPreview('Absolute screenshot', absolutePng);
+    await preview.getByRole('button', { name: 'Close image preview', exact: true }).click();
+    await preview.waitFor({ state: 'hidden', timeout: 10_000 });
+
+    // Clicking the image inside a file link must only preview the image, not reveal README.md.
+    const activeTabs = await win.locator('.panel-tab.active').allTextContents();
+    expect(await message.locator('a.file-ref[data-file="README.md"]').count()).toBe(1);
+    expect(await win.locator('.file-preview').count()).toBe(0);
+    await message.getByRole('button', { name: 'Preview Linked screenshot', exact: true }).click();
+    await expectPreview('Linked screenshot', png);
+    expect(await win.locator('.panel-tab.active').allTextContents()).toEqual(activeTabs);
+    expect(await win.locator('.file-preview').count()).toBe(0);
+    await preview.getByRole('button', { name: 'Close image preview', exact: true }).click();
+    await preview.waitFor({ state: 'hidden', timeout: 10_000 });
+    expect(await win.locator('.file-preview').count()).toBe(0);
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'files-03-inline-images.png') });
   }, 120_000);

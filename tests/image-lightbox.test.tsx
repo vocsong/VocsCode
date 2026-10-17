@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { ImageLightbox, navigateLightbox } from '../src/renderer/src/components/ImageLightbox';
 import { UserMessage } from '../src/renderer/src/components/Transcript';
 import type { ImageAttachment, TranscriptItem } from '../src/shared/types';
@@ -44,6 +45,33 @@ describe('ImageLightbox', () => {
     fireEvent.keyDown(window, { key: 'ArrowRight' });
     expect((screen.getByRole('img') as HTMLImageElement).src).toContain('BBB');
     fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps keyboard focus in the preview and restores the image trigger on close', async () => {
+    const user = userEvent.setup();
+    render(<button type="button">Preview screenshot</button>);
+    const trigger = screen.getByRole('button', { name: 'Preview screenshot' });
+    trigger.focus();
+    const view = render(<ImageLightbox images={images} index={0} onClose={() => {}} />);
+    const close = screen.getByRole('button', { name: 'Close image preview' });
+    expect(document.activeElement).toBe(close);
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Previous image' }));
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Next image' }));
+    await user.tab();
+    expect(document.activeElement).toBe(close);
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Next image' }));
+    view.unmount();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('closes exactly once from the close control', () => {
+    const onClose = vi.fn();
+    render(<ImageLightbox images={images} index={0} onClose={onClose} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Close image preview' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
