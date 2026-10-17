@@ -97,6 +97,42 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Package-only regressions need the real asar layout, not Electron launched against out/.
+  # Keep this behind the full E2E gate; ordinary develop PRs do not build installers.
+  packaged-smoke:
+    name: Windows packaged-app smoke (offline)
+    needs: [gate, e2e]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'pull_request' && github.base_ref == 'master')
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --include=dev
+        env:
+          NODE_ENV: development
+      - run: npm run dist:dir -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Launch packaged app and verify IPC and shutdown
+        timeout-minutes: 5
+        run: node scripts/e2e-guard.mjs tests/e2e.packaged.test.ts
+        env:
+          HARNESS_E2E_EXE: ${{ github.workspace }}/dist/win-unpacked/Vocs Code.exe
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: packaged-smoke-failure
+          path: tests/artifacts/packaged-smoke/
+          if-no-files-found: warn
+          retention-days: 7
+
   # The Ubuntu gate cannot execute Windows Job Objects, ConPTY or deep-path cases. Prove those
   # selected offline boundaries on the primary platform without needing a provider or installed Pi.
   windows-offline:
