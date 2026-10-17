@@ -65,6 +65,7 @@ import type { AgentFileFields, ParsedAgentFile } from './agent-files';
 import type { ProjectAgentInfo } from './agent-info';
 import type { ClaudeAgentFileInfo } from './claude-agent-files';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
+import type { DictationLocalStatus, DictationResult, LocalModelId } from './dictation';
 import type { RemoteTerminalFrame, RemoteTerminalSnapshot } from './remote-terminal';
 import type { CreateMissionRequest, MissionControlRequest, MissionRecord } from './mission';
 import type { MissionCommandRequest } from './mission-command';
@@ -158,6 +159,21 @@ export interface IpcContract {
 
   /** Corrects one model's advertised capabilities; `null` clears that field's override. */
   'models:setOverride': [{ provider: string; model: string; supportsImages: boolean | null }, Record<string, ModelOverride>];
+
+  /**
+   * Dictation, desktop only: `audio` is a base64 16 kHz mono WAV clip, transcribed by the engine in
+   * settings. Keys stay in main; the renderer never sees one.
+   */
+  'dictation:transcribe': [{ audio: string }, DictationResult];
+  /** Transcription models a provider offers; OpenRouter's list is fetched live. */
+  'dictation:cloudModels': [{ provider: string }, { models: { id: string; label: string }[]; error?: string }];
+  'dictation:status': [void, DictationLocalStatus];
+  /** Downloads the whisper.cpp build and model the saved local settings need; progress is pushed. */
+  'dictation:install': [void, DictationLocalStatus];
+  'dictation:cancelInstall': [void, void];
+  'dictation:removeModel': [{ model: LocalModelId }, DictationLocalStatus];
+  /** Stops the local server now, freeing its GPU memory; the next local clip starts it again. */
+  'dictation:stopLocal': [void, DictationLocalStatus];
 
   'harness:availability': [{ id?: HarnessId } | void, Partial<Record<HarnessId, HarnessAvailability>>];
   'harness:models': [
@@ -457,7 +473,8 @@ export const PUSH_CHANNELS = {
   remoteState: 'push:remoteState',
   desktopFocus: 'push:desktopFocus',
   updateState: 'push:updateState',
-  processSummary: 'push:processSummary'
+  processSummary: 'push:processSummary',
+  dictationStatus: 'push:dictationStatus'
 } as const;
 
 export type PushPayloads = {
@@ -482,6 +499,8 @@ export type PushPayloads = {
   'push:updateState': UpdateState;
   /** Tracked process counts for the Processes tab badge, sent with every background sample. */
   'push:processSummary': ProcessSummary;
+  /** Local dictation engine: download progress and server state. Desktop only. */
+  'push:dictationStatus': DictationLocalStatus;
 };
 
 export type PushChannel = keyof PushPayloads;

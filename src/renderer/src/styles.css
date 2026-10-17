@@ -2705,6 +2705,95 @@ h4 {
   padding: 4px 8px 8px;
   justify-content: flex-end;
 }
+.dictation {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.dictation .icon-btn {
+  border: none;
+  background: none;
+}
+.dictation .icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.dictation-mic {
+  position: relative;
+}
+.dictation-mic:disabled {
+  cursor: default;
+}
+/* Recording: the mic turns red and a ring grows with the input level, so a dead microphone shows. */
+.dictation-mic.is-recording,
+.dictation-mic.is-recording:hover:not(:disabled) {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  box-shadow: 0 0 0 calc(1px + var(--dictation-level, 0) * 5px) color-mix(in srgb, var(--red) 35%, transparent);
+  transition: box-shadow 80ms linear;
+}
+.dictation-clock {
+  color: var(--red);
+  padding: 0 2px;
+  font-variant-numeric: tabular-nums;
+}
+.dictation-engine {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 2px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.dictation-engine:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.dictation-engine:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.dictation-engine[data-engine='local'] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.dictation-local {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+.dictation-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dictation-progress progress {
+  flex: 1;
+  min-width: 160px;
+  height: 6px;
+  accent-color: var(--accent);
+}
+.dictation-models {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dictation-model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 0 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11.5px;
+}
 .composer-hint {
   max-width: 920px;
   margin: 6px auto 0;

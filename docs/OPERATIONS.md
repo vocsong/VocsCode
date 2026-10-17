@@ -100,5 +100,8 @@ None of these are required to run the app; they exist for headless runs and the 
 | `HARNESS_E2E_HARNESS` | Which harness the e2e session uses, for example `native`. |
 | `VOCS_CODE_E2E_UI=1` | Opts into `tests/e2e.vision.test.ts`. Runs with every provider key stripped from the environment, so it never reaches a provider. |
 | `HARNESS_E2E_EXE` | Path to a packaged binary (`dist/win-unpacked/Vocs Code.exe`); the terminal e2e drives it instead of `out/`. |
+| `VOCS_CODE_WHISPER_INTEGRATION=1` | Opts into `tests/dictation-whisper.integration.test.ts`, which downloads the pinned whisper.cpp build and a model and transcribes a real clip. |
+| `VOCS_CODE_WHISPER_COMPUTE=gpu` | Runs that test on the CUDA build instead of the CPU one; it fails rather than accept a CPU fallback. |
+| `VOCS_CODE_WHISPER_CACHE` | Directory that test downloads into, so repeated runs reuse the files. |
 
 The live suites need the corresponding runtime installed and logged in, and they spend real API credit.

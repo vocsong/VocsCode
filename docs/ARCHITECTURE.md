@@ -24,6 +24,8 @@ src/main
                   the app started (sampled tree under main, saved for the next run), who it works for, and ending it;
                   the Windows table reader is resources/processes/windows-process-snapshot.ps1
   models/         provider clients and model discovery, with offline catalogs and pricing
+  dictation/      composer voice to text: a provider's transcription endpoint (cloud.ts), or whisper.cpp's
+                  server downloaded into <userData>/dictation and run on loopback while in use (local.ts)
   util/           fs and async helpers shared by the adapters (no Electron imports)
   session-manager.ts  sessions, transcripts, approvals, goals, worktrees
   knowledge/      Layer 2 project knowledge: markdown wiki store, scored retrieval, synthesis and
@@ -164,6 +166,7 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.
 - Sessions must resume after restart for every harness; keep that path working when touching persistence.
 - A session forked from one in an app-managed worktree gets a worktree and branch of its own, branched from the source checkout's HEAD; a fork never shares the source's directory, so archiving the source with its worktree cannot delete the fork's. A provider resume id belongs to the directory it ran in, so a same-harness fork that moved is handed the conversation as text instead (`pendingForkContext`).
+- Dictation never hands the renderer a key or a model: the renderer records and encodes a 16 kHz WAV, and main transcribes it with the engine in settings (`dictation:transcribe`, desktop only, not a remote channel). The local engine runs only what it downloaded from the pinned whisper.cpp release (`WHISPER_RELEASE`, `WHISPER_BUILDS`, `LOCAL_MODELS` in `shared/dictation.ts`), and a file gets its final name only after its size and sha256 match; bumping the release means re-pinning every asset's size and digest. Its server holds GPU memory only while in use — the idle timeout, a switch to the cloud engine and quit all stop it.
 - A session's usage counts only the money it spent itself. Turn rows are the itemized ledger and `SessionMeta.usage` is the counter over it; a fork carries the conversation, never the ledger.
 
 ## Mission ownership

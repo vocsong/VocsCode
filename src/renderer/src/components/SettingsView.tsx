@@ -19,8 +19,9 @@ import { PairingQr } from './PairingQr';
 import { PiSection } from './PiSettings';
 import { InstructionsSection } from './InstructionsSection';
 import { MissionSettings } from './mission/MissionSettings';
+import { VoiceSection } from './VoiceSettings';
 
-export type SettingsSection = 'general' | 'mission' | 'instructions' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
+export type SettingsSection = 'general' | 'mission' | 'instructions' | 'shortcuts' | 'terminal' | 'providers' | 'voice' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
 type Section = SettingsSection;
 
 /** Deep links ("Configure Mission") land on their section, whether or not Settings is open. */
@@ -57,6 +58,7 @@ export function SettingsView() {
             ['shortcuts', 'Shortcuts', 'keyboard'],
             ['terminal', 'Terminal', 'terminal'],
             ['providers', 'Providers & keys', 'key'],
+            ['voice', 'Voice', 'mic'],
             ['harnesses', 'Harnesses', 'shield'],
             ['instructions', 'Instructions', 'edit'],
             ['pi', 'Pi', 'sparkles'],
@@ -76,6 +78,7 @@ export function SettingsView() {
         {section === 'shortcuts' && <ShortcutsSection settings={settings} />}
         {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
         {section === 'providers' && <Providers settings={settings} />}
+        {section === 'voice' && <VoiceSection settings={settings} />}
         {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
         {section === 'instructions' && <InstructionsSection />}
         {section === 'pi' && <PiSection />}

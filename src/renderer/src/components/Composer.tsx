@@ -4,7 +4,7 @@ import type { EffortLevel, FileAttachment, ImageAttachment, PermissionMode, Sess
 import { formatDoctorReport } from '../../../shared/doctor';
 import { HARNESS_BY_ID, SLASH_COMMANDS, effortOptionsFor } from '../../../shared/harness-meta';
 import { modelName, parseTypedModel } from '../../../shared/model-names';
-import { invoke } from '../api';
+import { canInvoke, invoke } from '../api';
 import { FileAttachmentChips, readAttachments } from '../attachments';
 import { fmtCost, fmtTokens } from '../format';
 import { useSessionModels } from '../models';
@@ -15,6 +15,8 @@ import { Button, Icon, Kbd } from './ui';
 import { parseMissionCommand } from '../../../shared/mission-command';
 import { missionQuestionUsage } from '../../../shared/mission';
 import { commandMission, MISSION_MANAGED_REASON, pauseMissionSession, sendMissionUser } from '../missions';
+import { insertTranscript } from '../../../shared/dictation';
+import { DictationControl, type DictationHandle } from './DictationControl';
 
 /** With one pane the composer is the only one; in a split, only the active pane's takes focus and inserts. */
 function ownsComposerFocus(sessionId: string): boolean {
@@ -50,6 +52,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
   // The browse position stays local — it is a caret-like cursor, not part of the session's record.
   const [histIdx, setHistIdx] = useState(-1);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const dictation = useRef<DictationHandle>(null);
   const toast = useStore((s) => s.toast);
   const providers = useStore((s) => s.settings?.providers) ?? [];
   const composerInsert = useStore((s) => s.composerInsert);
@@ -407,7 +410,33 @@ function SessionComposer({ session }: { session: SessionMeta }) {
     }
   };
 
+  /** A transcript goes in at the caret (replacing a selection), and the caret ends up after it. */
+  const insertDictation = (said: string) => {
+    const el = ref.current;
+    // The clip finished after the user switched sessions: it belongs to this session's draft.
+    if (!el) {
+      const draft = useStore.getState().drafts[session.id] ?? '';
+      setDraft(session.id, insertTranscript(draft, draft.length, draft.length, said).text);
+      return;
+    }
+    const current = el?.value ?? text;
+    const { text: next, caret } = insertTranscript(current, el?.selectionStart ?? current.length, el?.selectionEnd ?? current.length, said);
+    setText(next);
+    setHistIdx(-1);
+    requestAnimationFrame(() => {
+      const box = ref.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(caret, caret);
+    });
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'Space') {
+      e.preventDefault();
+      dictation.current?.toggle();
+      return;
+    }
     if (mention && mention.results.length) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -578,6 +607,7 @@ function SessionComposer({ session }: { session: SessionMeta }) {
             <Icon name="file" size={16} />
             <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
           </label>
+          {canInvoke('dictation:transcribe') && <DictationControl ref={dictation} onText={insertDictation} />}
           {shellDraft && !completed ? (
             <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
               Run
