@@ -58,6 +58,8 @@ const LIST: ProcessList = {
   processes: [
     p(100, 1, { name: 'claude.exe', command: 'C:\\x\\claude.exe --output-format stream-json', owner: { sessionId: 's1' } }),
     p(101, 100, { command: 'node C:\\npm\\node_modules\\npm\\bin\\npm-cli.js run dev', owner: { sessionId: 's1' } }),
+    // Start-Processed by the session through a tool shell that has exited: detached, still the session's.
+    p(102, 4242, { name: 'powershell.exe', command: 'powershell -NoExit -Command npm run update', owner: { sessionId: 's1' }, orphaned: true }),
     p(200, 1, { name: 'powershell.exe', owner: { sessionId: 's2', terminalId: 't1', label: 'PowerShell' } }),
     p(300, 1, { name: 'cmd.exe', owner: { label: 'GitNexus server' } }),
     p(400, 999, { command: 'node server.js', owner: { sessionId: 's2' }, orphaned: true, previousRun: true }),
@@ -96,14 +98,17 @@ describe('Processes tab', () => {
     expect(groups[1].textContent).toContain('(this session)');
     expect(groups[1].textContent).toContain('vocscode/s1');
     const rows = within(groups[1]).getAllByTestId('process-row');
-    expect(rows.map((r) => r.getAttribute('data-pid'))).toEqual(['100', '101']);
+    expect(rows.map((r) => r.getAttribute('data-pid'))).toEqual(['100', '101', '102']);
     expect(rows[0].textContent).toContain('Claude Code');
     expect(rows[1].textContent).toContain('npm run dev');
     expect(rows[1].style.paddingLeft).toBe('22px');
+    expect(within(rows[2]).getByTestId('process-detached').textContent).toBe('detached');
+    expect(within(groups[1]).getAllByTestId('process-detached')).toHaveLength(1);
+    expect(groups[0].textContent).not.toContain('npm run update');
 
     expect(groups[2].textContent).toContain('Terminal · PowerShell');
     expect(groups[3].textContent).toContain('GitNexus server');
-    expect(screen.getByTestId('processes-summary').textContent).toContain('6 processes');
+    expect(screen.getByTestId('processes-summary').textContent).toContain('7 processes');
   });
 
   it('ends exactly the row it was asked to, naming it by PID and creation time', async () => {
