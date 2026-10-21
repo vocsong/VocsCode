@@ -8,6 +8,7 @@ import type { Logger } from './log';
 import { runCapture, which, type CaptureResult } from './runtime';
 import { exists } from './util/fs';
 import { makeFileChange } from './util/file-changes';
+import { WORKTREE_INCLUDE_FILE, copyWorktreeIncludes } from './worktree-include';
 
 const gitBin = () => which('git') ?? 'git';
 const ghBin = () => which('gh');
@@ -1063,7 +1064,39 @@ export async function createWorktree(projectRoot: string, slug: string, opts: { 
   const branch = `${prefix}/${name}`;
   const r = await git(root, ['worktree', 'add', '-b', branch, wtPath, ...(startPoint ? [startPoint] : [])], 60_000);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
+  await includeIgnoredFiles(root, wtPath);
   return { path: wtPath, branch };
+}
+
+/**
+ * Copies the gitignored files the project's `.worktreeinclude` names (`.env`, local config) from
+ * `root` into a worktree just created from it (see worktree-include.ts). A copy that fails is
+ * logged, never thrown: the worktree is usable without it, and the session must still start.
+ */
+async function includeIgnoredFiles(root: string, wtPath: string): Promise<void> {
+  try {
+    const r = await copyWorktreeIncludes(root, wtPath, async () => {
+      const ls = await git(root, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], 60_000);
+      if (ls.code !== 0) throw new Error(failure(ls));
+      if (ls.truncated) throw new Error('ignored-file listing was truncated');
+      const entries = ls.stdout.split('\0').filter((e) => e && e !== '.vocs-code/' && !e.startsWith('.vocs-code/'));
+      // Check every ancestor, not only collapsed entries: a force-tracked file prevents Git from
+      // collapsing its otherwise ignored parent (e.g. node_modules/README).
+      const dirs = new Set<string>();
+      for (const entry of entries) {
+        for (let i = entry.indexOf('/'); i >= 0; i = entry.indexOf('/', i + 1)) dirs.add(entry.slice(0, i + 1));
+      }
+      if (!dirs.size) return { entries, ignoredDirs: new Set<string>() };
+      const ci = await runCapture(gitBin(), ['check-ignore', '--no-index', '-z', '--stdin'], { cwd: root, timeoutMs: 20_000, input: [...dirs].join('\0') + '\0', env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } });
+      if (ci.code !== 0 && ci.code !== 1) throw new Error(failure(ci));
+      if (ci.truncated) throw new Error('ignored-directory listing was truncated');
+      return { entries, ignoredDirs: new Set(ci.stdout.split('\0').filter(Boolean)) };
+    });
+    if (r.copied.length) gitLog('info', `${WORKTREE_INCLUDE_FILE}: copied ${r.copied.length} file(s) into ${wtPath}`);
+    for (const f of r.failed) gitLog('warn', `${WORKTREE_INCLUDE_FILE}: not copied into ${wtPath}: ${f}`);
+  } catch (e) {
+    gitLog('warn', `${WORKTREE_INCLUDE_FILE}: skipped for ${wtPath}: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** The commit this exact folder has checked out, or null when there is none (missing folder, unborn branch). */
@@ -1104,6 +1137,7 @@ export async function worktreeAddForBranch(projectRoot: string, branch: string):
   while (await exists(wtPath)) wtPath = path.join(base, `${name}-${++i}`);
   const r = await git(root, ['worktree', 'add', wtPath, branch], 60_000);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
+  await includeIgnoredFiles(root, wtPath);
   return { path: wtPath, branch };
 }
 
@@ -1156,6 +1190,7 @@ export async function restoreWorktree(projectRoot: string, wtPath: string, branc
   await git(root, ['worktree', 'prune']);
   const r = await git(root, ['worktree', 'add', wtPath, branch], 60_000);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
+  await includeIgnoredFiles(root, wtPath);
 }
 
 export async function worktreeInfo(cwd: string): Promise<{ branch?: string; mainRoot?: string } | null> {
