@@ -137,6 +137,7 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 | --- | --- |
 | Transcript file mentions, Files panel | `e2e.files` |
 | Sidebar, New Session dialog, session lifecycle | `e2e.terminal` (no key) + `e2e.electron` (live) |
+| Worktree creation and `.worktreeinclude` | `tests/worktree-include.test.ts`, `tests/worktree-include-patterns.test.ts`, `tests/session-worktree-isolation.test.ts`, `tests/fork-context.test.ts`, `tests/session-archive.test.ts`, `tests/unit.test.ts` + `e2e.terminal` |
 | Right-click menus (`components/ContextMenu.tsx`), folder removal | `tests/context-menus.test.tsx`, `tests/folder-remove.test.ts` + `e2e.context-menu` |
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Composer slash commands answered in the transcript (`/doctor`) | `tests/composer-doctor.test.tsx` + `e2e.doctor` |

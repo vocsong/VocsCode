@@ -65,6 +65,29 @@ That installs everything (including dev dependencies, even if your environment s
 
 **Private by default.** Keys in your keychain, encrypted at rest. Sessions resume after restart, whatever agent you used.
 
+### Local config in worktrees
+
+Put a `.worktreeinclude` file at your **project root**, alongside `.gitignore`, to copy local
+configuration into newly created session worktrees:
+
+```gitignore
+.env
+.env.local
+config/secrets.json
+```
+
+Commit the pattern list, not the secrets. Vocs Code reads it and copies matching **gitignored**
+files from the project checkout when creating a session worktree, forking one, starting on an
+existing branch, or restoring an archived worktree. Existing worktrees are not synchronized.
+
+The file uses `.gitignore`-style patterns, including comments, wildcards and `!` exclusions, and
+can also be used by [Claude Code](https://code.claude.com/docs/en/worktrees#copy-gitignored-files-into-worktrees).
+Bare names such as `.env` do not search inside wholly ignored directories such as `node_modules/`;
+name the directory explicitly to copy from it, for example `vendor/**/config.json`.
+Tracked files and existing destination files are left alone, `.vocs-code/` is excluded, and copies
+never write through destination symlinks. Copy failures are logged without blocking the session.
+This only copies files; it does not install dependencies, run setup commands, or allocate ports.
+
 ## Why you'll like it
 
 It takes the best of the Codex and Claude Code desktop apps — threads grouped by project, isolated git worktrees, live multi-session sidebar, diff review with per-file revert and commit, `/goal` with an iteration guard — and makes it all work **across every agent**, not just one. There's even a Doctor page — and a `/doctor` command that prints the same report into a session — that shows which runtimes you have installed and logged in, so setup is never guesswork.
