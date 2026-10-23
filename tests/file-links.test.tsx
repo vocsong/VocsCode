@@ -194,13 +194,70 @@ describe('file mentions open the Files panel', () => {
     expect(invokeMock).toHaveBeenCalledWith('fs:read', { sessionId: session.id, path: 'src/hello.ts', maxBytes: 200_000 });
   });
 
-  it('refuses a mention outside the session folder without reading it', async () => {
-    useStore.setState({ panelTab: 'files', fileReveal: { sessionId: session.id, path: 'G:/elsewhere/secrets.ts' } });
-    invokeMock.mockImplementation((channel: string) => (channel === 'fs:list' ? Promise.resolve([]) : Promise.resolve({})));
+  it('shows a file outside the session folder in File Explorer without reading it', async () => {
+    useStore.setState({ panelTab: 'files', fileReveal: { sessionId: session.id, path: 'G:/elsewhere/SideGuard-Q-2026-10.zip' } });
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'fs:list') return Promise.resolve([]);
+      if (channel === 'app:showInFolder') return Promise.resolve({ ok: true });
+      return Promise.resolve({});
+    });
 
     render(<RightPanel session={session} />);
 
-    await waitFor(() => expect(useStore.getState().toasts.some((t) => t.kind === 'error')).toBe(true));
+    // The file manager's name follows the platform, which the hoisted imports read before the stub above.
+    await waitFor(() => expect(useStore.getState().toasts.map((t) => [t.kind, t.text])).toEqual([
+      ['info', expect.stringMatching(/^Showing SideGuard-Q-2026-10\.zip in .+: files outside this session cannot be previewed here$/)]
+    ]));
+    expect(invokeMock).toHaveBeenCalledWith('app:showInFolder', { sessionId: session.id, path: 'G:/elsewhere/SideGuard-Q-2026-10.zip' });
     expect(invokeMock).not.toHaveBeenCalledWith('fs:read', expect.anything());
+  });
+
+  it('refuses a mention outside the session folder where the host cannot show it', async () => {
+    const harness = window.harness as unknown as { can?: (channel: string) => boolean };
+    harness.can = (channel) => channel !== 'app:showInFolder';
+    try {
+      useStore.setState({ panelTab: 'files', fileReveal: { sessionId: session.id, path: 'G:/elsewhere/secrets.ts' } });
+      invokeMock.mockImplementation((channel: string) => (channel === 'fs:list' ? Promise.resolve([]) : Promise.resolve({})));
+
+      render(<RightPanel session={session} />);
+
+      await waitFor(() => expect(useStore.getState().toasts.map((t) => [t.kind, t.text])).toEqual([['error', 'Cannot open files outside G:/proj/a']]));
+      expect(invokeMock).not.toHaveBeenCalledWith('fs:read', expect.anything());
+      expect(invokeMock).not.toHaveBeenCalledWith('app:showInFolder', expect.anything());
+    } finally {
+      delete harness.can;
+    }
+  });
+
+  it('names a file missing from the session folder without the IPC wrapper or realpath noise', async () => {
+    useStore.setState({ panelTab: 'files', fileReveal: { sessionId: session.id, path: 'SideGuard-Q-2026-10.zip' } });
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'fs:list') return Promise.resolve([]);
+      // What Electron hands the renderer when the handler throws.
+      if (channel === 'fs:read') return Promise.reject(new Error("Error invoking remote method 'fs:read': Error: SideGuard-Q-2026-10.zip was not found in G:\\proj\\a"));
+      return Promise.resolve({});
+    });
+
+    const { container } = render(<RightPanel session={session} />);
+
+    await waitFor(() => expect(useStore.getState().toasts.map((t) => [t.kind, t.text])).toEqual([['error', 'SideGuard-Q-2026-10.zip was not found in G:\\proj\\a']]));
+    expect(container.querySelector('.file-preview')).toBeNull();
+  });
+
+  it('says a binary file has no text preview and offers its folder instead', async () => {
+    useStore.setState({ panelTab: 'files', fileReveal: { sessionId: session.id, path: 'dist/bundle.zip' } });
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'fs:list') return Promise.resolve([]);
+      if (channel === 'fs:read') return Promise.resolve({ content: '', truncated: false, binary: true });
+      if (channel === 'app:showInFolder') return Promise.resolve({ ok: true });
+      return Promise.resolve({});
+    });
+
+    const { container } = render(<RightPanel session={session} />);
+
+    expect(await screen.findByText('Binary file, no text preview.')).toBeTruthy();
+    expect(container.querySelector('.file-preview pre')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^Show in / }));
+    expect(invokeMock).toHaveBeenCalledWith('app:showInFolder', { sessionId: session.id, path: 'G:/proj/a/dist/bundle.zip' });
   });
 });

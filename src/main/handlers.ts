@@ -71,6 +71,8 @@ export interface DesktopBridge {
   electronVersion(): string;
   openExternal(url: string): Promise<void>;
   openPath(p: string): Promise<void>;
+  /** Opens the system file manager at `p`'s folder with `p` selected; never opens `p` itself. */
+  showItemInFolder(p: string): void;
   showOpenDialog(opts: OpenDialogOptions): Promise<{ canceled: boolean; filePaths: string[] }>;
   showSaveDialog(opts: SaveDialogOptions): Promise<{ canceled: boolean; filePath?: string }>;
   notify(title: string, body: string): Promise<void>;
@@ -627,6 +629,22 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const target = path.isAbsolute(p) ? p : path.resolve(m.cwd, p);
     if (isOutsideWorkspace(m.cwd, target, path)) return;
     await deps.desktop.openPath(target);
+  });
+  // Reveal, never launch: a reply can name a file outside the session (a bundle in another repo),
+  // and the file manager can point at it without reading or running it. Network and device paths
+  // are refused before anything touches the filesystem, so a link cannot make Windows reach out to
+  // a remote share.
+  handle('app:showInFolder', async ({ sessionId, path: p }) => {
+    if (!sessions.get(sessionId)) return { ok: false, error: 'Session not found' };
+    const target = localAbsolutePath(p);
+    if (!target) return { ok: false, error: 'Only local absolute paths can be shown in their folder' };
+    try {
+      await fs.stat(target);
+    } catch {
+      return { ok: false, error: `${target} was not found` };
+    }
+    deps.desktop.showItemInFolder(target);
+    return { ok: true };
   });
   const launchEditor = async (p: string, line?: number): Promise<{ ok: boolean; error?: string }> => {
     const s = settings.get();
@@ -1655,6 +1673,16 @@ function normalizeAgentImages(raw: unknown): ImageAttachment[] | undefined {
     out.push({ mimeType, data, ...(typeof name === 'string' && name ? { name } : {}) });
   }
   return out.length ? out : undefined;
+}
+
+/** A local absolute path, normalised, or null. UNC (`\\host\share`), device (`\\?\`, `\\.\`) and
+ *  `//host` forms are refused, as are Windows stream suffixes (`file.txt:stream`). */
+function localAbsolutePath(p: unknown): string | null {
+  if (typeof p !== 'string' || !p || p.length > 4096 || /[\x00-\x1f]/.test(p) || /^[\\/]{2}/.test(p)) return null;
+  if (process.platform === 'win32') {
+    if (!/^[A-Za-z]:[\\/]/.test(p) || p.slice(2).includes(':')) return null;
+  } else if (!p.startsWith('/')) return null;
+  return path.resolve(p);
 }
 
 function fuzzyMatch(hay: string, needle: string): boolean {

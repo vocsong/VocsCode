@@ -8,10 +8,24 @@ const DEFAULT_MAX_BYTES = 400_000;
 const MAX_BYTES = 2_000_000;
 /** Images travel whole as base64; past this the panel says so instead of shipping the bytes. */
 export const MAX_IMAGE_BYTES = 20_000_000;
+/** Git's heuristic: a NUL byte this early means the file is binary, not text worth showing. */
+const BINARY_SNIFF_BYTES = 8000;
 
 function isWithin(root: string, target: string): boolean {
   const relative = path.relative(root, target);
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/** A transcript can name a file the workspace does not have (a bare name from another repo, or one
+ *  a worktree never got). Say which path was looked for and where, not Node's `ENOENT: realpath`. */
+async function realpathOrNotFound(p: string, missing: () => string): Promise<string> {
+  try {
+    return await fs.realpath(p);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') throw new Error(missing());
+    throw error;
+  }
 }
 
 async function resolveInWorkspace(root: string, target = ''): Promise<{ lexicalRoot: string; lexicalTarget: string; realTarget: string } | undefined> {
@@ -19,7 +33,9 @@ async function resolveInWorkspace(root: string, target = ''): Promise<{ lexicalR
   const lexicalTarget = path.resolve(lexicalRoot, target);
   if (!isWithin(lexicalRoot, lexicalTarget)) return undefined;
 
-  const [realRoot, realTarget] = await Promise.all([fs.realpath(lexicalRoot), fs.realpath(lexicalTarget)]);
+  // The root first: when the whole folder is gone, that is what to report, not each file in it.
+  const realRoot = await realpathOrNotFound(lexicalRoot, () => `${lexicalRoot} no longer exists`);
+  const realTarget = await realpathOrNotFound(lexicalTarget, () => `${path.relative(lexicalRoot, lexicalTarget).split(path.sep).join('/')} was not found in ${lexicalRoot}`);
   if (!isWithin(realRoot, realTarget)) return undefined;
   return { lexicalRoot, lexicalTarget, realTarget };
 }
@@ -50,7 +66,8 @@ export async function listWorkspaceFiles(root: string, relPath?: string): Promis
   return out.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name));
 }
 
-export async function readWorkspaceFile(root: string, target: string, maxBytes?: number): Promise<{ content: string; truncated: boolean }> {
+/** `binary` is set, with empty content, when the bytes are not text: a zip decoded as UTF-8 is noise. */
+export async function readWorkspaceFile(root: string, target: string, maxBytes?: number): Promise<{ content: string; truncated: boolean; binary?: boolean }> {
   const resolved = await resolveInWorkspace(root, target);
   if (!resolved) return { content: '', truncated: false };
 
@@ -67,6 +84,7 @@ export async function readWorkspaceFile(root: string, target: string, maxBytes?:
       totalRead += bytesRead;
     }
 
+    if (buffer.subarray(0, Math.min(totalRead, BINARY_SNIFF_BYTES)).includes(0)) return { content: '', truncated: false, binary: true };
     const finalSize = (await handle.stat()).size;
     return {
       content: buffer.subarray(0, totalRead).toString('utf8'),

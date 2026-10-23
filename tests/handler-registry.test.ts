@@ -49,6 +49,7 @@ function bridgeStub() {
     electronVersion: () => 'unknown',
     openExternal: async (url) => void calls.push(`openExternal:${url}`),
     openPath: async (p) => void calls.push(`openPath:${p}`),
+    showItemInFolder: (p) => void calls.push(`showItemInFolder:${p}`),
     showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
     showSaveDialog: async () => ({ canceled: true, filePath: '' }),
     notify: async (title) => void calls.push(`notify:${title}`),
@@ -357,6 +358,26 @@ describe('handler registry', () => {
     expect(calls).toContain('openExternal:https://example.com');
     await registry.invoke('app:openExternal', { url: 'file:///etc/passwd' });
     expect(calls).not.toContain('openExternal:file:///etc/passwd');
+  });
+
+  it('shows a local file in its folder, even outside the session, and never a network or relative path', async () => {
+    const { registry, calls } = stubDeps();
+    const elsewhere = tmpDir('elsewhere');
+    const bundle = path.join(elsewhere, 'SideGuard-Q-2026-10.zip');
+    fsSync.writeFileSync(bundle, 'PK');
+
+    // Transcript links carry forward slashes; the file manager gets the platform's own path.
+    await expect(registry.invoke('app:showInFolder', { sessionId: 's_test', path: bundle.replace(/\\/g, '/') })).resolves.toEqual({ ok: true });
+    const missing = path.join(elsewhere, 'gone.zip');
+    await expect(registry.invoke('app:showInFolder', { sessionId: 's_test', path: missing })).resolves.toEqual({ ok: false, error: `${missing} was not found` });
+    // Refused before any stat, so a UNC link cannot make Windows contact the named host.
+    for (const refused of ['\\\\attacker\\share\\bundle.zip', '//attacker/share/bundle.zip', '\\\\?\\C:\\bundle.zip', 'relative/bundle.zip', '']) {
+      await expect(registry.invoke('app:showInFolder', { sessionId: 's_test', path: refused })).resolves.toEqual({ ok: false, error: 'Only local absolute paths can be shown in their folder' });
+    }
+    await expect(registry.invoke('app:showInFolder', { sessionId: 's_missing', path: bundle })).resolves.toEqual({ ok: false, error: 'Session not found' });
+
+    expect(calls.filter((c) => c.startsWith('showItemInFolder:'))).toEqual([`showItemInFolder:${bundle}`]);
+    expect(calls.some((c) => c.startsWith('openPath:'))).toBe(false);
   });
 
   it('dispatches session handlers, passively indexes new sessions, and fails unknown sessions', async () => {

@@ -3860,6 +3860,13 @@ body.resizing {
   height: auto;
   background: repeating-conic-gradient(var(--border) 0% 25%, transparent 0% 50%) 50% / 16px 16px;
 }
+.file-preview .file-binary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+}
 /* Usage page: a session dashboard inside a narrow column. The chart primitives are the analytics
    ones, so only the panel-scale overrides and the panel-only marks (turn columns, error log) live
    here. Status hues stay reserved for status; mixes use the categorical --chart-N slots. */

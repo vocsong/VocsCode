@@ -174,7 +174,7 @@ interface Transport {
 and the terminal (P3.5): `terminal:list/screen` and `terminal:watch/unwatch/watchAck` on the read
 half, `terminal:input` and `terminal:create` on the write half, so view-only mode lets a browser
 watch but not type. Excluded or remapped: `window:*`, `app:pickFolder`, `app:openPath`,
-`app:openInEditor`, `secrets:*`, `dialog` flows, and terminal resize, attach, kill, close, restart,
+`app:showInFolder`, `app:openInEditor`, `secrets:*`, `dialog` flows, and terminal resize, attach, kill, close, restart,
 clear and rename — the desktop owns its terminals' geometry and lifetime. The web client never
 touches or needs API keys.
 
