@@ -41,6 +41,7 @@ function stubRegistry() {
     electronVersion: () => 'unknown',
     openExternal: async () => undefined,
     openPath: async () => undefined,
+    showItemInFolder: () => undefined,
     showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
     showSaveDialog: async () => ({ canceled: true, filePath: '' }),
     notify: async () => undefined,

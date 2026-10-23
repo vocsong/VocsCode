@@ -3,7 +3,7 @@ import type { FsEntry, SessionMeta } from '../../../shared/types';
 import { nativeGoalCommands } from '../../../shared/goal-driver';
 import { imageMimeType, type WorkspaceImage } from '../../../shared/image-files';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
-import { invoke } from '../api';
+import { canInvoke, invoke, invokeErrorMessage, isMac, platform } from '../api';
 import { useGitDiff, useGitSummary } from '../gitReads';
 import { workspaceRelativePath } from '../file-refs';
 import { clamp, relTime } from '../format';
@@ -26,6 +26,8 @@ import { MissionChanges, MissionWorkspacePicker } from './mission/MissionWorkspa
 
 /** Stable fallback so zustand selectors never return a fresh array (React #185 infinite loop). */
 const EMPTY: never[] = [];
+/** What `app:showInFolder` opens, named the way the platform names it. */
+const FILE_MANAGER = isMac ? 'Finder' : platform === 'win32' ? 'File Explorer' : 'the file manager';
 
 const TABS: { id: PanelTab; label: string; icon: string }[] = [
   { id: 'changes', label: 'Changes', icon: 'diff' },
@@ -245,8 +247,9 @@ function ChangesTab({ session }: { session: SessionMeta }) {
 function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missionWorkspaceId?: string }) {
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<FsEntry[]>([]);
-  /** `image` is set for image files: they render as a picture, and a null read means it could not be previewed. */
-  const [preview, setPreview] = useState<{ path: string; content: string; truncated: boolean; image?: WorkspaceImage | null } | null>(null);
+  /** `image` is set for image files: they render as a picture, and a null read means it could not be previewed.
+   *  `binary` marks a file that is not text (a zip, an executable): there is nothing to show but its name. */
+  const [preview, setPreview] = useState<{ path: string; content: string; truncated: boolean; binary?: boolean; image?: WorkspaceImage | null } | null>(null);
   /** Markdown files open in rendered preview; the toggle flips back to the raw text. */
   const [mdView, setMdView] = useState(false);
   const mdBody = useRef<HTMLDivElement | null>(null);
@@ -277,7 +280,22 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
       setMdView(/\.(?:md|markdown)$/i.test(p));
       setScrollLine(line && line > 0 ? line : null);
     } catch (err) {
-      if (liveId.current === sid && readSeq.current === seq) toast(err instanceof Error ? err.message : String(err), 'error');
+      if (liveId.current === sid && readSeq.current === seq) toast(invokeErrorMessage(err), 'error');
+    }
+  };
+  /** The panel cannot preview a file outside the session folder, but the desktop can point the
+   *  system file manager at it: nothing is read or launched. */
+  const showOutside = async (target: string) => {
+    if (!/^(?:[A-Za-z]:[\\/]|\/)/.test(target) || !canInvoke('app:showInFolder')) {
+      toast(`Cannot open files outside ${session.cwd}`, 'error');
+      return;
+    }
+    try {
+      const r = await invoke('app:showInFolder', { sessionId: session.id, path: target });
+      if (!r.ok) toast(r.error ?? `Could not show ${target}`, 'error');
+      else toast(`Showing ${target.split(/[\\/]/).pop()} in ${FILE_MANAGER}: files outside this session cannot be previewed here`, 'info');
+    } catch (err) {
+      toast(invokeErrorMessage(err), 'error');
     }
   };
 
@@ -298,7 +316,7 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
     useStore.getState().consumeFileReveal();
     const rel = workspaceRelativePath(session.cwd, reveal.path);
     if (rel === null) {
-      toast(`Cannot open files outside ${session.cwd}`, 'error');
+      void showOutside(reveal.path.trim());
       return;
     }
     const dir = /[\\/]$/.test(reveal.path.trim());
@@ -337,7 +355,7 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
         if (!stale && liveId.current === sid) setEntries(list);
       })
       .catch((e) => {
-        if (!stale && liveId.current === sid) toast(String(e.message ?? e), 'error');
+        if (!stale && liveId.current === sid) toast(invokeErrorMessage(e), 'error');
       });
     return () => {
       stale = true;
@@ -392,6 +410,19 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
                 <span className="muted small">
                   {image?.tooLarge ? `Image is ${(image.size / 1_000_000).toFixed(1)} MB, too large to preview.` : 'This image could not be previewed.'}
                 </span>
+              )}
+            </div>
+          ) : preview.binary ? (
+            <div className="file-binary">
+              <span className="muted small">Binary file, no text preview.</span>
+              {!session.mission && canInvoke('app:showInFolder') && (
+                <Button
+                  size="sm"
+                  icon="folder"
+                  onClick={() => void invoke('app:showInFolder', { sessionId: session.id, path: `${session.cwd}/${preview.path}` }).then((r) => !r.ok && toast(r.error ?? 'Could not show the file', 'error'))}
+                >
+                  Show in {FILE_MANAGER}
+                </Button>
               )}
             </div>
           ) : isMd && mdView ? (

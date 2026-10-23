@@ -107,6 +107,8 @@ export interface IpcContract {
   'app:doctor': [void, DoctorReport];
   'app:openExternal': [{ url: string }, void];
   'app:openPath': [{ path: string; sessionId: string }, void];
+  /** Desktop only: shows a local file in the system file manager, even outside the session; never opens it. */
+  'app:showInFolder': [{ path: string; sessionId: string }, { ok: boolean; error?: string }];
   'app:openInEditor': [{ path: string; sessionId: string; line?: number }, { ok: boolean; error?: string }];
   'app:openTerminal': [{ cwd: string }, { ok: boolean; error?: string }];
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];
@@ -405,7 +407,8 @@ export interface IpcContract {
   /** Mission leads default to integration; tool-file reveals select the explicit lead workspace. */
   'fs:list': [{ sessionId: string; relPath?: string; missionWorkspaceId?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number; missionWorkspaceId?: string }, string[]];
-  'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean }];
+  /** `binary` comes with empty content: the file is not text the panel can show. */
+  'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean; binary?: boolean }];
   /** An image file as base64 for the Files panel preview; null outside the workspace or for a non-image path. */
   'fs:readImage': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceImage | null];
 

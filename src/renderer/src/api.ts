@@ -26,6 +26,13 @@ export function canInvoke<K extends IpcChannel>(channel: K): boolean {
   return window.harness?.can?.(channel) ?? true;
 }
 
+/** The handler's own message. Electron wraps a rejected invoke as
+ *  `Error invoking remote method '<channel>': Error: <message>`, which is noise in a toast. */
+export function invokeErrorMessage(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.replace(/^Error invoking remote method '[^']*': (?:[A-Za-z]*Error: )?/, '');
+}
+
 /** Serves the desktop affordances a browser must handle itself.
  *  Returns `undefined` to pass the invoke through to the host, `null` when handled
  *  with no result, or the shimmed result object. Exported for tests. */
