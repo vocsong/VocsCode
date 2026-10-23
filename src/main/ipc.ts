@@ -63,6 +63,7 @@ function desktopBridge(deps: IpcDeps): DesktopBridge {
     openPath: async (p) => {
       await shell.openPath(p);
     },
+    showItemInFolder: (p) => shell.showItemInFolder(p),
     showOpenDialog: (opts) => dialog.showOpenDialog(deps.getWindow() ?? (undefined as unknown as BrowserWindow), opts as unknown as Electron.OpenDialogOptions),
     showSaveDialog: (opts) => dialog.showSaveDialog(deps.getWindow() ?? (undefined as unknown as BrowserWindow), opts as unknown as Electron.SaveDialogOptions),
     notify: async (title, body) => {

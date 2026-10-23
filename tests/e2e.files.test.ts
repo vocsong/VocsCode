@@ -129,6 +129,8 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     await fs.writeFile(path.join(project, 'src', 'hello.ts'), body);
     // A 1x1 PNG beside it: the panel must draw it, not dump its bytes as text.
     await fs.writeFile(path.join(project, 'src', 'pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
+    // A zip's local file header: binary, so the panel must say so rather than decode it.
+    await fs.writeFile(path.join(project, 'src', 'bundle.zip'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]));
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
     const sid = 's_file_e2e';
@@ -151,7 +153,9 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     const items: TranscriptItem[] = [
       ...history,
       { id: 'u1', kind: 'user', ts: Date.now(), text: 'Where is the greeting?' },
-      { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'It lives in `src/hello.ts:300`, right at the top.' }
+      { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'It lives in `src/hello.ts:300`, right at the top.' },
+      // A bare name the folder does not have (the agent meant a bundle in another repository), and a zip it does have.
+      { id: 'a2', kind: 'assistant', ts: Date.now(), text: 'Import `SideGuard-Q-2026-10.zip`; the local copy is `src/bundle.zip`.' }
     ];
     await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
     await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
@@ -188,6 +192,21 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
 
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'files-01-preview.png') });
+
+    // The missing name: a toast that names the file and the folder searched, without Electron's
+    // IPC wrapper or Node's realpath error around it.
+    await win.locator('.transcript .file-ref', { hasText: 'SideGuard-Q-2026-10.zip' }).click();
+    const notFound = win.locator('.toast-error', { hasText: 'SideGuard-Q-2026-10.zip was not found in' });
+    await notFound.waitFor({ timeout: 10_000 });
+    expect(await notFound.innerText()).not.toMatch(/ENOENT|realpath/);
+    expect(await win.locator('.toast', { hasText: 'Error invoking remote method' }).count()).toBe(0);
+
+    // The zip that is there opens as a binary file with no text dump.
+    await win.locator('.transcript .file-ref', { hasText: 'src/bundle.zip' }).click();
+    await win.waitForSelector('.file-preview-head .mono:has-text("src/bundle.zip")', { timeout: 10_000 });
+    await win.getByText('Binary file, no text preview.', { exact: true }).waitFor({ timeout: 10_000 });
+    expect(await win.locator('.file-preview pre').count()).toBe(0);
+    await win.screenshot({ path: path.join(shots, 'files-04-missing-and-binary.png') });
 
     // Deep search temporarily reveals history, then returns to a bounded list at the match.
     await win.getByRole('button', { name: 'Search sessions', exact: true }).click();

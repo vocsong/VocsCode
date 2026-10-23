@@ -87,6 +87,35 @@ describe('readWorkspaceFile', () => {
     await expect(readWorkspaceFile(root, 'sample.txt', 20)).resolves.toEqual({ content: 'abcdefgh', truncated: false });
   });
 
+  it('names a missing file and the folder it was looked for in, not the realpath error', async () => {
+    const { root } = workspace();
+    await fs.mkdir(path.join(root, 'docs'), { recursive: true });
+    const where = path.resolve(root);
+
+    // A reply named a bundle that lives in another repository, so the session folder has no such file.
+    await expect(readWorkspaceFile(root, 'SideGuard-Q-2026-10.zip')).rejects.toThrow(new Error(`SideGuard-Q-2026-10.zip was not found in ${where}`));
+    await expect(readWorkspaceFile(root, path.join('docs', 'gone.md'))).rejects.toThrow(new Error(`docs/gone.md was not found in ${where}`));
+    await expect(readWorkspaceImage(root, 'gone.png')).rejects.toThrow(new Error(`gone.png was not found in ${where}`));
+    await expect(listWorkspaceFiles(root, 'nope')).rejects.toThrow(new Error(`nope was not found in ${where}`));
+  });
+
+  it('says the session folder itself is gone rather than blaming the file', async () => {
+    const { root } = workspace();
+
+    await expect(readWorkspaceFile(root, 'a.txt')).rejects.toThrow(new Error(`${path.resolve(root)} no longer exists`));
+  });
+
+  it('flags binary content instead of decoding it as text', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root, { recursive: true });
+    // A zip's local file header: the NULs a UTF-8 decode would turn into noise.
+    await fs.writeFile(path.join(root, 'bundle.zip'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]));
+    await fs.writeFile(path.join(root, 'notes.txt'), 'plain text');
+
+    await expect(readWorkspaceFile(root, 'bundle.zip')).resolves.toEqual({ content: '', truncated: false, binary: true });
+    await expect(readWorkspaceFile(root, 'notes.txt')).resolves.toEqual({ content: 'plain text', truncated: false });
+  });
+
   it('honors a zero-byte maximum', async () => {
     const { root } = workspace();
     await fs.mkdir(root, { recursive: true });
