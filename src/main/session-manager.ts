@@ -1373,7 +1373,7 @@ export class SessionManager {
     // the fallback so titling still works before the user picks a utility model.
     const meta = this.get(id);
     const preferred = this.settings().utilityModel ?? meta?.activeModel;
-    void generateSessionTitle(prompt, this.settings().providers, this.deps.getSecret, preferred, this.deps.log)
+    void generateSessionTitle(prompt, this.settings().providers, this.deps.getSecret, preferred, this.deps.log, id)
       .then((title) => {
         if (!title || title === placeholder) return;
         const meta = this.get(id);

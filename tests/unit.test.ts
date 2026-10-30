@@ -162,6 +162,28 @@ describe('LLM session titles', () => {
     }
   });
 
+  it('names an OpenCode Go session when the gateway requires routing headers', async () => {
+    const seen: IncomingMessage['headers'][] = [];
+    const server = await listenOnce((req, res) => {
+      seen.push(req.headers);
+      res.setHeader('content-type', 'application/json');
+      if (req.headers['x-opencode-session'] !== 's_existing' || req.headers['x-opencode-client'] !== 'vocs-code') {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: { message: 'Request is missing x-opencode-session and cannot be routed efficiently' } }));
+        return;
+      }
+      res.end(JSON.stringify({ choices: [{ message: { content: 'Fix utility routing' }, finish_reason: 'stop' }] }));
+    });
+    try {
+      const provider: ProviderConfig = { id: 'go', kind: 'opencode-go', name: 'OpenCode Go', enabled: true, hasApiKey: true, baseUrl: server.url, headers: { 'x-custom': 'kept' }, models: [] };
+      expect(await generateSessionTitle('Fix utility routing', [provider], async () => 'sk-go', { provider: 'go', model: 'go-model' }, undefined, 's_existing')).toBe('Fix utility routing');
+      expect(seen).toHaveLength(1);
+      expect(seen[0]['x-custom']).toBe('kept');
+    } finally {
+      await server.close();
+    }
+  });
+
   it('uses max_completion_tokens with low effort for reasoning models', async () => {
     const seen: { body?: Record<string, unknown> } = {};
     const server = await listenOnce((req, res, body) => {
@@ -250,6 +272,37 @@ describe('LLM session titles', () => {
       expect(seen.body?.messages?.[0]).toMatchObject({ role: 'system' });
       expect(seen.body?.messages?.[0].content).toContain('git branches');
       expect(seen.body?.messages?.[1]).toEqual({ role: 'user', content: prompt });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('names branches with a standalone OpenCode Go routing id, without changing other providers headers', async () => {
+    const seen: IncomingMessage['headers'][] = [];
+    const server = await listenOnce((req, res) => {
+      seen.push(req.headers);
+      res.setHeader('content-type', 'application/json');
+      if (req.headers['x-custom'] !== 'kept' || (req.headers['x-provider'] !== 'ordinary' &&
+        (!req.headers['x-opencode-session'] || req.headers['x-opencode-client'] !== 'vocs-code'))) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: { message: 'Request is missing x-opencode-session and cannot be routed efficiently' } }));
+        return;
+      }
+      res.end(JSON.stringify({ choices: [{ message: { content: 'fix-utility-routing' }, finish_reason: 'stop' }] }));
+    });
+    try {
+      const base: ProviderConfig = { id: 'go', kind: 'opencode-go', name: 'Go', enabled: true, hasApiKey: true, baseUrl: server.url, headers: { 'x-custom': 'kept' }, models: [] };
+      expect(await generateBranchName('Fix utility routing', [base], async () => 'sk-go', { provider: 'go', model: 'go-model' })).toBe('fix-utility-routing');
+      expect(await generateBranchName('Fix utility routing', [base], async () => 'sk-go', { provider: 'go', model: 'go-model' })).toBe('fix-utility-routing');
+      const ordinary: ProviderConfig = { ...base, id: 'ordinary', kind: 'openai-compatible', headers: { 'x-custom': 'kept', 'x-provider': 'ordinary' } };
+      expect(await generateBranchName('Fix utility routing', [ordinary], async () => 'sk-test', { provider: 'ordinary', model: 'other-model' })).toBe('fix-utility-routing');
+      expect(seen).toHaveLength(3);
+      expect(seen[0]['x-opencode-session']).toMatch(/^[0-9a-f-]{36}$/);
+      expect(seen[1]['x-opencode-session']).toMatch(/^[0-9a-f-]{36}$/);
+      expect(seen[1]['x-opencode-session']).not.toBe(seen[0]['x-opencode-session']);
+      expect(seen[2]['x-opencode-session']).toBeUndefined();
+      expect(seen[2]['x-opencode-client']).toBeUndefined();
+      expect(seen[2]['x-provider']).toBe('ordinary');
     } finally {
       await server.close();
     }

@@ -6,7 +6,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { AppSettings } from '../../shared/types';
-import { selectBackgroundModel } from '../agents/model';
+import { backgroundHeaders, selectBackgroundModel } from '../agents/model';
 import { resolveProviderApiKey } from '../models/providers';
 import { isAnthropicProvider } from '../harness/native/drivers';
 import { errorMessage } from '../util/async';
@@ -62,6 +62,8 @@ export function createKnowledgeCompleter(deps: {
       const { provider, model } = choice;
       const apiKey = await resolveProviderApiKey(provider, deps.getSecret);
       const timeout = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      // One id for the whole completion, including the retry; unrelated jobs get distinct ids.
+      const headers = backgroundHeaders(provider);
       let budget = req.maxTokens ?? DEFAULT_MAX_TOKENS;
       // A thinking model may spend the entire budget before writing any content. Retrying once with
       // a bigger budget and an explicit "answer only" instruction is cheaper than explaining to a
@@ -69,7 +71,7 @@ export function createKnowledgeCompleter(deps: {
       let system = req.system;
       for (let attempt = 1; attempt <= 2; attempt++) {
         deps.log('debug', `knowledge: asking ${provider.id}/${model} (attempt ${attempt}, max ${budget})`);
-        const outcome = await attemptOnce({ provider, model, apiKey, system, prompt: req.prompt, budget, timeout });
+        const outcome = await attemptOnce({ provider, model, apiKey, system, prompt: req.prompt, budget, timeout, headers });
         if (outcome.text && outcome.text.trim()) return outcome.text;
         deps.log(
           'warn',
@@ -105,11 +107,12 @@ async function attemptOnce(opts: {
   prompt: string;
   budget: number;
   timeout: number;
+  headers: Record<string, string> | undefined;
 }): Promise<AttemptResult> {
-  const { provider, model, apiKey, system, prompt, budget, timeout } = opts;
+  const { provider, model, apiKey, system, prompt, budget, timeout, headers } = opts;
   try {
     if (isAnthropicProvider(provider)) {
-      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: provider.headers });
+      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers });
       const msg = await client.messages.create(
         { model, max_tokens: budget, system, messages: [{ role: 'user', content: prompt }] },
         { signal: AbortSignal.timeout(timeout) }
@@ -121,7 +124,7 @@ async function attemptOnce(opts: {
       const thinking = msg.content.filter((b) => b.type !== 'text').length;
       return { text, finishReason: msg.stop_reason ?? undefined, ...(text.trim() ? {} : { note: thinking ? `${thinking} non-text block(s) only` : 'empty content' }) };
     }
-    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: provider.headers });
+    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers });
     const body: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = isReasoningModel(model)
       ? { model, max_completion_tokens: budget, reasoning_effort: 'low', messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }
       : { model, max_tokens: budget, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] };

@@ -71,12 +71,12 @@ afterEach(() => {
   delete process.env.CLAUDE_CONFIG_DIR;
 });
 
-async function makeManager(baseUrl: string): Promise<{ manager: SessionManager; store: SessionStore; asked: () => string[]; settled: () => string[] }> {
+async function makeManager(baseUrl: string, kind: ProviderConfig['kind'] = 'openai-compatible'): Promise<{ manager: SessionManager; store: SessionStore; asked: () => string[]; settled: () => string[] }> {
   const store = new SessionStore(path.join(tmpRoot, `store${++counter}`));
   await store.load();
   const log = vi.fn();
   const providers: ProviderConfig[] = [
-    { id: 'fake', kind: 'openai-compatible', name: 'Fake', enabled: true, hasApiKey: true, baseUrl, models: [{ id: 'cheap', provider: 'fake', displayName: 'Cheap' }] }
+    { id: 'fake', kind, name: 'Fake', enabled: true, hasApiKey: true, baseUrl, models: [{ id: 'cheap', provider: 'fake', displayName: 'Cheap' }] }
   ];
   const settings = { ...defaultSettings(), providers, utilityModel: { provider: 'fake', model: 'cheap' } };
   const deps: SessionManagerDeps = {
@@ -135,6 +135,36 @@ describe('naming a session', () => {
       expect(manager.get(meta.id)?.titleIsPlaceholder).toBeUndefined();
     } finally {
       await server.close();
+    }
+  });
+
+  it('routes retries for an OpenCode Go title under the existing session id', async () => {
+    const headers: IncomingMessage['headers'][] = [];
+    const server = createServer((req, res) => {
+      headers.push(req.headers);
+      req.resume();
+      req.on('end', () => {
+        res.setHeader('content-type', 'application/json');
+        if (!req.headers['x-opencode-session'] || req.headers['x-opencode-client'] !== 'vocs-code') {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: { message: 'Request is missing x-opencode-session and cannot be routed efficiently' } }));
+          return;
+        }
+        res.end(JSON.stringify(answer(headers.length === 1 ? '' : 'Name the session')));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const { manager, settled } = await makeManager(url, 'opencode-go');
+      const meta = await create(manager, { initialPrompt: 'name this session' });
+      await vi.waitFor(() => expect(settled()).toHaveLength(1));
+      await manager.send(meta.id, { text: 'and retry the name' });
+      await vi.waitFor(() => expect(manager.get(meta.id)?.title).toBe('Name the session'));
+      expect(headers).toHaveLength(2);
+      expect(headers.map((h) => h['x-opencode-session'])).toEqual([meta.id, meta.id]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 

@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { ModelRef, ProviderConfig } from '../shared/types';
-import { selectBackgroundModel } from './agents/model';
+import { backgroundHeaders, selectBackgroundModel } from './agents/model';
 import { STATIC_MODELS_BY_PROVIDER } from './models/static-models';
 import { resolveProviderApiKey } from './models/providers';
 import { isAnthropicProvider } from './harness/native/drivers';
@@ -110,7 +110,8 @@ async function askBackgroundModel(
   getSecret: (providerId: string) => Promise<string | undefined>,
   preferred: ModelRef | undefined,
   log: ((level: 'debug' | 'info' | 'warn' | 'error', message: string) => void) | undefined,
-  timeoutMs: number
+  timeoutMs: number,
+  sessionId?: string
 ): Promise<{ text: string; stopReason?: string } | null> {
   const picked = selectBackgroundModel(providers, preferred);
   if (!picked) {
@@ -121,10 +122,11 @@ async function askBackgroundModel(
   log?.('debug', `${label}: asking ${provider.id}/${model}`);
   const apiKey = await resolveProviderApiKey(provider, getSecret);
   const sample = prompt.trim().slice(0, PROMPT_SAMPLE_CHARS);
+  const headers = backgroundHeaders(provider, sessionId);
   try {
     const thinks = thinksBeforeAnswering(provider, model);
     if (isAnthropicProvider(provider)) {
-      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: provider.headers });
+      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers });
       const msg = await client.messages.create(
         { model, max_tokens: thinks ? TITLE_REASONING_MAX_TOKENS : TITLE_MAX_TOKENS, system, messages: [{ role: 'user', content: sample }] },
         { signal: AbortSignal.timeout(timeoutMs) }
@@ -135,7 +137,7 @@ async function askBackgroundModel(
       }
       return { text: msg.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join(' ') };
     }
-    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: provider.headers });
+    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers });
     // Reasoning models (o-series, gpt-5) reject max_tokens and spend the budget on thinking
     // before any text arrives, so they need max_completion_tokens and low effort. Other thinking
     // models (DeepSeek and friends) take max_tokens but need the same room.
@@ -168,9 +170,10 @@ export async function generateSessionTitle(
   providers: ProviderConfig[],
   getSecret: (providerId: string) => Promise<string | undefined>,
   preferred?: ModelRef,
-  log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
+  log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void,
+  sessionId?: string
 ): Promise<string | null> {
-  const reply = await askBackgroundModel('session title', TITLE_SYSTEM, prompt, providers, getSecret, preferred, log, TITLE_TIMEOUT_MS);
+  const reply = await askBackgroundModel('session title', TITLE_SYSTEM, prompt, providers, getSecret, preferred, log, TITLE_TIMEOUT_MS, sessionId);
   if (reply === null) return null;
   const title = sanitizeLlmTitle(reply.text);
   log?.('debug', `session title: ${title ? `got "${title}"` : `no usable reply${reply.stopReason ? ` (finish_reason ${reply.stopReason})` : ''}`}`);
