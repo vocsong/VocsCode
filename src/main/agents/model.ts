@@ -1,10 +1,17 @@
-/** Picks the provider and model for background work outside a session: session titles today. */
+/** Selects providers for background completions (titles, branch names and knowledge jobs). */
+import { randomUUID } from 'node:crypto';
 import type { ModelRef, ProviderConfig } from '../../shared/types';
 import { STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
 
 export interface BackgroundModel {
   provider: ProviderConfig;
   model: string;
+}
+
+/** One routing id per background task; callers with a real session supply its stable id. */
+export function backgroundHeaders(provider: ProviderConfig, sessionId?: string): Record<string, string> | undefined {
+  if (provider.kind !== 'opencode-go') return provider.headers;
+  return { ...provider.headers, 'x-opencode-client': 'vocs-code', 'x-opencode-session': sessionId ?? randomUUID() };
 }
 
 /** Providers that can actually answer: a stored key, an env key, or a local runtime that needs neither. */
