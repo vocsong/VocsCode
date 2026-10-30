@@ -862,6 +862,11 @@ export interface SessionMeta {
   /** Reset on restart/fork; a saved preference is not proof of an active provider tier. */
   fastModeStatus?: FastModeStatus;
   /**
+   * The user asked this machine to stay awake while the session is working. Never survives a
+   * restart (the store clears it on load), so an old choice cannot keep a laptop awake unseen.
+   */
+  keepAwake?: boolean;
+  /**
    * Commands the running harness accepts itself — Claude's slash command names and their aliases, as
    * advertised by the CLI. Reported by the adapter at startup and on every later change, so `/goal`
    * can be handed to the harness when it has a goal of its own (see shared/goal-driver.ts).

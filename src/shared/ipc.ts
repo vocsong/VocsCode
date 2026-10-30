@@ -306,6 +306,8 @@ export interface IpcContract {
   'sessions:setModel': [{ id: string; model: ModelRef }, SessionMeta];
   'sessions:setEffort': [{ id: string; effort: EffortLevel }, SessionMeta];
   'sessions:setFastMode': [{ id: string; enabled: boolean }, SessionMeta];
+  /** Keep this computer from idle-sleeping while the session is working. Desktop only: it is about the host machine. */
+  'sessions:setKeepAwake': [{ id: string; enabled: boolean }, SessionMeta];
   'sessions:setPermissionMode': [{ id: string; mode: PermissionMode }, SessionMeta];
   'sessions:compact': [{ id: string }, { ok: boolean; detail?: string }];
   'sessions:clearTranscript': [{ id: string }, void];

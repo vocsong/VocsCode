@@ -4,7 +4,7 @@ import { existsSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { BrowserWindow, Menu, Notification, app, nativeTheme, screen, shell } from 'electron';
+import { BrowserWindow, Menu, Notification, app, nativeTheme, powerSaveBlocker, screen, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
@@ -39,6 +39,7 @@ import { modelsForProvider } from './models/static-models';
 import { inheritedUsageOf, pricedModelOf, repricingOf, turnUsageTotals, type ForkInheritance } from './util/usage-repair';
 import { errorMessage } from './util/async';
 import { electronUpdaterFacade } from './updater-electron';
+import { KeepAwake } from './keep-awake';
 import { RemoteHost } from './remote/host';
 import { RemoteAudit } from './remote/audit';
 import { RemoteMirror } from './remote/mirror';
@@ -84,6 +85,7 @@ let terminals: TerminalManager | null = null;
 let webServer: WebServer | null = null;
 let remoteHost: RemoteHost | null = null;
 let updater: UpdateService | null = null;
+let keepAwake: KeepAwake | null = null;
 let processErrorHandlersInstalled = false;
 
 /** Console-only until userData is known (see main()), then also a rotating file under logs/. */
@@ -252,6 +254,9 @@ async function main(): Promise<void> {
 
   // Fan-out hooks that need to run on every sessions change (the update prompt waits for idle).
   const sessionsChangedHooks: Array<() => void> = [];
+  // Holds the power-save blocker for sessions whose header toggle is on, only while they work.
+  keepAwake = new KeepAwake(powerSaveBlocker, log);
+  sessionsChangedHooks.push(() => keepAwake?.sync(sessions?.list() ?? []));
   // Declared before the manager so the push callbacks can mirror transcripts; assigned once the
   // remote host exists (the callbacks only fire on real activity, long after boot).
   let remoteMirror: RemoteMirror | null = null;
@@ -529,6 +534,7 @@ async function main(): Promise<void> {
     quitting = true;
     e.preventDefault();
     const t0 = Date.now();
+    keepAwake?.release();
     log('info', `quitting: ${sessions?.list().filter((s) => s.status === 'running' || s.status === 'awaiting' || s.status === 'starting').length ?? 0} live session(s), ${terminals?.list().length ?? 0} terminal tab(s)`);
     // Drain debounced session-meta persists after the sessions themselves are stopped. Restored
     // terminal snapshots are written first, and the cap ensures a large terminal set cannot hold

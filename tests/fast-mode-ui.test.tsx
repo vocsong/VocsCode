@@ -170,19 +170,19 @@ describe('message-header Fast mode request', () => {
   it('uses a custom active ref and provider endpoint instead of the saved model', () => {
     seed(session({ activeModel: { provider: 'openai', model: 'gpt-4.1-custom' } }));
     const view = render(<LiveHeader />);
-    expect((screen.getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('switch', { name: 'Request Fast mode' }) as HTMLButtonElement).disabled).toBe(true);
     view.unmount();
     seed();
     useStore.setState({ settings: { ...settings, providers: [{ id: 'openai', baseUrl: 'https://gateway.example/v1', enabled: true } as never] } });
     render(<LiveHeader />);
-    expect((screen.getByRole('switch') as HTMLButtonElement).title).toContain('custom endpoints');
+    expect((screen.getByRole('switch', { name: 'Request Fast mode' }) as HTMLButtonElement).title).toContain('custom endpoints');
   });
 
   it('allows an unsupported saved request to be turned off without confirmation', async () => {
     const meta = session();
     seed(session({ config: { ...meta.config, harness: 'cursor', fastMode: true }, fastModeStatus: { state: 'unavailable' } }));
     render(<LiveHeader />);
-    const toggle = screen.getByRole('switch') as HTMLButtonElement;
+    const toggle = screen.getByRole('switch', { name: 'Request Fast mode' }) as HTMLButtonElement;
     expect(toggle.disabled).toBe(false);
     fireEvent.click(toggle);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:setFastMode', { id: 's_fast', enabled: false }));
@@ -192,7 +192,7 @@ describe('message-header Fast mode request', () => {
   it('honors connection capability and hides the toggle for Missions', () => {
     gate.allowed = false;
     const view = render(<LiveHeader />);
-    expect((screen.getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('switch', { name: 'Request Fast mode' }) as HTMLButtonElement).disabled).toBe(true);
     view.unmount();
     seed(session({ mission: { missionId: 'm1', role: 'lead' } as SessionMeta['mission'] }));
     render(<LiveHeader />);

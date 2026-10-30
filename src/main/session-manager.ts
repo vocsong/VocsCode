@@ -1678,6 +1678,31 @@ export class SessionManager {
     return meta;
   }
 
+  /** Allowed in any status, including mid-turn: it changes the host's power state, not the runtime. */
+  async setKeepAwake(id: string, enabled: boolean): Promise<SessionMeta> {
+    this.assertUnmanaged(id);
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (typeof enabled !== 'boolean') throw new Error('Keep awake must be a boolean');
+    const previous = meta.keepAwake;
+    if (enabled) meta.keepAwake = true;
+    else delete meta.keepAwake;
+    try {
+      await this.deps.store.upsert(meta);
+    } catch (e) {
+      // Roll back the in-memory flag so a failed save cannot leave the
+      // session looking opted-in (and holding a power-save blocker) when
+      // the persisted setting — and the UI, which only updates on success —
+      // still says otherwise.
+      if (previous === undefined) delete meta.keepAwake;
+      else meta.keepAwake = previous;
+      throw e;
+    }
+    this.deps.log('info', `[${id}] keep awake ${enabled ? 'on' : 'off'}`);
+    this.pushSessions();
+    return meta;
+  }
+
   async setFastMode(id: string, enabled: boolean): Promise<SessionMeta> {
     this.assertUnmanaged(id);
     const meta = this.get(id);

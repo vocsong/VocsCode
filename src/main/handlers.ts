@@ -177,7 +177,7 @@ const missionInputSchema = z.strictObject({ text: z.string().max(100_000), image
  * ordinary-session aliases. Read channels deliberately do not acquire mutation authority. */
 const MISSION_SESSION_CONTROLS = new Set<string>([
   'sessions:delete', 'sessions:editAndResend', 'sessions:interrupt', 'sessions:stop', 'sessions:setModel',
-  'sessions:setEffort', 'sessions:setFastMode', 'sessions:setPermissionMode', 'sessions:compact', 'sessions:clearTranscript',
+  'sessions:setEffort', 'sessions:setFastMode', 'sessions:setKeepAwake', 'sessions:setPermissionMode', 'sessions:compact', 'sessions:clearTranscript',
   'sessions:fork', 'sessions:moveTo', 'sessions:goal', 'subagents:stop', 'subagents:steer',
   'agents:save', 'agents:delete', 'agents:track', 'claude-agents:setModel', 'claude-agents:create'
 ]);
@@ -1200,6 +1200,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const { id, enabled } = z.strictObject({ id: z.string().regex(/^[A-Za-z0-9_-]+$/), enabled: z.boolean() }).parse(input);
     sessionFor(id);
     return sessions.setFastMode(id, enabled);
+  });
+  handle('sessions:setKeepAwake', (input) => {
+    const { id, enabled } = z.strictObject({ id: z.string().regex(/^[A-Za-z0-9_-]+$/), enabled: z.boolean() }).parse(input);
+    sessionFor(id);
+    return sessions.setKeepAwake(id, enabled);
   });
   handle('sessions:setPermissionMode', ({ id, mode }) => sessions.setPermissionMode(id, mode));
   handle('sessions:compact', ({ id }) => sessions.compact(id));
