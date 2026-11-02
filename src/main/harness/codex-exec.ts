@@ -6,6 +6,7 @@ import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, TranscriptItem, 
 import { errorMessage, shortId, truncate } from '../util/async';
 import { fastModeSupport } from '../../shared/fast-mode';
 import { toCodex } from '../mcp/effective';
+import { readCodexMcpServerIds } from '../mcp/codex';
 import { TurnUsageTracker } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { listCodexModels } from './codex-app-server';
@@ -75,7 +76,9 @@ export class CodexExecAdapter implements HarnessAdapter {
     });
     // `owned` keeps a same-named server in the user's own config.toml from starting a second copy
     // inside the session beside the one shared server this app runs.
-    const { config: mcpServers, env: mcpEnv } = toCodex(mcp, 'env-ref', { owned: this.ctx.ownedMcpIds() });
+    const owned = this.ctx.ownedMcpIds();
+    const inherited = owned.length && bin ? await readCodexMcpServerIds(bin.path, meta.cwd) : [];
+    const { config: mcpServers, env: mcpEnv } = toCodex(mcp, 'env-ref', { owned, inherited });
     Object.assign(env, mcpEnv);
     this.model = (meta.config.model ?? meta.activeModel)?.model;
     this.modelProvider = (meta.config.model ?? meta.activeModel)?.provider;

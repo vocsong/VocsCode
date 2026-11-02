@@ -238,9 +238,10 @@ export function codexHeaderVar(serverId: string, header: string): string {
  *
  * `opts.owned` names the servers this app defines itself (its built-ins). Codex reads its own
  * `config.toml` underneath everything handed over here, so a server this app is not injecting has
- * to be switched off by name.
+ * to be switched off by name. `inherited` names servers with valid native transports: keep those
+ * in place when disabling a server rather than copying credentials into exec argv.
  */
-export function toCodex(servers: ResolvedServer[], mode: 'inline' | 'env-ref' = 'inline', opts: { owned?: string[] } = {}): CodexMcpConfig {
+export function toCodex(servers: ResolvedServer[], mode: 'inline' | 'env-ref' = 'inline', opts: { owned?: string[]; inherited?: string[] } = {}): CodexMcpConfig {
   const config: Record<string, Record<string, CodexTomlValue>> = {};
   const env: Record<string, string> = {};
   for (const { def, secretEnvKeys, secretHeaderKeys } of servers) {
@@ -283,7 +284,12 @@ export function toCodex(servers: ResolvedServer[], mode: 'inline' | 'env-ref' = 
   }
   // Without this, a `[mcp_servers.gitnexus]` in the user's own config.toml would start a second,
   // unscoped copy in every session beside the one shared server this app runs.
-  for (const id of opts.owned ?? []) if (!config[id]) config[id] = { enabled: false };
+  for (const id of opts.owned ?? []) {
+    if (config[id]) continue;
+    // Codex validates the transport even when disabled. The fallback command is never launched;
+    // an inherited transport stays untouched so HTTP entries cannot acquire a conflicting command.
+    config[id] = opts.inherited?.includes(id) ? { enabled: false } : { enabled: false, command: id };
+  }
   return { config, env };
 }
 

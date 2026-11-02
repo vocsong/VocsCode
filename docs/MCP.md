@@ -504,9 +504,15 @@ Rules:
   unindexed project.
 - Codex loads its own `~/.codex/config.toml` underneath whatever a session is handed, so a
   `[mcp_servers.gitnexus]` left there would start a second, unscoped copy beside the shared one.
-  Both Codex adapters pass `ownedMcpIds()` to `toCodex`, which writes
-  `mcp_servers.gitnexus = { enabled: false }` for any owned name the session is not receiving:
-  the name is switched off, and a real entry of the same name is never replaced. Both Codex
+  Both Codex adapters query `codex mcp list --json` in the session's working directory and pass
+  the valid native server names alongside `ownedMcpIds()` to `toCodex`. This read-only query
+  respects Codex's config layers and `CODEX_HOME` without starting MCP servers. For an owned name the
+  session is not receiving, it writes `{ enabled: false }` when a valid native transport exists,
+  or `{ enabled: false, command: "gitnexus" }` (using that server's name) otherwise. Codex validates
+  transport before checking `enabled`, so a disabled entry still needs a command or URL in the
+  merged config. The fallback command is never launched. Native transports stay inherited to avoid
+  conflicting with an HTTP URL or copying credentials into exec argv; an injected entry of the
+  same name is never replaced. Both Codex
   harnesses belong to the set whose config the app writes, so the built-in row on the MCP tab
   says this (`claimed`); a harness whose config the app does not write is injected and left alone.
 - A worktree session shares the main checkout's switches (`projectRoot`), but its `cwd` also
