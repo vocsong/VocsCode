@@ -157,13 +157,38 @@ function timestamp(value: unknown): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function textContent(content: unknown, allowedTypes: readonly string[]): string {
-  if (typeof content === 'string') return content;
+function textContent(content: unknown, allowedTypes: readonly string[], transform: (text: string) => string = (text) => text): string {
+  if (typeof content === 'string') return transform(content);
   if (!Array.isArray(content)) return '';
   return content.map((part) => {
     const value = object(part);
-    return value && allowedTypes.includes(string(value.type)) ? string(value.text) : '';
+    return value && allowedTypes.includes(string(value.type)) ? transform(string(value.text)) : '';
   }).filter(Boolean).join('\n');
+}
+
+/** Claude also persists local CLI artifacts as user text, without necessarily setting isMeta.
+ * Match whole text blocks only: examples in prose and assistant explanations are conversation.
+ */
+function claudeUserText(text: string): string {
+  const trimmed = text.trim();
+  const local = /^<(local-command-stdout|local-command-stderr|local-command-caveat)>[\s\S]*?<\/\1>/.exec(trimmed);
+  if (local?.[0] === trimmed) return '';
+  const fields = new Map<string, string>();
+  const field = /<(command-name|command-message|command-args)>([\s\S]*?)<\/\1>\s*/y;
+  for (let index = 0; index < 3; index++) {
+    const match = field.exec(trimmed);
+    if (!match || fields.has(match[1])) return text;
+    fields.set(match[1], match[2]);
+  }
+  if (field.lastIndex !== trimmed.length) return text;
+  const name = fields.get('command-name')!.trim();
+  const message = fields.get('command-message')!.trim();
+  const args = fields.get('command-args')!.trim();
+  // Do not discard unfamiliar envelopes or nonredundant command-message text.
+  if (!/^\/[\w:.-]+$/.test(name) || (message !== name && message !== name.slice(1))) return text;
+  if (name === '/clear' && !args) return '';
+  // Custom/model-facing slash commands are real prompts, not local output.
+  return args ? `${name} ${args}` : name;
 }
 
 function absoluteCwd(value: unknown): string {
@@ -305,7 +330,7 @@ function parseTranscript(source: ChatImportSource, contents: string, filename: s
       if (record.type !== 'user' && record.type !== 'assistant') continue;
       const message = object(record.message);
       if (!message || message.role !== record.type) continue;
-      const text = textContent(message.content, ['text']);
+      const text = textContent(message.content, ['text'], record.type === 'user' ? claudeUserText : undefined);
       if (!text.trim()) continue;
       const uuid = string(record.uuid);
       if (uuid && seen.has(uuid)) continue;

@@ -85,6 +85,8 @@ describe.runIf(enabled)('chat import UI', () => {
     for (const dir of [userData, project, path.dirname(claudeFile), path.dirname(codexFile)]) await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { onboardingDone: false, agent: { enabled: false } }));
     const claudeText = [
+      { type: 'user', uuid: 'claude-clear', sessionId: 'claude-fixture', cwd: project, timestamp: '2026-10-30T00:58:00Z', message: { role: 'user', content: '<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>' } },
+      { type: 'user', uuid: 'claude-local-output', sessionId: 'claude-fixture', cwd: project, timestamp: '2026-10-30T00:59:00Z', message: { role: 'user', content: [{ type: 'text', text: '<local-command-stdout>Conversation cleared.</local-command-stdout>' }] } },
       { type: 'user', uuid: 'claude-user', sessionId: 'claude-fixture', cwd: project, timestamp: '2026-10-30T01:00:00Z', message: { role: 'user', content: [{ type: 'text', text: 'Claude import fixture' }] } },
       { type: 'assistant', uuid: 'claude-assistant', sessionId: 'claude-fixture', cwd: project, timestamp: '2026-10-30T01:01:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Claude conversation survived import.' }] } }
     ].map((row) => JSON.stringify(row)).join('\n') + '\n';
@@ -136,19 +138,22 @@ describe.runIf(enabled)('chat import UI', () => {
     const sessions = await readSessions();
     expect(new Set(sessions.map((session) => session.config.harness))).toEqual(new Set(['claude', 'codex']));
     for (const session of sessions) {
+      expect(session.title).toBe(session.config.harness === 'claude' ? 'Claude import fixture' : 'Codex import fixture');
       expect(session.harnessRef).toEqual({});
       expect(session.usage.costUsd).toBe(0);
       expect(session.worktreeBranch).toBeUndefined();
       const items: TranscriptItem[] = (await fs.readFile(path.join(userData, 'sessions', session.id, 'transcript.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
       expect(items.filter((item) => item.kind === 'user' || item.kind === 'assistant')).toHaveLength(2);
-      expect(JSON.stringify(items)).not.toContain('DISCARDED-CODEX-TURN');
-      expect(await fs.readFile(path.join(userData, 'sessions', session.id, 'fork-context.md'), 'utf8')).not.toContain('DISCARDED-CODEX-TURN');
+      expect(JSON.stringify(items)).not.toMatch(/DISCARDED-CODEX-TURN|command-name|local-command-stdout|Conversation cleared/);
+      expect(await fs.readFile(path.join(userData, 'sessions', session.id, 'fork-context.md'), 'utf8')).not.toMatch(/DISCARDED-CODEX-TURN|command-name|local-command-stdout|Conversation cleared/);
     }
     for (const source of ['Claude', 'Codex']) {
       await win.getByTestId('session-row').filter({ hasText: `${source} import fixture` }).click();
       await win.getByText(`${source} conversation survived import.`, { exact: true }).waitFor();
       expect(await win.getByText('DISCARDED-CODEX-TURN', { exact: false }).count()).toBe(0);
     }
+    expect(await win.getByText('<command-name>', { exact: false }).count()).toBe(0);
+    expect(await win.getByText('Conversation cleared.', { exact: false }).count()).toBe(0);
     await app!.close();
     app = null;
     win = await launch();
@@ -167,6 +172,8 @@ describe.runIf(enabled)('chat import UI', () => {
       await win.getByText(`${source} conversation survived import.`, { exact: true }).waitFor();
       expect(await win.getByText('DISCARDED-CODEX-TURN', { exact: false }).count()).toBe(0);
     }
+    expect(await win.getByText('<command-name>', { exact: false }).count()).toBe(0);
+    expect(await win.getByText('Conversation cleared.', { exact: false }).count()).toBe(0);
     expect(await fs.readFile(claudeFile)).toEqual(Buffer.from(claudeText));
     expect(await fs.readFile(codexFile)).toEqual(Buffer.from(codexText));
   }, 180_000);

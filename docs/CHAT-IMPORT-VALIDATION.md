@@ -78,7 +78,46 @@ conversations and duplicate detection, and checks the original source bytes.
 These regressions use fresh profiles. A rescan does not rewrite an existing imported
 copy or its later continuations; use a fresh profile when retesting an earlier import.
 
-## Final commands
+## Claude local-command formatting follow-up
+
+Claude can persist local CLI command records as user text without `isMeta`. The
+importer now omits complete `/clear` envelopes with redundant command labels and
+empty arguments, and standalone user-side `local-command-stdout`,
+`local-command-stderr` and `local-command-caveat` blocks. They no longer become
+transcript rows, default titles, message counts or continuation/fork handoffs.
+Other complete command envelopes with redundant labels are normalized to readable
+`/name args` prompts, preserving custom/namespaced commands and multiline arguments.
+Prose, fenced examples, incomplete/unknown envelopes, nonredundant command-message
+text and assistant examples are retained. Individual text blocks are processed
+before joining so a local artifact does not discard a separate genuine prompt.
+
+This is formatting/import hygiene, not a change to Claude history replay: `/clear`
+markers do not authorize deleting earlier imported messages. Existing imported
+copies and source files remain untouched; use a fresh profile to retest.
+
+Parser and real-store/scripted-adapter regressions reproduce the old title and
+continuation-context bug before the fix. The extended Electron fixture also fails
+against the original build because the picker is titled with the raw command
+rather than the genuine question. It covers clean picker/sidebar titles, persisted
+text and context, a full app restart, duplicate detection and unchanged sources.
+These checks use synthetic histories, not private histories or live provider calls.
+
+Follow-up verification on Node 22.16.0/macOS, with a canonical `TMPDIR` for the
+Git-backed suites (separate from the original PR results below):
+
+| Command | Follow-up result |
+| --- | --- |
+| `npm run typecheck` | Pass, all five TypeScript projects |
+| `npm run test:changed` | 108 files / 1,460 tests passed; 6 optional files / 83 tests skipped; 0 failures |
+| `npm run test:pr` | 29 files / 693 tests passed, 0 failures, 0 skips |
+| `npm run build` | Pass, Electron and web bundles |
+| `node scripts/e2e-guard.mjs tests/e2e.instructions.test.ts` | 2 tests passed, 0 failures, 0 skips |
+
+The changed-suite run completed in 586.14 seconds. The optional skips do not
+constitute live-provider verification. No provider credentials or private history
+were used for the follow-up.
+
+## Original PR verification commands
 
 Run with Node 22.16.0 first in `PATH` and a canonical macOS `TMPDIR`:
 

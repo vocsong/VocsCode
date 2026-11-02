@@ -61,6 +61,100 @@ describe('Claude Code chat import', () => {
     expect(JSON.stringify(result)).not.toMatch(/private-|never-import-settings|sidechain prompt|metadata prompt|nested tool response|session\.jsonl/);
   });
 
+  it.each(['string', 'blocks'] as const)('excludes local commands from %s content, the title and message count', async (format) => {
+    const command = '<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>';
+    const content = (text: string) => format === 'string' ? text : [{ type: 'text', text }];
+    await jsonl('claude/projects/encoded/session.jsonl', [
+      claude('user', content(command), { uuid: 'clear' }),
+      claude('user', content('<local-command-stdout>Conversation cleared.</local-command-stdout>'), { uuid: 'stdout' }),
+      claude('user', content('<local-command-stderr>Local command failed.</local-command-stderr>'), { uuid: 'stderr' }),
+      claude('user', content('<local-command-caveat>These messages were generated while running local commands.</local-command-caveat>'), { uuid: 'caveat' }),
+      claude('user', content('Fix the tests')),
+      claude('assistant', 'Tests fixed.'),
+    ]);
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude') });
+    expect(result.sessions).toHaveLength(1);
+    expect(result.sessions[0].candidate).toMatchObject({ title: 'Fix the tests', messageCount: 2 });
+    expect(result.sessions[0].items).toMatchObject([{ kind: 'user', text: 'Fix the tests' }, { kind: 'assistant', text: 'Tests fixed.' }]);
+    expect(result.skippedFiles).toBe(0);
+    expect(result.malformedLines).toBe(0);
+  });
+
+  it('does not offer a transcript consisting only of local command artifacts', async () => {
+    await jsonl('claude/projects/encoded/session.jsonl', [
+      claude('user', '<command-name>/clear</command-name> <command-message>clear</command-message> <command-args></command-args>'),
+      claude('user', '<local-command-stdout></local-command-stdout>', { uuid: 'stdout' }),
+    ]);
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude') });
+    expect(result.sessions).toEqual([]);
+    expect(result.skippedFiles).toBe(1);
+  });
+
+  it.each([
+    '<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args>src/main</command-args>',
+    '<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>src/main</command-args>',
+  ])('keeps model-facing slash commands as readable prompts: %s', async (command) => {
+    await jsonl('claude/projects/encoded/session.jsonl', [claude('user', command), claude('assistant', 'Review complete.')]);
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude') });
+    expect(result.sessions[0].candidate).toMatchObject({ title: '/review src/main', messageCount: 2 });
+    expect(result.sessions[0].items).toMatchObject([{ kind: 'user', text: '/review src/main' }, { kind: 'assistant', text: 'Review complete.' }]);
+  });
+
+  it('preserves namespaced commands, multiline arguments and authoritative custom titles', async () => {
+    await jsonl('claude/projects/encoded/session.jsonl', [
+      claude('user', '<command-message>team:review</command-message><command-name>/team:review</command-name><command-args>Inspect café.ts\nKeep <types> intact</command-args>'),
+      { type: 'custom-title', customTitle: 'Team review', sessionId: 'claude-session' },
+    ]);
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude') });
+    expect(result.sessions[0].candidate).toMatchObject({ title: 'Team review', messageCount: 1 });
+    expect(result.sessions[0].items).toMatchObject([{ kind: 'user', text: '/team:review Inspect café.ts\nKeep <types> intact' }]);
+  });
+
+  it('does not treat a local clear artifact as permission to delete earlier conversation', async () => {
+    await jsonl('claude/projects/encoded/session.jsonl', [
+      claude('user', 'Accepted question'), claude('assistant', 'Accepted answer'),
+      claude('user', '<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>', { uuid: 'clear' }),
+      claude('user', 'Next question', { uuid: 'next' }),
+    ]);
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude') });
+    expect(result.sessions[0].items).toMatchObject([
+      { kind: 'user', text: 'Accepted question' }, { kind: 'assistant', text: 'Accepted answer' }, { kind: 'user', text: 'Next question' },
+    ]);
+  });
+
+  it('filters individual artifact blocks without losing real text or assistant examples', async () => {
+    const command = '<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>';
+    await jsonl('claude/projects/encoded/session.jsonl', [
+      claude('user', [
+        { type: 'text', text: command },
+        { type: 'text', text: 'Keep this genuine prompt' },
+        { type: 'text', text: '<local-command-stdout>Local output</local-command-stdout>' },
+      ]),
+      claude('assistant', command),
+    ]);
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude') });
+    expect(result.sessions[0].candidate).toMatchObject({ title: 'Keep this genuine prompt', messageCount: 2 });
+    expect(result.sessions[0].items).toMatchObject([{ kind: 'user', text: 'Keep this genuine prompt' }, { kind: 'assistant', text: command }]);
+  });
+
+  it.each([
+    '/clear',
+    'Explain <command-name>/clear</command-name> and how it works.',
+    '<command-name>/clear</command-name><command-message>Explain what this command does</command-message><command-args></command-args>',
+    '<command-name>/clear</command-name><command-message>clear</command-message><command-name>/clear</command-name><command-args></command-args>',
+    '<command-name>/clear</command-name>',
+    '<command-name>/clear</command-name><command-message>clear</command-message><command-args>unfinished',
+    '<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>\nPlease explain this record.',
+    '```xml\n<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>\n```',
+    '<local-command-stdout>unfinished',
+    '<local-command-stdout>example</local-command-stdout>\nExplain the output.',
+    '<local-command-stdout>first</local-command-stdout>\nPlease compare these outputs.\n<local-command-stdout>second</local-command-stdout>',
+  ])('preserves genuine prose and incomplete command lookalikes: %s', async (text) => {
+    await jsonl('claude/projects/encoded/session.jsonl', [claude('user', text)]);
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude') });
+    expect(result.sessions[0].items).toMatchObject([{ kind: 'user', text }]);
+  });
+
   it('skips old and new subagent transcript layouts without descending into nested session directories', async () => {
     await jsonl('claude/projects/encoded/session.jsonl', [claude('user', 'Parent conversation')]);
     await jsonl('claude/projects/encoded/agent-child.jsonl', [claude('user', 'Old child', { sessionId: 'old-child' })]);

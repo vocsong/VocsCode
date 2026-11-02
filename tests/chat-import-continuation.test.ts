@@ -75,7 +75,10 @@ async function fixture(dir: string, source: ChatImportSource) {
   const message = (role: 'user' | 'assistant', text: string, id: string) => source === 'claude'
     ? { type: role, uuid: id, sessionId: 'external-session', cwd: dir, timestamp: '2026-10-30T01:00:00Z', message: { role, content: [{ type: 'text', text }] } }
     : { type: 'response_item', timestamp: '2026-10-30T01:00:00Z', payload: { id, type: 'message', role, content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }] } };
-  const records = source === 'claude' ? [] : [{ type: 'session_meta', timestamp: '2026-10-30T01:00:00Z', payload: { id: 'external-session', cwd: dir } }];
+  const records = source === 'claude' ? [
+    message('user', '<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>', 'local-clear'),
+    message('user', '<local-command-stdout>Conversation cleared.</local-command-stdout>', 'local-output'),
+  ] : [{ type: 'session_meta', timestamp: '2026-10-30T01:00:00Z', payload: { id: 'external-session', cwd: dir } }];
   const rows: unknown[] = [...records, message('user', 'Historical question', 'old-user'), message('assistant', 'Historical answer', 'old-assistant')];
   if (source === 'codex') rows.push(
     message('user', `${discarded} question`, 'discarded-user'),
@@ -94,6 +97,28 @@ const cases = (['claude', 'codex'] as const).flatMap((source) =>
 );
 
 describe('imported conversation lifecycle', () => {
+  it.each(['continue', 'fork'] as const)('never sends Claude local command artifacts in the first %s prompt after restart', async (mode) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-import-commands-'));
+    dirs.push(dir);
+    const original = await fixture(dir, 'claude');
+    const first = await open(path.join(dir, 'user-data'));
+    const { imported } = await first.manager.importChats((await original.scan()).sessions);
+    const { store, manager } = await open(path.join(dir, 'user-data'));
+    const session = mode === 'fork' ? (await manager.fork(imported[0]!.id))! : store.get(imported[0]!.id)!;
+    await manager.send(session.id, { text: 'Continue accepted work' });
+    expect(runtime.sent).toHaveLength(1);
+    const delivered = runtime.sent[0]!.input.text;
+    expect(delivered).toContain('Historical question');
+    expect(delivered).toContain('Historical answer');
+    expect(delivered.endsWith('Continue accepted work')).toBe(true);
+    expect(delivered).not.toMatch(/command-name|local-command-stdout|Conversation cleared/);
+    expect(await store.readBlob(session.id, 'fork-context.md')).not.toMatch(/command-name|local-command-stdout|Conversation cleared/);
+    const items = await store.readTranscript(session.id);
+    expect(items.filter((item) => item.kind === 'user').map((item) => item.text)).toEqual(['Historical question', 'Continue accepted work']);
+    expect(imported[0]!.title).toBe('Historical question');
+    expect(await fs.readFile(original.file)).toEqual(original.bytes);
+  });
+
   it.each(['continue', 'fork'] as const)('never sends a discarded Codex turn in the first %s prompt after import and restart', async (mode) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-import-rollback-'));
     dirs.push(dir);
