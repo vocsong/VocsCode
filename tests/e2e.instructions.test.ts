@@ -91,7 +91,10 @@ describe.runIf(enabled)('chat import UI', () => {
     const codexText = [
       { type: 'session_meta', timestamp: '2026-10-30T02:00:00Z', payload: { id: 'codex-fixture', cwd: project, timestamp: '2026-10-30T02:00:00Z' } },
       { type: 'response_item', timestamp: '2026-10-30T02:00:00Z', payload: { id: 'codex-user', type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Codex import fixture' }] } },
-      { type: 'response_item', timestamp: '2026-10-30T02:01:00Z', payload: { id: 'codex-assistant', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Codex conversation survived import.' }] } }
+      { type: 'response_item', timestamp: '2026-10-30T02:01:00Z', payload: { id: 'codex-assistant', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Codex conversation survived import.' }] } },
+      { type: 'response_item', timestamp: '2026-10-30T02:02:00Z', payload: { id: 'discarded-user', type: 'message', role: 'user', content: [{ type: 'input_text', text: 'DISCARDED-CODEX-TURN question' }] } },
+      { type: 'response_item', timestamp: '2026-10-30T02:03:00Z', payload: { id: 'discarded-assistant', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'DISCARDED-CODEX-TURN answer' }] } },
+      { type: 'event_msg', timestamp: '2026-10-30T02:04:00Z', payload: { type: 'thread_rolled_back', num_turns: 1 } }
     ].map((row) => JSON.stringify(row)).join('\n') + '\n';
     await fs.writeFile(claudeFile, claudeText);
     await fs.writeFile(codexFile, codexText);
@@ -138,9 +141,14 @@ describe.runIf(enabled)('chat import UI', () => {
       expect(session.worktreeBranch).toBeUndefined();
       const items: TranscriptItem[] = (await fs.readFile(path.join(userData, 'sessions', session.id, 'transcript.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
       expect(items.filter((item) => item.kind === 'user' || item.kind === 'assistant')).toHaveLength(2);
+      expect(JSON.stringify(items)).not.toContain('DISCARDED-CODEX-TURN');
+      expect(await fs.readFile(path.join(userData, 'sessions', session.id, 'fork-context.md'), 'utf8')).not.toContain('DISCARDED-CODEX-TURN');
     }
-    await win.getByTestId('session-row').filter({ hasText: 'Claude import fixture' }).click();
-    await win.getByText('Claude conversation survived import.', { exact: true }).waitFor();
+    for (const source of ['Claude', 'Codex']) {
+      await win.getByTestId('session-row').filter({ hasText: `${source} import fixture` }).click();
+      await win.getByText(`${source} conversation survived import.`, { exact: true }).waitFor();
+      expect(await win.getByText('DISCARDED-CODEX-TURN', { exact: false }).count()).toBe(0);
+    }
     await app!.close();
     app = null;
     win = await launch();
@@ -152,8 +160,14 @@ describe.runIf(enabled)('chat import UI', () => {
       expect(await checkbox.isDisabled()).toBe(true);
       expect(await win.getByRole('button', { name: 'Import selected', exact: true }).isDisabled()).toBe(true);
     }
-    expect(await readSessions()).toHaveLength(2);
-    expect(await fs.readFile(claudeFile, 'utf8')).toBe(claudeText);
-    expect(await fs.readFile(codexFile, 'utf8')).toBe(codexText);
+    const restored = await readSessions();
+    expect(restored).toEqual(sessions);
+    for (const source of ['Claude', 'Codex']) {
+      await win.getByTestId('session-row').filter({ hasText: `${source} import fixture` }).click();
+      await win.getByText(`${source} conversation survived import.`, { exact: true }).waitFor();
+      expect(await win.getByText('DISCARDED-CODEX-TURN', { exact: false }).count()).toBe(0);
+    }
+    expect(await fs.readFile(claudeFile)).toEqual(Buffer.from(claudeText));
+    expect(await fs.readFile(codexFile)).toEqual(Buffer.from(codexText));
   }, 180_000);
 });

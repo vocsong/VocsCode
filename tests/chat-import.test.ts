@@ -34,6 +34,10 @@ function codex(role: string, text: string, extra: Record<string, unknown> = {}):
   return { type: 'response_item', timestamp: finish, payload: { type: 'message', role, content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text }], ...extra } };
 }
 
+function codexEvent(type: string, fields: Record<string, unknown> = {}): unknown {
+  return { type: 'event_msg', timestamp: finish, payload: { type, ...fields } };
+}
+
 describe('Claude Code chat import', () => {
   it('previews and imports only conversation text, preserving timestamps and project metadata', async () => {
     await jsonl('claude/projects/encoded/session.jsonl', [
@@ -84,6 +88,191 @@ describe('Claude Code chat import', () => {
 });
 
 describe('Codex chat import', () => {
+  it('removes a rolled-back user turn, its assistant output and later context-only or autonomous activity', async () => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codex('user', 'Keep question'), codex('assistant', 'Keep answer'),
+      codexEvent('task_started', { turn_id: 'discard' }),
+      codex('user', 'Discard question'), codexEvent('user_message', { message: 'Discard question' }),
+      codex('assistant', 'Discard commentary', { phase: 'commentary' }),
+      codex('user', '<environment_context>hidden cwd update</environment_context>'),
+      codex('assistant', 'Discard answer', { phase: 'final_answer' }),
+      codexEvent('task_started', { turn_id: 'automatic' }), codex('assistant', 'Discard automatic continuation'),
+      codexEvent('thread_rolled_back', { num_turns: 1 }),
+    ]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions[0].candidate.messageCount).toBe(2);
+    expect(result.sessions[0].items.map((item) => 'text' in item ? item.text : '')).toEqual(['Keep question', 'Keep answer']);
+    expect(JSON.stringify(result)).not.toMatch(/Discard|hidden cwd/);
+  });
+
+  it('counts real user prompts rather than task starts or mirrored events, including mid-turn steering', async () => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codexEvent('task_started', { turn_id: 'one' }),
+      codex('user', 'Keep question'), codexEvent('user_message', { message: 'Keep question' }), codex('assistant', 'Keep answer'),
+      codexEvent('task_started', { turn_id: 'two' }),
+      codex('user', 'Discard question'), codexEvent('user_message', { message: 'Discard question' }), codex('assistant', 'Discard answer'),
+      codex('user', 'Discard steer'), codexEvent('user_message', { message: 'Discard steer' }), codex('assistant', 'Discard steered answer'),
+      codexEvent('thread_rolled_back', { num_turns: 2 }),
+    ]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions[0].items.map((item) => 'text' in item ? item.text : '')).toEqual(['Keep question', 'Keep answer']);
+  });
+
+  it('applies repeated rollback before replacement turns and allows discarded message identifiers to be reused', async () => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codex('user', 'Discard first', { id: 'user-reused' }), codex('assistant', 'Discard first answer', { id: 'answer-reused' }),
+      codex('user', 'Discard second'), codex('assistant', 'Discard second answer'),
+      codexEvent('thread_rolled_back', { num_turns: 1 }),
+      codex('user', 'Discard replacement'), codex('assistant', 'Discard replacement answer'),
+      codexEvent('thread_rolled_back', { num_turns: 2 }),
+      codex('user', 'Final replacement', { id: 'user-reused' }), codex('assistant', 'Final answer', { id: 'answer-reused' }),
+    ]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions[0].candidate).toMatchObject({ title: 'Final replacement', messageCount: 2 });
+    expect(result.sessions[0].items.map((item) => 'text' in item ? item.text : '')).toEqual(['Final replacement', 'Final answer']);
+  });
+
+  it('preserves the prefix before the first real prompt when rollback exceeds the available turn count', async () => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codex('assistant', 'Standalone prefix'), codex('user', 'Discard question'), codex('assistant', 'Discard answer'),
+      codexEvent('thread_rolled_back', { num_turns: 99 }),
+    ]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions[0].items).toMatchObject([{ kind: 'assistant', text: 'Standalone prefix' }]);
+  });
+
+  it('treats zero rollback and rollback without any previous user prompt as no-ops', async () => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codex('assistant', 'Standalone prefix'), codexEvent('thread_rolled_back', { num_turns: 5 }),
+      codex('user', 'Keep question'), codex('assistant', 'Keep answer'), codexEvent('thread_rolled_back', { num_turns: 0 }),
+    ]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions[0].items).toHaveLength(3);
+  });
+
+  it('counts image-only prompts even though attachments are excluded from imported text', async () => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codex('user', 'Keep question'), codex('assistant', 'Keep answer'),
+      { type: 'response_item', timestamp: finish, payload: { type: 'message', role: 'user', id: 'image-question', content: [{ type: 'input_image', image_url: 'private-image' }] } },
+      codex('assistant', 'Discard image analysis'), codexEvent('thread_rolled_back', { num_turns: 1 }),
+    ]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions[0].items.map((item) => 'text' in item ? item.text : '')).toEqual(['Keep question', 'Keep answer']);
+  });
+
+  it('does not import an empty conversation after all user turns are rolled back', async () => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [meta(), codex('user', 'Discard question'), codex('assistant', 'Discard answer'), codexEvent('thread_rolled_back', { num_turns: 1 })]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions).toEqual([]);
+    expect(result.skippedFiles).toBe(1);
+    expect(result.malformedLines).toBe(0);
+  });
+
+  it('excludes contextual user fragments from rollback boundaries but retains ordinary lookalike prompts', async () => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codex('user', 'Keep question'), codex('assistant', 'Keep answer'),
+      codex('user', '<environment_context>user-authored text without closing marker'), codex('assistant', 'Discard answer'),
+      codex('user', '# AGENTS.md instructions for /work/app\n<INSTRUCTIONS>context</INSTRUCTIONS>'),
+      { type: 'response_item', timestamp: finish, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>hidden</environment_context>' }, { type: 'input_text', text: 'Mixed contextual fragment' }] } },
+      codexEvent('thread_rolled_back', { num_turns: 1 }),
+    ]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions[0].items.map((item) => 'text' in item ? item.text : '')).toEqual(['Keep question', 'Keep answer']);
+  });
+
+  it('counts structured assistant inter-agent instructions while excluding their text from imported chats', async () => {
+    const instruction = JSON.stringify({ author: 'root', recipient: 'root/child', content: 'Hidden inter-agent instruction', trigger_turn: true });
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codex('user', 'Keep question'), codex('assistant', 'Keep answer'),
+      codex('assistant', instruction), codex('assistant', 'Discard inter-agent answer'),
+      codexEvent('thread_rolled_back', { num_turns: 1 }),
+    ]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions[0].items.map((item) => 'text' in item ? item.text : '')).toEqual(['Keep question', 'Keep answer']);
+  });
+
+  it.each([
+    '<environment_context>cwd update</environment_context>',
+    '<ENVIRONMENT_CONTEXT>case-insensitive native marker</ENVIRONMENT_CONTEXT>',
+    '<user_shell_command>shell result</user_shell_command>',
+    '<turn_aborted>runtime interruption</turn_aborted>',
+    '<subagent_notification>child status</subagent_notification>',
+    '<agent_message_board_notification>board status</agent_message_board_notification>',
+    '<recommended_plugins>plugin catalog</recommended_plugins>',
+    '<skill>selected skill</skill>',
+    '# AGENTS.md instructions for /work/app\n<INSTRUCTIONS>project rules</INSTRUCTIONS>',
+    '# agents.md instructions for /work/app\n<instructions>case-insensitive native marker</instructions>',
+    '<goal_context>legacy internal context</goal_context>',
+    '<codex_internal_context source="task_1">internal steering</codex_internal_context>',
+    '<external_file_context>external context</external_file_context>',
+    '<external_>empty-key external context</external_>',
+    'Warning: apply_patch was requested via a shell. Use the apply_patch tool instead of exec_command.',
+    'Warning: The maximum number of unified exec processes you can keep open is 64.',
+    'Warning: Your account was flagged for potentially high-risk cyber activity. Runtime notice.',
+    '<hook_prompt hook_run_id="hook-run-1">Runtime steering</hook_prompt>',
+    "<hook_prompt hook_run_id='hook-run-1'>Retry with tests &amp; care.</hook_prompt>",
+    '<hook_prompt other="retained" hook_run_id="hook&#45;run&#x2D;1">Retry &lt;carefully&gt;.</hook_prompt>',
+  ])('does not let a native contextual fragment consume the rollback boundary: %s', async (context) => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codex('user', 'Keep question'), codex('assistant', 'Keep answer'),
+      codex('user', 'Discard question'), codex('assistant', 'Discard answer'),
+      codex('user', context), codexEvent('thread_rolled_back', { num_turns: 1 }),
+    ]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions[0].items.map((item) => 'text' in item ? item.text : '')).toEqual(['Keep question', 'Keep answer']);
+  });
+
+  it.each([
+    '<environment_context extra="not-a-native-marker">An actual prompt</environment_context>',
+    '<GOAL_CONTEXT>An actual prompt</GOAL_CONTEXT>',
+    '<CODEX_INTERNAL_CONTEXT source="task">An actual prompt</CODEX_INTERNAL_CONTEXT>',
+    '<codex_internal_context source="INVALID">An actual prompt</codex_internal_context>',
+    '<external_note>An actual prompt</external_other>',
+    '<hook_prompt>An actual prompt with no run id</hook_prompt>',
+    '<hook_prompt hook_run_id="">An actual prompt with an empty run id</hook_prompt>',
+    '<hook_prompt hook_run_id=" &#32;&#x20; ">Whitespace run id</hook_prompt>',
+    '<hook_prompt hook_run_id=unquoted>An actual prompt</hook_prompt>',
+    '<hook_prompt hook_run_id="one" hook_run_id="two">Duplicate attribute</hook_prompt>',
+    '<hook_prompt hook_run_id="one">Unescaped & body</hook_prompt>',
+    '<hook_prompt hook_run_id="&unknown;">Unknown entity</hook_prompt>',
+    '<hook_prompt hook_run_id="&#0;">Invalid XML character</hook_prompt>',
+    '<HOOK_PROMPT hook_run_id="hook-run-1">Case-sensitive XML</HOOK_PROMPT>',
+    '<hook_prompt hook_run_id="hook-run-1">Incomplete wrapper',
+  ])('retains genuine lookalike prompts as rollback boundaries: %s', async (prompt) => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codex('user', 'Keep question'), codex('assistant', 'Keep answer'),
+      codex('user', prompt), codex('assistant', 'Discard answer'), codexEvent('thread_rolled_back', { num_turns: 1 }),
+    ]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions[0].items.map((item) => 'text' in item ? item.text : '')).toEqual(['Keep question', 'Keep answer']);
+  });
+
+  it('excludes the exact synthetic compaction prefix from rollback boundaries without reading replacement history', async () => {
+    const prefix = 'Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:';
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+      meta(), codex('user', 'Keep question'), codex('assistant', 'Keep answer'),
+      codex('user', 'Discard question'), codex('assistant', 'Discard answer'),
+      codex('user', prefix + '\nSynthetic summary'), codexEvent('thread_rolled_back', { num_turns: 1 }),
+    ]);
+    const options = { codexDir: path.join(fixture, 'codex') };
+    expect((await discoverChatImports('codex', options)).sessions[0].items.map((item) => 'text' in item ? item.text : '')).toEqual(['Keep question', 'Keep answer']);
+    for (const prompt of [prefix, ' ' + prefix + '\nAn ordinary prefixed prompt']) {
+      await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
+        meta(), codex('user', 'Keep question'), codex('assistant', 'Keep answer'),
+        codex('user', prompt), codex('assistant', 'Discard answer'), codexEvent('thread_rolled_back', { num_turns: 1 }),
+      ]);
+      expect((await discoverChatImports('codex', options)).sessions[0].items.map((item) => 'text' in item ? item.text : '')).toEqual(['Keep question', 'Keep answer']);
+    }
+  });
+
+  it.each([-1, 0.5, '1', undefined, 4_294_967_296])('refuses a history with an invalid rollback count (%s) instead of importing discarded turns', async (num_turns) => {
+    await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [meta(), codex('user', 'Potentially discarded'), codexEvent('thread_rolled_back', { num_turns })]);
+    const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
+    expect(result.sessions).toEqual([]);
+    expect(result.skippedFiles).toBe(1);
+    expect(result.malformedLines).toBe(1);
+  });
+
   it('reads dated rollout files once, ignores mirror events, tools, system/developer messages and reasoning', async () => {
     await jsonl('codex/sessions/2026/06/01/rollout-session.jsonl', [
       meta(),

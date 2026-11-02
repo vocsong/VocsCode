@@ -39,6 +39,8 @@ On first launch the app starts with no agent configured — open **Settings → 
 
 Already using Claude Code or Codex? Choose **Import chats** during setup, or open **Settings → Import chats** later. Scan a source, select conversations, then import them into their original project folders in the sidebar. Imported chats are copied into Vocs Code; the original histories stay intact, and repeated imports skip existing conversations.
 
+Codex rollback events are applied before import, so discarded turns are excluded from both the displayed history and the context used to continue or fork the chat.
+
 The desktop importer reads Claude Code's `~/.claude/projects` and Codex's `~/.codex/sessions` and `archived_sessions` (including `CLAUDE_CONFIG_DIR` / `CODEX_HOME` overrides). It copies user and assistant text with titles and timestamps; tool activity, attachments, analysis, subagents, configuration and credentials are excluded. Continuing starts a fresh agent session with a bounded text handoff of the conversation, using Ask permissions. Project directories must still be accessible; an import does not copy the project's files. Scans are bounded, report skipped files, and support the recognized local JSONL formats.
 
 The app updates itself: a packaged build checks GitHub Releases on startup (you can also check from **Settings → About**), shows a pill in the title bar when an update is available, and offers restart-to-install once the download is done — the prompt waits until no session is running a turn. Downloading the newer installer from [Releases](https://github.com/vocsong/VocsCode/releases/latest) still works. See [Releasing](docs/RELEASING.md) for how the update feed is produced.

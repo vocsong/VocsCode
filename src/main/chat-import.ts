@@ -175,8 +175,107 @@ function hash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+// Core compact::is_summary_message requires this exact prefix followed by a newline.
+// https://github.com/openai/codex/blob/main/codex-rs/prompts/templates/compact/summary_prefix.md
+const CODEX_SUMMARY_PREFIX = 'Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:';
+
+/** Decode the text-only XML emitted by Codex's HookPromptXml serializer. */
+function codexXmlText(value: string): string | undefined {
+  let valid = !/[<\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/.test(value) && !value.includes(']]>');
+  const named: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'" };
+  const decoded = value.replace(/&(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);|&/g, (entity) => {
+    if (entity in named) return named[entity];
+    if (entity.startsWith('&#')) {
+      const point = entity.startsWith('&#x') ? Number.parseInt(entity.slice(3, -1), 16) : Number(entity.slice(2, -1));
+      if (point === 9 || point === 10 || point === 13 || point >= 0x20 && point <= 0xD7FF || point >= 0xE000 && point <= 0xFFFD || point >= 0x10000 && point <= 0x10FFFF) return String.fromCodePoint(point);
+    }
+    valid = false;
+    return entity;
+  });
+  return valid ? decoded : undefined;
+}
+
+/** A serialized hook prompt requires a nonempty run id and well-formed quoted attributes/text.
+ * https://github.com/openai/codex/blob/main/codex-rs/protocol/src/items.rs
+ */
+function isCodexHookPrompt(text: string): boolean {
+  const hook = /^<hook_prompt((?:[ \t\r\n]+[A-Za-z_:][A-Za-z0-9_:.-]*[ \t\r\n]*=[ \t\r\n]*(?:"[^"<]*"|'[^'<]*'))*)[ \t\r\n]*>([\s\S]*)<\/hook_prompt>$/.exec(text);
+  if (!hook || codexXmlText(hook[2]) === undefined) return false;
+  const names = new Set<string>();
+  let runId: string | undefined;
+  for (const attribute of hook[1].matchAll(/([A-Za-z_:][A-Za-z0-9_:.-]*)[ \t\r\n]*=[ \t\r\n]*(?:"([^"<]*)"|'([^'<]*)')/g)) {
+    const name = attribute[1];
+    const value = codexXmlText(attribute[2] ?? attribute[3]);
+    if (names.has(name) || value === undefined) return false;
+    names.add(name);
+    if (name === 'hook_run_id') runId = value;
+  }
+  return !!runId?.trim();
+}
+
+/** Codex's persisted contextual user fragments are not real prompt/rollback boundaries.
+ * Match complete wrappers, as core's ContextualUserFragment does, rather than arbitrary tags.
+ * https://github.com/openai/codex/blob/main/codex-rs/core/src/context/contextual_user_message.rs
+ */
+function isCodexContext(content: unknown): boolean {
+  const parts = Array.isArray(content) ? content : [{ type: 'input_text', text: content }];
+  return parts.some((part) => {
+    const item = object(part);
+    if (item?.type !== 'input_text') return false;
+    const raw = string(item.text);
+    if (raw.startsWith(CODEX_SUMMARY_PREFIX + '\n')) return true;
+    const text = raw.trim();
+    const lower = text.toLowerCase();
+    // Default fragment markers ignore ASCII case; custom internal/external and hook XML do not.
+    const tags = ['environment_context', 'user_shell_command', 'turn_aborted', 'subagent_notification', 'agent_message_board_notification', 'recommended_plugins', 'skill'];
+    if (tags.some((tag) => lower.startsWith(`<${tag}>`) && lower.endsWith(`</${tag}>`))) return true;
+    if (lower.startsWith('# agents.md instructions') && lower.endsWith('</instructions>')) return true;
+    if (text.startsWith('<goal_context>') && text.endsWith('</goal_context>')) return true;
+    if (/^<codex_internal_context source="[a-z][a-z0-9_]*">/.test(text) && text.endsWith('</codex_internal_context>')) return true;
+    const external = /^<external_([^>]*)>/.exec(text);
+    if (external && text.endsWith(`</external_${external[1]}>`)) return true;
+    if (isCodexHookPrompt(text)) return true;
+    return (text.startsWith('Warning: apply_patch was requested via ') && text.endsWith('Use the apply_patch tool instead of exec_command.'))
+      || text.startsWith('Warning: The maximum number of unified exec processes you can keep open is')
+      || text.startsWith('Warning: Your account was flagged for potentially high-risk cyber activity');
+  });
+}
+
+/** Legacy inter-agent instructions were assistant messages containing one serialized envelope. */
+function isCodexAgentInstruction(content: unknown): boolean {
+  if (!Array.isArray(content) || content.length !== 1) return false;
+  const part = object(content[0]);
+  if (!part || (part.type !== 'input_text' && part.type !== 'output_text')) return false;
+  try {
+    const instruction = object(JSON.parse(string(part.text)));
+    return !!instruction && typeof instruction.author === 'string' && typeof instruction.recipient === 'string'
+      && typeof instruction.content === 'string' && typeof instruction.trigger_turn === 'boolean';
+  } catch {
+    return false;
+  }
+}
+
+interface CodexImportEntry {
+  sourceId: string;
+  boundary: boolean;
+  item?: TranscriptItem;
+}
+
+/** ThreadRolledBack counts real user prompts, not task_started or mirrored UserMessage events.
+ * Entries retain even textless prompts so attachment-only turns consume the correct boundary.
+ * https://github.com/openai/codex/blob/main/codex-rs/core/src/context_manager/history.rs
+ */
+function rollbackCodex(entries: CodexImportEntry[], seen: Set<string>, count: number): void {
+  if (!count) return;
+  const boundaries = entries.flatMap((entry, index) => entry.boundary ? [index] : []);
+  if (!boundaries.length) return;
+  const cut = boundaries[Math.max(0, boundaries.length - count)];
+  for (const entry of entries.splice(cut)) if (entry.sourceId) seen.delete(entry.sourceId);
+}
+
 function parseTranscript(source: ChatImportSource, contents: string, filename: string): { session?: ParsedChatImport; malformedLines: number } {
   const items: TranscriptItem[] = [];
+  const codexEntries: CodexImportEntry[] = [];
   const seen = new Set<string>();
   let sourceSessionId = '';
   let projectRoot = '';
@@ -216,6 +315,17 @@ function parseTranscript(source: ChatImportSource, contents: string, filename: s
     } else {
       const payload = object(record.payload);
       if (!payload) continue;
+      if (record.type === 'event_msg' && payload.type === 'thread_rolled_back') {
+        const count = payload.num_turns;
+        // An invalid mutation marker makes the surviving history unknowable: skip the file.
+        if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > 0xFFFF_FFFF) return { malformedLines: malformedLines + 1 };
+        rollbackCodex(codexEntries, seen, count);
+        continue;
+      }
+      if (record.type === 'inter_agent_communication' || record.type === 'response_item' && payload.type === 'agent_message') {
+        codexEntries.push({ sourceId: '', boundary: true });
+        continue;
+      }
       if (record.type === 'session_meta') {
         sourceSessionId ||= string(payload.id);
         projectRoot ||= absoluteCwd(payload.cwd);
@@ -228,16 +338,21 @@ function parseTranscript(source: ChatImportSource, contents: string, filename: s
       // event_msg mirrors the same conversation; importing both duplicates every turn.
       if (record.type !== 'response_item' || payload.type !== 'message' || (payload.role !== 'user' && payload.role !== 'assistant')) continue;
       if (payload.role === 'assistant' && payload.channel === 'analysis') continue;
-      const text = textContent(payload.content, ['input_text', 'output_text']);
-      if (!text.trim()) continue;
+      if (payload.role === 'user' && isCodexContext(payload.content)) continue;
       const messageId = string(payload.id);
       if (messageId && seen.has(messageId)) continue;
       if (messageId) seen.add(messageId);
+      const text = textContent(payload.content, ['input_text', 'output_text']);
+      const instruction = payload.role === 'assistant' && isCodexAgentInstruction(payload.content);
+      const entry: CodexImportEntry = { sourceId: messageId, boundary: payload.role === 'user' || instruction };
+      codexEntries.push(entry);
+      if (!text.trim() || instruction) continue;
       const item = { id: `import-${hash(`${source}:${messageId || lineNumber}`)}`, ts: ts ?? updatedAt ?? 0, text };
       const phase = payload.phase === 'final_answer' ? 'final' : payload.phase === 'commentary' || payload.channel === 'commentary' ? 'commentary' : undefined;
-      items.push(payload.role === 'user' ? { ...item, kind: 'user' } : { ...item, kind: 'assistant', ...(phase ? { phase } : {}) });
+      entry.item = payload.role === 'user' ? { ...item, kind: 'user' } : { ...item, kind: 'assistant', ...(phase ? { phase } : {}) };
     }
   }
+  if (source === 'codex') items.push(...codexEntries.flatMap((entry) => entry.item ? [entry.item] : []));
   if (subagent || !items.length || !projectRoot) return { malformedLines };
   // Filenames are only a fallback for older transcripts without provider metadata.
   sourceSessionId ||= path.basename(filename, '.jsonl');

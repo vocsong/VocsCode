@@ -2636,7 +2636,9 @@ export class SessionManager {
     // A same-harness fork that lost the source directory also lost the provider session it would
     // have resumed; both it and a fork into another harness start from the conversation as text.
     const lostResume = !cross && !!own && src.config.harness === 'claude' && !!src.harnessRef.claudeSessionId;
-    if (cross || lostResume || src.pendingForkContext) {
+    // Codex forks start a fresh provider thread; unlike Claude, they cannot inherit a fork-on-resume ref.
+    const lostCodexResume = !cross && (src.config.harness === 'codex' || src.config.harness === 'codex-exec') && !!src.harnessRef.codexThreadId;
+    if (cross || lostResume || lostCodexResume || src.pendingForkContext) {
       // Hand the prior conversation over as plain text: the first message in the fork carries it
       // and then the flag is cleared.
       await this.deps.store.writeBlob(nid, FORK_CONTEXT_FILE, renderForkContext(keep, src.config.harness, target));
