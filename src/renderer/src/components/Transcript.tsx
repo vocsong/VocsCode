@@ -909,7 +909,7 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
           {q.options?.length ? (
             <div className="approval-qopts">
               {q.options.map((o) => (
-                <button key={o.label} type="button" className={`chip ${answers[q.id] === o.label ? 'active' : ''}`} disabled={decided} onClick={() => setAnswers({ ...answers, [q.id]: o.label })} title={o.description}>
+                <button key={o.label} type="button" className={`chip ${answers[q.id] === o.label ? 'active' : ''}`} disabled={decided} onClick={() => setAnswers(answers[q.id] === o.label ? Object.fromEntries(Object.entries(answers).filter(([id]) => id !== q.id)) : { ...answers, [q.id]: o.label })} aria-pressed={answers[q.id] === o.label} title={o.description}>
                   {o.label}
                 </button>
               ))}
