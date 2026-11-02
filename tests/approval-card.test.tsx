@@ -60,6 +60,40 @@ it('sends the harness option id with the question answers and the edited command
   });
 });
 
+it('unselects a chosen option when it is clicked again, and sends no answer for that question', () => {
+  const req: ApprovalRequest = {
+    ...request,
+    questions: [{ id: 'q1', question: 'Which environment?', options: [{ label: 'staging' }, { label: 'production' }] }]
+  };
+  render(<ApprovalCard item={item(req)} sessionId="s1" />);
+  const staging = screen.getByRole('button', { name: 'staging' });
+  fireEvent.click(staging);
+  expect(staging.getAttribute('aria-pressed')).toBe('true');
+  fireEvent.click(staging);
+  expect(staging.getAttribute('aria-pressed')).toBe('false');
+  expect(staging.className).not.toContain('active');
+  fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));
+
+  expect(invoke).toHaveBeenCalledTimes(1);
+  expect(invoke).toHaveBeenCalledWith('approvals:respond', expect.objectContaining({
+    decision: expect.objectContaining({ optionId: 'acp-allow-once', answers: {} })
+  }));
+});
+
+it('switches to another option without keeping the previous one', () => {
+  const req: ApprovalRequest = {
+    ...request,
+    questions: [{ id: 'q1', question: 'Which environment?', options: [{ label: 'staging' }, { label: 'production' }] }]
+  };
+  render(<ApprovalCard item={item(req)} sessionId="s1" />);
+  fireEvent.click(screen.getByRole('button', { name: 'staging' }));
+  fireEvent.click(screen.getByRole('button', { name: 'production' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));
+  expect(invoke).toHaveBeenCalledWith('approvals:respond', expect.objectContaining({
+    decision: expect.objectContaining({ answers: { q1: 'production' } })
+  }));
+});
+
 it('labels a decided card by the option the harness chose, not a hardcoded allow', () => {
   render(<ApprovalCard item={item(request, { optionId: 'acp-deny' })} sessionId="s1" />);
   expect(screen.getByText('Deny')).toBeTruthy();
