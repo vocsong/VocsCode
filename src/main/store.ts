@@ -30,6 +30,7 @@ export class SessionStore {
   private pendingIndexWrite: Promise<void> | null = null;
   /** Per-session transcript write chain: reads and rewrites wait for in-flight appends to land first. */
   private transcriptWrites = new Map<string, Promise<void>>();
+  private importing = new Set<string>();
   /** Optional observers (the search indexer); set after construction to avoid a dependency cycle. */
   hooks: { onAppend?: (sessionId: string, item: TranscriptItem) => void; onRewrite?: (sessionId: string) => void; onRemove?: (sessionId: string) => void } = {};
   private readonly log: Logger;
@@ -84,6 +85,31 @@ export class SessionStore {
     if (idx >= 0) this.sessions[idx] = meta;
     else this.sessions.unshift(meta);
     await this.flushIndex();
+  }
+
+  /** Publish an imported session only after its complete transcript and continuation context exist. */
+  async importSession(meta: SessionMeta, items: TranscriptItem[], context: string): Promise<void> {
+    assertValidSessionId(meta.id);
+    if (this.get(meta.id) || this.importing.has(meta.id)) throw new Error('Session already exists');
+    this.importing.add(meta.id);
+    const dir = this.sessionDir(meta.id);
+    try {
+      await writeText(path.join(dir, 'transcript.jsonl'), items.map((item) => JSON.stringify(item)).join('\n') + '\n');
+      await writeText(path.join(dir, 'fork-context.md'), context);
+      // Do not expose the new metadata to concurrent snapshots until its index write succeeds.
+      const publish = this.writeQueue.then(async () => {
+        await writeJson(this.indexFile, structuredClone([meta, ...this.sessions]));
+        this.sessions.unshift(meta);
+      });
+      this.writeQueue = publish.catch(() => undefined);
+      await publish;
+    } catch (error) {
+      await rmrf(dir).catch(() => undefined);
+      throw error;
+    } finally {
+      this.importing.delete(meta.id);
+    }
+    this.hooks.onRewrite?.(meta.id);
   }
 
   /**

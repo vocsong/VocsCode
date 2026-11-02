@@ -1,5 +1,6 @@
 /** Owns sessions: transcripts, approvals, goals, worktrees, and resuming a session after a restart. */
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { MissionOwnership } from '../shared/mission';
@@ -50,6 +51,7 @@ import type { AnalyticsStore } from './analytics';
 import { deferred, errorMessage, shortId, type Deferred } from './util/async';
 import { exists, readJson, writeJson } from './util/fs';
 import { generateBranchName, generateSessionTitle, titleFromPrompt } from './session-title';
+import type { ParsedChatImport } from './chat-import';
 
 export { titleFromPrompt };
 
@@ -208,6 +210,8 @@ export class SessionManager {
   private static readonly GIT_STATE_RECHECK_MS = 120_000;
 
   private active = new Map<string, ActiveSession>();
+  /** Serialize imports so concurrent requests cannot publish the same source conversation twice. */
+  private importQueue: Promise<void> = Promise.resolve();
   /** No turn or second settings change may race a premium-speed transition. */
   private fastModeUpdates = new Set<string>();
   /** Reserve send-first dispatches before startup/preamble awaits expose an idle gap. */
@@ -505,6 +509,57 @@ export class SessionManager {
         return meta ? this.deps.store.upsert(meta).catch((e) => this.deps.log('warn', `[${id}] meta persist during shutdown failed: ${errorMessage(e)}`)) : Promise.resolve();
       })
     );
+  }
+
+  async importChats(chats: ParsedChatImport[]): Promise<{ imported: SessionMeta[]; skipped: number }> {
+    const run = this.importQueue.then(async () => {
+      const imported: SessionMeta[] = [];
+      let skipped = 0;
+      try {
+        for (const { candidate, items } of chats) {
+          if (this.deps.store.list().some((session) => session.importedFrom?.source === candidate.source && session.importedFrom.sessionId === candidate.sourceSessionId)) {
+            skipped++;
+            continue;
+          }
+          const id = `import_${createHash('sha256').update(`${candidate.source}\0${candidate.sourceSessionId}`).digest('hex').slice(0, 32)}`;
+          if (this.deps.store.get(id)) throw new Error('Imported session identifier is already in use');
+          const harness = candidate.source;
+          const model = this.settings().defaultModelByHarness[harness];
+          const meta: SessionMeta = {
+            id,
+            importedFrom: { source: candidate.source, sessionId: candidate.sourceSessionId },
+            title: candidate.title,
+            createdAt: candidate.createdAt,
+            updatedAt: candidate.updatedAt,
+            lastUserMessageAt: items.filter((item) => item.kind === 'user').at(-1)?.ts,
+            config: { harness, projectRoot: candidate.projectRoot, permissionMode: 'ask', useWorktree: false, model },
+            cwd: candidate.projectRoot,
+            status: 'idle',
+            queued: 0,
+            harnessRef: {},
+            usage: emptyUsage(),
+            activeModel: model,
+            pendingForkContext: true,
+            ...(!HARNESS_BY_ID[harness].capabilities.systemPrompt ? { pendingAppInstructions: true } : {})
+          };
+          await this.deps.store.importSession(meta, items, renderForkContext(items, harness, harness));
+          imported.push(meta);
+        }
+        if (imported.length) {
+          const settings = this.settings();
+          const roots = imported.map((session) => session.config.projectRoot);
+          await this.deps.settings.update({
+            folders: [...new Set([...settings.folders, ...roots])],
+            recentProjects: [...new Set([...roots, ...settings.recentProjects])].slice(0, 12)
+          });
+        }
+        return { imported, skipped };
+      } finally {
+        if (imported.length) this.pushSessions();
+      }
+    });
+    this.importQueue = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   async create(req: CreateSessionRequest): Promise<SessionMeta> {
@@ -2531,6 +2586,7 @@ export class SessionManager {
       // keep their text and tokens for context but are worth nothing.
       usage: emptyUsage(),
       forkedFrom: src.id,
+      importedFrom: undefined,
       harnessRef: {},
       pendingForkContext: undefined,
       pendingKnowledgeDigest: undefined,
@@ -2580,7 +2636,7 @@ export class SessionManager {
     // A same-harness fork that lost the source directory also lost the provider session it would
     // have resumed; both it and a fork into another harness start from the conversation as text.
     const lostResume = !cross && !!own && src.config.harness === 'claude' && !!src.harnessRef.claudeSessionId;
-    if (cross || lostResume) {
+    if (cross || lostResume || src.pendingForkContext) {
       // Hand the prior conversation over as plain text: the first message in the fork carries it
       // and then the flag is cleared.
       await this.deps.store.writeBlob(nid, FORK_CONTEXT_FILE, renderForkContext(keep, src.config.harness, target));

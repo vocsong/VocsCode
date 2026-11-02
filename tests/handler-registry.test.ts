@@ -23,6 +23,9 @@ import { PiConfigStore } from '../src/main/pi-config';
 import { AppInstructions } from '../src/main/app-instructions';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
+import { discoverChatImports } from '../src/main/chat-import';
+
+vi.mock('../src/main/chat-import', () => ({ discoverChatImports: vi.fn() }));
 
 const dirs: string[] = [];
 let ws: string;
@@ -112,6 +115,29 @@ function stubDeps(overrides: Partial<Deps> = {}): { registry: HandlerRegistry; d
 }
 
 describe('handler registry', () => {
+  it('validates import sources, opaque identifiers and selection before privileged operations', async () => {
+    const { registry, deps } = stubDeps();
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    const importChats = vi.fn();
+    deps.sessions.importChats = importChats;
+    for (const request of [{ source: 'other' }, { source: 'claude', path: '/private/file' }]) {
+      await expect(registry.invoke('sessions:importList', request)).rejects.toThrow();
+    }
+    for (const request of [{ source: 'claude', ids: [] }, { source: 'claude', ids: ['../../file'] }, { source: 'codex', ids: Array(201).fill('id') }]) {
+      await expect(registry.invoke('sessions:import', request)).rejects.toThrow();
+    }
+    expect(discover).not.toHaveBeenCalled();
+    expect(importChats).not.toHaveBeenCalled();
+    discover.mockResolvedValue({ sessions: [], skippedFiles: 0, malformedLines: 0, truncated: false });
+    await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['unlisted'] })).rejects.toThrow('Scan again');
+    expect(importChats).not.toHaveBeenCalled();
+    for (const channel of ['sessions:importList', 'sessions:import']) {
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels().includes(channel as never)).toBe(false);
+    }
+  });
+
   beforeAll(() => {
     ws = tmpDir('ws');
     fsSync.writeFileSync(path.join(ws, 'a.txt'), 'hello', 'utf8');

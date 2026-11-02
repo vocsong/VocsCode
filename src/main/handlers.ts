@@ -51,6 +51,7 @@ import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
 import { DictationService } from './dictation/service';
 import { localModel } from '../shared/dictation';
+import { discoverChatImports } from './chat-import';
 
 /** Structural dialog options (Electron shapes are cast in ipc.ts, keeping this file Electron-free). */
 export interface OpenDialogOptions {
@@ -1071,6 +1072,28 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   };
 
   handle('sessions:list', () => sessions.list());
+  const importSourceSchema = z.strictObject({ source: z.enum(['claude', 'codex']) });
+  handle('sessions:importList', async (req) => {
+    const { source } = importSourceSchema.parse(req);
+    const scan = await discoverChatImports(source);
+    return {
+      candidates: scan.sessions.map(({ candidate }) => ({
+        ...candidate,
+        imported: sessions.list().some((session) => session.importedFrom?.source === source && session.importedFrom.sessionId === candidate.sourceSessionId)
+      })),
+      skipped: scan.skippedFiles,
+      malformedLines: scan.malformedLines,
+      truncated: scan.truncated
+    };
+  });
+  handle('sessions:import', async (req) => {
+    const { source, ids } = importSourceSchema.extend({ ids: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,100}$/)).min(1).max(200) }).parse(req);
+    const scan = await discoverChatImports(source);
+    const wanted = new Set(ids);
+    const selected = scan.sessions.filter(({ candidate }) => wanted.has(candidate.id));
+    if (selected.length !== wanted.size) throw new Error('Some conversations are no longer available. Scan again before importing.');
+    return sessions.importChats(selected);
+  });
   handle('sessions:create', async (req) => {
     const session = await sessions.create(req);
     scheduleGitnexus(session, 'session-start');

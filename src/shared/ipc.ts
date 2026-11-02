@@ -58,6 +58,7 @@ import type {
   UserInput
 } from './types';
 import type { AgentClientContext, AgentState } from './agent';
+import type { ChatImportPreview, ChatImportSource } from './chat-import';
 import type { ExecutionRecord } from './analytics/records';
 import type { KnowledgeGraph, KnowledgePageDetail, KnowledgeSearchResult, KnowledgeView } from './knowledge';
 import type { AgentTypeInfo, SubagentRun, SubagentRunSummary } from './subagents';
@@ -260,6 +261,9 @@ export interface IpcContract {
   'missions:command': [MissionCommandRequest, MissionCommandResponse];
 
   'sessions:list': [void, SessionMeta[]];
+  /** Desktop-only explicit discovery; the renderer never supplies filesystem paths. */
+  'sessions:importList': [{ source: ChatImportSource }, ChatImportPreview];
+  'sessions:import': [{ source: ChatImportSource; ids: string[] }, { imported: SessionMeta[]; skipped: number }];
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
