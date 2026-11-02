@@ -144,7 +144,7 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 | Analytics dashboard, `src/main/analytics*.ts`, `src/shared/analytics/**` | `tests/analytics*.test.ts(x)` + `e2e.vision` |
 | Themes, `styles.css`, terminal colours | `e2e.themes` |
 | Terminal panel, PTY, `terminal/host.ts` | `e2e.terminal` |
-| Approval cards, `harness/permissions.ts` | `e2e.approval` (live) |
+| Approval cards and their question chips, `harness/permissions.ts` | `tests/approval-card.test.tsx` + `e2e.transcript` (a seeded pending question) + `e2e.approval` (live) |
 | Mission configuration, orchestration, controls or managed workspaces | `tests/mission-*.test.ts` + `e2e.mission-settings`, `e2e.mission`; managed or ordinary Pi process ownership also needs `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/mission-pi.integration.test.ts tests/mission-ordinary-pi.integration.test.ts`. Suites that need Windows Job Objects (`mission-check-job`, `mission-terminal-windows`, `mission-receipt-recovery`, `mission-ordinary-pi`, the app-death part of `mission-restart-recovery`) skip on macOS/Linux, so the ubuntu CI gate does not cover them. Live demonstrations: see below and `docs/MISSION-STATUS.md`. |
 | Harness CLI update check (`runtime.ts` `checkUpdates`, Harness logins card) | `tests/harness-updates.test.ts`, `tests/harness-update-ui.test.tsx` + `e2e.vision` |
 | Vesta panel, `agents/` pi bridge, `resources/pi/vocs-code-vesta.ts` | `tests/vesta.test.ts` + `e2e.vesta` (opt-in, real pi) |

@@ -190,4 +190,72 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     await expectQuietWindow(app);
     expect(await completionTimes(reopened)).toEqual(originalTimes);
   }, 180_000);
+
+  it('lets a pending question option be chosen, switched and unselected', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-question-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+
+    const sid = 's_question_e2e';
+    const session: SessionMeta = {
+      id: sid,
+      title: 'Pending question',
+      createdAt: T,
+      updatedAt: T,
+      config: { harness: 'native', projectRoot: project, permissionMode: 'ask' },
+      cwd: project,
+      status: 'idle',
+      harnessRef: {},
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 1 }
+    };
+    const items: TranscriptItem[] = [
+      { id: 'u1', kind: 'user', ts: T, text: 'Deploy it.' },
+      {
+        id: 'ap1',
+        kind: 'approval',
+        ts: T + 1,
+        request: {
+          id: 'ap1', sessionId: sid, harness: 'claude', kind: 'question', title: 'Claude has a question', toolName: 'AskUserQuestion',
+          options: [{ id: 'allow', label: 'Answer', kind: 'allow' }, { id: 'deny', label: 'Skip', kind: 'deny' }],
+          questions: [{ id: '0', question: 'Which environment?', options: [{ label: 'staging' }, { label: 'production' }], allowOther: true }],
+          createdAt: T + 1
+        }
+      }
+    ];
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
+    await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
+    await fs.writeFile(path.join(userData, 'sessions', sid, 'transcript.jsonl'), items.map((i) => JSON.stringify(i)).join('\n') + '\n');
+
+    const packaged = process.env.HARNESS_E2E_EXE;
+    app = await electron.launch({
+      executablePath: packaged || (require('electron') as string),
+      args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+      env: isolatedEnv(userData),
+      timeout: 60_000
+    });
+    const win: Page = await app.firstWindow();
+    await win.waitForSelector('.brand', { timeout: 60_000 });
+    await expectQuietWindow(app);
+
+    const staging = win.locator('.approval-qopts .chip', { hasText: 'staging' });
+    const production = win.locator('.approval-qopts .chip', { hasText: 'production' });
+    await staging.waitFor({ timeout: 30_000 });
+    const active = win.locator('.approval-qopts .chip.active');
+    expect(await active.count()).toBe(0);
+
+    await staging.click();
+    await expect(active.allInnerTexts()).resolves.toEqual(['staging']);
+    await production.click();
+    await expect(active.allInnerTexts()).resolves.toEqual(['production']);
+
+    // The same chip a second time puts the question back to unanswered.
+    await production.click();
+    expect(await active.count()).toBe(0);
+    await expect(production.getAttribute('aria-pressed')).resolves.toBe('false');
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'transcript-04-question-unselected.png') });
+  }, 120_000);
 });
