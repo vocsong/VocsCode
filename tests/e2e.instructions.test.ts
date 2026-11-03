@@ -100,6 +100,12 @@ describe.runIf(enabled)('chat import UI', () => {
     ].map((row) => JSON.stringify(row)).join('\n') + '\n';
     await fs.writeFile(claudeFile, claudeText);
     await fs.writeFile(codexFile, codexText);
+    const skippedFixtures = [
+      { file: path.join(path.dirname(claudeFile), 'command-only.jsonl'), text: claudeText.split('\n').slice(0, 2).join('\n') + '\n' },
+      { file: path.join(path.dirname(claudeFile), 'missing-project.jsonl'), text: JSON.stringify({ type: 'user', uuid: 'missing-project', sessionId: 'missing-project', message: { role: 'user', content: 'History without project metadata' } }) + '\n' },
+      { file: path.join(path.dirname(claudeFile), 'invalid.jsonl'), text: 'not-json\n' },
+    ];
+    await Promise.all(skippedFixtures.map(({ file, text }) => fs.writeFile(file, text)));
     const env = isolatedEnv(userData, { CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: codexDir });
     const launch = async (): Promise<Page> => {
       app = await electron.launch({ ...launchOptions, env, timeout: 60_000 });
@@ -111,6 +117,17 @@ describe.runIf(enabled)('chat import UI', () => {
       await win.locator('.sidebar-bottom').getByRole('button', { name: 'Settings', exact: true }).click();
       await win.getByRole('button', { name: 'Import chats', exact: true }).click();
       await win.getByRole('heading', { name: 'Import chats' }).waitFor();
+    };
+    const checkSkipReasons = async (win: Page, source: string) => {
+      const reasons = win.getByRole('list', { name: 'Skipped chat reasons' });
+      if (source === 'Claude Code') {
+        await win.getByText('3 history files skipped.', { exact: true }).waitFor();
+        expect(await reasons.locator('li').allTextContents()).toEqual([
+          '1 — Empty or no conversation text', '1 — Missing or invalid project directory metadata', '1 — Unrecognized or invalid history'
+        ]);
+      } else {
+        expect(await reasons.count()).toBe(0);
+      }
     };
     const readSessions = async (): Promise<SessionMeta[]> => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8').catch(() => '[]'));
     let win = await launch();
@@ -124,6 +141,7 @@ describe.runIf(enabled)('chat import UI', () => {
     for (const [source, title] of [['Claude Code', 'Claude import fixture'], ['Codex', 'Codex import fixture']] as const) {
       await win.getByRole('button', { name: `Scan ${source}`, exact: true }).click();
       await win.getByRole('checkbox', { name: `Import ${title}`, exact: true }).check();
+      await checkSkipReasons(win, source);
       if (source === 'Claude Code') {
         // The global form-input rule is full-width: checkboxes must keep their own compact size.
         expect((await win.getByRole('checkbox', { name: `Import ${title}`, exact: true }).boundingBox())!.width).toBeLessThan(24);
@@ -162,6 +180,7 @@ describe.runIf(enabled)('chat import UI', () => {
       await win.getByRole('button', { name: `Scan ${source}`, exact: true }).click();
       const checkbox = win.getByRole('checkbox', { name: `Import ${title}`, exact: true });
       await checkbox.waitFor();
+      await checkSkipReasons(win, source);
       expect(await checkbox.isDisabled()).toBe(true);
       expect(await win.getByRole('button', { name: 'Import selected', exact: true }).isDisabled()).toBe(true);
     }
@@ -176,5 +195,6 @@ describe.runIf(enabled)('chat import UI', () => {
     expect(await win.getByText('Conversation cleared.', { exact: false }).count()).toBe(0);
     expect(await fs.readFile(claudeFile)).toEqual(Buffer.from(claudeText));
     expect(await fs.readFile(codexFile)).toEqual(Buffer.from(codexText));
+    for (const { file, text } of skippedFixtures) expect(await fs.readFile(file)).toEqual(Buffer.from(text));
   }, 180_000);
 });

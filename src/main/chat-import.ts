@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { lstat, open, opendir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { ChatImportCandidate, ChatImportSource } from '../shared/chat-import';
+import type { ChatImportCandidate, ChatImportSkipCounts, ChatImportSkipReason, ChatImportSource } from '../shared/chat-import';
 import type { TranscriptItem } from '../shared/types';
 
 export interface ParsedChatImport {
@@ -14,6 +14,8 @@ export interface ParsedChatImport {
 export interface ChatImportDiscovery {
   sessions: ParsedChatImport[];
   skippedFiles: number;
+  skippedReasons: ChatImportSkipCounts;
+  scanErrors: number;
   malformedLines: number;
   truncated: boolean;
 }
@@ -52,7 +54,11 @@ export async function discoverChatImports(source: ChatImportSource, options: Cha
   const root = source === 'claude'
     ? options.claudeDir ?? (process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(homedir(), '.claude'))
     : options.codexDir ?? (process.env.CODEX_HOME?.trim() || path.join(homedir(), '.codex'));
-  const result: ChatImportDiscovery = { sessions: [], skippedFiles: 0, malformedLines: 0, truncated: false };
+  const result: ChatImportDiscovery = { sessions: [], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false };
+  const skip = (reason: ChatImportSkipReason): void => {
+    result.skippedFiles++;
+    result.skippedReasons[reason] = (result.skippedReasons[reason] ?? 0) + 1;
+  };
   const sessions = new Map<string, ParsedChatImport>();
   let visited = 0;
   let files = 0;
@@ -83,12 +89,12 @@ export async function discoverChatImports(source: ChatImportSource, options: Cha
         if (source === 'claude' ? depth !== 1 || entry.name.startsWith('agent-') : !entry.name.startsWith('rollout-')) continue;
         files++;
         try {
-          const contents = await readTranscript(filename, Math.min(limits.maxFileBytes, limits.maxTotalBytes - bytes));
+          const contents = await readTranscript(filename, limits.maxFileBytes, limits.maxTotalBytes - bytes);
           bytes += contents.length;
           const parsed = parseTranscript(source, contents.toString('utf8'), filename);
           result.malformedLines += parsed.malformedLines;
           if (!parsed.session) {
-            result.skippedFiles++;
+            skip(parsed.skipReason);
             continue;
           }
           const previous = sessions.get(parsed.session.candidate.id);
@@ -96,13 +102,13 @@ export async function discoverChatImports(source: ChatImportSource, options: Cha
             || (parsed.session.candidate.updatedAt === previous.candidate.updatedAt && parsed.session.items.length > previous.items.length)) {
             sessions.set(parsed.session.candidate.id, parsed.session);
           }
-        } catch {
-          // Counts are useful to the picker without exposing source paths, messages or errors.
-          result.skippedFiles++;
+        } catch (error) {
+          // Aggregate reasons never include source paths, messages or raw filesystem errors.
+          skip(error instanceof ChatImportLimitError ? error.reason : 'unreadable');
         }
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') result.skippedFiles++;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') result.scanErrors++;
     }
   }
 
@@ -111,7 +117,7 @@ export async function discoverChatImports(source: ChatImportSource, options: Cha
     const stat = await lstat(root);
     if (!stat.isDirectory() || stat.isSymbolicLink()) return result;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') result.skippedFiles++;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') result.scanErrors++;
     return result;
   }
   if (source === 'claude') await visit(path.join(root, 'projects'), 0);
@@ -123,11 +129,20 @@ export async function discoverChatImports(source: ChatImportSource, options: Cha
   return result;
 }
 
-async function readTranscript(filename: string, limit: number): Promise<Buffer> {
+class ChatImportLimitError extends Error {
+  constructor(readonly reason: 'tooLarge' | 'scanBudget') {
+    super('Transcript exceeds import limit');
+  }
+}
+
+async function readTranscript(filename: string, maxFileBytes: number, remainingBytes: number): Promise<Buffer> {
+  const limit = Math.min(maxFileBytes, remainingBytes);
   const file = await open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || stat.size > limit) throw new Error('Transcript exceeds import limit');
+    if (!stat.isFile()) throw new Error('Transcript is not a file');
+    if (stat.size > maxFileBytes) throw new ChatImportLimitError('tooLarge');
+    if (stat.size > remainingBytes) throw new ChatImportLimitError('scanBudget');
     const chunks: Buffer[] = [];
     let total = 0;
     while (true) {
@@ -135,7 +150,7 @@ async function readTranscript(filename: string, limit: number): Promise<Buffer> 
       const { bytesRead } = await file.read(chunk);
       if (!bytesRead) break;
       total += bytesRead;
-      if (total > limit) throw new Error('Transcript exceeds import limit');
+      if (total > limit) throw new ChatImportLimitError(maxFileBytes <= remainingBytes ? 'tooLarge' : 'scanBudget');
       chunks.push(chunk.subarray(0, bytesRead));
     }
     return Buffer.concat(chunks, total);
@@ -298,7 +313,10 @@ function rollbackCodex(entries: CodexImportEntry[], seen: Set<string>, count: nu
   for (const entry of entries.splice(cut)) if (entry.sourceId) seen.delete(entry.sourceId);
 }
 
-function parseTranscript(source: ChatImportSource, contents: string, filename: string): { session?: ParsedChatImport; malformedLines: number } {
+type ParsedTranscript = { session: ParsedChatImport; malformedLines: number }
+  | { session?: undefined; skipReason: ChatImportSkipReason; malformedLines: number };
+
+function parseTranscript(source: ChatImportSource, contents: string, filename: string): ParsedTranscript {
   const items: TranscriptItem[] = [];
   const codexEntries: CodexImportEntry[] = [];
   const seen = new Set<string>();
@@ -309,10 +327,13 @@ function parseTranscript(source: ChatImportSource, contents: string, filename: s
   let updatedAt: number | undefined;
   let malformedLines = 0;
   let subagent = false;
+  let hasLines = false;
+  let recognizedHistory = false;
   let lineNumber = 0;
   for (const line of contents.split('\n')) {
     lineNumber++;
     if (!line.trim()) continue;
+    hasLines = true;
     let record: RecordValue | undefined;
     try { record = object(JSON.parse(line)); } catch { malformedLines++; continue; }
     if (!record) { malformedLines++; continue; }
@@ -323,13 +344,17 @@ function parseTranscript(source: ChatImportSource, contents: string, filename: s
     }
     if (source === 'claude') {
       if (record.type === 'agent-setting') subagent = true;
-      if (record.isSidechain === true || record.isMeta === true || record.parent_tool_use_id != null) continue;
+      if (record.isSidechain === true || record.isMeta === true || record.parent_tool_use_id != null) {
+        recognizedHistory = true;
+        continue;
+      }
       sourceSessionId ||= string(record.sessionId);
       projectRoot ||= absoluteCwd(record.cwd);
       if (record.type === 'custom-title') title = string(record.customTitle) || title;
       if (record.type !== 'user' && record.type !== 'assistant') continue;
       const message = object(record.message);
       if (!message || message.role !== record.type) continue;
+      recognizedHistory = true;
       const text = textContent(message.content, ['text'], record.type === 'user' ? claudeUserText : undefined);
       if (!text.trim()) continue;
       const uuid = string(record.uuid);
@@ -343,7 +368,7 @@ function parseTranscript(source: ChatImportSource, contents: string, filename: s
       if (record.type === 'event_msg' && payload.type === 'thread_rolled_back') {
         const count = payload.num_turns;
         // An invalid mutation marker makes the surviving history unknowable: skip the file.
-        if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > 0xFFFF_FFFF) return { malformedLines: malformedLines + 1 };
+        if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > 0xFFFF_FFFF) return { skipReason: 'invalidHistory', malformedLines: malformedLines + 1 };
         rollbackCodex(codexEntries, seen, count);
         continue;
       }
@@ -352,6 +377,7 @@ function parseTranscript(source: ChatImportSource, contents: string, filename: s
         continue;
       }
       if (record.type === 'session_meta') {
+        recognizedHistory = true;
         sourceSessionId ||= string(payload.id);
         projectRoot ||= absoluteCwd(payload.cwd);
         const sessionSource = object(payload.source);
@@ -362,6 +388,7 @@ function parseTranscript(source: ChatImportSource, contents: string, filename: s
       if (record.type === 'turn_context') projectRoot ||= absoluteCwd(payload.cwd);
       // event_msg mirrors the same conversation; importing both duplicates every turn.
       if (record.type !== 'response_item' || payload.type !== 'message' || (payload.role !== 'user' && payload.role !== 'assistant')) continue;
+      recognizedHistory = true;
       if (payload.role === 'assistant' && payload.channel === 'analysis') continue;
       if (payload.role === 'user' && isCodexContext(payload.content)) continue;
       const messageId = string(payload.id);
@@ -378,7 +405,9 @@ function parseTranscript(source: ChatImportSource, contents: string, filename: s
     }
   }
   if (source === 'codex') items.push(...codexEntries.flatMap((entry) => entry.item ? [entry.item] : []));
-  if (subagent || !items.length || !projectRoot) return { malformedLines };
+  if (subagent) return { skipReason: 'subagent', malformedLines };
+  if (!items.length) return { skipReason: !hasLines || recognizedHistory || sourceSessionId || projectRoot ? 'empty' : 'invalidHistory', malformedLines };
+  if (!projectRoot) return { skipReason: 'missingProject', malformedLines };
   // Filenames are only a fallback for older transcripts without provider metadata.
   sourceSessionId ||= path.basename(filename, '.jsonl');
   const id = `${source}-${hash(sourceSessionId)}`;

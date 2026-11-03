@@ -1,16 +1,24 @@
-import { mkdtemp, mkdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, open, opendir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { discoverChatImports } from '../src/main/chat-import';
+
+vi.mock('node:fs/promises', { spy: true });
 
 let fixture: string;
 const start = '2026-06-01T12:00:00.000Z';
 const finish = '2026-06-01T12:00:02.000Z';
 const cwd = process.platform === 'win32' ? 'C:\\work\\app' : '/work/app';
 
-beforeEach(async () => { fixture = await mkdtemp(path.join(tmpdir(), 'vocs-chat-import-')); });
+beforeEach(async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(open).mockReset().mockImplementation(actual.open);
+  vi.mocked(opendir).mockReset().mockImplementation(actual.opendir);
+  fixture = await mkdtemp(path.join(tmpdir(), 'vocs-chat-import-'));
+});
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   await rm(fixture, { recursive: true, force: true });
 });
@@ -364,6 +372,7 @@ describe('Codex chat import', () => {
     const result = await discoverChatImports('codex', { codexDir: path.join(fixture, 'codex') });
     expect(result.sessions).toEqual([]);
     expect(result.skippedFiles).toBe(1);
+    expect(result.skippedReasons).toEqual({ invalidHistory: 1 });
     expect(result.malformedLines).toBe(1);
   });
 
@@ -420,6 +429,92 @@ describe('Codex chat import', () => {
 });
 
 describe('chat import boundaries', () => {
+  it('reports one reason per skipped file without exposing paths, content or raw errors', async () => {
+    await jsonl('claude/projects/encoded/clear.jsonl', [claude('user', '<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>', { sessionId: 'clear' })]);
+    await jsonl('claude/projects/encoded/tools.jsonl', [claude('assistant', [{ type: 'tool_use', input: { secret: 'private-tool' } }], { sessionId: 'tools' })]);
+    await jsonl('claude/projects/encoded/teammate.jsonl', [{ type: 'agent-setting' }, claude('user', 'private-subagent', { sessionId: 'teammate' })]);
+    await jsonl('claude/projects/encoded/missing.jsonl', [claude('user', 'private-prompt', { sessionId: 'missing', cwd: undefined })]);
+    await jsonl('claude/projects/encoded/broken.jsonl', ['not json']);
+    await jsonl('claude/projects/encoded/unknown.jsonl', [{ type: 'unknown-format', privateData: 'private-unknown' }]);
+    await jsonl('claude/projects/encoded/large.jsonl', [claude('user', 'x'.repeat(4_000), { sessionId: 'large' })]);
+    await jsonl('claude/projects/encoded/accepted.jsonl', [claude('user', 'Keep this chat', { sessionId: 'accepted' })]);
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude'), maxFileBytes: 2_000 });
+    expect(result.sessions.map((session) => session.candidate.title)).toEqual(['Keep this chat']);
+    expect(result.skippedFiles).toBe(7);
+    expect(result.skippedReasons).toEqual({ empty: 2, subagent: 1, missingProject: 1, invalidHistory: 2, tooLarge: 1 });
+    expect(Object.values(result.skippedReasons).reduce((sum, count) => sum + (count ?? 0), 0)).toBe(result.skippedFiles);
+    expect(result.scanErrors).toBe(0);
+    expect(result.malformedLines).toBe(1);
+    expect(JSON.stringify(result)).not.toMatch(/private-|encoded|broken\.jsonl|large\.jsonl/);
+  });
+
+  it('distinguishes unreadable history files from directories that could not be scanned', async () => {
+    const filename = await jsonl('claude/projects/encoded/private-history.jsonl', [claude('user', 'private-message')]);
+    vi.mocked(open).mockRejectedValueOnce(Object.assign(new Error(`EACCES reading ${filename}`), { code: 'EACCES' }));
+    const fileFailure = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude') });
+    expect(fileFailure).toMatchObject({ sessions: [], skippedFiles: 1, skippedReasons: { unreadable: 1 }, scanErrors: 0 });
+    vi.mocked(opendir).mockRejectedValueOnce(Object.assign(new Error(`EACCES scanning ${fixture}`), { code: 'EACCES' }));
+    const directoryFailure = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude') });
+    expect(directoryFailure).toMatchObject({ sessions: [], skippedFiles: 0, skippedReasons: {}, scanErrors: 1 });
+    expect(JSON.stringify([fileFailure, directoryFailure])).not.toMatch(/private-|EACCES|encoded|projects/);
+  });
+
+  it('distinguishes the remaining scan budget from a per-file size limit', async () => {
+    const records = [claude('user', 'A bounded conversation')];
+    await jsonl('claude/projects/encoded/one.jsonl', records);
+    await jsonl('claude/projects/encoded/two.jsonl', [claude('user', 'Another conversation', { sessionId: 'second-session' })]);
+    const bytes = Buffer.byteLength(JSON.stringify(records[0]) + '\n');
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude'), maxTotalBytes: bytes + 100 });
+    expect(result.sessions).toHaveLength(1);
+    expect(result.skippedFiles).toBe(1);
+    expect(result.skippedReasons).toEqual({ scanBudget: 1 });
+    expect(result.scanErrors).toBe(0);
+  });
+
+  it.each([
+    { maxFileBytes: 100, maxTotalBytes: 500, reason: 'tooLarge' },
+    { maxFileBytes: 500, maxTotalBytes: 100, reason: 'scanBudget' },
+  ] as const)('reports $reason when a source grows beyond its initial stat and closes the file', async ({ maxFileBytes, maxTotalBytes, reason }) => {
+    await jsonl('claude/projects/encoded/growing.jsonl', [claude('user', 'x'.repeat(1_000))]);
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const closed = vi.fn();
+    vi.mocked(open).mockImplementationOnce(async (...args) => {
+      const file = await actual.open(...args);
+      const stat = await file.stat();
+      vi.spyOn(file, 'stat').mockResolvedValue(Object.assign(stat, { size: 0 }));
+      const close = file.close.bind(file);
+      vi.spyOn(file, 'close').mockImplementation(async () => { closed(); await close(); });
+      return file;
+    });
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude'), maxFileBytes, maxTotalBytes });
+    expect(result.sessions).toEqual([]);
+    expect(result.skippedFiles).toBe(1);
+    expect(result.skippedReasons).toEqual({ [reason]: 1 });
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it('continues to import later fitting files after one exceeds the remaining scan budget', async () => {
+    const seed = [claude('user', 'Seed prompt', { sessionId: 'seed' })];
+    const small = [claude('user', 'Small prompt', { sessionId: 'small' })];
+    await jsonl('claude/projects/encoded/seed.jsonl', seed);
+    await jsonl('claude/projects/encoded/large.jsonl', [claude('user', 'x'.repeat(1_000), { sessionId: 'large' })]);
+    await jsonl('claude/projects/encoded/small.jsonl', small);
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    vi.mocked(opendir).mockImplementation(async (...args) => {
+      if (String(args[0]) !== path.join(fixture, 'claude/projects/encoded')) return actual.opendir(...args);
+      return {
+        async *[Symbol.asyncIterator]() {
+          for (const name of ['seed.jsonl', 'large.jsonl', 'small.jsonl']) yield { name, isSymbolicLink: () => false, isDirectory: () => false, isFile: () => true };
+        }
+      } as unknown as Awaited<ReturnType<typeof opendir>>;
+    });
+    const maxTotalBytes = Buffer.byteLength(JSON.stringify(seed[0]) + '\n' + JSON.stringify(small[0]) + '\n') + 50;
+    const result = await discoverChatImports('claude', { claudeDir: path.join(fixture, 'claude'), maxTotalBytes });
+    expect(result.sessions.map((session) => session.candidate.title).sort()).toEqual(['Seed prompt', 'Small prompt']);
+    expect(result.skippedFiles).toBe(1);
+    expect(result.skippedReasons).toEqual({ scanBudget: 1 });
+  });
+
   it('skips histories with missing or invalid project roots', async () => {
     await jsonl('claude/projects/encoded/missing.jsonl', [claude('user', 'Missing cwd', { cwd: undefined, sessionId: 'missing' })]);
     await jsonl('claude/projects/encoded/relative.jsonl', [claude('user', 'Relative cwd', { cwd: 'relative/path', sessionId: 'relative' })]);
@@ -429,7 +524,7 @@ describe('chat import boundaries', () => {
   });
 
   it('treats missing homes and unsupported source layouts as empty', async () => {
-    expect(await discoverChatImports('claude', { claudeDir: path.join(fixture, 'missing') })).toEqual({ sessions: [], skippedFiles: 0, malformedLines: 0, truncated: false });
+    expect(await discoverChatImports('claude', { claudeDir: path.join(fixture, 'missing') })).toEqual({ sessions: [], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
     await expect(discoverChatImports('unsupported' as 'claude', { claudeDir: fixture })).rejects.toThrow('Unsupported chat import source');
   });
 

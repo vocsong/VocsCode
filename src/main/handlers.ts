@@ -1082,6 +1082,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
         imported: sessions.list().some((session) => session.importedFrom?.source === source && session.importedFrom.sessionId === candidate.sourceSessionId)
       })),
       skipped: scan.skippedFiles,
+      skippedReasons: scan.skippedReasons,
+      scanErrors: scan.scanErrors,
       malformedLines: scan.malformedLines,
       truncated: scan.truncated
     };

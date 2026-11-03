@@ -1,6 +1,6 @@
 /** Explicit, desktop-only discovery and text import of existing coding-agent conversations. */
 import React, { useState } from 'react';
-import type { ChatImportCandidate, ChatImportSource } from '../../../shared/chat-import';
+import { CHAT_IMPORT_SKIP_REASON_LABELS, type ChatImportCandidate, type ChatImportSkipCounts, type ChatImportSkipReason, type ChatImportSource } from '../../../shared/chat-import';
 import { invoke, invokeErrorMessage, isWeb } from '../api';
 import { useStore } from '../store';
 import { Badge, Button, Icon, Spinner } from './ui';
@@ -16,6 +16,8 @@ export function ChatImport() {
   const [busy, setBusy] = useState<'scan' | 'import' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [skipped, setSkipped] = useState(0);
+  const [skippedReasons, setSkippedReasons] = useState<ChatImportSkipCounts>({});
+  const [scanErrors, setScanErrors] = useState(0);
   const [malformedLines, setMalformedLines] = useState(0);
   const [truncated, setTruncated] = useState(false);
 
@@ -25,6 +27,8 @@ export function ChatImport() {
     setCandidates([]);
     setSelected([]);
     setSkipped(0);
+    setSkippedReasons({});
+    setScanErrors(0);
     setMalformedLines(0);
     setTruncated(false);
     setError(null);
@@ -32,6 +36,8 @@ export function ChatImport() {
       const result = await invoke('sessions:importList', { source: next });
       setCandidates(result.candidates);
       setSkipped(result.skipped);
+      setSkippedReasons(result.skippedReasons ?? {});
+      setScanErrors(result.scanErrors ?? 0);
       setMalformedLines(result.malformedLines ?? 0);
       setTruncated(result.truncated ?? false);
     } catch (e) {
@@ -56,6 +62,8 @@ export function ChatImport() {
         const refreshed = await invoke('sessions:importList', { source });
         setCandidates(refreshed.candidates);
         setSkipped(refreshed.skipped);
+        setSkippedReasons(refreshed.skippedReasons ?? {});
+        setScanErrors(refreshed.scanErrors ?? 0);
         setMalformedLines(refreshed.malformedLines ?? 0);
         setTruncated(refreshed.truncated ?? false);
       } catch (e) {
@@ -71,6 +79,10 @@ export function ChatImport() {
   };
 
   const available = candidates.filter((candidate) => !candidate.imported);
+  const skipRows = Object.entries(CHAT_IMPORT_SKIP_REASON_LABELS).flatMap(([reason, label]) => {
+    const count = skippedReasons[reason as ChatImportSkipReason] ?? 0;
+    return count > 0 ? [{ reason, label, count }] : [];
+  });
 
   return (
     <div className="settings-section">
@@ -86,7 +98,13 @@ export function ChatImport() {
         </div>
         {error && <p role="alert" className="info-line info-error">{error}</p>}
         {source && busy !== 'scan' && !error && candidates.length === 0 && <p role="status" className="muted">No importable {SOURCE_NAMES[source]} chats found.</p>}
-        {skipped > 0 && <p className="muted small">{skipped} {skipped === 1 ? 'file was' : 'files were'} skipped because they could not be imported.</p>}
+        {skipped > 0 && <>
+          <p className="muted small">{skipped} history {skipped === 1 ? 'file' : 'files'} skipped.</p>
+          {skipRows.length > 0 && <ul aria-label="Skipped chat reasons" className="muted small">
+            {skipRows.map(({ reason, label, count }) => <li key={reason}>{count} — {label}</li>)}
+          </ul>}
+        </>}
+        {scanErrors > 0 && <p role="status" className="muted small">{scanErrors} history {scanErrors === 1 ? 'directory' : 'directories'} could not be scanned. Some chats may be missing.</p>}
         {malformedLines > 0 && <p className="muted small">{malformedLines} malformed {malformedLines === 1 ? 'history entry was' : 'history entries were'} ignored.</p>}
         {truncated && <p role="status" className="muted small">The scan reached its safety limit. Some chats may be missing from this list.</p>}
         {candidates.length > 0 && <>

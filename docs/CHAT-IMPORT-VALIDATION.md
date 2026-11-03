@@ -78,6 +78,48 @@ conversations and duplicate detection, and checks the original source bytes.
 These regressions use fresh profiles. A rescan does not rewrite an existing imported
 copy or its later continuations; use a fresh profile when retesting an earlier import.
 
+## Skip-reason diagnostics follow-up
+
+Discovery now assigns exactly one aggregate reason to each rejected history file:
+empty/no conversation text (including command-only histories), recognized subagent
+history, missing/invalid project-directory metadata, invalid/unrecognized history,
+per-file size limit, remaining scan byte budget, or unreadable file. Counts sum to
+the skipped-file total. Root/directory failures are counted separately as scan
+errors rather than mislabeled as rejected files. Missing optional history roots
+remain normal empty discovery; unvisited entries and excluded layouts are not
+invented as skipped files.
+
+The desktop preview forwards only these counts, not filenames, message text or raw
+errors. Settings/onboarding show nonzero reasons beneath the neutral skipped-file
+summary, refresh them after import, and clear them when switching sources. Malformed
+line counts and scan-truncation warnings remain separate. The change does not alter
+which conversations are accepted, the `/clear` sanitation rule, or existing copies.
+
+Regression coverage includes exact reason totals and privacy, invalid Codex rollback
+counts, unreadable files versus directory failures, per-file versus total-byte limits
+(including growth after stat and later files that still fit), and UI refresh/reset.
+The Electron fixture scans an importable Claude conversation alongside command-only,
+missing-project and invalid histories; it checks the breakdown, switching to Codex,
+full restart, duplicate detection and byte-for-byte unchanged sources.
+
+Verification for this diagnostic-only follow-up, on Node 22.16.0/macOS with a
+canonical `TMPDIR` for Git-backed suites:
+
+| Command | Skip-diagnostics result |
+| --- | --- |
+| `npm run typecheck` | Pass, all five TypeScript projects |
+| `npm run test:changed` | 108 files / 1,469 tests passed; 6 optional files / 83 tests skipped; 0 failures |
+| `npm run test:pr` | 29 files / 702 tests passed, 0 failures, 0 skips |
+| `npm run build` | Pass, Electron and web bundles |
+| `node scripts/e2e-guard.mjs tests/e2e.instructions.test.ts` | 2 tests passed, 0 failures, 0 skips |
+
+The six import/handler/fork-context suites also pass directly (168 tests, zero
+skips). New parser, registered-handler and UI assertions fail against the earlier
+implementation. The changed run completed in 637.49 seconds. All histories were
+synthetic; optional skips are not live-provider verification. The separate review
+findings concerning accepted history, lifecycle races and folder registration are
+not addressed by this diagnostics change.
+
 ## Claude local-command formatting follow-up
 
 Claude can persist local CLI command records as user text without `isMeta`. The

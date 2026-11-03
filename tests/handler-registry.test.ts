@@ -129,13 +129,24 @@ describe('handler registry', () => {
     }
     expect(discover).not.toHaveBeenCalled();
     expect(importChats).not.toHaveBeenCalled();
-    discover.mockResolvedValue({ sessions: [], skippedFiles: 0, malformedLines: 0, truncated: false });
+    discover.mockResolvedValue({ sessions: [], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
     await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['unlisted'] })).rejects.toThrow('Scan again');
     expect(importChats).not.toHaveBeenCalled();
     for (const channel of ['sessions:importList', 'sessions:import']) {
       expect(isRemoteChannel(channel)).toBe(false);
       expect(agentChannels().includes(channel as never)).toBe(false);
     }
+  });
+
+  it('forwards only aggregate import skip diagnostics from discovery to the desktop preview', async () => {
+    const { registry } = stubDeps();
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [], skippedFiles: 4, skippedReasons: { empty: 2, invalidHistory: 1, unreadable: 1 }, scanErrors: 1, malformedLines: 3, truncated: false });
+    await expect(registry.invoke('sessions:importList', { source: 'claude' })).resolves.toEqual({
+      candidates: [], skipped: 4, skippedReasons: { empty: 2, invalidHistory: 1, unreadable: 1 }, scanErrors: 1, malformedLines: 3, truncated: false
+    });
+    expect(discover).toHaveBeenCalledExactlyOnceWith('claude');
   });
 
   beforeAll(() => {

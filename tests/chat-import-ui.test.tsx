@@ -64,8 +64,47 @@ describe('chat import UI', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:import', { source: 'claude', ids: ['one'] }));
     await waitFor(() => expect((screen.getByRole('checkbox', { name: 'Import Chat one' }) as HTMLInputElement).disabled).toBe(true));
     expect(useStore.getState().toast).toHaveBeenCalledWith('1 chat imported', 'success');
-    expect(screen.getByText(/1 file was skipped/)).toBeTruthy();
+    expect(screen.getByText('1 history file skipped.')).toBeTruthy();
     expect((screen.getByRole('checkbox', { name: 'Import Chat two' }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('explains skipped histories with reason counts and reports directory failures separately', async () => {
+    invoke.mockResolvedValueOnce({ candidates: [], skipped: 168, skippedReasons: { empty: 120, subagent: 30, missingProject: 10, invalidHistory: 4, tooLarge: 2, scanBudget: 1, unreadable: 1 }, scanErrors: 2 });
+    render(<ChatImport />);
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Claude Code' }));
+    expect(await screen.findByText('168 history files skipped.')).toBeTruthy();
+    const reasons = screen.getByRole('list', { name: 'Skipped chat reasons' });
+    expect(reasons.querySelectorAll('li')).toHaveLength(7);
+    for (const text of ['120 — Empty or no conversation text', '30 — Subagent history', '10 — Missing or invalid project directory metadata', '4 — Unrecognized or invalid history', '2 — File exceeds the size limit', '1 — File exceeds the remaining scan budget', '1 — History file could not be read']) {
+      expect(screen.getByText(text)).toBeTruthy();
+    }
+    expect(screen.getByText('2 history directories could not be scanned. Some chats may be missing.')).toBeTruthy();
+    expect(screen.queryByText(/because they could not be imported/)).toBeNull();
+  });
+
+  it('refreshes the breakdown after importing and clears stale reasons when scanning another source', async () => {
+    let imported = false;
+    invoke.mockImplementation(async (channel: string, request?: { source: string }) => {
+      if (channel === 'sessions:import') { imported = true; return { imported: [{ id: 'local-one' }], skipped: 0 }; }
+      if (channel === 'sessions:importList' && request?.source === 'codex') return { candidates: [], skipped: 0, skippedReasons: {}, scanErrors: 0 };
+      return imported
+        ? { candidates: [candidate('one', true)], skipped: 1, skippedReasons: { unreadable: 1 }, scanErrors: 0 }
+        : { candidates: [candidate('one')], skipped: 3, skippedReasons: { empty: 2, subagent: 1 }, scanErrors: 1 };
+    });
+    render(<ChatImport />);
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Claude Code' }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Import Chat one' }));
+    expect(screen.getByText('2 — Empty or no conversation text')).toBeTruthy();
+    expect(screen.getByText('1 history directory could not be scanned. Some chats may be missing.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Import selected (1)' }));
+    expect(await screen.findByText('1 — History file could not be read')).toBeTruthy();
+    expect(screen.queryByText('2 — Empty or no conversation text')).toBeNull();
+    expect(screen.queryByText(/history directory could not be scanned/)).toBeNull();
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Scan Codex' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Codex' }));
+    expect(screen.queryByRole('list', { name: 'Skipped chat reasons' })).toBeNull();
+    await screen.findByText('No importable Codex chats found.');
+    expect(screen.queryByText(/history file skipped/)).toBeNull();
   });
 
   it('resets selection when scanning a different source', async () => {
