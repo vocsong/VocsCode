@@ -239,6 +239,29 @@ A session counts only what it spent itself, and the transcript is the ledger it 
 
 The dashboard (`src/renderer/src/components/analytics/`) asks for one range at a time and scopes every tab to it. All-time views come from the session records; bounded ranges (7, 30, 90 days) come from the day slices through the shared `src/shared/usage-rollup.ts`, and the summary also carries the preceding window so tiles can show period-over-period change. Days recorded before slices existed are reconstructed once on load from the sessions last active that day, in proportion to their lifetime usage (per-tool and per-file counts are shared out from the all-time maps by call volume); those days are flagged `estimated` and the dashboard says so. A legacy day with no matching session keeps its usage in the totals only and is labelled "unattributed" until it ages out of the bounded ranges. Series colours come from `CHART_SERIES` in `src/shared/themes.ts`, a categorical palette validated for colour-vision separation on every theme surface (the theme hues themselves are UI accents and fail those checks); single-series charts use the theme accent.
 
+### User-entered input tokens
+
+Tokens → **User input (est.)** measures ordinary-session message text before file instructions,
+app instructions, knowledge or fork context are appended. It counts typed/pasted text once per
+submission (including queued, steering and edited/resubmitted messages), using a rough estimate of
+one token per four Unicode code points, rounded up per message. It is not a model tokenizer or a
+billing measurement; language and code affect accuracy. Images, attached files, goal configuration,
+generated goal/Mission/subagent prompts, Mission mailbox input and per-subagent panel steering are
+not measured. Existing **Input** remains the provider's uncached input counter; cache tokens are
+reported separately.
+
+The host stamps an owner/session id, submission id, timestamp and estimate on the transcript item.
+`AnalyticsStore` persists the receipt ids atomically with UTC day counters. Replaying a receipt or
+copying it into a fork never counts it twice; an explicit edit/resend gets a new receipt. Receipt-only
+recovery and strict analytics flushing before a transcript rewind, clear or deletion protect earlier
+submission counts even while startup replay is still pending. After startup,
+transcripts are checked asynchronously for receipts whose analytics write was lost; this scan
+cannot use session timestamps as a watermark because the transcript may outlive an unflushed index.
+Legacy unmarked messages are not guessed to be human-authored: tracking starts with this update.
+The metric is summed from day buckets for every date range, including all recorded days for all time
+(regardless of chart sampling limits), and never enters `UsageTotals`, `totalTokens`, prices, cache
+rates or provider-token mix charts.
+
 ## Known limitations
 
 - Computer use ships as a built-in MCP server (Cua Driver), on by default once the driver binary is found. Phase 1 core plus a read-only Desktop preview tab are live (`src/main/mcp/cua.ts`, `cua-preview.ts`, `renderer/.../CuaCard.tsx`, `DesktopTab.tsx`); in-transcript screenshots of driver actions, a guidance skill, a preview window picker, and one shared app-owned runtime are not yet shipped (docs/CUA-COMPUTER-USE.md).

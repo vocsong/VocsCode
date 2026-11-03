@@ -16,6 +16,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { openAnalytics, openNewSession, pickModel, seedSettings } from './e2e-ui';
 import { AnalyticsStore } from '../src/main/analytics';
+import { SessionStore } from '../src/main/store';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -295,6 +296,115 @@ describe.runIf(enabled)('analytics harness/tool reliability UI', () => {
       expect(text).toContain('node build.js');
       expect(text).toContain('exit 1');
       expect(text).toContain('Program raised an error');
+    } finally {
+      await app?.close();
+      app = null;
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  }, 180_000);
+});
+
+describe.runIf(enabled)('analytics user input UI', () => {
+  it('keeps exact user-input estimates separate from provider tokens across ranges and an Electron restart', async () => {
+    await app?.close();
+    app = null;
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-user-input-ui-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    const now = Date.now();
+    const dayMs = 86_400_000;
+    const dateOf = (ago: number) => new Date(now - ago * dayMs).toISOString().slice(0, 10);
+    const dateLabel = (ago: number) => new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+      .format(new Date(`${dateOf(ago)}T00:00:00Z`)).replace(/, (\d{4})$/, ' $1');
+    const meta: SessionMeta = {
+      id: 'user-input', title: 'User input accounting', createdAt: now - 40 * dayMs, updatedAt: now,
+      config: { harness: 'native', projectRoot: project, permissionMode: 'ask' }, cwd: project, status: 'idle', harnessRef: {},
+      activeModel: { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    };
+    // Both stores are production persistence: Electron replays these receipts on each launch.
+    // No adapter starts and no provider is contacted. Provider usage deliberately dwarfs user text.
+    const sessions = new SessionStore(userData);
+    await sessions.load();
+    await sessions.upsert(meta);
+    const analytics = new AnalyticsStore(userData, { log: () => undefined });
+    await analytics.load(sessions.list(), (id) => sessions.readTranscript(id));
+    await analytics.whenBackfilled();
+    for (const [ago, text, tokens, input, output, cacheRead, cacheWrite] of [
+      [40, 'a'.repeat(52), 13, 100, 20, 200, 30],
+      [10, 'b'.repeat(20), 5, 50, 10, 100, 15],
+      [1, '🙂🙂🙂🙂a', 2, 20, 4, 40, 6]
+    ] as const) {
+      const ts = now - ago * dayMs;
+      const item: Extract<TranscriptItem, { kind: 'user' }> = {
+        id: `user-${ago}`, kind: 'user', ts, text,
+        userInput: { id: `submission-${ago}`, sessionId: meta.id, ts, tokens }
+      };
+      await sessions.appendTranscript(meta.id, item);
+      analytics.recordUserMessage(meta, item, ts);
+      analytics.recordUserMessage(meta, item, now); // Replay cannot move the submission to today.
+      meta.usage = {
+        ...meta.usage,
+        inputTokens: meta.usage.inputTokens + input,
+        outputTokens: meta.usage.outputTokens + output,
+        cacheReadTokens: meta.usage.cacheReadTokens + cacheRead,
+        cacheWriteTokens: meta.usage.cacheWriteTokens + cacheWrite,
+        turns: meta.usage.turns + 1
+      };
+      analytics.recordUsage(meta, meta.usage, ts);
+    }
+    await sessions.appendTranscript(meta.id, { id: 'legacy', kind: 'user', ts: now, text: 'An unmarked old or generated prompt. '.repeat(100) });
+    await sessions.upsert(meta);
+    await analytics.flush();
+
+    const checkMetrics = async (win: Page, user: string, provider: string, input: string) => {
+      const metric = (label: string) => win.locator('.kpi').filter({ has: win.getByText(label, { exact: true }) }).locator('.kpi-value');
+      await expect.poll(() => metric('User input (est.)').innerText()).toBe(user);
+      await expect.poll(() => metric('Total tokens').innerText()).toBe(provider);
+      await expect.poll(() => metric('Input').innerText()).toBe(input);
+    };
+    const chart = (win: Page) => win.locator('section.acard').filter({ has: win.getByText('User input per day (est.)', { exact: true }) });
+    const inputRows = (win: Page) => chart(win).getByRole('table').locator('tbody tr').evaluateAll((rows) => rows
+      .map((row) => Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent))
+      .filter((cells) => cells[1] !== '0'));
+    try {
+      app = await electron.launch({ ...launchOptions, env: isolatedEnv(userData), timeout: 60_000 });
+      const win = await app.firstWindow();
+      await openAnalytics(win);
+      await win.getByRole('tab', { name: 'Tokens', exact: true }).click();
+      await checkMetrics(win, '7', '245', '70');
+      await expect.poll(() => win.getByRole('radio', { name: '30 days', exact: true }).getAttribute('aria-checked')).toBe('true');
+      await win.getByRole('img', { name: 'User input per day (est.)', exact: true }).waitFor();
+      expect(await win.getByText(/User input tracking starts with this update/).innerText()).toContain('legacy unmarked messages are not reconstructed');
+      expect(await win.getByText(/one token per four Unicode characters/).innerText()).toContain('separate from provider token totals');
+      expect(await win.getByText(/original submitted text is counted once/).innerText()).toContain('It excludes attachments, system/context content, tool output and automated prompts');
+      await chart(win).getByTitle('Show as table', { exact: true }).click();
+      expect(await chart(win).getByRole('columnheader').allTextContents()).toEqual(['Day', 'User input (est.)']);
+      await expect.poll(() => inputRows(win)).toEqual([[dateLabel(1), '2'], [dateLabel(10), '5']]);
+
+      await win.getByRole('radio', { name: '7 days', exact: true }).click();
+      await checkMetrics(win, '2', '70', '20');
+      await expect.poll(() => inputRows(win)).toEqual([[dateLabel(1), '2']]);
+      await win.getByRole('radio', { name: 'All time', exact: true }).click();
+      await expect.poll(() => win.getByRole('radio', { name: 'All time', exact: true }).getAttribute('aria-checked')).toBe('true');
+      await checkMetrics(win, '20', '595', '170');
+      await expect.poll(() => inputRows(win)).toEqual([[dateLabel(1), '2'], [dateLabel(10), '5'], [dateLabel(40), '13']]);
+
+      await app.close();
+      app = await electron.launch({ ...launchOptions, env: isolatedEnv(userData), timeout: 60_000 });
+      const restarted = await app.firstWindow();
+      await openAnalytics(restarted);
+      await restarted.getByRole('tab', { name: 'Tokens', exact: true }).click();
+      await restarted.getByRole('radio', { name: 'All time', exact: true }).click();
+      await checkMetrics(restarted, '20', '595', '170');
+      await chart(restarted).getByTitle('Show as table', { exact: true }).click();
+      await expect.poll(() => inputRows(restarted)).toEqual([[dateLabel(1), '2'], [dateLabel(10), '5'], [dateLabel(40), '13']]);
+      await restarted.getByRole('radio', { name: '7 days', exact: true }).click();
+      await checkMetrics(restarted, '2', '70', '20');
+      await expect.poll(() => inputRows(restarted)).toEqual([[dateLabel(1), '2']]);
     } finally {
       await app?.close();
       app = null;

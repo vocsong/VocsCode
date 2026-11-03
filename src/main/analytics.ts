@@ -60,6 +60,8 @@ interface AnalyticsFile {
   harnessTools: Record<string, Record<string, ToolUsage>>;
   /** Bounded recent-call replay protection, persisted atomically with the counters. */
   recordedTools: string[];
+  /** User-submission receipt ids, persisted atomically with their day counters (no prompt text). */
+  recordedUserInputs: string[];
   /** Completed tool calls per tool name, keyed by harness and model (`harness|provider/model`). */
   harnessModelTools: Record<string, Record<string, ToolUsage>>;
   /** File-change counts per path, aggregated from tool results. */
@@ -68,7 +70,7 @@ interface AnalyticsFile {
   harnessVersions?: Record<string, string>;
 }
 
-const EMPTY_FILE: AnalyticsFile = { version: 2, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], files: {} };
+const EMPTY_FILE: AnalyticsFile = { version: 2, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], recordedUserInputs: [], files: {} };
 
 /** Older calls remain deduped in memory; only this recent window survives restart. */
 const RECENT_TOOL_LIMIT = 10_000;
@@ -188,11 +190,14 @@ export function apportion(total: number, weights: number[], integer: boolean): n
   return parts;
 }
 
-const INTEGER_FIELDS = new Set<keyof UsageCounters>(['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'turns', 'toolCalls']);
+const INTEGER_FIELDS = new Set<keyof UsageCounters>(['userInputTokens', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'turns', 'toolCalls']);
 
 /** Each session's own total of a counter, the weight used to share a legacy day's total between them. */
 function sessionWeight(s: UsageSessionRecord, f: keyof UsageCounters): number {
   switch (f) {
+    // User text is only known from host receipts, never inferred from provider/session totals.
+    case 'userInputTokens':
+      return 0;
     case 'toolCalls':
       return s.toolCalls;
     case 'speedTokens':
@@ -601,12 +606,13 @@ export interface AnalyticsDeps {
 export type TranscriptReader = (sessionId: string) => Promise<TranscriptItem[]>;
 
 export class AnalyticsStore {
-  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], files: {} };
+  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], recordedUserInputs: [], files: {} };
   private readonly file: string;
   private writeTimer: NodeJS.Timeout | null = null;
   private writeQueue: Promise<void> = Promise.resolve();
   /** Tool item ids already counted, so repeated upserts of one call never double-record. */
   private recordedTools = new Set<string>();
+  private recordedUserInputs = new Set<string>();
   /** Subagent spend awaiting model re-attribution, keyed by session then `provider/model`. */
   private readonly pendingSubagentCost = new Map<string, Map<string, SubagentCost>>();
   /** Per-execution records behind the reliability analytics. */
@@ -649,11 +655,13 @@ export class AnalyticsStore {
       modelTools: stored?.modelTools && typeof stored.modelTools === 'object' ? stored.modelTools : {},
       harnessTools: stored?.harnessTools && typeof stored.harnessTools === 'object' ? stored.harnessTools : {},
       recordedTools: Array.isArray(stored?.recordedTools) ? stored.recordedTools.filter((key) => typeof key === 'string').slice(-RECENT_TOOL_LIMIT) : [],
+      recordedUserInputs: Array.isArray(stored?.recordedUserInputs) ? stored.recordedUserInputs.filter((key) => typeof key === 'string') : [],
       harnessModelTools: stored?.harnessModelTools && typeof stored.harnessModelTools === 'object' ? stored.harnessModelTools : {},
       files: stored?.files && typeof stored.files === 'object' ? stored.files : {},
       harnessVersions: stored?.harnessVersions && typeof stored.harnessVersions === 'object' ? stored.harnessVersions : {}
     };
     this.recordedTools = new Set(this.data.recordedTools);
+    this.recordedUserInputs = new Set(this.data.recordedUserInputs);
     await this.executions.load();
     // Fields added after a file was written (speed samples, dimension slices) load as zero rather than NaN.
     for (const day of Object.values(this.data.days)) {
@@ -744,27 +752,39 @@ export class AnalyticsStore {
   /**
    * Replays each known session's transcript into the execution log once. Records are marked
    * `backfill`; items without output or exit code become `legacy_unclassified`, never guessed.
+   * Host user-input receipts are checked every boot: a crash can persist a transcript without
+   * updating session metadata or analytics, so updatedAt is not a safe replay watermark.
    */
   private async backfillExecutions(existing: SessionMeta[], readTranscript: TranscriptReader): Promise<void> {
     let sessions = 0;
     let records = 0;
     const started = Date.now();
+    let scannedInputs = false;
     for (const meta of existing) {
-      if (this.executions.isBackfilled(meta.id)) continue;
+      const replayExecutions = !this.executions.isBackfilled(meta.id);
+      const scanInputs = !meta.mission;
+      if (!replayExecutions && !scanInputs) continue;
       let items: TranscriptItem[];
       try {
         items = await readTranscript(meta.id);
       } catch {
-        this.deps.log('warn', `analytics: could not read transcript of ${meta.id} for the execution log`);
+        this.deps.log('warn', `analytics: could not read transcript of ${meta.id} for replay`);
         continue;
       }
-      const count = this.executions.backfillTranscript(meta.id, items, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel));
-      await this.executions.markBackfilled(meta.id, count);
-      sessions++;
-      records += count;
+      if (scanInputs) {
+        this.recordUserInputs(meta, items);
+        scannedInputs = true;
+      }
+      if (replayExecutions) {
+        const count = this.executions.backfillTranscript(meta.id, items, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel));
+        await this.executions.markBackfilled(meta.id, count);
+        sessions++;
+        records += count;
+      }
       // Yield between sessions so a large history never starves the event loop.
       await new Promise((r) => setImmediate(r));
     }
+    if (scannedInputs) await this.flush();
     if (sessions) {
       await this.executions.flush();
       this.deps.log('info', `analytics: replayed ${records} execution(s) from ${sessions} transcript(s) into the execution log in ${Date.now() - started}ms`);
@@ -785,9 +805,30 @@ export class AnalyticsStore {
     this.scheduleWrite();
   }
 
-  /** A user message opens the session's next turn in the execution log. */
+  /** Opens the next execution turn; only a host receipt contributes user-entered text. */
   recordUserMessage(meta: SessionMeta, item: Extract<TranscriptItem, { kind: 'user' }>, now = Date.now()): void {
+    this.collectUserInput(meta, item);
     this.executions.recordUser(meta.id, item, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel, undefined, 'live', now));
+  }
+
+  /** Receipt-only recovery, also used before a transcript is cleared, deleted or rewound. */
+  recordUserInputs(meta: SessionMeta, items: TranscriptItem[]): void {
+    for (const item of items) if (item.kind === 'user') this.collectUserInput(meta, item);
+  }
+
+  private collectUserInput(meta: SessionMeta, item: Extract<TranscriptItem, { kind: 'user' }>): void {
+    const receipt = item.userInput;
+    if (meta.mission || !receipt || receipt.sessionId !== meta.id || typeof receipt.id !== 'string' || !receipt.id) return;
+    if (!Number.isSafeInteger(receipt.tokens) || receipt.tokens <= 0 || !Number.isFinite(receipt.ts) || !Number.isFinite(new Date(receipt.ts).getTime())) return;
+    const key = JSON.stringify([meta.id, receipt.id]);
+    if (this.recordedUserInputs.has(key)) return;
+    this.recordedUserInputs.add(key);
+    this.data.recordedUserInputs.push(key);
+    const day = this.dayFor(dayKey(receipt.ts));
+    const delta = { userInputTokens: receipt.tokens };
+    addDay(day, delta);
+    attribute(day, attributionOf(meta), delta);
+    this.scheduleWrite();
   }
 
   /** Representative executions for a dashboard drill-down. */
@@ -1102,14 +1143,16 @@ export class AnalyticsStore {
     }, 500);
   }
 
-  async flush(): Promise<void> {
+  /** Strict callers must persist accounting before removing its transcript recovery source. */
+  async flush(strict = false): Promise<void> {
     if (this.writeTimer) {
       clearTimeout(this.writeTimer);
       this.writeTimer = null;
     }
-    this.writeQueue = this.writeQueue.then(() => writeJson(this.file, this.data)).catch((e) => this.deps.log('warn', `analytics write failed: ${String(e)}`));
+    const write = this.writeQueue.then(() => writeJson(this.file, this.data));
+    this.writeQueue = write.catch((e) => this.deps.log('warn', `analytics write failed: ${String(e)}`));
     await this.executions.flush();
-    return this.writeQueue;
+    return strict ? write : this.writeQueue;
   }
 
   /** Summary over the last `dayLimit` days (0 = all time), with the preceding window for comparison. */

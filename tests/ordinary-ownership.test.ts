@@ -68,7 +68,7 @@ function dependencies(sessionStore: SessionStore) {
     store: sessionStore,
     settings: { get: () => settings, update: vi.fn(async () => settings) } as unknown as SettingsStore,
     runtime: undefined as unknown as RuntimeResolver,
-    analytics: { touchSession: vi.fn(), recordUserMessage: vi.fn(), recordToolCall: vi.fn(), recordTurn: vi.fn(), recordUsage: vi.fn(), recordSubagent: vi.fn() } as unknown as AnalyticsStore,
+    analytics: { touchSession: vi.fn(), recordUserMessage: vi.fn(), recordUserInputs: vi.fn(), flush: vi.fn(async () => undefined), recordToolCall: vi.fn(), recordTurn: vi.fn(), recordUsage: vi.fn(), recordSubagent: vi.fn() } as unknown as AnalyticsStore,
     getSecret: vi.fn<(_providerId: string) => Promise<string | undefined>>(async () => undefined),
     pushEvent: vi.fn(), pushSessions: vi.fn(), notify: vi.fn(), log: vi.fn(),
   };

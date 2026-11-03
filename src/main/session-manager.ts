@@ -631,7 +631,7 @@ export class SessionManager {
       // A slash command has to open its message, so the objective rides along as its argument. The
       // harness's own goal takes it from there — no kickoff prompt, no app-side continuation.
       if (!req.title?.trim()) this.scheduleLlmTitle(id, title, promptText || objective);
-      void this.send(id, { text: `/${meta.nativeGoal} ${objective}` }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+      void this.sendAs(id, { text: `/${meta.nativeGoal} ${objective}` }, 'user', undefined, '').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
       if (promptText || initialImages || initialFiles) {
         void this.send(id, { text: promptText, images: initialImages, files: initialFiles }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
       }
@@ -640,7 +640,7 @@ export class SessionManager {
       // until the one-shot LLM title call lands.
       if (!req.title?.trim() && promptText) this.scheduleLlmTitle(id, title, promptText);
       const prompt = meta.goal && promptText ? `${promptText}\n\nActive goal: ${meta.goal.objective}` : promptText;
-      void this.send(id, { text: prompt, images: initialImages, files: initialFiles }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+      void this.sendAs(id, { text: prompt, images: initialImages, files: initialFiles }, 'user', undefined, promptText).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     } else if (meta.goal) {
       void this.sendAs(id, { text: this.goalKickoffPrompt(meta.goal) }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     }
@@ -745,6 +745,7 @@ export class SessionManager {
     if (!meta) return false;
     const t0 = Date.now();
     await this.stop(id);
+    await this.preserveUserInputs(meta, await this.deps.store.readTranscript(id));
     this.cancelPersist(id);
     this.titleAttempts.delete(id);
     const tStop = Date.now();
@@ -1198,7 +1199,7 @@ export class SessionManager {
    * `source` is host provenance, never supplied by a renderer or model. Goal and Mission dispatch
    * are not user actions: they confer no new authority and must not affect user recency.
    */
-  private async sendAs(id: string, input: UserInput, source: 'user' | 'goal' | 'mission', generation?: number): Promise<void> {
+  private async sendAs(id: string, input: UserInput, source: 'user' | 'goal' | 'mission', generation?: number, originalText = input.text): Promise<void> {
     const meta = source === 'mission' ? this.managedMeta(id, generation!) : this.get(id);
     if (!meta) throw new Error('Session not found');
     if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
@@ -1210,7 +1211,11 @@ export class SessionManager {
     const files = input.files?.length ? await retainMessageFiles(this.deps.store.sessionDir(id), input.files) : [];
     // Size and shape only: the prompt itself belongs to the transcript, not the log.
     this.deps.log('debug', `[${id}] ${source === 'mission' ? 'mission' : 'user'} input: ${input.text.length} chars${input.images?.length ? `, ${input.images.length} image(s)` : ''}${files.length ? `, ${files.length} file(s)` : ''}${input.mode ? `, mode=${input.mode}` : ''}`);
-    const userItem: TranscriptItem = { id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text, images: input.images, files: files.length ? files : undefined, queuedAs: input.mode };
+    const userItem: TranscriptItem = {
+      id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text,
+      images: input.images, files: files.length ? files : undefined, queuedAs: input.mode,
+      userInput: source === 'user' ? measureUserInput(id, originalText) : undefined
+    };
     this.emit(id, { type: 'item.upsert', item: userItem });
     // The sidebar orders rows by the user's own last message: stamp it before the harness even
     // starts, so the row moves up on the send rather than on whatever the turn does next.
@@ -1248,6 +1253,7 @@ export class SessionManager {
     if (!active.adapter.rewindToUserMessage) throw new Error('This harness does not support editing past messages yet');
     // Validate and write before rewinding: a failed upload must not discard later turns.
     const files = input.files ? await retainMessageFiles(this.deps.store.sessionDir(id), input.files) : previous.files ?? [];
+    await this.preserveUserInputs(meta, items);
     if (!(await active.adapter.rewindToUserMessage(userItemId))) throw new Error('This message can no longer be rewound');
     this.deps.log('info', `[${id}] rewound to message ${userItemId} for edit-and-resend; ${items.length - index - 1} later item(s) dropped from the transcript`);
     const revised: TranscriptItem = {
@@ -1255,7 +1261,8 @@ export class SessionManager {
       text: input.text,
       images: input.images ?? previous.images,
       files: files.length ? files : undefined,
-      queuedAs: 'now'
+      queuedAs: 'now',
+      userInput: measureUserInput(id, input.text)
     };
     // Context is now safely at the same boundary, so the persistence rewrite cannot diverge.
     active.liveItems.clear();
@@ -1263,6 +1270,7 @@ export class SessionManager {
     this.resetCheckpoints(active);
     active.lastAssistantText = '';
     await this.deps.store.rewriteTranscript(id, [...items.slice(0, index), revised]);
+    this.deps.analytics.recordUserInputs(meta, [revised]);
     // A re-sent prompt is a user message too, so the sidebar treats this as its latest one.
     meta.lastUserMessageAt = Date.now();
     this.schedulePersist(meta);
@@ -1917,9 +1925,19 @@ export class SessionManager {
     }
   }
 
+  /** Recover first: the background startup scan may not have reached this transcript yet. */
+  private async preserveUserInputs(meta: SessionMeta, items: TranscriptItem[]): Promise<void> {
+    if (!items.some((item) => item.kind === 'user' && item.userInput?.sessionId === meta.id)) return;
+    this.deps.analytics.recordUserInputs(meta, items);
+    // A failed write leaves the recovery source intact so the operation can be retried.
+    await this.deps.analytics.flush(true);
+  }
+
   async clearTranscript(id: string): Promise<void> {
     this.assertUnmanaged(id);
-    if (!this.get(id)) throw new Error('Session not found');
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    await this.preserveUserInputs(meta, await this.deps.store.readTranscript(id));
     const active = this.active.get(id);
     if (active) {
       active.liveItems.clear();
@@ -2676,6 +2694,13 @@ function forkNote(src: SessionMeta, target: HarnessId, own: { path: string; bran
  */
 function carriedItem(item: TranscriptItem): TranscriptItem {
   return item.kind === 'turn' ? { ...item, costUsd: 0, carried: true } : item;
+}
+
+/** Model-independent estimate: Unicode code points / 4, not a provider tokenizer or bill. */
+function measureUserInput(sessionId: string, text: string): NonNullable<Extract<TranscriptItem, { kind: 'user' }>['userInput']> {
+  let characters = 0;
+  for (const _ of text) characters++;
+  return { id: shortId('input_'), sessionId, ts: Date.now(), tokens: Math.ceil(characters / 4) };
 }
 
 /** `provider/model` for log lines, or 'default' when the harness picks. */

@@ -100,7 +100,7 @@ beforeEach(async () => {
   deps = {
     store, settings: { get: () => settings, update: async () => settings } as unknown as SettingsStore,
     runtime: { resolve: () => ({ path: path.join(root, 'pi.exe'), source: 'installed' }), resource: (...parts: string[]) => path.resolve(helperAvailable ? 'resources' : path.join(root, 'missing-resources'), ...parts) } as never,
-    analytics: { touchSession: vi.fn(), recordUserMessage: vi.fn(), recordToolCall: vi.fn(), recordTurn: vi.fn(), recordUsage: vi.fn(), recordSubagent: vi.fn() } as never,
+    analytics: { touchSession: vi.fn(), recordUserMessage: vi.fn(), recordUserInputs: vi.fn(), flush: vi.fn(async () => undefined), recordToolCall: vi.fn(), recordTurn: vi.fn(), recordUsage: vi.fn(), recordSubagent: vi.fn() } as never,
     getSecret: async () => undefined, pushEvent: vi.fn(), pushSessions: vi.fn(), notify: vi.fn(), log: vi.fn(),
     ordinaryProcessOwnership: () => ordinaryOwnership,
   };
