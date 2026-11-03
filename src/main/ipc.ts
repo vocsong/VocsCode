@@ -32,6 +32,7 @@ export interface IpcDeps {
   appInstructions?: AppInstructions;
   /** Remote access host (docs/REMOTE-ACCESS.md), wired in index.ts. */
   remote?: RemoteHost;
+  control?: HandlerDeps['control'];
   /** Where the desktop window is looking, mirrored to paired browsers; wired in index.ts. */
   desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
@@ -127,6 +128,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     gitnexusIndexer: deps.gitnexusIndexer,
     appInstructions: deps.appInstructions,
     remote: deps.remote,
+    control: deps.control,
     desktopFocus: deps.desktopFocus,
     remoteMirror: deps.remoteMirror,
     updater: deps.updater,
@@ -138,6 +140,12 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     },
     desktop: desktopBridge(deps)
   });
-  for (const channel of registry.channels()) ipcMain.handle(channel, (_e, req: unknown) => registry.invoke(channel, req));
+  for (const channel of registry.channels()) ipcMain.handle(channel, (event, req: unknown) => {
+    if (channel.startsWith('control:')) {
+      const contents = deps.getWindow()?.webContents;
+      if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) throw new Error('External control grants require the local desktop owner.');
+    }
+    return registry.invoke(channel, req, 'desktop');
+  });
   return registry;
 }

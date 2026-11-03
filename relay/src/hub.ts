@@ -45,6 +45,8 @@ export class HubRouter<S extends HubSocket> {
       deviceRouteSecret?: string;
       sockets: SocketRegistry<S>;
       now: () => number;
+      /** Optional private control channel. Browser frames never reach this callback. */
+      controlResponse?: (ws: S, hostId: string, raw: string) => Promise<void>;
     }
   ) {}
 
@@ -69,15 +71,19 @@ export class HubRouter<S extends HubSocket> {
 
   async message(ws: S, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== 'string' || message.length > MAX_WS_FRAME_BYTES || utf8Bytes(message) > MAX_WS_FRAME_BYTES) return;
-    let msg: HostIn | ClientIn;
+    let msg: HostIn | ClientIn | { t: 'control.response' };
     try {
-      msg = JSON.parse(message) as HostIn | ClientIn;
+      msg = JSON.parse(message) as typeof msg;
     } catch {
       return;
     }
     // Parsed JSON is untrusted; `null` and arrays must not escape into a handler.
     if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.t !== 'string') return;
     const role = this.role(ws);
+    if (msg.t === 'control.response') {
+      if (role?.kind === 'host') await this.deps.controlResponse?.(ws, role.id, message);
+      return;
+    }
     if (role?.kind === 'host') await this.fromHost(ws, role.id, msg as HostIn);
     else if (role?.kind === 'client') this.fromClient(ws, role.id, msg as ClientIn);
   }

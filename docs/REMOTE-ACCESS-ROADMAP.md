@@ -254,7 +254,7 @@ unvalidated names and keys.
 - **Model B (cloud workspaces):** sandbox orchestration, headless harness logins, server-side KMS,
   folder sync, metering. Reuses the protocol, web client and auth built above.
 
-### 2.8 Dots remote MCP control (proposed, not shipped)
+### 2.8 Dots remote MCP control (implemented first slice, disabled)
 
 The [remote MCP implementation plan](CONTROL-MCP-PLAN.md) records the owner-confirmed direction:
 Dots connects through OAuth to our own Cloudflare gateway at the proposed `code.vocs.io/mcp`,
@@ -264,8 +264,11 @@ default. This adds a delegated automation principal, not another paired human br
 blind-cloud E2E encryption.
 
 Ordinary session control is the first delivery; the local CLI, Missions and process administration
-are follow-ups. The plan includes the separate landing repository's ingress/auth work and two-host
-qualification. Nothing here enables a listener, grants access or authorizes production deployment.
+are follow-ups. The [implemented first slice](CONTROL-MCP.md) includes desktop-only grants,
+durable operation receipts/runtime boundaries, authenticated relay MCP and a coordinated OAuth
+landing branch. Both production flags remain unset. Actual Dots/two-host qualification, distributed
+OAuth race checks and authorization review remain outstanding; this is not shipped compatibility.
+Nothing here grants access or authorizes production deployment.
 
 ## 3. Order of operations
 

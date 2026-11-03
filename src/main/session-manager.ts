@@ -1,5 +1,6 @@
 /** Owns sessions: transcripts, approvals, goals, worktrees, and resuming a session after a restart. */
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { MissionOwnership } from '../shared/mission';
@@ -113,6 +114,31 @@ export interface ManagedSessionUpdate {
   worktreeBranch?: string;
 }
 
+export interface ControlledTurnResult {
+  outcome: 'succeeded' | 'failed' | 'interrupted' | 'unknown';
+  inputId: string;
+  runtimeId: string;
+  turnId?: string;
+  outputIds: string[];
+}
+
+interface ControlledTurn {
+  operationId: string;
+  inputId: string;
+  runtimeId: string;
+  runtime?: ActiveSession;
+  dispatched: boolean;
+  started: boolean;
+  canceled: boolean;
+  uncertain: boolean;
+  terminal?: ControlledTurnResult['outcome'];
+  turnId?: string;
+  outputIds: Set<string>;
+  ended: Deferred<void>;
+  writes: Set<Promise<void>>;
+  writeFailed: boolean;
+}
+
 export interface SessionActivity {
   /** An owned runtime still exists, including during disposal or an uncertain stop. */
   active: boolean;
@@ -208,6 +234,11 @@ export class SessionManager {
   private static readonly GIT_STATE_RECHECK_MS = 120_000;
 
   private active = new Map<string, ActiveSession>();
+  /** Reserved synchronously, including preparation and the terminal persistence barrier. */
+  private controlled = new Map<string, ControlledTurn>();
+  private controlledCreations = new Map<string, { hash: string; promise: Promise<SessionMeta> }>();
+  /** A controlled runtime is never reused: late events cannot become another operation's reply. */
+  private fencedRuntimes = new WeakSet<ActiveSession>();
   /** No turn or second settings change may race a premium-speed transition. */
   private fastModeUpdates = new Set<string>();
   /** Reserve send-first dispatches before startup/preamble awaits expose an idle gap. */
@@ -292,7 +323,7 @@ export class SessionManager {
       processes: writers === 'active' || !!active?.workspaceWriterClaim,
       approvals: active?.approvals.size ?? 0,
       compacting: !!active?.compactionInFlight,
-      queued: (this.get(id)?.queued ?? 0) + (this.managedDispatches.has(id) ? 1 : 0),
+      queued: (this.get(id)?.queued ?? 0) + (this.managedDispatches.has(id) ? 1 : 0) + (this.controlled.has(id) ? 1 : 0),
       tearingDown: !!active?.tearingDown || retiring,
       uncertain: !!active?.uncertain || writers === 'unknown' || unprovenClaims,
     };
@@ -343,7 +374,7 @@ export class SessionManager {
       setTimeout(() => {
         this.persistTimers.delete(meta.id);
         // Fire-and-forget: a failed index write must not become an unhandled rejection.
-        if (this.deps.store.get(meta.id)) Promise.resolve(this.deps.store.upsert(meta)).catch((e) => this.deps.log('warn', `meta persist failed: ${errorMessage(e)}`));
+        if (this.deps.store.get(meta.id)) this.trackControlledWrite(meta.id, Promise.resolve(this.deps.store.upsert(meta))).catch((e) => this.deps.log('warn', `meta persist failed: ${errorMessage(e)}`));
       }, 300)
     );
   }
@@ -508,7 +539,36 @@ export class SessionManager {
   }
 
   async create(req: CreateSessionRequest): Promise<SessionMeta> {
-    const id = shortId('s_');
+    return this.createWithId(req, shortId('s_'));
+  }
+
+  /** Host-only identity, allocated before worktree effects. The journal owns crash reconciliation;
+   * an absent session after a crash is not permission to replay an uncertain creation. */
+  async createControlled(req: CreateSessionRequest, operationId: string): Promise<SessionMeta> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(operationId)) throw new Error('Invalid control operation ID');
+    if (req.initialPrompt !== undefined || req.initialImages !== undefined || req.initialFiles !== undefined || req.goal !== undefined) throw new Error('Controlled creation cannot dispatch initial input or goals');
+    operationId = operationId.toLowerCase();
+    const id = `s_control_${operationId.replaceAll('-', '')}`;
+    const request = structuredClone(req);
+    const canonical = JSON.stringify(request, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+    const requestHash = createHash('sha256').update(canonical).digest('hex');
+    const pending = this.controlledCreations.get(id);
+    if (pending && pending.hash !== requestHash) throw new Error('Control creation payload conflicts with this operation');
+    const existing = this.get(id);
+    if (existing) {
+      if (existing.mission || existing.controlCreation?.operationId !== operationId || existing.controlCreation.requestHash !== requestHash) throw new Error('Control creation identity conflicts with an existing session');
+      await this.deps.store.upsert(existing);
+      return existing;
+    }
+    if (pending) return pending.promise;
+    const promise = Promise.resolve().then(() => this.createWithId(request, id, { operationId, requestHash }));
+    // Keep a failed attempt too: it may have created a worktree before the session write failed.
+    this.controlledCreations.set(id, { hash: requestHash, promise });
+    return promise;
+  }
+
+  private async createWithId(req: CreateSessionRequest, id: string, controlCreation?: SessionMeta['controlCreation']): Promise<SessionMeta> {
     if (req.config.fastMode !== undefined && typeof req.config.fastMode !== 'boolean') throw new Error('Fast mode must be a boolean');
     const settings = this.settings();
     let cfg = { ...req.config, fastMode: req.config.fastMode === true };
@@ -570,6 +630,7 @@ export class SessionManager {
     const title = req.title?.trim() || (titleSeed ? titleFromPrompt(titleSeed) : 'New session');
     const meta: SessionMeta = {
       id,
+      ...(controlCreation ? { controlCreation } : {}),
       title,
       titleIsPlaceholder: req.title?.trim() ? undefined : true,
       createdAt: Date.now(),
@@ -740,6 +801,10 @@ export class SessionManager {
 
   /** The delete itself, without the list push; resolves false when the id is already gone. */
   private async deleteOne(id: string, removeWt: boolean): Promise<boolean> {
+    return this.withoutControlled(id, () => this.deleteUncontrolled(id, removeWt));
+  }
+
+  private async deleteUncontrolled(id: string, removeWt: boolean): Promise<boolean> {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) return false;
@@ -764,6 +829,11 @@ export class SessionManager {
   }
 
   async patch(id: string, patch: Partial<SessionMeta>): Promise<SessionMeta> {
+    return this.withoutControlled(id, () => this.patchUncontrolled(id, patch));
+  }
+
+  private async patchUncontrolled(id: string, patch: Partial<SessionMeta>): Promise<SessionMeta> {
+    if ('controlCreation' in patch) throw new Error('Control creation identity is host-owned');
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     if ('mission' in patch || (meta.mission && Object.keys(patch).some((key) => !['title', 'titleIsPlaceholder', 'pinned', 'pinnedAt'].includes(key)))) {
@@ -815,6 +885,10 @@ export class SessionManager {
 
   /** Archives a session; with `removeWt` it also deletes the worktree (the branch is kept so unarchive can restore it). */
   async setArchived(id: string, archived: boolean, removeWt = false, forceWt = false): Promise<SessionMeta> {
+    return this.withoutControlled(id, () => this.archiveUncontrolled(id, archived, removeWt, forceWt));
+  }
+
+  private async archiveUncontrolled(id: string, archived: boolean, removeWt: boolean, forceWt: boolean): Promise<SessionMeta> {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
@@ -877,6 +951,10 @@ export class SessionManager {
    * the Claude SDK can interrupt a turn but not one child, so it must refuse rather than no-op.
    */
   async subagentCommand(id: string, runId: string, kind: 'stop' | 'steer', message?: string): Promise<{ ok: boolean; error?: string }> {
+    return this.withoutControlled(id, () => this.subagentCommandUncontrolled(id, runId, kind, message));
+  }
+
+  private async subagentCommandUncontrolled(id: string, runId: string, kind: 'stop' | 'steer', message?: string): Promise<{ ok: boolean; error?: string }> {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) return { ok: false, error: 'Session not found' };
@@ -928,7 +1006,7 @@ export class SessionManager {
     return { items: order.map((k) => map.get(k) as TranscriptItem), seq: this.seq };
   }
 
-  private buildContext(meta: SessionMeta, id: string, current = () => true): HarnessContext {
+  private buildContext(meta: SessionMeta, id: string, current = () => true, runtime?: () => ActiveSession): HarnessContext {
     const store = this.deps.store;
     const sessionDir = store.sessionDir(id);
     const managed = !!meta.mission;
@@ -977,7 +1055,7 @@ export class SessionManager {
         return resolved;
       },
       ownedMcpIds: () => builtinServerIds(),
-      emit: (event) => { if (current()) this.emit(id, event); },
+      emit: (event) => { if (current()) this.emit(id, event, runtime?.()); },
       requestApproval: (draft) => current() ? this.requestApproval(id, draft) : Promise.resolve({ optionId: 'deny', note: 'Session runtime is no longer current' }),
       updateRef: (patch: Partial<HarnessRef>) => {
         if (!current()) return;
@@ -1047,9 +1125,9 @@ export class SessionManager {
     // history), as it always did, and is fenced only once a newer runtime supersedes it.
     const current = managed
       ? () => !!active && this.active.get(id) === active && !active.tearingDown && this.get(id)?.mission?.generation === generation
-      : () => this.runtimeSeq.get(id) === seq && this.get(id)?.mission?.generation === generation;
+      : () => this.runtimeSeq.get(id) === seq && this.get(id)?.mission?.generation === generation && !this.fencedRuntimes.has(active);
     const live = () => current() && !active.tearingDown;
-    const ctx = this.buildContext(meta, id, current);
+    const ctx = this.buildContext(meta, id, current, () => active);
     // Every adapter call runs as this session, so whatever the harness spawns (its CLI, MCP servers,
     // tool shells) is attributed to it in the Processes panel.
     const adapter = ownedAdapter(createAdapter(meta.config.harness, ctx), { sessionId: id });
@@ -1080,6 +1158,8 @@ export class SessionManager {
       checkpointTimer: null
     };
     this.active.set(id, active);
+    const controlled = this.controlled.get(id);
+    if (controlled) controlled.runtime = active;
     meta.status = 'starting';
     meta.statusDetail = `Starting ${HARNESS_BY_ID[meta.config.harness].name}…`;
     this.pushSessions();
@@ -1144,6 +1224,209 @@ export class SessionManager {
     return this.sendAs(id, input, 'user');
   }
 
+  private assertNotControlled(id: string): void {
+    if (this.controlled.has(id)) throw new Error('Session is busy with a controlled turn');
+  }
+
+  /** Covers awaits before ordinary sends and destructive/configuration edits as well as dispatch. */
+  private async withoutControlled<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    this.assertNotControlled(id);
+    this.configDispatches.set(id, (this.configDispatches.get(id) ?? 0) + 1);
+    try {
+      return await operation();
+    } finally {
+      const count = (this.configDispatches.get(id) ?? 1) - 1;
+      if (count) this.configDispatches.set(id, count);
+      else this.configDispatches.delete(id);
+    }
+  }
+
+  /** Internal desktop boundary, not a generic IPC method. Each admission gets a fresh runtime:
+   * the normalized protocol has a running transition and terminal turn item, not a provider turn
+   * ID on every delta. Reusing an earlier runtime would misattribute its late terminal events. */
+  async runControlled(id: string, input: { text: string }, control: { operationId: string; inputId: string; beforeDispatch: () => Promise<void> }): Promise<ControlledTurnResult> {
+    this.assertUnmanaged(id);
+    this.assertNotControlled(id);
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (!input.text.trim() || /^\s*\//.test(input.text)) throw new Error('Controlled input must be a nonempty text turn, not a harness command');
+    if (!control.operationId || !/^[A-Za-z0-9_-]+$/.test(control.inputId)) throw new Error('Invalid control identity');
+    const previous = this.active.get(id);
+    const activity = this.activity(id);
+    if (meta.archived || meta.goal?.status === 'active' || meta.nativeGoal || previous?.goalContinuationTimer || previous?.pendingGoalKickoff ||
+        this.configDispatches.has(id) || this.fastModeUpdates.has(id) || previous?.starting || activity.turn || activity.tools || activity.nativeChildren ||
+        activity.approvals || activity.queued || activity.tearingDown || activity.uncertain || previous?.adapter.workspaceWriterState?.() === 'active' ||
+        meta.status === 'starting' || meta.status === 'awaiting' || meta.status === 'running' && !activity.compacting) {
+      throw new Error('Session is busy or its activity is unproven');
+    }
+    const lease: ControlledTurn = {
+      operationId: control.operationId, inputId: control.inputId, runtimeId: shortId('runtime_'),
+      dispatched: false, started: false, canceled: false, uncertain: false, outputIds: new Set(),
+      ended: deferred<void>(), writes: new Set(), writeFailed: false,
+    };
+    // This reservation precedes the very first await; ordinary send/steer/queue cannot slip in.
+    this.controlled.set(id, lease);
+    const assertCurrent = () => {
+      if (lease.canceled || this.controlled.get(id) !== lease) throw new Error('Controlled turn was canceled before dispatch');
+      if (lease.uncertain) throw new Error('Controlled runtime activity is unproven');
+      if (lease.runtime && (this.active.get(id) !== lease.runtime || lease.runtime.tearingDown || lease.runtime.uncertain)) throw new Error('Controlled runtime is no longer current');
+    };
+    try {
+      if (previous?.compactionInFlight) await previous.compactionInFlight;
+      assertCurrent();
+      if (previous) {
+        this.fencedRuntimes.add(previous);
+        await this.disposeRuntime(id, previous, 'idle');
+        if (this.retiring.get(id)?.size || this.activity(id).uncertain) throw new Error('Previous runtime disposal is unproven');
+      }
+      assertCurrent();
+      const existingItems = await this.deps.store.readTranscript(id);
+      if (existingItems.some((item) => item.id === control.inputId)) throw new Error('Controlled input identity is already present');
+      assertCurrent();
+      const active = await this.ensureActive(id);
+      assertCurrent();
+      if (active.compactionInFlight) await active.compactionInFlight;
+      assertCurrent();
+      if (active.adapter.busy || active.turnPending || active.approvals.size || meta.queued || this.get(id)?.goal?.status === 'active' ||
+          [...active.nativeChildren.values()].some((child) => child.running) || active.adapter.workspaceWriterState?.() === 'unknown') throw new Error('Controlled runtime is not idle');
+      const prepared = await this.withSessionPreamble(id, { text: input.text, transcriptItemId: control.inputId });
+      assertCurrent();
+      this.emit(id, { type: 'item.upsert', item: { id: control.inputId, kind: 'user', ts: Date.now(), text: input.text } });
+      await this.controlledBarrier(id, lease);
+      let accepted = Promise.resolve();
+      const dispatch = async () => {
+        assertCurrent();
+        // Nothing asynchronous belongs between this grant/intent recheck and adapter dispatch.
+        await control.beforeDispatch();
+        assertCurrent();
+        if (active.adapter.busy || active.turnPending || active.approvals.size || meta.queued ||
+            [...active.nativeChildren.values()].some((child) => child.running) || active.adapter.workspaceWriterState?.() === 'unknown') throw new Error('Controlled runtime became busy before dispatch');
+        lease.dispatched = true;
+        active.turnPending = true;
+        try {
+          accepted = Promise.resolve(active.adapter.send(prepared)).catch(() => {
+            if (this.controlled.get(id) !== lease) return;
+            lease.uncertain = true;
+            this.endControlled(lease, 'unknown');
+          });
+        } catch {
+          lease.uncertain = true;
+          this.endControlled(lease, 'unknown');
+        }
+      };
+      if (this.admits(meta)) await this.deps.withWorkspaceDispatch!(meta, dispatch);
+      else await dispatch();
+      // Acceptance is deliberately not completion. Only this runtime's normalized events end it.
+      await lease.ended.promise;
+      // Some adapters save provider history after emitting their terminal event. Do not fence those
+      // writes on the normal completion path; an explicit Stop still need not await a hung send.
+      if (lease.turnId && !lease.canceled) await accepted;
+      await this.clearSessionPreamble(id);
+      const state = this.activity(id);
+      // Missing writer tracking cannot certify the absence of child work. This is evidence about
+      // an ordinary turn, not adapter certification or proof of tests mentioned in assistant prose.
+      if (active.adapter.workspaceWriterState?.() !== 'quiescent' || state.nativeChildren || state.tools || state.approvals || meta.queued || state.uncertain) lease.uncertain = true;
+      this.fencedRuntimes.add(active);
+      await this.disposeRuntime(id, active, 'idle');
+      if (this.retiring.get(id)?.size) lease.uncertain = true;
+      await this.flushLive(id, active, true);
+      await this.controlledBarrier(id, lease);
+      return {
+        outcome: lease.uncertain ? 'unknown' : lease.terminal ?? 'unknown',
+        inputId: lease.inputId, runtimeId: lease.runtimeId, ...(lease.turnId ? { turnId: lease.turnId } : {}), outputIds: [...lease.outputIds],
+      };
+    } finally {
+      if (lease.runtime) {
+        this.fencedRuntimes.add(lease.runtime);
+        if (this.active.get(id) === lease.runtime) await this.disposeRuntime(id, lease.runtime, 'idle');
+      }
+      if (this.controlled.get(id) === lease) this.controlled.delete(id);
+    }
+  }
+
+  /** Never interrupts a later desktop turn, even while this operation's result is being saved. */
+  async interruptControlled(id: string, operationId: string): Promise<void> {
+    const lease = this.controlled.get(id);
+    if (!lease || lease.operationId !== operationId || lease.terminal) throw new Error('Controlled operation is no longer active');
+    const active = lease.runtime;
+    if (active && this.active.get(id) !== active) throw new Error('Controlled runtime is no longer current');
+    lease.canceled = true;
+    if (!lease.dispatched || !active) return;
+    this.cancelApprovals(id, active, 'Interrupted');
+    try {
+      await active.adapter.interrupt();
+    } finally {
+      // An interrupt ACK without a normalized terminal event proves no terminal disposition.
+      if (!lease.terminal) { lease.uncertain = true; this.endControlled(lease, 'unknown'); }
+    }
+  }
+
+  private endControlled(lease: ControlledTurn, outcome: ControlledTurnResult['outcome']): void {
+    if (lease.terminal) return;
+    lease.terminal = outcome;
+    lease.ended.resolve();
+  }
+
+  private observeControlled(id: string, runtime: ActiveSession, event: SessionEvent): void {
+    const lease = this.controlled.get(id);
+    if (!lease || lease.runtime !== runtime) return;
+    if (!lease.dispatched) {
+      if (event.type === 'status' && event.status === 'running' || event.type === 'subagent.run' ||
+          event.type === 'item.upsert' && ['assistant', 'tool', 'turn'].includes(event.item.kind)) lease.uncertain = true;
+      return;
+    }
+    if (event.type === 'status' && event.status === 'running') {
+      if (lease.terminal) lease.uncertain = true;
+      lease.started = true;
+    }
+    if (event.type === 'item.upsert') {
+      const item = event.item;
+      if (item.kind === 'turn') {
+        if (!lease.started || lease.turnId && lease.turnId !== item.id) lease.uncertain = true;
+        lease.turnId ??= item.id;
+        this.endControlled(lease, item.status === 'completed' ? 'succeeded' : item.status);
+      } else if (item.kind !== 'user') {
+        lease.outputIds.add(item.id);
+        // A delegation tool without a matching run lifecycle is untracked, even if its tool card
+        // says done. Its parent turn ending says nothing about that child.
+        if (item.kind === 'tool' && (item.hint === 'agent' || item.runId) && (!item.runId || !runtime.nativeChildren.has(item.runId))) lease.uncertain = true;
+      } else if (item.id !== lease.inputId) lease.uncertain = true;
+    }
+    if (event.type === 'subagent' && !runtime.nativeChildren.has(event.completion.agentId)) lease.uncertain = true;
+    if (event.type === 'subagent.run') {
+      const previous = runtime.nativeChildren.get(event.run.runId);
+      if (!['running', 'completed', 'error', 'stopped', 'interrupted'].includes(event.run.status) ||
+          event.run.status !== 'running' && (!previous || previous.startedAt !== event.run.startedAt)) lease.uncertain = true;
+    }
+    if (event.type === 'status' && (event.status === 'stopped' || event.status === 'error') || event.type === 'error' && event.fatal) {
+      lease.uncertain = true;
+      this.endControlled(lease, 'unknown');
+    }
+  }
+
+  /** Keep rejection evidence even though ordinary UI appends intentionally log and recover. */
+  private trackControlledWrite(id: string, write: Promise<void>): Promise<void> {
+    const lease = this.controlled.get(id);
+    if (lease) {
+      const observed = write.then(() => undefined, () => { lease.writeFailed = true; });
+      lease.writes.add(observed);
+      void observed.then(() => lease.writes.delete(observed));
+    }
+    return write;
+  }
+
+  private async controlledBarrier(id: string, lease: ControlledTurn): Promise<void> {
+    this.cancelPersist(id);
+    const meta = this.get(id);
+    if (!meta) throw new Error('Controlled session disappeared');
+    while (lease.writes.size) await Promise.all([...lease.writes]);
+    if (lease.writeFailed) throw new Error('Controlled turn persistence failed');
+    await this.trackControlledWrite(id, this.deps.store.commitTranscript(id, [...(lease.runtime?.liveItems.values() ?? [])]));
+    await this.trackControlledWrite(id, this.deps.store.upsert(meta));
+    while (lease.writes.size) await Promise.all([...lease.writes]);
+    if (lease.writeFailed) throw new Error('Controlled turn persistence failed');
+  }
+
   /** Starts only the pinned managed runtime and observes its handshake; never sends a prompt.
    * Kept off generic IPC: configuration/catalog entries are not runtime Mission certification. */
   async prepareManaged(id: string, generation: number) {
@@ -1199,6 +1482,10 @@ export class SessionManager {
    * are not user actions: they confer no new authority and must not affect user recency.
    */
   private async sendAs(id: string, input: UserInput, source: 'user' | 'goal' | 'mission', generation?: number): Promise<void> {
+    return this.withoutControlled(id, () => this.sendUncontrolled(id, input, source, generation));
+  }
+
+  private async sendUncontrolled(id: string, input: UserInput, source: 'user' | 'goal' | 'mission', generation?: number): Promise<void> {
     const meta = source === 'mission' ? this.managedMeta(id, generation!) : this.get(id);
     if (!meta) throw new Error('Session not found');
     if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
@@ -1233,6 +1520,10 @@ export class SessionManager {
 
   /** Replaces a sent prompt only when its adapter can restore a durable pre-message checkpoint. */
   async editAndResend(id: string, userItemId: string, input: UserInput): Promise<TranscriptItem[]> {
+    return this.withoutControlled(id, () => this.editUncontrolled(id, userItemId, input));
+  }
+
+  private async editUncontrolled(id: string, userItemId: string, input: UserInput): Promise<TranscriptItem[]> {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
@@ -1439,7 +1730,7 @@ export class SessionManager {
     // A crash after this write is unknown, not an empty runtime map proving settlement. A later
     // launch remains usable but owns only its new claim; it cannot erase an earlier process tree.
     // Bookkeeping never fails the ordinary start itself: the claim stays in memory either way.
-    active.workspaceWriterClaimPersisted = Promise.resolve(this.deps.store.upsert(meta)).then(
+    active.workspaceWriterClaimPersisted = this.trackControlledWrite(meta.id, Promise.resolve(this.deps.store.upsert(meta))).then(
       () => undefined,
       (e) => this.deps.log('warn', `[${meta.id}] workspace writer claim persist failed: ${errorMessage(e)}`),
     );
@@ -1548,7 +1839,7 @@ export class SessionManager {
           meta.statusDetail = undefined;
         }
         meta.queued = 0;
-        await Promise.resolve(this.deps.store.upsert(meta)).catch((e) => this.deps.log('warn', `[${id}] meta persist on stop failed: ${errorMessage(e)}`));
+        await this.trackControlledWrite(id, Promise.resolve(this.deps.store.upsert(meta))).catch((e) => this.deps.log('warn', `[${id}] meta persist on stop failed: ${errorMessage(e)}`));
       }
       this.pushSessions();
     }).finally(() => {
@@ -1563,6 +1854,8 @@ export class SessionManager {
     const claim = active.workspaceWriterClaim;
     if (!claim || !this.get(id)?.workspaceWriterClaims?.includes(claim)) return;
     if (!proven) {
+      const controlled = this.controlled.get(id);
+      if (controlled?.runtime === active) controlled.uncertain = true;
       this.deps.log('warn', `[${id}] process-tree disposal is unproven; its workspace writer claim is kept for Mission admission only`);
       return;
     }
@@ -1574,7 +1867,7 @@ export class SessionManager {
     if (!meta?.workspaceWriterClaims?.includes(claim)) return;
     const kept = meta.workspaceWriterClaims.filter((entry) => entry !== claim);
     meta.workspaceWriterClaims = kept.length ? kept : undefined;
-    await this.deps.store.upsert(meta);
+    await this.trackControlledWrite(id, this.deps.store.upsert(meta));
   }
 
   /** An explicit user Stop, Archive, Delete or Move is the acknowledgment for writer claims that no
@@ -1594,6 +1887,11 @@ export class SessionManager {
 
   async interrupt(id: string): Promise<void> {
     this.assertUnmanaged(id);
+    const controlled = this.controlled.get(id);
+    if (controlled) {
+      if (!controlled.terminal) await this.interruptControlled(id, controlled.operationId);
+      return;
+    }
     const active = this.active.get(id);
     if (!active) return;
     this.deps.log('info', `[${id}] interrupt requested`);
@@ -1604,11 +1902,19 @@ export class SessionManager {
   /** User Stop (also Archive, Delete and Move): never fails or wedges an ordinary session. */
   async stop(id: string): Promise<void> {
     this.assertUnmanaged(id);
+    const controlled = this.controlled.get(id);
+    if (controlled) controlled.canceled = true;
     await this.releaseStaleWriterClaims(id);
     await this.stopOrdinary(id);
   }
 
   private async stopOrdinary(id: string): Promise<void> {
+    const controlled = this.controlled.get(id);
+    if (controlled) {
+      controlled.canceled = true;
+      controlled.uncertain = true;
+      this.endControlled(controlled, 'unknown');
+    }
     const active = this.active.get(id);
     if (!active) return;
     this.deps.log('info', `[${id}] stopping ${active.adapter.id}${active.adapter.busy ? ' (turn in progress)' : ''}`);
@@ -1617,7 +1923,7 @@ export class SessionManager {
 
   /** App quit. Never rejects, so the caller still flushes persistence and analytics afterwards. */
   async stopAll(): Promise<void> {
-    const ids = [...new Set([...this.active.keys(), ...this.managedDispatches.keys()])];
+    const ids = [...new Set([...this.active.keys(), ...this.managedDispatches.keys(), ...this.controlled.keys()])];
     if (ids.length) this.deps.log('info', `stopping ${ids.length} running session(s)`);
     const results = await Promise.allSettled(ids.map((id) => {
       const mission = this.get(id)?.mission;
@@ -1638,6 +1944,7 @@ export class SessionManager {
   }
 
   async setModel(id: string, model: ModelRef): Promise<SessionMeta> {
+    this.assertNotControlled(id);
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
@@ -1665,6 +1972,10 @@ export class SessionManager {
   }
 
   async setEffort(id: string, effort: EffortLevel): Promise<SessionMeta> {
+    return this.withoutControlled(id, () => this.setEffortUncontrolled(id, effort));
+  }
+
+  private async setEffortUncontrolled(id: string, effort: EffortLevel): Promise<SessionMeta> {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
@@ -1679,6 +1990,7 @@ export class SessionManager {
   }
 
   async setFastMode(id: string, enabled: boolean): Promise<SessionMeta> {
+    this.assertNotControlled(id);
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
@@ -1731,6 +2043,10 @@ export class SessionManager {
   }
 
   async setPermissionMode(id: string, mode: PermissionMode): Promise<SessionMeta> {
+    return this.withoutControlled(id, () => this.setPermissionUncontrolled(id, mode));
+  }
+
+  private async setPermissionUncontrolled(id: string, mode: PermissionMode): Promise<SessionMeta> {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
@@ -1755,6 +2071,7 @@ export class SessionManager {
   }
 
   async compact(id: string): Promise<{ ok: boolean; detail?: string }> {
+    this.assertNotControlled(id);
     const active = this.active.get(id);
     if (!active) return { ok: false, detail: 'Session is not running.' };
     if (active.tearingDown || active.uncertain) return { ok: false, detail: 'Session runtime is stopping or uncertain.' };
@@ -1839,6 +2156,7 @@ export class SessionManager {
   }
 
   private async maybeAutoCompact(id: string): Promise<void> {
+    if (this.controlled.has(id)) return;
     const active = this.active.get(id);
     const meta = this.get(id);
     const threshold = this.settings().autoCompactionThreshold;
@@ -1918,6 +2236,10 @@ export class SessionManager {
   }
 
   async clearTranscript(id: string): Promise<void> {
+    return this.withoutControlled(id, () => this.clearUncontrolled(id));
+  }
+
+  private async clearUncontrolled(id: string): Promise<void> {
     this.assertUnmanaged(id);
     if (!this.get(id)) throw new Error('Session not found');
     const active = this.active.get(id);
@@ -1974,7 +2296,8 @@ export class SessionManager {
   }
 
   /** Central event sink: persists transcript, updates meta, forwards to renderer, drives goals. */
-  private emit(sessionId: string, event: SessionEvent): void {
+  private emit(sessionId: string, event: SessionEvent, runtime?: ActiveSession): void {
+    if (runtime) this.observeControlled(sessionId, runtime, event);
     // Harness-reported catalogs gain only known provider metadata, then pass through user corrections.
     if (event.type === 'models') {
       const live = this.active.get(sessionId);
@@ -1986,7 +2309,7 @@ export class SessionManager {
     const meta = this.get(sessionId);
     const active = this.active.get(sessionId);
     // Ownership/configuration are host-owned even if an adapter emits the broad normalized meta shape.
-    if (meta?.mission && event.type === 'meta') {
+    if ((meta?.mission || this.controlled.has(sessionId)) && event.type === 'meta') {
       const patch = event.patch;
       const { activeModel, activeEffort, title, queued, statusDetail, harnessCommands } = patch;
       const allowed = { activeModel, activeEffort, title, queued, statusDetail, harnessCommands };
@@ -2147,7 +2470,9 @@ export class SessionManager {
    *  count against, which is what makes a snapshot plus a live stream reconcilable for a remote
    *  client; the Mission hook needs the envelope for every event either way. */
   private publish(sessionId: string, event: SessionEvent): void {
-    const env: SessionEventEnvelope = { sessionId, event, ts: Date.now(), seq: ++this.seq };
+    const lease = this.controlled.get(sessionId);
+    const control = lease?.dispatched ? { operationId: lease.operationId, inputId: lease.inputId, runtimeId: lease.runtimeId, ...(lease.turnId ? { turnId: lease.turnId } : {}) } : undefined;
+    const env: SessionEventEnvelope = { sessionId, event, ts: Date.now(), seq: ++this.seq, ...(control ? { control } : {}) };
     this.deps.pushEvent(env);
     const listeners = [...this.listeners];
     if (this.get(sessionId)?.mission && this.missionHooks?.onEvent) listeners.push(this.missionHooks.onEvent);
@@ -2159,7 +2484,7 @@ export class SessionManager {
 
   /** Transcript appends must never reject into the void; log a warning instead. */
   private appendTranscript(sessionId: string, item: TranscriptItem): void {
-    this.deps.store.appendTranscript(sessionId, item).catch((e) => this.deps.log('warn', `[${sessionId}] transcript append failed (${item.kind} ${item.id}): ${errorMessage(e)}`));
+    this.trackControlledWrite(sessionId, this.deps.store.appendTranscript(sessionId, item)).catch((e) => this.deps.log('warn', `[${sessionId}] transcript append failed (${item.kind} ${item.id}): ${errorMessage(e)}`));
   }
 
   /**
@@ -2175,7 +2500,7 @@ export class SessionManager {
       const streaming = item.kind === 'assistant' && item.streaming;
       if (streaming && !settle) continue;
       const saved: TranscriptItem = streaming ? { ...item, streaming: false } : item;
-      await this.deps.store.appendTranscript(sessionId, saved);
+      await this.trackControlledWrite(sessionId, this.deps.store.appendTranscript(sessionId, saved));
       active.dirty.delete(id);
       if (streaming) {
         active.liveItems.set(id, saved);
@@ -2247,7 +2572,7 @@ export class SessionManager {
     // mistaken for the next kickoff's answer if that turn produces no assistant text.
     const text = active?.lastAssistantText ?? '';
     if (active) active.lastAssistantText = '';
-    if (meta.mission) return;
+    if (meta.mission || this.controlled.has(meta.id)) return;
     const goal = meta.goal;
     if (!goal || goal.status !== 'active' || !active) return;
     // This reply began before the new goal was submitted. Its token (or lack of one) says
@@ -2290,7 +2615,7 @@ export class SessionManager {
    */
   private scheduleGoalContinuation(id: string, prompt: string, attempt = 0, pending?: ActiveSession['pendingGoalKickoff']): void {
     const active = this.active.get(id);
-    if (!active || this.get(id)?.mission) return;
+    if (!active || this.get(id)?.mission || this.controlled.has(id)) return;
     const expectedGoal = pending?.goal ?? this.get(id)?.goal;
     if (attempt === 0 && active.goalContinuationTimer) {
       clearTimeout(active.goalContinuationTimer);
@@ -2321,6 +2646,10 @@ export class SessionManager {
   }
 
   async goal(id: string, action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update', opts: { objective?: string; autoContinue?: boolean; maxIterations?: number }): Promise<SessionMeta> {
+    return this.withoutControlled(id, () => this.goalUncontrolled(id, action, opts));
+  }
+
+  private async goalUncontrolled(id: string, action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update', opts: { objective?: string; autoContinue?: boolean; maxIterations?: number }): Promise<SessionMeta> {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
@@ -2455,6 +2784,10 @@ export class SessionManager {
    * provider resume state is tied to the old directory, so it is dropped (the app transcript stays).
    */
   async moveTo(id: string, cwd: string): Promise<SessionMeta> {
+    return this.withoutControlled(id, () => this.moveUncontrolled(id, cwd));
+  }
+
+  private async moveUncontrolled(id: string, cwd: string): Promise<SessionMeta> {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
@@ -2531,6 +2864,7 @@ export class SessionManager {
       // keep their text and tokens for context but are worth nothing.
       usage: emptyUsage(),
       forkedFrom: src.id,
+      controlCreation: undefined,
       harnessRef: {},
       pendingForkContext: undefined,
       pendingKnowledgeDigest: undefined,

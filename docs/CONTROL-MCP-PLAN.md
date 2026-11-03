@@ -1,11 +1,26 @@
 # Dots remote MCP control — implementation plan
 
-Status: **proposed implementation; not shipped**. Revision 1.1, 2026-11-03.
+Status: **first implementation slice under review; disabled and not shipped**. Revision 1.2, 2026-11-03.
 
 This replaces the delivery order and first-release scope of the supplied **VocsCode CLI and MCP
 implementation plan**, revision 1.0 (2026-10-17). The attachment remains historical input, not a
 second specification to implement in parallel. This document records the review and subsequent
 owner decisions; it does not authorize deployment, credentials handling, dependencies or paid tests.
+The owner subsequently approved implementation and the pinned Cloudflare OAuth provider dependency.
+That approval did not enable deployment or live/provider tests.
+
+## Implementation checkpoint
+
+The [first-slice guide](CONTROL-MCP.md) describes the code now present: typed desktop grants and
+project identities, durable ordinary-session receipts and runtime barriers, a separate authenticated
+relay MCP channel, and local enrollment/revocation UI. The coordinated `vocs.io` branch adds OAuth,
+consent and ingress. Both cloud feature flags remain unset; OAuth KV is not provisioned.
+
+This is **not completion of every W0–W5 item** below. All questions are owner-only; creation uses
+remembered defaults rather than arbitrary overrides; lifecycle events are a bounded local ring,
+not a resumable public feed. Moved projects need explicit re-enrollment. Actual Dots identity,
+interoperability, stable intent retries, distributed OAuth race qualification and two-computer live
+validation remain gates before activation. No deployed `/mcp` availability is claimed.
 
 ## 1. Decisions and first user journey
 

@@ -5,7 +5,10 @@ import type { RelayStorage, RelayStore } from './core';
 import { ENROLL_GRANT_TTL_MS, hashToken, PairError } from './core';
 import { accountIdFromDeviceId, ACCOUNT_ASSERTION_HEADER, INTERNAL_ACCOUNT_AUTH_HEADER, INTERNAL_ACCOUNT_ID_HEADER, isAccountId, LEGACY_ACCOUNT_ID, verifyAccountAssertion } from './account';
 import { forwardToHub } from './edge';
-import { HubRouter } from './hub';
+import { HubRouter, type SocketRegistry } from './hub';
+import { CONTROL_INTERNAL_PATH, CONTROL_PATH, CONTROLLER_ASSERTION_HEADER, controlHttpError, controlJson, readControlBytes, verifyControllerAssertion } from './control-auth';
+import { ControlHostBridge } from './control-host';
+import { ControlMcpGateway } from './control-mcp';
 import { FixedWindowLimiter } from './rate';
 import { authorizeSocket, BROADCAST_TAG, handleHttp, json, type RouteContext } from './routes';
 
@@ -29,6 +32,8 @@ export interface Env {
   ENROLL_TOKEN: string;
   /** Shared only by the landing and relay Workers; verifies the landing's signed account assertions. */
   ACCOUNT_ASSERTION_SECRET?: string;
+  /** Opt-in only after security + real-client qualification; unset in production config. */
+  CONTROL_MCP_ENABLED?: string;
   /** Relay-only HMAC key for device-id route hints. Keep stable until a device-id migration. */
   DEVICE_ROUTE_SECRET?: string;
   /** Edge rate limits (wrangler.jsonc `ratelimits`); absent from configs that predate them. */
@@ -67,11 +72,25 @@ function relayStore(state: DurableObjectState): RelayStore {
 export class Hub {
   private readonly store: RelayStore;
   private readonly rate = new FixedWindowLimiter();
+  private readonly controlHosts: ControlHostBridge<WebSocket>;
+  private readonly control: ControlMcpGateway<WebSocket>;
   private accountId: string | null = null;
   private accountInit: Promise<boolean> | null = null;
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.store = relayStore(state);
+    this.controlHosts = new ControlHostBridge({ store: this.store, sockets: this.sockets() });
+    this.control = new ControlMcpGateway(this.store, this.controlHosts);
+  }
+
+  private sockets(): SocketRegistry<WebSocket> {
+    return {
+      byTag: (tag) => this.state.getWebSockets(tag),
+      tags: (ws) => this.state.getTags(ws),
+      attachment: (ws) => ws.deserializeAttachment(),
+      attach: (ws, value) => ws.serializeAttachment(value),
+      isOpen: (ws) => ws.readyState === WebSocket.OPEN
+    };
   }
 
   private async pinAccount(accountId: string): Promise<boolean> {
@@ -101,13 +120,10 @@ export class Hub {
       accountId,
       deviceRouteSecret: this.env.DEVICE_ROUTE_SECRET,
       now: Date.now,
-      sockets: {
-        byTag: (tag) => this.state.getWebSockets(tag),
-        tags: (ws) => this.state.getTags(ws),
-        attachment: (ws) => ws.deserializeAttachment(),
-        attach: (ws, value) => ws.serializeAttachment(value),
-        isOpen: (ws) => ws.readyState === WebSocket.OPEN
-      }
+      sockets: this.sockets(),
+      controlResponse: this.env.CONTROL_MCP_ENABLED === '1'
+        ? (ws, hostId, raw) => this.controlHosts.response(ws, hostId, accountId, raw).catch(() => this.controlHosts.closed(ws))
+        : undefined
     });
   }
 
@@ -139,8 +155,13 @@ export class Hub {
 
   async fetch(request: Request): Promise<Response> {
     const accountId = request.headers.get(INTERNAL_ACCOUNT_ID_HEADER) ?? '';
-    if (!(await this.pinAccount(accountId))) return json({ error: 'invalid account' }, 403);
     const url = new URL(request.url);
+    if (url.pathname === CONTROL_INTERNAL_PATH) {
+      if (this.env.CONTROL_MCP_ENABLED !== '1') return controlJson({ error: 'not found' }, 404);
+      if (!(await this.pinAccount(accountId))) return controlJson({ error: 'invalid account' }, 403);
+      return this.control.handle(request, accountId, this.env.ACCOUNT_ASSERTION_SECRET);
+    }
+    if (!(await this.pinAccount(accountId))) return json({ error: 'invalid account' }, 403);
     // Only the bound EnrollmentDirectory may reach this private subroute. The public Worker refuses
     // /v1/__internal/* before it can select a Hub and strips all internal headers on normal routes.
     if (url.pathname.startsWith('/__internal/')) {
@@ -162,6 +183,7 @@ export class Hub {
       const pair = new WebSocketPair();
       // Tags are Hub-local: distinct account Durable Objects cannot fan out across tenants.
       this.state.acceptWebSocket(pair[1], [`${kind}:${auth.deviceId}`, BROADCAST_TAG[kind]]);
+      if (kind === 'host' && this.env.CONTROL_MCP_ENABLED === '1') this.controlHosts.opened(pair[1], auth.deviceId);
       // Revocation may commit after ticket consumption but before acceptance; re-check before drain.
       if (kind === 'client') await this.router(accountId).clientOpened(pair[1], auth.deviceId);
       return new Response(null, { status: 101, webSocket: pair[0] });
@@ -174,7 +196,12 @@ export class Hub {
     if (accountId) await this.router(accountId).message(ws, message);
   }
 
+  async webSocketError(ws: WebSocket): Promise<void> {
+    this.controlHosts.closed(ws);
+  }
+
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    this.controlHosts.closed(ws);
     const accountId = await this.storedAccount();
     if (accountId) this.router(accountId).closed(ws);
     // This Worker's compatibility date predates automatic close-frame replies. 1005/1006 are
@@ -291,12 +318,33 @@ export default {
     const url = new URL(request.url);
     if (!url.pathname.startsWith('/v1/')) return json({ error: 'not found' }, 404);
     // This RPC is reachable only through the directory's DO binding, never through public /v1.
-    if (url.pathname.startsWith('/v1/__internal/')) return json({ error: 'not found' }, 404);
+    if (url.pathname.startsWith('/v1/__internal')) return controlJson({ error: 'not found' }, 404);
+    // Deliberately before routeAccount: browser cookies/assertions/device tokens confer ZERO
+    // controller authority. Forward only a fresh allowlist of headers, never public internals.
+    if (url.pathname === CONTROL_PATH) {
+      if (env.CONTROL_MCP_ENABLED !== '1') return controlJson({ error: 'not found' }, 404);
+      if (request.method !== 'POST' || url.search) return controlJson({ error: 'invalid_request' }, 400);
+      try {
+        const body = await readControlBytes(request);
+        const assertion = await verifyControllerAssertion(request, body, env.ACCOUNT_ASSERTION_SECRET);
+        if (!assertion) return controlJson({ error: 'invalid_controller_assertion' }, 401);
+        const headers = new Headers({
+          [INTERNAL_ACCOUNT_ID_HEADER]: assertion.principal.accountId,
+          [CONTROLLER_ASSERTION_HEADER]: request.headers.get(CONTROLLER_ASSERTION_HEADER)!
+        });
+        for (const name of ['accept', 'content-type', 'mcp-protocol-version']) {
+          const value = request.headers.get(name);
+          if (value) headers.set(name, value);
+        }
+        const namespace = env.HUB.get(env.HUB.idFromName(assertion.principal.accountId));
+        return await namespace.fetch(new Request(`https://hub${CONTROL_INTERNAL_PATH}`, { method: 'POST', headers, body, signal: request.signal }));
+      } catch (error) { return controlHttpError(error); }
+    }
     const stripInternal = (source: Request, accountId?: string, authenticated = false): Request => {
       const headers = new Headers(source.headers);
       headers.delete(ACCOUNT_ASSERTION_HEADER);
-      headers.delete(INTERNAL_ACCOUNT_ID_HEADER);
-      headers.delete(INTERNAL_ACCOUNT_AUTH_HEADER);
+      headers.delete(CONTROLLER_ASSERTION_HEADER);
+      for (const name of [...headers.keys()]) if (name.startsWith('x-vocs-internal-')) headers.delete(name);
       if (accountId) headers.set(INTERNAL_ACCOUNT_ID_HEADER, accountId);
       if (authenticated) headers.set(INTERNAL_ACCOUNT_AUTH_HEADER, '1');
       return new Request(source, { headers });

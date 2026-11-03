@@ -5,7 +5,10 @@
 const invokeMock = vi.fn().mockResolvedValue({});
 (window as unknown as { harness: unknown }).harness = {
   platform: 'win32',
-  invoke: invokeMock,
+  // The separate automation panel has its own contract, not a browser-remote response.
+  invoke: (channel: string, args: unknown) => channel === 'control:get'
+    ? Promise.resolve({ instanceId: '30e4d8a1-cb8b-40bc-aa03-0c7ace255174', enabled: false, projects: [], grants: [] })
+    : invokeMock(channel, args),
   on: vi.fn().mockReturnValue(() => undefined)
 };
 

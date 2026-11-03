@@ -730,6 +730,31 @@ describe('remote handlers', () => {
   });
 });
 
+describe('external control owner boundary', () => {
+  it('refuses browser/default and agent origins before any owner service call', async () => {
+    const ownerState = vi.fn(async () => ({ enabled: false }));
+    const setEnabled = vi.fn();
+    const grant = vi.fn();
+    const revoke = vi.fn();
+    const { registry } = stubDeps({ control: { ownerState, setEnabled, grant, revoke } as unknown as NonNullable<Deps['control']> });
+    for (const actor of [undefined, 'user', 'agent'] as const) {
+      await expect(registry.invoke('control:get', undefined, actor)).rejects.toThrow('local desktop owner');
+      await expect(registry.invoke('control:enable', { enabled: true }, actor)).rejects.toThrow('local desktop owner');
+      await expect(registry.invoke('control:grant', {}, actor)).rejects.toThrow('local desktop owner');
+    }
+    expect(ownerState).not.toHaveBeenCalled();
+    expect(setEnabled).not.toHaveBeenCalled();
+    expect(grant).not.toHaveBeenCalled();
+    await expect(registry.invoke('control:get', undefined, 'desktop')).resolves.toEqual({ enabled: false });
+    expect(ownerState).toHaveBeenCalledTimes(1);
+    await expect(registry.invoke('control:enable', { enabled: 'yes' }, 'desktop')).rejects.toBeDefined();
+    await expect(registry.invoke('control:grant', { controllerId: '../escape' }, 'desktop')).rejects.toBeDefined();
+    await expect(registry.invoke('control:revoke', { grantId: '../escape' }, 'desktop')).rejects.toBeDefined();
+    expect(setEnabled).not.toHaveBeenCalled(); expect(grant).not.toHaveBeenCalled(); expect(revoke).not.toHaveBeenCalled();
+    for (const channel of ['control:get', 'control:enable', 'control:grant', 'control:revoke']) expect(isRemoteChannel(channel)).toBe(false);
+  });
+});
+
 describe('remote sign-in handlers', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
