@@ -53,6 +53,7 @@ function setup(list: SessionMeta[]) {
     get: (id: string) => list.find((s) => s.id === id),
     upsert: vi.fn(async () => undefined),
     appendTranscript: vi.fn(async () => undefined),
+    readTranscript: vi.fn(async () => []),
     remove: vi.fn(async (id: string) => {
       removed.push(id);
       list.splice(

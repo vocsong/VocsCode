@@ -134,6 +134,7 @@ const invokeMock = vi.fn().mockImplementation((channel: string) => Promise.resol
 
 import { fireEvent, render, waitFor, within } from '@testing-library/react';
 import { AnalyticsDashboard } from '../src/renderer/src/components/AnalyticsDashboard';
+import { TOKEN_KINDS } from '../src/renderer/src/components/analytics/model';
 import { useStore } from '../src/renderer/src/store';
 
 const liveSession = (id: string): SessionMeta =>
@@ -335,6 +336,126 @@ describe('analytics dashboard', () => {
     const table = container.querySelector('.atable');
     expect(table).toBeTruthy();
     expect(table?.querySelector('th')?.textContent).toBe('Day');
+  });
+
+  it('shows estimated user input separately from provider tokens across 7-day, 30-day and all-time ranges', async () => {
+    reset();
+    const inputDays = [[40, 500], [10, 275], [1, 125]].map(([daysAgo, userInputTokens]) => {
+      const day = sliced(daysAgo, [{ id: 's1', harness: 'claude', model: 'opus', project: '/p', costUsd: 1, turns: 1 }]);
+      return { ...day, usage: { ...day.usage, userInputTokens } };
+    });
+    const response: AnalyticsSummary = { ...summary, days: inputDays, firstDay: inputDays[0].date };
+    invokeMock.mockImplementation((channel: string, args?: { days: number }) => Promise.resolve(channel === 'analytics:summary'
+      ? { ...response, previous: { ...emptyCounters(), userInputTokens: args?.days === 7 ? 100 : 200 } }
+      : []));
+    useStore.setState({ analyticsTab: 'tokens' });
+    const view = render(<AnalyticsDashboard />);
+    const ui = within(view.container);
+    const tile = (label: string) => Array.from(view.container.querySelectorAll('.kpi')).find((k) => k.querySelector('.kpi-label')?.textContent === label);
+    const value = (label: string) => tile(label)?.querySelector('.kpi-value')?.textContent;
+    const card = (title: string) => ui.getByRole('heading', { name: title }).closest('section')!;
+    const userTableValues = () => within(card('User input per day (est.)')).getAllByRole('row').slice(1).map((row) => within(row).getAllByRole('cell')[1].textContent);
+    try {
+      await waitFor(() => expect(value('Total tokens')).toBe('3.2k'));
+      expect(value('User input (est.)')).toBe('400');
+      expect(tile('User input (est.)')?.querySelector('.kpi-delta')?.textContent).toBe('▲ +100%');
+      expect(tile('User input (est.)')?.querySelector('.spark')).toBeTruthy();
+      expect(tile('User input (est.)')?.querySelector('.kpi-sub')?.textContent).not.toContain('%');
+      expect(value('Input')).toBe('2.0k');
+      expect(tile('Input')?.textContent).toContain('provider-reported uncached context');
+      expect(view.container.textContent).toContain('not just typed text');
+      for (const text of ['ordinary-session message text', 'original submitted text', 'counted once', 'including pasted text', 'attachments', 'system/context', 'tool output', 'automated prompts', 'automatic goal prompts', 'Mission mailbox', 'goal configuration', 'subagent-panel steering', 'one token per four Unicode characters', 'not model-specific billing', 'tracking starts with this update', 'legacy unmarked messages are not reconstructed']) {
+        expect(view.container.textContent).toContain(text);
+      }
+      expect(ui.getByRole('img', { name: 'User input per day (est.)' })).toBeTruthy();
+      // This is an independent count, never a fifth provider kind or part of its stacked mix.
+      expect(TOKEN_KINDS.map((kind) => kind.key)).toEqual(['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens']);
+      const mix = card('Token mix by model');
+      expect(within(mix).getAllByRole('listitem').map((item) => item.textContent)).toEqual(['Input', 'Output', 'Cache read', 'Cache write']);
+      expect(mix.querySelector('.mixrow-value')?.textContent).toBe('3.2k');
+      expect(Array.from(mix.querySelectorAll('.stackbar span')).map((segment) => segment.getAttribute('title'))).toEqual(['Input · 2.0k · 63%', 'Output · 200 · 6.3%', 'Cache read · 1.0k · 31%']);
+      fireEvent.click(within(card('Tokens per day by kind')).getByTitle('Show as table'));
+      expect(within(card('Tokens per day by kind')).getAllByRole('columnheader').map((header) => header.textContent)).toEqual(['Day', 'Input', 'Output', 'Cache read', 'Cache write']);
+      fireEvent.click(within(card('User input per day (est.)')).getByTitle('Show as table'));
+      expect(within(card('User input per day (est.)')).getAllByRole('columnheader').map((header) => header.textContent)).toEqual(['Day', 'User input (est.)']);
+      expect(userTableValues()).toHaveLength(30);
+      expect(userTableValues().filter((value) => value !== '0')).toEqual(['125', '275']);
+
+      fireEvent.click(ui.getByRole('radio', { name: '7 days' }));
+      await waitFor(() => expect(value('User input (est.)')).toBe('125'));
+      await waitFor(() => expect(tile('User input (est.)')?.querySelector('.kpi-delta')?.textContent).toBe('▲ +25%'));
+      expect(invokeMock).toHaveBeenCalledWith('analytics:summary', { days: 7 });
+      expect(value('Total tokens')).toBe('1.6k');
+      expect(userTableValues()).toHaveLength(7);
+      expect(userTableValues().filter((value) => value !== '0')).toEqual(['125']);
+
+      fireEvent.click(ui.getByRole('radio', { name: 'All time' }));
+      await waitFor(() => expect(value('User input (est.)')).toBe('900'));
+      expect(invokeMock).toHaveBeenCalledWith('analytics:summary', { days: 0 });
+      expect(value('Total tokens')).toBe('4.8k');
+      expect(tile('User input (est.)')?.querySelector('.kpi-delta')).toBeNull();
+      expect(userTableValues()).toHaveLength(41);
+      expect(userTableValues().filter((value) => value !== '0')).toEqual(['125', '275', '500']);
+
+      fireEvent.click(ui.getByRole('radio', { name: '30 days' }));
+      await waitFor(() => expect(value('User input (est.)')).toBe('400'));
+      await waitFor(() => expect(tile('User input (est.)')?.querySelector('.kpi-delta')?.textContent).toBe('▲ +100%'));
+      expect(invokeMock).toHaveBeenCalledWith('analytics:summary', { days: 30 });
+      expect(value('Total tokens')).toBe('3.2k');
+    } finally {
+      view.unmount();
+      invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? summary : []));
+    }
+  });
+
+  it.each([[7, '125'], [30, '400'], [0, '900']] as const)('counts user input receipts beyond the 731-day chart cap in the %s-day range', async (range, expected) => {
+    reset();
+    const legacyDay = sliced(900, [{ id: 's1', harness: 'claude', model: 'opus', project: '/p', costUsd: 1, turns: 1 }]);
+    Reflect.deleteProperty(legacyDay.usage, 'userInputTokens');
+    // Old provider history starts the capped chart before both old and recent user receipts.
+    const inputDays = [[800, 500], [10, 275], [1, 125]].map(([daysAgo, userInputTokens]) => ({
+      date: dateOf(daysAgo),
+      usage: { ...emptyCounters(), userInputTokens }
+    }));
+    const response: AnalyticsSummary = { ...summary, days: [legacyDay, ...inputDays], firstDay: legacyDay.date };
+    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? response : []));
+    useStore.setState({ analyticsTab: 'tokens', analyticsRange: range });
+    const view = render(<AnalyticsDashboard />);
+    const tile = () => Array.from(view.container.querySelectorAll('.kpi')).find((k) => k.querySelector('.kpi-label')?.textContent === 'User input (est.)');
+    try {
+      await waitFor(() => expect(tile()?.querySelector('.kpi-value')?.textContent).toBe(expected));
+      expect(invokeMock).toHaveBeenCalledWith('analytics:summary', { days: range });
+    } finally {
+      view.unmount();
+      invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? summary : []));
+    }
+  });
+
+  it.each([7, 30, 0] as const)('shows zero estimated user input for legacy usage in the %s-day range without reconstructing it from provider tokens', async (range) => {
+    reset();
+    const legacyDay = sliced(1, [{ id: 's1', harness: 'claude', model: 'opus', project: '/p', costUsd: 1, turns: 1 }]);
+    Reflect.deleteProperty(legacyDay.usage, 'userInputTokens');
+    const response: AnalyticsSummary = { ...summary, days: [legacyDay], totals: { ...summary.totals, inputTokens: 1000, outputTokens: 100, cacheReadTokens: 500 }, previous: emptyCounters() };
+    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? response : []));
+    useStore.setState({ analyticsTab: 'tokens', analyticsRange: range });
+    const view = render(<AnalyticsDashboard />);
+    const ui = within(view.container);
+    const tile = (label: string) => Array.from(view.container.querySelectorAll('.kpi')).find((k) => k.querySelector('.kpi-label')?.textContent === label);
+    try {
+      await waitFor(() => expect(tile('Total tokens')?.querySelector('.kpi-value')?.textContent).toBe('1.6k'));
+      expect(tile('User input (est.)')?.querySelector('.kpi-value')?.textContent).toBe('0');
+      expect(tile('User input (est.)')?.querySelector('.kpi-delta')).toBeNull();
+      expect(tile('User input (est.)')?.querySelector('.spark')).toBeNull();
+      const chart = ui.getByRole('heading', { name: 'User input per day (est.)' }).closest('section')!;
+      expect(chart.textContent).toContain('No ordinary-session message text tracked in this range yet.');
+      fireEvent.click(within(chart).getByTitle('Show as table'));
+      const values = within(chart).getAllByRole('row').slice(1).map((row) => within(row).getAllByRole('cell')[1].textContent);
+      expect(values).toEqual(Array(range || 2).fill('0'));
+      expect(view.container.textContent).not.toMatch(/NaN|Infinity/);
+    } finally {
+      view.unmount();
+      invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? summary : []));
+    }
   });
 
   it('shows the cache hit rate of each model on the tokens tab', async () => {
