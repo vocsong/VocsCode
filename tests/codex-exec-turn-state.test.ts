@@ -8,6 +8,9 @@ import type { HarnessRef, SessionEvent, SessionMeta, TranscriptItem } from '../s
 import type { HarnessContext } from '../src/main/harness/types';
 import { emptyUsage } from '../src/main/models/static-models';
 import { CodexExecAdapter } from '../src/main/harness/codex-exec';
+import { readCodexMcpServerIds } from '../src/main/mcp/codex';
+
+vi.mock('../src/main/mcp/codex', () => ({ readCodexMcpServerIds: vi.fn(async () => []) }));
 
 type AnyRecord = Record<string, any>;
 
@@ -148,6 +151,7 @@ const usageEvent = (events: SessionEvent[]): Extract<SessionEvent, { type: 'usag
 
 describe('codex-exec adapter', () => {
   beforeEach(() => {
+    vi.mocked(readCodexMcpServerIds).mockReset().mockResolvedValue([]);
     sdk.codexOptions.length = 0;
     sdk.startCalls.length = 0;
     sdk.resumeCalls.length = 0;
@@ -157,6 +161,27 @@ describe('codex-exec adapter', () => {
 
   afterEach(() => {
     (globalThis as AnyRecord).__nextCodexThread = undefined;
+  });
+
+  it.each([
+    { name: 'no native transport', inherited: [], disabled: { enabled: false, command: 'gitnexus' } },
+    { name: 'a valid native transport', inherited: ['gitnexus'], disabled: { enabled: false } }
+  ])('disables an absent built-in with $name in the SDK config', async ({ inherited, disabled }) => {
+    vi.mocked(readCodexMcpServerIds).mockResolvedValue(inherited);
+    const { ctx } = makeCtx();
+    ctx.runtime = { resolve: () => ({ path: '/fake/codex' }) } as never;
+    ctx.ownedMcpIds = () => ['gitnexus'];
+    scriptThreads([{ id: 'thread-1' }]);
+    const adapter = new CodexExecAdapter(ctx);
+    try {
+      await adapter.start();
+      expect(sdk.codexOptions).toHaveLength(1);
+      expect(sdk.codexOptions[0].config.mcp_servers).toEqual({ gitnexus: disabled });
+      expect(readCodexMcpServerIds).toHaveBeenCalledExactlyOnceWith('/fake/codex', '/proj');
+      expect(sdk.startCalls).toHaveLength(1);
+    } finally {
+      await adapter.dispose();
+    }
   });
 
   it('starts a fresh thread and normalizes items, ref and usage', async () => {

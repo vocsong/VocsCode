@@ -15,6 +15,9 @@ import { defaultSettings } from '../src/main/settings';
 import type { HarnessContext } from '../src/main/harness/types';
 import type { AppSettings, HarnessRef, ModelRef, ProviderConfig, SessionEvent, SessionMeta } from '../src/shared/types';
 import { CODEX_STATIC_MODELS, emptyUsage } from '../src/main/models/static-models';
+import { readCodexMcpServerIds } from '../src/main/mcp/codex';
+
+vi.mock('../src/main/mcp/codex', () => ({ readCodexMcpServerIds: vi.fn(async () => []) }));
 
 type AnyRecord = Record<string, any>;
 
@@ -167,6 +170,7 @@ function scriptServer(child: AnyRecord): FakeJsonRpcServer {
 }
 
 beforeEach(() => {
+  vi.mocked(readCodexMcpServerIds).mockReset().mockResolvedValue([]);
   mocks.shutdown.mockClear();
   mocks.spawnChildren.length = 0;
   mocks.spawnCalls.length = 0;
@@ -395,7 +399,11 @@ describe('codex custom provider wiring', () => {
     await adapter.dispose();
   });
 
-  it('switches this app\u2019s own server name off in the thread config when the session gets none', async () => {
+  it.each([
+    { name: 'no native transport', inherited: [], disabled: { enabled: false, command: 'gitnexus' } },
+    { name: 'a valid native transport', inherited: ['gitnexus'], disabled: { enabled: false } }
+  ])('disables an absent built-in with $name in the thread config', async ({ inherited, disabled }) => {
+    vi.mocked(readCodexMcpServerIds).mockResolvedValue(inherited);
     const meta = makeMeta();
     const { ctx } = makeCtx(meta, defaultSettings(), ['gitnexus']);
     const child = makeFakeChild();
@@ -403,10 +411,13 @@ describe('codex custom provider wiring', () => {
     const server = scriptServer(child);
 
     const adapter = new CodexAppServerAdapter(ctx);
-    await adapter.start();
-
-    const thread = server.requests.find((r) => r.method === 'thread/start');
-    expect(thread?.params.config?.mcp_servers).toEqual({ gitnexus: { enabled: false } });
-    await adapter.dispose();
+    try {
+      await adapter.start();
+      const thread = server.requests.find((r) => r.method === 'thread/start');
+      expect(thread?.params.config?.mcp_servers).toEqual({ gitnexus: disabled });
+      expect(readCodexMcpServerIds).toHaveBeenCalledExactlyOnceWith('C:/fake/codex.exe', meta.cwd);
+    } finally {
+      await adapter.dispose();
+    }
   });
 });

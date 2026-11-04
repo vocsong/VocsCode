@@ -9,6 +9,7 @@ import { TurnUsageTracker } from '../util/turn-usage';
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
 import { codexProviderModels } from '../models/codex-catalog';
 import { toCodex } from '../mcp/effective';
+import { readCodexMcpServerIds } from '../mcp/codex';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY } from './permissions';
 import { spawnTool } from './spawn';
@@ -221,7 +222,9 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       // Codex loads its own ~/.codex/config.toml under whatever this hands over, so a server this
       // app defines has to be claimed either way: the shared endpoint when the repo has an index,
       // otherwise switched off, so that config cannot start a second copy in the session.
-      const mcpServers = toCodex(mcp, 'inline', { owned: this.ctx.ownedMcpIds() }).config;
+      const owned = this.ctx.ownedMcpIds();
+      const inherited = owned.length ? await readCodexMcpServerIds(bin.path, meta.cwd) : [];
+      const mcpServers = toCodex(mcp, 'inline', { owned, inherited }).config;
       if (Object.keys(mcpServers).length) config.mcp_servers = mcpServers;
       if (Object.keys(config).length) common.config = config;
       let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null; serviceTier?: string | null };

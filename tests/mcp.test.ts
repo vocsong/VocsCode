@@ -18,6 +18,7 @@ import {
 import { codexHeaderVar, effectiveEntries, effectiveServers, normalizeStdio, referencedVars, resolveVars, toAcp, toClaude, toCodex } from '../src/main/mcp/effective';
 import { normalizeMcpProjectState, normalizeMcpServers } from '../src/main/settings';
 import { HARNESSES } from '../src/shared/harness-meta';
+import { MCP_BUILTIN_IDS } from '../src/shared/types';
 import type { McpServerDef } from '../src/shared/types';
 
 let dir: string;
@@ -343,9 +344,20 @@ describe('dialects', () => {
     expect(toAcp([http({ transport: 'sse' })], { http: true })).toEqual([]);
   });
 
-  it('switches an owned name off for a session that does not receive it', () => {
-    const { config, env } = toCodex([], 'inline', { owned: ['gitnexus'] });
-    expect(config).toEqual({ gitnexus: { enabled: false } });
+  it.each(['inline', 'env-ref'] as const)('supplies a valid disabled transport without inherited config in %s mode', (mode) => {
+    const { config, env } = toCodex([], mode, { owned: ['gitnexus'] });
+    expect(config).toEqual({ gitnexus: { enabled: false, command: 'gitnexus' } });
+    expect(env).toEqual({});
+  });
+
+  it.each(MCP_BUILTIN_IDS)('supplies a disabled transport for the absent %s builtin', (id) => {
+    expect(toCodex([], 'inline', { owned: [id] }).config[id]).toEqual({ enabled: false, command: id });
+  });
+
+  it.each(['inline', 'env-ref'] as const)('keeps known inherited transports in place in %s config', (mode) => {
+    const inherited = ['gitnexus', 'vocs-memory'];
+    const { config, env } = toCodex([], mode, { owned: ['gitnexus', 'vocs-memory'], inherited });
+    expect(config).toEqual({ gitnexus: { enabled: false }, 'vocs-memory': { enabled: false } });
     expect(env).toEqual({});
   });
 
