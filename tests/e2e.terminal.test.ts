@@ -370,6 +370,10 @@ describe.runIf(enabled)('electron e2e: fork a worktree session', () => {
     await fs.mkdir(userData, { recursive: true });
     await fs.mkdir(project, { recursive: true });
     await fs.writeFile(path.join(project, 'README.md'), '# fork project\n');
+    await fs.writeFile(path.join(project, '.gitignore'), '.env*\n');
+    await fs.writeFile(path.join(project, '.worktreeinclude'), '.env\n');
+    await fs.writeFile(path.join(project, '.env'), 'DEV_CONFIG=from-project\n');
+    await fs.writeFile(path.join(project, '.env.local'), 'not included\n');
     execFileSync('git', ['init', '-q'], { cwd: project });
     execFileSync('git', ['add', '-A'], { cwd: project });
     execFileSync('git', ['-c', 'user.email=e2e@example.com', '-c', 'user.name=e2e', 'commit', '-qm', 'init'], { cwd: project });
@@ -403,6 +407,9 @@ describe.runIf(enabled)('electron e2e: fork a worktree session', () => {
       expect(src.worktreeBranch).toMatch(/^feat\//);
       expect(src.cwd).toContain(path.join('.vocs-code', 'worktrees'));
       expect(await present(src.cwd), 'the source worktree exists on disk').toBe(true);
+      expect(await fs.readFile(path.join(src.cwd, '.env'), 'utf8')).toBe('DEV_CONFIG=from-project\n');
+      expect(await present(path.join(src.cwd, '.env.local'))).toBe(false);
+      await fs.writeFile(path.join(src.cwd, '.env'), 'DEV_CONFIG=source-only\n');
 
       // Fork from the sidebar row: the fork gets its own directory and its own branch.
       const srcRow = win.locator(`[data-session-id="${src.id}"]`);
@@ -418,6 +425,9 @@ describe.runIf(enabled)('electron e2e: fork a worktree session', () => {
       expect(fork.worktreeBranch).toMatch(/^feat\//);
       expect(fork.worktreeBranch).not.toBe(src.worktreeBranch);
       expect(await present(fork.cwd), 'the fork worktree exists on disk').toBe(true);
+      // The include list and local config come from the project, not the source session's edits.
+      expect(await fs.readFile(path.join(fork.cwd, '.env'), 'utf8')).toBe('DEV_CONFIG=from-project\n');
+      expect(await present(path.join(fork.cwd, '.env.local'))).toBe(false);
 
       // Archive the source with its worktree removed: its folder goes, the fork's stays.
       const srcRowAgain = win.locator(`[data-session-id="${src.id}"]`);

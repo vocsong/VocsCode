@@ -114,6 +114,22 @@ describe('worktree isolation at session creation', () => {
     expect(meta.config.useWorktree).toBe(true);
   });
 
+  it('starts the session in a worktree that has the gitignored files .worktreeinclude names', async () => {
+    const projectRoot = await repoFolder();
+    await fs.writeFile(path.join(projectRoot, '.gitignore'), '.env\n.env.local\n');
+    await fs.writeFile(path.join(projectRoot, '.worktreeinclude'), '.env\n');
+    await runGit(projectRoot, ['add', '.gitignore', '.worktreeinclude']);
+    await runGit(projectRoot, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'include .env']);
+    await fs.writeFile(path.join(projectRoot, '.env'), 'PORT=3001\n');
+    await fs.writeFile(path.join(projectRoot, '.env.local'), 'not named\n');
+    const manager = await makeManager();
+
+    const meta = await manager.create({ config: { harness: 'native', projectRoot, permissionMode: 'ask', useWorktree: true }, title: 'run the server' } as never);
+
+    expect(await fs.readFile(path.join(meta.cwd, '.env'), 'utf8')).toBe('PORT=3001\n');
+    expect(await exists(path.join(meta.cwd, '.env.local'))).toBe(false);
+  });
+
   it('starts the worktree on a branch under the requested prefix', async () => {
     const projectRoot = await repoFolder();
     const manager = await makeManager();
