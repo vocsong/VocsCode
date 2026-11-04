@@ -30,9 +30,9 @@ async function setup() {
   return { dir, store, settings, manager: new SessionManager(deps), pushSessions };
 }
 
-function chat(projectRoot: string, source: 'claude' | 'codex' = 'claude'): ParsedChatImport {
+function chat(projectRoot: string, source: 'claude' | 'codex' = 'claude', sourceSessionId = 'external-id'): ParsedChatImport {
   return {
-    candidate: { id: `${source}_external`, source, sourceSessionId: 'external-id', title: 'Imported question', projectRoot, createdAt: 1000, updatedAt: 2000, messageCount: 2 },
+    candidate: { id: `${source}_${sourceSessionId}`, source, sourceSessionId, title: 'Imported question', projectRoot, createdAt: 1000, updatedAt: 2000, messageCount: 2 },
     items: [{ id: 'user', kind: 'user', text: 'Imported question', ts: 1000 }, { id: 'assistant', kind: 'assistant', text: 'Historical answer', ts: 2000 }]
   };
 }
@@ -66,6 +66,112 @@ describe('chat import persistence', () => {
     expect(results.map((result) => result.skipped)).toEqual([1, 1]);
     await manager.importChats([chat(dir, 'codex')]);
     expect(store.list()).toHaveLength(2);
+  });
+
+  it.each([
+    { harness: 'claude', source: 'claude', harnessRef: { claudeSessionId: 'external-id' } },
+    { harness: 'codex', source: 'codex', harnessRef: { codexThreadId: 'external-id' } },
+    { harness: 'codex-exec', source: 'codex', harnessRef: { codexThreadId: 'external-id' } },
+  ] as const)('does not clone a provider conversation already represented by a $harness session', async ({ harness, source, harnessRef }) => {
+    const { dir, store, settings, manager } = await setup();
+    const ordinary: SessionMeta = {
+      id: 'ordinary-session', title: 'Existing conversation', createdAt: 1, updatedAt: 2,
+      config: { harness, projectRoot: dir, permissionMode: 'ask' }, cwd: dir,
+      status: 'idle', harnessRef, usage: { ...emptyUsage(), costUsd: 1.25 }, queued: 0
+    };
+    await store.upsert(ordinary);
+    const previous = [{ id: 'original-user', kind: 'user' as const, ts: 1, text: 'Original Vocs conversation' }];
+    await store.rewriteTranscript(ordinary.id, previous);
+    expect(await manager.importChats([chat(dir, source)])).toEqual({ imported: [], skipped: 1 });
+    expect(store.list()).toEqual([ordinary]);
+    expect(await store.readTranscript(ordinary.id)).toEqual(previous);
+    expect(await store.readBlob(ordinary.id, 'fork-context.md')).toBeNull();
+    expect(settings.get().folders).toContain(dir);
+    const restarted = new SessionStore(dir);
+    await restarted.load();
+    expect(restarted.list()).toHaveLength(1);
+    expect(restarted.get(ordinary.id)!.usage.costUsd).toBe(1.25);
+  });
+
+  it('does not confuse the same provider identifier across Claude and Codex', async () => {
+    const { dir, store, manager } = await setup();
+    await store.upsert({ id: 'ordinary-claude', title: 'Claude original', createdAt: 1, updatedAt: 2,
+      config: { harness: 'claude', projectRoot: dir, permissionMode: 'ask' }, cwd: dir,
+      status: 'idle', harnessRef: { claudeSessionId: 'external-id' }, usage: emptyUsage() });
+    expect((await manager.importChats([chat(dir, 'codex')])).imported).toHaveLength(1);
+    expect(store.list()).toHaveLength(2);
+  });
+
+  it('registers committed project folders even when a later selected chat fails', async () => {
+    const { dir, store, settings, manager, pushSessions } = await setup();
+    const one = chat(path.join(dir, 'first-project'), 'claude', 'first');
+    const two = chat(path.join(dir, 'second-project'), 'claude', 'second');
+    const rename = fs.rename.bind(fs);
+    let writes = 0;
+    const failure = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (String(to).endsWith('transcript.jsonl') && ++writes === 2) throw Object.assign(new Error('second import failed'), { code: 'ENOSPC' });
+      return rename(from, to);
+    });
+    await expect(manager.importChats([one, two])).rejects.toThrow('second import failed');
+    failure.mockRestore();
+    expect(store.list()).toHaveLength(1);
+    expect(settings.get().folders).toContain(one.candidate.projectRoot);
+    expect(settings.get().folders).not.toContain(two.candidate.projectRoot);
+    expect(pushSessions).toHaveBeenCalledTimes(1);
+    expect(await manager.importChats([one, two])).toMatchObject({ skipped: 1, imported: [expect.objectContaining({ importedFrom: { source: 'claude', sessionId: 'second' } })] });
+    expect(store.list()).toHaveLength(2);
+    expect(settings.get().folders).toEqual(expect.arrayContaining([one.candidate.projectRoot, two.candidate.projectRoot]));
+    const restarted = new SettingsStore(dir);
+    await restarted.load();
+    expect(restarted.get().folders).toEqual(settings.get().folders);
+  });
+
+  it('repairs project registration on a deduplicated retry after a settings write failed', async () => {
+    const { dir, store, settings, manager } = await setup();
+    const input = chat(path.join(dir, 'unregistered-project'));
+    const rename = fs.rename.bind(fs);
+    const failure = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (String(to).endsWith('settings.json')) throw Object.assign(new Error('settings write failed'), { code: 'ENOSPC' });
+      return rename(from, to);
+    });
+    await expect(manager.importChats([input])).rejects.toThrow('settings write failed');
+    failure.mockRestore();
+    expect(store.list()).toHaveLength(1);
+    expect(settings.get().folders).not.toContain(input.candidate.projectRoot);
+    expect(await manager.importChats([input])).toEqual({ imported: [], skipped: 1 });
+    expect(store.list()).toHaveLength(1);
+    expect(settings.get().folders).toContain(input.candidate.projectRoot);
+    expect(settings.get().recentProjects).toContain(input.candidate.projectRoot);
+    const imported = store.list()[0]!;
+    await manager.patch(imported.id, { archived: true });
+    const restartedSettings = new SettingsStore(dir);
+    await restartedSettings.load();
+    expect(restartedSettings.get().folders).toContain(input.candidate.projectRoot);
+    const restartedStore = new SessionStore(dir);
+    await restartedStore.load();
+    expect(restartedStore.list()).toHaveLength(1);
+    expect(await restartedStore.readTranscript(imported.id)).toEqual(input.items);
+  });
+
+  it('preserves the import error when both a later chat and project registration fail, and repairs on retry', async () => {
+    const { dir, store, settings, manager } = await setup();
+    const one = chat(path.join(dir, 'first-project'), 'claude', 'first');
+    const two = chat(path.join(dir, 'second-project'), 'claude', 'second');
+    const rename = fs.rename.bind(fs);
+    let writes = 0;
+    const failure = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (String(to).endsWith('transcript.jsonl') && ++writes === 2) throw Object.assign(new Error('original import error'), { code: 'ENOSPC' });
+      if (String(to).endsWith('settings.json')) throw Object.assign(new Error('registration error'), { code: 'ENOSPC' });
+      return rename(from, to);
+    });
+    await expect(manager.importChats([one, two])).rejects.toThrow('original import error');
+    failure.mockRestore();
+    expect(store.list()).toHaveLength(1);
+    expect(settings.get().folders).not.toContain(one.candidate.projectRoot);
+    expect(await manager.importChats([one])).toEqual({ imported: [], skipped: 1 });
+    expect(settings.get().folders).toContain(one.candidate.projectRoot);
+    expect(store.list()).toHaveLength(1);
+    expect(await store.readTranscript(store.list()[0]!.id)).toEqual(one.items);
   });
 
   it('does not persist a failed import through a concurrent ordinary session update', async () => {

@@ -18,6 +18,7 @@ export const CHAT_IMPORT_SKIP_REASON_LABELS = {
   subagent: 'Subagent history',
   missingProject: 'Missing or invalid project directory metadata',
   invalidHistory: 'Unrecognized or invalid history',
+  unsupportedHistory: 'Linked Codex history is not supported',
   tooLarge: 'File exceeds the size limit',
   scanBudget: 'File exceeds the remaining scan budget',
   unreadable: 'History file could not be read',

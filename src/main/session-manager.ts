@@ -52,6 +52,7 @@ import { deferred, errorMessage, shortId, type Deferred } from './util/async';
 import { exists, readJson, writeJson } from './util/fs';
 import { generateBranchName, generateSessionTitle, titleFromPrompt } from './session-title';
 import type { ParsedChatImport } from './chat-import';
+import { representsChatImport } from './chat-import-identity';
 
 export { titleFromPrompt };
 
@@ -514,10 +515,15 @@ export class SessionManager {
   async importChats(chats: ParsedChatImport[]): Promise<{ imported: SessionMeta[]; skipped: number }> {
     const run = this.importQueue.then(async () => {
       const imported: SessionMeta[] = [];
+      const roots = new Set<string>();
       let skipped = 0;
+      let importFailed = false;
       try {
         for (const { candidate, items } of chats) {
-          if (this.deps.store.list().some((session) => session.importedFrom?.source === candidate.source && session.importedFrom.sessionId === candidate.sourceSessionId)) {
+          const existing = this.deps.store.list().find((session) => representsChatImport(session, candidate));
+          if (existing) {
+            // A previous batch may have saved the session but failed to register its project.
+            if (existing.config?.projectRoot) roots.add(existing.config.projectRoot);
             skipped++;
             continue;
           }
@@ -544,18 +550,29 @@ export class SessionManager {
           };
           await this.deps.store.importSession(meta, items, renderForkContext(items, harness, harness));
           imported.push(meta);
-        }
-        if (imported.length) {
-          const settings = this.settings();
-          const roots = imported.map((session) => session.config.projectRoot);
-          await this.deps.settings.update({
-            folders: [...new Set([...settings.folders, ...roots])],
-            recentProjects: [...new Set([...roots, ...settings.recentProjects])].slice(0, 12)
-          });
+          roots.add(meta.config.projectRoot);
         }
         return { imported, skipped };
+      } catch (error) {
+        importFailed = true;
+        throw error;
       } finally {
-        if (imported.length) this.pushSessions();
+        try {
+          if (roots.size) {
+            const settings = this.settings();
+            const folders = [...new Set([...settings.folders, ...roots])];
+            const recentProjects = [...new Set([...roots, ...settings.recentProjects])].slice(0, 12);
+            if (!isDeepStrictEqual(folders, settings.folders) || !isDeepStrictEqual(recentProjects, settings.recentProjects)) {
+              await this.deps.settings.update({ folders, recentProjects });
+            }
+          }
+        } catch (error) {
+          // Preserve the original import error; a retry still repairs registration for committed rows.
+          if (!importFailed) throw error;
+          this.deps.log('warn', `Imported project registration failed: ${errorMessage(error)}`);
+        } finally {
+          if (imported.length) this.pushSessions();
+        }
       }
     });
     this.importQueue = run.then(() => undefined, () => undefined);

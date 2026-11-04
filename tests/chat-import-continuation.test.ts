@@ -67,19 +67,29 @@ async function open(dir: string) {
 }
 
 const discarded = 'DISCARDED-CODEX-TURN';
+const discardedClaude = 'DISCARDED-CLAUDE-TURN';
 async function fixture(dir: string, source: ChatImportSource) {
   const home = path.join(dir, 'source');
   const file = source === 'claude'
     ? path.join(home, 'projects', 'fixture-project', 'original.jsonl')
     : path.join(home, 'sessions', '2026', '10', '30', 'rollout-original.jsonl');
-  const message = (role: 'user' | 'assistant', text: string, id: string) => source === 'claude'
-    ? { type: role, uuid: id, sessionId: 'external-session', cwd: dir, timestamp: '2026-10-30T01:00:00Z', message: { role, content: [{ type: 'text', text }] } }
+  const message = (role: 'user' | 'assistant', text: string, id: string, parentUuid?: string | null) => source === 'claude'
+    ? { type: role, uuid: id, ...(parentUuid !== undefined ? { parentUuid } : {}), sessionId: 'external-session', cwd: dir, timestamp: '2026-10-30T01:00:00Z', message: { role, content: [{ type: 'text', text }] } }
     : { type: 'response_item', timestamp: '2026-10-30T01:00:00Z', payload: { id, type: 'message', role, content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }] } };
   const records = source === 'claude' ? [
-    message('user', '<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>', 'local-clear'),
-    message('user', '<local-command-stdout>Conversation cleared.</local-command-stdout>', 'local-output'),
+    message('user', '<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>', 'local-clear', null),
+    message('user', '<local-command-stdout>Conversation cleared.</local-command-stdout>', 'local-output', 'local-clear'),
   ] : [{ type: 'session_meta', timestamp: '2026-10-30T01:00:00Z', payload: { id: 'external-session', cwd: dir } }];
-  const rows: unknown[] = [...records, message('user', 'Historical question', 'old-user'), message('assistant', 'Historical answer', 'old-assistant')];
+  const rows: unknown[] = [...records,
+    message('user', 'Historical question', 'old-user', source === 'claude' ? 'local-output' : undefined),
+    message('assistant', 'Historical answer', 'old-assistant', source === 'claude' ? 'old-user' : undefined),
+  ];
+  if (source === 'claude') rows.push(
+    message('user', `${discardedClaude} question`, 'discarded-user', 'old-assistant'),
+    message('assistant', `${discardedClaude} answer`, 'discarded-assistant', 'discarded-user'),
+    { type: 'user', uuid: 'kept-tool-bridge', parentUuid: 'old-assistant', sessionId: 'external-session', cwd: dir, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'synthetic-tool', content: 'Tool-only retained bridge' }] } },
+    { type: 'progress', uuid: 'late-progress', parentUuid: 'discarded-assistant', sessionId: 'external-session', cwd: dir },
+  );
   if (source === 'codex') rows.push(
     message('user', `${discarded} question`, 'discarded-user'),
     message('assistant', `${discarded} answer`, 'discarded-assistant'),
@@ -111,7 +121,9 @@ describe('imported conversation lifecycle', () => {
     expect(delivered).toContain('Historical question');
     expect(delivered).toContain('Historical answer');
     expect(delivered.endsWith('Continue accepted work')).toBe(true);
+    expect(delivered).not.toContain(discardedClaude);
     expect(delivered).not.toMatch(/command-name|local-command-stdout|Conversation cleared/);
+    expect(await store.readBlob(session.id, 'fork-context.md')).not.toContain(discardedClaude);
     expect(await store.readBlob(session.id, 'fork-context.md')).not.toMatch(/command-name|local-command-stdout|Conversation cleared/);
     const items = await store.readTranscript(session.id);
     expect(items.filter((item) => item.kind === 'user').map((item) => item.text)).toEqual(['Historical question', 'Continue accepted work']);
@@ -137,6 +149,45 @@ describe('imported conversation lifecycle', () => {
     expect(await store.readBlob(session.id, 'fork-context.md')).not.toContain(discarded);
     expect(JSON.stringify(await store.readTranscript(session.id))).not.toContain(discarded);
     expect(await fs.readFile(original.file)).toEqual(original.bytes);
+  });
+
+  it.each((['messages', 'segment'] as const).flatMap((format) => (['continue', 'fork'] as const).map((mode) => ({ format, mode }))))('hands off retained partial-compaction history in logical order for $format $mode', async ({ format, mode }) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-import-compaction-'));
+    dirs.push(dir);
+    const home = path.join(dir, 'claude');
+    const file = path.join(home, 'projects', 'fixture', 'compacted.jsonl');
+    const accepted = ['Summary of retained work', 'Retained constraint: preserve existing data', 'Retained decision: add only a migration', 'Latest accepted question', 'Latest accepted answer'];
+    const message = (role: 'user' | 'assistant', uuid: string, parentUuid: string | null, text: string) => ({ type: role, uuid, parentUuid, sessionId: 'compacted-session', cwd: dir, timestamp: '2026-10-30T01:00:00Z', message: { role, content: text } });
+    const preservation = format === 'messages'
+      ? { preservedMessages: { anchorUuid: 'summary', uuids: ['kept-user', 'kept-assistant'] } }
+      : { preservedSegment: { anchorUuid: 'summary', headUuid: 'kept-user', tailUuid: 'kept-assistant' } };
+    const rows = [
+      message('user', 'old-user', null, 'OLD-DISCARDED-COMPACT question'), message('assistant', 'old-answer', 'old-user', 'OLD-DISCARDED-COMPACT answer'),
+      message('user', 'kept-user', 'old-answer', accepted[1]!), message('assistant', 'kept-assistant', 'kept-user', accepted[2]!),
+      { type: 'system', subtype: 'compact_boundary', uuid: 'compact-boundary', parentUuid: null, sessionId: 'compacted-session', cwd: dir, compactMetadata: preservation },
+      { ...message('user', 'summary', 'compact-boundary', accepted[0]!), isCompactSummary: true },
+      message('user', 'latest-user', 'summary', accepted[3]!), message('assistant', 'latest-answer', 'latest-user', accepted[4]!),
+    ];
+    const bytes = Buffer.from(rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, bytes);
+    const first = await open(path.join(dir, 'user-data'));
+    const { imported } = await first.manager.importChats((await discoverChatImports('claude', { claudeDir: home })).sessions);
+    expect(imported).toHaveLength(1);
+    const { store, manager } = await open(path.join(dir, 'user-data'));
+    const session = mode === 'fork' ? (await manager.fork(imported[0]!.id))! : store.get(imported[0]!.id)!;
+    await manager.send(session.id, { text: 'Continue the retained work' });
+    expect(runtime.sent).toHaveLength(1);
+    const delivered = runtime.sent[0]!.input.text;
+    for (const text of accepted) expect(delivered).toContain(text);
+    const positions = accepted.map((text) => delivered.indexOf(text));
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(delivered).not.toContain('OLD-DISCARDED-COMPACT');
+    expect(delivered.endsWith('Continue the retained work')).toBe(true);
+    const transcript = await store.readTranscript(session.id);
+    expect(transcript.filter((item) => item.kind === 'user' || item.kind === 'assistant').map((item) => item.text)).toEqual([...accepted, 'Continue the retained work', 'Scripted answer']);
+    expect(await store.readBlob(session.id, 'fork-context.md')).not.toContain('OLD-DISCARDED-COMPACT');
+    expect(await fs.readFile(file)).toEqual(bytes);
   });
 
   it.each(cases)('$source $mode preserves accepted history, deduplicates, survives restart and leaves source bytes unchanged', async ({ source, mode }) => {
@@ -188,6 +239,7 @@ describe('imported conversation lifecycle', () => {
       expect(runtime.started.at(-1)!.ref).toEqual({ claudeSessionId: `provider-${originalId}`, forkOnResume: true });
     }
     expect(delivered.input.text).not.toContain(discarded);
+    expect(delivered.input.text).not.toContain(discardedClaude);
     expect(delivered.input.text.endsWith('Continue now')).toBe(true);
     expect(manager.get(session.id)!.pendingForkContext).toBeUndefined();
     await manager.send(session.id, { text: 'Next question' });

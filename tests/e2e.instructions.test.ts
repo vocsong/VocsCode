@@ -82,8 +82,9 @@ describe.runIf(enabled)('chat import UI', () => {
     const codexDir = path.join(tmp, 'codex');
     const claudeFile = path.join(claudeDir, 'projects', 'fixture-project', 'claude-fixture.jsonl');
     const codexFile = path.join(codexDir, 'sessions', '2026', '10', '30', 'rollout-codex-fixture.jsonl');
+    const linkedCodexFile = path.join(path.dirname(codexFile), 'rollout-linked.jsonl');
     for (const dir of [userData, project, path.dirname(claudeFile), path.dirname(codexFile)]) await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { onboardingDone: false, agent: { enabled: false } }));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { folders: [], recentProjects: [], onboardingDone: false, agent: { enabled: false } }));
     const claudeText = [
       { type: 'user', uuid: 'claude-clear', sessionId: 'claude-fixture', cwd: project, timestamp: '2026-10-30T00:58:00Z', message: { role: 'user', content: '<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>' } },
       { type: 'user', uuid: 'claude-local-output', sessionId: 'claude-fixture', cwd: project, timestamp: '2026-10-30T00:59:00Z', message: { role: 'user', content: [{ type: 'text', text: '<local-command-stdout>Conversation cleared.</local-command-stdout>' }] } },
@@ -98,8 +99,13 @@ describe.runIf(enabled)('chat import UI', () => {
       { type: 'response_item', timestamp: '2026-10-30T02:03:00Z', payload: { id: 'discarded-assistant', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'DISCARDED-CODEX-TURN answer' }] } },
       { type: 'event_msg', timestamp: '2026-10-30T02:04:00Z', payload: { type: 'thread_rolled_back', num_turns: 1 } }
     ].map((row) => JSON.stringify(row)).join('\n') + '\n';
+    const linkedCodexText = [
+      { type: 'session_meta', payload: { id: '22222222-2222-4222-8222-222222222222', cwd: project, history_mode: 'paginated', history_base: { thread_id: '11111111-1111-4111-8111-111111111111', end_ordinal_exclusive: 3, end_byte_offset: 1000 } } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'LINKED-CODEX-LOCAL-ONLY' }] } },
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n';
     await fs.writeFile(claudeFile, claudeText);
     await fs.writeFile(codexFile, codexText);
+    await fs.writeFile(linkedCodexFile, linkedCodexText);
     const skippedFixtures = [
       { file: path.join(path.dirname(claudeFile), 'command-only.jsonl'), text: claudeText.split('\n').slice(0, 2).join('\n') + '\n' },
       { file: path.join(path.dirname(claudeFile), 'missing-project.jsonl'), text: JSON.stringify({ type: 'user', uuid: 'missing-project', sessionId: 'missing-project', message: { role: 'user', content: 'History without project metadata' } }) + '\n' },
@@ -126,7 +132,9 @@ describe.runIf(enabled)('chat import UI', () => {
           '1 — Empty or no conversation text', '1 — Missing or invalid project directory metadata', '1 — Unrecognized or invalid history'
         ]);
       } else {
-        expect(await reasons.count()).toBe(0);
+        await win.getByText('1 history file skipped.', { exact: true }).waitFor();
+        expect(await reasons.locator('li').allTextContents()).toEqual(['1 — Linked Codex history is not supported']);
+        expect(await win.getByRole('checkbox', { name: 'Import LINKED-CODEX-LOCAL-ONLY', exact: true }).count()).toBe(0);
       }
     };
     const readSessions = async (): Promise<SessionMeta[]> => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8').catch(() => '[]'));
@@ -195,6 +203,47 @@ describe.runIf(enabled)('chat import UI', () => {
     expect(await win.getByText('Conversation cleared.', { exact: false }).count()).toBe(0);
     expect(await fs.readFile(claudeFile)).toEqual(Buffer.from(claudeText));
     expect(await fs.readFile(codexFile)).toEqual(Buffer.from(codexText));
+    expect(await fs.readFile(linkedCodexFile)).toEqual(Buffer.from(linkedCodexText));
     for (const { file, text } of skippedFixtures) expect(await fs.readFile(file)).toEqual(Buffer.from(text));
   }, 180_000);
+
+  it('retains a previously unknown imported folder immediately after archiving its last chat and after restart', async () => {
+    await app?.close();
+    app = null;
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-import-new-folder-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'unknown-project');
+    const claudeDir = path.join(tmp, 'claude');
+    const filename = path.join(claudeDir, 'projects', 'fixture', 'session.jsonl');
+    for (const dir of [userData, project, path.dirname(filename)]) await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { folders: [], recentProjects: [], agent: { enabled: false } }));
+    const original = JSON.stringify({ type: 'user', uuid: 'folder-user', sessionId: 'folder-session', cwd: project, timestamp: '2026-10-30T01:00:00Z', message: { role: 'user', content: 'Previously unknown project chat' } }) + '\n';
+    await fs.writeFile(filename, original);
+    const env = isolatedEnv(userData, { CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: path.join(tmp, 'codex') });
+    const launch = async (): Promise<Page> => {
+      app = await electron.launch({ ...launchOptions, env, timeout: 60_000 });
+      const win = await app.firstWindow();
+      await win.waitForSelector('.brand', { timeout: 60_000 });
+      return win;
+    };
+    let win = await launch();
+    await win.locator('.sidebar-bottom').getByRole('button', { name: 'Settings', exact: true }).click();
+    await win.getByRole('button', { name: 'Import chats', exact: true }).click();
+    await win.getByRole('button', { name: 'Scan Claude Code', exact: true }).click();
+    await win.getByRole('checkbox', { name: 'Import Previously unknown project chat', exact: true }).check();
+    await win.getByRole('button', { name: 'Import selected (1)', exact: true }).click();
+    const row = win.getByTestId('session-row').filter({ hasText: 'Previously unknown project chat' });
+    await row.waitFor();
+    await row.hover();
+    await row.getByRole('button', { name: 'Archive session', exact: true }).click();
+    await row.waitFor({ state: 'hidden' });
+    // This assertion must precede reload/restart: boot would mask a missed settings push.
+    expect(await win.getByRole('button', { name: 'New session in unknown-project', exact: true }).count()).toBe(1);
+    await app!.close();
+    app = null;
+    win = await launch();
+    await win.getByRole('button', { name: 'New session in unknown-project', exact: true }).waitFor();
+    expect(await win.getByTestId('session-row').count()).toBe(0);
+    expect(await fs.readFile(filename, 'utf8')).toBe(original);
+  }, 120_000);
 });

@@ -69,13 +69,13 @@ describe('chat import UI', () => {
   });
 
   it('explains skipped histories with reason counts and reports directory failures separately', async () => {
-    invoke.mockResolvedValueOnce({ candidates: [], skipped: 168, skippedReasons: { empty: 120, subagent: 30, missingProject: 10, invalidHistory: 4, tooLarge: 2, scanBudget: 1, unreadable: 1 }, scanErrors: 2 });
+    invoke.mockResolvedValueOnce({ candidates: [], skipped: 168, skippedReasons: { empty: 120, subagent: 30, missingProject: 10, invalidHistory: 3, unsupportedHistory: 1, tooLarge: 2, scanBudget: 1, unreadable: 1 }, scanErrors: 2 });
     render(<ChatImport />);
     fireEvent.click(screen.getByRole('button', { name: 'Scan Claude Code' }));
     expect(await screen.findByText('168 history files skipped.')).toBeTruthy();
     const reasons = screen.getByRole('list', { name: 'Skipped chat reasons' });
-    expect(reasons.querySelectorAll('li')).toHaveLength(7);
-    for (const text of ['120 — Empty or no conversation text', '30 — Subagent history', '10 — Missing or invalid project directory metadata', '4 — Unrecognized or invalid history', '2 — File exceeds the size limit', '1 — File exceeds the remaining scan budget', '1 — History file could not be read']) {
+    expect(reasons.querySelectorAll('li')).toHaveLength(8);
+    for (const text of ['120 — Empty or no conversation text', '30 — Subagent history', '10 — Missing or invalid project directory metadata', '3 — Unrecognized or invalid history', '1 — Linked Codex history is not supported', '2 — File exceeds the size limit', '1 — File exceeds the remaining scan budget', '1 — History file could not be read']) {
       expect(screen.getByText(text)).toBeTruthy();
     }
     expect(screen.getByText('2 history directories could not be scanned. Some chats may be missing.')).toBeTruthy();

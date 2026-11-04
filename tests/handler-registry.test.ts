@@ -24,6 +24,7 @@ import { AppInstructions } from '../src/main/app-instructions';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
 import { discoverChatImports } from '../src/main/chat-import';
+import type { ChatImportPreview } from '../src/shared/chat-import';
 
 vi.mock('../src/main/chat-import', () => ({ discoverChatImports: vi.fn() }));
 
@@ -147,6 +148,37 @@ describe('handler registry', () => {
       candidates: [], skipped: 4, skippedReasons: { empty: 2, invalidHistory: 1, unreadable: 1 }, scanErrors: 1, malformedLines: 3, truncated: false
     });
     expect(discover).toHaveBeenCalledExactlyOnceWith('claude');
+  });
+
+  it.each(['claude', 'codex', 'codex-exec'] as const)('marks an existing %s provider conversation as already represented in the import preview', async (harness) => {
+    const { registry, deps } = stubDeps();
+    const source = harness === 'claude' ? 'claude' : 'codex';
+    const existing = deps.sessions.get('s_test')!;
+    deps.sessions.list = () => [{ ...existing, config: { ...existing.config, harness }, harnessRef: source === 'claude' ? { claudeSessionId: 'provider-owned' } : { codexThreadId: 'provider-owned' } }];
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [{ candidate: { id: `${source}_owned`, source, sourceSessionId: 'provider-owned', title: 'Existing conversation', projectRoot: ws, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [{ id: 'q', kind: 'user', text: 'Original question', ts: 1 }] }], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    const result = await registry.invoke('sessions:importList', { source }) as ChatImportPreview;
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]!.imported).toBe(true);
+  });
+
+  it.each([false, true])('publishes authoritative import settings after the operation (partial failure: %s)', async (fails) => {
+    const { registry, deps, pushes } = stubDeps();
+    const root = path.join(ws, 'imported-project');
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [{ candidate: { id: 'claude_new', source: 'claude', sourceSessionId: 'new-provider', title: 'Imported conversation', projectRoot: root, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [{ id: 'q', kind: 'user', text: 'Imported question', ts: 1 }] }], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    deps.sessions.importChats = async () => {
+      await deps.settings.update({ folders: [root], recentProjects: [root] });
+      if (fails) throw new Error('later selected chat failed');
+      return { imported: [], skipped: 0 };
+    };
+    const result = registry.invoke('sessions:import', { source: 'claude', ids: ['claude_new'] });
+    if (fails) await expect(result).rejects.toThrow('later selected chat failed');
+    else await expect(result).resolves.toEqual({ imported: [], skipped: 0 });
+    expect(pushes).toEqual([[PUSH_CHANNELS.settingsChanged, deps.settings.get()]]);
+    expect((pushes[0]![1] as { folders: string[] }).folders).toEqual([root]);
   });
 
   beforeAll(() => {

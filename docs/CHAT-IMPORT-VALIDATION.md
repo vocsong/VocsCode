@@ -11,6 +11,71 @@ All import histories are synthetic fixtures. No live provider tier is enabled. T
 Electron suite launches a separate temporary profile and a mock keychain; it checks
 the production desktop UI and persistence without reading the user's real history.
 
+## Six review findings follow-up
+
+The follow-up after `c32f8da` fixes or safely blocks the six reviewed failure modes:
+
+- Claude text/title/count/context inputs are materialized only from accepted
+  `parentUuid` chains. Textless tools/system/metadata can bridge the chain; trailing
+  status and sidechain rows cannot choose an abandoned branch. Entirely legacy
+  segments remain supported. Both partial-compaction preservation encodings
+  (`preservedMessages` and legacy `preservedSegment`) are applied before extraction,
+  including the logical order of relocated retained messages. Explicit cycle
+  detection permits verified relocation edges without accepting broken raw forward
+  links. Non-empty accepted segments around `/clear` remain imported, while
+  malformed/ambiguous linked histories are refused instead of falling back to an
+  abandoned branch. Isolated synthetic oracle cases agree with the public SDK
+  `getSessionMessages()` accepted chain without provider calls; both compaction
+  encodings also have exact-order direct/fork handoff coverage after restart.
+- Codex `history_base` references are explicitly refused before a child suffix can
+  become transcript or handoff context. Structurally valid linked histories report
+  the dedicated `unsupportedHistory` reason; malformed references/modes report
+  `invalidHistory`. **Full inherited-prefix reconstruction is not implemented.**
+  Complete standalone legacy/paginated histories, including `history_base: null`,
+  retain their normal import and rollback behavior. A known refused thread also
+  blocks older standalone files with that same stable thread ID, so a revert cannot
+  silently fall back to discarded history. Every blocked physical file contributes
+  one skip reason, independent of enumeration order.
+- A per-session lifecycle queue owns import/removal through publication and cleanup,
+  so an earlier delete cannot erase a same-ID replacement. Different IDs progress
+  independently, and failed index/transcript/context/cleanup operations do not
+  poison retries. Existing ordinary index and transcript queues are retained.
+- Both preview and admission recognize existing provider references as well as
+  `importedFrom`, including the Codex app-server/exec family. Existing conversations,
+  transcripts, provider references and spend are not replaced by duplicate copies.
+- Every import handler publishes authoritative settings after the operation, even
+  if a later chat failed. A previously unknown project remains visible immediately
+  after its last chat is archived; a reload must not be needed to learn its folder.
+- Project registration runs for committed and deduplicated imports even after a
+  later batch failure. Retrying repairs a previous settings-write failure without
+  copying the chat twice; a registration error does not mask the original import
+  error when both operations fail.
+
+Coverage includes parser/oracle, real-store/scripted continuation and fork prompts,
+registered-handler pushes and native-reference previews, barrier-controlled
+import/delete races and failure recovery, and fresh-profile Electron import/archive/
+restart tests. The new regressions reproduce failures before these fixes. Sources
+are synthetic and left byte-for-byte unchanged; no private histories, credentials
+or live provider calls are used. Existing imported copies are not migrated by a
+rescan and still need a fresh profile to re-evaluate accepted history.
+
+Final verification for these review fixes, on Node 22.16.0/macOS with canonical
+`TMPDIR` for Git-backed suites:
+
+| Command | Review-fixes result |
+| --- | --- |
+| `npm run typecheck` | Pass, all five TypeScript projects |
+| `npm run test:changed` | 111 files / 1,587 tests passed; 6 optional files / 84 tests skipped; 0 failures |
+| `npm run test:pr` | 32 requested files / 820 tests passed, 0 failures, 0 skips |
+| `npm run build` | Pass, Electron and web bundles |
+| `node scripts/e2e-guard.mjs tests/e2e.instructions.test.ts` | 3 tests passed, 0 failures, 0 skips |
+
+The eleven focused import/handler/fork/store suites also pass (300 tests). The
+changed run completed in 719.68 seconds. Its optional skips are not verification of
+those opt-in tiers; the requested Electron suite executes separately through the
+no-skip guard. Live Claude/Codex provider turns and Windows-only behavior were not
+run. No full offline or full release E2E gate was substituted for the develop gate.
+
 ## Baseline versus reviewed PR
 
 The earlier three failures came from two test files. The comparison below executes

@@ -52,6 +52,7 @@ import { spawnTool } from './harness/spawn';
 import { DictationService } from './dictation/service';
 import { localModel } from '../shared/dictation';
 import { discoverChatImports } from './chat-import';
+import { representsChatImport } from './chat-import-identity';
 
 /** Structural dialog options (Electron shapes are cast in ipc.ts, keeping this file Electron-free). */
 export interface OpenDialogOptions {
@@ -1079,7 +1080,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return {
       candidates: scan.sessions.map(({ candidate }) => ({
         ...candidate,
-        imported: sessions.list().some((session) => session.importedFrom?.source === source && session.importedFrom.sessionId === candidate.sourceSessionId)
+        imported: sessions.list().some((session) => representsChatImport(session, candidate))
       })),
       skipped: scan.skippedFiles,
       skippedReasons: scan.skippedReasons,
@@ -1094,7 +1095,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const wanted = new Set(ids);
     const selected = scan.sessions.filter(({ candidate }) => wanted.has(candidate.id));
     if (selected.length !== wanted.size) throw new Error('Some conversations are no longer available. Scan again before importing.');
-    return sessions.importChats(selected);
+    try {
+      return await sessions.importChats(selected);
+    } finally {
+      // Committed imports (including a partial batch) register projects outside settings:update.
+      deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
+    }
   });
   handle('sessions:create', async (req) => {
     const session = await sessions.create(req);
