@@ -23,6 +23,10 @@ import { PiConfigStore } from '../src/main/pi-config';
 import { AppInstructions } from '../src/main/app-instructions';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
+import { discoverChatImports } from '../src/main/chat-import';
+import type { ChatImportPreview } from '../src/shared/chat-import';
+
+vi.mock('../src/main/chat-import', () => ({ discoverChatImports: vi.fn() }));
 
 const dirs: string[] = [];
 let ws: string;
@@ -112,6 +116,113 @@ function stubDeps(overrides: Partial<Deps> = {}): { registry: HandlerRegistry; d
 }
 
 describe('handler registry', () => {
+  it('validates import sources, opaque identifiers and selection before privileged operations', async () => {
+    const { registry, deps } = stubDeps();
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    const importChats = vi.fn();
+    deps.sessions.importChats = importChats;
+    for (const request of [{ source: 'other' }, { source: 'claude', path: '/private/file' }]) {
+      await expect(registry.invoke('sessions:importList', request)).rejects.toThrow();
+    }
+    for (const request of [{ source: 'claude', ids: [] }, { source: 'claude', ids: ['../../file'] }, { source: 'codex', ids: Array(201).fill('id') }, { source: 'claude', ids: ['id'], repairOnly: 'true' }, { source: 'claude', ids: ['id'], repairOnly: 1 }, { source: 'claude', ids: ['id'], repairOnly: true, projectRoot: '/private/file' }]) {
+      await expect(registry.invoke('sessions:import', request)).rejects.toThrow();
+    }
+    expect(discover).not.toHaveBeenCalled();
+    expect(importChats).not.toHaveBeenCalled();
+    discover.mockResolvedValue({ sessions: [], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['unlisted'] })).rejects.toThrow('Scan again');
+    expect(importChats).not.toHaveBeenCalled();
+    for (const channel of ['sessions:importList', 'sessions:import']) {
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels().includes(channel as never)).toBe(false);
+    }
+  });
+
+  it('forwards only aggregate import skip diagnostics from discovery to the desktop preview', async () => {
+    const { registry } = stubDeps();
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [], skippedFiles: 4, skippedReasons: { empty: 2, invalidHistory: 1, unreadable: 1 }, scanErrors: 1, malformedLines: 3, truncated: false });
+    await expect(registry.invoke('sessions:importList', { source: 'claude' })).resolves.toEqual({
+      candidates: [], skipped: 4, skippedReasons: { empty: 2, invalidHistory: 1, unreadable: 1 }, scanErrors: 1, malformedLines: 3, truncated: false
+    });
+    expect(discover).toHaveBeenCalledExactlyOnceWith('claude');
+  });
+
+  it.each(['claude', 'codex', 'codex-exec'] as const)('marks an existing %s provider conversation as already represented in the import preview', async (harness) => {
+    const { registry, deps } = stubDeps();
+    const source = harness === 'claude' ? 'claude' : 'codex';
+    const existing = deps.sessions.get('s_test')!;
+    deps.sessions.list = () => [{ ...existing, config: { ...existing.config, harness }, harnessRef: source === 'claude' ? { claudeSessionId: 'provider-owned' } : { codexThreadId: 'provider-owned' } }];
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [{ candidate: { id: `${source}_owned`, source, sourceSessionId: 'provider-owned', title: 'Existing conversation', projectRoot: ws, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [{ id: 'q', kind: 'user', text: 'Original question', ts: 1 }] }], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    const result = await registry.invoke('sessions:importList', { source }) as ChatImportPreview;
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]!.imported).toBe(true);
+  });
+
+  it.each(['imported', 'claude', 'codex', 'codex-exec'] as const)('reports missing registration for a saved %s chat without mutating settings on scan', async (identity) => {
+    const { registry, deps } = stubDeps();
+    const source = identity === 'codex' || identity === 'codex-exec' ? 'codex' : 'claude';
+    const storedRoot = path.join(ws, 'stored-project');
+    const externalRoot = path.join(ws, 'moved-source-project');
+    const existing: SessionMeta = { ...deps.sessions.get('s_test')!, config: { harness: identity === 'imported' ? 'claude' : identity, permissionMode: 'ask', projectRoot: storedRoot },
+      ...(identity === 'imported' ? { importedFrom: { source, sessionId: 'provider-owned' } } : {}),
+      harnessRef: identity === 'imported' ? {} : source === 'claude' ? { claudeSessionId: 'provider-owned' } : { codexThreadId: 'provider-owned' } };
+    deps.sessions.list = () => [existing];
+    const update = vi.spyOn(deps.settings, 'update');
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [{ candidate: { id: `${source}_owned`, source, sourceSessionId: 'provider-owned', title: 'Saved chat', projectRoot: externalRoot, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [] }], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    const preview = await registry.invoke('sessions:importList', { source }) as ChatImportPreview;
+    expect(preview.candidates).toHaveLength(1);
+    expect(preview.candidates[0]).toMatchObject({ imported: true, registrationPending: true, projectRoot: storedRoot });
+    expect(update).not.toHaveBeenCalled();
+    expect(deps.settings.get().folders).not.toContain(storedRoot);
+    await deps.settings.update({ folders: [storedRoot] });
+    update.mockClear();
+    const repaired = await registry.invoke('sessions:importList', { source }) as ChatImportPreview;
+    expect(repaired.candidates[0]!.imported).toBe(true);
+    expect(repaired.candidates[0]!.registrationPending).toBeFalsy();
+    expect(update).not.toHaveBeenCalled();
+    update.mockRestore();
+  });
+
+  it('forwards repair-only intent only after opaque selection validation', async () => {
+    const { registry, deps, pushes } = stubDeps();
+    const parsed = { candidate: { id: 'claude_saved', source: 'claude' as const, sourceSessionId: 'saved', title: 'Saved chat', projectRoot: ws, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [] };
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [parsed], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    const repair = vi.fn(async () => ({ imported: [], skipped: 1 }));
+    deps.sessions.importChats = repair;
+    await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['unlisted'], repairOnly: true })).rejects.toThrow('Scan again');
+    expect(repair).not.toHaveBeenCalled();
+    await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['claude_saved'], repairOnly: true })).resolves.toEqual({ imported: [], skipped: 1 });
+    expect(repair).toHaveBeenCalledExactlyOnceWith([parsed], { repairOnly: true });
+    expect(pushes).toEqual([[PUSH_CHANNELS.settingsChanged, deps.settings.get()]]);
+  });
+
+  it.each([false, true])('publishes authoritative import settings after the operation (partial failure: %s)', async (fails) => {
+    const { registry, deps, pushes } = stubDeps();
+    const root = path.join(ws, 'imported-project');
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [{ candidate: { id: 'claude_new', source: 'claude', sourceSessionId: 'new-provider', title: 'Imported conversation', projectRoot: root, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [{ id: 'q', kind: 'user', text: 'Imported question', ts: 1 }] }], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    deps.sessions.importChats = async () => {
+      await deps.settings.update({ folders: [root], recentProjects: [root] });
+      if (fails) throw new Error('later selected chat failed');
+      return { imported: [], skipped: 0 };
+    };
+    const result = registry.invoke('sessions:import', { source: 'claude', ids: ['claude_new'] });
+    if (fails) await expect(result).rejects.toThrow('later selected chat failed');
+    else await expect(result).resolves.toEqual({ imported: [], skipped: 0 });
+    expect(pushes).toEqual([[PUSH_CHANNELS.settingsChanged, deps.settings.get()]]);
+    expect((pushes[0]![1] as { folders: string[] }).folders).toEqual([root]);
+  });
+
   beforeAll(() => {
     ws = tmpDir('ws');
     fsSync.writeFileSync(path.join(ws, 'a.txt'), 'hello', 'utf8');
