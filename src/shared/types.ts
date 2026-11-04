@@ -794,6 +794,8 @@ export interface GoalState {
 
 export interface SessionMeta {
   id: string;
+  /** Stable provenance for local chat imports; also prevents importing the same conversation twice. */
+  importedFrom?: { source: 'claude' | 'codex'; sessionId: string };
   title: string;
   /**
    * The title is still the truncated-prompt stand-in, so the one-shot title model may replace it.
