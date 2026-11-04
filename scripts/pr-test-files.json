@@ -5,6 +5,7 @@
   "tests/chat-import-claude-chain.test.ts",
   "tests/chat-import-codex-lineage.test.ts",
   "tests/chat-import-store.test.ts",
+  "tests/chat-import-registration-recovery.test.ts",
   "tests/chat-import-lifecycle-race.test.ts",
   "tests/chat-import-continuation.test.ts",
   "tests/chat-import-ui.test.tsx",

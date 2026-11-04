@@ -1077,11 +1077,20 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:importList', async (req) => {
     const { source } = importSourceSchema.parse(req);
     const scan = await discoverChatImports(source);
+    const existingSessions = sessions.list();
+    const folders = deps.settings.get().folders;
     return {
-      candidates: scan.sessions.map(({ candidate }) => ({
-        ...candidate,
-        imported: sessions.list().some((session) => representsChatImport(session, candidate))
-      })),
+      candidates: scan.sessions.map(({ candidate }) => {
+        const existing = existingSessions.find((session) => representsChatImport(session, candidate));
+        const root = existing?.config?.projectRoot;
+        return {
+          ...candidate,
+          imported: !!existing,
+          // A saved chat is not proof that the separate settings write completed.
+          // Use its stored root: an external history may since have moved projects.
+          ...(root && !folders.includes(root) ? { registrationPending: true, projectRoot: root } : {})
+        };
+      }),
       skipped: scan.skippedFiles,
       skippedReasons: scan.skippedReasons,
       scanErrors: scan.scanErrors,
@@ -1090,13 +1099,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     };
   });
   handle('sessions:import', async (req) => {
-    const { source, ids } = importSourceSchema.extend({ ids: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,100}$/)).min(1).max(200) }).parse(req);
+    const { source, ids, repairOnly } = importSourceSchema.extend({ ids: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,100}$/)).min(1).max(200), repairOnly: z.boolean().optional() }).parse(req);
     const scan = await discoverChatImports(source);
     const wanted = new Set(ids);
     const selected = scan.sessions.filter(({ candidate }) => wanted.has(candidate.id));
     if (selected.length !== wanted.size) throw new Error('Some conversations are no longer available. Scan again before importing.');
     try {
-      return await sessions.importChats(selected);
+      return await (repairOnly ? sessions.importChats(selected, { repairOnly: true }) : sessions.importChats(selected));
     } finally {
       // Committed imports (including a partial batch) register projects outside settings:update.
       deps.push(PUSH_CHANNELS.settingsChanged, settings.get());

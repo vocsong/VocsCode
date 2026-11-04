@@ -512,7 +512,7 @@ export class SessionManager {
     );
   }
 
-  async importChats(chats: ParsedChatImport[]): Promise<{ imported: SessionMeta[]; skipped: number }> {
+  async importChats(chats: ParsedChatImport[], options: { repairOnly?: boolean } = {}): Promise<{ imported: SessionMeta[]; skipped: number }> {
     const run = this.importQueue.then(async () => {
       const imported: SessionMeta[] = [];
       const roots = new Set<string>();
@@ -527,6 +527,8 @@ export class SessionManager {
             skipped++;
             continue;
           }
+          // Repair must never recreate a chat deleted since its preview was shown.
+          if (options.repairOnly) throw new Error('This conversation is no longer in Vocs Code. Scan again before repairing registration.');
           const id = `import_${createHash('sha256').update(`${candidate.source}\0${candidate.sourceSessionId}`).digest('hex').slice(0, 32)}`;
           if (this.deps.store.get(id)) throw new Error('Imported session identifier is already in use');
           const harness = candidate.source;

@@ -263,7 +263,7 @@ export interface IpcContract {
   'sessions:list': [void, SessionMeta[]];
   /** Desktop-only explicit discovery; the renderer never supplies filesystem paths. */
   'sessions:importList': [{ source: ChatImportSource }, ChatImportPreview];
-  'sessions:import': [{ source: ChatImportSource; ids: string[] }, { imported: SessionMeta[]; skipped: number }];
+  'sessions:import': [{ source: ChatImportSource; ids: string[]; repairOnly?: boolean }, { imported: SessionMeta[]; skipped: number }];
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];

@@ -153,6 +153,73 @@ describe('chat import UI', () => {
     expect(invoke.mock.calls.filter(([channel]) => channel === 'sessions:import')).toHaveLength(1);
   });
 
+  it.each(['rescan', 'reopen'])('keeps registration repair reachable after a saved import fails and the picker is %s', async (refresh) => {
+    let saved = false;
+    let registered = false;
+    invoke.mockImplementation(async (channel: string, request?: { repairOnly?: boolean }) => {
+      if (channel === 'sessions:importList') return { candidates: [{ ...candidate('one', saved), registrationPending: saved && !registered }, candidate('old', true)], skipped: 0 };
+      if (channel === 'sessions:import') {
+        if (request?.repairOnly) { registered = true; return { imported: [], skipped: 1 }; }
+        saved = true;
+        throw new Error('Project registration failed');
+      }
+      return {};
+    });
+    let view = render(<ChatImport />);
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Claude Code' }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Import Chat one' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import selected (1)' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('Project registration failed');
+    if (refresh === 'reopen') {
+      view.unmount();
+      view = render(<ChatImport />);
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Claude Code' }));
+    const repair = await screen.findByRole('button', { name: 'Repair registration' });
+    expect((screen.getByRole('checkbox', { name: 'Import Chat one' }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole('checkbox', { name: 'Import Chat old' }) as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText('Folder registration incomplete')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
+    expect((screen.getByRole('button', { name: 'Import selected' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(repair);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:import', { source: 'claude', ids: ['one'], repairOnly: true }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Repair registration' })).toBeNull());
+    expect(screen.queryByText('Folder registration incomplete')).toBeNull();
+    expect(useStore.getState().toast).toHaveBeenCalledWith('Project registration repaired', 'success');
+    expect((screen.getByRole('checkbox', { name: 'Import Chat one' }) as HTMLInputElement).disabled).toBe(true);
+    expect(invoke.mock.calls.filter(([channel]) => channel === 'sessions:import')).toHaveLength(2);
+  });
+
+  it('keeps a failed repair available across reopening and blocks concurrent actions while repairing', async () => {
+    let registered = false;
+    let rejectRepair: (error: Error) => void = () => undefined;
+    let attempts = 0;
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'sessions:importList') return { candidates: [{ ...candidate('one', true), registrationPending: !registered }], skipped: 0 };
+      if (channel === 'sessions:import') {
+        if (++attempts === 1) return new Promise((_resolve, reject) => { rejectRepair = reject; });
+        registered = true;
+        return { imported: [], skipped: 1 };
+      }
+      return {};
+    });
+    const view = render(<ChatImport />);
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Claude Code' }));
+    const repair = await screen.findByRole('button', { name: 'Repair registration' });
+    fireEvent.click(repair);
+    expect((repair as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Scan Codex' }) as HTMLButtonElement).disabled).toBe(true);
+    rejectRepair(new Error('Settings still unavailable'));
+    expect((await screen.findByRole('alert')).textContent).toBe('Settings still unavailable');
+    expect((repair as HTMLButtonElement).disabled).toBe(false);
+    view.unmount();
+    render(<ChatImport />);
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Claude Code' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Repair registration' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Repair registration' })).toBeNull());
+    expect(attempts).toBe(2);
+  });
+
   it('explains incomplete scans and imports at most 200 selected chats per batch', async () => {
     const candidates = Array.from({ length: 201 }, (_, index) => candidate(String(index)));
     invoke.mockImplementation(async (channel: string) => {

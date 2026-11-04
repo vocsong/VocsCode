@@ -13,7 +13,7 @@ export function ChatImport() {
   const [source, setSource] = useState<ChatImportSource | null>(null);
   const [candidates, setCandidates] = useState<ChatImportCandidate[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
-  const [busy, setBusy] = useState<'scan' | 'import' | null>(null);
+  const [busy, setBusy] = useState<'scan' | 'import' | 'repair' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [skipped, setSkipped] = useState(0);
   const [skippedReasons, setSkippedReasons] = useState<ChatImportSkipCounts>({});
@@ -47,15 +47,19 @@ export function ChatImport() {
     }
   };
 
-  const importSelected = async () => {
-    if (!source || !selected.length || busy) return;
-    setBusy('import');
+  const importChats = async (ids: string[], repairOnly = false) => {
+    if (!source || !ids.length || busy) return;
+    setBusy(repairOnly ? 'repair' : 'import');
     setError(null);
     try {
-      const result = await invoke('sessions:import', { source, ids: selected });
-      setSelected([]);
-      const count = result.imported.length;
-      toast(`${count} ${count === 1 ? 'chat imported' : 'chats imported'}${result.skipped ? `; ${result.skipped} skipped` : ''}`, count ? 'success' : 'info');
+      const result = await invoke('sessions:import', { source, ids, ...(repairOnly ? { repairOnly: true } : {}) });
+      if (repairOnly) {
+        toast('Project registration repaired', 'success');
+      } else {
+        setSelected([]);
+        const count = result.imported.length;
+        toast(`${count} ${count === 1 ? 'chat imported' : 'chats imported'}${result.skipped ? `; ${result.skipped} skipped` : ''}`, count ? 'success' : 'info');
+      }
       // Import is also an explicit request to refresh its preview: deduplication may have rejected
       // a chat imported in another window since the scan, so use the authoritative list again.
       try {
@@ -67,7 +71,7 @@ export function ChatImport() {
         setMalformedLines(refreshed.malformedLines ?? 0);
         setTruncated(refreshed.truncated ?? false);
       } catch (e) {
-        setError(`Import finished, but the list could not refresh: ${invokeErrorMessage(e)}. Scan again to refresh it.`);
+        setError(`${repairOnly ? 'Registration repair' : 'Import'} finished, but the list could not refresh: ${invokeErrorMessage(e)}. Scan again to refresh it.`);
       }
     } catch (e) {
       const message = invokeErrorMessage(e);
@@ -113,21 +117,26 @@ export function ChatImport() {
             <Button size="sm" variant="ghost" disabled={busy !== null || !available.length} onClick={() => setSelected(selected.length === Math.min(available.length, MAX_SELECTION) ? [] : available.slice(0, MAX_SELECTION).map((candidate) => candidate.id))}>
               {selected.length === Math.min(available.length, MAX_SELECTION) && available.length ? 'Clear selection' : available.length > MAX_SELECTION ? `Select first ${MAX_SELECTION}` : 'Select all'}
             </Button>
-            <Button variant="primary" disabled={busy !== null || !selected.length} onClick={() => void importSelected()}>
+            <Button variant="primary" disabled={busy !== null || !selected.length} onClick={() => void importChats(selected)}>
               {busy === 'import' && <Spinner size={12} />}
               Import selected{selected.length ? ` (${selected.length})` : ''}
             </Button>
           </div>
           <div aria-label={`${SOURCE_NAMES[source!]} chats`} aria-busy={busy !== null}>
-            {candidates.map((candidate) => <label key={candidate.id} className="provider-card provider-head">
-              <input type="checkbox" style={{ width: 16, height: 16, padding: 0, flex: '0 0 auto' }} aria-label={`Import ${candidate.title}`} checked={selected.includes(candidate.id)} disabled={busy !== null || candidate.imported || selected.length >= MAX_SELECTION && !selected.includes(candidate.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, candidate.id].slice(0, MAX_SELECTION) : current.filter((id) => id !== candidate.id))} />
-              <span className="spacer" style={{ minWidth: 0 }}>
-                <strong>{candidate.title}</strong>
-                <span className="muted small" style={{ display: 'block', overflowWrap: 'anywhere' }}>{candidate.projectRoot}</span>
-                <span className="muted small">{candidate.messageCount} messages · {new Date(candidate.updatedAt).toLocaleDateString()}</span>
-              </span>
-              {candidate.imported && <Badge tone="green">Imported</Badge>}
-            </label>)}
+            {candidates.map((candidate) => <div key={candidate.id} className="provider-card provider-head">
+              <label className="row gap8 spacer" style={{ minWidth: 0 }}>
+                <input type="checkbox" style={{ width: 16, height: 16, padding: 0, flex: '0 0 auto' }} aria-label={`Import ${candidate.title}`} checked={selected.includes(candidate.id)} disabled={busy !== null || candidate.imported || selected.length >= MAX_SELECTION && !selected.includes(candidate.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, candidate.id].slice(0, MAX_SELECTION) : current.filter((id) => id !== candidate.id))} />
+                <span className="spacer" style={{ minWidth: 0 }}>
+                  <strong>{candidate.title}</strong>
+                  <span className="muted small" style={{ display: 'block', overflowWrap: 'anywhere' }}>{candidate.projectRoot}</span>
+                  <span className="muted small">{candidate.messageCount} messages · {new Date(candidate.updatedAt).toLocaleDateString()}</span>
+                </span>
+              </label>
+              {candidate.imported && (candidate.registrationPending ? <>
+                <Badge tone="amber" title="The chat is saved, but its project folder is not registered.">Folder registration incomplete</Badge>
+                <Button size="sm" disabled={busy !== null} onClick={() => void importChats([candidate.id], true)}>Repair registration</Button>
+              </> : <Badge tone="green">Imported</Badge>)}
+            </div>)}
           </div>
         </>}
       </>}

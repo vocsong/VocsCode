@@ -125,7 +125,7 @@ describe('handler registry', () => {
     for (const request of [{ source: 'other' }, { source: 'claude', path: '/private/file' }]) {
       await expect(registry.invoke('sessions:importList', request)).rejects.toThrow();
     }
-    for (const request of [{ source: 'claude', ids: [] }, { source: 'claude', ids: ['../../file'] }, { source: 'codex', ids: Array(201).fill('id') }]) {
+    for (const request of [{ source: 'claude', ids: [] }, { source: 'claude', ids: ['../../file'] }, { source: 'codex', ids: Array(201).fill('id') }, { source: 'claude', ids: ['id'], repairOnly: 'true' }, { source: 'claude', ids: ['id'], repairOnly: 1 }, { source: 'claude', ids: ['id'], repairOnly: true, projectRoot: '/private/file' }]) {
       await expect(registry.invoke('sessions:import', request)).rejects.toThrow();
     }
     expect(discover).not.toHaveBeenCalled();
@@ -161,6 +161,48 @@ describe('handler registry', () => {
     const result = await registry.invoke('sessions:importList', { source }) as ChatImportPreview;
     expect(result.candidates).toHaveLength(1);
     expect(result.candidates[0]!.imported).toBe(true);
+  });
+
+  it.each(['imported', 'claude', 'codex', 'codex-exec'] as const)('reports missing registration for a saved %s chat without mutating settings on scan', async (identity) => {
+    const { registry, deps } = stubDeps();
+    const source = identity === 'codex' || identity === 'codex-exec' ? 'codex' : 'claude';
+    const storedRoot = path.join(ws, 'stored-project');
+    const externalRoot = path.join(ws, 'moved-source-project');
+    const existing: SessionMeta = { ...deps.sessions.get('s_test')!, config: { harness: identity === 'imported' ? 'claude' : identity, permissionMode: 'ask', projectRoot: storedRoot },
+      ...(identity === 'imported' ? { importedFrom: { source, sessionId: 'provider-owned' } } : {}),
+      harnessRef: identity === 'imported' ? {} : source === 'claude' ? { claudeSessionId: 'provider-owned' } : { codexThreadId: 'provider-owned' } };
+    deps.sessions.list = () => [existing];
+    const update = vi.spyOn(deps.settings, 'update');
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [{ candidate: { id: `${source}_owned`, source, sourceSessionId: 'provider-owned', title: 'Saved chat', projectRoot: externalRoot, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [] }], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    const preview = await registry.invoke('sessions:importList', { source }) as ChatImportPreview;
+    expect(preview.candidates).toHaveLength(1);
+    expect(preview.candidates[0]).toMatchObject({ imported: true, registrationPending: true, projectRoot: storedRoot });
+    expect(update).not.toHaveBeenCalled();
+    expect(deps.settings.get().folders).not.toContain(storedRoot);
+    await deps.settings.update({ folders: [storedRoot] });
+    update.mockClear();
+    const repaired = await registry.invoke('sessions:importList', { source }) as ChatImportPreview;
+    expect(repaired.candidates[0]!.imported).toBe(true);
+    expect(repaired.candidates[0]!.registrationPending).toBeFalsy();
+    expect(update).not.toHaveBeenCalled();
+    update.mockRestore();
+  });
+
+  it('forwards repair-only intent only after opaque selection validation', async () => {
+    const { registry, deps, pushes } = stubDeps();
+    const parsed = { candidate: { id: 'claude_saved', source: 'claude' as const, sourceSessionId: 'saved', title: 'Saved chat', projectRoot: ws, createdAt: 1, updatedAt: 2, messageCount: 1 }, items: [] };
+    const discover = vi.mocked(discoverChatImports);
+    discover.mockReset();
+    discover.mockResolvedValue({ sessions: [parsed], skippedFiles: 0, skippedReasons: {}, scanErrors: 0, malformedLines: 0, truncated: false });
+    const repair = vi.fn(async () => ({ imported: [], skipped: 1 }));
+    deps.sessions.importChats = repair;
+    await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['unlisted'], repairOnly: true })).rejects.toThrow('Scan again');
+    expect(repair).not.toHaveBeenCalled();
+    await expect(registry.invoke('sessions:import', { source: 'claude', ids: ['claude_saved'], repairOnly: true })).resolves.toEqual({ imported: [], skipped: 1 });
+    expect(repair).toHaveBeenCalledExactlyOnceWith([parsed], { repairOnly: true });
+    expect(pushes).toEqual([[PUSH_CHANNELS.settingsChanged, deps.settings.get()]]);
   });
 
   it.each([false, true])('publishes authoritative import settings after the operation (partial failure: %s)', async (fails) => {

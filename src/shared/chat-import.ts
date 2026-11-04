@@ -11,6 +11,8 @@ export interface ChatImportCandidate {
   updatedAt: number;
   messageCount: number;
   imported?: boolean;
+  /** The existing chat is saved, but its stored project is absent from registered folders. */
+  registrationPending?: boolean;
 }
 
 export const CHAT_IMPORT_SKIP_REASON_LABELS = {

@@ -207,6 +207,140 @@ describe.runIf(enabled)('chat import UI', () => {
     for (const { file, text } of skippedFixtures) expect(await fs.readFile(file)).toEqual(Buffer.from(text));
   }, 180_000);
 
+  it('repairs folder registration after a committed import fails and the picker is reopened', async () => {
+    await app?.close();
+    app = null;
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-import-registration-recovery-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'recovered-project');
+    const claudeDir = path.join(tmp, 'claude');
+    const filename = path.join(claudeDir, 'projects', 'fixture', 'registration-session.jsonl');
+    const settingsFile = path.join(userData, 'settings.json');
+    const settingsBackup = path.join(tmp, 'settings-before-import.json');
+    for (const dir of [userData, project, path.dirname(filename)]) await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(settingsFile, seedSettings(project, { folders: [], recentProjects: [], agent: { enabled: false } }));
+    const title = 'Registration recovery fixture';
+    const answer = 'The committed conversation must survive registration repair.';
+    const original = [
+      { type: 'user', uuid: 'registration-user', sessionId: 'registration-session', cwd: project, timestamp: '2026-10-30T01:00:00Z', message: { role: 'user', content: title } },
+      { type: 'assistant', uuid: 'registration-assistant', sessionId: 'registration-session', cwd: project, timestamp: '2026-10-30T01:01:00Z', message: { role: 'assistant', content: answer } }
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n';
+    await fs.writeFile(filename, original);
+    const env = isolatedEnv(userData, { CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: path.join(tmp, 'codex') });
+    const launch = async (): Promise<Page> => {
+      app = await electron.launch({ ...launchOptions, env, timeout: 60_000 });
+      const win = await app.firstWindow();
+      await win.waitForSelector('.brand', { timeout: 60_000 });
+      return win;
+    };
+    const openImport = async (win: Page) => {
+      await win.locator('.sidebar-bottom').getByRole('button', { name: 'Settings', exact: true }).click();
+      await win.getByRole('button', { name: 'Import chats', exact: true }).click();
+      await win.getByRole('heading', { name: 'Import chats' }).waitFor();
+    };
+    const readSessions = async (): Promise<SessionMeta[]> => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8').catch(() => '[]'));
+    const readSettings = (win: Page) => win.evaluate(() => window.harness.invoke('settings:get', undefined));
+    let win = await launch();
+    await openImport(win);
+    await win.getByRole('button', { name: 'Scan Claude Code', exact: true }).click();
+    await win.getByRole('checkbox', { name: `Import ${title}`, exact: true }).check();
+    expect(await readSessions()).toHaveLength(0);
+    expect((await readSettings(win)).folders).toEqual([]);
+
+    // Fail the real atomic settings rename, not the import or a renderer mock. Only this throwaway
+    // profile's settings target becomes a directory; sessions/transcript/context remain writable.
+    // This leaves the actual SessionStore commit intact at the registration-failure boundary.
+    await fs.rename(settingsFile, settingsBackup);
+    await fs.mkdir(settingsFile);
+    let committed!: SessionMeta;
+    let transcript!: Buffer;
+    let context!: Buffer;
+    try {
+      await win.getByRole('button', { name: 'Import selected (1)', exact: true }).click();
+      await win.locator('.settings-body').getByRole('alert').filter({ hasText: /settings\.json/ }).waitFor();
+      await expect.poll(async () => (await readSessions()).length).toBe(1);
+      committed = (await readSessions())[0]!;
+      expect(committed.importedFrom).toEqual({ source: 'claude', sessionId: 'registration-session' });
+      expect(committed.config.projectRoot).toBe(project);
+      expect((await readSettings(win)).folders).toEqual([]);
+      expect((await readSettings(win)).recentProjects).toEqual([]);
+      transcript = await fs.readFile(path.join(userData, 'sessions', committed.id, 'transcript.jsonl'));
+      context = await fs.readFile(path.join(userData, 'sessions', committed.id, 'fork-context.md'));
+      const items: TranscriptItem[] = transcript.toString('utf8').trim().split('\n').map((line) => JSON.parse(line));
+      expect(items.filter((item) => item.kind === 'user' || item.kind === 'assistant')).toHaveLength(2);
+      for (const text of [title, answer]) {
+        expect(transcript.toString('utf8')).toContain(text);
+        expect(context.toString('utf8')).toContain(text);
+      }
+
+      // Unmount the picker so the stale selected IDs cannot be reused as a hidden retry path.
+      await win.locator('.settings-title').getByRole('button', { name: 'Back', exact: true }).click();
+      await openImport(win);
+      expect(await win.getByRole('checkbox', { name: `Import ${title}`, exact: true }).count()).toBe(0);
+      await win.getByRole('button', { name: 'Scan Claude Code', exact: true }).click();
+      const checkbox = win.getByRole('checkbox', { name: `Import ${title}`, exact: true });
+      await checkbox.waitFor();
+      expect(await checkbox.isDisabled()).toBe(true);
+      expect(await checkbox.isChecked()).toBe(false);
+      expect(await win.getByRole('button', { name: 'Import selected', exact: true }).isDisabled()).toBe(true);
+      const repair = win.getByRole('button', { name: 'Repair registration', exact: true });
+      await repair.waitFor();
+      expect(await repair.isEnabled()).toBe(true);
+      await win.getByText('Folder registration incomplete', { exact: true }).waitFor();
+      // Scanning is read-only. A failed explicit repair must still allow another attempt.
+      expect((await readSettings(win)).folders).toEqual([]);
+      await repair.click();
+      await win.locator('.settings-body').getByRole('alert').filter({ hasText: /settings\.json/ }).waitFor();
+      await expect.poll(() => repair.isEnabled()).toBe(true);
+      expect((await readSettings(win)).folders).toEqual([]);
+      expect(await readSessions()).toEqual([committed]);
+    } finally {
+      await fs.rm(settingsFile, { recursive: true, force: true });
+      await fs.rename(settingsBackup, settingsFile);
+    }
+
+    await win.getByRole('button', { name: 'Repair registration', exact: true }).click();
+    await expect.poll(async () => (await readSettings(win)).folders).toEqual([project]);
+    expect((await readSettings(win)).recentProjects).toEqual([project]);
+    await win.getByText('Project registration repaired', { exact: true }).waitFor();
+    await expect.poll(async () => win.getByRole('button', { name: 'Repair registration', exact: true }).count()).toBe(0);
+    expect(await win.getByText('Folder registration incomplete', { exact: true }).count()).toBe(0);
+    await win.getByText('Imported', { exact: true }).waitFor();
+    await win.getByRole('button', { name: 'Scan Claude Code', exact: true }).click();
+    const imported = win.getByRole('checkbox', { name: `Import ${title}`, exact: true });
+    await imported.waitFor();
+    expect(await imported.isDisabled()).toBe(true);
+    expect(await win.getByRole('button', { name: 'Repair registration', exact: true }).count()).toBe(0);
+    expect(await readSessions()).toEqual([committed]);
+    expect(await fs.readFile(path.join(userData, 'sessions', committed.id, 'transcript.jsonl'))).toEqual(transcript);
+    expect(await fs.readFile(path.join(userData, 'sessions', committed.id, 'fork-context.md'))).toEqual(context);
+    expect(await fs.readFile(filename)).toEqual(Buffer.from(original));
+    expect(JSON.parse(await fs.readFile(settingsFile, 'utf8')).folders).toEqual([project]);
+
+    const row = win.getByTestId('session-row').filter({ hasText: title });
+    await row.click();
+    await win.getByText(answer, { exact: true }).waitFor();
+    await row.hover();
+    await row.getByRole('button', { name: 'Archive session', exact: true }).click();
+    await row.waitFor({ state: 'hidden' });
+    // A boot-time reconstruction must not be what makes the repaired folder visible.
+    expect(await win.getByRole('button', { name: 'New session in recovered-project', exact: true }).count()).toBe(1);
+    expect((await readSettings(win)).folders).toEqual([project]);
+    await app!.close();
+    app = null;
+    win = await launch();
+    await win.getByRole('button', { name: 'New session in recovered-project', exact: true }).waitFor();
+    expect(await win.getByTestId('session-row').count()).toBe(0);
+    expect((await readSettings(win)).folders).toEqual([project]);
+    const archived = await readSessions();
+    expect(archived).toHaveLength(1);
+    expect(archived[0]!.id).toBe(committed.id);
+    expect(archived[0]!.archived).toBe(true);
+    expect(await fs.readFile(path.join(userData, 'sessions', committed.id, 'transcript.jsonl'))).toEqual(transcript);
+    expect(await fs.readFile(path.join(userData, 'sessions', committed.id, 'fork-context.md'))).toEqual(context);
+    expect(await fs.readFile(filename)).toEqual(Buffer.from(original));
+  }, 180_000);
+
   it('retains a previously unknown imported folder immediately after archiving its last chat and after restart', async () => {
     await app?.close();
     app = null;

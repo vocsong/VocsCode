@@ -11,7 +11,59 @@ All import histories are synthetic fixtures. No live provider tier is enabled. T
 Electron suite launches a separate temporary profile and a mock keychain; it checks
 the production desktop UI and persistence without reading the user's real history.
 
-## Six review findings follow-up
+## Registration repair after picker refresh
+
+The recovery follow-up to `621b94c` distinguishes a saved conversation from completed
+folder registration. A read-only scan derives `registrationPending` when an existing
+chat's stored project root is absent from `settings.folders`. This survives picker
+reopening, rescanning and process restart without a new persisted marker. Matching
+ordinary provider sessions use the same recovery path. The pending preview displays
+the stored root, not a subsequently changed source-history working directory.
+
+The saved chat's import checkbox stays disabled; **Folder registration incomplete**
+and **Repair registration** provide an explicit recovery action. The desktop-only
+`sessions:import` request accepts a strictly validated optional `repairOnly` boolean
+alongside the existing source/opaque-ID selection. Repair deduplicates and registers
+the existing project, without rewriting transcript, context, provenance or spend.
+If the chat has been deleted since its preview, repair fails rather than recreating
+it. Failed repairs remain reachable after another reopen; successful repair refreshes
+the preview and publishes authoritative settings. Discovery itself never writes.
+
+Regression evidence:
+
+- Three new renderer cases failed before the UI fix (no repair control), then passed:
+  import-registration failure → rescan or unmount/reopen → repair, plus repeated
+  repair failure with a later reopen/retry.
+- `tests/chat-import-registration-recovery.test.ts` uses real discovery, registered
+  handlers, settings, manager and store in an isolated Claude home. Actual atomic
+  settings-rename failures leave a committed chat; reload/failure/reload/repair
+  retains exactly one session and byte-identical index/transcript/context. It also
+  covers native-provider references, changed external working directories and stale
+  deleted-chat repair with no recreated files.
+- The new Electron scenario replaces only its temporary profile's settings target
+  with a directory, causing the real rename to fail after chat commit. It reopens
+  and rescans the picker, exercises both failed and successful explicit repairs,
+  checks source/transcript/context preservation, and archives the last chat before
+  verifying folder retention both immediately and after restart. The baseline failed
+  at the missing repair control, not at fixture setup.
+
+Final verification on Node 22.16.0/macOS with canonical `TMPDIR`:
+
+| Command | Recovery-follow-up result |
+| --- | --- |
+| `npm run typecheck` | Pass, all five projects |
+| `npm run test:pr` | 33 files / 831 tests passed, 0 skips |
+| `npm run test:changed` | 112 files / 1,598 tests passed; 6 optional files / 85 tests skipped; 0 failures |
+| `npm run build` | Pass, Electron and web bundles |
+| `node scripts/e2e-guard.mjs tests/e2e.instructions.test.ts` | 4 passed, 0 skips |
+
+Twelve focused import/handler/fork/store suites additionally pass all 311 tests.
+The changed run took 729.38 seconds. Optional skips are not claimed as verification;
+the requested Electron suite ran separately through its no-skip guard. Independent
+review found no blocking issue. No live providers, private histories or Windows-only
+tiers were exercised; no full release suite was run.
+
+## Six review findings follow-up (621b94c)
 
 The follow-up after `c32f8da` fixes or safely blocks the six reviewed failure modes:
 
