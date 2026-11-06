@@ -18,8 +18,11 @@ src/main/agents/context.ts     system prompt + per-turn app context
 src/main/agents/tools.ts       manifest -> tool defs; runs one capability
 src/main/agents/index.ts       the gate: batch, approve, apply, confirm
 resources/pi/vocs-code-vesta.ts  registers the allowlist tools with pi
-src/renderer/src/components/Vesta.tsx   the floating panel
+src/renderer/src/components/Vesta.tsx   the floating panel, and its title-bar launcher
 ```
+
+Minimized, Vesta is a launcher in the title bar (`VestaLauncher`) rather than an avatar floating over
+the workspace; the open panel still floats, parks bottom-right and can be dragged by its header.
 
 Vesta runs on **pi**, the same coding agent the Pi harness uses, started once per conversation in
 RPC mode. It is a hermetic run: no session file, no built-in tools, and no user extensions, skills,

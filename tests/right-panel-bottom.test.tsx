@@ -84,6 +84,24 @@ describe('right panel bottom half', () => {
     expect(await screen.findByTestId('mcp-global-section')).toBeTruthy();
   });
 
+  it('is only its tab strip until one of its tabs is opened, then takes its share with a split handle', async () => {
+    // The split handle reads the stored split fraction, so it needs settings to exist.
+    useStore.setState({ settings: { panelSplit: 0.62 } } as never);
+    const { container } = render(<RightPanel session={session()} />);
+    const panel = container.querySelector('aside.panel') as HTMLElement;
+    // Nothing opened yet: no empty pane under the workspace view, so no handle and no selected tab.
+    expect(panel.classList.contains('panel-bottom-idle')).toBe(true);
+    expect(container.querySelector('.resizer-split')).toBeNull();
+    expect(container.querySelector('.panel-bottom .panel-tab.active')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('panel-bottom-mcp'));
+    });
+    expect(panel.classList.contains('panel-bottom-idle')).toBe(false);
+    expect(container.querySelector('.resizer-split')).toBeTruthy();
+    expect(container.querySelector('.panel-bottom .panel-tab.active')?.getAttribute('data-testid')).toBe('panel-bottom-mcp');
+  });
+
   it('mounts the Desktop tab lazily and shows the Cua card when the driver is not ready', async () => {
     render(<RightPanel session={session()} />);
     // Not opened yet, so the preview has not been asked for.

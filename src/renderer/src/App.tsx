@@ -16,7 +16,8 @@ import { McpView } from './components/McpView';
 import { SkillsView } from './components/SkillsView';
 import { SessionPanes } from './components/SessionPanes';
 import { TitleBar } from './components/TitleBar';
-import { Button, ConfirmHost, EmptyState, Icon, Kbd, Spinner } from './components/ui';
+import { Button, ConfirmHost, Icon, Spinner } from './components/ui';
+import { Welcome } from './components/Welcome';
 import { ContextMenuHost } from './components/ContextMenu';
 import { handleCustomShortcut } from './shortcuts';
 import { createTerminal } from './terminal/host';
@@ -192,22 +193,7 @@ export function App() {
           ) : view === 'mcp' ? (
             <McpView />
           ) : (
-            <SessionPanes empty={<div className="main-empty">
-              <EmptyState icon="sparkles" title="Welcome to Vocs Code">
-                <p>One desktop for every coding agent. Pick a harness per session — Claude Agent SDK, Codex, Pi, DeepSeek Harness or any ACP agent, or the built-in loop — and any model it can reach.</p>
-                <div className="row gap8 center">
-                  <Button variant="primary" icon="plus" onClick={() => void useStore.getState().startNewSession()}>
-                    New session
-                  </Button>
-                  <Button icon="settings" onClick={() => useStore.getState().setView('settings')}>
-                    Settings
-                  </Button>
-                </div>
-                <p className="muted small">
-                  <Kbd>Ctrl+N</Kbd> new (quick) · <Kbd>Ctrl+Alt+N</Kbd> new in folder · <Kbd>Ctrl+K</Kbd> palette · <Kbd>Ctrl+Shift+F</Kbd> search · <Kbd>Ctrl+1…9</Kbd> switch · <Kbd>Ctrl+J</Kbd> panel
-                </p>
-              </EmptyState>
-            </div>} />
+            <SessionPanes empty={<Welcome />} />
           )}
         </main>
         {panelOpen && session && view === 'chat' && <RightPanel session={session} />}

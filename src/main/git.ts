@@ -38,6 +38,15 @@ const MAX_SINGLE_FILE_DIFF_BYTES = 2_000_000;
 /** A PR reflection reads a bounded patch, not the whole change; the commits carry the rest. */
 const MAX_PR_DIFF_CHARS = 12_000;
 
+/**
+ * Lines in a file's text the way `git diff --numstat` counts them: the final newline ends the last
+ * line rather than starting another, so an untracked file reads the same as once it is added.
+ */
+function lineCount(text: string): number {
+  if (!text) return 0;
+  return text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+}
+
 /** Reads a file only when it is small enough; a multi-GB artifact is never buffered just to be sized. */
 async function readCapped(file: string, maxBytes: number): Promise<string | undefined> {
   try {
@@ -113,7 +122,7 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
     let additions = c?.additions;
     if (st === '?' && additions === undefined) {
       const content = await readCapped(path.join(root, p), MAX_UNTRACKED_COUNT_BYTES);
-      if (content !== undefined) additions = content.split('\n').length;
+      if (content !== undefined) additions = lineCount(content);
     }
     files.push({ path: p, status: st, staged: x !== ' ' && x !== '?', additions, deletions: c?.deletions });
   }

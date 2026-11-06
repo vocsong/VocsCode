@@ -109,7 +109,7 @@ async function runScenario(win: Page): Promise<void> {
   await win.waitForSelector('.turn-footer', { timeout: 60_000 });
   await win.screenshot({ path: path.join(shots, `e2e-03-${harness}-reply.png`) });
 
-  // Header pills reflect model + mode; usage pill exists; Changes tab renders git state.
+  // The run controls under the composer reflect model + mode; Changes tab renders git state.
   expect(await win.locator('.pill').count()).toBeGreaterThanOrEqual(3);
   const title = await win.getByTestId('session-title').innerText();
   expect(title.length).toBeGreaterThan(3);

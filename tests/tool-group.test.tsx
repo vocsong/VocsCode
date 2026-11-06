@@ -41,18 +41,24 @@ describe('groupTranscript', () => {
     expect(chunks[0]).toMatchObject({ kind: 'work', entries: items });
   });
 
-  it('keeps users, answers, warnings, plans and turns outside the work', () => {
+  it('keeps users, answers, warnings and turns outside the work', () => {
     const items: TranscriptItem[] = [
       { id: 'u1', kind: 'user', ts: 0, text: 'go' },
       tool({ id: 'c1' }),
       { id: 'w1', kind: 'info', ts: 0, level: 'warn', text: 'MCP unavailable' },
-      { id: 'p1', kind: 'plan', ts: 0, entries: [] },
       text('a1', 'the answer'),
       { id: 'turn1', kind: 'turn', ts: 0, status: 'completed', durationMs: 12_000 }
     ];
     const chunks = groupTranscript(items);
-    expect(chunks.map((c) => c.kind)).toEqual(['single', 'work', 'single', 'single', 'single', 'single']);
+    expect(chunks.map((c) => c.kind)).toEqual(['single', 'work', 'single', 'single', 'single']);
     expect(workEntries(chunks).map((e) => e.id)).toEqual(['c1']);
+  });
+
+  it('keeps a plan update inside the turn’s work instead of splitting it in two', () => {
+    const items: TranscriptItem[] = [tool({ id: 'c1' }), { id: 'p1', kind: 'plan', ts: 0, entries: [] }, tool({ id: 'c2' }), text('a1', 'done')];
+    const chunks = groupTranscript(items);
+    expect(chunks.map((c) => c.kind)).toEqual(['work', 'single']);
+    expect(workEntries(chunks).map((e) => e.id)).toEqual(['c1', 'p1', 'c2']);
   });
 
   it('keeps an approval inside the work so one turn keeps one header', () => {
@@ -87,7 +93,7 @@ describe('groupTranscript', () => {
   });
 
   it('splits work when an item that must stay visible sits between two runs', () => {
-    const items: TranscriptItem[] = [tool({ id: 'c1' }), { id: 'p1', kind: 'plan', ts: 0, entries: [] }, tool({ id: 'c2' })];
+    const items: TranscriptItem[] = [tool({ id: 'c1' }), { id: 'w1', kind: 'info', ts: 0, level: 'warn', text: 'context is getting full' }, tool({ id: 'c2' })];
     const chunks = groupTranscript(items);
     expect(chunks.map((c) => c.kind)).toEqual(['work', 'single', 'work']);
   });
@@ -192,6 +198,63 @@ describe('WorkGroup', () => {
   it('collapses again once the only approval has been decided', () => {
     render(<WorkGroup chunk={chunk([tool(), approval('ap2', true)])} {...props} />);
     expect(screen.queryByText('Run it?')).toBeNull();
+  });
+
+  it('keeps only the latest plan on screen while the work around it is collapsed', () => {
+    const first: TranscriptItem = { id: 'p1', kind: 'plan', ts: 0, entries: [{ content: 'Write the limiter', status: 'in_progress' }, { content: 'Add tests', status: 'pending' }] };
+    const latest: TranscriptItem = { id: 'p2', kind: 'plan', ts: 1, entries: [{ content: 'Write the limiter', status: 'completed' }, { content: 'Add tests', status: 'in_progress' }] };
+    const { container } = render(<WorkGroup chunk={chunk([tool({ hint: 'read', name: 'Read', summary: 'git status' }), first, tool({ summary: 'npm test' }), latest], { status: 'completed', durationMs: 9000 })} {...props} />);
+    // Collapsed: the steps are hidden, the one plan card is not.
+    expect(screen.queryByText('git status')).toBeNull();
+    expect(container.querySelectorAll('.plan-card')).toHaveLength(1);
+    expect(container.querySelector('.plan-progress')?.textContent).toBe('1 of 2 done');
+    expect(container.querySelector('.plan-completed')?.textContent).toContain('Write the limiter');
+    expect(container.querySelector('.plan-in_progress')?.textContent).toContain('Add tests');
+    // Opened: the steps appear and the plan is still shown once, not once per update.
+    fireEvent.click(container.querySelector('.work-head') as HTMLElement);
+    expect(screen.getByText('git status')).toBeTruthy();
+    expect(container.querySelectorAll('.plan-card')).toHaveLength(1);
+  });
+
+  it('shows a plan-only turn as its card without an empty work header', () => {
+    const plan: TranscriptItem = { id: 'p1', kind: 'plan', ts: 0, entries: [{ content: 'Read the code', status: 'pending' }] };
+    const { container } = render(<WorkGroup chunk={chunk([plan])} {...props} />);
+    expect(container.querySelector('.work-head')).toBeNull();
+    expect(container.querySelector('.plan-card')?.textContent).toContain('Read the code');
+  });
+
+  it('sums the steps and the files they changed on the header', () => {
+    const edit = tool({ hint: 'edit', name: 'Edit', summary: 'src/a.ts', changes: [{ path: 'src/a.ts', kind: 'update' }] });
+    const write = tool({ hint: 'edit', name: 'Write', summary: 'src/b.ts', changes: [{ path: 'src/b.ts', kind: 'add' }, { path: 'src/a.ts', kind: 'update' }] });
+    const { container } = render(<WorkGroup chunk={chunk([tool(), edit, write])} {...props} />);
+    const stats = [...container.querySelectorAll('.work-head .work-stat')].map((el) => el.textContent);
+    expect(stats).toEqual(['3 steps', '2 files changed']);
+  });
+});
+
+describe('ToolCard rows', () => {
+  const props = { sessionId: 's', showThinking: false, onImageExpand: () => undefined } as const;
+  const open = (entries: TranscriptItem[]) => {
+    const view = render(<WorkGroup chunk={{ kind: 'work', id: entries[0]!.id, entries }} {...props} />);
+    fireEvent.click(view.container.querySelector('.work-head') as HTMLElement);
+    return view;
+  };
+
+  it('gives a successful step no status badge, and a failed or declined one a badge', () => {
+    const { container } = open([
+      tool({ hint: 'read', name: 'Read', summary: 'src/ok.ts' }),
+      tool({ hint: 'read', name: 'Read', summary: 'src/missing.ts', status: 'error' }),
+      tool({ hint: 'edit', name: 'Edit', summary: 'src/locked.ts', status: 'declined' })
+    ]);
+    const rows = [...container.querySelectorAll('.tool-card')];
+    expect(rows.map((row) => row.querySelector('.badge')?.textContent ?? null)).toEqual([null, 'error', 'declined']);
+  });
+
+  it('counts the lines an edit added and removed', () => {
+    const diff = ['--- a/src/a.ts', '+++ b/src/a.ts', '@@ -1,2 +1,3 @@', ' keep', '-old', '+new', '+added'].join('\n');
+    const { container } = open([tool({ hint: 'edit', name: 'Edit', summary: 'src/a.ts', changes: [{ path: 'src/a.ts', kind: 'update', diff }] })]);
+    expect(container.querySelector('.tool-changes .add')?.textContent).toBe('+2');
+    expect(container.querySelector('.tool-changes .del')?.textContent).toBe('−1');
   });
 });
 

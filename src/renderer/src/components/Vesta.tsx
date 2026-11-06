@@ -1,6 +1,7 @@
 /** Vesta: a floating assistant that drives the app through its capability allowlist.
  *  Portalled to the body and mounted outside the view switch, so it stays put wherever
- *  the user goes and wherever they drag it. */
+ *  the user goes and wherever they drag it. Minimized, it lives in the title bar
+ *  (VestaLauncher) instead of floating over the composer and the side panel. */
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentItem, AgentProposal } from '../../../shared/agent';
@@ -14,6 +15,7 @@ import { askConfirm, Button, Icon, Spinner } from './ui';
 const PANEL_W = 360;
 /** Tallest the expanded panel grows before the transcript starts scrolling. */
 const PANEL_H = 460;
+/** The panel hangs from a point this far below `y` (the height the minimized avatar used to have). */
 const AVATAR = 52;
 /** Gap kept between the panel and the window edge. */
 const MARGIN = 8;
@@ -131,11 +133,7 @@ export function Vesta() {
     const d = dragRef.current;
     dragRef.current = null;
     if (!d) return;
-    if (d.moved) {
-      if (pos) persist({ x: Math.round(pos.x), y: Math.round(pos.y) });
-    } else if (collapsed) {
-      toggle();
-    }
+    if (d.moved && pos) persist({ x: Math.round(pos.x), y: Math.round(pos.y) });
   };
 
   const toggle = () => persist({ collapsed: !collapsed });
@@ -165,35 +163,10 @@ export function Vesta() {
   const anchorBottom = pos.y + AVATAR;
   const bottom = Math.max(MARGIN, window.innerHeight - anchorBottom);
   const maxHeight = Math.max(160, Math.min(PANEL_H, anchorBottom - MARGIN, window.innerHeight - 2 * MARGIN));
-  const style: React.CSSProperties = collapsed
-    ? { left: pos.x, bottom, width: AVATAR, height: AVATAR }
-    : { left: pos.x, bottom, width: PANEL_W, maxHeight };
+  const style: React.CSSProperties = { left: pos.x, bottom, width: PANEL_W, maxHeight };
 
-  if (collapsed) {
-    return createPortal(
-      <div
-        ref={boxRef}
-        className={`vesta vesta-avatar ${agent.busy ? 'busy' : ''}`}
-        style={style}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        role="button"
-        tabIndex={0}
-        aria-label={`Open ${AGENT_NAME}`}
-        title={`${AGENT_NAME} — the in-app assistant`}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            toggle();
-          }
-        }}
-      >
-        {agent.busy ? <Spinner size={18} /> : <Icon name="sparkles" size={22} />}
-      </div>,
-      document.body
-    );
-  }
+  // Minimized, Vesta is the title bar's launcher (VestaLauncher); nothing floats over the workspace.
+  if (collapsed) return null;
 
   return createPortal(
     <div ref={boxRef} className="vesta vesta-panel" style={style} role="dialog" aria-label={AGENT_NAME}>
@@ -205,7 +178,7 @@ export function Vesta() {
         <button className="icon-btn" title="Clear the conversation" aria-label="Clear the conversation" onClick={() => void invoke('agent:reset', undefined).catch(toastError)}>
           <Icon name="trash" size={13} />
         </button>
-        <button className="icon-btn" title="Minimize to the avatar" aria-label="Minimize" onClick={toggle}>
+        <button className="icon-btn" title="Minimize to the title bar" aria-label="Minimize" onClick={toggle}>
           <Icon name="minus" size={13} />
         </button>
       </div>
@@ -269,6 +242,31 @@ export function Vesta() {
       </div>
     </div>,
     document.body
+  );
+}
+
+/** Vesta's place in the title bar: opens the panel, closes it again, and shows when Vesta is working. */
+export function VestaLauncher() {
+  const enabled = useStore((s) => !!s.settings?.onboardingDone && s.settings.agent?.enabled !== false);
+  const collapsed = useStore((s) => s.settings?.agent?.collapsed !== false);
+  const busy = useStore((s) => s.agent.busy);
+  if (!enabled) return null;
+  const toggle = () => {
+    const current = useStore.getState().settings?.agent ?? {};
+    void invoke('settings:update', { agent: { ...current, collapsed: !collapsed } }).catch(toastError);
+  };
+  return (
+    <button
+      type="button"
+      className={`titlebar-vesta ${collapsed ? '' : 'open'} ${busy ? 'busy' : ''}`}
+      aria-label={collapsed ? `Open ${AGENT_NAME}` : `Minimize ${AGENT_NAME}`}
+      aria-pressed={!collapsed}
+      title={`${AGENT_NAME} — the in-app assistant`}
+      onClick={toggle}
+    >
+      {busy ? <Spinner size={12} /> : <Icon name="sparkles" size={14} />}
+      <span>{AGENT_NAME}</span>
+    </button>
   );
 }
 
