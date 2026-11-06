@@ -64,6 +64,34 @@ describe.runIf(enabled)('remote access settings', () => {
     };
     const win = await launch();
 
+    // External automation is independently disabled. Only the native owner can persist a scoped
+    // grant; this fixture exercises the actual renderer → IPC → durable journal boundary.
+    const control = win.getByTestId('control-settings');
+    await control.getByTestId('control-enabled').waitFor();
+    expect(await control.getByTestId('control-enabled').isChecked()).toBe(false);
+    // This checkbox reflects committed state, so click then await the asynchronous save.
+    await control.getByTestId('control-enabled').click();
+    await expect.poll(() => control.getByTestId('control-enabled').isChecked()).toBe(true);
+    const controlFile = path.join(userData, 'control.json');
+    await expect.poll(async () => JSON.parse(await fs.readFile(controlFile, 'utf8')).enabled).toBe(true);
+    await control.getByLabel('Controller label', { exact: true }).fill('E2E controller');
+    await control.getByLabel('Account ID from OAuth consent', { exact: true }).fill('vocs-v1');
+    await control.getByLabel('Controller ID from OAuth consent', { exact: true }).fill('30e4d8a1-cb8b-40bc-aa03-0c7ace255174');
+    await control.getByLabel(project, { exact: true }).check();
+    await control.getByLabel('I approve these actions and the harness’s existing access on this computer.').check();
+    await control.getByRole('button', { name: 'Save controller grant' }).click();
+    await expect.poll(async () => JSON.parse(await fs.readFile(controlFile, 'utf8')).grants.length).toBe(1);
+    const grant = JSON.parse(await fs.readFile(controlFile, 'utf8')).grants[0];
+    expect(grant.scopes).toEqual(['control:discover']);
+    expect(grant.projectIds).toHaveLength(1);
+    expect(grant.permissionModes).toEqual(['ask']);
+    await control.getByRole('button', { name: 'Revoke E2E controller' }).click();
+    await expect.poll(async () => JSON.parse(await fs.readFile(controlFile, 'utf8')).grants[0].revokedAt).toBeTypeOf('number');
+    await expect.poll(() => control.getByTestId('control-enabled').isEnabled()).toBe(true);
+    await control.getByTestId('control-enabled').click();
+    await expect.poll(() => control.getByTestId('control-enabled').isChecked()).toBe(false);
+    await expect.poll(async () => JSON.parse(await fs.readFile(controlFile, 'utf8')).enabled).toBe(false);
+
     // Nothing to type but the enrollment secret: the panel names the relay it will use.
     await expect.poll(async () => win.getByTestId('remote-relay').innerText(), { timeout: 20_000 }).toBe(`127.0.0.1:${port}`);
     expect(await win.getByTestId('remote-relay-url').count()).toBe(0);

@@ -40,6 +40,8 @@ import { inheritedUsageOf, pricedModelOf, repricingOf, turnUsageTotals, type For
 import { errorMessage } from './util/async';
 import { electronUpdaterFacade } from './updater-electron';
 import { RemoteHost } from './remote/host';
+import { ControlJournal } from './control/journal';
+import { ControlService } from './control/service';
 import { RemoteAudit } from './remote/audit';
 import { RemoteMirror } from './remote/mirror';
 import { relayUrl } from './remote/relay-url';
@@ -405,7 +407,17 @@ async function main(): Promise<void> {
   const remoteAudit = new RemoteAudit({ dir: userData, log });
   await remoteAudit.load();
   let registryRef: import('./handlers').HandlerRegistry | null = null;
+  const controlJournal = new ControlJournal(userData);
+  await controlJournal.load().catch(() => log('warn', 'External control journal unavailable; automation is disabled.'));
+  const control = new ControlService({
+    journal: controlJournal, sessions: sessionsRef, settings: () => settings.get(),
+    guard: async (resource) => {
+      if (!registryRef?.assertControlResource) throw new Error('Control resource guard is unavailable.');
+      await registryRef.assertControlResource(resource);
+    },
+  });
   remoteHost = new RemoteHost({
+    control,
     registry: () => registryRef!,
     secrets: { get: (key) => secrets.get(key), set: (key, value) => secrets.set(key, value) },
     pushState: () => pushAll(PUSH_CHANNELS.remoteState, remoteHost!.state()),
@@ -444,6 +456,7 @@ async function main(): Promise<void> {
     gitnexusIndexer,
     appInstructions,
     remote: remoteHost,
+    control,
     desktopFocus,
     remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },
     updater: updater ?? undefined,

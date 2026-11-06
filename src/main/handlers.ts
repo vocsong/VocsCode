@@ -7,6 +7,7 @@ import { promises as fs } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
+import { controlGrantInputSchema } from '../shared/control';
 import type { CreateMissionRequest, MissionCodeRevision, MissionControlRequest, MissionRecord, MissionUserControl } from '../shared/mission';
 import { MISSION_NOT_LINKED_MESSAGE, parseMissionCommand } from '../shared/mission-command';
 import { missionRevisionConflictMessage } from '../shared/mission-errors';
@@ -113,6 +114,8 @@ export interface HandlerDeps {
   gitnexusIndexer?: Pick<GitnexusIndexer, 'schedule' | 'index'>;
   /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
   remote?: RemoteHost;
+  /** Local owner configuration, never exposed through browser/agent invocation origins. */
+  control?: import('./control/service').ControlService;
   /** Which session the desktop window is on, mirrored to paired browsers; absent in tests. */
   desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
@@ -136,7 +139,9 @@ export interface HandlerDeps {
 export interface HandlerRegistry {
   /** Every channel this registry serves — the host binds each to its transport. */
   channels(): IpcChannel[];
-  invoke(channel: string, req: unknown): Promise<unknown>;
+  invoke(channel: string, req: unknown, actor?: 'user' | 'agent' | 'desktop'): Promise<unknown>;
+  /** Shared ordinary-resource guard for typed control operations, not generic IPC dispatch. */
+  assertControlResource?(resource: { sessionId?: string; projectRoot?: string }): Promise<void>;
   /** Stops background children the registry owns (Vesta's pi process). */
   shutdown(): Promise<void>;
 }
@@ -244,7 +249,16 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     handlers.set(channel, fn as (req: never) => unknown);
   }
 
-  async function invokeChannel(channel: string, req: unknown, actor: 'user' | 'agent' = 'user'): Promise<unknown> {
+  if (deps.control) {
+    const control = deps.control;
+    handle('control:get', () => control.ownerState());
+    handle('control:enable', (input) => control.setEnabled(z.strictObject({ enabled: z.boolean() }).parse(input).enabled));
+    handle('control:grant', (input) => control.grant(controlGrantInputSchema.parse(input)));
+    handle('control:revoke', (input) => control.revoke(z.strictObject({ grantId: z.string().uuid() }).parse(input).grantId));
+  }
+
+  async function invokeChannel(channel: string, req: unknown, actor: 'user' | 'agent' | 'desktop' = 'user'): Promise<unknown> {
+    if (channel.startsWith('control:') && actor !== 'desktop') throw new Error('External control grants require the local desktop owner.');
     const fn = handlers.get(channel as IpcChannel);
     if (!fn) {
       deps.log('warn', `ipc: unknown channel ${channel}`);
@@ -253,7 +267,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const t0 = Date.now();
     try {
       // Undefined for the synchronous paths (most channels, every keystroke): nothing to await.
-      const guard = guardMissionBoundary(channel, req, actor);
+      const guard = guardMissionBoundary(channel, req, actor === 'desktop' ? 'user' : actor);
       if (guard) await guard;
       return await fn(req as never);
     } catch (e) {
@@ -1694,6 +1708,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   return {
     channels: () => Array.from(handlers.keys()),
     invoke: invokeChannel,
+    assertControlResource: async ({ sessionId, projectRoot }) => {
+      const target = sessionId ? sessionFor(sessionId).cwd : projectRoot;
+      if (!target || !path.isAbsolute(target)) throw new Error('Invalid control resource.');
+      await fs.realpath(target); // Unlike legacy desktop probes, automation never falls back on a failed canonical read.
+      if (sessionId) await assertOrdinarySession(sessionId);
+      else await assertOrdinaryWorkspace(target);
+    },
     shutdown: async () => {
       await Promise.all([vesta.dispose(), dictationService?.dispose()]);
     }
