@@ -23,7 +23,11 @@ import { VoiceSection } from './VoiceSettings';
 import { ControlSettings } from './ControlSettings';
 import { ChatImport } from './ChatImport';
 
-export type SettingsSection = 'general' | 'mission' | 'instructions' | 'shortcuts' | 'terminal' | 'providers' | 'voice' | 'harnesses' | 'import' | 'pi' | 'acp' | 'remote' | 'about';
+import { SETTINGS_GROUPS, SETTINGS_PAGES, searchSettings, type SettingsSection } from '../settings-catalog';
+import { SettingsGroup, SettingsNote } from './SettingsPrimitives';
+import './settings.css';
+
+export type { SettingsSection } from '../settings-catalog';
 type Section = SettingsSection;
 
 /** Deep links ("Configure Mission") land on their section, whether or not Settings is open. */
@@ -38,57 +42,123 @@ export function openSettings(section: Section): void {
 export function SettingsView() {
   const settings = useStore((s) => s.settings)!;
   const setView = useStore((s) => s.setView);
+  const toast = useStore((s) => s.toast);
   const [section, setSection] = useState<Section>(() => requestedSection ?? 'general');
+  const [query, setQuery] = useState('');
+  const [destination, setDestination] = useState<{ anchor?: string } | null>(null);
+  const body = useRef<HTMLDivElement>(null);
+  const search = useRef<HTMLInputElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const page = SETTINGS_PAGES.find((p) => p.id === section)!;
+  const searching = !!query.trim();
+  const results = searchSettings(query);
+  const navigate = (next: Section, anchor?: string, focus = false) => {
+    setSection(next);
+    setQuery('');
+    setDestination(focus ? { anchor } : null);
+    if (body.current) body.current.scrollTop = 0;
+  };
   useEffect(() => {
     requestedSection = null;
-    const listener = (next: Section) => { requestedSection = null; setSection(next); };
+    const listener = (next: Section) => { requestedSection = null; navigate(next); };
     sectionListeners.add(listener);
     return () => { sectionListeners.delete(listener); };
   }, []);
-  const update = (patch: Partial<AppSettings>) => void invoke('settings:update', patch);
+  useEffect(() => {
+    if (!destination || searching) return;
+    const target = destination.anchor ? document.getElementById(destination.anchor) : null;
+    // A result leads to a visible setting group, with keyboard focus following the jump.
+    if (target) {
+      for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+        if (parent instanceof HTMLDetailsElement) parent.open = true;
+      }
+      target.setAttribute('tabindex', '-1');
+      target.focus({ preventScroll: true });
+      target.scrollIntoView?.({ block: 'start' });
+    } else heading.current?.focus();
+    setDestination(null);
+  }, [destination, searching, section]);
+  const update = (patch: Partial<AppSettings>) => void invoke('settings:update', patch).catch((error: unknown) => {
+    toast(`Could not save settings: ${error instanceof Error ? error.message : String(error)}`, 'error');
+  });
   return (
-    <div className="settings">
-      <div className="settings-nav">
-        <div className="settings-title">
-          <Button variant="ghost" size="sm" icon="chevronRight" className="rot180" onClick={() => setView('chat')} title="Back" />
-          Settings
+    <div className="settings" onKeyDown={(e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault(); e.stopPropagation(); search.current?.focus(); search.current?.select();
+      }
+    }}>
+      <div className="settings-shell">
+        <aside className="settings-nav">
+          <div className="settings-title">
+            <Button variant="ghost" size="sm" icon="arrowLeft" onClick={() => setView('chat')} title="Back" aria-label="Back to workspace" />
+            <span>Settings</span>
+          </div>
+          <div className="settings-search">
+            <Icon name="search" size={16} />
+            <input ref={search} type="search" aria-label="Search settings" placeholder="Search settings…" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => {
+              if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setQuery(''); }
+              if (e.key === 'Enter' && results[0]) { e.preventDefault(); navigate(results[0].section, results[0].topic.anchor, true); }
+              if (e.key === 'ArrowDown' && searching) { e.preventDefault(); body.current?.querySelector<HTMLButtonElement>('.settings-search-result')?.focus(); }
+            }} />
+            {query && <Button variant="ghost" size="sm" icon="x" aria-label="Clear search" onClick={() => { setQuery(''); search.current?.focus(); }} />}
+          </div>
+          <select className="settings-mobile-nav" aria-label="Settings section" value={section} onChange={(e) => navigate(e.target.value as Section)}>
+            {SETTINGS_GROUPS.map((group) => <optgroup key={group} label={group}>
+              {SETTINGS_PAGES.filter((p) => p.group === group).map((p) => <option key={p.id} value={p.id}>{group} / {p.label}</option>)}
+            </optgroup>)}
+          </select>
+          <nav className="settings-nav-groups" aria-label="Settings sections">
+            {SETTINGS_GROUPS.map((group) => (
+              <div className="settings-nav-group" key={group}>
+                <div className="settings-nav-label">{group}</div>
+                {SETTINGS_PAGES.filter((p) => p.group === group).map((p) => (
+                  <button key={p.id} type="button" className={`settings-link ${section === p.id && !searching ? 'active' : ''}`} aria-current={section === p.id && !searching ? 'page' : undefined} onClick={() => navigate(p.id)}>
+                    <Icon name={p.icon} size={16} /><span>{p.label}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </nav>
+          <div className="settings-nav-footer"><Icon name="search" size={13} /><span>{isMac ? '⌘' : 'Ctrl'} F to find a setting</span></div>
+        </aside>
+        <div className="settings-main">
+          <header className="settings-page-header">
+            <div className="settings-breadcrumb">Settings <Icon name="chevronRight" size={12} /> {searching ? 'Search' : page.group}</div>
+            <h1 ref={heading} tabIndex={-1}>{searching ? 'Find a setting' : page.label}</h1>
+            <p>{searching ? 'Search by what you want to change, not where it lives.' : page.description}</p>
+            {!searching && <div className="settings-save-hint"><Icon name="info" size={13} />{page.saveHint}</div>}
+          </header>
+          <div className="settings-body" ref={body}>
+            {searching && <div className="settings-search-results">
+              <p className="settings-result-count" role="status">{results.length} {results.length === 1 ? 'result' : 'results'} for “{query.trim()}”</p>
+              {results.map((result) => <button key={`${result.section}-${result.topic.label}`} type="button" className="settings-search-result" onClick={() => navigate(result.section, result.topic.anchor, true)}>
+                <span className="settings-result-icon"><Icon name={result.icon} size={20} /></span>
+                <span className="settings-result-copy"><span className="settings-result-path">{result.group} / {result.pageLabel}</span><strong>{result.topic.label}</strong><span>{result.topic.description}</span></span>
+                <Icon name="arrowRight" size={16} />
+              </button>)}
+              {!results.length && <div className="settings-search-empty"><Icon name="search" size={32} /><h2>No settings found</h2><p>Try “theme”, “API key”, “compaction” or “keyboard”.</p><Button onClick={() => { setQuery(''); search.current?.focus(); }}>Browse all settings</Button></div>}
+            </div>}
+            {/* Searching never unmounts the current editor or throws away an unsaved draft. */}
+            <div className="settings-content" hidden={searching}>
+              {section === 'general' && <General settings={settings} update={update} navigate={navigate} />}
+              {section === 'appearance' && <Appearance settings={settings} update={update} />}
+              {section === 'sessions' && <SessionDefaults settings={settings} update={update} />}
+              {section === 'assistant' && <BackgroundModelFields settings={settings} update={update} />}
+              {section === 'mission' && <MissionSettings settings={settings} />}
+              {section === 'shortcuts' && <ShortcutsSection settings={settings} />}
+              {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
+              {section === 'providers' && <Providers settings={settings} />}
+              {section === 'voice' && <VoiceSection settings={settings} />}
+              {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
+              {section === 'import' && <ChatImport />}
+              {section === 'instructions' && <InstructionsSection />}
+              {section === 'pi' && <PiSection />}
+              {section === 'acp' && <AcpAgents settings={settings} update={update} />}
+              {section === 'remote' && <><SettingsGroup id="remote-browser" title="Browser access" icon="globe"><RemoteSection settings={settings} update={update} /></SettingsGroup><SettingsGroup id="remote-controllers" title="External MCP control" description="Experimental · Connect a controller with explicit desktop grants." icon="shield"><ControlSettings /></SettingsGroup></>}
+              {section === 'about' && <About />}
+            </div>
+          </div>
         </div>
-        {(
-          [
-            ['general', 'General', 'settings'],
-            ['mission', 'Mission', 'flag'],
-            ['shortcuts', 'Shortcuts', 'keyboard'],
-            ['terminal', 'Terminal', 'terminal'],
-            ['providers', 'Providers & keys', 'key'],
-            ['voice', 'Voice', 'mic'],
-            ['harnesses', 'Harnesses', 'shield'],
-            ['import', 'Import chats', 'download'],
-            ['instructions', 'Instructions', 'edit'],
-            ['pi', 'Pi', 'sparkles'],
-            ['acp', 'ACP agents', 'fork'],
-            ['remote', 'Remote access', 'bolt'],
-            ['about', 'About & doctor', 'info']
-          ] as [Section, string, string][]
-        ).map(([id, label, icon]) => (
-          <button key={id} type="button" className={`settings-link ${section === id ? 'active' : ''}`} onClick={() => setSection(id)}>
-            <Icon name={icon} size={14} /> {label}
-          </button>
-        ))}
-      </div>
-      <div className="settings-body">
-        {section === 'general' && <General settings={settings} update={update} />}
-        {section === 'mission' && <MissionSettings settings={settings} />}
-        {section === 'shortcuts' && <ShortcutsSection settings={settings} />}
-        {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
-        {section === 'providers' && <Providers settings={settings} />}
-        {section === 'voice' && <VoiceSection settings={settings} />}
-        {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
-        {section === 'import' && <ChatImport />}
-        {section === 'instructions' && <InstructionsSection />}
-        {section === 'pi' && <PiSection />}
-        {section === 'acp' && <AcpAgents settings={settings} update={update} />}
-        {section === 'remote' && <><RemoteSection settings={settings} update={update} /><ControlSettings /></>}
-        {section === 'about' && <About />}
       </div>
     </div>
   );
@@ -114,6 +184,7 @@ function ThemePicker({ value, onChange }: { value: ThemeId; onChange: (id: Theme
                     type="button"
                     className={`theme-card${value === t.id ? ' active' : ''}`}
                     title={t.description}
+                    aria-label={t.name}
                     aria-pressed={value === t.id}
                     onClick={() => onChange(t.id)}
                   >
@@ -136,14 +207,57 @@ function ThemePicker({ value, onChange }: { value: ThemeId; onChange: (id: Theme
   );
 }
 
-function General({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+function General({ settings, update, navigate }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void; navigate: (section: Section) => void }) {
+  const theme = THEMES.find((t) => t.id === settings.theme);
+  const links: { section: Section; detail: string }[] = [
+    { section: 'appearance', detail: theme?.name ?? 'System' },
+    { section: 'sessions', detail: HARNESSES.find((h) => h.id === settings.defaultHarness)?.name ?? 'Choose your defaults' },
+    { section: 'providers', detail: `${settings.providers.filter((p) => p.enabled).length} enabled providers` },
+    { section: 'shortcuts', detail: 'Make it second nature' },
+  ];
+  return <div className="settings-section">
+    <div className="settings-overview">
+      <span className="settings-overview-symbol"><Icon name="settings" size={24} /></span>
+      <div><div className="settings-eyebrow">YOUR WORKSPACE, YOUR WAY</div><h2>A little setup. A better flow.</h2><p>Start with the essentials, or search for exactly what you need.</p></div>
+    </div>
+    <div className="settings-quick-links">
+      {links.map((link) => {
+        const item = SETTINGS_PAGES.find((p) => p.id === link.section)!;
+        return <button key={item.id} type="button" className="settings-quick-link" onClick={() => navigate(item.id)}>
+          <span className="settings-quick-icon"><Icon name={item.icon} size={19} /></span><span><strong>{item.label}</strong><small>{link.detail}</small></span><Icon name="chevronRight" size={15} />
+        </button>;
+      })}
+    </div>
+    <SettingsGroup id="general-notifications" title="Stay in the loop" description="Get a heads-up when your agents need you, without interrupting your focus." icon="bell">
+      <Toggle checked={settings.notifications} onChange={(v) => update({ notifications: v })} label="Desktop notifications when a turn finishes or approval is needed (only while the window is unfocused)" />
+    </SettingsGroup>
+    <SettingsGroup id="general-editor" title="Your editor" description="Jump from a file or diff into the editor you already love." icon="code">
+      <Field label="Editor command" hint="Used by “Open in editor”. VS Code (code) supports jumping to a line.">
+        <input value={settings.binaries.editor ?? ''} placeholder="code" onChange={(e) => update({ binaries: { ...settings.binaries, editor: e.target.value } })} />
+      </Field>
+    </SettingsGroup>
+  </div>;
+}
+
+function Appearance({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+  const theme = THEMES.find((t) => t.id === settings.theme)!;
+  return <div className="settings-section">
+    <div className="settings-theme-preview" aria-hidden="true">
+      <div className="settings-preview-sidebar"><Icon name="logo" size={24} /><span /><span /><span /></div>
+      <div className="settings-preview-workspace"><div className="settings-eyebrow">YOUR NEXT GREAT IDEA</div><strong>A calmer place to build.</strong><p>One workspace. Every coding agent.</p><div className="settings-preview-message"><Icon name="sparkles" size={16} /> Ready when you are.</div></div>
+      <div className="settings-preview-caption"><Icon name={theme?.id === 'system' ? 'sun' : 'palette'} size={15} />{theme?.name ?? 'System'}<span>Live preview</span></div>
+    </div>
+    <SettingsGroup id="appearance-theme" title="Color theme" description="Choose a palette below. System follows your computer’s light or dark preference." icon="palette">
+      <ThemePicker value={settings.theme} onChange={(next) => update({ theme: next })} />
+    </SettingsGroup>
+  </div>;
+}
+
+function SessionDefaults({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   return (
     <div className="settings-section">
-      <h2>General</h2>
-      <div className="field">
-        <span className="field-label">Theme</span>
-        <ThemePicker value={settings.theme} onChange={(theme) => update({ theme })} />
-      </div>
+      <SettingsNote>These are starting defaults, not overrides. Each project remembers the choices made in its New Session dialog. Running sessions are unchanged.</SettingsNote>
+      <SettingsGroup id="sessions-defaults" title="New sessions" icon="sessionPlus" description="Choose how agents start in a project with no remembered preferences.">
       <Field
         label="Default harness"
         hint="Used by folders that have no remembered choices yet: the New Session dialog keeps each project's own harness, model, permission mode and worktree setting."
@@ -175,6 +289,8 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
           ))}
         </select>
       </Field>
+      </SettingsGroup>
+      <SettingsGroup id="sessions-context" title="Context management" icon="layers" description="Keep longer conversations within the model’s working context.">
       <Field
         label="Automatically compact context at"
         hint="Checked after each turn. Vocs Code can request compaction from Claude, Codex, Pi and Native; other harnesses keep their own behavior, and any harness may compact earlier. Percentage presets require a reported context window."
@@ -191,9 +307,8 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
           ))}
         </select>
       </Field>
-      <Toggle checked={settings.notifications} onChange={(v) => update({ notifications: v })} label="Desktop notifications when a turn finishes or approval is needed (only while the window is unfocused)" />
-      <BackgroundModelFields settings={settings} update={update} />
-      <h3>Goal defaults</h3>
+      </SettingsGroup>
+      <SettingsGroup id="sessions-goals" title="Goal defaults" icon="target" description="Control how an agent continues working toward an active goal.">
       <Toggle checked={settings.goalDefaults.autoContinue} onChange={(v) => update({ goalDefaults: { ...settings.goalDefaults, autoContinue: v } })} label="Auto-continue goals after each turn" />
       <Field label="Iteration guard">
         <input type="number" min={1} max={500} value={settings.goalDefaults.maxIterations} onChange={(e) => update({ goalDefaults: { ...settings.goalDefaults, maxIterations: Number(e.target.value) || 25 } })} />
@@ -203,16 +318,15 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
         onChange={(v) => update({ goalDefaults: { ...settings.goalDefaults, preferHarness: v } })}
         label="Prefer a harness's own /goal when it has one — the command goes to the harness instead of the app's goal engine"
       />
-      <BranchPrefixFields settings={settings} update={update} />
-      <h3>Editor</h3>
-      <Field label="Editor command" hint="Used by “Open in editor”. VS Code (code) supports jumping to a line.">
-        <input value={settings.binaries.editor ?? ''} placeholder="code" onChange={(e) => update({ binaries: { ...settings.binaries, editor: e.target.value } })} />
-      </Field>
+      </SettingsGroup>
+      <SettingsGroup id="sessions-branches" title="Worktree branches" icon="branch">
+        <BranchPrefixFields settings={settings} update={update} />
+      </SettingsGroup>
     </div>
   );
 }
 
-/** General → Worktree branches: the saved prefixes every project's New Session dialog offers after the built-in ones. */
+/** Session defaults → Worktree branches: the saved prefixes every project's New Session dialog offers after the built-in ones. */
 function BranchPrefixFields({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   const custom = settings.customBranchPrefixes ?? [];
   const [draft, setDraft] = useState('');
@@ -225,7 +339,6 @@ function BranchPrefixFields({ settings, update }: { settings: AppSettings; updat
   };
   return (
     <>
-      <h3>Worktree branches</h3>
       <p className="muted small">
         A session isolated in a git worktree starts on a new branch named <code>prefix/session-name</code>. {BUILTIN_BRANCH_PREFIXES.map((p) => `${p}/`).join(', ')} are always offered; the prefixes
         below are offered in every project too. A custom prefix typed in the New Session dialog is added here when its session starts.
@@ -259,7 +372,7 @@ function BranchPrefixFields({ settings, update }: { settings: AppSettings; updat
 const FONT_SIZES = [10, 11, 12, 13, 14, 15, 16, 18, 20];
 const SCROLLBACKS = [1_000, 5_000, 10_000, 20_000, 50_000, 100_000];
 
-/** General → the two background models: chores (session titles) and Vesta, plus its on/off switch. */
+/** Vesta & utility → the two background models: chores (session titles) and Vesta, plus its on/off switch. */
 function BackgroundModelFields({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -281,7 +394,8 @@ function BackgroundModelFields({ settings, update }: { settings: AppSettings; up
   }, []);
   const models = providers.filter((p) => p.enabled).flatMap((p) => p.models);
   return (
-    <>
+    <div className="settings-section">
+      <SettingsGroup id="assistant-models" title="Utility model" icon="bolt" description="Small, fast chores shouldn’t need your most powerful model.">
       <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions and worktree branches. Falls back to the session's own model when unset.">
         {error && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {error}</span></div>}
         <div className="onboarding-model-picker">
@@ -293,7 +407,8 @@ function BackgroundModelFields({ settings, update }: { settings: AppSettings; up
           />
         </div>
       </Field>
-      <h3>Vesta</h3>
+      </SettingsGroup>
+      <SettingsGroup id="assistant-vesta" title="Vesta" icon="sparkles" description="Your floating assistant for the workspace itself.">
       <p className="muted small">
         The floating assistant. It runs on pi — the same coding agent as the Pi harness — and drives the app itself to set up MCP servers, start sessions
         and tidy branches. pi only ever sees the app's capability list: every change Vesta wants to make is shown as a proposal you approve first. Drag it
@@ -312,7 +427,8 @@ function BackgroundModelFields({ settings, update }: { settings: AppSettings; up
           />
         </div>
       </Field>
-    </>
+      </SettingsGroup>
+    </div>
   );
 }
 
@@ -328,7 +444,7 @@ function TerminalSection({ settings, update }: { settings: AppSettings; update: 
   return (
     <div className="settings-section">
       <h2>Terminal</h2>
-      <p className="muted small">Each tab in the Terminal panel is a real pseudo-terminal: interactive programs, colors, Ctrl+C and your shell profile all work, and tabs keep running while you use the rest of the app.</p>
+      <SettingsGroup id="terminal-shell" title="Shell & startup" icon="terminal" description="Interactive programs, shell profiles and colors work just as they do in your terminal app.">
       <Field label="Default shell" hint="New terminals start this shell in the session's working directory. Auto picks PowerShell on Windows and your login shell elsewhere.">
         <select value={t.shell} onChange={(e) => patch({ shell: e.target.value as ShellKind })}>
           <option value="auto">Auto</option>
@@ -351,6 +467,9 @@ function TerminalSection({ settings, update }: { settings: AppSettings; update: 
           </Field>
         </div>
       )}
+      <Toggle checked={t.restoreOnStartup} onChange={(v) => patch({ restoreOnStartup: v })} label="Restore terminals on startup: tabs come back with their scrollback, and the shell starts again when you open one" />
+      </SettingsGroup>
+      <SettingsGroup id="terminal-display" title="Text & cursor" icon="edit" description="Make your terminal comfortable to read.">
       <div className="row gap12">
         <Field label="Font size">
           <select value={t.fontSize} onChange={(e) => patch({ fontSize: Number(e.target.value) })}>
@@ -379,8 +498,8 @@ function TerminalSection({ settings, update }: { settings: AppSettings; update: 
         </Field>
       </div>
       <Toggle checked={t.cursorBlink} onChange={(v) => patch({ cursorBlink: v })} label="Blinking cursor" />
-      <Toggle checked={t.restoreOnStartup} onChange={(v) => patch({ restoreOnStartup: v })} label="Restore terminals on startup: tabs come back with their scrollback, and the shell starts again when you open one" />
-      <h3>Shortcuts</h3>
+      </SettingsGroup>
+      <SettingsGroup title="Terminal shortcuts" icon="keyboard">
       <p className="muted small">
         <Kbd>{mod}+`</Kbd> focus the terminal (again to return to the composer) · <Kbd>{mod}+Shift+`</Kbd> new terminal · <Kbd>{mod}+F</Kbd> find · <Kbd>Ctrl+Shift+C</Kbd> / <Kbd>Ctrl+Shift+V</Kbd> copy / paste
         {!isMac && (
@@ -391,6 +510,7 @@ function TerminalSection({ settings, update }: { settings: AppSettings; update: 
         )}{' '}
         · right-click copies the selection or pastes · double-click a tab to rename it.
       </p>
+      </SettingsGroup>
     </div>
   );
 }
@@ -401,7 +521,16 @@ function Providers({ settings }: { settings: AppSettings }) {
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
+  const [filter, setFilter] = useState('');
+  const filtered = settings.providers.filter((p) => `${p.name} ${p.id} ${p.kind}`.toLowerCase().includes(filter.trim().toLowerCase()));
   const [custom, setCustom] = useState({ id: '', name: '', baseUrl: '', envKey: '', kind: 'openai-compatible' as ProviderKind });
+  const addForm = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (adding) {
+      addForm.current?.scrollIntoView?.({ block: 'start' });
+      addForm.current?.querySelector('input')?.focus({ preventScroll: true });
+    }
+  }, [adding]);
 
   const refreshSecretStatus = async () => {
     try {
@@ -447,15 +576,23 @@ function Providers({ settings }: { settings: AppSettings }) {
   return (
     <div className="settings-section">
       <h2>Providers & API keys</h2>
-      <p className="muted">Keys are encrypted with the OS keychain (DPAPI on Windows) and only sent to the provider you configure. Harnesses that bring their own login (Claude Code, Codex, pi, dsh) keep using it; keys here are a fallback and power the native loop.</p>
+      <SettingsNote>Harnesses with their own login keep using it. Keys here power the native loop and serve as a fallback. They are encrypted with the OS keychain and sent only to the endpoint you configure.</SettingsNote>
       {secretStatus && !secretStatus.encryptionAvailable && secretStatus.hasFallback && (
         <div className="info-line info-warn"><Icon name="alert" size={13} /> <span>OS encryption is unavailable. Stored provider keys use a local fallback and are less protected; enable OS encryption or clear and re-enter these keys.</span></div>
       )}
-      <HarnessLogins />
+      <div id="providers-logins"><HarnessLogins /></div>
+      <div id="providers-catalog" className="settings-provider-filter">
+        <input type="search" aria-label="Filter providers" placeholder="Find a provider…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <span role="status">{filtered.length} of {settings.providers.length} providers</span>
+        {filter && <Button size="sm" variant="ghost" onClick={() => setFilter('')}>Show all providers</Button>}
+        <span className="spacer" />
+        {!adding && <Button icon="plus" size="sm" onClick={() => setAdding(true)}>Add provider</Button>}
+      </div>
+      {!filtered.length && <p className="muted">No providers match “{filter}”. Clear the filter or add a custom provider.</p>}
       {settings.providers.map((p) => (
-        <div key={p.id} className={`provider-card ${p.enabled ? '' : 'disabled'}`}>
+        <div key={p.id} hidden={!filtered.some((match) => match.id === p.id)} className={`provider-card ${p.enabled ? '' : 'disabled'}`}>
           <div className="provider-head">
-            <Toggle checked={p.enabled} onChange={(v) => void save(p, { enabled: v })} />
+            <Toggle checked={p.enabled} onChange={(v) => void save(p, { enabled: v })} label={<span className="settings-sr-only">Enable {p.name}</span>} />
             <span className="provider-name">{p.name}</span>
             <Badge tone="neutral">{p.kind}</Badge>
             {p.hasApiKey ? <Badge tone="green">key stored</Badge> : p.envKey && <Badge tone="neutral">env: {p.envKey}</Badge>}
@@ -468,7 +605,7 @@ function Providers({ settings }: { settings: AppSettings }) {
           {p.enabled && (
             <div className="provider-body">
               <div className="row gap8">
-                <input type="password" placeholder={p.hasApiKey ? 'Replace stored key…' : p.kind === 'ollama' || p.kind === 'lmstudio' ? 'No key needed' : 'Paste API key'} value={keys[p.id] ?? ''} onChange={(e) => setKeys({ ...keys, [p.id]: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && void saveKey(p)} />
+                <input type="password" aria-label={`${p.name} API key`} autoComplete="off" placeholder={p.hasApiKey ? 'Replace stored key…' : p.kind === 'ollama' || p.kind === 'lmstudio' ? 'No key needed' : 'Paste API key'} value={keys[p.id] ?? ''} onChange={(e) => setKeys({ ...keys, [p.id]: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && void saveKey(p)} />
                 <Button size="sm" onClick={() => void saveKey(p)} disabled={!keys[p.id]?.trim()}>
                   Save key
                 </Button>
@@ -501,17 +638,17 @@ function Providers({ settings }: { settings: AppSettings }) {
           )}
         </div>
       ))}
-      {adding ? (
-        <div className="provider-card">
+      {adding && (
+        <div ref={addForm} className="provider-card">
           <div className="provider-head"><span className="provider-name">New provider</span></div>
           <div className="provider-body">
             <div className="row gap8">
-              <input placeholder="id (letters, dashes)" value={custom.id} onChange={(e) => setCustom({ ...custom, id: e.target.value.replace(/[^a-z0-9-]/gi, '').toLowerCase() })} />
-              <input placeholder="Display name" value={custom.name} onChange={(e) => setCustom({ ...custom, name: e.target.value })} />
+              <input aria-label="Provider ID" placeholder="id (letters, dashes)" value={custom.id} onChange={(e) => setCustom({ ...custom, id: e.target.value.replace(/[^a-z0-9-]/gi, '').toLowerCase() })} />
+              <input aria-label="Provider display name" placeholder="Display name" value={custom.name} onChange={(e) => setCustom({ ...custom, name: e.target.value })} />
             </div>
             <div className="row gap8">
-              <input placeholder="Base URL (…/v1)" value={custom.baseUrl} onChange={(e) => setCustom({ ...custom, baseUrl: e.target.value })} />
-              <input placeholder="Env var for key (optional)" value={custom.envKey} onChange={(e) => setCustom({ ...custom, envKey: e.target.value })} />
+              <input aria-label="Provider base URL" placeholder="Base URL (…/v1)" value={custom.baseUrl} onChange={(e) => setCustom({ ...custom, baseUrl: e.target.value })} />
+              <input aria-label="Provider key environment variable" placeholder="Env var for key (optional)" value={custom.envKey} onChange={(e) => setCustom({ ...custom, envKey: e.target.value })} />
             </div>
             <Field label="Kind" inline hint={custom.kind === 'anthropic' ? 'Claude Code runs on this endpoint, so its models appear for the Claude harness.' : 'OpenAI-compatible endpoints power the native harness.'}>
               <select value={custom.kind} onChange={(e) => setCustom({ ...custom, kind: e.target.value as ProviderKind })}>
@@ -538,12 +675,8 @@ function Providers({ settings }: { settings: AppSettings }) {
             </div>
           </div>
         </div>
-      ) : (
-        <Button icon="plus" onClick={() => setAdding(true)}>
-          Add provider
-        </Button>
       )}
-      <ModelOverrides settings={settings} />
+      <SettingsGroup id="providers-overrides" title="Model capability overrides" icon="image" description="Correct a model’s advertised support for images."><ModelOverrides settings={settings} /></SettingsGroup>
     </div>
   );
 }
@@ -782,7 +915,6 @@ function ModelOverrides({ settings }: { settings: AppSettings }) {
 
   return (
     <>
-      <h3>Model capability overrides</h3>
       <p className="muted">
         Harnesses advertise which models accept images, and they get it wrong — a hand-written entry in a harness catalog, a stale model list, or a name-based guess for an
         OpenAI-compatible endpoint. An override corrects one model here. It changes what this app believes and warns about; it cannot stop a harness that strips attachments
@@ -846,7 +978,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
     <div className="settings-section">
       <h2>Harnesses</h2>
       <p className="muted">Each harness is a separate agent runtime. Vocs Code detects binaries on PATH, in its private runtime folder, or bundled with the app.</p>
-      <div className="harness-table">
+      <div id="harnesses-installed" className="harness-table">
         {HARNESSES.map((h) => {
           const av = availability[h.id];
           return (
@@ -878,7 +1010,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
           );
         })}
       </div>
-      <h3>Claude</h3>
+      <SettingsGroup id="harnesses-config" title="Claude runtime" icon="cpu">
       <Field label="Runtime" hint="System uses your Claude Code login (~/.claude); bundled is the runtime shipped with the Agent SDK and needs an API key or shared credentials.">
         <select value={settings.claude.runtime} onChange={(e) => update({ claude: { ...settings.claude, runtime: e.target.value as AppSettings['claude']['runtime'] } })}>
           <option value="auto">Auto (system first, then bundled)</option>
@@ -889,7 +1021,8 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
       <Toggle checked={settings.claude.useProviderKey} onChange={(v) => update({ claude: { ...settings.claude, useProviderKey: v } })} label="Pass the stored Anthropic API key to Anthropic's own endpoint" />
       <p className="muted small">Claude Code runs against any provider that publishes an Anthropic-format endpoint. OpenRouter and DeepSeek do, so once their key is stored their catalogs appear for this harness automatically and the endpoint follows the model you pick. Anything else can be added under Providers with Kind <strong>Anthropic-compatible</strong>. This toggle only affects Anthropic's own endpoint: on sends the stored API key, off keeps the Claude Code login.</p>
       {bin('claude', 'claude path override')}
-      <h3>Codex</h3>
+      </SettingsGroup>
+      <SettingsGroup title="Codex runtime" icon="cpu">
       <Field label="Runtime">
         <select value={settings.codex.runtime} onChange={(e) => update({ codex: { ...settings.codex, runtime: e.target.value as AppSettings['codex']['runtime'] } })}>
           <option value="auto">Auto (system first, then bundled)</option>
@@ -898,15 +1031,18 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
         </select>
       </Field>
       {bin('codex', 'codex path override')}
-      <h3>Pi</h3>
+      </SettingsGroup>
+      <SettingsGroup title="Pi runtime" icon="puzzle">
       {bin('pi', 'pi path override')}
       <Field label="Extra pi arguments" hint="Space separated, appended to every pi session launch (e.g. --no-skills). Vesta's own pi run is hermetic and ignores these.">
         <input value={settings.pi.extraArgs.join(' ')} onChange={(e) => update({ pi: { extraArgs: e.target.value.split(/\s+/).filter(Boolean) } })} />
       </Field>
-      <h3>DeepSeek Harness / npx</h3>
+      </SettingsGroup>
+      <SettingsGroup title="Other runtime paths" icon="folder" description="Leave blank to use automatic detection.">
       {bin('dsh', 'dsh path override')}
       {bin('npx', 'npx path override')}
       {bin('gemini', 'gemini path override')}
+      </SettingsGroup>
     </div>
   );
 }
@@ -925,8 +1061,8 @@ function AcpAgents({ settings, update }: { settings: AppSettings; update: (p: Pa
             {a.builtin && <Badge tone="neutral">built-in</Badge>}
             <span className="spacer" />
             <code className="small">{[a.command, ...a.args].join(' ')}</code>
-            <Button size="sm" variant="ghost" icon="edit" onClick={() => setDraft({ ...a })} />
-            {!a.builtin && <Button size="sm" variant="ghost" icon="trash" onClick={() => save(settings.acpAgents.filter((x) => x.id !== a.id))} />}
+            <Button size="sm" variant="ghost" icon="edit" aria-label={`Edit ${a.name}`} onClick={() => setDraft({ ...a })} />
+            {!a.builtin && <Button size="sm" variant="ghost" icon="trash" aria-label={`Remove ${a.name}`} onClick={() => save(settings.acpAgents.filter((x) => x.id !== a.id))} />}
           </div>
           <div className="muted small pad-h">{a.description}</div>
         </div>
@@ -935,14 +1071,14 @@ function AcpAgents({ settings, update }: { settings: AppSettings; update: (p: Pa
         <div className="provider-card">
           <div className="provider-body">
             <div className="row gap8">
-              <input placeholder="id" value={draft.id} disabled={!!settings.acpAgents.find((x) => x.id === draft.id && x.builtin)} onChange={(e) => setDraft({ ...draft, id: e.target.value.replace(/[^a-z0-9-]/gi, '').toLowerCase() })} />
-              <input placeholder="Name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+              <input aria-label="Agent ID" placeholder="id" value={draft.id} disabled={!!settings.acpAgents.find((x) => x.id === draft.id && x.builtin)} onChange={(e) => setDraft({ ...draft, id: e.target.value.replace(/[^a-z0-9-]/gi, '').toLowerCase() })} />
+              <input aria-label="Agent name" placeholder="Name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
             </div>
             <div className="row gap8">
-              <input placeholder="command" value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} />
-              <input placeholder="args (space separated)" value={draft.args.join(' ')} onChange={(e) => setDraft({ ...draft, args: e.target.value.split(/\s+/).filter(Boolean) })} />
+              <input aria-label="Agent command" placeholder="command" value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} />
+              <input aria-label="Agent arguments" placeholder="args (space separated)" value={draft.args.join(' ')} onChange={(e) => setDraft({ ...draft, args: e.target.value.split(/\s+/).filter(Boolean) })} />
             </div>
-            <input placeholder="Description" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+            <input aria-label="Agent description" placeholder="Description" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
             <div className="row gap8">
               <Button
                 variant="primary"
@@ -998,7 +1134,7 @@ function ShortcutsSection({ settings }: { settings: AppSettings }) {
       <h2>Shortcuts</h2>
       <p className="muted">The built-in combinations below always work. Add your own bindings for common actions — they work app-wide, and session actions apply to the session you are on.</p>
 
-      <h3>Custom shortcuts</h3>
+      <SettingsGroup id="shortcuts-custom" title="Custom shortcuts" icon="keyboard">
       {entries.length === 0 && <p className="muted small">No custom shortcuts yet. Pick a command, press a key combination, then Add.</p>}
       {entries.map(([accel, cmd]) => {
         const info = shortcutCommandInfo(cmd);
@@ -1047,8 +1183,8 @@ function ShortcutsSection({ settings }: { settings: AppSettings }) {
         <p className="muted small">Moves the binding for {shortcutCommandInfo(movedFrom[1])?.label ?? movedFrom[1]} from {formatAccelerator(movedFrom[0], isMac)}.</p>
       )}
 
-      <h3>Built-in shortcuts</h3>
-      <p className="muted small">Fixed combinations the app handles itself; custom bindings cannot take these.</p>
+      </SettingsGroup>
+      <SettingsGroup id="shortcuts-reference" title="Built-in shortcuts" icon="book" description="Fixed combinations the app handles itself; custom bindings cannot take these.">
       {BUILTIN_SHORTCUT_GROUPS.map((g) => (
         <div key={g.title} className="shortcut-ref">
           <div className="shortcut-ref-title">{g.title}</div>
@@ -1064,8 +1200,10 @@ function ShortcutsSection({ settings }: { settings: AppSettings }) {
           ))}
         </div>
       ))}
+      </SettingsGroup>
     </div>
-  );}
+  );
+}
 
 /** Input that captures a pressed key combination into an accelerator; it never accumulates typed text. */
 function ShortcutCapture({ value, onChange }: { value: string | null; onChange: (accel: string | null) => void }) {
@@ -1108,12 +1246,14 @@ function About() {
   return (
     <div className="settings-section">
       <h2>About</h2>
+      <SettingsGroup title="Vocs Code" icon="logo" description="One workspace for your coding agents.">
       <p>
         <strong>Vocs Code</strong> {info?.version} · Electron {report?.electron} · Node {report?.node} · {report?.platform}
       </p>
       {info?.isPackaged && <UpdatesPanel state={updateState} currentVersion={info.version} />}
       <p className="muted small mono">{info?.userData}</p>
-      <h3>Doctor</h3>
+      </SettingsGroup>
+      <SettingsGroup id="about-doctor" title="Doctor" icon="activity" description="Detected runtimes and provider credentials on this computer.">
       {!report && <Spinner />}
       {report && (
         <table className="doctor">
@@ -1135,6 +1275,7 @@ function About() {
           </tbody>
         </table>
       )}
+      </SettingsGroup>
     </div>
   );
 }
@@ -1280,8 +1421,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   const signingIn = state?.signIn;
 
   return (
-    <div className="settings-body">
-      <h3>Remote access</h3>
+    <div className="settings-remote">
       <p className="muted small">
         Let a paired browser at{' '}
         <button type="button" className="link-btn" data-testid="remote-relay" title={`Open ${webApp}`} onClick={openWebApp}>

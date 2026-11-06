@@ -142,6 +142,7 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 | Composer slash commands answered in the transcript (`/doctor`) | `tests/composer-doctor.test.tsx` + `e2e.doctor` |
 | Usage panel, `src/renderer/src/session-usage.ts` | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx` + `e2e.usage` |
 | Analytics dashboard, `src/main/analytics*.ts`, `src/shared/analytics/**` | `tests/analytics*.test.ts(x)` + `e2e.vision` |
+| Settings navigation/search, `settings-catalog.ts`, `SettingsPrimitives.tsx`, `components/settings.css` | `tests/settings-navigation.test.tsx`, `tests/branch-prefix-settings-ui.test.tsx`, `tests/context-ui.test.tsx` + `e2e.layout`; update and run the affected section’s E2E below. The layout suite captures isolated light/dark review screenshots in `tests/artifacts/settings-redesign-*.png`; see [Settings UX](SETTINGS.md). |
 | Themes, `styles.css`, terminal colours | `e2e.themes` |
 | Terminal panel, PTY, `terminal/host.ts` | `e2e.terminal` |
 | Approval cards and their question chips, `harness/permissions.ts` | `tests/approval-card.test.tsx` + `e2e.transcript` (a seeded pending question) + `e2e.approval` (live) |

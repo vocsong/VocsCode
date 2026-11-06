@@ -5,7 +5,7 @@
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { PiSection } from '../src/renderer/src/components/PiSettings';
 import type { PiSetup } from '../src/shared/types';
 
@@ -80,6 +80,11 @@ function mockBackend(): PiSetup {
   return current;
 }
 
+async function selectCategory(name: string): Promise<void> {
+  const categories = await screen.findByRole('group', { name: 'Pi settings categories' });
+  fireEvent.click(within(categories).getByRole('button', { name }));
+}
+
 afterEach(() => {
   cleanup();
   invoke.mockReset();
@@ -93,10 +98,67 @@ describe('PiSection', () => {
     expect(screen.getAllByText('C:/pi/agent').length).toBeGreaterThan(1);
   });
 
+  it('defaults to Preferences and exposes only the selected category', async () => {
+    mockBackend();
+    render(<PiSection />);
+    const categories = await screen.findByRole('group', { name: 'Pi settings categories' });
+    const buttons = within(categories).getAllByRole('button');
+    expect(buttons.map((button) => button.textContent)).toEqual(['Preferences', 'Prompts', 'Resources', 'Packages', 'Subagents']);
+    expect(within(categories).getByRole('button', { name: 'Preferences', pressed: true })).toBeTruthy();
+    expect(screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent)).toEqual(['Preferences', 'Compaction and retry']);
+    expect(screen.queryByRole('textbox', { name: 'Package source' })).toBeNull();
+
+    for (const button of buttons) {
+      fireEvent.click(button);
+      expect(within(categories).getAllByRole('button', { pressed: true })).toEqual([button]);
+      const panel = document.getElementById(button.getAttribute('aria-controls')!)!;
+      expect(panel.hidden).toBe(false);
+      for (const other of buttons.filter((candidate) => candidate !== button)) {
+        expect(document.getElementById(other.getAttribute('aria-controls')!)!.hidden).toBe(true);
+      }
+      expect(screen.getByText(/global pi settings/i).closest('[hidden]')).toBeNull();
+    }
+  });
+
+  it('keeps prompt, package and uncontrolled preference drafts mounted across categories', async () => {
+    mockBackend();
+    render(<PiSection />);
+    const reserve = (await screen.findByRole('spinbutton', { name: /Reserve tokens/ })) as HTMLInputElement;
+    fireEvent.change(reserve, { target: { value: '8192' } });
+
+    await selectCategory('Prompts');
+    const editor = screen.getByPlaceholderText('SYSTEM.md is not set') as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: '# Unsaved instructions\n' } });
+
+    await selectCategory('Packages');
+    expect(editor.isConnected).toBe(true);
+    expect(editor.closest('[hidden]')).not.toBeNull();
+    const source = screen.getByRole('textbox', { name: 'Package source' }) as HTMLInputElement;
+    fireEvent.change(source, { target: { value: 'npm:demo-package' } });
+
+    await selectCategory('Resources');
+    await selectCategory('Subagents');
+    expect(source.isConnected).toBe(true);
+    expect(source.closest('[hidden]')).not.toBeNull();
+
+    await selectCategory('Preferences');
+    expect(screen.getByRole('spinbutton', { name: /Reserve tokens/ })).toBe(reserve);
+    expect(reserve.value).toBe('8192');
+    await selectCategory('Prompts');
+    expect(screen.getByPlaceholderText('SYSTEM.md is not set')).toBe(editor);
+    expect(editor.value).toBe('# Unsaved instructions\n');
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
+    await selectCategory('Packages');
+    expect(screen.getByRole('textbox', { name: 'Package source' })).toBe(source);
+    expect(source.value).toBe('npm:demo-package');
+    expect(invoke.mock.calls).toEqual([['pi:setup', undefined]]);
+  });
+
   it('renders discovered resources with their type groups', async () => {
     mockBackend();
     render(<PiSection />);
-    expect(await screen.findByText('goal.ts')).toBeTruthy();
+    await selectCategory('Resources');
+    expect(screen.getByText('goal.ts')).toBeTruthy();
     expect(screen.getByText('demo')).toBeTruthy();
     expect(screen.getByText('Demo the thing')).toBeTruthy();
     expect(screen.getByText('Extensions')).toBeTruthy();
@@ -108,7 +170,7 @@ describe('PiSection', () => {
   it('sends a resource toggle with the exact path pi needs', async () => {
     mockBackend();
     render(<PiSection />);
-    await screen.findByText('demo');
+    await selectCategory('Resources');
     const row = screen.getByText('demo').closest('.pi-resource')!;
     fireEvent.click(row.querySelector('input[type="checkbox"]')!);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pi:resource', { type: 'skills', path: 'C:/pi/agent/skills/demo/SKILL.md', enabled: false }));
@@ -118,7 +180,7 @@ describe('PiSection', () => {
   it('lists package resources and toggles them through the package filter channel', async () => {
     mockBackend();
     render(<PiSection />);
-    await screen.findByText('git:github.com/tintinweb/pi-subagents');
+    await selectCategory('Packages');
     const row = screen.getByText('src/index.ts', { selector: 'strong' }).closest('.pi-resource')!;
     fireEvent.click(row.querySelector('input[type="checkbox"]')!);
     await waitFor(() =>
@@ -134,7 +196,8 @@ describe('PiSection', () => {
   it('writes subagent settings and lists on-disk agents', async () => {
     mockBackend();
     render(<PiSection />);
-    await screen.findByText('Read-only search');
+    await selectCategory('Subagents');
+    expect(screen.getByText('Read-only search')).toBeTruthy();
     fireEvent.click(screen.getByLabelText('Show estimated cost next to subagent token counts'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pi:subagents', { showCost: true }));
   });
@@ -150,9 +213,11 @@ describe('PiSection', () => {
   it('keeps Save disabled until a prompt file is edited, then writes it', async () => {
     mockBackend();
     render(<PiSection />);
-    expect((await screen.findByPlaceholderText('SYSTEM.md is not set')) as HTMLTextAreaElement).toBeTruthy();
-    // Tabs follow the System, Append, Agent sequence and the first one is selected on load.
-    const tabNames = [...document.querySelectorAll('.pi-tab')].map((el) => (el.firstChild?.textContent ?? '').trim());
+    await selectCategory('Prompts');
+    expect(screen.getByPlaceholderText('SYSTEM.md is not set')).toBeTruthy();
+    // Prompt file buttons follow the System, Append, Agent sequence.
+    const promptFiles = screen.getByRole('group', { name: 'System prompt files' });
+    const tabNames = within(promptFiles).getAllByRole('button').map((el) => (el.firstChild?.textContent ?? '').trim());
     expect(tabNames).toEqual(['SYSTEM.md', 'APPEND_SYSTEM.md', 'AGENTS.md']);
 
     fireEvent.click(screen.getByRole('button', { name: 'AGENTS.md' }));

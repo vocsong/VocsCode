@@ -15,7 +15,7 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import { decodePng, type Frame, openNewSession, pixelDelta, seedSettings } from './e2e-ui';
+import { decodePng, type Frame, isolatedEnv, openNewSession, pixelDelta, seedSettings } from './e2e-ui';
 import { GROUP_ORDER, THEMES } from '../src/shared/themes';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -64,20 +64,13 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
     await fs.writeFile(path.join(project, 'colors.txt'), colored + esc + '[0m' + String.fromCharCode(10));
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v === undefined) continue;
-      if (k === 'ELECTRON_RUN_AS_NODE' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
-      env[k] = v;
-    }
-    env.VOCS_CODE_USER_DATA = userData;
-
-    app = await electron.launch({ executablePath: require('electron') as string, args: [path.join(root, 'out', 'main', 'index.js')], env, timeout: 60_000 });
+    app = await electron.launch({ executablePath: require('electron') as string, args: [path.join(root, 'out', 'main', 'index.js')], env: isolatedEnv(userData), timeout: 60_000 });
     const win: Page = await app.firstWindow();
     failedPage = win;
     await win.waitForSelector('.brand', { timeout: 60_000 });
 
     await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
+    await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Appearance', exact: true }).click();
     await win.waitForSelector('.theme-picker', { timeout: 20_000 });
 
     // Every catalogue entry is offered, exactly once.
@@ -181,8 +174,9 @@ describe.runIf(enabled)('theme catalogue (e2e)', () => {
     const screens = new Map<string, Frame>();
     for (const id of ['midnight', 'blueprint', 'ember', 'nebula'] as const) {
       const name = THEMES.find((t) => t.id === id)?.name as string;
-      // The View menu offers one "Theme" item that opens Settings; the catalogue itself lives there.
+      // Reopening Settings starts at General; themes now live in Appearance.
       await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
+      await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Appearance', exact: true }).click();
       await win.waitForSelector('.theme-picker', { timeout: 20_000 });
       await win.locator('.theme-card', { hasText: new RegExp(`^${name}$`) }).click();
       await win.waitForSelector(`html[data-theme='${id}']`, { timeout: 10_000 });
