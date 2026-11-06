@@ -65,6 +65,10 @@ export function SettingsView() {
     return () => { sectionListeners.delete(listener); };
   }, []);
   useEffect(() => {
+    // A new query must expose its first result, not inherit the previous page/list's scroll.
+    if (searching && body.current) body.current.scrollTop = 0;
+  }, [query, searching]);
+  useEffect(() => {
     if (!destination || searching) return;
     const target = destination.anchor ? document.getElementById(destination.anchor) : null;
     // A result leads to a visible setting group, with keyboard focus following the jump.
@@ -85,6 +89,8 @@ export function SettingsView() {
     <div className="settings" onKeyDown={(e) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
         e.preventDefault(); e.stopPropagation(); search.current?.focus(); search.current?.select();
+      } else if (searching && e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation(); setQuery(''); search.current?.focus();
       }
     }}>
       <div className="settings-shell">
@@ -256,8 +262,8 @@ function Appearance({ settings, update }: { settings: AppSettings; update: (p: P
 function SessionDefaults({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   return (
     <div className="settings-section">
-      <SettingsNote>These are starting defaults, not overrides. Each project remembers the choices made in its New Session dialog. Running sessions are unchanged.</SettingsNote>
       <SettingsGroup id="sessions-defaults" title="New sessions" icon="sessionPlus" description="Choose how agents start in a project with no remembered preferences.">
+      <SettingsNote>These defaults do not change existing sessions. Each project keeps its remembered New Session choices.</SettingsNote>
       <Field
         label="Default harness"
         hint="Used by folders that have no remembered choices yet: the New Session dialog keeps each project's own harness, model, permission mode and worktree setting."
@@ -290,7 +296,7 @@ function SessionDefaults({ settings, update }: { settings: AppSettings; update: 
         </select>
       </Field>
       </SettingsGroup>
-      <SettingsGroup id="sessions-context" title="Context management" icon="layers" description="Keep longer conversations within the model’s working context.">
+      <SettingsGroup id="sessions-context" title="Context management" icon="layers" description="This app-wide setting also applies to existing sessions at their next idle boundary.">
       <Field
         label="Automatically compact context at"
         hint="Checked after each turn. Vocs Code can request compaction from Claude, Codex, Pi and Native; other harnesses keep their own behavior, and any harness may compact earlier. Percentage presets require a reported context window."
@@ -308,7 +314,7 @@ function SessionDefaults({ settings, update }: { settings: AppSettings; update: 
         </select>
       </Field>
       </SettingsGroup>
-      <SettingsGroup id="sessions-goals" title="Goal defaults" icon="target" description="Control how an agent continues working toward an active goal.">
+      <SettingsGroup id="sessions-goals" title="Goal defaults" icon="target" description="Auto-continue and iteration defaults apply to new goals. The /goal preference also updates existing sessions.">
       <Toggle checked={settings.goalDefaults.autoContinue} onChange={(v) => update({ goalDefaults: { ...settings.goalDefaults, autoContinue: v } })} label="Auto-continue goals after each turn" />
       <Field label="Iteration guard">
         <input type="number" min={1} max={500} value={settings.goalDefaults.maxIterations} onChange={(e) => update({ goalDefaults: { ...settings.goalDefaults, maxIterations: Number(e.target.value) || 25 } })} />

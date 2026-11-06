@@ -14,6 +14,7 @@ import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { AppSettings } from '../src/shared/types';
+import { SETTINGS_PAGES } from '../src/renderer/src/settings-catalog';
 import { expectQuietWindow, isolatedEnv, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -150,6 +151,17 @@ describe.runIf(enabled)('shell layout', () => {
     await win.keyboard.press('Tab');
     const search = win.getByRole('searchbox', { name: 'Search settings', exact: true });
     expect(await win.locator('.settings-search input:focus').count()).toBe(1);
+    // A scrolled page and a scrolled result list must both yield to the next query's first result.
+    const scrollResultsToBottom = () => win.locator('.settings-body').evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      return element.scrollTop;
+    });
+    expect(await scrollResultsToBottom()).toBeGreaterThan(0);
+    await search.fill('p');
+    await expect.poll(() => win.locator('.settings-body').evaluate((element) => element.scrollTop)).toBe(0);
+    expect(await scrollResultsToBottom()).toBeGreaterThan(0);
+    await search.fill('pr');
+    await expect.poll(() => win.locator('.settings-body').evaluate((element) => element.scrollTop)).toBe(0);
     await search.fill('compaction');
     await win.getByRole('heading', { name: 'Find a setting', level: 1 }).waitFor();
     const contextResult = win.getByRole('button', { name: /Session defaults.*Context management/ });
@@ -159,6 +171,12 @@ describe.runIf(enabled)('shell layout', () => {
     await capture('search');
     await search.press('ArrowDown');
     expect(await win.locator('.settings-search-result:focus').innerText()).toContain('Context management');
+    await contextResult.press('Escape');
+    expect(await search.inputValue()).toBe('');
+    expect(await win.locator('.settings-search input:focus').count()).toBe(1);
+    await win.getByRole('heading', { name: 'Appearance', level: 1 }).waitFor();
+    await search.fill('compaction');
+    await search.press('ArrowDown');
     await contextResult.press('Enter');
     await win.getByRole('heading', { name: 'Session defaults', level: 1 }).waitFor();
     await expect.poll(() => win.locator('#sessions-context:focus').count()).toBe(1);
@@ -257,6 +275,27 @@ describe.runIf(enabled)('shell layout', () => {
       if (name === 'Shortcuts') await capture('shortcuts');
     }
 
+    // Every configured anchor must land on a real, visible control group, including cold page mounts.
+    let anchoredTopics = 0;
+    for (const page of SETTINGS_PAGES) {
+      for (const topic of page.topics) {
+        if (!('anchor' in topic)) continue;
+        await navigate('General');
+        await search.fill(topic.label);
+        await win.locator('.settings-search-result').filter({ has: win.getByText(topic.label, { exact: true }) }).click();
+        await win.getByRole('heading', { name: page.label, level: 1, exact: true }).waitFor();
+        const target = win.locator(`#${topic.anchor}`);
+        await expect.poll(() => target.evaluate((element) => element === document.activeElement)).toBe(true);
+        expect(await target.isVisible(), topic.label).toBe(true);
+        const targetBox = await box(win, `#${topic.anchor}`);
+        const viewport = await box(win, '.settings-body');
+        expect(targetBox.y, topic.label).toBeGreaterThanOrEqual(viewport.y - 1);
+        expect(targetBox.y, topic.label).toBeLessThan(viewport.y + viewport.height);
+        anchoredTopics++;
+      }
+    }
+    expect(anchoredTopics).toBe(26);
+
     // A Mission budget result skips the tier cards and focuses the actual limits heading.
     await search.fill('mission budget');
     await win.getByRole('button', { name: /Mission limits & projects/ }).waitFor();
@@ -304,6 +343,22 @@ describe.runIf(enabled)('shell layout', () => {
     await search.press('Enter');
     await expect.poll(() => win.locator('#sessions-context:focus').count()).toBe(1);
     expect(await compact.inputValue()).toBe('sessions');
+
+    // Check every page at both navigation breakpoints and at compact/zoom-sized widths.
+    for (const width of [960, 820, 650, 600, 480]) {
+      await win.setViewportSize({ width, height: 800 });
+      for (const page of SETTINGS_PAGES) {
+        if (await compact.isVisible()) await compact.selectOption(page.id);
+        else await navigate(page.label);
+        await win.getByRole('heading', { name: page.label, level: 1, exact: true }).waitFor();
+        if (page.id === 'pi') await win.getByRole('group', { name: 'Pi settings categories' }).waitFor();
+        const overflow = await win.locator('.settings-content').evaluate(async (element) => {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          return element.scrollWidth - element.clientWidth;
+        });
+        expect(overflow, `${page.label} at ${width}px`).toBeLessThanOrEqual(1);
+      }
+    }
 
     // The View menu remains a direct route to Appearance, including from outside Settings.
     await win.setViewportSize({ width: 1440, height: 1000 });

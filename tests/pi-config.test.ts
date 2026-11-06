@@ -3,10 +3,13 @@
  * would load, enable/disable writes pi's own `+`/`-` patterns without touching other settings keys,
  * and a malformed settings.json is reported and never rewritten.
  */
-import { promises as fs } from 'node:fs';
+import type { ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { promises as fs, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as processTools from '../src/main/harness/spawn';
 import { PiConfigStore, applyPatternsToFiles, matchPiGlob, packageLocation, packageResourceEnabled, piPaths, piResourceEnabled, runPiCommand, type PiRunner } from '../src/main/pi-config';
 
 const dirs: string[] = [];
@@ -18,8 +21,25 @@ async function tmpDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(dirs.splice(0).map((d) => fs.rm(d, { recursive: true, force: true })));
 });
+
+/** Capture each JSON read at invocation, so overlapping mutations deterministically see stale data.
+ * The store and atomic writer still use real files; no timer or filesystem scheduling race is needed. */
+function snapshotJsonReads(file: string): void {
+  const readFile = fs.readFile.bind(fs);
+  vi.spyOn(fs, 'readFile').mockImplementation(((...args: Parameters<typeof fs.readFile>) => {
+    if (args[0] === file && args[1] === 'utf8') return Promise.resolve(readFileSync(file, 'utf8'));
+    return readFile(...args);
+  }) as typeof fs.readFile);
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 /** A temp agent dir seeded with one of every resource type, plus a settings.json. */
 async function fixture(settings: Record<string, unknown> = {}): Promise<{ agentDir: string; store: PiConfigStore }> {
@@ -176,6 +196,145 @@ describe('PiConfigStore.updatePreferences', () => {
   });
 });
 
+describe('PiConfigStore complete mutations', () => {
+  it('preserves concurrent preference patches across stores sharing a file, including each returned snapshot', async () => {
+    const { agentDir, store } = await fixture({ theme: 'dark', retry: { provider: { maxRetries: 2 } } });
+    const file = path.join(agentDir, 'settings.json');
+    const other = new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } });
+    snapshotJsonReads(file);
+
+    const [first, second] = await Promise.all([
+      store.updatePreferences({ retryEnabled: false }),
+      other.updatePreferences({ retryBaseDelayMs: 500 })
+    ]);
+    expect(first.preferences.retryEnabled).toBe(false);
+    expect(first.preferences.retryBaseDelayMs).toBeUndefined();
+    expect(second.preferences).toMatchObject({ retryEnabled: false, retryBaseDelayMs: 500 });
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({
+      theme: 'dark', retry: { provider: { maxRetries: 2 }, enabled: false, baseDelayMs: 500 }
+    });
+    const reloaded = await new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } }).read();
+    expect(reloaded.preferences).toEqual(second.preferences);
+  });
+
+  it('merges concurrent preferences, local resource toggles and package filters without losing unknown keys', async () => {
+    const { agentDir, pkgRoot, store } = await withPackage({ theme: 'dark' }, async (root) => {
+      await fs.mkdir(path.join(root, 'extensions'), { recursive: true });
+      await fs.writeFile(path.join(root, 'extensions', 'hello.ts'), 'export default () => {};', 'utf8');
+    });
+    await fs.mkdir(path.join(agentDir, 'extensions'), { recursive: true });
+    const local = path.join(agentDir, 'extensions', 'local.ts');
+    await fs.writeFile(local, 'export default () => {};', 'utf8');
+    const file = path.join(agentDir, 'settings.json');
+    await fs.writeFile(file, JSON.stringify({ theme: 'dark', packages: [{ source: pkgRoot, custom: 'keep' }] }), 'utf8');
+    snapshotJsonReads(file);
+
+    const [preferences, resource, pkg] = await Promise.all([
+      store.updatePreferences({ transport: 'sse' }),
+      store.setResourceEnabled('extensions', local, false),
+      store.setPackageResourceEnabled(pkgRoot, 'extensions', path.join(pkgRoot, 'extensions', 'hello.ts'), false)
+    ]);
+    expect(preferences.preferences.transport).toBe('sse');
+    expect(preferences.resources[0]?.enabled).toBe(true);
+    expect(resource.preferences.transport).toBe('sse');
+    expect(resource.resources[0]?.enabled).toBe(false);
+    expect(resource.packages[0]?.resources[0]?.enabled).toBe(true);
+    expect(pkg.packages[0]?.resources[0]?.enabled).toBe(false);
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({
+      theme: 'dark', transport: 'sse', extensions: ['-extensions/local.ts'],
+      packages: [{ source: pkgRoot, custom: 'keep', extensions: ['-extensions/hello.ts'] }]
+    });
+    const reloaded = await new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } }).read();
+    expect(reloaded.preferences.transport).toBe('sse');
+    expect(reloaded.resources[0]?.enabled).toBe(false);
+    expect(reloaded.packages[0]?.resources[0]?.enabled).toBe(false);
+  });
+
+  it('merges concurrent subagent patches and snapshots while preserving uncurated keys', async () => {
+    const { agentDir, store } = await fixture();
+    const file = path.join(agentDir, 'subagents.json');
+    await fs.writeFile(file, JSON.stringify({ widgetMode: 'off', showModel: true }), 'utf8');
+    snapshotJsonReads(file);
+
+    const [first, second] = await Promise.all([
+      store.updateSubagents({ showModel: null, reportUsage: true }),
+      store.updateSubagents({ maxConcurrent: 7 })
+    ]);
+    expect(first.subagents).toEqual({ reportUsage: true });
+    expect(second.subagents).toEqual({ reportUsage: true, maxConcurrent: 7 });
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ widgetMode: 'off', reportUsage: true, maxConcurrent: 7 });
+    expect((await new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } }).read()).subagents).toEqual(second.subagents);
+  });
+
+  it.each(['settings.json', 'subagents.json'] as const)('recovers %s after a failed atomic write and a rejected patch', async (name) => {
+    const { agentDir, store } = await fixture();
+    const file = path.join(agentDir, name);
+    const original = JSON.stringify({ unrelated: { keep: true } });
+    await fs.writeFile(file, original, 'utf8');
+    const update = (value: number) => name === 'settings.json'
+      ? store.updatePreferences({ retryBaseDelayMs: value })
+      : store.updateSubagents({ maxConcurrent: value });
+    const failure = Object.assign(new Error('injected disk full'), { code: 'ENOSPC' });
+    vi.spyOn(fs, 'rename').mockRejectedValueOnce(failure);
+
+    await expect(update(500)).rejects.toThrow('injected disk full');
+    expect(await fs.readFile(file, 'utf8')).toBe(original);
+    expect((await fs.readdir(agentDir)).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
+    const [rejected, recovered] = await Promise.allSettled([update(-1), update(200)]);
+    expect(rejected).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ message: expect.stringContaining('Invalid value') }) });
+    expect(recovered.status).toBe('fulfilled');
+    const reloaded = await new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } }).read();
+    if (name === 'settings.json') {
+      expect(reloaded.preferences.retryBaseDelayMs).toBe(200);
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ unrelated: { keep: true }, retry: { baseDelayMs: 200 } });
+    } else {
+      expect(reloaded.subagents).toEqual({ maxConcurrent: 200 });
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ unrelated: { keep: true }, maxConcurrent: 200 });
+    }
+  });
+
+  it('orders a public read after a pending save and before a later save, across store instances', async () => {
+    const { agentDir, store } = await fixture({ transport: 'auto' });
+    snapshotJsonReads(path.join(agentDir, 'settings.json'));
+    const entered = deferred();
+    const release = deferred();
+    const rename = fs.rename.bind(fs);
+    vi.spyOn(fs, 'rename').mockImplementationOnce(async (...args) => {
+      entered.resolve();
+      await release.promise;
+      await rename(...args);
+    });
+    const saved = store.updatePreferences({ transport: 'sse' });
+    await entered.promise;
+    const read = new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } }).read();
+    const later = store.updatePreferences({ transport: 'websocket' });
+    release.resolve();
+    const snapshots = await Promise.all([saved, read, later]);
+    expect(snapshots.map((setup) => setup.preferences.transport)).toEqual(['sse', 'sse', 'websocket']);
+  });
+
+  it('a public reload retains the earlier successful save when a later queued mutation fails', async () => {
+    const { agentDir, store } = await fixture({ transport: 'auto' });
+    snapshotJsonReads(path.join(agentDir, 'settings.json'));
+    const outcomes = await Promise.allSettled([
+      store.updatePreferences({ transport: 'sse' }),
+      store.updatePreferences({ retryMaxRetries: -1 }),
+      store.read()
+    ]);
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fulfilled', 'rejected', 'fulfilled']);
+    expect(outcomes[2]).toMatchObject({ status: 'fulfilled', value: { preferences: { transport: 'sse' } } });
+    expect(JSON.parse(await fs.readFile(path.join(agentDir, 'settings.json'), 'utf8'))).toEqual({ transport: 'sse' });
+  });
+
+  it('round-trips zero retries through save and a new store', async () => {
+    const { agentDir, store } = await fixture({ retry: { maxRetries: 3 } });
+    const saved = await store.updatePreferences({ retryMaxRetries: 0 });
+    expect(saved.preferences.retryMaxRetries).toBe(0);
+    expect((await new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } }).read()).preferences.retryMaxRetries).toBe(0);
+    expect(JSON.parse(await fs.readFile(path.join(agentDir, 'settings.json'), 'utf8'))).toEqual({ retry: { maxRetries: 0 } });
+  });
+});
+
 describe('PiConfigStore.setResourceEnabled', () => {
   it('writes pi-style patterns and flips the resource state', async () => {
     const { agentDir, store } = await fixture({ theme: 'dark' });
@@ -227,6 +386,40 @@ describe('PiConfigStore.writePrompt', () => {
     const { store } = await fixture();
     await expect(store.writePrompt('NOTES.md' as never, 'x')).rejects.toThrow('Unknown prompt file');
     await expect(store.writePrompt('AGENTS.md', 'x'.repeat(600_000))).rejects.toThrow('limited to 512 KB');
+  });
+});
+
+describe('PiConfigStore prompt byte limits', () => {
+  const limit = 512 * 1024;
+
+  it.each(['é', '界', '😀'])('round-trips %s at the exact UTF-8 byte boundary and rejects overflow without replacing it', async (character) => {
+    const { agentDir, store } = await fixture();
+    const bytes = Buffer.byteLength(character, 'utf8');
+    const content = character.repeat(Math.floor(limit / bytes)) + 'x'.repeat(limit % bytes);
+    expect(Buffer.byteLength(content, 'utf8')).toBe(limit);
+    const saved = await store.writePrompt('AGENTS.md', content);
+    const prompt = saved.promptFiles.find((f) => f.name === 'AGENTS.md');
+    expect(prompt?.truncated).toBeUndefined();
+    expect(prompt?.content === content).toBe(true);
+    expect(await fs.readFile(path.join(agentDir, 'AGENTS.md'), 'utf8') === content).toBe(true);
+
+    await expect(store.writePrompt('AGENTS.md', content + character)).rejects.toThrow('limited to 512 KB');
+    expect(await fs.readFile(path.join(agentDir, 'AGENTS.md'), 'utf8') === content).toBe(true);
+    const reloaded = await new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } }).read();
+    expect(reloaded.promptFiles.find((f) => f.name === 'AGENTS.md')?.content === content).toBe(true);
+  });
+
+  it.each([['é', 1], ['界', 1], ['界', 2], ['😀', 1], ['😀', 2], ['😀', 3]] as const)('does not split %s after byte %i in a truncated preview', async (character, partialBytes) => {
+    const { agentDir, store } = await fixture();
+    const prefix = 'x'.repeat(limit - partialBytes);
+    const file = path.join(agentDir, 'SYSTEM.md');
+    const content = prefix + character + 'tail';
+    await fs.writeFile(file, content, 'utf8');
+    const prompt = (await store.read()).promptFiles.find((f) => f.name === 'SYSTEM.md');
+    expect(prompt?.truncated).toBe(true);
+    expect(prompt?.content).toHaveLength(prefix.length);
+    expect(prompt?.content === prefix).toBe(true);
+    expect(await fs.readFile(file, 'utf8') === content).toBe(true);
   });
 });
 
@@ -399,7 +592,108 @@ describe('PiConfigStore package commands', () => {
   });
 });
 
+describe('PiConfigStore package mutation ordering', () => {
+  it.each(['install', 'remove', 'update'] as const)('keeps %s runner writes authoritative before a concurrent preference patch', async (command) => {
+    const { agentDir } = await fixture({ theme: 'dark' });
+    const file = path.join(agentDir, 'settings.json');
+    snapshotJsonReads(file);
+    const entered = deferred();
+    const release = deferred();
+    const runner = vi.fn<PiRunner>(async () => {
+      const before = JSON.parse(await fs.readFile(file, 'utf8'));
+      entered.resolve();
+      await release.promise;
+      await fs.writeFile(file, JSON.stringify({ ...before, packages: ['npm:runner-result'] }), 'utf8');
+      return { ok: true, code: 0, log: 'done' };
+    });
+    const store = new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir }, runPi: runner });
+    const commandResult = command === 'install' ? store.installPackage('npm:demo')
+      : command === 'remove' ? store.removePackage('npm:demo') : store.updatePackages('npm:demo');
+    await entered.promise;
+    const preferenceResult = store.updatePreferences({ transport: 'sse' });
+    release.resolve();
+    const [result, setup] = await Promise.all([commandResult, preferenceResult]);
+
+    expect(result).toEqual({ ok: true, code: 0, log: 'done' });
+    expect(runner.mock.calls).toEqual([[[command, 'npm:demo']]]);
+    expect(setup.packages.map((pkg) => pkg.source)).toEqual(['npm:runner-result']);
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ theme: 'dark', packages: ['npm:runner-result'], transport: 'sse' });
+    const reloaded = await new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } }).read();
+    expect(reloaded.preferences.transport).toBe('sse');
+    expect(reloaded.packages.map((pkg) => pkg.source)).toEqual(['npm:runner-result']);
+  });
+
+  it('recovers after a rejected runner without blocking other agent directories while it is running', async () => {
+    const { agentDir } = await fixture({ theme: 'dark' });
+    const other = await fixture();
+    const entered = deferred();
+    const release = deferred();
+    const runner = vi.fn<PiRunner>(async () => {
+      entered.resolve();
+      await release.promise;
+      throw new Error('runner failed');
+    });
+    const store = new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir }, runPi: runner });
+    const result = Promise.allSettled([store.installPackage('npm:demo'), store.updatePreferences({ transport: 'sse' }), store.updateSubagents({ reportUsage: true })]);
+    await entered.promise;
+    try {
+      expect((await other.store.updatePreferences({ transport: 'websocket' })).preferences.transport).toBe('websocket');
+    } finally {
+      release.resolve();
+    }
+    const outcomes = await result;
+    expect(outcomes[0]).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ message: 'runner failed' }) });
+    expect(outcomes[1]).toMatchObject({ status: 'fulfilled', value: { preferences: { transport: 'sse' } } });
+    expect(outcomes[2]).toMatchObject({ status: 'fulfilled', value: { subagents: { reportUsage: true } } });
+    const reloaded = await new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } }).read();
+    expect(reloaded.preferences.transport).toBe('sse');
+    expect(reloaded.subagents).toEqual({ reportUsage: true });
+  });
+});
+
 describe('runPiCommand', () => {
+  it('holds queued reads and writes through timeout teardown, even if close arrives first', async () => {
+    const { agentDir } = await fixture({ theme: 'dark' });
+    const stopping = deferred();
+    const stopped = deferred();
+    const child = new EventEmitter() as ChildProcess;
+    vi.spyOn(processTools, 'spawnTool').mockReturnValueOnce(child);
+    vi.spyOn(processTools, 'killTree').mockImplementationOnce(async () => {
+      stopping.resolve();
+      await stopped.promise;
+    });
+    const store = new PiConfigStore({
+      env: { PI_CODING_AGENT_DIR: agentDir },
+      runPi: (args) => runPiCommand(args, { piPath: 'fixture-pi', cwd: agentDir, log: () => undefined, timeoutMs: 1 })
+    });
+    const other = new PiConfigStore({ env: { PI_CODING_AGENT_DIR: agentDir } });
+    const packageDone = vi.fn();
+    const readDone = vi.fn();
+    const writeDone = vi.fn();
+    const command = store.installPackage('npm:fixture').then((result) => { packageDone(); return result; });
+    await stopping.promise;
+    const read = other.read().then((result) => { readDone(); return result; });
+    const write = other.updatePreferences({ transport: 'sse' }).then((result) => { writeDone(); return result; });
+    try {
+      child.emit('close', 0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(packageDone).not.toHaveBeenCalled();
+      expect(readDone).not.toHaveBeenCalled();
+      expect(writeDone).not.toHaveBeenCalled();
+      expect(JSON.parse(await fs.readFile(path.join(agentDir, 'settings.json'), 'utf8'))).toEqual({ theme: 'dark' });
+      // A final CLI write during teardown must be visible to the queued merge, not overwritten.
+      await fs.writeFile(path.join(agentDir, 'settings.json'), JSON.stringify({ theme: 'light' }), 'utf8');
+    } finally {
+      stopped.resolve();
+      await Promise.all([command, read, write]);
+    }
+    expect(await command).toMatchObject({ ok: false, code: null, error: expect.stringContaining('timed out') });
+    expect(packageDone).toHaveBeenCalledTimes(1);
+    expect(readDone).toHaveBeenCalledTimes(1);
+    expect(writeDone).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(await fs.readFile(path.join(agentDir, 'settings.json'), 'utf8'))).toEqual({ theme: 'light', transport: 'sse' });
+  });
+
   it('captures output and exit status from a real process', async () => {
     const ok = await runPiCommand(['-e', 'console.log("PI_OK")'], { piPath: process.execPath, cwd: os.tmpdir(), log: () => undefined, timeoutMs: 30_000 });
     expect(ok).toMatchObject({ ok: true, code: 0 });
