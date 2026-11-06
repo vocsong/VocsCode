@@ -417,7 +417,7 @@ describe('Mission user IPC', () => {
 const mutations: Array<[string, Record<string, unknown>]> = [
   ['sessions:delete', { removeWorktree: true }], ['sessions:editAndResend', { userItemId: 'u', input: { text: 'retry' } }],
   ['sessions:interrupt', {}], ['sessions:stop', {}], ['sessions:setModel', { model: { provider: 'p', model: 'm' } }],
-  ['sessions:setEffort', { effort: 'high' }], ['sessions:setPermissionMode', { mode: 'full-auto' }],
+  ['sessions:setEffort', { effort: 'high' }], ['sessions:setKeepAwake', { enabled: true }], ['sessions:setPermissionMode', { mode: 'full-auto' }],
   ['sessions:compact', {}], ['sessions:clearTranscript', {}], ['sessions:fork', {}], ['sessions:moveTo', { cwd: '/tmp' }],
   ['subagents:stop', { runId: 'run' }], ['subagents:steer', { runId: 'run', message: 'bypass' }]
 ];

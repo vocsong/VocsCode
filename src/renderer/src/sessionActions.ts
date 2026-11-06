@@ -68,6 +68,12 @@ export async function setSessionFastMode(id: string, enabled: boolean): Promise<
   useStore.setState((s) => ({ sessions: s.sessions.map((session) => session.id === id ? meta : session) }));
 }
 
+/** Publish the server-confirmed state, so the button never claims a wake lock the host did not take. */
+export async function setSessionKeepAwake(id: string, enabled: boolean): Promise<void> {
+  const meta = await invoke('sessions:setKeepAwake', { id, enabled });
+  useStore.setState((s) => ({ sessions: s.sessions.map((session) => session.id === id ? meta : session) }));
+}
+
 /** Archive like the sidebar row does: a worktree is removed after confirmation; uncommitted changes block, then force. */
 export async function archiveSession(s: SessionMeta, toast: Toast) {
   if (s.archived || useStore.getState().archiving[s.id]) return;

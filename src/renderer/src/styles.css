@@ -1797,6 +1797,37 @@ h4 {
 .pill.open {
   background: var(--bg-hover);
 }
+.pill.pill-on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* An instant tooltip: the native title waits about a second, too long for a control whose
+   meaning is not obvious from its label. Text comes from data-tip. */
+.pill-tip {
+  position: relative;
+  overflow: visible; /* .pill clips; the hover card hangs below the pill */
+}
+.pill-tip:hover::after,
+.pill-tip:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  width: max-content;
+  max-width: 280px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: normal;
+  text-align: left;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
 .pill:disabled {
   opacity: 0.5;
   cursor: default;
