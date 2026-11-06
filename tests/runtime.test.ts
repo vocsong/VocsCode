@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AppSettings } from '../src/shared/types';
 import { MAX_CAPTURE_BYTES, RuntimeResolver, clearWhichCache, runCapture } from '../src/main/runtime';
+import { defaultSettings } from '../src/main/settings';
 
 const temporaryDirs: string[] = [];
 afterEach(async () => {
@@ -73,6 +74,38 @@ describe.skipIf(process.platform !== 'win32')('Claude SDK runtime selection on W
     await fs.mkdir(path.dirname(binary), { recursive: true });
     await fs.writeFile(binary, '');
     expect(resolver.resolve('claude')).toEqual({ path: binary, source: 'bundled' });
+  });
+});
+
+describe('bundled runtime intent', () => {
+  it('resolves Codex from ancestor dependencies in a worktree, like the Claude SDK', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-codex-runtime-'));
+    temporaryDirs.push(root);
+    const appRoot = path.join(root, 'worktrees', 'feature');
+    const name = `@openai/codex-${process.platform}-${process.arch}`;
+    const pkg = path.join(root, 'node_modules', name);
+    const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
+    const triple = `${arch}-${process.platform === 'win32' ? 'pc-windows-msvc' : process.platform === 'darwin' ? 'apple-darwin' : 'unknown-linux-musl'}`;
+    const binary = path.join(pkg, 'vendor', triple, 'bin', process.platform === 'win32' ? 'codex.exe' : 'codex');
+    await fs.mkdir(path.dirname(binary), { recursive: true }); await fs.mkdir(appRoot, { recursive: true });
+    await fs.writeFile(path.join(pkg, 'package.json'), JSON.stringify({ name })); await fs.writeFile(binary, '');
+    const settings = defaultSettings(); settings.codex.runtime = 'bundled';
+    const resolver = new RuntimeResolver({ appRoot, appRuntimeDir: path.join(root, 'runtime'), resourcesDir: root }, () => settings);
+    expect(resolver.resolve('codex')).toEqual({ path: binary, source: 'bundled' });
+  });
+  it.each(['claude', 'codex'] as const)('does not silently substitute another %s runtime when bundled-only is missing', async (tool) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-pinned-runtime-'));
+    temporaryDirs.push(root);
+    const appRoot = path.join(root, 'app'), appRuntimeDir = path.join(root, 'runtime');
+    const binDir = process.platform === 'win32' ? appRuntimeDir : path.join(appRuntimeDir, 'bin');
+    await fs.mkdir(appRoot); await fs.mkdir(binDir, { recursive: true });
+    const binary = path.join(binDir, process.platform === 'win32' ? `${tool}.exe` : tool);
+    await fs.writeFile(binary, '', { mode: 0o755 });
+    const settings = defaultSettings(); settings[tool].runtime = 'bundled';
+    const resolver = new RuntimeResolver({ appRoot, appRuntimeDir, resourcesDir: root }, () => settings);
+    expect(resolver.resolve(tool)).toBeNull();
+    settings.binaries[tool] = binary;
+    expect(resolver.resolve(tool)).toEqual({ path: binary, source: 'settings' });
   });
 });
 

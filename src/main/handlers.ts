@@ -34,7 +34,8 @@ import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvide
 import { enrichModelsFromProviders } from './models/static-models';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
-import { clearWhichCache, runCapture, which } from './runtime';
+import { clearWhichCache, clearRuntimeProbeCache, HARNESS_PACKAGES, runCapture, which } from './runtime';
+import { assertHarnessId, openHarnessLogin, readHarnessSetup, withAppCredentials } from './harness-setup';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
 import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
@@ -244,6 +245,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     }));
   const handlers = new Map<IpcChannel, (req: never) => unknown>();
   const availabilityCache = new Map<HarnessId, { at: number; value: HarnessAvailability }>();
+  let availabilityGeneration = 0;
+  const invalidateAvailability = () => { availabilityGeneration++; availabilityCache.clear(); clearRuntimeProbeCache(); };
 
   function handle<K extends IpcChannel>(channel: K, fn: (req: IpcRequest<K>) => Promise<IpcResponse<K>> | IpcResponse<K>): void {
     handlers.set(channel, fn as (req: never) => unknown);
@@ -259,6 +262,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   async function invokeChannel(channel: string, req: unknown, actor: 'user' | 'agent' | 'desktop' = 'user'): Promise<unknown> {
     if (channel.startsWith('control:') && actor !== 'desktop') throw new Error('External control grants require the local desktop owner.');
+    if (channel === 'harness:login' && actor !== 'desktop') throw new Error('Harness sign-in requires the local desktop owner.');
     const fn = handlers.get(channel as IpcChannel);
     if (!fn) {
       deps.log('warn', `ipc: unknown channel ${channel}`);
@@ -895,8 +899,22 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
   handle('dictation:stopLocal', () => dictation().stopLocal());
 
+  handle('harness:setup', async ({ harness }) => {
+    assertHarnessId(harness);
+    invalidateAvailability();
+    return readHarnessSetup(runtime, settings.get(), harness);
+  });
+  handle('harness:login', async (input) => {
+    const { harness, device } = z.strictObject({ harness: z.enum(['claude', 'codex', 'pi']), device: z.boolean().optional() }).parse(input);
+    const result = await openHarnessLogin(runtime, harness, device);
+    invalidateAvailability();
+    return result;
+  });
   handle('harness:availability', async (req) => {
-    const ids: HarnessId[] = req && 'id' in req && req.id ? [req.id] : HARNESSES.map((h) => h.id);
+    if (req?.id !== undefined) assertHarnessId(req.id);
+    if (req?.refresh) invalidateAvailability();
+    const generation = availabilityGeneration;
+    const ids: HarnessId[] = req?.id ? [req.id] : HARNESSES.map((h) => h.id);
     const out: Partial<Record<HarnessId, HarnessAvailability>> = {};
     await Promise.all(
       ids.map(async (id) => {
@@ -905,8 +923,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
           out[id] = cached.value;
           return;
         }
-        const value = await runtime.availability(id);
-        availabilityCache.set(id, { at: Date.now(), value });
+        const value = withAppCredentials(id, await runtime.availability(id), settings.get());
+        if (generation === availabilityGeneration) availabilityCache.set(id, { at: Date.now(), value });
         deps.analytics.noteHarnessVersion(id, value.version);
         deps.log('debug', `harness ${id}: ${value.available ? 'available' : 'unavailable'}${value.version ? ` ${value.version}` : ''}${value.binaryPath ? ` at ${value.binaryPath}` : ''}${value.detail ? ` — ${value.detail}` : ''}`);
         out[id] = value;
@@ -915,14 +933,16 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return out;
   });
   handle('harness:models', async ({ harness }) => {
+    assertHarnessId(harness);
     const current = settings.get();
     const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: (id) => secrets.get(id) });
     return { ...result, models: enrichModelsFromProviders(result.models, current.providers) };
   });
   handle('harness:install', async ({ id }) => {
+    if (typeof id !== 'string' || !Object.prototype.hasOwnProperty.call(HARNESS_PACKAGES, id)) throw new Error('Unsupported harness installer');
     deps.log('info', `installing ${id} into the app runtime directory`);
     const r = await runtime.install(id);
-    availabilityCache.clear();
+    invalidateAvailability();
     // npm's output is the renderer's to show in full; the log keeps the verdict and the tail of a failure.
     if (r.ok) deps.log('info', `installed ${id}`);
     else deps.log('warn', `install of ${id} failed: ${r.log.trim().split('\n').slice(-5).join(' | ').slice(0, 600)}`);

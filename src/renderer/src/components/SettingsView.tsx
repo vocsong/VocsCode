@@ -5,6 +5,7 @@ import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
 import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, HarnessUpdate, ModelInfo, ProviderConfig, ProviderKind, RemoteAuditEntry, RemoteDeviceInfo, RemoteState, SecretStatus, UpdateState } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
+import { harnessStatus } from '../../../shared/harness-setup';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
 import { DEFAULT_REMOTE_ORIGIN, pairingLink as pairingLinkFor, remoteOrigin } from '../../../shared/pairing';
 import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
@@ -582,7 +583,7 @@ function Providers({ settings }: { settings: AppSettings }) {
   return (
     <div className="settings-section">
       <h2>Providers & API keys</h2>
-      <SettingsNote>Harnesses with their own login keep using it. Keys here power the native loop and serve as a fallback. They are encrypted with the OS keychain and sent only to the endpoint you configure.</SettingsNote>
+      <SettingsNote>Claude and ChatGPT subscription sign-ins do not require an API key. API billing is separate; keys here power API/local harnesses and configured API routes. Keys stay in the main-process vault, encrypted by the OS when available, and are sent only to the configured provider endpoint.</SettingsNote>
       {secretStatus && !secretStatus.encryptionAvailable && secretStatus.hasFallback && (
         <div className="info-line info-warn"><Icon name="alert" size={13} /> <span>OS encryption is unavailable. Stored provider keys use a local fallback and are less protected; enable OS encryption or clear and re-enter these keys.</span></div>
       )}
@@ -818,15 +819,15 @@ function HarnessLogins() {
 
   const update = async (id: LoginHarness) => {
     setUpdating(id);
-    const r = await invoke('harness:install', { id });
-    setUpdating(null);
-    if (!r.ok) {
-      toast(`Update failed: ${r.log.slice(-400)}`, 'error');
-      return;
-    }
-    toast(`Updated ${HARNESSES.find((h) => h.id === id)?.name ?? id} to ${updates?.[id]?.latest ?? 'the newest version'}`, 'success');
-    await refresh();
-    await checkUpdates();
+    try {
+      const r = await invoke('harness:install', { id });
+      if (!r.ok) { toast(`Update failed: ${r.log.slice(-400)}`, 'error'); return; }
+      toast(`Installer finished for ${HARNESSES.find((h) => h.id === id)?.name ?? id}; rechecking the selected runtime.`, 'success');
+      await refresh();
+      await checkUpdates();
+    } catch (e) {
+      toast(`Update failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally { setUpdating(null); }
   };
 
   const summary = updates ? updateSummary(updates) : null;
@@ -850,17 +851,8 @@ function HarnessLogins() {
           return (
             <div key={id} className="row gap8" style={{ alignItems: 'center' }}>
               <strong>{h.name}</strong>
-              {!av ? (
-                <Spinner size={11} />
-              ) : !av.available ? (
-                <Badge tone="red">not installed</Badge>
-              ) : av.authenticated === true ? (
-                <Badge tone="green">logged in</Badge>
-              ) : av.authenticated === false ? (
-                <Badge tone="amber">not logged in</Badge>
-              ) : (
-                <Badge tone="neutral">login unknown</Badge>
-              )}
+              <Badge tone={harnessStatus(id, av).tone}>{harnessStatus(id, av).label}</Badge>
+              <Button size="sm" variant="ghost" aria-label={`Sign in to ${h.name}`} onClick={() => useStore.getState().openOnboarding(id)}>Sign in / setup</Button>
               <span className="muted small">
                 {av?.version ? `${av.version} · ` : ''}
                 uses its own credentials from {credHome[id]}
@@ -881,7 +873,7 @@ function HarnessLogins() {
           );
         })}
         {summary && <p className={`muted small${summary.error ? ' info-error' : ''}`}>{summary.text}</p>}
-        <p className="muted small">Log in from a terminal with <code>claude</code>, <code>codex login</code> or <code>pi</code>; these sessions then reuse that login. API keys below are only used for the native loop and as a fallback.</p>
+        <p className="muted small">Sign in / setup opens the guide for the runtime Vocs Code actually selected, including bundled binaries. Complete the vendor login, then recheck. A detected login does not guarantee plan access to every model.</p>
       </div>
     </div>
   );
@@ -970,10 +962,13 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
   const [installing, setInstalling] = useState<string | null>(null);
   const install = async (id: 'pi' | 'dsh' | 'codex' | 'claude') => {
     setInstalling(id);
-    const r = await invoke('harness:install', { id });
-    setInstalling(null);
-    toast(r.ok ? `Installed ${id}` : `Install failed: ${r.log.slice(-400)}`, r.ok ? 'success' : 'error');
-    void refresh();
+    try {
+      const r = await invoke('harness:install', { id });
+      toast(r.ok ? `Installer finished for ${id}; rechecking the selected runtime.` : `Install failed: ${r.log.slice(-400)}`, r.ok ? 'success' : 'error');
+      await refresh();
+    } catch (e) {
+      toast(`Install failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally { setInstalling(null); }
   };
   const bin = (key: keyof AppSettings['binaries'], label: string, hint?: string) => (
     <Field label={label} hint={hint}>
@@ -983,7 +978,8 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
   return (
     <div className="settings-section">
       <h2>Harnesses</h2>
-      <p className="muted">Each harness is a separate agent runtime. Vocs Code detects binaries on PATH, in its private runtime folder, or bundled with the app.</p>
+      <p className="muted">Each harness is a separate agent runtime. Vocs Code detects binaries on PATH, in its private runtime folder, or bundled with the app. Working bundled Claude/Codex runtimes do not need another CLI or SDK install.</p>
+      <div className="row gap8"><Button onClick={() => useStore.getState().openOnboarding()}>Setup guide</Button><Button variant="ghost" icon="refresh" onClick={() => void refresh()}>Recheck runtimes</Button></div>
       <div id="harnesses-installed" className="harness-table">
         {HARNESSES.map((h) => {
           const av = availability[h.id];
@@ -993,7 +989,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
                 <div className="row gap8">
                   <strong>{h.name}</strong>
                   <span className="muted small">{h.vendor}</span>
-                  {av ? av.available ? <Badge tone={av.authenticated === false ? 'amber' : 'green'}>{av.authenticated === false ? 'installed, not logged in' : 'ready'}</Badge> : <Badge tone="red">not found</Badge> : <Spinner size={11} />}
+                  <Badge tone={harnessStatus(h.id, av).tone}>{harnessStatus(h.id, av).label}</Badge>
                 </div>
                 <div className="muted small">{h.description}</div>
                 {av && (
@@ -1006,6 +1002,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
                 {av && !av.available && av.installHint && <code className="small">{av.installHint}</code>}
               </div>
               <div className="harness-row-actions">
+                <Button size="sm" onClick={() => useStore.getState().openOnboarding(h.id)}>Set up {h.name}</Button>
                 {h.id === 'pi' && <Button size="sm" onClick={() => void install('pi')} disabled={installing !== null}>{installing === 'pi' ? <Spinner /> : 'Install/update pi'}</Button>}
                 {h.id === 'acp' && <Button size="sm" onClick={() => void install('dsh')} disabled={installing !== null}>{installing === 'dsh' ? <Spinner /> : 'Install/update dsh'}</Button>}
                 {(h.id === 'codex') && <Button size="sm" onClick={() => void install('codex')} disabled={installing !== null}>{installing === 'codex' ? <Spinner /> : 'Install/update codex'}</Button>}
@@ -1017,7 +1014,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
         })}
       </div>
       <SettingsGroup id="harnesses-config" title="Claude runtime" icon="cpu">
-      <Field label="Runtime" hint="System uses your Claude Code login (~/.claude); bundled is the runtime shipped with the Agent SDK and needs an API key or shared credentials.">
+      <Field label="Runtime" hint="Both system and bundled runtimes can use Claude Code sign-in. Use the setup guide to sign in with the selected binary; an API key is a separate billing choice.">
         <select value={settings.claude.runtime} onChange={(e) => update({ claude: { ...settings.claude, runtime: e.target.value as AppSettings['claude']['runtime'] } })}>
           <option value="auto">Auto (system first, then bundled)</option>
           <option value="system">System CLI only</option>
@@ -1267,7 +1264,7 @@ function About() {
             {Object.entries(report.harnesses).map(([id, av]) => (
               <tr key={id}>
                 <td>{HARNESSES.find((h) => h.id === id)?.name}</td>
-                <td>{av.available ? <Badge tone={av.authenticated === false ? 'amber' : 'green'}>{av.authenticated === false ? 'not logged in' : 'ok'}</Badge> : <Badge tone="red">missing</Badge>}</td>
+                <td><Badge tone={harnessStatus(id as HarnessId, av).tone}>{harnessStatus(id as HarnessId, av).label}</Badge></td>
                 <td className="mono small muted">{av.version ?? ''} {av.binaryPath ?? av.detail ?? ''}</td>
               </tr>
             ))}

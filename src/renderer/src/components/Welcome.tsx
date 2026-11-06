@@ -31,6 +31,7 @@ export function Welcome() {
           <Button variant="primary" icon="plus" onClick={() => void useStore.getState().startNewSession()}>
             New session
           </Button>
+          <Button onClick={() => useStore.getState().openOnboarding()}>Setup guide</Button>
           <Button icon="settings" onClick={() => useStore.getState().setView('settings')}>
             Settings
           </Button>

@@ -10,7 +10,7 @@
  */
 import os from 'node:os';
 import path from 'node:path';
-import { promises as fs } from 'node:fs';
+import { promises as fs, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
@@ -43,6 +43,14 @@ function isolatedEnv(userData: string): Record<string, string> {
     env[k] = v;
   }
   env.VOCS_CODE_USER_DATA = userData;
+  env.CLAUDE_CONFIG_DIR = path.join(userData, 'claude');
+  env.CODEX_HOME = path.join(userData, 'codex');
+  env.PI_CODING_AGENT_DIR = path.join(userData, 'pi');
+  env.HOME = env.USERPROFILE = path.join(userData, 'home');
+  env.APPDATA = path.join(env.USERPROFILE, 'AppData', 'Roaming');
+  env.LOCALAPPDATA = path.join(env.USERPROFILE, 'AppData', 'Local');
+  for (const dir of [env.APPDATA, env.LOCALAPPDATA, env.CLAUDE_CONFIG_DIR, env.CODEX_HOME, env.PI_CODING_AGENT_DIR]) mkdirSync(dir, { recursive: true });
+  for (const key of ['ANTHROPIC_AUTH_TOKEN', 'CODEX_API_KEY', 'CURSOR_API_KEY', 'GOOGLE_API_KEY']) env[key] = '';
   return env;
 }
 
@@ -122,6 +130,10 @@ describe.runIf(enabled)('vision capability UI', () => {
     // one of its own outcomes — an offered update, something newer held back with a reason, the
     // all-clear, or the registry reported as unreachable — instead of leaving the card spinning.
     const card = '.provider-card:has-text("Harness logins")';
+    await win.locator(card).getByRole('button', { name: 'Sign in to Codex (app-server)', exact: true }).click();
+    const setup = win.getByRole('dialog', { name: 'Welcome to Vocs Code', exact: true });
+    await setup.getByRole('heading', { name: 'Connect Codex (app-server)', exact: true }).waitFor();
+    await setup.getByRole('button', { name: 'Close', exact: true }).click();
     await win.locator(card).locator('button', { hasText: 'Check for updates' }).click();
     await win.waitForSelector(
       [

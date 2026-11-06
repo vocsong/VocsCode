@@ -189,8 +189,13 @@ describe.runIf(enabled)('chat import UI', () => {
     // First-run users can find the feature without completing the provider setup steps.
     await win.getByRole('button', { name: 'Import chats from Claude Code or Codex' }).click();
     await win.getByRole('heading', { name: 'Import chats' }).waitFor();
+    expect(await win.getByText('Importing conversations is optional and does not install or sign in to an agent.').isVisible()).toBe(true);
+    expect((await win.evaluate(() => window.harness.invoke('settings:get', undefined))).onboardingDone).toBe(false);
     expect(await readSessions()).toHaveLength(0);
     await win.getByRole('button', { name: 'Done', exact: true }).click();
+    await win.getByRole('heading', { name: 'What would you like to use?' }).waitFor();
+    expect((await win.evaluate(() => window.harness.invoke('settings:get', undefined))).onboardingDone).toBe(false);
+    await win.getByRole('button', { name: 'Skip setup', exact: true }).click();
     await win.locator('.modal').waitFor({ state: 'hidden' });
     await openImport(win);
     for (const [source, title] of [['Claude Code', 'Claude import fixture'], ['Codex', 'Codex import fixture']] as const) {
