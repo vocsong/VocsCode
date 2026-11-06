@@ -14,7 +14,8 @@ That approval did not enable deployment or live/provider tests.
 The [first-slice guide](CONTROL-MCP.md) describes the code now present: typed desktop grants and
 project identities, durable ordinary-session receipts and runtime barriers, a separate authenticated
 relay MCP channel, and local enrollment/revocation UI. The coordinated `vocs.io` branch adds OAuth,
-consent and ingress. Both cloud feature flags remain unset; OAuth KV is not provisioned.
+consent and ingress, followed by a disabled per-client OAuth lifecycle coordinator (see the guide).
+Both cloud feature flags remain unset; authorization storage is not provisioned.
 
 This is **not completion of every W0–W5 item** below. All questions are owner-only; creation uses
 remembered defaults rather than arbitrary overrides; lifecycle events are a bounded local ring,

@@ -7,18 +7,20 @@ remain outstanding. The broader [plan](CONTROL-MCP-PLAN.md) is not all implement
 ## Boundaries
 
 - The separate `vocs.io` landing Worker owns OAuth and `/mcp`. Its `MCP_ENABLED` flag is unset and
-  `OAUTH_KV` is deliberately unbound. The relay's `CONTROL_MCP_ENABLED` flag is also unset.
+  its SQLite Durable Object binding `MCP_AUTHORIZATION` is deliberately unbound. There is no
+  OAuth KV fallback. The relay's `CONTROL_MCP_ENABLED` flag is also unset.
   Nothing in this change provisions credentials, enables these flags, or deploys either Worker.
 - Browser sign-in authorizes consent, not MCP calls. Resource-bound OAuth bearers identify an
   account and controller. Refresh retains that controller; another consent creates another one.
   Dots sharing a grant share its authority; a supplied Dot name cannot split or expand it.
-- The landing sends a 30-second, exact-body-bound HMAC assertion through its relay service binding.
+- The landing sends an exact-body-bound HMAC assertion, valid for at most 30 seconds and never
+  beyond the access token's expiry, through its relay service binding.
   The account Hub verifies it again and durably consumes a single-use nonce. A request names its
   host explicitly; the reply must come from that host's current authenticated socket.
 - Controller traffic is a separate typed channel, never browser IPC. The desktop independently
   checks account/controller, instance, project, action, expiry, harness and permission mode.
 - Gateway and relay see readable content. MCP bodies/results are not logged, cached or queued in
-  cloud storage. OAuth KV contains authorization data, not conversations; relay storage contains
+  cloud storage. OAuth storage contains authorization data, not conversations; relay storage contains
   bounded nonce metadata. Existing encrypted browser access and its optional mirror remain separate.
 
 ## Owner setup (after a separately approved rollout)
@@ -100,10 +102,10 @@ queue, steer, attachment or slash-command tools.
   controller's still-accepted receipts `failed`; disabling control does so for all controllers.
   Regranting or re-enabling cannot revive those intents, and matching retries keep their failed
   receipts. Already-dispatched turns are not automatically stopped; use the ordinary desktop Stop
-  or an authorized exact-operation interrupt. OAuth revocation is not yet qualified: review
-  reproduced grant resurrection during refresh, not just eventual KV propagation. An already-issued
-  relay assertion can remain valid for up to 30 seconds; that bound does not limit the lifetime of
-  a resurrected OAuth grant. Activation remains blocked.
+  or an authorized exact-operation interrupt. The gateway follow-up uses atomic, revision-checked
+  OAuth state to prevent refresh from restoring a revoked grant. It is offline-tested, not yet
+  independently reviewed or live-qualified. An already-issued relay assertion can remain valid
+  for up to 30 seconds; revocation does not retroactively cancel admitted desktop work.
 
 ## Verification and remaining rollout gates
 
@@ -115,14 +117,16 @@ across restart. The landing repository owns OAuth/consent and browser tests unde
 
 The 2026-11-06 implementation review fixed local revocation/regrant races, moved-workspace and
 transcript-read authorization gaps, and discovery hiding current hosts behind stale sockets.
-The separate landing review reproduced three unresolved provider 1.2.4 blockers using synthetic
-credentials and immediately consistent storage: reusable previous refresh tokens, replacement
-consent swallowing revocation failures, and in-flight refresh resurrecting a successfully revoked
-grant. See `code/worker/MCP.md` in the landing repository for the interleavings and proposed
-strongly consistent authorization-lifecycle boundary. These are not covered by a 30-second
-assertion expiry or a blanket claim of eventual OAuth revocation.
+The separate landing review reproduced three provider 1.2.4 blockers using synthetic credentials
+and immediately consistent storage: reusable previous refresh tokens, replacement consent swallowing
+revocation failures, and in-flight refresh resurrecting a successfully revoked grant. The disabled
+follow-up keeps that provider but moves all OAuth authority into a per-client SQLite Durable Object:
+atomic consent/code consumption and replacement, strict refresh-family reuse rejection, and current
+revision checks for reads as well as writes. It revalidates after reading an MCP body. Offline tests
+cover those races, storage failures, and real local workerd restart/replay; these do not certify a
+production rollout. See `code/worker/MCP.md` and `code/worker/OAUTH-LIFECYCLE.md` in the landing repo.
 
-Before activation: resolve those findings and re-review authorization; distributed OAuth
+Before activation: independently review the new authorization boundary; distributed OAuth
 code/refresh/revocation qualification and edge abuse controls; actual Dots OAuth/transport/stable-key qualification;
 two real computers/projects including existing-session follow-ups, disconnect/restart, revocation,
 wrong-resource denial and unaffected desktop work. Live GitHub/provider tests, provisioning and
