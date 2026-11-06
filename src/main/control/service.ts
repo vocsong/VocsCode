@@ -57,9 +57,22 @@ export class ControlService {
     return { instanceId: state.instanceId, enabled: state.enabled, projects: state.projects, grants: state.grants };
   }
 
+  /** Cancel before-dispatch intent in the same commit that withdraws its authority. Re-enabling
+   * or regranting must not resurrect it; already-dispatched work keeps its terminal evidence. */
+  private failPending(state: ControlJournalState, controller?: Pick<ControlGrantInput, 'accountId' | 'controllerId'>): void {
+    for (const operation of state.operations) {
+      if (operation.state !== 'accepted' || (controller && (operation.accountId !== controller.accountId || operation.controllerId !== controller.controllerId))) continue;
+      operation.state = 'failed';
+      operation.updatedAt = this.now();
+    }
+  }
+
   async setEnabled(enabled: boolean): Promise<ControlOwnerState> {
     if (typeof enabled !== 'boolean') throw new ControlError('invalid_request');
-    await this.deps.journal.transaction((s) => { s.enabled = enabled; });
+    await this.deps.journal.transaction((s) => {
+      s.enabled = enabled;
+      if (!enabled) this.failPending(s);
+    });
     return this.ownerState();
   }
 
@@ -72,6 +85,7 @@ export class ControlService {
       if (parsed.projectIds.some((id) => !s.projects.some((p) => p.id === id))) throw new ControlError('denied');
       // A replacement is an explicit owner action, never an automation-side scope expansion.
       for (const old of s.grants) if (old.accountId === parsed.accountId && old.controllerId === parsed.controllerId && !old.revokedAt) old.revokedAt = now;
+      this.failPending(s, parsed);
       s.grants.push({ ...parsed, id: randomUUID() });
     });
     return this.ownerState();
@@ -81,7 +95,9 @@ export class ControlService {
     await this.deps.journal.transaction((s) => {
       const grant = s.grants.find((g) => g.id === grantId);
       if (!grant) throw new ControlError('denied');
-      grant.revokedAt ??= this.now();
+      if (grant.revokedAt !== undefined) return;
+      grant.revokedAt = this.now();
+      this.failPending(s, grant);
     });
     // Already-dispatched work is not silently interrupted; the owner can still use Stop.
     return this.ownerState();
@@ -117,7 +133,12 @@ export class ControlService {
     try {
       if (key(await fs.realpath(session.config.projectRoot)) !== key(project.canonicalRoot)) throw new Error('wrong project');
       // A substituted worktree symlink must not make an existing session point elsewhere.
-      if (key(await fs.realpath(session.cwd)) !== key(session.cwd)) throw new Error('changed workspace');
+      const cwd = key(await fs.realpath(session.cwd));
+      if (cwd !== key(session.cwd)) throw new Error('changed workspace');
+      // Desktop moveTo keeps projectRoot. It must not carry a controller grant to another folder.
+      // This slice supports the project and its descendants, including app-managed worktrees.
+      const relative = path.relative(key(project.canonicalRoot), cwd);
+      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('outside project');
       await this.deps.guard({ sessionId });
     } catch { throw new ControlError('denied'); }
     const grant = this.authorize(principal, method, projectId);
@@ -164,6 +185,8 @@ export class ControlService {
       case 'sessions.transcript': {
         const session = await this.session(principal, request.method, projectId!, String(params.sessionId));
         const transcript = await this.deps.sessions.transcript(session.id);
+        // Reads do not reserve the runtime: desktop moves/configuration edits can finish meanwhile.
+        await this.session(principal, request.method, projectId!, session.id);
         this.authorize(principal, request.method, projectId); // Revocation during the read also wins.
         const items: unknown[] = [];
         let bytes = 0;
@@ -250,8 +273,8 @@ export class ControlService {
         // Authorization and dispatch intent commit atomically. No OAuth/browser identity elevation.
         await this.deps.journal.transaction((state) => {
           this.authorize(principal, operation.method, project.id, state);
-          const receipt = state.operations.find((op) => op.id === operation.id)!;
-          if (receipt.state !== 'accepted') throw new ControlError('conflict');
+          const receipt = state.operations.find((op) => op.id === operation.id);
+          if (!receipt || receipt.state !== 'accepted') throw new ControlError('conflict');
           receipt.state = 'dispatched'; receipt.updatedAt = this.now();
         });
         this.authorize(principal, operation.method, project.id);
@@ -269,8 +292,14 @@ export class ControlService {
         await this.update(operation.id, { state: 'succeeded', sessionId: session.id });
       }
     } catch {
-      const current = this.snapshot().operations.find((op) => op.id === operation.id)!;
-      if (!terminal.has(current.state)) await this.update(operation.id, { state: current.state === 'accepted' ? 'failed' : 'unknown' });
+      // Serialize with owner cancellation: a stale snapshot plus update would turn a harmless
+      // terminal conflict into a service-wide storage fault. Pruned canceled receipts are no-ops.
+      await this.deps.journal.transaction((state) => {
+        const current = state.operations.find((op) => op.id === operation.id);
+        if (!current || terminal.has(current.state)) return;
+        current.state = current.state === 'accepted' ? 'failed' : 'unknown';
+        current.updatedAt = this.now();
+      });
     }
   }
 

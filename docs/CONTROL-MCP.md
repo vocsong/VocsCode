@@ -39,8 +39,12 @@ internal agent, Mission, or controller cannot enable control or change its grant
 
 Project enrollment binds a stable ID to a canonical root and filesystem identity. A missing,
 replaced or redirected root is refused. A moved root needs explicit owner re-enrollment; automatic
-move reconciliation is not implemented. A project grant is an API-resource boundary, **not an OS
-sandbox**. The selected harness retains the permissions/access of its existing mode.
+move reconciliation is not implemented. A session's canonical working directory must remain in the
+enrolled project or its descendants, including app-managed worktrees. A desktop directory switch
+cannot carry the old project's grant to another folder; external worktrees outside that root are
+not supported by this slice. Transcript reads recheck the session's workspace and configuration
+before returning content. A project grant is an API-resource boundary, **not an OS sandbox**. The
+selected harness retains the permissions/access of its existing mode.
 
 ## Tool flow
 
@@ -92,10 +96,14 @@ queue, steer, attachment or slash-command tools.
   `unknown`, never automatically replays prompts, creates worktrees again or declares success from
   a live event alone. Session storage and the journal are separate stores; ambiguous crash windows
   remain explicitly unknown. Do not delete the journal to recover a lost acknowledgment.
-- Local revoke/disable prevents new dispatch. Already-dispatched turns are not automatically stopped;
-  use the ordinary desktop Stop or an authorized exact-operation interrupt. OAuth/KV revocation is
-  eventually consistent, and an already-issued assertion can remain valid for up to 30 seconds.
-  This is not an instantaneous global cancellation guarantee.
+- Local revoke/disable prevents new dispatch. Revoking or replacing a grant atomically marks that
+  controller's still-accepted receipts `failed`; disabling control does so for all controllers.
+  Regranting or re-enabling cannot revive those intents, and matching retries keep their failed
+  receipts. Already-dispatched turns are not automatically stopped; use the ordinary desktop Stop
+  or an authorized exact-operation interrupt. OAuth revocation is not yet qualified: review
+  reproduced grant resurrection during refresh, not just eventual KV propagation. An already-issued
+  relay assertion can remain valid for up to 30 seconds; that bound does not limit the lifetime of
+  a resurrected OAuth grant. Activation remains blocked.
 
 ## Verification and remaining rollout gates
 
@@ -105,8 +113,17 @@ Offline coverage: `tests/control-service.test.ts`, `tests/control-turns.test.ts`
 grant creation/revocation. Real local workerd exercises the SDK, host sockets and replay rejection
 across restart. The landing repository owns OAuth/consent and browser tests under `code/worker/`.
 
-Before activation: independent authorization review; distributed OAuth code/refresh/revocation
-race qualification and edge abuse controls; actual Dots OAuth/transport/stable-key qualification;
+The 2026-11-06 implementation review fixed local revocation/regrant races, moved-workspace and
+transcript-read authorization gaps, and discovery hiding current hosts behind stale sockets.
+The separate landing review reproduced three unresolved provider 1.2.4 blockers using synthetic
+credentials and immediately consistent storage: reusable previous refresh tokens, replacement
+consent swallowing revocation failures, and in-flight refresh resurrecting a successfully revoked
+grant. See `code/worker/MCP.md` in the landing repository for the interleavings and proposed
+strongly consistent authorization-lifecycle boundary. These are not covered by a 30-second
+assertion expiry or a blanket claim of eventual OAuth revocation.
+
+Before activation: resolve those findings and re-review authorization; distributed OAuth
+code/refresh/revocation qualification and edge abuse controls; actual Dots OAuth/transport/stable-key qualification;
 two real computers/projects including existing-session follow-ups, disconnect/restart, revocation,
 wrong-resource denial and unaffected desktop work. Live GitHub/provider tests, provisioning and
 production deployment require separate authorization. See [TESTING.md](TESTING.md) for the develop

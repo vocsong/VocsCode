@@ -261,6 +261,20 @@ describe('controller Worker and Hub dispatch', () => {
     expect([...a.values.keys()].some((key) => key.startsWith('q:'))).toBe(false);
   });
 
+  it('discovers the current host even when retained superseded sockets precede it', async () => {
+    const h = harness(); const a = h.account();
+    // opened() marks predecessors non-current but keeps them for encrypted browser routing.
+    const previous = Array.from({ length: 65 }, () => {
+      const ws = a.add(); ws.attachment = { controlCurrent: false }; return ws;
+    });
+    const current = a.add();
+    a.auto(current, () => ({ ok: true, result: { version: 1, instanceId: INSTANCE } }));
+    expect(await content(await h.call(tool('capabilities', { hostId: HOST })))).toEqual({ version: 1, instanceId: INSTANCE });
+    expect(await content(await h.call(tool('computers_list')))).toEqual({ computers: [{ hostId: HOST, name: `name-${HOST}`, platform: 'test', online: true, version: 1, instanceId: INSTANCE }] });
+    expect(current.frames).toHaveLength(2);
+    expect(previous.every((ws) => ws.frames.length === 0)).toBe(true);
+  });
+
   it('requires the asserted method scope before forwarding', async () => {
     const h = harness(); const ws = h.account().add();
     const value = tool('sessions_send', { hostId: HOST, instanceId: INSTANCE, projectId: 'p', sessionId: 's', admissionWindowId: randomUUID(), idempotencyKey: 'send', text: 'private prompt' });

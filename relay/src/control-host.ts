@@ -108,10 +108,11 @@ export class ControlHostBridge<S extends HubSocket> {
 
   async computers(principal: ControllerPrincipal, signal: AbortSignal): Promise<unknown> {
     if (!principal.scopes.includes('control:discover')) throw new ControlError('denied');
-    // Socket count is bounded by the runtime. Inspect at most 64 entries and five distinct host
-    // ids (the registry's account host cap); never enumerate offline registry/mirror contents.
+    // Socket count is runtime-bounded; only current generations count toward the five-host
+    // fan-out cap. Retained superseded sockets must not hide a later live connection.
     const ids = new Set<string>();
-    for (const ws of this.deps.sockets.byTag(BROADCAST_TAG.host).slice(0, 64)) {
+    for (const ws of this.deps.sockets.byTag(BROADCAST_TAG.host)) {
+      if (!this.deps.sockets.isOpen(ws) || (this.deps.sockets.attachment(ws) as { controlCurrent?: unknown } | null)?.controlCurrent !== true) continue;
       const hostId = this.deps.sockets.tags(ws).find((tag) => tag.startsWith('host:'))?.slice(5);
       if (hostId && hostId !== 'enrolling' && this.current(hostId) === ws) ids.add(hostId);
       if (ids.size >= MAX_HOST_DEVICES) break;

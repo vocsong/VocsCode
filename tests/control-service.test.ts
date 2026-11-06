@@ -15,7 +15,7 @@ import type { SessionMeta } from '../src/shared/types';
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))); });
 
-async function fixture() {
+async function fixture(persist = writeJson) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-control-'));
   roots.push(root);
   const project = path.join(root, 'project');
@@ -25,7 +25,7 @@ async function fixture() {
   const meta: SessionMeta = { id: 's_test', title: 'A session', createdAt: 1, updatedAt: 1, config: { harness: 'native', permissionMode: 'ask', projectRoot: project }, cwd: project, status: 'idle', harnessRef: {}, usage: emptyUsage() };
   let now = Date.now();
   const principal: ControllerPrincipal = { accountId: 'vocs-v1', controllerId: randomUUID(), scopes: [...CONTROL_SCOPES], validUntil: now + 30_000 };
-  const journal = new ControlJournal(root, writeJson, () => now);
+  const journal = new ControlJournal(root, persist, () => now);
   await journal.load();
   const dispatch = vi.fn();
   const runControlled = vi.fn(async (_id: string, _input: unknown, context: { inputId: string; beforeDispatch(): Promise<void> }) => {
@@ -103,6 +103,166 @@ it('rechecks local revocation after runtime preparation and never dispatches the
   expect(f.journal.snapshot().operations[0]!.state).toBe('failed');
 });
 
+it.each(['revoke and regrant', 'disable and reenable', 'replace grant'] as const)('never revives admitted work after %s', async (action) => {
+  const f = await fixture();
+  let ready!: () => void;
+  const wait = new Promise<void>((resolve) => { ready = resolve; });
+  f.runControlled.mockImplementationOnce(async (_id, _input, control) => {
+    await wait;
+    await control.beforeDispatch();
+    f.dispatch();
+    return { outcome: 'succeeded', inputId: control.inputId, runtimeId: 'runtime', turnId: 'turn', outputIds: [] };
+  });
+  const receipt = await f.service.handle(f.principal, { method: 'sessions.send', params: f.params }) as ControlOperation;
+  try {
+    if (action === 'disable and reenable') {
+      await f.service.setEnabled(false);
+      await f.service.setEnabled(true);
+    } else {
+      if (action === 'revoke and regrant') await f.service.revoke(f.journal.snapshot().grants[0]!.id);
+      await f.service.grant(f.grant);
+    }
+  } finally { ready(); await f.service.settle(); }
+  expect(f.dispatch).not.toHaveBeenCalled();
+  expect(f.journal.snapshot().operations).toEqual([expect.objectContaining({ id: receipt.id, state: 'failed' })]);
+  expect(f.journal.snapshot().events.map((event) => event.state)).toEqual(['accepted', 'failed']);
+  await expect(f.service.handle(f.principal, { method: 'sessions.send', params: f.params })).resolves.toMatchObject({ id: receipt.id, state: 'failed' });
+  expect(f.runControlled).toHaveBeenCalledTimes(1);
+  const recovered = new ControlJournal(f.root); await recovered.load();
+  expect(recovered.snapshot().operations[0]).toMatchObject({ id: receipt.id, state: 'failed' });
+});
+
+it('does not create using a captured configuration after the owner narrows its grant', async () => {
+  const f = await fixture();
+  let release!: () => void, entered!: () => void;
+  const paused = new Promise<void>((resolve) => { entered = resolve; });
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  f.guard.mockResolvedValueOnce(undefined).mockImplementationOnce(async () => { entered(); await wait; });
+  const { sessionId: _id, text: _text, ...params } = f.params;
+  await f.service.handle(f.principal, { method: 'sessions.create', params });
+  await paused;
+  try { await f.service.grant({ ...f.grant, harnesses: ['pi'] }); }
+  finally { release(); await f.service.settle(); }
+  expect(f.createControlled).not.toHaveBeenCalled();
+  expect(f.journal.snapshot().operations.map((op) => op.state)).toEqual(['failed']);
+  expect(f.journal.snapshot().events.map((event) => event.state)).toEqual(['accepted', 'failed']);
+});
+
+it('does not cancel pending work for another controller or a previously revoked grant', async () => {
+  const f = await fixture();
+  const oldGrantId = f.journal.snapshot().grants[0]!.id;
+  await f.service.grant(f.grant);
+  const other = { ...f.grant, controllerId: randomUUID() };
+  await f.service.grant(other);
+  let ready!: () => void;
+  const wait = new Promise<void>((resolve) => { ready = resolve; });
+  f.runControlled.mockImplementationOnce(async (_id, _input, control) => {
+    await wait; await control.beforeDispatch(); f.dispatch();
+    return { outcome: 'succeeded', inputId: control.inputId, runtimeId: 'runtime', turnId: 'turn', outputIds: [] };
+  });
+  await f.service.handle(f.principal, { method: 'sessions.send', params: f.params });
+  try {
+    await f.service.revoke(oldGrantId);
+    await f.service.revoke(f.journal.snapshot().grants.find((grant) => grant.controllerId === other.controllerId)!.id);
+    expect(f.journal.snapshot().operations[0]!.state).toBe('accepted');
+  } finally { ready(); await f.service.settle(); }
+  expect(f.dispatch).toHaveBeenCalledTimes(1);
+  expect(f.journal.snapshot().operations[0]!.state).toBe('succeeded');
+});
+
+it('keeps already-dispatched work and its terminal evidence when authority is withdrawn', async () => {
+  const f = await fixture();
+  let ready!: () => void, entered!: () => void;
+  const wait = new Promise<void>((resolve) => { ready = resolve; });
+  const dispatched = new Promise<void>((resolve) => { entered = resolve; });
+  f.runControlled.mockImplementationOnce(async (_id, _input, control) => {
+    await control.beforeDispatch(); f.dispatch(); entered(); await wait;
+    return { outcome: 'succeeded', inputId: control.inputId, runtimeId: 'runtime', turnId: 'turn', outputIds: ['answer'] };
+  });
+  await f.service.handle(f.principal, { method: 'sessions.send', params: f.params });
+  await dispatched;
+  try {
+    await f.service.revoke(f.journal.snapshot().grants[0]!.id);
+    await f.service.setEnabled(false);
+    expect(f.journal.snapshot().operations[0]!.state).toBe('dispatched');
+    expect(f.interruptControlled).not.toHaveBeenCalled();
+  } finally { ready(); await f.service.settle(); }
+  expect(f.dispatch).toHaveBeenCalledTimes(1);
+  expect(f.journal.snapshot().operations[0]).toMatchObject({ state: 'succeeded', outputIds: ['answer'] });
+  expect(f.journal.snapshot().events.map((event) => event.state)).toEqual(['accepted', 'dispatched', 'succeeded']);
+});
+
+it('serializes runtime failure with a revocation commit without falsely disabling control', async () => {
+  let pause = false, saving!: () => void, save!: () => void, failRuntime!: () => void;
+  const savingStarted = new Promise<void>((resolve) => { saving = resolve; });
+  const saveGate = new Promise<void>((resolve) => { save = resolve; });
+  const runtimeGate = new Promise<void>((resolve) => { failRuntime = resolve; });
+  const f = await fixture(async (file, data) => {
+    if (pause) { pause = false; saving(); await saveGate; }
+    await writeJson(file, data);
+  });
+  f.runControlled.mockImplementationOnce(async () => { await runtimeGate; throw new Error('runtime preparation failed'); });
+  await f.service.handle(f.principal, { method: 'sessions.send', params: f.params });
+  const transaction = vi.spyOn(f.journal, 'transaction');
+  pause = true;
+  const revoking = f.service.revoke(f.journal.snapshot().grants[0]!.id).then((value) => ({ value }), (error: unknown) => ({ error }));
+  try {
+    await savingStarted;
+    failRuntime();
+    await vi.waitFor(() => expect(transaction).toHaveBeenCalledTimes(2));
+  } finally { save(); failRuntime(); await f.service.settle(); }
+  expect(await revoking).not.toHaveProperty('error');
+  await expect(f.service.ownerState()).resolves.toMatchObject({ enabled: true });
+  expect(f.dispatch).not.toHaveBeenCalled();
+  expect(f.journal.snapshot().operations[0]!.state).toBe('failed');
+  expect(f.journal.snapshot().events.map((event) => event.state)).toEqual(['accepted', 'failed']);
+});
+
+it('commits cancellation and revocation together or neither on storage failure', async () => {
+  let fail = false;
+  const f = await fixture(async (file, data) => { if (fail) throw new Error('disk full'); await writeJson(file, data); });
+  let ready!: () => void;
+  const wait = new Promise<void>((resolve) => { ready = resolve; });
+  f.runControlled.mockImplementationOnce(async (_id, _input, control) => {
+    await wait; await control.beforeDispatch(); f.dispatch();
+    return { outcome: 'succeeded', inputId: control.inputId, runtimeId: 'runtime', turnId: 'turn', outputIds: [] };
+  });
+  await f.service.handle(f.principal, { method: 'sessions.send', params: f.params });
+  const before = f.journal.snapshot();
+  const durableBefore = await fs.readFile(f.journal.file, 'utf8');
+  try {
+    fail = true;
+    await expect(f.service.revoke(before.grants[0]!.id)).rejects.toMatchObject({ code: 'storage_unavailable' });
+    expect(f.journal.snapshot()).toEqual(before);
+    expect(await fs.readFile(f.journal.file, 'utf8')).toBe(durableBefore);
+    fail = false;
+    await f.service.revoke(before.grants[0]!.id);
+  } finally { fail = false; ready(); await f.service.settle(); }
+  expect(f.dispatch).not.toHaveBeenCalled();
+  const recovered = new ControlJournal(f.root); await recovered.load();
+  expect(recovered.snapshot().grants[0]!.revokedAt).toBeDefined();
+  expect(recovered.snapshot().operations[0]!.state).toBe('failed');
+});
+
+it('remains usable when canceled preparation finishes after its receipt was safely pruned', async () => {
+  const f = await fixture();
+  let ready!: () => void;
+  const wait = new Promise<void>((resolve) => { ready = resolve; });
+  f.runControlled.mockImplementationOnce(async (_id, _input, control) => {
+    await wait; await control.beforeDispatch(); f.dispatch();
+    return { outcome: 'succeeded', inputId: control.inputId, runtimeId: 'runtime', turnId: 'turn', outputIds: [] };
+  });
+  await f.service.handle(f.principal, { method: 'sessions.send', params: f.params });
+  try {
+    await f.service.revoke(f.journal.snapshot().grants[0]!.id);
+    f.advance(3_600_001 + CONTROL_RETRY_GRACE_MS);
+    await f.service.grant({ ...f.grant, expiresAt: f.principal.validUntil + 60_000 });
+    expect(f.journal.snapshot().operations).toHaveLength(0);
+  } finally { ready(); await f.service.settle(); }
+  expect(f.dispatch).not.toHaveBeenCalled();
+  await expect(f.service.handle(f.principal, { method: 'capabilities', params: {} })).resolves.toMatchObject({ instanceId: f.state.instanceId });
+});
+
 it('keeps retry receipts through expiry plus grace, then refuses late retries without replay', async () => {
   const f = await fixture();
   await f.service.grant({ ...f.grant, expiresAt: Date.now() + 3 * CONTROL_RETRY_GRACE_MS });
@@ -131,6 +291,19 @@ it('separates transcript permission and withholds secret/approval groups entirel
   await expect(f.service.handle(f.principal, { method: 'approval.resolve', params: {} })).rejects.toBeDefined();
 });
 
+it.each(['workspace', 'permission mode'] as const)('rechecks the session %s after reading its transcript', async (change) => {
+  const f = await fixture();
+  const outside = path.join(f.root, 'other');
+  await fs.mkdir(outside);
+  f.transcript.mockImplementationOnce(async () => {
+    if (change === 'workspace') f.meta.cwd = outside;
+    else f.meta.config.permissionMode = 'full-auto';
+    return [{ kind: 'assistant', id: 'answer', ts: 1, text: 'must not escape the old grant' }];
+  });
+  await expect(f.service.handle(f.principal, { method: 'sessions.transcript', params: { instanceId: f.state.instanceId, projectId: f.projectId, sessionId: f.meta.id } })).rejects.toMatchObject({ code: 'denied' });
+  expect(f.transcript).toHaveBeenCalledTimes(1);
+});
+
 it('rejects replaced project roots and managed aliases before privileged calls', async () => {
   const f = await fixture();
   f.guard.mockRejectedValueOnce(new Error('Mission-owned'));
@@ -138,6 +311,36 @@ it('rejects replaced project roots and managed aliases before privileged calls',
   await fs.rename(f.project, `${f.project}-old`); await fs.mkdir(f.project);
   await expect(f.service.handle(f.principal, { method: 'sessions.send', params: f.params })).rejects.toMatchObject({ code: 'unavailable' });
   expect(f.runControlled).not.toHaveBeenCalled();
+});
+
+it.each(['outside', 'prefix sibling', 'junction escape'] as const)('refuses a moved workspace (%s) under its old project grant', async (kind) => {
+  const f = await fixture();
+  const outside = kind === 'prefix sibling' ? `${f.project}-other` : path.join(f.root, 'other');
+  await fs.mkdir(outside);
+  f.meta.cwd = outside; // moveTo deliberately retains config.projectRoot when switching directories.
+  if (kind === 'junction escape') {
+    f.meta.cwd = path.join(f.project, 'redirected');
+    await fs.symlink(outside, f.meta.cwd, process.platform === 'win32' ? 'junction' : 'dir');
+  }
+  const params = { instanceId: f.state.instanceId, projectId: f.projectId, sessionId: f.meta.id };
+  await expect(f.service.handle(f.principal, { method: 'sessions.list', params: { instanceId: f.state.instanceId, projectId: f.projectId } })).resolves.toEqual({ items: [], nextOffset: null });
+  for (const method of ['sessions.get', 'sessions.transcript'] as const) {
+    await expect(f.service.handle(f.principal, { method, params })).rejects.toMatchObject({ code: 'denied' });
+  }
+  await expect(f.service.handle(f.principal, { method: 'sessions.send', params: f.params })).rejects.toMatchObject({ code: 'denied' });
+  expect(f.runControlled).not.toHaveBeenCalled();
+  expect(f.transcript).not.toHaveBeenCalled();
+  expect(f.journal.snapshot().operations).toHaveLength(0);
+});
+
+it('continues to authorize ordinary sessions in app-managed project worktrees', async () => {
+  const f = await fixture();
+  f.meta.cwd = path.join(f.project, '.vocs-code', 'worktrees', 'topic');
+  await fs.mkdir(f.meta.cwd, { recursive: true });
+  await f.service.handle(f.principal, { method: 'sessions.send', params: f.params });
+  await f.service.settle();
+  expect(f.dispatch).toHaveBeenCalledTimes(1);
+  expect(f.journal.snapshot().operations[0]!.state).toBe('succeeded');
 });
 
 it('inherits project defaults and rejects unapproved creation modes rather than widening them', async () => {
