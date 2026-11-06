@@ -1,27 +1,27 @@
-import React from 'react';
-import type { ModelInfo, SessionMeta } from '../../../shared/types';
-import { HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
-import { modelRefName, parseTypedModel } from '../../../shared/model-names';
+import React, { useEffect, useRef, useState } from 'react';
+import type { GitSummary, SessionMeta } from '../../../shared/types';
+import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
-import { basename, fmtCost, fmtTokens, harnessShort, harnessTone } from '../format';
-import { archiveSession, setSessionEffort } from '../sessionActions';
-import { effortOptions, permissionOptions } from '../session-controls';
-import { useSessionModels } from '../models';
+import { basename, harnessShort, harnessTone } from '../format';
+import { archiveSession } from '../sessionActions';
 import { useGitSummary } from '../gitReads';
 import { useStore } from '../store';
-import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
+import { Badge, Button, Icon, StatusDot } from './ui';
 import { ForkIntoDropdown } from './ForkInto';
-import { ModelPicker } from './ModelPicker';
-import { FastModePill } from './FastModePill';
 import { MissionHeaderControls, useMission } from './mission/MissionPanel';
 import { openMission } from '../missions';
 import { canSplit } from '../panes';
 
-/** `paneId` is the split pane this header sits in; it carries the split and close-pane actions. */
+/**
+ * One row: who the session is (status, title, harness, folder, branch) on the left, what it changed
+ * and the view actions on the right. The run controls — model, effort, mode, Fast, spend — sit under
+ * the composer (SessionControls), where a change applies to the next message.
+ *
+ * `paneId` is the split pane this header sits in; it carries the split and close-pane actions.
+ */
 export function Header({ session, paneId }: { session: SessionMeta; paneId?: string }) {
   const { record: mission, error: missionError } = useMission(session);
   const missions = useStore((s) => s.missions);
-  const { models, loading: modelsLoading, error: modelsError } = useSessionModels(session);
   const panelOpen = useStore((s) => s.panelOpen);
   const togglePanel = useStore((s) => s.togglePanel);
   const setPanelTab = useStore((s) => s.setPanelTab);
@@ -29,131 +29,41 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
   const showThinking = useStore((s) => s.showThinking);
   const toggleThinking = useStore((s) => s.toggleThinking);
   const changesVersion = useStore((s) => s.changesVersion);
-  const providers = useStore((s) => s.settings?.providers) ?? [];
   const splittable = useStore((s) => canSplit(s.layout));
   const split = useStore((s) => s.layout.panes.length > 1);
   const { data: summary } = useGitSummary(session.id, changesVersion);
   const branch = summary?.branch;
   const h = HARNESS_BY_ID[session.config.harness];
-
-  const current = session.activeModel ?? session.config.model;
-  const currentInfo = models.find((m) => current && m.id === current.model && m.provider === current.provider);
-  const effortLevels = effortOptions(session, currentInfo);
-  const modes = permissionOptions(session);
-  const mode = session.config.permissionMode;
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
-  const ctxPct = session.usage.contextWindow && session.usage.contextTokens ? Math.min(100, Math.round((session.usage.contextTokens / session.usage.contextWindow) * 100)) : null;
-
-  const setModel = async (m: ModelInfo) => {
-    try {
-      await invoke('sessions:setModel', { id: session.id, model: { provider: m.provider, model: m.id } });
-    } catch (e) {
-      toast(`Model switch failed: ${(e as Error).message}`, 'error');
-    }
-  };
+  const ref = useRef<HTMLElement>(null);
+  const width = useHeaderWidth(ref);
 
   return (
-    <header className="header">
+    <header className="header" ref={ref} data-width={width}>
       <div className="header-title">
         <StatusDot status={session.status} />
         <span className="header-name" data-testid="session-title" title={session.title}>
           {session.title}
         </span>
-        <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
-          <Icon name="folder" size={12} /> {basename(session.cwd)}
-        </button>
-        {branch && (
-          <button type="button" className="header-path" title={`Branch ${branch} — open the Git panel`} onClick={() => setPanelTab('branches')}>
-            <Icon name="branch" size={12} /> {branch}
-          </button>
+        {!session.mission && (
+          <Badge tone={harnessTone(session.config.harness)} title={h.name}>
+            {harnessShort(session.config.harness)}
+            {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
+          </Badge>
         )}
+        <span className="header-crumbs">
+          <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
+            <Icon name="folder" size={12} /> <span>{basename(session.cwd)}</span>
+          </button>
+          {branch && (
+            <button type="button" className="header-path" title={`Branch ${branch} — open the Git panel`} onClick={() => setPanelTab('branches')}>
+              <Icon name="branch" size={12} /> <span>{branch}</span>
+            </button>
+          )}
+        </span>
         {session.statusDetail && busy && <span className="header-status muted">{session.statusDetail}</span>}
         <span className="spacer" />
-        {paneId && splittable && (
-          <Button variant="ghost" size="sm" icon="splitRight" onClick={() => useStore.getState().splitPane('horizontal', { paneId })} title="Split right (Ctrl+\) · Ctrl+Shift+\ splits down" aria-label="Split right" />
-        )}
-        {paneId && split && (
-          <Button variant="ghost" size="sm" icon="x" onClick={() => useStore.getState().closePane(paneId)} title="Close pane — the session keeps running" aria-label="Close pane" />
-        )}
-        <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" aria-label="Toggle panel" />
-      </div>
-
-      <div className="header-controls">
-        {session.mission ? (mission ? <MissionHeaderControls record={mission} /> : <span role="status">Mission · {missionError ?? 'Loading coordination state…'}</span>) : <div className="header-pills">
-        <Badge tone={harnessTone(session.config.harness)} title={h.name}>
-          {harnessShort(session.config.harness)}
-          {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
-        </Badge>
-        <Dropdown align="right" width={380} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {modelRefName(current) ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
-          {(close) => (
-            <ModelPicker
-              models={models}
-              loading={modelsLoading}
-              error={modelsError}
-              selected={current}
-              emptyText={
-                h.capabilities.liveModelSwitch
-                  ? 'No models available.'
-                  : 'No models available (this harness cannot switch models live).'
-              }
-              onSelect={(m) => {
-                close();
-                if (m) void setModel(m);
-              }}
-              onSelectCustom={(id) => {
-                close();
-                const ref = parseTypedModel(id, providers.map((p) => p.id), (current ?? models[0])?.provider ?? 'anthropic');
-                void setModel({ id: ref.model, provider: ref.provider, displayName: ref.model });
-              }}
-            />
-          )}
-        </Dropdown>
-
-        {h.capabilities.effort && effortLevels.length > 0 && (
-          <Dropdown align="right" width={200} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Reasoning effort"><Icon name="brain" size={13} /> {session.activeEffort ?? session.config.effort ?? 'effort'} <Icon name="chevron" size={12} /></button>}>
-            {(close) => (
-              <>
-                {effortLevels.map((option) => (
-                  <MenuItem key={option.value} active={(session.activeEffort ?? session.config.effort) === option.value} onClick={() => { close(); void setSessionEffort(session.id, option.value, toast); }}>
-                    {option.label}
-                  </MenuItem>
-                ))}
-              </>
-            )}
-          </Dropdown>
-        )}
-        {/* A model that takes no effort keeps the pill in place, disabled, so switching models does not shift the row. */}
-        {h.capabilities.effort && effortLevels.length === 0 && (
-          <button type="button" className="pill" disabled aria-label="Reasoning effort" title={`${currentInfo?.displayName ?? 'This model'} does not support reasoning effort`}>
-            <Icon name="brain" size={13} /> effort
-          </button>
-        )}
-
-        <FastModePill key={session.id} session={session} />
-
-        <Dropdown align="right" width={300} trigger={(open) => <button type="button" className={`pill mode-${mode} ${open ? 'open' : ''}`} title={PERMISSION_MODE_LABELS[mode].description}><Icon name="shield" size={13} /> {PERMISSION_MODE_LABELS[mode].short} <Icon name="chevron" size={12} /></button>}>
-          {(close) => (
-            <>
-              {modes.map((option) => (
-                <MenuItem key={option.value} active={option.value === mode} hint={option.hint} onClick={() => { close(); void invoke('sessions:setPermissionMode', { id: session.id, mode: option.value }); }}>
-                  {option.label}
-                </MenuItem>
-              ))}
-            </>
-          )}
-        </Dropdown>
-
-        <button type="button" className="pill" title={`Input ${fmtTokens(session.usage.inputTokens)} · Output ${fmtTokens(session.usage.outputTokens)} · Cache read ${fmtTokens(session.usage.cacheReadTokens)}${ctxPct !== null ? ` · Context ${ctxPct}%` : ''}`} onClick={() => useStore.getState().setPanelTab('usage')}>
-          <Icon name="chart" size={13} /> {fmtCost(session.usage.costUsd)}
-          {ctxPct !== null && (
-            <span className="ctx-bar" title={`Context ${ctxPct}% used`}>
-              <span style={{ width: `${ctxPct}%` }} />
-            </span>
-          )}
-        </button>
-
-        </div>}
-
+        {summary && <ChangesButton summary={summary} onOpen={() => setPanelTab('changes')} />}
         <div className="header-actions">
           <Button variant="ghost" size="sm" icon={showThinking ? 'eye' : 'eyeOff'} onClick={toggleThinking} title={showThinking ? 'Hide thinking' : 'Show thinking'} aria-label={showThinking ? 'Hide thinking' : 'Show thinking'} />
           <ForkIntoDropdown
@@ -171,8 +81,62 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
             onClick={() => void archiveSession(session, toast)}
           />
         </div>
+        <span className="header-divider" aria-hidden />
+        {paneId && splittable && (
+          <Button variant="ghost" size="sm" icon="splitRight" onClick={() => useStore.getState().splitPane('horizontal', { paneId })} title="Split right (Ctrl+\) · Ctrl+Shift+\ splits down" aria-label="Split right" />
+        )}
+        {paneId && split && (
+          <Button variant="ghost" size="sm" icon="x" onClick={() => useStore.getState().closePane(paneId)} title="Close pane — the session keeps running" aria-label="Close pane" />
+        )}
+        <Button variant={panelOpen ? 'subtle' : 'ghost'} size="sm" icon="layout" onClick={() => togglePanel()} title="Toggle panel (Ctrl+J)" aria-label="Toggle panel" />
       </div>
+
+      {session.mission && (
+        <div className="header-controls">
+          {mission ? <MissionHeaderControls record={mission} /> : <span role="status">Mission · {missionError ?? 'Loading coordination state…'}</span>}
+        </div>
+      )}
       {!session.mission && Object.values(missions).some((m) => m.originSessionId === session.id) && <div className="mission-links row gap8 wrap">{Object.values(missions).filter((m) => m.originSessionId === session.id).map((m) => <Button size="sm" variant="ghost" key={m.id} onClick={() => void openMission(m).catch((e) => toast(String(e.message ?? e), 'error'))}>Mission: {m.title}</Button>)}</div>}
     </header>
+  );
+}
+
+/**
+ * How much of the one-row header fits: a split pane can be as narrow as 360px. Measured on the
+ * header itself (a container query on the pane would trap the transcript's fixed lightbox), so the
+ * row sheds the folder/branch crumbs first, then the harness badge and line totals, then the
+ * changes button — the title, the actions and the pane controls stay.
+ */
+type HeaderWidth = 'wide' | 'compact' | 'narrow' | 'tiny';
+function useHeaderWidth(ref: React.RefObject<HTMLElement | null>): HeaderWidth {
+  const [width, setWidth] = useState<HeaderWidth>('wide');
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const w = el.clientWidth;
+      setWidth(w === 0 || w >= 760 ? 'wide' : w >= 560 ? 'compact' : w >= 440 ? 'narrow' : 'tiny');
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return width;
+}
+
+/** What the session's working tree holds right now: file count and line totals, opening Changes. */
+function ChangesButton({ summary, onOpen }: { summary: GitSummary; onOpen: () => void }) {
+  const files = summary.files ?? [];
+  if (!summary.isRepo || files.length === 0) return null;
+  const add = files.reduce((n, f) => n + (f.additions ?? 0), 0);
+  const del = files.reduce((n, f) => n + (f.deletions ?? 0), 0);
+  return (
+    <button type="button" className="header-changes" title={`${files.length} changed file${files.length === 1 ? '' : 's'} — open Changes`} onClick={onOpen}>
+      <Icon name="diff" size={13} />
+      <span>{files.length} file{files.length === 1 ? '' : 's'}</span>
+      <span className="add">+{add}</span>
+      <span className="del">−{del}</span>
+    </button>
   );
 }

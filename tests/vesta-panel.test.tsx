@@ -7,7 +7,7 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { Vesta } from '../src/renderer/src/components/Vesta';
+import { Vesta, VestaLauncher } from '../src/renderer/src/components/Vesta';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
 import type { AgentItem, AgentState } from '../src/shared/agent';
@@ -54,19 +54,26 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('Vesta panel', () => {
-  it('collapses to an avatar and stays hidden when switched off', () => {
+  it('minimizes to the title-bar launcher, which opens it again, and stays hidden when switched off', () => {
     const { unmount } = setup([], {}, { enabled: true, collapsed: true });
-    expect(screen.getByLabelText('Open Vesta')).toBeTruthy();
+    // Nothing floats over the workspace while minimized; the launcher is the way back in.
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.queryByPlaceholderText('Ask Vesta…')).toBeNull();
     unmount();
+    const launcher = render(<VestaLauncher />);
+    fireEvent.click(screen.getByLabelText('Open Vesta'));
+    expect(invoke).toHaveBeenCalledWith('settings:update', expect.objectContaining({ agent: expect.objectContaining({ collapsed: false }) }));
+    launcher.unmount();
     setup([], {}, { enabled: false, collapsed: false });
+    render(<VestaLauncher />);
     expect(screen.queryByLabelText('Vesta')).toBeNull();
+    expect(screen.queryByLabelText('Open Vesta')).toBeNull();
   });
 
-  it('offers minimize rather than close, since the control only collapses to the avatar', () => {
+  it('offers minimize rather than close, since the control only collapses to the title bar', () => {
     setup([]);
     const minimize = screen.getByLabelText('Minimize');
-    expect(minimize.getAttribute('title')).toBe('Minimize to the avatar');
+    expect(minimize.getAttribute('title')).toBe('Minimize to the title bar');
     expect(minimize.querySelector('[data-icon="minus"]')).toBeTruthy();
     expect(minimize.querySelector('[data-icon="x"]')).toBeNull();
     fireEvent.click(minimize);
@@ -214,11 +221,11 @@ describe('Vesta panel placement', () => {
     expect(panel.style.left).toBe('40px');
   });
 
-  it('keeps the avatar in reach when the stored position is off the bottom of a shorter window', () => {
+  it('keeps the panel in reach when the stored position is off the bottom of a shorter window', () => {
     viewport(1024, 600);
-    setup([], {}, { enabled: true, collapsed: true, x: 9000, y: 5000 });
-    const avatar = screen.getByLabelText('Open Vesta') as HTMLElement;
-    expect(avatar.style.bottom).toBe('8px');
-    expect(avatar.style.left).toBe(`${1024 - 52 - 8}px`);
+    setup([], {}, { enabled: true, collapsed: false, x: 9000, y: 5000 });
+    const panel = screen.getByRole('dialog') as HTMLElement;
+    expect(panel.style.bottom).toBe('8px');
+    expect(panel.style.left).toBe(`${1024 - 360 - 8}px`);
   });
 });

@@ -73,8 +73,11 @@ export function RightPanel({ session }: { session: SessionMeta }) {
   const opened = useStore((s) => s.panelBottomOpened);
   // Left-behind processes are flagged on the tab itself: the point is that they cannot go unnoticed.
   const orphanedProcesses = useStore((s) => s.processSummary?.orphaned ?? 0);
+  // Until one of its tabs is opened the lower half is only its tab strip, so the workspace view
+  // above gets the whole height instead of sitting over an empty pane.
+  const bottomIdle = opened.length === 0;
   return (
-    <aside className="panel">
+    <aside className={`panel ${bottomIdle ? 'panel-bottom-idle' : ''}`}>
       <div className="panel-section panel-top">
         <div className="panel-tabs">
           {TABS.map((t) => (
@@ -96,11 +99,11 @@ export function RightPanel({ session }: { session: SessionMeta }) {
           {tab === 'terminal' && (session.mission && (session.archived || mission?.archived) ? <div className="pad muted">Archived Mission — terminals are closed. Restore the Mission to use its lead terminal.</div> : <>{session.mission && <div className="mission-ui mission-workspace"><strong>Lead interactive terminal</strong><p className="mono small">{session.cwd}</p><p className="muted small">Actual lead tool cwd. Integration and specialist workspaces have no writable terminal here.</p></div>}<TerminalPanel session={session} /></>)}
         </div>
       </div>
-      <SplitResizer />
+      {!bottomIdle && <SplitResizer />}
       <div className="panel-section panel-bottom">
         <div className="panel-tabs">
           {BOTTOM_TABS.filter((t) => !session.mission || t.id !== 'subagents').map((t) => (
-            <button key={t.id} type="button" className={`panel-tab ${bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
+            <button key={t.id} type="button" className={`panel-tab ${!bottomIdle && bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
               <Icon name={t.icon} size={13} /> {t.label}
               {t.id === 'processes' && orphanedProcesses > 0 && (
                 <span className="panel-tab-count warn" data-testid="processes-orphaned-count" title={`${orphanedProcesses} process${orphanedProcesses === 1 ? '' : 'es'} running on ${orphanedProcesses === 1 ? 'its' : 'their'} own: nothing in Vocs Code will stop ${orphanedProcesses === 1 ? 'it' : 'them'}`}>
