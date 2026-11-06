@@ -1,4 +1,4 @@
-// Settings → General → Worktree branches: the saved custom branch prefixes every project's New
+// Settings → Session defaults → Worktree branches: the saved custom branch prefixes every project's New
 // Session dialog offers after vocscode/, feat/, fix/ and chore/ — adding, refusing and removing.
 /** @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -43,6 +43,7 @@ beforeEach(() => {
 describe('Settings → Worktree branches', () => {
   it('lists the saved prefixes and removes one', () => {
     render(<SettingsView />);
+    fireEvent.click(screen.getByRole('button', { name: 'Session defaults' }));
     expect(screen.getByText('ops/')).toBeTruthy();
     expect(screen.getByText('team/feat/')).toBeTruthy();
 
@@ -53,6 +54,7 @@ describe('Settings → Worktree branches', () => {
 
   it('adds a typed prefix in its stored form, newest first', () => {
     render(<SettingsView />);
+    fireEvent.click(screen.getByRole('button', { name: 'Session defaults' }));
     fireEvent.change(screen.getByLabelText('New branch prefix'), { target: { value: ' bug/ ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
 
@@ -62,6 +64,7 @@ describe('Settings → Worktree branches', () => {
 
   it('refuses a prefix that is already offered or that git cannot take', () => {
     render(<SettingsView />);
+    fireEvent.click(screen.getByRole('button', { name: 'Session defaults' }));
     const input = screen.getByLabelText('New branch prefix');
     const add = screen.getByRole('button', { name: 'Add' }) as HTMLButtonElement;
 

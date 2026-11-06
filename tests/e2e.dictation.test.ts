@@ -135,9 +135,23 @@ describe.runIf(enabled)('electron e2e: dictation', () => {
     await expect.poll(async () => (await saved()).engine).toBe('local');
     await expect.poll(() => win.getByTestId('dictation-local-status').innerText(), { timeout: 15_000 }).toMatch(/Download \(\d+ MB\)/);
 
-    // And back to the cloud from the settings page.
-    await win.getByRole('group', { name: 'Dictation engine' }).getByRole('button', { name: 'Cloud provider', exact: true }).click();
+    // Both engines remain configurable, independently of which one the mic currently uses.
+    const dictation = win.getByRole('region', { name: 'Dictation', exact: true });
+    const cloud = win.getByRole('region', { name: 'Cloud transcription', exact: true });
+    const local = win.getByRole('region', { name: 'Local transcription', exact: true });
+    expect(await dictation.getAttribute('id')).toBe('voice-engine');
+    expect(await cloud.getAttribute('id')).toBe('voice-cloud');
+    expect(await local.getAttribute('id')).toBe('voice-local');
+    expect(await cloud.getByLabel(/^Provider/).inputValue()).toBe('stt-fake');
+    expect(await local.getByLabel(/^Model/).inputValue()).toBe('base.en');
+    await local.getByLabel(/^Stop the server after/).selectOption('15');
+    await expect.poll(async () => (await saved()).local.idleMinutes).toBe(15);
+
+    // And back to the cloud from the settings page, without hiding the local controls.
+    await dictation.getByRole('group', { name: 'Dictation engine' }).getByRole('button', { name: 'Cloud provider', exact: true }).click();
     await expect.poll(async () => (await saved()).engine).toBe('cloud');
-    expect(await saved()).toMatchObject({ cloud: { provider: 'stt-fake', model: 'fake-whisper' }, language: 'en' });
+    expect(await cloud.getByLabel(/^Provider/).isVisible()).toBe(true);
+    expect(await local.getByLabel(/^Model/).isVisible()).toBe(true);
+    expect(await saved()).toMatchObject({ cloud: { provider: 'stt-fake', model: 'fake-whisper' }, local: { model: 'base.en', compute: 'cpu', idleMinutes: 15 }, language: 'en' });
   }, 240_000);
 });

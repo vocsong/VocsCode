@@ -50,6 +50,7 @@ const settings = {
   utilityModel: undefined,
   goalDefaults: { autoContinue: false, maxIterations: 25 },
   binaries: {},
+  providers: [],
   onboardingDone: false,
   folders: [],
   recentProjects: [],
@@ -85,6 +86,7 @@ describe('issue 140 renderer error states', () => {
   it('surfaces provider list failures in Settings and onboarding', async () => {
     invoke.mockImplementation((channel: string) => channel === 'providers:list' ? Promise.reject(new Error('provider service offline')) : Promise.resolve({}));
     const settingsView = render(<SettingsView />);
+    fireEvent.click(screen.getByRole('button', { name: 'Vesta & utility' }));
     expect(await screen.findByText(/Provider list unavailable: provider service offline/)).toBeTruthy();
     settingsView.unmount();
     render(<OnboardingWizard />);
@@ -160,10 +162,10 @@ describe('issue 140 renderer error states', () => {
 });
 
 describe('settings navigation icons', () => {
-  it('marks Providers & keys with the key icon instead of the bolt it shared with Remote access', () => {
+  it('distinguishes provider credentials from remote access with key and globe icons', () => {
     render(<SettingsView />);
     const icon = (name: string): string | null => screen.getByRole('button', { name }).querySelector('svg')?.getAttribute('data-icon') ?? null;
     expect(icon('Providers & keys')).toBe('key');
-    expect(icon('Remote access')).toBe('bolt');
+    expect(icon('Remote access')).toBe('globe');
   });
 });

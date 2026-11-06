@@ -248,7 +248,7 @@ describe('chat import UI', () => {
     openSettings('import');
     const settings = render(<SettingsView />);
     expect(screen.getByRole('button', { name: 'Import chats' })).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'Import chats' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Import chats', level: 1 })).toBeTruthy();
     expect(invoke).not.toHaveBeenCalled();
     settings.unmount();
     render(<OnboardingWizard />);
