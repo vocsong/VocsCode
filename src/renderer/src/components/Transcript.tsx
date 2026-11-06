@@ -461,32 +461,52 @@ function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, s
     case 'turn':
       return (
         <div className={`turn-footer turn-${item.status}`}>
+          <Icon name={item.status === 'completed' ? 'check' : 'alert'} size={12} />
           <span>{item.status === 'completed' ? 'Turn complete' : item.status === 'interrupted' ? 'Interrupted' : `Failed${item.error ? `: ${item.error}` : ''}`}</span>
           <span>· <time dateTime={new Date(item.ts).toISOString()} title={new Date(item.ts).toLocaleString()}>{new Date(item.ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</time></span>
           {item.durationMs ? <span>· {fmtDuration(item.durationMs)}</span> : null}
-          {item.usage && (item.usage.inputTokens || item.usage.outputTokens) ? <span>· {fmtTokens(item.usage.inputTokens)} in / {fmtTokens(item.usage.outputTokens)} out</span> : null}
-          {item.status === 'completed' && fmtRate(item.usage?.outputTokens, item.durationMs) ? (
-            <span title="Output tokens per second of turn wall time (includes tool execution)">· {fmtRate(item.usage?.outputTokens, item.durationMs)}</span>
-          ) : null}
           {item.costUsd ? <span>· {fmtCost(item.costUsd)}</span> : null}
+          {/* Token detail is for the curious: it shows when the row is hovered. */}
+          {item.usage && (item.usage.inputTokens || item.usage.outputTokens) ? <span className="turn-detail">· {fmtTokens(item.usage.inputTokens)} in / {fmtTokens(item.usage.outputTokens)} out</span> : null}
+          {item.status === 'completed' && fmtRate(item.usage?.outputTokens, item.durationMs) ? (
+            <span className="turn-detail" title="Output tokens per second of turn wall time (includes tool execution)">· {fmtRate(item.usage?.outputTokens, item.durationMs)}</span>
+          ) : null}
         </div>
       );
     case 'plan':
-      return (
-        <div className="plan-card">
-          <div className="plan-title"><Icon name="target" size={13} /> Plan</div>
-          <ul>
-            {item.entries.map((e, i) => (
-              <li key={i} className={`plan-${e.status}`}>
-                <span className="plan-check">{e.status === 'completed' ? '✓' : e.status === 'in_progress' ? '›' : '○'}</span> {e.content}
-              </li>
-            ))}
-          </ul>
-        </div>
-      );
+      return <PlanCard item={item} />;
     default:
       return null;
   }
+}
+
+/** A plan as a checklist: done steps stay readable (no strike-through), the live one is marked. */
+function PlanCard({ item }: { item: Extract<TranscriptItem, { kind: 'plan' }> }) {
+  const done = item.entries.filter((e) => e.status === 'completed').length;
+  const total = item.entries.length;
+  return (
+    <div className="plan-card">
+      <div className="plan-title">
+        <Icon name="list" size={13} /> Plan
+        {total > 0 && <span className="plan-progress">{done} of {total} done</span>}
+        {total > 0 && (
+          <span className="plan-bar" aria-hidden>
+            <span style={{ width: `${Math.round((done / total) * 100)}%` }} />
+          </span>
+        )}
+      </div>
+      <ul>
+        {item.entries.map((e, i) => (
+          <li key={i} className={`plan-${e.status}`}>
+            <span className="plan-check" aria-label={e.status.replace('_', ' ')}>
+              {e.status === 'completed' ? <Icon name="check" size={11} /> : e.status === 'in_progress' ? <span className="plan-live" /> : null}
+            </span>
+            <span className="plan-text">{e.content}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; sessionId?: string; canEdit?: boolean; onImageExpand?: OnImageExpand }) {
@@ -615,13 +635,14 @@ export const isRunningEntry = (item: TranscriptItem): boolean =>
 
 /**
  * Whether an item is part of a turn's work (collapsed behind its "Worked for …" header) rather
- * than something that must stay visible: the answer, warnings, plans and user turns. Approvals
- * are work too, but the header stays open while one is undecided (see `WorkGroup`).
+ * than something that must stay visible: the answer, warnings and user turns. Approvals are work
+ * too, but the header stays open while one is undecided; plans are work that `WorkGroup` keeps on
+ * screen as one card under its header, so a plan update no longer splits a turn's work in two.
  * `laterToolInTurn` says whether a tool call still follows within the same turn, which is what
  * makes an unlabelled assistant text commentary instead of the answer.
  */
 export function isWorkItem(item: TranscriptItem, laterToolInTurn: boolean): boolean {
-  if (item.kind === 'tool' || item.kind === 'approval') return true;
+  if (item.kind === 'tool' || item.kind === 'approval' || item.kind === 'plan') return true;
   // Warnings and errors are signals, not work: they stay on screen when the group is collapsed.
   if (item.kind === 'info') return item.level === 'info';
   if (item.kind !== 'assistant') return false;
@@ -631,8 +652,8 @@ export function isWorkItem(item: TranscriptItem, laterToolInTurn: boolean): bool
 }
 
 /**
- * Collapses each turn's tool calls, commentary, thinking and approvals into one `work` chunk
- * (Codex-style), keeping the answer, warnings, plans and turn rows as standalone rows. The duration
+ * Collapses each turn's tool calls, commentary, thinking, plans and approvals into one `work` chunk
+ * (Codex-style), keeping the answer, warnings and turn rows as standalone rows. The duration
  * shown by the header comes off the turn row that closes the work.
  */
 export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
@@ -728,17 +749,28 @@ export function WorkGroup({ chunk, sessionId, canEdit = false, showThinking, onI
   const expanded = pendingApproval || jumpHere || (open ?? running);
   const failed = chunk.entries.filter((e) => e.kind === 'tool' && (e.status === 'error' || e.status === 'declined')).length;
   const durationMs = chunk.turn?.durationMs;
+  // Every plan update replaces the last one, so only the latest is shown — and it stays on screen
+  // while the work around it is collapsed.
+  const plan = [...chunk.entries].reverse().find((e): e is Extract<TranscriptItem, { kind: 'plan' }> => e.kind === 'plan');
+  const entries = plan ? chunk.entries.filter((e) => e.kind !== 'plan') : chunk.entries;
+  const tools = entries.filter((e): e is ToolItem => e.kind === 'tool');
+  const files = new Set(tools.flatMap((t) => t.changes?.map((c) => c.path) ?? []));
+  if (!entries.length) return plan ? <div className="work-group"><PlanCard item={plan} /></div> : null;
   return (
-    <div className={`work-group ${running ? 'work-running' : ''}`}>
+    <div className={`work-group ${running ? 'work-running' : ''} ${expanded ? 'work-open' : ''}`}>
       <button type="button" className="work-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
+        <Icon name={running ? 'activity' : 'layers'} size={13} className="work-icon" />
         <span className="work-label">{running ? 'Working…' : durationMs ? `Worked for ${fmtDuration(durationMs)}` : 'Worked'}</span>
+        {tools.length > 0 && <span className="work-stat">{tools.length} step{tools.length === 1 ? '' : 's'}</span>}
+        {files.size > 0 && <span className="work-stat">{files.size} file{files.size === 1 ? '' : 's'} changed</span>}
         {running ? <Spinner size={12} /> : null}
         {failed ? <Badge tone="red">{failed} failed</Badge> : null}
-        <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
+        <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} className="work-chevron" />
       </button>
+      {plan && <PlanCard item={plan} />}
       {expanded && (
         <div className="work-body">
-          {groupCommands(chunk.entries).map((c) =>
+          {groupCommands(entries).map((c) =>
             c.kind === 'run' ? (
               <ToolGroup key={c.id} entries={c.entries} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} />
             ) : (
@@ -768,7 +800,7 @@ export function ToolGroup({ entries, sessionId, canEdit = false, showThinking, o
   return (
     <div className={`tool-group ${running ? 'tool-group-running' : ''}`}>
       <button type="button" className="tool-group-head" onClick={() => setOpen(!expanded)}>
-        <Icon name="terminal" size={14} className="tool-icon" />
+        <span className="tool-glyph"><Icon name="terminal" size={13} className="tool-icon" /></span>
         <span className="tool-name">{running ? 'Running' : 'Ran'} {commands.length} command{commands.length === 1 ? '' : 's'}</span>
         <span className="spacer" />
         {failed ? <Badge tone="red">{failed} failed</Badge> : null}
@@ -796,6 +828,21 @@ function toolStatus(item: ToolItem): string {
   return item.status === 'done' ? 'done' : item.status;
 }
 
+/** Lines added and removed across a tool call's diffs; null when it carried none. */
+function diffStat(changes: FileChange[] | undefined): { add: number; del: number } | null {
+  const diffs = changes?.filter((c) => c.diff) ?? [];
+  if (!diffs.length) return null;
+  let add = 0;
+  let del = 0;
+  for (const c of diffs) {
+    for (const line of c.diff!.split('\n')) {
+      if (line.startsWith('+') && !line.startsWith('+++')) add++;
+      else if (line.startsWith('-') && !line.startsWith('---')) del++;
+    }
+  }
+  return { add, del };
+}
+
 function ToolCard({ item, sessionId, dataItemId }: { item: Extract<TranscriptItem, { kind: 'tool' }>; sessionId: string; dataItemId?: string }) {
   const [open, setOpen] = useState(false);
   const revealSubagentRun = useStore((s) => s.revealSubagentRun);
@@ -807,15 +854,19 @@ function ToolCard({ item, sessionId, dataItemId }: { item: Extract<TranscriptIte
   // A running command streams its output into view; every other body waits for a click.
   const showBody = open || (running && command && !!item.output);
   const commandText = item.summary ?? (typeof item.input === 'string' ? item.input : '');
+  const stat = diffStat(item.changes);
   return (
     <div data-item-id={dataItemId} className={`tool-card tool-${item.status} ${command ? 'tool-command' : ''} ${item.parentId ? 'tool-nested' : ''}`}>
       <button type="button" className="tool-head" onClick={() => hasBody && setOpen((o) => !o)}>
-        <Icon name={HINT_ICON[item.hint ?? 'other']} size={14} className="tool-icon" />
+        <span className="tool-glyph"><Icon name={HINT_ICON[item.hint ?? 'other']} size={13} className="tool-icon" /></span>
         <span className="tool-name">{command ? (running ? 'Running' : 'Ran') : item.title ?? item.name}</span>
         {item.summary && <span className="tool-summary mono" title={item.summary}>{item.summary}</span>}
         <span className="spacer" />
-        {item.changes?.length ? <span className="tool-changes">{item.changes.length} file{item.changes.length === 1 ? '' : 's'}</span> : null}
-        {running ? <Spinner size={12} /> : !command || failed ? <Badge tone={statusTone}>{toolStatus(item)}</Badge> : null}
+        {stat ? (
+          <span className="tool-changes diff-stat"><span className="add">+{stat.add}</span> <span className="del">−{stat.del}</span></span>
+        ) : item.changes?.length ? <span className="tool-changes">{item.changes.length} file{item.changes.length === 1 ? '' : 's'}</span> : null}
+        {/* Success is the expected outcome, so only a failure, a refusal or live work earns a badge. */}
+        {running ? <Spinner size={12} /> : failed ? <Badge tone={statusTone}>{toolStatus(item)}</Badge> : null}
         {!command && item.durationMs ? <span className="muted small">{fmtDuration(item.durationMs)}</span> : null}
         {item.runId ? (
           <span
@@ -887,12 +938,14 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
   return (
     <div className={`approval ${decided ? 'decided' : 'pending'}`}>
       <div className="approval-head">
-        <Icon name="shield" size={14} />
-        <span className="approval-title">{req.title}</span>
+        <span className="approval-glyph"><Icon name="shield" size={14} /></span>
+        <span className="approval-heading">
+          <span className="approval-title">{req.title}</span>
+          {req.description && <span className="approval-desc">{req.description}</span>}
+        </span>
         <Badge tone="neutral">{req.harness}</Badge>
         {decided && <Badge tone={/deny|reject|cancel/.test(item.decision!.optionId) ? 'red' : 'green'}>{labelFor(req, item.decision!.optionId)}</Badge>}
       </div>
-      {req.description && <div className="approval-desc">{req.description}</div>}
       {req.command !== undefined && (
         decided ? (
           <pre className="approval-cmd mono">{req.command}</pre>
@@ -922,14 +975,16 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
         </div>
       ))}
       {!decided && canRespond && (
-        <div className="approval-actions">
-          {req.options.map((o) => (
-            <Button key={o.id} variant={o.kind === 'allow' ? 'primary' : o.kind === 'allow_session' || o.kind === 'allow_always' ? 'default' : 'ghost'} size="sm" onClick={() => respond(o.id)} title={o.description}>
-              {o.label}
-            </Button>
-          ))}
-          <input className="approval-note" placeholder="Optional note for the agent (sent when denying)" value={note} onChange={(e) => setNote(e.target.value)} />
-        </div>
+        <>
+          <div className="approval-actions">
+            {req.options.map((o) => (
+              <Button key={o.id} className={`approval-opt opt-${o.kind}`} variant={o.kind === 'allow' ? 'primary' : o.kind === 'allow_session' || o.kind === 'allow_always' ? 'default' : 'ghost'} size="sm" onClick={() => respond(o.id)} title={o.description}>
+                {o.label}
+              </Button>
+            ))}
+          </div>
+          <input className="approval-note" placeholder="Add a note for the agent (sent with Deny)…" value={note} onChange={(e) => setNote(e.target.value)} />
+        </>
       )}
       {!decided && !canRespond && <div className="approval-remote muted small">Decide on your computer</div>}
     </div>

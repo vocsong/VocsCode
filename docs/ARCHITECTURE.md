@@ -82,8 +82,8 @@ and saved-catalog fallback. Distinct providers and explicit context variants rem
 catalog refresh does not rewrite a session's pinned selection.
 
 A model's `supportedEfforts` has three states, and adapters must keep them apart: a list offers
-exactly those levels; `[]` means the model takes no effort, so the New Session select and header pill
-are disabled, `/effort` is refused, and the dialog neither submits nor remembers an effort level.
+exactly those levels; `[]` means the model takes no effort, so the New Session select and the
+composer's effort control are disabled, `/effort` is refused, and the dialog neither submits nor remembers an effort level.
 It persists `SessionConfig.effort: null` to explicitly omit effort at the adapter boundary, including
 after restart, without clearing the app/folder preference. An absent config effort still inherits the
 app preference; a later explicit session effort replaces the omission. `supportedEfforts: undefined`

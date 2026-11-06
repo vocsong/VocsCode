@@ -3,8 +3,8 @@ import React, { useMemo, useRef, useState } from 'react';
 import type { AppSettings, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { modelRefName } from '../../../shared/model-names';
-import { invoke } from '../api';
-import { basename, fmtCost, harnessShort, harnessTone, relTime } from '../format';
+import { invoke, modKey } from '../api';
+import { basename, harnessShort, harnessTone, relTime } from '../format';
 import { archiveSession, removeFolder } from '../sessionActions';
 import { isTopLevelSession } from '../missions';
 import { sortSessionRows } from '../sessionOrder';
@@ -14,7 +14,7 @@ import { Resizer } from './Resizer';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
 import { FolderBranch } from './FolderBranch';
 import { ForkIntoDropdown } from './ForkInto';
-import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
+import { askConfirm, Badge, Button, Dropdown, Icon, Kbd, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
 
 /** Icon choices for folder headers (names from the renderer icon set). */
 const FOLDER_ICONS = [
@@ -280,6 +280,28 @@ export function Sidebar() {
           <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
         </div>
       </div>
+      <div className="sidebar-nav">
+        <button type="button" className="sidebar-new" onClick={() => useStore.getState().openQuickSession(true)} title="Start a session in a recent folder">
+          <Icon name="sessionPlus" size={15} /> <span>New session</span> <Kbd>{modKey}+N</Kbd>
+        </button>
+        <div className="sidebar-views">
+          <button type="button" className={`sidebar-link ${view === 'analytics' ? 'active' : ''}`} onClick={() => setView('analytics')}>
+            <Icon name="chart" size={14} /> Analytics
+          </button>
+          <button type="button" className={`sidebar-link ${view === 'skills' ? 'active' : ''}`} onClick={() => setView('skills')}>
+            <Icon name="puzzle" size={14} /> Skills
+          </button>
+          <button type="button" className={`sidebar-link ${view === 'mcp' ? 'active' : ''}`} onClick={() => setView('mcp')}>
+            <Icon name="server" size={14} /> MCP
+          </button>
+        </div>
+      </div>
+      <div className="sidebar-section">
+        <span className="sidebar-section-label">{showArchived ? 'Archived sessions' : 'Sessions'}</span>
+        <button type="button" className={`sidebar-link sidebar-archived ${showArchived ? 'active' : ''}`} onClick={() => setShowArchived((v) => !v)}>
+          <Icon name={showArchived ? 'arrowLeft' : 'clock'} size={13} /> {showArchived ? 'Show active' : 'Archived'}
+        </button>
+      </div>
       <div
         className="sidebar-list"
         onDragOver={(e) => {
@@ -373,18 +395,6 @@ export function Sidebar() {
         })}
       </div>
       <div className="sidebar-bottom">
-        <button type="button" className={`sidebar-link ${showArchived ? 'active' : ''}`} onClick={() => setShowArchived((v) => !v)}>
-          <Icon name="clock" size={14} /> {showArchived ? 'Show active' : 'Archived'}
-        </button>
-        <button type="button" className={`sidebar-link ${view === 'analytics' ? 'active' : ''}`} onClick={() => setView('analytics')}>
-          <Icon name="chart" size={14} /> Analytics
-        </button>
-        <button type="button" className={`sidebar-link ${view === 'skills' ? 'active' : ''}`} onClick={() => setView('skills')}>
-          <Icon name="puzzle" size={14} /> Skills
-        </button>
-        <button type="button" className={`sidebar-link ${view === 'mcp' ? 'active' : ''}`} onClick={() => setView('mcp')}>
-          <Icon name="server" size={14} /> MCP
-        </button>
         <button type="button" className={`sidebar-link ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
           <Icon name="settings" size={14} /> Settings
         </button>
@@ -555,15 +565,14 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
         )}
         <div className="session-meta">
           {s.mission && <Badge tone="purple">Mission</Badge>}
-          <Badge tone={harnessTone(s.config.harness)} title={h?.name}>
+          <span className={`session-harness tone-${harnessTone(s.config.harness)}`} title={h?.name}>
             {harnessShort(s.config.harness)}
-          </Badge>
+          </span>
           {s.activeModel && (
             <span className="session-model" title={modelRefName(s.activeModel)}>
               {modelRefName(s.activeModel)}
             </span>
           )}
-          {s.usage.costUsd > 0 && <span className="session-cost">{fmtCost(s.usage.costUsd)}</span>}
           {s.worktreeBranch && (
             <span className="session-worktree" title={`Worktree · ${s.worktreeBranch}`}>
               <Icon name="branch" size={12} />
@@ -571,18 +580,17 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
             </span>
           )}
           {(s.queued ?? 0) > 0 && <span className="session-queued">+{s.queued}</span>}
+          <span className="spacer" />
+          {/* Time clicks must bubble to the row so they select the session; only the status pill swallows them. */}
+          <span className="session-side" onClick={(e) => e.stopPropagation()}>
+            <Dropdown align="right" width={200} trigger={() => archiving
+              ? <span className="session-status status-archiving" title="Archiving…">Archiving</span>
+              : <StatusLabel status={s.status} label={s.statusLabel} />}>
+              {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
+            </Dropdown>
+          </span>
+          <span className="session-time">{relTime(s.updatedAt)}</span>
         </div>
-      </div>
-      {/* Time clicks must bubble to the row so they select the session; only the status pill swallows them. */}
-      <div className="session-side">
-        <div onClick={(e) => e.stopPropagation()}>
-          <Dropdown align="right" width={200} trigger={() => archiving
-            ? <span className="session-status status-archiving" title="Archiving…">Archiving</span>
-            : <StatusLabel status={s.status} label={s.statusLabel} />}>
-            {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
-          </Dropdown>
-        </div>
-        <span className="session-time">{relTime(s.updatedAt)}</span>
       </div>
       <div className="row-actions" onClick={(e) => e.stopPropagation()}>
         {s.archived ? (

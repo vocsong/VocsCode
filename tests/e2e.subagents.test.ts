@@ -126,13 +126,13 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       const win = await launch(userData);
       await win.waitForSelector('.panel', { timeout: 30_000 });
 
-      // The panel has two halves with a draggable split between them.
-      const top = await win.locator('.panel-section.panel-top').boundingBox();
-      const bottom = await win.locator('.panel-section.panel-bottom').boundingBox();
-      expect(top!.height).toBeGreaterThan(100);
-      expect(bottom!.height).toBeGreaterThan(100);
-      expect(top!.height).toBeGreaterThan(bottom!.height); // default split favours the workspace views
-      expect(await win.locator('.resizer-split').count()).toBe(1);
+      // Until one of its tabs is opened, the lower half is only its tab strip: the workspace views
+      // get the height, with no empty pane and no split handle under them.
+      const idleTop = await win.locator('.panel-section.panel-top').boundingBox();
+      const idleBottom = await win.locator('.panel-section.panel-bottom').boundingBox();
+      expect(idleBottom!.height).toBeLessThan(60);
+      expect(idleTop!.height).toBeGreaterThan(idleBottom!.height * 5);
+      expect(await win.locator('.resizer-split').count()).toBe(0);
       await win.getByTestId('panel-bottom-mcp').waitFor({ state: 'visible', timeout: 20_000 });
 
       // The card in the transcript links into the panel's lower half. The turn's work is collapsed
@@ -142,6 +142,14 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       await chip.waitFor({ timeout: 20_000 });
       await chip.click();
       await win.locator('.panel-tab.active:has-text("Subagents")').waitFor({ timeout: 20_000 });
+
+      // Opened, the panel has two halves with a draggable split between them.
+      const top = await win.locator('.panel-section.panel-top').boundingBox();
+      const bottom = await win.locator('.panel-section.panel-bottom').boundingBox();
+      expect(top!.height).toBeGreaterThan(100);
+      expect(bottom!.height).toBeGreaterThan(100);
+      expect(top!.height).toBeGreaterThan(bottom!.height); // default split favours the workspace views
+      expect(await win.locator('.resizer-split').count()).toBe(1);
 
       // The run list shows the recorded run and its stats.
       const row = win.locator('.subagent-row').first();

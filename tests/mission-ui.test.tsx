@@ -524,8 +524,10 @@ describe('Mission launch and controls', () => {
   it('disables stale proposals and offers T5 handover instead of model/effort controls', async () => {
     record = { ...record, specificationRevision: 4 };
     useStore.setState({ missions: { mission: record } });
-    render(<><Header session={owned('lead')} /><MissionPanel session={owned('lead')} /></>);
+    // The composer is where an ordinary session's model and effort controls live.
+    render(<><Header session={owned('lead')} /><MissionPanel session={owned('lead')} /><Composer session={owned('lead')} /></>);
     expect((screen.getByRole('button', { name: 'Proceed' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByPlaceholderText(/Message the principal engineer/)).toBeTruthy();
     expect(screen.queryByTitle('Model')).toBeNull();
     expect(screen.queryByTitle('Reasoning effort')).toBeNull();
     expect(screen.getByTestId('mission-header').textContent).toContain('T5 principal engineer: Principal engineer');
@@ -801,10 +803,13 @@ describe('Mission navigation, inspection and workspace safety', () => {
 
   it('ordinary sessions retain app Goal, native subagents, model controls, editable prompts and normal creation', async () => {
     useStore.setState({ panelTab: 'goal', activeId: 'source', loaded: { source: true }, transcripts: { source: [{ id: 'normal-message', kind: 'user', ts: 1, text: 'Normal prompt' }] } });
-    const ui = render(<><Header session={ordinary()} /><RightPanel session={ordinary()} /><Transcript session={ordinary()} /></>);
+    const ui = render(<><Header session={ordinary()} /><RightPanel session={ordinary()} /><Transcript session={ordinary()} /><Composer session={ordinary()} /></>);
     expect(screen.getByRole('button', { name: 'Set goal' })).toBeTruthy();
     expect(screen.getByTestId('panel-bottom-subagents')).toBeTruthy();
-    expect(screen.getByTitle('Model')).toBeTruthy();
+    // One model control for the session, under the composer rather than in the header.
+    const models = screen.getAllByTitle('Model');
+    expect(models).toHaveLength(1);
+    expect(models[0].closest('.composer')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Edit and rerun message' }) as HTMLButtonElement).disabled).toBe(false);
     ui.unmount();
     const previous = invokeMock.getMockImplementation()!;

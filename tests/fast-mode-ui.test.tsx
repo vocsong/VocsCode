@@ -6,10 +6,10 @@ import { FAST_MODE_COST_WARNING } from '../src/shared/fast-mode';
 
 const { invoke, gate } = vi.hoisted(() => ({ invoke: vi.fn(), gate: { allowed: true } }));
 vi.mock('../src/renderer/src/api', () => ({ invoke, on: vi.fn(), canInvoke: () => gate.allowed, isMac: false, isWeb: false, platform: 'win32', modKey: 'Ctrl' }));
-vi.mock('../src/renderer/src/gitReads', () => ({ useGitSummary: () => ({ data: undefined }) }));
 
 import { NewSessionDialog } from '../src/renderer/src/components/NewSessionDialog';
-import { Header } from '../src/renderer/src/components/Header';
+import { Composer } from '../src/renderer/src/components/Composer';
+import { SessionControls } from '../src/renderer/src/components/SessionControls';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
 
@@ -29,9 +29,10 @@ function session(patch: Partial<SessionMeta> = {}): SessionMeta {
   };
 }
 
-function LiveHeader() {
+/** The run controls under the composer, re-rendered from the store as an IPC reply lands. */
+function LiveControls() {
   const meta = useStore((s) => s.sessions[0]);
-  return <><Header session={meta} /><ConfirmHost /></>;
+  return <><SessionControls session={meta} /><ConfirmHost /></>;
 }
 
 function seed(meta = session()) {
@@ -113,11 +114,11 @@ describe('new-session Fast mode request', () => {
   });
 });
 
-describe('message-header Fast mode request', () => {
+describe('composer Fast mode request', () => {
   it('requires visible cost confirmation, waits for IPC, and never claims requested means on', async () => {
     let resolve!: (meta: SessionMeta) => void;
     invoke.mockImplementation((channel: string) => channel === 'sessions:setFastMode' ? new Promise((r) => { resolve = r; }) : Promise.resolve({}));
-    render(<LiveHeader />);
+    render(<LiveControls />);
     const toggle = screen.getByRole('switch', { name: 'Request Fast mode' }) as HTMLButtonElement;
     fireEvent.click(toggle);
     expect(await screen.findByText(FAST_MODE_COST_WARNING)).toBeTruthy();
@@ -137,7 +138,7 @@ describe('message-header Fast mode request', () => {
 
   it('cancels without mutation and shows failed requests without changing checked state', async () => {
     invoke.mockRejectedValue(new Error('account refused'));
-    render(<LiveHeader />);
+    render(<LiveControls />);
     const toggle = screen.getByRole('switch', { name: 'Request Fast mode' }) as HTMLButtonElement;
     fireEvent.click(toggle);
     fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
@@ -153,7 +154,7 @@ describe('message-header Fast mode request', () => {
 
   it.each(['requested', 'on', 'unavailable', 'cooldown'] as const)('shows effective %s status, including runtime detail', (state) => {
     seed(session({ config: { ...session().config, fastMode: true }, fastModeStatus: { state, detail: 'runtime detail' } }));
-    render(<LiveHeader />);
+    render(<LiveControls />);
     const toggle = screen.getByRole('switch', { name: 'Request Fast mode' });
     expect(toggle.textContent).toContain(state);
     expect(toggle.getAttribute('title')).toContain('runtime detail');
@@ -161,7 +162,7 @@ describe('message-header Fast mode request', () => {
 
   it.each(['running', 'starting', 'awaiting'] as const)('disables changes while %s', (status) => {
     seed(session({ status }));
-    render(<LiveHeader />);
+    render(<LiveControls />);
     const toggle = screen.getByRole('switch', { name: 'Request Fast mode' }) as HTMLButtonElement;
     expect(toggle.disabled).toBe(true);
     expect(toggle.title).toContain('Stop the session');
@@ -169,19 +170,19 @@ describe('message-header Fast mode request', () => {
 
   it('uses a custom active ref and provider endpoint instead of the saved model', () => {
     seed(session({ activeModel: { provider: 'openai', model: 'gpt-4.1-custom' } }));
-    const view = render(<LiveHeader />);
+    const view = render(<LiveControls />);
     expect((screen.getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
     view.unmount();
     seed();
     useStore.setState({ settings: { ...settings, providers: [{ id: 'openai', baseUrl: 'https://gateway.example/v1', enabled: true } as never] } });
-    render(<LiveHeader />);
+    render(<LiveControls />);
     expect((screen.getByRole('switch') as HTMLButtonElement).title).toContain('custom endpoints');
   });
 
   it('allows an unsupported saved request to be turned off without confirmation', async () => {
     const meta = session();
     seed(session({ config: { ...meta.config, harness: 'cursor', fastMode: true }, fastModeStatus: { state: 'unavailable' } }));
-    render(<LiveHeader />);
+    render(<LiveControls />);
     const toggle = screen.getByRole('switch') as HTMLButtonElement;
     expect(toggle.disabled).toBe(false);
     fireEvent.click(toggle);
@@ -191,11 +192,15 @@ describe('message-header Fast mode request', () => {
 
   it('honors connection capability and hides the toggle for Missions', () => {
     gate.allowed = false;
-    const view = render(<LiveHeader />);
+    const view = render(<LiveControls />);
     expect((screen.getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
     view.unmount();
-    seed(session({ mission: { missionId: 'm1', role: 'lead' } as SessionMeta['mission'] }));
-    render(<LiveHeader />);
+    // The composer carries the run controls for an ordinary session, and none for a Mission lead.
+    const ordinary = render(<Composer session={session()} />);
+    expect(screen.getByRole('switch', { name: 'Request Fast mode' })).toBeTruthy();
+    ordinary.unmount();
+    render(<Composer session={session({ mission: { missionId: 'm1', role: 'lead' } as SessionMeta['mission'] })} />);
+    expect(screen.getByPlaceholderText(/Message the principal engineer/)).toBeTruthy();
     expect(screen.queryByRole('switch', { name: 'Request Fast mode' })).toBeNull();
   });
 });
