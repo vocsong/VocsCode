@@ -3,6 +3,12 @@
 Settings is organized around tasks rather than storage files. Existing IPC, configuration owners,
 keychain boundaries, permissions and save semantics are unchanged.
 
+For first-time setup or recovery, open **Harnesses → Setup guide**, a per-harness **Set up** action,
+or **Providers & keys → Harness logins → Sign in / setup**. The guide separates subscription
+sign-in from API keys, detects selected-runtime prerequisites, and checks models without sending
+a coding prompt. See [First-time setup and recovery](ONBOARDING.md) for billing caveats, explicit
+save/dismissal behavior and repair paths.
+
 ## Find the right page
 
 | Group | Pages |

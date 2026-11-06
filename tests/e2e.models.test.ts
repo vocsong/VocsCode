@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
+import { createServer } from 'node:http';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { ProviderConfig, SessionMeta } from '../src/shared/types';
@@ -62,6 +63,15 @@ async function launch(userData: string): Promise<Page> {
   // Keep the short-lived Claude model probe off the developer's real login. Claude Code may still
   // report its runtime catalog, but this suite never borrows account credentials or starts a turn.
   env.CLAUDE_CONFIG_DIR = path.join(userData, 'claude');
+  env.CODEX_HOME = path.join(userData, 'codex');
+  env.PI_CODING_AGENT_DIR = path.join(userData, 'pi');
+  env.HOME = env.USERPROFILE = path.join(userData, 'home');
+  env.APPDATA = path.join(env.USERPROFILE, 'AppData', 'Roaming');
+  env.LOCALAPPDATA = path.join(env.USERPROFILE, 'AppData', 'Local');
+  // Windows resolves appData before our userData override. A synthetic profile must exist.
+  for (const dir of [env.APPDATA, env.LOCALAPPDATA, env.CLAUDE_CONFIG_DIR, env.CODEX_HOME, env.PI_CODING_AGENT_DIR]) await fs.mkdir(dir, { recursive: true });
+  for (const key of ['ANTHROPIC_AUTH_TOKEN', 'CODEX_API_KEY', 'CURSOR_API_KEY', 'GOOGLE_API_KEY']) env[key] = '';
+  env.VOCS_CODE_UPDATER_DISABLE = '1';
   // requestSingleInstanceLock() runs before VOCS_CODE_USER_DATA is applied, so a run started while
   // the app is open would exit silently; --user-data-dir is a Chromium switch and lands earlier.
   const packaged = process.env.HARNESS_E2E_EXE;
@@ -398,5 +408,146 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await expect.poll(() => effort.isEnabled(), { timeout: 10_000 }).toBe(true);
     expect(await effort.locator('option').evaluateAll((els) => els.map((el) => (el as HTMLOptionElement).value))).toEqual(['', 'low', 'high', 'max']);
     await win.screenshot({ path: path.join(shots, 'models-05-deepseek-effort.png') });
+  }, 180_000);
+});
+
+describe.runIf(enabled)('first-run setup through real desktop boundaries', () => {
+  it('offers clean-profile Claude/ChatGPT sign-in without demanding API keys, and resumes after dismissal or restart', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-onboarding-subscriptions-'));
+    const userData = path.join(tmp, 'userData'), project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true }); await fs.mkdir(project, { recursive: true }); await fs.mkdir(shots, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { onboardingDone: false, theme: 'light', claude: { runtime: 'bundled', useProviderKey: false, settingSources: [] }, codex: { runtime: 'bundled' }, agent: { enabled: false } }));
+    let win = await launch(userData);
+    const errors: string[] = []; win.on('pageerror', (error) => errors.push(error.message));
+    let guide = win.getByRole('dialog', { name: 'Welcome to Vocs Code', exact: true });
+    await guide.waitFor();
+    expect(await guide.getByRole('button', { name: 'Next', exact: true }).isDisabled()).toBe(true);
+    await win.setViewportSize({ width: 960, height: 800 });
+    await win.screenshot({ path: path.join(shots, 'onboarding-01-agent-choice.png') });
+    await win.setViewportSize({ width: 480, height: 800 });
+    expect(await guide.evaluate((el) => el.scrollWidth <= el.clientWidth + 1 && el.querySelector('.modal-body')!.scrollWidth <= el.querySelector('.modal-body')!.clientWidth + 1)).toBe(true);
+    await win.screenshot({ path: path.join(shots, 'onboarding-02-compact.png') });
+    await win.setViewportSize({ width: 960, height: 800 });
+    for (const item of [{ name: /^Claude Agent SDK/, signIn: 'Sign in with Claude' }, { name: /^Codex \(app-server\)/, signIn: 'Sign in with ChatGPT' }]) {
+      await guide.getByRole('button', { name: item.name }).click();
+      await guide.getByRole('button', { name: 'Next', exact: true }).click();
+      await guide.getByRole('button', { name: item.signIn, exact: true }).waitFor({ timeout: 60_000 });
+      expect(await guide.locator('input[type="password"]').count()).toBe(0);
+      expect(await guide.getByText(/an API key is not required for that route/).isVisible()).toBe(true);
+      expect(await guide.getByRole('button', { name: 'Next', exact: true }).isDisabled()).toBe(true);
+      expect(await guide.locator('.setup-checks .badge').innerText()).toMatch(/Sign-in needed|Sign-in not verified/);
+      expect(await guide.getByRole('button', { name: /^Install / }).count()).toBe(0);
+      if (item.signIn === 'Sign in with ChatGPT') {
+        expect(await guide.getByRole('button', { name: 'Use device sign-in' }).isVisible()).toBe(true);
+        await win.screenshot({ path: path.join(shots, 'onboarding-03-subscription.png') });
+      }
+      await win.setViewportSize({ width: 480, height: 800 });
+      expect(await guide.evaluate((el) => el.scrollWidth <= el.clientWidth + 1 && el.querySelector('.modal-body')!.scrollWidth <= el.querySelector('.modal-body')!.clientWidth + 1)).toBe(true);
+      if (item.signIn === 'Sign in with ChatGPT') await win.screenshot({ path: path.join(shots, 'onboarding-06-compact-connection.png') });
+      await win.setViewportSize({ width: 960, height: 800 });
+      await guide.getByRole('button', { name: 'Back', exact: true }).click();
+    }
+    // Do not launch an external OAuth flow or borrow any real account in this offline suite.
+    await guide.getByRole('button', { name: 'Close', exact: true }).click();
+    expect((await win.evaluate(() => window.harness.invoke('settings:get', undefined))).onboardingDone).toBe(false);
+    await win.locator('.main-empty').getByRole('button', { name: 'Setup guide', exact: true }).click();
+    await guide.waitFor(); await guide.getByRole('button', { name: 'Skip setup', exact: true }).click();
+    await guide.waitFor({ state: 'hidden' });
+    expect((await win.evaluate(() => window.harness.invoke('settings:get', undefined))).onboardingDone).toBe(true);
+    expect(await win.evaluate(() => window.harness.invoke('sessions:list', undefined))).toEqual([]);
+    expect(errors).toEqual([]);
+    await apps[apps.length - 1]!.close();
+    win = await launch(userData);
+    await win.locator('.main-empty').waitFor();
+    guide = win.getByRole('dialog', { name: 'Welcome to Vocs Code', exact: true });
+    expect(await guide.count()).toBe(0);
+    await win.locator('.main-empty').getByRole('button', { name: 'Settings', exact: true }).click();
+    await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Harnesses', exact: true }).click();
+    await win.getByRole('button', { name: 'Set up Codex (app-server)', exact: true }).click();
+    await guide.getByRole('heading', { name: 'Connect Codex (app-server)', exact: true }).waitFor();
+    await guide.getByRole('button', { name: 'Close', exact: true }).click();
+    await apps[apps.length - 1]!.close();
+  }, 180_000);
+
+  it.each([{ id: 'lmstudio', name: 'LM Studio', api: false }, { id: 'openai', name: 'OpenAI', api: true }])('recovers the $name catalog, persists setup across restart and preserves a session draft', async ({ id, name, api }) => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-onboarding-local-'));
+    const userData = path.join(tmp, 'userData'), project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true }); await fs.mkdir(project, { recursive: true }); await fs.mkdir(shots, { recursive: true });
+    let failCatalog = true;
+    const requests: string[] = [], authorization: (string | undefined)[] = [];
+    const fixtureKey = 'sk-onboarding-fixture-not-a-real-key';
+    const server = createServer((req, res) => {
+      requests.push(`${req.method} ${req.url}`); authorization.push(req.headers.authorization);
+      res.writeHead(req.url !== '/v1/models' ? 404 : failCatalog ? 503 : 200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(failCatalog ? { error: 'fixture server not ready' } : { data: [{ id: 'fixture-chat' }] }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+    try {
+      await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { onboardingDone: false, theme: 'dark', providers: [{ id, kind: id, name, baseUrl: endpoint, enabled: true, models: [] }], agent: { enabled: false } }));
+      let win = await launch(userData);
+      const errors: string[] = []; win.on('pageerror', (error) => errors.push(error.message));
+      const guide = win.getByRole('dialog', { name: 'Welcome to Vocs Code', exact: true });
+      await guide.getByRole('button', { name: /^Native loop/ }).click();
+      await guide.getByRole('button', { name: 'Next', exact: true }).click();
+      await guide.locator('.setup-provider select').selectOption(id);
+      if (api) {
+        const input = guide.locator('input[type="password"]');
+        await input.fill(fixtureKey);
+        const fallback = guide.getByRole('checkbox', { name: 'I understand and want to save a key on this machine', exact: true });
+        if (await fallback.isVisible()) await fallback.check();
+        await guide.getByRole('button', { name: 'Save key', exact: true }).click();
+        await guide.getByText('Key saved', { exact: true }).waitFor();
+        expect(await input.inputValue()).toBe('');
+      }
+      const next = guide.getByRole('button', { name: 'Next', exact: true });
+      await expect.poll(() => next.isEnabled(), { timeout: 60_000 }).toBe(true);
+      await next.click();
+      await guide.getByRole('alert').filter({ hasText: 'Catalog check failed' }).waitFor();
+      expect(await next.isDisabled()).toBe(true);
+      await win.screenshot({ path: path.join(shots, 'onboarding-04-catalog-recovery.png') });
+      failCatalog = false;
+      await guide.getByRole('button', { name: 'Recheck models', exact: true }).click();
+      const choice = guide.locator(`.mp-row:has(.mp-name[title="${id}/fixture-chat"]) .mp-select`);
+      await choice.click();
+      expect(await next.isEnabled()).toBe(true);
+      await next.click(); await next.click();
+      await guide.getByRole('heading', { name: 'Your choices are configured' }).waitFor();
+      await win.screenshot({ path: path.join(shots, 'onboarding-05-summary.png') });
+      await win.setViewportSize({ width: 480, height: 800 });
+      expect(await guide.evaluate((el) => el.scrollWidth <= el.clientWidth + 1 && el.querySelector('.modal-body')!.scrollWidth <= el.querySelector('.modal-body')!.clientWidth + 1)).toBe(true);
+      await win.screenshot({ path: path.join(shots, 'onboarding-07-compact-summary.png') });
+      await win.setViewportSize({ width: 960, height: 800 });
+      await guide.getByRole('button', { name: 'Finish setup', exact: true }).click();
+      await guide.waitFor({ state: 'hidden' });
+      const saved = JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8'));
+      expect(saved.defaultHarness).toBe('native');
+      expect(saved.defaultModelByHarness.native).toEqual({ provider: id, model: 'fixture-chat' });
+      expect(JSON.stringify(saved)).not.toContain(fixtureKey);
+      expect(saved.onboardingDone).toBe(true);
+      expect(errors).toEqual([]);
+      await apps[apps.length - 1]!.close();
+      win = await launch(userData);
+      await openNewSession(win);
+      expect(await win.locator('.harness-card.active').innerText()).toContain('Native loop');
+      await expect.poll(() => win.locator('.mp-row.active .mp-name').getAttribute('title'), { timeout: 30_000 }).toBe(`${id}/fixture-chat`);
+      const prompt = win.getByPlaceholder('What should the agent do?');
+      await prompt.fill('Keep this unsent draft while I check setup');
+      await win.getByRole('button', { name: 'Set up / sign in', exact: true }).click();
+      const recovery = win.getByRole('dialog', { name: 'Welcome to Vocs Code', exact: true });
+      await recovery.getByRole('heading', { name: 'Connect Native loop', exact: true }).waitFor();
+      await expect.poll(() => recovery.locator('.setup-provider select').inputValue()).toBe(id);
+      if (api) { await recovery.getByText('Key saved', { exact: true }).waitFor(); expect(await recovery.locator('input[type="password"]').inputValue()).toBe(''); }
+      await win.keyboard.press('Escape');
+      await recovery.waitFor({ state: 'hidden' });
+      expect(await prompt.inputValue()).toBe('Keep this unsent draft while I check setup');
+      expect(await win.getByRole('button', { name: /Start session/ }).isVisible()).toBe(true);
+      expect(await win.evaluate(() => window.harness.invoke('sessions:list', undefined))).toEqual([]);
+      // The OpenAI-wire client retries the first 503 once (maxRetries: 1), then the explicit
+      // recheck succeeds. Reopening/closing setup and restarting must not add requests or turns.
+      expect(requests).toEqual(['GET /v1/models', 'GET /v1/models', 'GET /v1/models']);
+      if (api) expect(authorization).toEqual(Array(3).fill(`Bearer ${fixtureKey}`));
+      await apps[apps.length - 1]!.close();
+    } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
   }, 180_000);
 });

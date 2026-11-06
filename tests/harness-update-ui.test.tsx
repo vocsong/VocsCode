@@ -108,17 +108,21 @@ describe('harness login updates', () => {
     expect(update).toBeTruthy();
   });
 
-  it('installs the newer version, then refreshes the card and the check', async () => {
+  it('rechecks the selected runtime after installation rather than claiming the registry version was installed', async () => {
     await openAndCheck();
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Update to 0.87.1' }));
     });
 
     expect(invokeMock).toHaveBeenCalledWith('harness:install', { id: 'pi' });
-    // The card re-reads availability and re-checks, so the button cannot outlive the update.
+    // This fixture still reports the older selected binary: installer success must not invent
+    // a newer version or drop the offer. Recheck the actual selected runtime without cached probes.
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'harness:availability')).toHaveLength(1);
+    expect(invokeMock).toHaveBeenCalledWith('harness:availability', { refresh: true });
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'harness:checkUpdates')).toHaveLength(2);
-    expect(useStore.getState().toasts.at(-1)?.text).toContain('Updated Pi to 0.87.1');
+    expect(useStore.getState().toasts.at(-1)?.text).toBe('Installer finished for Pi; rechecking the selected runtime.');
+    expect(useStore.getState().availability.pi?.version).toBe('0.85.1');
+    expect(screen.getByRole('button', { name: 'Update to 0.87.1' })).toBeTruthy();
   });
 
   it('keeps the offer and reports the failure when the install fails', async () => {
