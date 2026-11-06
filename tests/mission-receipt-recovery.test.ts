@@ -1,6 +1,6 @@
 /** Production receipt wiring: real coordinator operations, Git CAS, checks and local delivery.
- * Only Pi's model/process boundary is scripted; its truthful not-started ownership is separate
- * from integration/delivery proof. Recovery must never execute the lost operation again. */
+ * Pi's model/process boundary is scripted and unrelated sidebar badge polling is isolated.
+ * Not-started ownership is separate from integration/delivery proof; recovery never replays work. */
 import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -27,6 +27,12 @@ import { missionFixture } from './support/mission-fixture';
 import { fixtureGitHubRemote, fixtureGitHubRepo, fixtureGitHubTransport, fixturePr } from './support/mission-github-fixture';
 
 vi.mock('../src/main/harness/registry', () => ({ createAdapter: vi.fn() }));
+// Sidebar badge polling is not Mission recovery. Its unrelated gh reads otherwise race into
+// the exact recovery-transport assertions below. Keep all Mission Git/delivery calls real.
+vi.mock('../src/main/git', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/main/git')>()),
+  branchGitState: vi.fn(async () => ({ pr: false, merged: false })),
+}));
 // Every case recovers from the durable Windows Job receipts of real host checks. POSIX has no such
 // bounded-owner proof and honestly stays uncertain after restart, so these run on Windows only.
 const it = platformTest.runIf(process.platform === 'win32');
