@@ -12,6 +12,7 @@ import type { UpdateState } from '../../../shared/types';
 import { Icon, MenuItem } from './ui';
 import { ForkIntoItems } from './ForkInto';
 import { openSettings } from './SettingsView';
+import { VestaLauncher } from './Vesta';
 
 const REPO = 'https://github.com/vocsong/VocsCode';
 
@@ -43,8 +44,16 @@ export function TitleBar() {
         <MenuBar />
         <UpdatePill />
       </div>
-      <div className="titlebar-title" title={title}>
-        {title}
+      {/* The middle of the bar names where you are and doubles as the way to go anywhere else. */}
+      <div className="titlebar-title">
+        <button type="button" className="titlebar-search" title={`${title} — search sessions and commands (${modKey}+K)`} onClick={() => useStore.getState().openPalette(true)}>
+          <Icon name="search" size={13} />
+          <span className="titlebar-search-text">{view === 'settings' ? 'Settings' : session ? session.title : 'Search sessions and commands'}</span>
+          <kbd className="kbd">{modKey}+K</kbd>
+        </button>
+      </div>
+      <div className="titlebar-trail">
+        <VestaLauncher />
       </div>
       <div className="titlebar-tail">{isWeb && <span className="web-badge">web</span>}</div>
     </div>

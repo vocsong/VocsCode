@@ -1,7 +1,7 @@
 /**
  * Regression test for an empty model dropdown on a brand-new session. A harness process is only
- * spawned by the first message, so its `models` event does not exist before that; the header has to
- * fall back to the pre-session catalog instead of showing "no model list yet". Additional cases cover
+ * spawned by the first message, so its `models` event does not exist before that; the composer's model
+ * control has to fall back to the pre-session catalog instead of showing "no model list yet". Additional cases cover
  * the new-session dialog listing configured providers and both Codex harnesses' live runtime catalog.
  *
  * Requires `npm run build` first. Gated by VOCS_CODE_E2E_UI=1. Each session is seeded straight into a
@@ -74,7 +74,7 @@ async function launch(userData: string): Promise<Page> {
 }
 
 describe.runIf(enabled)('model picker before the first message', () => {
-  it('creates a Fast request and changes it in the message header without claiming an effective fast tier', async () => {
+  it('creates a Fast request and changes it under the composer without claiming an effective fast tier', async () => {
     const tmp = path.join(os.tmpdir(), `vocs-code-fast-mode-${Date.now()}`);
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -154,7 +154,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     // Nothing was ever sent, so the harness never spawned: this is the state that used to be empty.
     expect(await win.locator('.transcript .item').count()).toBe(0);
 
-    await win.click('.header-controls .pill[title="Model"]');
+    await win.click('.composer .run-controls .pill[title="Model"]');
     const picker = win.locator('.model-picker');
     await picker.waitFor({ timeout: 10_000 });
     await picker.locator('.mp-row').first().waitFor({ timeout: 20_000 });
@@ -168,7 +168,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
 
     // Picking one sticks even with no process to tell about it.
     const first = picker.locator('.mp-row .mp-select').first();
-    // The row is named `provider/id`, and that qualified name is what the header pill then shows.
+    // The row is named `provider/id`, and that qualified name is what the composer's model pill then shows.
     const picked = (await first.locator('.mp-name').getAttribute('title')) ?? '';
     expect(picked).toContain('/');
     await first.click();
@@ -176,7 +176,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
 
     // A gateway id that no catalog lists can still be typed and sticks: a bare id is adopted under
     // the provider already in use, and the pill names it that way.
-    await win.click('.header-controls .pill[title="Model"]');
+    await win.click('.composer .run-controls .pill[title="Model"]');
     const picker2 = win.locator('.model-picker');
     await picker2.waitFor({ timeout: 10_000 });
     await picker2.locator('.mp-search input').fill('acme-custom-1');
@@ -314,7 +314,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await pickModel(win, other!);
     await expect.poll(activeIds, { timeout: 10_000 }).toEqual([other]);
 
-    // The dialog starts on a listed model only: the header accepts a typed custom id after start,
+    // The dialog starts on a listed model only: the composer accepts a typed custom id after start,
     // but here the search must not offer one, so it can never leak into a new session's config.
     await picker.locator('.mp-search input').fill('acme-custom-1');
     await picker.locator('.mp-clear').waitFor({ timeout: 10_000 });
@@ -361,11 +361,11 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await expect.poll(() => effort.isDisabled(), { timeout: 10_000 }).toBe(true);
     expect(await effort.locator('option').allInnerTexts()).toEqual(['Not supported']);
 
-    // Started without a prompt, so no harness process exists; the header reads the same catalog.
+    // Started without a prompt, so no harness process exists; the composer's run controls read the same catalog.
     await win.getByRole('button', { name: /Start session/ }).click();
-    const pill = win.locator('.header-controls .pill[aria-label="Reasoning effort"]');
-    await expect.poll(async () => pill.count(), { timeout: 60_000 }).toBe(1);
-    expect(await pill.isDisabled()).toBe(true);
+    const pill = win.locator('.composer .run-controls .pill[aria-label="Reasoning effort"]');
+    // The control is there from the first paint; the catalog arriving is what disables it.
+    await expect.poll(async () => (await pill.count()) === 1 && (await pill.isDisabled()), { timeout: 60_000 }).toBe(true);
     expect(await pill.getAttribute('title')).toContain('does not support reasoning effort');
     const sessions = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
     expect(sessions).toHaveLength(1);
