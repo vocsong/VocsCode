@@ -40,7 +40,7 @@ export const SETTINGS_PAGES = [
     { label: 'Cloud transcription', description: 'Speech provider and transcription model.', keywords: 'audio speech api cloud', anchor: 'voice-cloud' },
     { label: 'Local transcription', description: 'Private, on-device whisper.cpp models, GPU and idle timeout.', keywords: 'whisper cpu gpu download microphone local idle server', anchor: 'voice-local' },
   ] },
-  { id: 'sessions', label: 'Session defaults', icon: 'sessionPlus', group: 'Agent behavior', description: 'A starting point for new projects. Each project can remember its own choices.', saveHint: 'Preferences save automatically · Use Add for new branch prefixes', topics: [
+  { id: 'sessions', label: 'Session defaults', icon: 'sessionPlus', group: 'Agent behavior', description: 'Starting choices for new sessions, plus app-wide context and goal behavior.', saveHint: 'Preferences save automatically · Use Add for new branch prefixes', topics: [
     { label: 'New sessions', description: 'Default harness, permission mode and reasoning effort.', keywords: 'agent model permissions approval full access effort', anchor: 'sessions-defaults' },
     { label: 'Context management', description: 'Choose when to automatically compact a session.', keywords: 'context window tokens compaction threshold percentage', anchor: 'sessions-context' },
     { label: 'Goal defaults', description: 'Auto-continue, iteration guard and harness-native goals.', keywords: 'automatic autonomous goal iterations continue', anchor: 'sessions-goals' },

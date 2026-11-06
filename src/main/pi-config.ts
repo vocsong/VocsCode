@@ -8,13 +8,15 @@
  * discipline; resource filters are written exactly as pi's config-selector writes them
  * (`+<relative>` / `-<relative>`, `!pattern` excludes).
  *
- * Writes are read-merge-write through the atomic JSON writer. pi's TUI takes a proper-lockfile lock
- * when it saves settings; a save landing between our read and rename could be lost, so the window
- * is one read/write pair and nothing is written on page load.
+ * Reads and complete mutations are serialized per agent dir within this process, including package
+ * commands launched here. JSON writes use the atomic writer. This does not coordinate with external
+ * pi processes' proper-lockfile locks: an external save between our read and rename can still be
+ * lost. Nothing is written on page load.
  */
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import type {
   PiAgentInfo,
   PiCommandResult,
@@ -40,7 +42,7 @@ import type { Logger } from './log';
 export const PI_RESOURCE_TYPES: PiResourceType[] = ['extensions', 'skills', 'prompts', 'themes'];
 export const PI_PROMPT_NAMES: PiPromptName[] = ['SYSTEM.md', 'APPEND_SYSTEM.md', 'AGENTS.md'];
 
-/** pi refuses to load a prompt file larger than this anyway; the cap also bounds the IPC payload. */
+/** UTF-8 byte budget for global prompt files; also bounds the IPC payload. */
 const PROMPT_FILE_LIMIT = 512 * 1024;
 /** Package installs can take a while (git clone + npm install); the handler waits, then kills. */
 const PI_COMMAND_TIMEOUT_MS = 300_000;
@@ -135,7 +137,7 @@ function readPreferences(settings: Record<string, unknown>): PiPreferences {
     compactionReserveTokens: positiveInt(compaction.reserveTokens),
     compactionKeepRecentTokens: positiveInt(compaction.keepRecentTokens),
     retryEnabled: bool(retry.enabled),
-    retryMaxRetries: positiveInt(retry.maxRetries),
+    retryMaxRetries: retry.maxRetries === 0 ? 0 : positiveInt(retry.maxRetries),
     retryBaseDelayMs: positiveInt(retry.baseDelayMs)
   };
 }
@@ -530,7 +532,9 @@ async function readPromptFiles(agentDir: string): Promise<PiPromptFile[]> {
       try {
         const buf = await fs.readFile(file);
         const truncated = buf.length > PROMPT_FILE_LIMIT;
-        return { name, path: file, exists: true, content: buf.subarray(0, PROMPT_FILE_LIMIT).toString('utf8'), ...(truncated ? { truncated: true } : {}) };
+        // Do not flush a partial UTF-8 sequence at the byte boundary as a replacement character.
+        const content = truncated ? new StringDecoder('utf8').write(buf.subarray(0, PROMPT_FILE_LIMIT)) : buf.toString('utf8');
+        return { name, path: file, exists: true, content, ...(truncated ? { truncated: true } : {}) };
       } catch {
         return { name, path: file, exists: false, content: '' };
       }
@@ -729,13 +733,14 @@ function validPackageSource(source: unknown): string {
 }
 
 /**
- * Runs `pi <args>` with piped stdio, capturing a capped combined log. The child is killed on the
- * timeout; callers get the log either way so a failed install can be shown verbatim.
+ * Runs `pi <args>` with piped stdio, capturing a capped combined log. On timeout it awaits the
+ * shared best-effort tree teardown before releasing its caller; failed installs keep their log.
  */
 export async function runPiCommand(args: string[], opts: { piPath: string; cwd: string; log: Logger; timeoutMs?: number }): Promise<PiCommandResult> {
   const timeoutMs = opts.timeoutMs ?? PI_COMMAND_TIMEOUT_MS;
   return new Promise((resolve) => {
     let settled = false;
+    let stopping = false;
     let out = '';
     const append = (chunk: Buffer): void => {
       if (out.length < PI_COMMAND_LOG_LIMIT) out += chunk.toString('utf8');
@@ -754,14 +759,36 @@ export async function runPiCommand(args: string[], opts: { piPath: string; cwd: 
       return;
     }
     const timer = setTimeout(() => {
-      void killTree(child);
-      finish({ ok: false, code: null, log: out, error: `pi ${args[0]} timed out after ${Math.round(timeoutMs / 1000)}s` });
+      stopping = true;
+      const error = `pi ${args[0]} timed out after ${Math.round(timeoutMs / 1000)}s`;
+      // A close/error can arrive while Windows taskkill is still stopping descendants. It must
+      // not release the directory queue early or turn a timed-out command into a success.
+      void killTree(child).then(
+        () => finish({ ok: false, code: null, log: out, error }),
+        (e) => finish({ ok: false, code: null, log: out, error: `${error}; cleanup failed: ${errorMessage(e)}` })
+      );
     }, timeoutMs);
     child.stdout?.on('data', append);
     child.stderr?.on('data', append);
-    child.on('error', (e) => finish({ ok: false, code: null, log: out, error: errorMessage(e) }));
-    child.on('close', (code) => finish(code === 0 ? { ok: true, code, log: out } : { ok: false, code, log: out, error: `pi exited with code ${code ?? 'unknown'}` }));
+    child.on('error', (e) => { if (!stopping) finish({ ok: false, code: null, log: out, error: errorMessage(e) }); });
+    child.on('close', (code) => { if (!stopping) finish(code === 0 ? { ok: true, code, log: out } : { ok: false, code, log: out, error: `pi exited with code ${code ?? 'unknown'}` }); });
   });
+}
+
+/** A PiSetup spans settings, subagents and prompt files, so its reads share the mutation queue.
+ * Shared across store instances, but never across processes or distinct agent directories. */
+const configOperations = new Map<string, Promise<unknown>>();
+
+async function withPiConfig<T>(agentDir: string, operation: () => Promise<T>): Promise<T> {
+  const resolved = path.resolve(agentDir);
+  const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  const run = (configOperations.get(key) ?? Promise.resolve()).then(operation, operation);
+  configOperations.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (configOperations.get(key) === run) configOperations.delete(key);
+  }
 }
 
 export class PiConfigStore {
@@ -789,8 +816,13 @@ export class PiConfigStore {
     return { subagents: sanitizeSubagents(settings) };
   }
 
-  /** Everything the Settings → Pi page renders; never throws for a malformed file, it reports. */
+  /** Everything the Settings → Pi page renders, ordered after earlier mutations; malformed files report. */
   async read(): Promise<PiSetup> {
+    return withPiConfig(this.paths().agentDir, () => this.readSnapshot());
+  }
+
+  /** Only inside withPiConfig: internal reads must not re-enter the queue they already hold. */
+  private async readSnapshot(): Promise<PiSetup> {
     const { agentDir, settingsPath } = this.paths();
     const { settings, error } = await readSettingsFile(settingsPath);
     const discovered: FoundResource[] = [];
@@ -825,24 +857,26 @@ export class PiConfigStore {
 
   /** Merges a curated preference patch into settings.json, preserving every other key. */
   async updatePreferences(patch: PiPreferencesPatch): Promise<PiSetup> {
-    const { settingsPath, settings } = await this.requireSettings();
-    const next: Record<string, unknown> = { ...settings };
-    const changed: string[] = [];
-    for (const key of Object.keys(patch) as FlatKey[]) {
-      if (!Object.prototype.hasOwnProperty.call(PREFERENCE_PATHS, key)) continue;
-      const value = patch[key];
-      if (value === null || value === undefined || value === '') {
-        deleteNested(next, PREFERENCE_PATHS[key]);
-      } else {
-        setNested(next, PREFERENCE_PATHS[key], normalizePreference(key, value));
+    return withPiConfig(this.paths().agentDir, async () => {
+      const { settingsPath, settings } = await this.requireSettings();
+      const next: Record<string, unknown> = { ...settings };
+      const changed: string[] = [];
+      for (const key of Object.keys(patch) as FlatKey[]) {
+        if (!Object.prototype.hasOwnProperty.call(PREFERENCE_PATHS, key)) continue;
+        const value = patch[key];
+        if (value === null || value === undefined || value === '') {
+          deleteNested(next, PREFERENCE_PATHS[key]);
+        } else {
+          setNested(next, PREFERENCE_PATHS[key], normalizePreference(key, value));
+        }
+        changed.push(key);
       }
-      changed.push(key);
-    }
-    if (changed.length) {
-      await writeJson(settingsPath, next);
-      this.log('info', `pi settings updated: ${changed.join(', ')}`);
-    }
-    return this.read();
+      if (changed.length) {
+        await writeJson(settingsPath, next);
+        this.log('info', `pi settings updated: ${changed.join(', ')}`);
+      }
+      return this.readSnapshot();
+    });
   }
 
   /**
@@ -850,19 +884,21 @@ export class PiConfigStore {
    * be a resource this agent dir actually exposes, so a tampered renderer cannot write outside it.
    */
   async setResourceEnabled(type: PiResourceType, absPath: string, enabled: boolean): Promise<PiSetup> {
-    if (!PI_RESOURCE_TYPES.includes(type)) throw new Error(`Unknown pi resource type: ${type}`);
-    const { agentDir, settingsPath, settings } = await this.requireSettings();
-    const setup = await this.read();
-    const item = setup.resources.find((r) => r.type === type && path.resolve(r.path) === path.resolve(absPath));
-    if (!item) throw new Error('Not a resource in the pi agent dir');
-    const pattern = toPosix(path.relative(agentDir, item.path));
-    const entry = `${enabled ? '+' : '-'}${pattern}`;
-    const current = stringArray(settings[type]);
-    const updated = current.filter((p) => normalizePattern(/^[!+-]/.test(p) ? p.slice(1) : p) !== pattern);
-    updated.push(entry);
-    await writeJson(settingsPath, { ...settings, [type]: updated });
-    this.log('info', `pi ${type} resource ${enabled ? 'enabled' : 'disabled'}: ${pattern}`);
-    return this.read();
+    return withPiConfig(this.paths().agentDir, async () => {
+      if (!PI_RESOURCE_TYPES.includes(type)) throw new Error(`Unknown pi resource type: ${type}`);
+      const { agentDir, settingsPath, settings } = await this.requireSettings();
+      const setup = await this.readSnapshot();
+      const item = setup.resources.find((r) => r.type === type && path.resolve(r.path) === path.resolve(absPath));
+      if (!item) throw new Error('Not a resource in the pi agent dir');
+      const pattern = toPosix(path.relative(agentDir, item.path));
+      const entry = `${enabled ? '+' : '-'}${pattern}`;
+      const current = stringArray(settings[type]);
+      const updated = current.filter((p) => normalizePattern(/^[!+-]/.test(p) ? p.slice(1) : p) !== pattern);
+      updated.push(entry);
+      await writeJson(settingsPath, { ...settings, [type]: updated });
+      this.log('info', `pi ${type} resource ${enabled ? 'enabled' : 'disabled'}: ${pattern}`);
+      return this.readSnapshot();
+    });
   }
 
   /**
@@ -870,19 +906,21 @@ export class PiConfigStore {
    * pi's built-in instruction stack from the same editor.
    */
   async writePrompt(name: PiPromptName, content: string): Promise<PiSetup> {
-    if (!PI_PROMPT_NAMES.includes(name)) throw new Error(`Unknown prompt file: ${name}`);
-    if (content.length > PROMPT_FILE_LIMIT) throw new Error(`Prompt file is limited to ${Math.round(PROMPT_FILE_LIMIT / 1024)} KB`);
     const { agentDir } = this.paths();
-    const file = path.join(agentDir, name);
-    if (!content.trim()) {
-      await fs.rm(file, { force: true });
-      this.log('info', `pi prompt file removed: ${name}`);
-    } else {
-      await fs.mkdir(agentDir, { recursive: true });
-      await fs.writeFile(file, content, 'utf8');
-      this.log('info', `pi prompt file saved: ${name}`);
-    }
-    return this.read();
+    return withPiConfig(agentDir, async () => {
+      if (!PI_PROMPT_NAMES.includes(name)) throw new Error(`Unknown prompt file: ${name}`);
+      if (Buffer.byteLength(content, 'utf8') > PROMPT_FILE_LIMIT) throw new Error(`Prompt file is limited to ${Math.round(PROMPT_FILE_LIMIT / 1024)} KB`);
+      const file = path.join(agentDir, name);
+      if (!content.trim()) {
+        await fs.rm(file, { force: true });
+        this.log('info', `pi prompt file removed: ${name}`);
+      } else {
+        await fs.mkdir(agentDir, { recursive: true });
+        await fs.writeFile(file, content, 'utf8');
+        this.log('info', `pi prompt file saved: ${name}`);
+      }
+      return this.readSnapshot();
+    });
   }
 
   /**
@@ -890,52 +928,56 @@ export class PiConfigStore {
    * `pi config` writes into the package object. The path must belong to a resource this store read.
    */
   async setPackageResourceEnabled(source: string, type: PiResourceType, absPath: string, enabled: boolean): Promise<PiSetup> {
-    if (!PI_RESOURCE_TYPES.includes(type)) throw new Error(`Unknown pi resource type: ${type}`);
-    const { settingsPath, settings } = await this.requireSettings();
-    const setup = await this.read();
-    const pkg = setup.packages.find((p) => p.source === source);
-    const item = pkg?.resources.find((r) => r.type === type && path.resolve(r.path) === path.resolve(absPath));
-    if (!pkg || !item || !pkg.installed) throw new Error('Not a resource of an installed pi package');
-    const pattern = toPosix(path.relative(pkg.path, item.path));
-    const packages = Array.isArray(settings.packages) ? [...settings.packages] : [];
-    const idx = packages.findIndex((p) => (typeof p === 'string' ? p : str(object(p).source) ?? '') === source);
-    if (idx < 0) throw new Error('Package is no longer listed in settings.json');
-    const raw = packages[idx];
-    const entry: Record<string, unknown> = typeof raw === 'string' ? { source: raw } : { ...(raw as Record<string, unknown>) };
-    const current = stringArray(entry[type]);
-    const updated = current.filter((p) => normalizePattern(/^[!+-]/.test(p) ? p.slice(1) : p) !== pattern);
-    updated.push(`${enabled ? '+' : '-'}${pattern}`);
-    entry[type] = updated;
-    packages[idx] = entry;
-    await writeJson(settingsPath, { ...settings, packages });
-    this.log('info', `pi package resource ${enabled ? 'enabled' : 'disabled'}: ${source} ${pattern}`);
-    return this.read();
+    return withPiConfig(this.paths().agentDir, async () => {
+      if (!PI_RESOURCE_TYPES.includes(type)) throw new Error(`Unknown pi resource type: ${type}`);
+      const { settingsPath, settings } = await this.requireSettings();
+      const setup = await this.readSnapshot();
+      const pkg = setup.packages.find((p) => p.source === source);
+      const item = pkg?.resources.find((r) => r.type === type && path.resolve(r.path) === path.resolve(absPath));
+      if (!pkg || !item || !pkg.installed) throw new Error('Not a resource of an installed pi package');
+      const pattern = toPosix(path.relative(pkg.path, item.path));
+      const packages = Array.isArray(settings.packages) ? [...settings.packages] : [];
+      const idx = packages.findIndex((p) => (typeof p === 'string' ? p : str(object(p).source) ?? '') === source);
+      if (idx < 0) throw new Error('Package is no longer listed in settings.json');
+      const raw = packages[idx];
+      const entry: Record<string, unknown> = typeof raw === 'string' ? { source: raw } : { ...(raw as Record<string, unknown>) };
+      const current = stringArray(entry[type]);
+      const updated = current.filter((p) => normalizePattern(/^[!+-]/.test(p) ? p.slice(1) : p) !== pattern);
+      updated.push(`${enabled ? '+' : '-'}${pattern}`);
+      entry[type] = updated;
+      packages[idx] = entry;
+      await writeJson(settingsPath, { ...settings, packages });
+      this.log('info', `pi package resource ${enabled ? 'enabled' : 'disabled'}: ${source} ${pattern}`);
+      return this.readSnapshot();
+    });
   }
 
   /** Merges a curated pi-subagents settings patch into the global subagents.json. */
   async updateSubagents(patch: PiSubagentsPatch): Promise<PiSetup> {
     const { agentDir } = this.paths();
-    const file = path.join(agentDir, 'subagents.json');
-    const { settings, error } = await readSettingsFile(file);
-    if (error) throw new Error(`${error} — fix it in an editor before changing subagent settings here.`);
-    const next: Record<string, unknown> = { ...settings };
-    const changed: string[] = [];
-    for (const key of Object.keys(patch)) {
-      if (!SUBAGENT_KEYS.has(key)) continue;
-      const value = patch[key as keyof PiSubagentsPatch];
-      if (value === null || value === undefined || value === '') {
-        delete next[key];
-      } else {
-        next[key] = normalizeSubagentValue(key, value);
+    return withPiConfig(agentDir, async () => {
+      const file = path.join(agentDir, 'subagents.json');
+      const { settings, error } = await readSettingsFile(file);
+      if (error) throw new Error(`${error} — fix it in an editor before changing subagent settings here.`);
+      const next: Record<string, unknown> = { ...settings };
+      const changed: string[] = [];
+      for (const key of Object.keys(patch)) {
+        if (!SUBAGENT_KEYS.has(key)) continue;
+        const value = patch[key as keyof PiSubagentsPatch];
+        if (value === null || value === undefined || value === '') {
+          delete next[key];
+        } else {
+          next[key] = normalizeSubagentValue(key, value);
+        }
+        changed.push(key);
       }
-      changed.push(key);
-    }
-    if (changed.length) {
-      await fs.mkdir(agentDir, { recursive: true });
-      await writeJson(file, next);
-      this.log('info', `pi subagent settings updated: ${changed.join(', ')}`);
-    }
-    return this.read();
+      if (changed.length) {
+        await fs.mkdir(agentDir, { recursive: true });
+        await writeJson(file, next);
+        this.log('info', `pi subagent settings updated: ${changed.join(', ')}`);
+      }
+      return this.readSnapshot();
+    });
   }
 
   /** Installs a package through the user's pi binary; pi owns cloning, npm and settings writes. */
@@ -953,8 +995,10 @@ export class PiConfigStore {
   }
 
   private async runPiCli(args: string[]): Promise<PiCommandResult> {
-    if (!this.runPiRunner) return { ok: false, code: null, log: '', error: 'pi is not installed — install it from Settings → Harnesses first.' };
-    return this.runPiRunner(args);
+    return withPiConfig(this.paths().agentDir, async () => {
+      if (!this.runPiRunner) return { ok: false, code: null, log: '', error: 'pi is not installed — install it from Settings → Harnesses first.' };
+      return this.runPiRunner(args);
+    });
   }
 
   /** Path inside the agent dir, or null. Guards the editor/reveal channels against arbitrary paths. */

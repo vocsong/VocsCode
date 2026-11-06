@@ -3,7 +3,7 @@
  * base-pi resources, installed packages (install/remove/update plus per-resource filters) and
  * pi-subagents' agents/subagents.json. Package commands shell out to the user's own pi binary.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { PiPackageItem, PiPreferences, PiPreferencesPatch, PiPromptName, PiResourceItem, PiResourceType, PiSetup, PiSubagentsPatch, PiSubagentsSettings } from '../../../shared/types';
 import { invoke } from '../api';
 import { useStore } from '../store';
@@ -48,6 +48,15 @@ function relativeTo(agentDir: string, p: string): string {
   return p.startsWith(prefix) ? p.slice(prefix.length) : p;
 }
 
+/** Lexical UX filter only, not authorization or symlink eligibility; main remains authoritative. */
+function isAgentPath(agentDir: string, p: string): boolean {
+  const windows = /^[a-z]:[\\/]|^[\\/]{2}/i.test(agentDir);
+  const normalize = (value: string): string => windows ? value.replace(/\\/g, '/').toLowerCase() : value;
+  const base = normalize(agentDir).replace(/\/+$/, '');
+  const target = normalize(p);
+  return !!agentDir && !target.split('/').includes('..') && (target === base || target.startsWith(`${base}/`));
+}
+
 export function PiSection() {
   const [setup, setSetup] = useState<PiSetup | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -61,22 +70,60 @@ export function PiSection() {
   const [packageLog, setPackageLog] = useState<{ ok: boolean; text: string; detail?: string } | null>(null);
   const toast = useStore((s) => s.toast);
   const setView = useStore((s) => s.setView);
+  const setupRequests = useRef({ issued: 0, applied: 0, lastMutation: 0, pendingMutations: 0, pendingReads: 0, reloadPending: false });
 
+  // Failed later requests must not hide an earlier successful write. Only an applied snapshot
+  // advances the fence; every category shares it because each response contains the full setup.
+  const applySetup = (request: number, next: PiSetup): void => {
+    if (request < setupRequests.current.applied) return;
+    setupRequests.current.applied = request;
+    setSetup(next);
+    setLoadError(null);
+  };
+  const beginMutation = (): number => {
+    const order = setupRequests.current;
+    // This mutation also invalidates reads already in flight, even if it later fails.
+    if (order.pendingReads) order.reloadPending = true;
+    order.pendingMutations++;
+    order.lastMutation = ++order.issued;
+    return order.lastMutation;
+  };
   const reload = (): void => {
+    const request = ++setupRequests.current.issued;
+    setupRequests.current.pendingReads++;
+    const overlapsMutation = setupRequests.current.pendingMutations > 0;
+    if (overlapsMutation) setupRequests.current.reloadPending = true;
+    // Reads are not revisions: a read started during a write may still see its old file.
+    const current = (): boolean => !overlapsMutation && request > setupRequests.current.lastMutation && request >= setupRequests.current.applied;
     invoke('pi:setup', undefined)
       .then((s) => {
-        setSetup(s);
-        setLoadError(null);
+        if (current()) applySetup(request, s);
       })
-      .catch((e) => setLoadError(errorMessage(e)));
+      .catch((e) => {
+        if (current()) setLoadError(errorMessage(e));
+      })
+      .finally(() => { setupRequests.current.pendingReads--; });
   };
   useEffect(reload, []);
 
+  const finishMutation = (): void => {
+    const order = setupRequests.current;
+    order.pendingMutations--;
+    // Preserve a requested refresh (including package-command refreshes), but re-read only once
+    // all in-flight mutations settle rather than promoting an overlapping snapshot to a revision.
+    if (!order.pendingMutations && order.reloadPending) {
+      order.reloadPending = false;
+      reload();
+    }
+  };
   const apply = async (next: Promise<PiSetup>): Promise<void> => {
+    const request = beginMutation();
     try {
-      setSetup(await next);
+      applySetup(request, await next);
     } catch (e) {
       toast(errorMessage(e), 'error');
+    } finally {
+      finishMutation();
     }
   };
   const savePref = (key: keyof PiPreferences, value: PiPreferences[keyof PiPreferences] | null): void => {
@@ -92,18 +139,22 @@ export function PiSection() {
   const locked = !setup || !!setup.settingsError;
 
   const savePrompt = async (): Promise<void> => {
+    const submitted = { name: promptName, content: draft };
+    const request = beginMutation();
     setSavingPrompt(true);
     try {
-      const next = await invoke('pi:prompt:write', { name: promptName, content: draft });
+      const next = await invoke('pi:prompt:write', submitted);
       setDrafts((d) => {
+        if (d[submitted.name] !== submitted.content) return d;
         const copy = { ...d };
-        delete copy[promptName];
+        delete copy[submitted.name];
         return copy;
       });
-      setSetup(next);
+      applySetup(request, next);
     } catch (e) {
       toast(errorMessage(e), 'error');
     } finally {
+      finishMutation();
       setSavingPrompt(false);
     }
   };
@@ -168,7 +219,7 @@ export function PiSection() {
               in <code>{setup.agentDir}</code>
             </>
           ) : null}
-          , shared with the pi CLI and every other tool using that install. Anything you change here affects <strong>all</strong> pi sessions, not only Vocs Code, and applies the next time pi starts.
+          , shared with the pi CLI and every other tool using that install, not only Vocs Code. Most changes apply when pi starts; the Subagents section explains concurrency limits that update in running sessions.
         </span>
       </div>
       <p className="muted">Pi&rsquo;s configuration files, packages and resources.</p>
@@ -277,65 +328,19 @@ export function PiSection() {
               <Toggle checked={setup.preferences.compactionEnabled ?? true} onChange={(v) => savePref('compactionEnabled', v)} label="Auto-compaction" />
               <div className="pi-inline">
                 <Field label="Reserve tokens" hint="Kept for the model's reply.">
-                  <input
-                    type="number"
-                    min={1024}
-                    disabled={locked}
-                    defaultValue={setup.preferences.compactionReserveTokens ?? ''}
-                    placeholder="16384"
-                    onBlur={(e) => {
-                      const v = e.target.value.trim();
-                      if (v === '') return;
-                      if (Number(v) !== setup.preferences.compactionReserveTokens) savePref('compactionReserveTokens', Number(v));
-                    }}
-                  />
+                  <NumericPreference min={1024} disabled={locked} value={setup.preferences.compactionReserveTokens} placeholder="16384" onSave={(v) => savePref('compactionReserveTokens', v)} />
                 </Field>
                 <Field label="Keep recent tokens" hint="Never summarized.">
-                  <input
-                    type="number"
-                    min={1024}
-                    disabled={locked}
-                    defaultValue={setup.preferences.compactionKeepRecentTokens ?? ''}
-                    placeholder="20000"
-                    onBlur={(e) => {
-                      const v = e.target.value.trim();
-                      if (v === '') return;
-                      if (Number(v) !== setup.preferences.compactionKeepRecentTokens) savePref('compactionKeepRecentTokens', Number(v));
-                    }}
-                  />
+                  <NumericPreference min={1024} disabled={locked} value={setup.preferences.compactionKeepRecentTokens} placeholder="20000" onSave={(v) => savePref('compactionKeepRecentTokens', v)} />
                 </Field>
               </div>
               <Toggle checked={setup.preferences.retryEnabled ?? true} onChange={(v) => savePref('retryEnabled', v)} label="Retry transient provider errors" />
               <div className="pi-inline">
                 <Field label="Max retries">
-                  <input
-                    type="number"
-                    min={0}
-                    max={10}
-                    disabled={locked}
-                    defaultValue={setup.preferences.retryMaxRetries ?? ''}
-                    placeholder="3"
-                    onBlur={(e) => {
-                      const v = e.target.value.trim();
-                      if (v === '') return;
-                      if (Number(v) !== setup.preferences.retryMaxRetries) savePref('retryMaxRetries', Number(v));
-                    }}
-                  />
+                  <NumericPreference min={0} max={10} disabled={locked} value={setup.preferences.retryMaxRetries} placeholder="3" onSave={(v) => savePref('retryMaxRetries', v)} />
                 </Field>
                 <Field label="Base delay (ms)">
-                  <input
-                    type="number"
-                    min={100}
-                    max={60000}
-                    disabled={locked}
-                    defaultValue={setup.preferences.retryBaseDelayMs ?? ''}
-                    placeholder="2000"
-                    onBlur={(e) => {
-                      const v = e.target.value.trim();
-                      if (v === '') return;
-                      if (Number(v) !== setup.preferences.retryBaseDelayMs) savePref('retryBaseDelayMs', Number(v));
-                    }}
-                  />
+                  <NumericPreference min={100} max={60000} disabled={locked} value={setup.preferences.retryBaseDelayMs} placeholder="2000" onSave={(v) => savePref('retryBaseDelayMs', v)} />
                 </Field>
               </div>
             </SettingsGroup>
@@ -400,7 +405,7 @@ export function PiSection() {
                     </h4>
                     <p className="muted small">{TYPE_HINTS[type]}</p>
                     {items.map((r) => (
-                      <ResourceRow key={`${r.type}:${r.path}`} resource={r} baseDir={setup.agentDir} disabled={locked} onToggle={(enabled) => void apply(invoke('pi:resource', { type: r.type, path: r.path, enabled }))} onOpen={() => void openResource(r.path, toast)} />
+                      <ResourceRow key={`${r.type}:${r.path}`} resource={r} baseDir={setup.agentDir} agentDir={setup.agentDir} disabled={locked} onToggle={(enabled) => void apply(invoke('pi:resource', { type: r.type, path: r.path, enabled }))} onOpen={() => void openResource(r.path, toast)} />
                     ))}
                   </div>
                 );
@@ -449,7 +454,7 @@ export function PiSection() {
                     {!pkg.installed && <Badge tone="amber">not fetched</Badge>}
                     {!pkg.autoload && <Badge tone="purple">autoload off</Badge>}
                     <span className="spacer" />
-                    {pkg.installed && pkg.path.startsWith(setup.agentDir) && (
+                    {pkg.installed && isAgentPath(setup.agentDir, pkg.path) && (
                       <Button size="sm" variant="ghost" icon="folder" title="Reveal in file manager" onClick={() => void invoke('pi:reveal', { path: pkg.path })} />
                     )}
                     <Button size="sm" variant="ghost" disabled={packageBusy || !setup.piAvailable} onClick={() => void runPackage('update', pkg.source)}>
@@ -465,6 +470,7 @@ export function PiSection() {
                         key={`${r.type}:${r.path}`}
                         resource={r}
                         baseDir={pkg.path}
+                        agentDir={setup.agentDir}
                         disabled={locked || packageBusy}
                         onToggle={(enabled) => void apply(invoke('pi:package:resource', { source: pkg.source, type: r.type, path: r.path, enabled }))}
                         onOpen={() => void openResource(r.path, toast)}
@@ -479,8 +485,9 @@ export function PiSection() {
           <div id="pi-subagents" hidden={category !== 'Subagents'}>
             <SettingsGroup
               title="Subagents"
-              description={<>pi-subagents&rsquo; global settings in <code>{setup.agentDir}/subagents.json</code> and the custom agents it loads from <code>agents/</code>. Built-in agents (general-purpose, Explore, Plan) are unaffected unless you disable them.</>}
+              description={<>pi-subagents&rsquo; global settings in <code>{setup.agentDir}/subagents.json</code> and custom agents in <code>agents/</code>. Custom agent files complement the built-in agents (general-purpose, Explore, Plan).</>}
             >
+              <p className="muted small">Vocs Code reloads concurrency limits before each subagent spawn, including in running sessions.</p>
               {setup.subagentsError && (
                 <div className="info-line info-error">
                   <span>{setup.subagentsError}</span>
@@ -491,60 +498,16 @@ export function PiSection() {
               <Toggle checked={setup.subagents.showModel ?? false} onChange={(v) => saveSubagent('showModel', v)} label="Show each agent's model in the subagent widget" />
               <div className="pi-inline">
                 <Field label="Max subagent depth" hint="0 or 1 disables nesting; default 2.">
-                  <input
-                    type="number"
-                    min={0}
-                    max={16}
-                    defaultValue={setup.subagents.maxSubagentDepth ?? ''}
-                    placeholder="2"
-                    onBlur={(e) => {
-                      const v = e.target.value.trim();
-                      if (v === '') return;
-                      if (Number(v) !== setup.subagents.maxSubagentDepth) saveSubagent('maxSubagentDepth', Number(v));
-                    }}
-                  />
+                  <NumericPreference min={0} max={16} value={setup.subagents.maxSubagentDepth} placeholder="2" onSave={(v) => saveSubagent('maxSubagentDepth', v)} />
                 </Field>
-                <Field label="Max concurrent agents" hint="Background pool and runs per session; default 4.">
-                  <input
-                    type="number"
-                    min={1}
-                    max={1024}
-                    defaultValue={setup.subagents.maxConcurrent ?? ''}
-                    placeholder="4"
-                    onBlur={(e) => {
-                      const v = e.target.value.trim();
-                      if (v === '') return;
-                      if (Number(v) !== setup.subagents.maxConcurrent) saveSubagent('maxConcurrent', Number(v));
-                    }}
-                  />
+                <Field label="Max concurrent agents" hint="Background and per-session cap. Unset: 4 background, 8 per session.">
+                  <NumericPreference min={1} max={1024} value={setup.subagents.maxConcurrent} placeholder="4" onSave={(v) => saveSubagent('maxConcurrent', v)} />
                 </Field>
                 <Field label="Max foreground agents" hint="0 = unlimited.">
-                  <input
-                    type="number"
-                    min={0}
-                    max={1024}
-                    defaultValue={setup.subagents.maxConcurrentForeground ?? ''}
-                    placeholder="0"
-                    onBlur={(e) => {
-                      const v = e.target.value.trim();
-                      if (v === '') return;
-                      if (Number(v) !== setup.subagents.maxConcurrentForeground) saveSubagent('maxConcurrentForeground', Number(v));
-                    }}
-                  />
+                  <NumericPreference min={0} max={1024} value={setup.subagents.maxConcurrentForeground} placeholder="0" onSave={(v) => saveSubagent('maxConcurrentForeground', v)} />
                 </Field>
                 <Field label="Default max turns" hint="Per agent; 0 = provider default.">
-                  <input
-                    type="number"
-                    min={0}
-                    max={10000}
-                    defaultValue={setup.subagents.defaultMaxTurns ?? ''}
-                    placeholder="0"
-                    onBlur={(e) => {
-                      const v = e.target.value.trim();
-                      if (v === '') return;
-                      if (Number(v) !== setup.subagents.defaultMaxTurns) saveSubagent('defaultMaxTurns', Number(v));
-                    }}
-                  />
+                  <NumericPreference min={0} max={10000} value={setup.subagents.defaultMaxTurns} placeholder="0" onSave={(v) => saveSubagent('defaultMaxTurns', v)} />
                 </Field>
               </div>
               <Toggle checked={setup.subagents.backgroundByDefault ?? false} onChange={(v) => saveSubagent('backgroundByDefault', v)} label="Start new agents in the background by default" />
@@ -592,15 +555,38 @@ export function PiSection() {
   );
 }
 
+/** Keep unsubmitted text local, but show the confirmed value again once a blur submits it. */
+function NumericPreference({ value, onSave, ...rest }: Pick<React.InputHTMLAttributes<HTMLInputElement>, 'min' | 'max' | 'disabled' | 'placeholder'> & { value?: number; onSave: (value: number | null) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  return (
+    <input
+      {...rest}
+      type="number"
+      value={draft ?? value ?? ''}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={(e) => {
+        if (draft === null) return;
+        setDraft(null);
+        // Incomplete native number text (e.g. “1e”) is exposed as empty, but is not a deletion.
+        if (e.currentTarget.validity.badInput) return;
+        const next = draft.trim() === '' ? null : Number(draft);
+        if (next !== (value ?? null)) onSave(next);
+      }}
+    />
+  );
+}
+
 async function openResource(path: string, toast: (text: string, kind?: 'info' | 'error') => void): Promise<void> {
   const res = await invoke('pi:openInEditor', { path });
   if (!res.ok && res.error) toast(res.error, 'error');
 }
 
-function ResourceRow({ resource, baseDir, disabled, onToggle, onOpen }: { resource: PiResourceItem; baseDir: string; disabled: boolean; onToggle: (enabled: boolean) => void; onOpen: () => void }) {
+function ResourceRow({ resource, baseDir, agentDir, disabled, onToggle, onOpen }: { resource: PiResourceItem; baseDir: string; agentDir: string; disabled: boolean; onToggle: (enabled: boolean) => void; onOpen: () => void }) {
+  const outside = !isAgentPath(agentDir, resource.path);
+  const explanation = 'Outside the pi agent directory; open this file manually.';
   return (
     <div className={`pi-resource ${resource.enabled ? '' : 'disabled'}`}>
-      <Toggle checked={resource.enabled} onChange={onToggle} disabled={disabled} />
+      <Toggle checked={resource.enabled} onChange={onToggle} disabled={disabled} label={<span className="settings-sr-only">Enable {resource.name} ({resource.path})</span>} />
       <div className="pi-resource-main">
         <div className="row gap8">
           <strong>{resource.name}</strong>
@@ -608,9 +594,10 @@ function ResourceRow({ resource, baseDir, disabled, onToggle, onOpen }: { resour
         </div>
         {resource.description && <div className="muted small">{resource.description}</div>}
         <div className="muted small mono">{relativeTo(baseDir, resource.path)}</div>
+        {outside && <div className="muted small">{explanation}</div>}
       </div>
       <span className="spacer" />
-      <Button size="sm" variant="ghost" icon="edit" title="Open in editor" disabled={disabled} onClick={onOpen} />
+      <Button size="sm" variant="ghost" icon="edit" aria-label="Open in editor" title={outside ? explanation : 'Open in editor'} disabled={disabled || outside} onClick={onOpen} />
     </div>
   );
 }
