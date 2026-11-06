@@ -91,11 +91,12 @@ See the onboarding row in [TESTING.md](TESTING.md). Offline tests cover prerequi
 SDK repair, pinned/bundled runtime intent, unknown authentication, fixed launch arguments and
 quoting, desktop dispatch authorization, stale checks, draft/save failures, and modal focus.
 
-The guarded `e2e.models`, `e2e.vision` and `e2e.instructions` suites exercise clean profiles, real
-IPC and persistence, first-run choices, Settings/Home recovery, dismissal versus skip/restart,
+The guarded `e2e.models`, `e2e.vision`, `e2e.instructions` and `e2e.session-view` suites exercise
+clean profiles, real IPC and persistence, first-run choices, Settings/Home recovery, dismissal versus skip/restart,
 import, compact layout, subscription choices without mandatory API keys, and API/local catalog
 failure → retry → model persistence → restart. API tests use only a fake key and a loopback server;
-they assert catalog request counts and no coding session creation. Vendor credential homes and
+they assert catalog request counts and no coding session creation. Home recovery also preserves agent/model
+defaults and restores keyboard focus without creating a session. Vendor credential homes and
 Windows APPDATA/LOCALAPPDATA must exist as isolated directories: Codex refuses a nonexistent
 explicit CODEX_HOME. The OpenAI-wire catalog client retries a 503 once before reporting failure.
 
