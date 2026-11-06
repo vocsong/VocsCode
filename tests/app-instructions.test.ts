@@ -6,7 +6,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppInstructions } from '../src/main/app-instructions';
 import { sessionAppendPrompt } from '../src/main/harness/system-prompt';
 import { buildSystemPrompt } from '../src/main/harness/native/prompt';
@@ -20,6 +20,7 @@ async function store(): Promise<{ store: AppInstructions; dir: string }> {
   return { store: new AppInstructions(dir), dir };
 }
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -57,6 +58,57 @@ describe('the app instruction layer', () => {
     await expect(layer.write('bogus' as never, 'text')).rejects.toThrow('Unknown instruction scope: bogus');
     await expect(layer.write('global', 'x'.repeat(APP_INSTRUCTION_MAX_CHARS + 1))).rejects.toThrow('Instructions are limited to');
     await expect(fs.access(path.join(dir, 'instructions'))).rejects.toThrow();
+  });
+
+  it.each(['é', '界', '😀'])('round-trips %s at the character cap through read, effective and a new store', async (character) => {
+    const { store: layer, dir } = await store();
+    const content = character.repeat(APP_INSTRUCTION_MAX_CHARS / character.length);
+    expect(content).toHaveLength(APP_INSTRUCTION_MAX_CHARS);
+    expect(Buffer.byteLength(content, 'utf8')).toBeGreaterThan(APP_INSTRUCTION_MAX_CHARS);
+    const written = await layer.write('global', content);
+    expect(written.find((f) => f.scope === 'global')?.truncated).toBeUndefined();
+    expect(written.find((f) => f.scope === 'global')?.content === content).toBe(true);
+    expect(await fs.readFile(path.join(dir, 'instructions', 'global.md'), 'utf8') === content).toBe(true);
+    await layer.write('pi', '追加 🧭');
+    const reloaded = new AppInstructions(dir);
+    expect((await reloaded.read()).find((f) => f.scope === 'global')?.content === content).toBe(true);
+    expect(await reloaded.effective('pi') === `${content}\n\n追加 🧭`).toBe(true);
+    expect(await reloaded.effective('claude') === content).toBe(true);
+  });
+
+  it('rejects character overflow with character wording and leaves the previous file intact', async () => {
+    const { store: layer, dir } = await store();
+    await layer.write('global', 'Keep these rules.');
+    await expect(layer.write('global', '😀'.repeat(APP_INSTRUCTION_MAX_CHARS / 2) + 'x')).rejects.toThrow(`Instructions are limited to ${APP_INSTRUCTION_MAX_CHARS} characters per file`);
+    expect(await fs.readFile(path.join(dir, 'instructions', 'global.md'), 'utf8')).toBe('Keep these rules.');
+    expect(await new AppInstructions(dir).effective('pi')).toBe('Keep these rules.');
+  });
+
+  it('does not split a surrogate pair at the character cap in a truncated file', async () => {
+    const { store: layer, dir } = await store();
+    const prefix = '界'.repeat(APP_INSTRUCTION_MAX_CHARS - 1);
+    const content = `${prefix}😀tail`;
+    await fs.mkdir(path.join(dir, 'instructions'), { recursive: true });
+    const file = path.join(dir, 'instructions', 'global.md');
+    await fs.writeFile(file, content, 'utf8');
+    const read = (await layer.read()).find((f) => f.scope === 'global');
+    expect(read?.truncated).toBe(true);
+    expect(read?.content).toHaveLength(APP_INSTRUCTION_MAX_CHARS - 1);
+    expect(read?.content === prefix).toBe(true);
+    expect(await layer.effective('pi') === prefix).toBe(true);
+    expect(await fs.readFile(file, 'utf8') === content).toBe(true);
+  });
+
+  it('reports a write failure and recovers on the next save and reload', async () => {
+    const { store: layer, dir } = await store();
+    await layer.write('pi', 'Original rules.');
+    vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(Object.assign(new Error('injected disk full'), { code: 'ENOSPC' }));
+    await expect(layer.write('pi', 'Failed rules.')).rejects.toThrow('injected disk full');
+    expect(await fs.readFile(path.join(dir, 'instructions', 'pi.md'), 'utf8')).toBe('Original rules.');
+    expect(await new AppInstructions(dir).effective('pi')).toBe('Original rules.');
+    const recovered = await layer.write('pi', 'Recovered 界😀.');
+    expect(recovered.find((f) => f.scope === 'pi')?.content).toBe('Recovered 界😀.');
+    expect(await new AppInstructions(dir).effective('pi')).toBe('Recovered 界😀.');
   });
 
   it('flags a file larger than the cap instead of silently shortening the prompt', async () => {

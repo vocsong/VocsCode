@@ -47,7 +47,7 @@ describe.runIf(enabled)('instructions UI', () => {
 
     const editorGroup = win.getByRole('region', { name: 'Instruction editor', exact: true });
     expect(await editorGroup.getAttribute('id')).toBe('instructions-editor');
-    expect(await win.getByText('Changes apply to your next session, not one already running.', { exact: true }).isVisible()).toBe(true);
+    expect(await win.getByText('Most harnesses load instructions when starting. The native loop reloads them before each model step.', { exact: true }).isVisible()).toBe(true);
     const precedence = win.locator('details').filter({ has: win.locator('summary', { hasText: 'How instructions are applied' }) });
     expect(await precedence.getAttribute('open')).toBeNull();
     await precedence.locator('summary').click();
@@ -101,6 +101,20 @@ describe.runIf(enabled)('instructions UI', () => {
     await editor.fill('   \n');
     await save.click();
     await expect.poll(async () => fs.access(path.join(userData, 'instructions', 'pi.md')).then(() => true).catch(() => false)).toBe(false);
+
+    // The advertised character budget must round-trip UTF-8 text larger than the old byte limit.
+    const unicode = '界'.repeat(6000);
+    await sharedScope.click();
+    await editor.fill(unicode);
+    await save.click();
+    await expect.poll(async () => fs.readFile(globalFile, 'utf8')).toBe(unicode);
+    await expect.poll(() => editorGroup.getByRole('status').innerText()).toBe('Saved');
+    const sections = win.getByRole('navigation', { name: 'Settings sections' });
+    await sections.getByRole('button', { name: 'General', exact: true }).click();
+    await sections.getByRole('button', { name: 'Instructions', exact: true }).click();
+    await expect.poll(() => editor.inputValue()).toBe(unicode);
+    expect(await editor.isEditable()).toBe(true);
+    expect(await editorGroup.getByLabel('Instruction character count').innerText()).toBe(`${unicode.length.toLocaleString()} / ${APP_INSTRUCTION_MAX_CHARS.toLocaleString()} characters`);
   }, 120_000);
 });
 
