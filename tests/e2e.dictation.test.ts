@@ -142,6 +142,21 @@ describe.runIf(enabled)('electron e2e: dictation', () => {
     expect(await dictation.getAttribute('id')).toBe('voice-engine');
     expect(await cloud.getAttribute('id')).toBe('voice-cloud');
     expect(await local.getAttribute('id')).toBe('voice-local');
+    // The segmented container clips overflow, so both keyboard focus rings must stay inset.
+    const engines = dictation.getByRole('group', { name: 'Dictation engine' });
+    const cloudEngine = engines.getByRole('button', { name: 'Cloud provider', exact: true });
+    const localEngine = engines.getByRole('button', { name: 'This computer', exact: true });
+    const shots = path.join(root, 'tests', 'artifacts');
+    await fs.mkdir(shots, { recursive: true });
+    await localEngine.focus();
+    await win.keyboard.press('Shift+Tab');
+    expect(await cloudEngine.evaluate((element) => element.matches(':focus-visible'))).toBe(true);
+    await engines.screenshot({ path: path.join(shots, 'settings-review-voice-cloud-focus.png') });
+    expect(await cloudEngine.evaluate((element) => getComputedStyle(element).outlineOffset)).toBe('-2px');
+    await win.keyboard.press('Tab');
+    expect(await localEngine.evaluate((element) => element.matches(':focus-visible'))).toBe(true);
+    await engines.screenshot({ path: path.join(shots, 'settings-review-voice-local-focus.png') });
+    expect(await localEngine.evaluate((element) => getComputedStyle(element).outlineOffset)).toBe('-2px');
     expect(await cloud.getByLabel(/^Provider/).inputValue()).toBe('stt-fake');
     expect(await local.getByLabel(/^Model/).inputValue()).toBe('base.en');
     await local.getByLabel(/^Stop the server after/).selectOption('15');

@@ -34,6 +34,14 @@ describe('task-oriented settings navigation', () => {
     expect(screen.queryByText('Default harness')).toBeNull();
   });
 
+  it('distinguishes new-session defaults from settings that also affect existing sessions', () => {
+    render(<SettingsView />);
+    fireEvent.click(nav('Session defaults'));
+    expect(within(screen.getByRole('region', { name: 'New sessions' })).getByText('These defaults do not change existing sessions. Each project keeps its remembered New Session choices.')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Context management' })).getByText(/also applies to existing sessions at their next idle boundary/)).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Goal defaults' })).getByText('Auto-continue and iteration defaults apply to new goals. The /goal preference also updates existing sessions.')).toBeTruthy();
+  });
+
   it('finds a control by its vocabulary and opens its page, with a clear empty state', async () => {
     render(<SettingsView />);
     const search = screen.getByRole('searchbox', { name: 'Search settings' });
@@ -47,6 +55,40 @@ describe('task-oriented settings navigation', () => {
     expect(screen.getByText('No settings found')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
     expect(screen.getByLabelText(/Automatically compact context at/)).toBeTruthy();
+  });
+
+  it('dismisses results with Escape, restores search focus and preserves the current draft', () => {
+    const globalKey = vi.fn();
+    render(<div onKeyDown={globalKey}><SettingsView /></div>);
+    fireEvent.click(nav('Session defaults'));
+    const draft = screen.getByLabelText('New branch prefix') as HTMLInputElement;
+    fireEvent.change(draft, { target: { value: 'unsaved-prefix' } });
+    const search = screen.getByRole('searchbox', { name: 'Search settings' }) as HTMLInputElement;
+    fireEvent.change(search, { target: { value: 'theme' } });
+    fireEvent.keyDown(search, { key: 'ArrowDown' });
+    const result = screen.getByRole('button', { name: /Color theme/ });
+    expect(document.activeElement).toBe(result);
+    globalKey.mockClear();
+    fireEvent.keyDown(result, { key: 'Escape' });
+    expect(search.value).toBe('');
+    expect(document.activeElement).toBe(search);
+    expect(globalKey).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: 'Session defaults', level: 1 })).toBeTruthy();
+    expect(draft.value).toBe('unsaved-prefix');
+    expect(invokeMock.mock.calls.some(([channel]) => channel === 'settings:update')).toBe(false);
+  });
+
+  it('starts new and refined search results at the top rather than inheriting the page scroll', () => {
+    const { container } = render(<SettingsView />);
+    fireEvent.click(nav('Appearance'));
+    const body = container.querySelector<HTMLDivElement>('.settings-body')!;
+    const search = screen.getByRole('searchbox', { name: 'Search settings' });
+    body.scrollTop = 500;
+    fireEvent.change(search, { target: { value: 'p' } });
+    expect(body.scrollTop).toBe(0);
+    body.scrollTop = 400;
+    fireEvent.change(search, { target: { value: 'pr' } });
+    expect(body.scrollTop).toBe(0);
   });
 
   it('opens the first search result with Enter and clears search on a deep link', async () => {

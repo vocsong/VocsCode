@@ -39,16 +39,18 @@ export function InstructionsSection() {
   const tooLong = draft.length > APP_INSTRUCTION_MAX_CHARS;
 
   const save = async (): Promise<void> => {
+    const submitted = { scope, content: draft };
     setSaving(true);
     try {
-      const next = await invoke('instructions:write', { scope, content: draft });
+      const next = await invoke('instructions:write', submitted);
       setFiles(next);
       setDrafts((d) => {
+        if (d[submitted.scope] !== submitted.content) return d;
         const copy = { ...d };
-        delete copy[scope];
+        delete copy[submitted.scope];
         return copy;
       });
-      toast(draft.trim() ? 'Instructions saved' : 'Instructions cleared', 'success');
+      toast(submitted.content.trim() ? 'Instructions saved' : 'Instructions cleared', 'success');
     } catch (e) {
       toast(errorMessage(e), 'error');
     } finally {
@@ -60,14 +62,14 @@ export function InstructionsSection() {
     <div className="settings-section">
       <h2>Instructions</h2>
       <p className="muted">Set shared guidance for every harness, then add any harness-specific instructions.</p>
-      <SettingsNote>Changes apply to your next session, not one already running.</SettingsNote>
+      <SettingsNote>Most harnesses load instructions when starting. The native loop reloads them before each model step.</SettingsNote>
       <details className="settings-details">
         <summary>How instructions are applied</summary>
         <p className="muted small">
           Text this app adds to a session&rsquo;s system prompt, whichever harness runs it. The shared file applies to every harness; a harness tab is added after it, so nothing here replaces the shared text. This does not touch a harness&rsquo;s own global file (<code>APPEND_SYSTEM.md</code>, <code>~/.claude/CLAUDE.md</code>, <code>~/.codex/AGENTS.md</code>) — that keeps applying on its own, so put a rule in one place or the other, not both. Saving an empty file removes it.
         </p>
         <p className="muted small">
-          Pi, Claude Agent SDK and the native loop take this in their system prompt at session start; Codex, Cursor and ACP agents get it on the first message instead, because their engines own the prompt. Either way it is read once when the session starts, so an edit applies to your next session, not one already running.
+          Pi and Claude Agent SDK take this in their system prompt at session start; Codex, Cursor and ACP agents get it on the first message instead, because their engines own the prompt. Start a new session for those harnesses to pick up edits. The native loop reloads this text before every model step, including in a running session.
         </p>
       </details>
 
@@ -93,7 +95,7 @@ export function InstructionsSection() {
 
         {file?.truncated ? (
           <div className="info-line info-warn">
-            <span>This file is larger than {Math.round(APP_INSTRUCTION_MAX_CHARS / 1000)} KB; edit it in an external editor.</span>
+            <span>This file is larger than {APP_INSTRUCTION_MAX_CHARS.toLocaleString()} characters; edit it in an external editor.</span>
           </div>
         ) : (
           <>
@@ -127,7 +129,7 @@ export function InstructionsSection() {
             </div>
             {tooLong && (
               <div className="info-line info-warn">
-                <span>Instructions are limited to {Math.round(APP_INSTRUCTION_MAX_CHARS / 1000)} KB per file.</span>
+                <span>Instructions are limited to {APP_INSTRUCTION_MAX_CHARS.toLocaleString()} characters per file.</span>
               </div>
             )}
           </>
