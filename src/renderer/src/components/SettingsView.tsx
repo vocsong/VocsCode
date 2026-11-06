@@ -20,6 +20,7 @@ import { PiSection } from './PiSettings';
 import { InstructionsSection } from './InstructionsSection';
 import { MissionSettings } from './mission/MissionSettings';
 import { VoiceSection } from './VoiceSettings';
+import { ControlSettings } from './ControlSettings';
 import { ChatImport } from './ChatImport';
 
 export type SettingsSection = 'general' | 'mission' | 'instructions' | 'shortcuts' | 'terminal' | 'providers' | 'voice' | 'harnesses' | 'import' | 'pi' | 'acp' | 'remote' | 'about';
@@ -86,7 +87,7 @@ export function SettingsView() {
         {section === 'instructions' && <InstructionsSection />}
         {section === 'pi' && <PiSection />}
         {section === 'acp' && <AcpAgents settings={settings} update={update} />}
-        {section === 'remote' && <RemoteSection settings={settings} update={update} />}
+        {section === 'remote' && <><RemoteSection settings={settings} update={update} /><ControlSettings /></>}
         {section === 'about' && <About />}
       </div>
     </div>

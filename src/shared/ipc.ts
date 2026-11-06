@@ -1,4 +1,5 @@
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
+import type { ControlGrantInput, ControlOwnerState } from './control';
 import type {
   AnalyticsSummary,
   AppInstructionFile,
@@ -355,6 +356,11 @@ export interface IpcContract {
   /** P4: the offline mirror is opt-in; enabling it syncs the existing sessions, disabling clears it. */
   'remote:setMirror': [{ mirror: boolean }, RemoteState];
   'remote:clearAudit': [void, void];
+  /** Local desktop owner only: never in the remote browser manifest or agent invocation origin. */
+  'control:get': [void, ControlOwnerState];
+  'control:enable': [{ enabled: boolean }, ControlOwnerState];
+  'control:grant': [ControlGrantInput, ControlOwnerState];
+  'control:revoke': [{ grantId: string }, ControlOwnerState];
 
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   /** Pre-session probe for a folder the dialog is configuring: worktree isolation needs a git repository. */

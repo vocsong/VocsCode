@@ -3,12 +3,15 @@
   "name": "vocs-relay",
   "main": "src/worker.ts",
   "compatibility_date": "2026-01-15",
+  // MCP SDK uses Node built-ins; verified locally only, this change does not deploy anything.
+  "compatibility_flags": ["nodejs_compat"],
   "assets": { "directory": "public" },
   "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }, { "name": "ENROLLMENTS", "class_name": "EnrollmentDirectory" }] },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Hub"] },
     { "tag": "v2", "new_sqlite_classes": ["EnrollmentDirectory"] }
   ],
+  // CONTROL_MCP_ENABLED deliberately unset. Do not enable/deploy before security + Dots qualification.
   "vars": { "RELAY_ACCOUNT": "vocs-v1" },
   // The landing Worker must carry the same session-assertion secret. Disable the direct workers.dev
   // entry so browser pairing always passes through the GitHub gate at code.vocs.io.

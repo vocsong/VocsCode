@@ -1,5 +1,5 @@
-/** Real coordinator, stores, scheduler, Git workspaces and broker host. Only the harness's
- * process boundary is scripted: send accepts immediately, and tests explicitly emit outcomes. */
+/** Real coordinator, stores, scheduler, Git workspaces and broker host. The harness's
+ * process boundary is scripted; unrelated sidebar badge polling is isolated below. */
 import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -35,6 +35,12 @@ import * as processRuntime from '../src/main/runtime';
 const wait = (assertion: () => void) => vi.waitFor(assertion, { timeout: 30_000, interval: 30 });
 
 vi.mock('../src/main/harness/registry', () => ({ createAdapter: vi.fn() }));
+// UI badge readers are not part of coordinator quiescence and can keep a worktree cwd open
+// during Windows cleanup. Isolate them, not the real Mission Git/cleanup/delivery boundary.
+vi.mock('../src/main/git', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/main/git')>()),
+  branchGitState: vi.fn(async () => ({ pr: false, merged: false })),
+}));
 let root: string, project: string, data: string, workspaceRoot: string, receiptRoot: string;
 let sessions: SessionManager, sessionStore: SessionStore, store: MissionStore<MissionRecord>, service: MissionService;
 let scheduler: MissionScheduler, workspaces: MissionWorkspaces, verification: MissionVerification;
@@ -838,7 +844,8 @@ describe('Mission coordinator', () => {
     await service.control({ missionId: r.id, expectedRevision: service.get(r.id)!.revision, idempotencyKey: 'stop-for-cleanup', control: { action: 'stop' } });
     const stopped = service.get(r.id)!;
     const cleaned = await service.control({ missionId: r.id, expectedRevision: stopped.revision, idempotencyKey: 'stopped-cleanup', control: { action: 'cleanup' } });
-    expect(cleaned.status).toBe('stopped'); expect(cleaned.operations.find((op) => op.kind === 'cleanup')?.state).toBe('succeeded');
+    const cleanup = cleaned.operations.find((op) => op.kind === 'cleanup');
+    expect(cleaned.status).toBe('stopped'); expect(cleanup?.state, JSON.stringify(cleanup)).toBe('succeeded');
     expect(cleaned.workspaces.map(({ id, ownerSessionId }) => ({ id, ownerSessionId }))).toEqual(stopped.workspaces.map(({ id, ownerSessionId }) => ({ id, ownerSessionId })));
     expect(cleaned.workspaces.every((workspace) => workspace.cleanedAt !== undefined)).toBe(true);
     expect(await store.readSource(r.id, r.sourceSnapshotId!)).toEqual(await store.readSource(r.id, stopped.sourceSnapshotId!));

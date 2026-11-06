@@ -821,6 +821,8 @@ export interface SessionMeta {
    * the fork starts its counters at zero.
    */
   forkedFrom?: string;
+  /** Host-allocated controller creation receipt; never accepted from ordinary create/patch. */
+  controlCreation?: { operationId: string; requestHash: string };
   /** Host-managed Mission identity; absent for ordinary sessions. Children are not sidebar rows. */
   mission?: MissionOwnership;
   /** Effective working directory (worktree path if isolated), never the Mission integration view. */
@@ -1086,6 +1088,8 @@ export interface SessionEventEnvelope {
   sessionId: string;
   event: SessionEvent;
   ts: number;
+  /** Host-only binding for an exclusively admitted controller turn; not a completion receipt. */
+  control?: { operationId: string; inputId: string; runtimeId: string; turnId?: string };
   /** Monotonic across every event this desktop pushes. A remote client takes a transcript snapshot
    *  together with the counter it reflects (`sessions:transcriptPage`'s `seq`) and applies only
    *  later events, so a follow-up stream cannot double text the snapshot already has. Absent on
