@@ -3,6 +3,7 @@
  *  registry over an e2e-encrypted session. Off by default; device credentials and the
  *  identity keys live in the secret store, never in settings or logs. */
 import { createHash, randomBytes } from 'node:crypto';
+import { CONTROL_MAX_BYTES, controlErrorCode, controlHostRequestSchema } from '../../shared/control';
 import os from 'node:os';
 import { WebSocket } from 'ws';
 import { enrollTokenContext, generateIdentity, hostAccept, openFrame, openSealedToKey, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob, type SealedToKey } from '../../shared/crypto';
@@ -66,7 +67,7 @@ interface Session {
 }
 
 interface WsMessage {
-  t: 'pair.request' | 'pair.result' | 'pair.error' | 'hs' | 'd' | 'client.gone' | 'device.revoked';
+  t: 'pair.request' | 'pair.result' | 'pair.error' | 'hs' | 'd' | 'client.gone' | 'device.revoked' | 'control.request';
   code?: string;
   error?: string;
   devices?: unknown;
@@ -118,6 +119,8 @@ export class RemoteHost {
   /** A connect is between its start and opening its socket (it may be buying an access token). */
   private connectInFlight = false;
   private connectAttempt = 0;
+  private controlInFlight = 0;
+  private readonly controlRequests = new Map<string, number>();
   /** Terminals streamed to paired browsers (P3.5), each to the browser that watches it. */
   private readonly terminalStreams: RemoteTerminalStreams;
   /** Terminals each connected browser has typed into, so the audit trail records the first
@@ -140,6 +143,8 @@ export class RemoteHost {
       onMirrorRotated?: () => void;
       /** P3.5: the terminals a browser may watch; absent when terminals are unavailable. */
       terminals?: () => TerminalSource | null;
+      /** Separate delegated controller boundary; never a browser invoke or approval channel. */
+      control?: Pick<import('../control/service').ControlService, 'handle'>;
     }
   ) {
     this.terminalStreams = new RemoteTerminalStreams({
@@ -668,6 +673,7 @@ export class RemoteHost {
     const ws = new WebSocket(`${this.base()}/v1/ws/host?device=${encodeURIComponent(device)}`, { headers: { authorization: `Bearer ${auth}` } });
     this.ws = ws;
     this.incoming.clear();
+    this.controlRequests.clear();
     let opened = false;
     ws.on('open', () => {
       opened = true;
@@ -711,6 +717,30 @@ export class RemoteHost {
     });
   }
 
+  private async onControlRequest(raw: string, socket: WebSocket): Promise<void> {
+    if (Buffer.byteLength(raw) > CONTROL_MAX_BYTES || this.ws !== socket || !this.enrolled()) return;
+    const parsed = controlHostRequestSchema.safeParse(JSON.parse(raw));
+    if (!parsed.success) return;
+    const frame = parsed.data;
+    const now = Date.now();
+    if (frame.hostId !== this.creds?.deviceId || frame.expiresAt <= now || frame.expiresAt > now + 30_000 ||
+        frame.principal.validUntil <= now || frame.principal.validUntil > now + 30_000) return;
+    const respond = (reply: unknown): void => {
+      if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+      let body = JSON.stringify({ t: 'control.response', id: frame.id, ...reply as object });
+      if (Buffer.byteLength(body) > CONTROL_MAX_BYTES) body = JSON.stringify({ t: 'control.response', id: frame.id, ok: false, error: 'unavailable' });
+      try { socket.send(body); } catch { /* A lost reply is recovered through the durable receipt, never replayed here. */ }
+    };
+    for (const [id, expiry] of this.controlRequests) if (expiry <= now) this.controlRequests.delete(id);
+    if (!this.deps.control || this.controlInFlight >= 16 || this.controlRequests.size >= 1024) { respond({ ok: false, error: 'unavailable' }); return; }
+    if (this.controlRequests.has(frame.id)) { respond({ ok: false, error: 'conflict' }); return; }
+    this.controlRequests.set(frame.id, frame.expiresAt);
+    this.controlInFlight++;
+    try { respond({ ok: true, result: await this.deps.control.handle(frame.principal, frame.request) }); }
+    catch (error) { respond({ ok: false, error: controlErrorCode(error) }); }
+    finally { this.controlInFlight--; }
+  }
+
   private async onMessage(raw: string, socket: WebSocket): Promise<void> {
     if (this.ws !== socket) return;
     let msg: WsMessage;
@@ -721,6 +751,7 @@ export class RemoteHost {
       return;
     }
     if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+    if (msg.t === 'control.request') { await this.onControlRequest(raw, socket); return; }
     switch (msg.t) {
       case 'pair.request': {
         // Either a code this desktop minted was claimed, or a signed-in owner's browser asked this

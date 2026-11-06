@@ -234,6 +234,22 @@ export class SessionStore {
     this.hooks.onRewrite?.(id);
   }
 
+  /** Controller barrier: an atomic, fsynced whole-file snapshot behind ordinary appenders.
+   * Reads fail closed (unlike UI transcript reads); callers retain earlier append failures too.
+   * This is not a transaction with sessions.json or the controller's separate receipt journal. */
+  async commitTranscript(id: string, items: TranscriptItem[]): Promise<void> {
+    const file = path.join(this.sessionDir(id), 'transcript.jsonl');
+    const suffix = items.map((item) => JSON.stringify(item)).join('\n');
+    await this.queueTranscriptWrite(id, async () => {
+      const previous = await fs.readFile(file, 'utf8').catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return '';
+        throw error;
+      });
+      await writeText(file, previous + (previous && !previous.endsWith('\n') ? '\n' : '') + (suffix ? suffix + '\n' : ''));
+    });
+    this.hooks.onRewrite?.(id);
+  }
+
   /** Chains a transcript write behind the session's pending ones; the chain never rejects. */
   private queueTranscriptWrite<T>(id: string, run: () => Promise<T>): Promise<T> {
     const next = (this.transcriptWrites.get(id) ?? Promise.resolve()).then(run, run);
