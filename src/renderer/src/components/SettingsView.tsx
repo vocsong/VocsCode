@@ -21,8 +21,9 @@ import { InstructionsSection } from './InstructionsSection';
 import { MissionSettings } from './mission/MissionSettings';
 import { VoiceSection } from './VoiceSettings';
 import { ControlSettings } from './ControlSettings';
+import { ChatImport } from './ChatImport';
 
-export type SettingsSection = 'general' | 'mission' | 'instructions' | 'shortcuts' | 'terminal' | 'providers' | 'voice' | 'harnesses' | 'pi' | 'acp' | 'remote' | 'about';
+export type SettingsSection = 'general' | 'mission' | 'instructions' | 'shortcuts' | 'terminal' | 'providers' | 'voice' | 'harnesses' | 'import' | 'pi' | 'acp' | 'remote' | 'about';
 type Section = SettingsSection;
 
 /** Deep links ("Configure Mission") land on their section, whether or not Settings is open. */
@@ -61,6 +62,7 @@ export function SettingsView() {
             ['providers', 'Providers & keys', 'key'],
             ['voice', 'Voice', 'mic'],
             ['harnesses', 'Harnesses', 'shield'],
+            ['import', 'Import chats', 'download'],
             ['instructions', 'Instructions', 'edit'],
             ['pi', 'Pi', 'sparkles'],
             ['acp', 'ACP agents', 'fork'],
@@ -81,6 +83,7 @@ export function SettingsView() {
         {section === 'providers' && <Providers settings={settings} />}
         {section === 'voice' && <VoiceSection settings={settings} />}
         {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
+        {section === 'import' && <ChatImport />}
         {section === 'instructions' && <InstructionsSection />}
         {section === 'pi' && <PiSection />}
         {section === 'acp' && <AcpAgents settings={settings} update={update} />}

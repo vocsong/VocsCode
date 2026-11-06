@@ -54,7 +54,7 @@ async function fixture() {
   const settings = { ...defaultSettings(), providers: [] };
   const deps: SessionManagerDeps = {
     store, settings: { get: () => settings, update: vi.fn(async () => settings) } as never, runtime: {} as never,
-    analytics: { touchSession: vi.fn(), recordToolCall: vi.fn(), recordUsage: vi.fn(), recordTurn: vi.fn(), recordUserMessage: vi.fn() } as never,
+    analytics: { touchSession: vi.fn(), recordToolCall: vi.fn(), recordUsage: vi.fn(), recordTurn: vi.fn(), recordUserMessage: vi.fn(), recordUserInputs: vi.fn(), flush: vi.fn(async () => undefined) } as never,
     getSecret: async () => undefined, pushEvent: vi.fn(), pushSessions: vi.fn(), notify: vi.fn(), log: vi.fn(),
   };
   const manager = new SessionManager(deps);

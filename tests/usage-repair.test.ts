@@ -74,6 +74,7 @@ function fileWith(session: SessionMeta, model: ModelRef): Parameters<typeof migr
     harnessTools: {},
     harnessModelTools: {},
     recordedTools: [],
+    recordedUserInputs: [],
     files: {}
   } as Parameters<typeof migrateClaudeFallbackSpend>[0];
 }

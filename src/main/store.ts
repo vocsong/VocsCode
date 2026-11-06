@@ -30,6 +30,9 @@ export class SessionStore {
   private pendingIndexWrite: Promise<void> | null = null;
   /** Per-session transcript write chain: reads and rewrites wait for in-flight appends to land first. */
   private transcriptWrites = new Map<string, Promise<void>>();
+  private importing = new Set<string>();
+  /** Imports and removals own a directory until publication or cleanup has completely finished. */
+  private sessionLifecycles = new Map<string, Promise<void>>();
   /** Optional observers (the search indexer); set after construction to avoid a dependency cycle. */
   hooks: { onAppend?: (sessionId: string, item: TranscriptItem) => void; onRewrite?: (sessionId: string) => void; onRemove?: (sessionId: string) => void } = {};
   private readonly log: Logger;
@@ -86,6 +89,37 @@ export class SessionStore {
     await this.flushIndex();
   }
 
+  /** Publish an imported session only after its complete transcript and continuation context exist. */
+  async importSession(meta: SessionMeta, items: TranscriptItem[], context: string): Promise<void> {
+    assertValidSessionId(meta.id);
+    if (this.importing.has(meta.id)) throw new Error('Session already exists');
+    this.importing.add(meta.id);
+    try {
+      await this.queueSessionLifecycle(meta.id, async () => {
+        // A preceding removal may still own this ID; check existence only after it finishes.
+        if (this.get(meta.id)) throw new Error('Session already exists');
+        const dir = this.sessionDir(meta.id);
+        try {
+          await writeText(path.join(dir, 'transcript.jsonl'), items.map((item) => JSON.stringify(item)).join('\n') + '\n');
+          await writeText(path.join(dir, 'fork-context.md'), context);
+          // Do not expose the new metadata to concurrent snapshots until its index write succeeds.
+          const publish = this.writeQueue.then(async () => {
+            await writeJson(this.indexFile, structuredClone([meta, ...this.sessions]));
+            this.sessions.unshift(meta);
+          });
+          this.writeQueue = publish.catch(() => undefined);
+          await publish;
+        } catch (error) {
+          await rmrf(dir).catch(() => undefined);
+          throw error;
+        }
+        this.hooks.onRewrite?.(meta.id);
+      });
+    } finally {
+      this.importing.delete(meta.id);
+    }
+  }
+
   /**
    * Writes the index back after something outside the store changed a meta it already holds —
    * the load-time usage repair corrects `usage` in place on the live list.
@@ -132,12 +166,26 @@ export class SessionStore {
 
   async remove(id: string): Promise<void> {
     assertValidSessionId(id);
-    this.sessions = this.sessions.filter((s) => s.id !== id);
-    await this.flushIndex();
-    await (this.transcriptWrites.get(id) ?? Promise.resolve()).catch(() => undefined);
-    this.transcriptWrites.delete(id);
-    await rmrf(this.sessionDir(id));
-    this.hooks.onRemove?.(id);
+    await this.queueSessionLifecycle(id, async () => {
+      this.sessions = this.sessions.filter((s) => s.id !== id);
+      await this.flushIndex();
+      await (this.transcriptWrites.get(id) ?? Promise.resolve()).catch(() => undefined);
+      this.transcriptWrites.delete(id);
+      await rmrf(this.sessionDir(id));
+      this.hooks.onRemove?.(id);
+    });
+  }
+
+  private queueSessionLifecycle(id: string, run: () => Promise<void>): Promise<void> {
+    const previous = this.sessionLifecycles.get(id);
+    // Start an uncontended operation synchronously to preserve ordinary upsert/remove batching.
+    const next = previous ? previous.then(run) : run();
+    const settled = next.catch(() => undefined);
+    this.sessionLifecycles.set(id, settled);
+    void settled.then(() => {
+      if (this.sessionLifecycles.get(id) === settled) this.sessionLifecycles.delete(id);
+    });
+    return next;
   }
 
   private flushIndex(): Promise<void> {

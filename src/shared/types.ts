@@ -565,6 +565,8 @@ export interface UsageTotals {
 
 /** The numeric usage counters shared by day buckets and their per-dimension slices. */
 export interface UsageCounters {
+  /** Estimated tokens of newly submitted user text, counted once; never part of billed totals. */
+  userInputTokens: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -792,6 +794,8 @@ export interface GoalState {
 
 export interface SessionMeta {
   id: string;
+  /** Stable provenance for local chat imports; also prevents importing the same conversation twice. */
+  importedFrom?: { source: 'claude' | 'codex'; sessionId: string };
   title: string;
   /**
    * The title is still the truncated-prompt stand-in, so the one-shot title model may replace it.
@@ -936,6 +940,9 @@ export type TranscriptItem =
        *  budget; the count is what the bubble reports as not shown. */
       imagesOmitted?: number;
       queuedAs?: SendMode;
+      /** Host-measured original message text, before prompt assembly. Absent on legacy/automated input.
+       * The receipt survives replay; its owner prevents copied fork history being counted again. */
+      userInput?: { id: string; sessionId: string; ts: number; tokens: number };
     }
   | {
       id: string;

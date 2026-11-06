@@ -6,11 +6,12 @@ import { invoke } from '../api';
 import { useStore } from '../store';
 import { ModelPicker } from './ModelPicker';
 import { Badge, Button, Field, Icon, Modal, Spinner } from './ui';
+import { ChatImport } from './ChatImport';
 
 const INSTALLABLE = ['claude', 'codex', 'pi', 'dsh'] as const;
 type Installable = (typeof INSTALLABLE)[number];
 
-const STEPS = ['Harnesses', 'API keys', 'Utility model'] as const;
+const STEPS = ['Harnesses', 'API keys', 'Utility model', 'Import chats'] as const;
 
 export function OnboardingWizard() {
   const settings = useStore((s) => s.settings)!;
@@ -64,9 +65,13 @@ export function OnboardingWizard() {
       }
     >
       {providersError && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {providersError}</span></div>}
-      {step === 0 && <HarnessStep />}
+      {step === 0 && <>
+        <HarnessStep />
+        <Button variant="ghost" icon="download" onClick={() => setStep(3)}>Import chats from Claude Code or Codex</Button>
+      </>}
       {step === 1 && <ProviderKeys providers={providers} onChanged={setProviders} />}
       {step === 2 && <UtilityModelStep settings={settings} providers={providers} update={update} />}
+      {step === 3 && <ChatImport />}
     </Modal>
   );
 }
