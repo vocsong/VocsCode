@@ -106,6 +106,7 @@ describe('context window UI', () => {
 
   it('offers every requested auto-compaction preset and persists the selection', () => {
     render(<SettingsView />);
+    fireEvent.click(screen.getByRole('button', { name: 'Session defaults' }));
     const select = screen.getByText('Automatically compact context at').closest('label')?.querySelector('select') as HTMLSelectElement;
     expect([...select.options].map((option) => option.text)).toEqual([
       'Harness default',

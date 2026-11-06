@@ -13,6 +13,7 @@ import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
+import { APP_INSTRUCTION_MAX_CHARS } from '../src/shared/app-instructions';
 import { isolatedEnv, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -44,29 +45,61 @@ describe.runIf(enabled)('instructions UI', () => {
     await win.locator('.settings-link:has-text("Instructions")').click({ timeout: 20_000 });
     await win.waitForSelector('.pi-prompt-editor', { timeout: 20_000 });
 
+    const editorGroup = win.getByRole('region', { name: 'Instruction editor', exact: true });
+    expect(await editorGroup.getAttribute('id')).toBe('instructions-editor');
+    expect(await win.getByText('Changes apply to your next session, not one already running.', { exact: true }).isVisible()).toBe(true);
+    const precedence = win.locator('details').filter({ has: win.locator('summary', { hasText: 'How instructions are applied' }) });
+    expect(await precedence.getAttribute('open')).toBeNull();
+    await precedence.locator('summary').click();
+    expect(await precedence.getByText('~/.codex/AGENTS.md', { exact: true }).isVisible()).toBe(true);
+    await precedence.locator('summary').click();
+
     // Every scope is offered, shared first, and none of them is set yet.
     const tabs = await win.locator('.pi-tab').allInnerTexts();
     expect(tabs.map((t) => t.replace(/not set/g, '').trim())).toEqual(['All harnesses', 'Pi', 'Claude Agent SDK', 'Codex', 'Cursor', 'ACP agents', 'Native']);
     await expect.poll(async () => win.locator('.pi-tab:has-text("not set")').count()).toBe(7);
 
     // The shared file lands under this run's userData, not under a harness's own config.
-    const editor = win.locator('.pi-prompt-editor');
-    await editor.fill('Always be proactive.\n');
-    await win.locator('.pi-prompt-actions button:has-text("Save")').click();
+    const editor = editorGroup.getByRole('textbox', { name: 'Instructions text', exact: true });
+    const save = editorGroup.getByRole('button', { name: 'Save', exact: true });
+    const sharedScope = editorGroup.getByRole('button', { name: /^All harnesses/ });
+    const piScope = editorGroup.getByRole('button', { name: /^Pi(?:\s|$)/ });
+    expect(await sharedScope.getAttribute('aria-pressed')).toBe('true');
+    expect(await editorGroup.getByRole('button', { pressed: true }).count()).toBe(1);
+    expect(await save.isDisabled()).toBe(true);
+    const sharedText = 'Always be proactive.\n';
+    await editor.fill(sharedText);
+    await expect.poll(() => editorGroup.getByRole('status').innerText()).toBe('Unsaved changes');
+    expect(await editorGroup.getByLabel('Instruction character count').innerText()).toBe(`${sharedText.length.toLocaleString()} / ${APP_INSTRUCTION_MAX_CHARS.toLocaleString()} characters`);
+    // Switching scope retains a draft but never saves it implicitly.
+    await piScope.click();
+    expect(await piScope.getAttribute('aria-pressed')).toBe('true');
+    expect(await sharedScope.getAttribute('aria-pressed')).toBe('false');
+    expect(await editor.inputValue()).toBe('');
+    expect(await save.isDisabled()).toBe(true);
+    await sharedScope.click();
+    expect(await editor.inputValue()).toBe(sharedText);
+    await save.click();
     const globalFile = path.join(userData, 'instructions', 'global.md');
-    await expect.poll(async () => fs.readFile(globalFile, 'utf8').catch(() => '')).toBe('Always be proactive.\n');
+    await expect.poll(async () => fs.readFile(globalFile, 'utf8').catch(() => '')).toBe(sharedText);
     await expect.poll(async () => win.locator('.pi-tab:has-text("not set")').count()).toBe(6);
+    await expect.poll(() => editorGroup.getByRole('status').innerText()).toBe('Saved');
+    expect(await save.isDisabled()).toBe(true);
 
     // A harness tab adds its own file rather than editing the shared one.
-    await win.locator('.pi-tab:has-text("Pi")').click();
-    await win.locator('.pi-prompt-editor').fill('Pi: keep it terse.\n');
-    await win.locator('.pi-prompt-actions button:has-text("Save")').click();
+    await piScope.click();
+    await editor.fill('Pi: keep it terse.\n');
+    await save.click();
     await expect.poll(async () => fs.readFile(path.join(userData, 'instructions', 'pi.md'), 'utf8').catch(() => '')).toBe('Pi: keep it terse.\n');
-    expect(await fs.readFile(globalFile, 'utf8')).toBe('Always be proactive.\n');
+    expect(await fs.readFile(globalFile, 'utf8')).toBe(sharedText);
+    await editor.fill('Unsaved replacement');
+    await editorGroup.getByRole('button', { name: 'Revert', exact: true }).click();
+    expect(await editor.inputValue()).toBe('Pi: keep it terse.\n');
+    expect(await save.isDisabled()).toBe(true);
 
     // Saving an empty file removes the layer again, so the editor can switch it off.
-    await win.locator('.pi-prompt-editor').fill('   \n');
-    await win.locator('.pi-prompt-actions button:has-text("Save")').click();
+    await editor.fill('   \n');
+    await save.click();
     await expect.poll(async () => fs.access(path.join(userData, 'instructions', 'pi.md')).then(() => true).catch(() => false)).toBe(false);
   }, 120_000);
 });
@@ -274,7 +307,7 @@ describe.runIf(enabled)('chat import UI', () => {
       }
 
       // Unmount the picker so the stale selected IDs cannot be reused as a hidden retry path.
-      await win.locator('.settings-title').getByRole('button', { name: 'Back', exact: true }).click();
+      await win.getByRole('button', { name: 'Back to workspace', exact: true }).click();
       await openImport(win);
       expect(await win.getByRole('checkbox', { name: `Import ${title}`, exact: true }).count()).toBe(0);
       await win.getByRole('button', { name: 'Scan Claude Code', exact: true }).click();

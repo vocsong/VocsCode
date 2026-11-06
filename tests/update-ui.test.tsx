@@ -124,7 +124,7 @@ describe('updates panel (Settings → About)', () => {
     });
     const dev = render(<SettingsView />);
     fireEvent.click(screen.getByText('About & doctor'));
-    await screen.findByText(/Vocs Code/);
+    await screen.findByText(/0\.2\.0 · Electron/);
     expect(dev.container.querySelector('.settings-updates')).toBeNull();
     cleanup();
   });
