@@ -11,6 +11,7 @@ import type { PanelTab } from '../store';
 import type { UpdateState } from '../../../shared/types';
 import { Icon, MenuItem } from './ui';
 import { ForkIntoItems } from './ForkInto';
+import { openSettings } from './SettingsView';
 
 const REPO = 'https://github.com/vocsong/VocsCode';
 
@@ -259,7 +260,7 @@ function ViewMenu({ close }: { close: () => void }) {
         Thinking
       </MenuItem>
       <Sep />
-      <MenuItem onClick={run(() => st.setView('settings'))}>Theme</MenuItem>
+      <MenuItem onClick={run(() => openSettings('appearance'))}>Theme</MenuItem>
     </>
   );
 }

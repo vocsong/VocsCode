@@ -372,7 +372,7 @@ export function MissionSettings({ settings }: { settings: AppSettings }) {
         {tier.id === 5 && leadSelect('global')}
       </section>)}
       {!mission.defaultLeadPresetId && <p role="note">Mission launch is unconfigured — no default principal engineer. No replacement is selected automatically.</p>}
-      <h3>Concurrency and progress limits</h3>
+      <h3 id="mission-limits">Concurrency and progress limits</h3>
       <p className="field-hint">Optional cost/token thresholds cover the whole Mission: lead, workers, repeated attempts and restarts. They pause automation at observed usage, not a guaranteed financial ceiling: in-flight work and delayed or estimated telemetry can overshoot. Missing usage after work pauses rather than counting as zero. No default monetary or time budget; healthy long work is not stopped for elapsed time.</p>
       <Limits value={mission.limits} onChange={(limits) => change({ ...mission, limits: limits as MissionConfig['limits'] })} />
       <AccountLimits value={mission.limits.accountLimits ?? {}} connections={[...new Set([...settings.providers.map((p) => p.id), ...mission.presets.map((p) => p.model.connectionId ?? p.model.provider)])]} onChange={(accountLimits) => change({ ...mission, limits: { ...mission.limits, accountLimits } })} />
