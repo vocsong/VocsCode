@@ -369,7 +369,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await win.getByRole('button', { name: 'More session controls' }).click();
     const note = win.locator('.composer .run-more-note');
     await expect.poll(() => note.innerText(), { timeout: 60_000 }).toContain('does not support reasoning effort');
-    expect(await win.locator('.composer .run-controls .dropdown-menu [role="menuitem"]').count()).toBe(0);
+    expect(await win.getByRole('menuitem', { name: 'high', exact: true }).count()).toBe(0);
     const sessions = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
     expect(sessions).toHaveLength(1);
     expect(sessions[0].config.effort).toBeNull();

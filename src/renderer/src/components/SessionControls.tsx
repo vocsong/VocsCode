@@ -1,6 +1,6 @@
 /**
- * Keep the model and safety mode beside the prompt; less-frequent effort, Fast mode and usage
- * live in More. The header stays focused on the session's identity.
+ * Keep the model beside the prompt; effort, permission and Fast mode live in More.
+ * Usage stays visible next to the send actions. The header holds the session identity.
  */
 import React from 'react';
 import type { ModelInfo, SessionMeta } from '../../../shared/types';
@@ -70,35 +70,11 @@ export function SessionControls({ session }: { session: SessionMeta }) {
         )}
       </Dropdown>
 
-      {/* The composer renders for every session the store holds, so a record without a mode gets no
-          mode control rather than taking the composer down with it. */}
-      {modeLabel && (
-        <Dropdown
-          align="left"
-          width={300}
-          trigger={(open) => (
-            <button type="button" className={`pill mode-${mode} ${open ? 'open' : ''}`} title={modeLabel.description} aria-label={`Permission mode: ${modeLabel.short}`}>
-              <Icon name="shield" size={13} /> <span className="pill-text">{modeLabel.short}</span> <Icon name="chevron" size={12} />
-            </button>
-          )}
-        >
-          {(close) => (
-            <>
-              {modes.map((option) => (
-                <MenuItem key={option.value} active={option.value === mode} hint={option.hint} onClick={() => { close(); void invoke('sessions:setPermissionMode', { id: session.id, mode: option.value }); }}>
-                  {option.label}
-                </MenuItem>
-              ))}
-            </>
-          )}
-        </Dropdown>
-      )}
-
       <Dropdown
         align="left"
-        width={240}
+        width={300}
         trigger={(open) => (
-          <button type="button" className={`pill run-more ${open ? 'open' : ''}`} title="More session controls" aria-label="More session controls">
+          <button type="button" className={`pill run-more ${mode ? `mode-${mode}` : ''} ${open ? 'open' : ''}`} title="More session controls" aria-label="More session controls">
             <Icon name="settings" size={14} /> <span className="pill-text">More{session.config.fastMode ? session.fastModeStatus?.state === 'on' ? ' · Fast on' : ' · Fast requested' : ''}</span> <Icon name="chevron" size={12} />
           </button>
         )}
@@ -111,9 +87,17 @@ export function SessionControls({ session }: { session: SessionMeta }) {
                 {option.label}
               </MenuItem>
             )) : <div className="run-more-note">{currentInfo?.displayName ?? 'This model'} does not support reasoning effort</div>)}
+            {/* A restored session can lack a mode; don't offer a selector until one exists. */}
+            {modeLabel && <>
+              <div className="run-more-label run-more-section">Permission mode · {modeLabel.short}</div>
+              {modes.map((option) => (
+                <MenuItem key={option.value} active={option.value === mode} hint={option.hint} onClick={() => { close(); void invoke('sessions:setPermissionMode', { id: session.id, mode: option.value }); }}>
+                  {option.label}
+                </MenuItem>
+              ))}
+            </>}
             <div className="run-more-footer">
               <FastModePill key={session.id} session={session} />
-              <SessionMeter session={session} />
             </div>
           </>
         )}

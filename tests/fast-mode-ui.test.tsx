@@ -115,21 +115,23 @@ describe('new-session Fast mode request', () => {
 });
 
 describe('composer Fast mode request', () => {
-  it('keeps busy actions together and queues or steers the draft explicitly', async () => {
-    const busy = session({ status: 'running' });
+  it('keeps cost and the labelled Queue/Steer actions visible while busy', async () => {
+    const busy = session({ status: 'running', usage: { ...session().usage, costUsd: 6.11 } });
     seed(busy);
-    const { container } = render(<Composer session={busy} />);
-    const input = screen.getByPlaceholderText('Steer the agent…');
-    const actions = container.querySelector('.composer-submit')!;
-    expect(actions.contains(screen.getByRole('button', { name: 'Queue after the current turn' }))).toBe(true);
-    expect(actions.contains(screen.getByRole('button', { name: 'Steer' }))).toBe(true);
-    expect(container.querySelector('.composer-actions .session-meter')).toBeNull();
+    render(<Composer session={busy} />);
+    const input = screen.getByPlaceholderText('Steer the agent… (Enter sends now, queue button waits for the turn)');
+    const meter = screen.getByRole('button', { name: 'Session usage' });
+    expect(meter.textContent).toContain('$6.11');
+    expect(screen.getByText('Queue', { selector: 'button' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Steer' })).toBeTruthy();
     fireEvent.change(input, { target: { value: 'after this turn' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Queue after the current turn' }));
+    fireEvent.click(screen.getByText('Queue', { selector: 'button' }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:send', { id: busy.id, input: expect.objectContaining({ text: 'after this turn', mode: 'queue' }) }));
     fireEvent.change(input, { target: { value: 'adjust now' } });
     fireEvent.click(screen.getByRole('button', { name: 'Steer' }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:send', { id: busy.id, input: expect.objectContaining({ text: 'adjust now', mode: 'steer' }) }));
+    fireEvent.click(meter);
+    expect(useStore.getState().panelTab).toBe('usage');
   });
 
   it('requires visible cost confirmation, waits for IPC, and never claims requested means on', async () => {

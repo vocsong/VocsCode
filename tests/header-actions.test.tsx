@@ -1,7 +1,7 @@
 // Header: one row — the session's identity (title, harness, folder, branch), what it changed and the
 // view actions. The 3-dot menu is gone, and fork/archive buttons behave exactly like the sidebar
-// row's (same fork menu, same archive flow). Model and safety sit under the composer;
-// reasoning effort and usage are in More: SessionControls.
+// row's (same fork menu, same archive flow). Model and usage stay under the composer;
+// effort, permission and Fast mode are in More: SessionControls.
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -193,17 +193,16 @@ describe('composer run controls', () => {
     );
   });
 
-  it('keeps model and safety visible while effort, Fast and usage live in More', () => {
+  it('keeps the model visible while effort, permission and Fast mode live in More', () => {
     const { container } = setupControls();
     expect(container.querySelector('[title="Model"]')).toBeTruthy();
-    expect(container.querySelector('[aria-label^="Permission mode:"]')).toBeTruthy();
-    expect(container.querySelector('[aria-label="Reasoning effort"]')).toBeNull();
-    expect(container.querySelector('[aria-label="Session usage"]')).toBeNull();
+    expect(container.querySelector('[aria-label^="Permission mode:"]')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'More session controls' }));
     expect(screen.getByText('Reasoning effort · default')).toBeTruthy();
+    expect(screen.getByText('Permission mode · Ask')).toBeTruthy();
     expect(screen.getByRole('switch', { name: 'Request Fast mode' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Session usage' }));
-    expect(useStore.getState().panelTab).toBe('usage');
+    fireEvent.click(screen.getByRole('menuitem', { name: /Accept edits/ }));
+    expect(invokeMock).toHaveBeenCalledWith('sessions:setPermissionMode', { id: 's_h', mode: 'accept-edits' });
   });
 
   it('explains when a model takes no effort in More', () => {
@@ -219,7 +218,7 @@ describe('composer run controls', () => {
   it('offers Claude its own effort levels while the model does not say which it takes', () => {
     const { container } = setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
     fireEvent.click(container.querySelector('[aria-label="More session controls"]') as HTMLElement);
-    const levels = [...document.querySelectorAll('.dropdown-menu .menu-item')].map((item) => item.textContent?.trim());
+    const levels = [...document.querySelectorAll('.dropdown-menu .menu-item')].slice(0, 5).map((item) => item.textContent?.trim());
     expect(levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
   });
 
