@@ -85,6 +85,15 @@ export const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
 const probeCache = new Map<string, { at: number; result: CaptureResult }>();
 const probePending = new Map<string, Promise<CaptureResult>>();
 const PROBE_TTL_MS = 60_000;
+let probeGeneration = 0;
+
+/** Explicit setup refreshes must see installs/sign-ins now, not a cached result from boot. */
+export function clearRuntimeProbeCache(): void {
+  clearWhichCache();
+  probeGeneration++;
+  probeCache.clear();
+  probePending.clear();
+}
 
 async function probeOnce(cmd: string, args: string[], timeoutMs: number): Promise<CaptureResult> {
   const key = `${cmd}\u0000${args.join('\u0000')}`;
@@ -93,10 +102,11 @@ async function probeOnce(cmd: string, args: string[], timeoutMs: number): Promis
   // Concurrent callers share one probe; 'codex' and 'codex-exec' refresh together at boot.
   let pending = probePending.get(key);
   if (!pending) {
+    const generation = probeGeneration;
     pending = runCapture(cmd, args, { timeoutMs })
       .then((result) => {
-        probeCache.set(key, { at: Date.now(), result });
-        probePending.delete(key);
+        if (generation === probeGeneration) probeCache.set(key, { at: Date.now(), result });
+        if (probePending.get(key) === pending) probePending.delete(key);
         return result;
       });
     probePending.set(key, pending);
@@ -231,6 +241,14 @@ export function bundledCodexPath(appRoot: string): string | null {
       /* try next */
     }
   }
+  // Worktrees/monorepos may share ancestor dependencies. Match the SDK resolver rather than
+  // silently falling back to a PATH shim when the app's bundled dependency is available there.
+  try {
+    const req = createRequire(path.join(appRoot, 'package.json'));
+    const pkgJson = req.resolve(`${pkg}/package.json`);
+    const p = path.join(path.dirname(pkgJson), 'vendor', triple, 'bin', isWin ? 'codex.exe' : 'codex');
+    if (statSync(p).isFile()) return p;
+  } catch { /* not installed */ }
   return null;
 }
 
@@ -302,7 +320,7 @@ export class RuntimeResolver {
 
     const bundled =
       tool === 'claude' ? bundledClaudePath(this.paths.appRoot) : tool === 'codex' ? bundledCodexPath(this.paths.appRoot) : null;
-    if (preferBundled && bundled) return { path: bundled, source: 'bundled' };
+    if (preferBundled) return bundled ? { path: bundled, source: 'bundled' } : null;
 
     const sys = which(tool, this.appRuntimeBin());
     // The Claude Agent SDK spawns the executable directly; an npm .cmd/.bat shim cannot be
@@ -333,14 +351,29 @@ export class RuntimeResolver {
           ? { available: false, detail: 'No launchable Claude Code runtime found (Windows .cmd/.bat shims cannot be started by the Agent SDK).', installHint: 'Reinstall Vocs Code (or run npm install --include=dev in a dev checkout), or select a native Claude executable.' }
           : { available: false, detail: 'No Claude Code runtime found.', installHint: 'npm install -g @anthropic-ai/claude-code' };
         const v = await probeOnce(bin.path, ['--version'], 20_000);
-        const authenticated = await claudeHasCredentials();
+        const login = v.code === 0 ? await probeOnce(bin.path, ['auth', 'status', '--json'], 20_000) : undefined;
+        let authenticated: HarnessAvailability['authenticated'] = 'unknown';
+        let authMethod: HarnessAvailability['authMethod'];
+        // A credential file can be empty, expired, or unused (macOS also uses the keychain).
+        // Ask the selected runtime. Never return its email, account id, tokens or raw auth output.
+        if (login && !login.timedOut && !login.truncated) {
+          try {
+            const auth = JSON.parse(login.stdout) as { loggedIn?: unknown; authMethod?: unknown };
+            if (auth?.loggedIn === false) authenticated = false;
+            if (auth?.loggedIn === true && login.code === 0) {
+              authenticated = true;
+              authMethod = auth.authMethod === 'claude.ai' ? 'subscription' : typeof auth.authMethod === 'string' && /api[_ -]?key|console/i.test(auth.authMethod) ? 'api-key' : 'other';
+            }
+          } catch { /* Older CLIs may not support auth status: unknown is not ready. */ }
+        }
         return {
           available: v.code === 0,
           version: v.stdout.trim() || undefined,
           binaryPath: bin.path,
           source: bin.source,
-          detail: `${bin.source} runtime`,
-          authenticated: authenticated ? true : 'unknown'
+          detail: v.code !== 0 ? 'Claude runtime could not start. Check its installation.' : authenticated === 'unknown' ? 'Runtime installed; sign-in could not be verified. Sign in or update the runtime, then check again.' : `${bin.source} runtime`,
+          authenticated,
+          authMethod
         };
       }
       case 'codex':
@@ -348,16 +381,21 @@ export class RuntimeResolver {
         const bin = this.resolve('codex');
         if (!bin) return { available: false, detail: 'Codex CLI not found.', installHint: 'npm install -g @openai/codex' };
         const v = await probeOnce(bin.path, ['--version'], 20_000);
-        const login = await probeOnce(bin.path, ['login', 'status'], 20_000);
-        const text = login.stdout + login.stderr;
-        const loggedIn = /logged in/i.test(text) && !/not logged in/i.test(text);
+        const login = v.code === 0 ? await probeOnce(bin.path, ['login', 'status'], 20_000) : undefined;
+        const text = login ? login.stdout + login.stderr : '';
+        const complete = login && !login.timedOut && !login.truncated;
+        const signedOut = complete && /not logged in/i.test(text);
+        const signedIn = complete && login.code === 0 && /logged in/i.test(text) && !signedOut;
+        const authenticated = signedIn ? true : signedOut ? false : 'unknown';
         return {
           available: v.code === 0,
           version: v.stdout.trim() || undefined,
           binaryPath: bin.path,
           source: bin.source,
-          detail: text.trim().split('\n')[0] || `${bin.source} runtime`,
-          authenticated: loggedIn
+          // `login status` can include a preview of an API key: don't copy its text into the UI/log.
+          detail: v.code !== 0 ? 'Codex runtime could not start. Check its installation.' : signedIn ? 'Codex sign-in detected.' : signedOut ? 'Sign in to Codex with ChatGPT or an API key.' : 'Runtime installed; sign-in could not be checked. Try again.',
+          authenticated,
+          authMethod: signedIn ? /api key/i.test(text) ? 'api-key' : /chatgpt/i.test(text) ? 'subscription' : 'other' : undefined
         };
       }
       case 'pi': {
@@ -373,11 +411,11 @@ export class RuntimeResolver {
         if (dsh) {
           const v = await probeOnce(dsh.path, ['--version'], 30_000);
           return {
-            available: true,
+            available: v.code === 0,
             version: v.stdout.trim() || undefined,
             binaryPath: dsh.path,
             source: dsh.source,
-            detail: 'DeepSeek Harness found',
+            detail: v.code === 0 ? 'DeepSeek Harness found' : 'DeepSeek Harness could not start. Check Node.js and its installation.',
             authenticated: 'unknown'
           };
         }
@@ -411,19 +449,17 @@ export class RuntimeResolver {
 
   /** Installs a harness CLI into the app runtime dir with npm. */
   async install(id: InstallableHarness): Promise<{ ok: boolean; log: string }> {
+    if (typeof id !== 'string' || !Object.prototype.hasOwnProperty.call(HARNESS_PACKAGES, id)) throw new Error('Unsupported harness installer');
     const pkg = HARNESS_PACKAGES[id];
     await fs.mkdir(this.paths.appRuntimeDir, { recursive: true });
     const npm = which('npm');
-    if (!npm) return { ok: false, log: 'npm not found on PATH.' };
+    if (!npm) return { ok: false, log: 'Node.js/npm is not available. Install Node.js from https://nodejs.org, restart Vocs Code, then retry. Bundled Claude/Codex runtimes do not require this installer.' };
     const r = await runCapture(npm, ['install', '-g', '--prefix', this.paths.appRuntimeDir, `${pkg}@latest`], {
       timeoutMs: 600_000
     });
     // The install put a new binary in the runtime dir; drop the memoized misses so it is found,
     // and the version probes so the next read reports what was just installed rather than the TTL.
-    if (r.code === 0) {
-      clearWhichCache();
-      probeCache.clear();
-    }
+    if (r.code === 0) clearRuntimeProbeCache();
     return { ok: r.code === 0, log: r.stdout + r.stderr };
   }
 

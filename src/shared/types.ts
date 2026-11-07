@@ -1136,8 +1136,10 @@ export interface HarnessAvailability {
   version?: string;
   binaryPath?: string;
   detail?: string;
-  /** Whether the harness appears to be authenticated / has credentials. */
+  /** Whether the runtime reports a sign-in / has credentials; not a paid model-access check. */
   authenticated?: boolean | 'unknown';
+  /** Reported login method or configured app API credentials; not proof of billing or key validity. */
+  authMethod?: 'subscription' | 'api-key' | 'other';
   installHint?: string;
   /** Set when a binary resolved; `bundled` and `settings` are the sources an app install cannot replace. */
   source?: HarnessBinarySource;

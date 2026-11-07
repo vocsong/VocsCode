@@ -111,6 +111,8 @@ describe('welcome screen', () => {
     expect([...container.querySelectorAll('.welcome-key .kbd')].map((k) => k.textContent)).toEqual(['Ctrl+N', 'Ctrl+Alt+N', 'Ctrl+K', 'Ctrl+Shift+F', 'Ctrl+1…9', 'Ctrl+J']);
     fireEvent.click(screen.getByRole('button', { name: 'New session' }));
     expect(startNewSession).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Setup guide' }));
+    expect(useStore.getState()).toMatchObject({ onboardingOpen: true, onboardingHarness: null });
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     expect(useStore.getState().view).toBe('settings');
   });

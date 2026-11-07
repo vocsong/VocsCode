@@ -11,7 +11,7 @@ const invokeMock = vi.fn();
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ErrorBoundary } from '../src/renderer/src/ErrorBoundary';
-import { OnboardingWizard } from '../src/renderer/src/components/OnboardingWizard';
+import { HarnessSetup } from '../src/renderer/src/components/HarnessSetup';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { Sidebar } from '../src/renderer/src/components/Sidebar';
 import { Transcript } from '../src/renderer/src/components/Transcript';
@@ -95,26 +95,26 @@ describe('render errors', () => {
 });
 
 describe('availability check failures', () => {
-  it('records the failure, renders a retry, and clears the error on a successful retry', async () => {
-    invokeMock.mockImplementation((channel: string) => {
-      if (channel === 'harness:availability') return Promise.reject(new Error('availability ipc down'));
-      return Promise.resolve({});
-    });
-
-    render(<OnboardingWizard />);
-    const retries = await screen.findAllByText(/could not check/i);
-    expect(retries.length).toBeGreaterThan(0);
+  it('records whole-app check failure and clears it on a successful fresh retry', async () => {
+    invokeMock.mockRejectedValue(new Error('availability ipc down'));
+    await useStore.getState().refreshAvailability();
     expect(useStore.getState().availabilityError).toBe('availability ipc down');
+    invokeMock.mockResolvedValue({ native: { available: true } });
+    await useStore.getState().refreshAvailability();
+    expect(useStore.getState().availabilityError).toBeNull();
+    expect(invokeMock).toHaveBeenCalledWith('harness:availability', { refresh: true });
+    expect(useStore.getState().availability.native).toMatchObject({ available: true });
+  });
 
-    invokeMock.mockClear();
-    invokeMock.mockImplementation((channel: string) => {
-      if (channel === 'harness:availability') return Promise.resolve({ native: { available: true } });
-      return Promise.resolve({});
-    });
-    fireEvent.click(retries[0]);
-
-    await waitFor(() => expect(useStore.getState().availabilityError).toBeNull());
-    expect(invokeMock).toHaveBeenCalledWith('harness:availability', undefined);
+  it('renders a selected-runtime setup failure and rechecks through the recovery control', async () => {
+    invokeMock.mockRejectedValue(new Error('setup ipc down'));
+    render(<HarnessSetup harness="native" onChange={vi.fn()} />);
+    expect(await screen.findByText('setup ipc down')).toBeTruthy();
+    invokeMock.mockResolvedValue({ harness: 'native', availability: { available: true }, requirements: [], providers: [], canInstall: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck setup' }));
+    expect(await screen.findByText('Built in')).toBeTruthy();
+    expect(screen.queryByText('setup ipc down')).toBeNull();
+    expect(invokeMock).toHaveBeenCalledWith('harness:setup', { harness: 'native' });
     expect(useStore.getState().availability.native).toMatchObject({ available: true });
   });
 });

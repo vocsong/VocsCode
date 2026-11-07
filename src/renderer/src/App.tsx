@@ -36,6 +36,9 @@ export function App() {
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const panelOpen = useStore((s) => s.panelOpen);
   const newSessionOpen = useStore((s) => s.newSessionOpen);
+  const onboardingOpen = useStore((s) => s.onboardingOpen);
+  const onboardingDismissed = useStore((s) => s.onboardingDismissed);
+  const onboardingHarness = useStore((s) => s.onboardingHarness);
   const quickSessionOpen = useStore((s) => s.quickSessionOpen);
   const paletteOpen = useStore((s) => s.paletteOpen);
   const searchOpen = useStore((s) => s.searchOpen);
@@ -199,7 +202,7 @@ export function App() {
         {panelOpen && session && view === 'chat' && <RightPanel session={session} />}
       </div>
       {newSessionOpen && <NewSessionDialog />}
-      {!settings.onboardingDone && <OnboardingWizard />}
+      {(onboardingOpen || (!settings.onboardingDone && !onboardingDismissed)) && <OnboardingWizard initialHarness={onboardingHarness ?? undefined} onClose={() => useStore.getState().dismissOnboarding()} />}
       {quickSessionOpen && <QuickSessionPicker />}
       {paletteOpen && <CommandPalette />}
       {searchOpen && <SearchModal />}
