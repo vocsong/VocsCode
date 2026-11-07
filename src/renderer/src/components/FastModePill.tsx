@@ -9,6 +9,7 @@ import { askConfirm, Spinner } from './ui';
 /** The switch is the request; only runtime status can say that Fast mode is actually on. */
 export function FastModePill({ session }: { session: SessionMeta }) {
   const providers = useStore((s) => s.settings?.providers);
+  const toast = useStore((s) => s.toast);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const support = fastModeSupport(session.config.harness, session.activeModel ?? session.config.model, providers);
@@ -26,7 +27,10 @@ export function FastModePill({ session }: { session: SessionMeta }) {
       if (!requested && !await askConfirm({ title: 'Enable Fast mode?', body: FAST_MODE_COST_WARNING, confirmLabel: 'Enable Fast mode' })) return;
       await setSessionFastMode(session.id, !requested);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      // Confirmation closes the More menu; still surface a failure after this control unmounts.
+      toast(`Fast mode change failed: ${message}`, 'error');
     } finally {
       setPending(false);
     }

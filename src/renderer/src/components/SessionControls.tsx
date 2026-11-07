@@ -1,7 +1,6 @@
 /**
- * The settings the next message goes out with — model, reasoning effort, Fast mode and permission
- * mode — plus the session's context use and spend. They live under the composer, where a change
- * takes effect, rather than in the header, which keeps only the session's identity.
+ * Keep the model beside the prompt; effort, permission and Fast mode live in More.
+ * Usage stays visible next to the send actions. The header holds the session identity.
  */
 import React from 'react';
 import type { ModelInfo, SessionMeta } from '../../../shared/types';
@@ -71,59 +70,38 @@ export function SessionControls({ session }: { session: SessionMeta }) {
         )}
       </Dropdown>
 
-      {h.capabilities.effort && effortLevels.length > 0 && (
-        <Dropdown
-          align="left"
-          width={200}
-          trigger={(open) => (
-            <button type="button" className={`pill ${open ? 'open' : ''}`} title="Reasoning effort" aria-label="Reasoning effort">
-              <Icon name="brain" size={13} /> <span className="pill-text">{effort ?? 'Effort'}</span> <Icon name="chevron" size={12} />
-            </button>
-          )}
-        >
-          {(close) => (
-            <>
-              {effortLevels.map((option) => (
-                <MenuItem key={option.value} active={effort === option.value} onClick={() => { close(); void setSessionEffort(session.id, option.value, toast); }}>
-                  {option.label}
-                </MenuItem>
-              ))}
-            </>
-          )}
-        </Dropdown>
-      )}
-      {/* A model that takes no effort keeps the control in place, disabled, so switching models does not shift the row. */}
-      {h.capabilities.effort && effortLevels.length === 0 && (
-        <button type="button" className="pill" disabled aria-label="Reasoning effort" title={`${currentInfo?.displayName ?? 'This model'} does not support reasoning effort`}>
-          <Icon name="brain" size={13} /> <span className="pill-text">Effort</span>
-        </button>
-      )}
-
-      {/* The composer renders for every session the store holds, so a record without a mode gets no
-          mode control rather than taking the composer down with it. */}
-      {modeLabel && (
-        <Dropdown
-          align="left"
-          width={300}
-          trigger={(open) => (
-            <button type="button" className={`pill mode-${mode} ${open ? 'open' : ''}`} title={modeLabel.description} aria-label={`Permission mode: ${modeLabel.short}`}>
-              <Icon name="shield" size={13} /> <span className="pill-text">{modeLabel.short}</span> <Icon name="chevron" size={12} />
-            </button>
-          )}
-        >
-          {(close) => (
-            <>
+      <Dropdown
+        align="left"
+        width={300}
+        trigger={(open) => (
+          <button type="button" className={`pill run-more ${mode ? `mode-${mode}` : ''} ${open ? 'open' : ''}`} title="More session controls" aria-label="More session controls">
+            <Icon name="settings" size={14} /> <span className="pill-text">More{session.config.fastMode ? session.fastModeStatus?.state === 'on' ? ' · Fast on' : ' · Fast requested' : ''}</span> <Icon name="chevron" size={12} />
+          </button>
+        )}
+      >
+        {(close) => (
+          <>
+            {h.capabilities.effort && <div className="run-more-label">Reasoning effort{effortLevels.length ? ` · ${effort ?? 'default'}` : ''}</div>}
+            {h.capabilities.effort && (effortLevels.length ? effortLevels.map((option) => (
+              <MenuItem key={option.value} active={effort === option.value} onClick={() => { close(); void setSessionEffort(session.id, option.value, toast); }}>
+                {option.label}
+              </MenuItem>
+            )) : <div className="run-more-note">{currentInfo?.displayName ?? 'This model'} does not support reasoning effort</div>)}
+            {/* A restored session can lack a mode; don't offer a selector until one exists. */}
+            {modeLabel && <>
+              <div className="run-more-label run-more-section">Permission mode · {modeLabel.short}</div>
               {modes.map((option) => (
                 <MenuItem key={option.value} active={option.value === mode} hint={option.hint} onClick={() => { close(); void invoke('sessions:setPermissionMode', { id: session.id, mode: option.value }); }}>
                   {option.label}
                 </MenuItem>
               ))}
-            </>
-          )}
-        </Dropdown>
-      )}
-
-      <FastModePill key={session.id} session={session} />
+            </>}
+            <div className="run-more-footer">
+              <FastModePill key={session.id} session={session} />
+            </div>
+          </>
+        )}
+      </Dropdown>
     </div>
   );
 }

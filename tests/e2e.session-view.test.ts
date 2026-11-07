@@ -1,6 +1,6 @@
 /**
  * Electron end-to-end for the session view's layout: a one-row header that carries the working
- * tree's changes, the run controls and usage readout under the composer, a turn's work behind one
+ * tree's changes, the visible usage readout and More menu under the composer, a turn's work behind one
  * chip with its plan still on screen, the title bar's search and Vesta launcher, the sidebar's New
  * session entry, and a header that sheds detail in a narrow split pane instead of overflowing it.
  * Sessions, transcripts and a git checkout with uncommitted work are seeded on disk, so no harness
@@ -163,7 +163,7 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.screenshot({ path: path.join(shots, 'session-view-02-work.png') });
     await work.click();
 
-    // The changes chip opens Changes; the readout under the composer opens Usage.
+    // The changes chip opens Changes; cost stays visible while permission lives behind More.
     await changes.click();
     await win.locator('.panel-tab.active', { hasText: 'Changes' }).waitFor({ timeout: 10_000 });
     await win.locator('.changes').waitFor({ timeout: 10_000 });
@@ -171,6 +171,14 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     expect(await composer.locator('.run-controls .pill[title="Model"]').innerText()).toContain('anthropic/claude-opus-5-5');
     const meter = composer.getByRole('button', { name: 'Session usage' });
     expect(await meter.innerText()).toMatch(/32%[\s\S]*\$0\.84/);
+    expect(await composer.getByRole('button', { name: 'Permission mode: Edits' }).count()).toBe(0);
+    await composer.getByRole('button', { name: 'More session controls' }).click();
+    expect(await composer.getByText('Permission mode · Edits').count()).toBe(1);
+    await win.screenshot({ path: path.join(shots, 'session-view-05-more.png') });
+    await composer.getByRole('menuitem', { name: /Ask before acting/ }).click();
+    await expect.poll(async () => (await win.evaluate(() => window.harness.invoke('sessions:list', undefined))).find((s: SessionMeta) => s.id === SID)?.config.permissionMode).toBe('ask');
+    await composer.getByRole('button', { name: 'More session controls' }).click();
+    expect(await composer.getByText('Permission mode · Ask').count()).toBe(1);
     await meter.click();
     await win.locator('.panel-tab.active', { hasText: 'Usage' }).waitFor({ timeout: 10_000 });
 
@@ -207,6 +215,7 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await expect.poll(async () => (await win.locator('.pane .header').evaluateAll((els) => els.map((el) => el.getAttribute('data-width')))).every((w) => w !== 'wide')).toBe(true);
     expect(await win.locator('.pane .header-crumbs:visible').count()).toBe(0);
     for (const over of await overflowX(win, '.pane .header-title')) expect(over).toBeLessThanOrEqual(1);
+    for (const over of await overflowX(win, '.pane .composer-actions')) expect(over).toBeLessThanOrEqual(1);
     expect(await win.locator('.pane.active .header').getByRole('button', { name: 'Close pane' }).count()).toBe(1);
     await win.screenshot({ path: path.join(shots, 'session-view-04-split.png') });
   }, 180_000);
