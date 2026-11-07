@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { AppSettings, EffortLevel, FileAttachment, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { branchNameFromText, branchPrefixOptions, branchSlug, normalizeBranchPrefix } from '../../../shared/branch-prefix';
 import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
+import { harnessStatus } from '../../../shared/harness-setup';
 import { FAST_MODE_COST_WARNING, fastModeSupport } from '../../../shared/fast-mode';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
 import { invoke } from '../api';
@@ -47,6 +48,13 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(!!projectRoot);
   const [modelsError, setModelsError] = useState<string | undefined>();
+  const [modelRefresh, setModelRefresh] = useState(0);
+  const onboardingOpen = useStore((s) => s.onboardingOpen);
+  const previousSetupOpen = useRef(onboardingOpen);
+  useEffect(() => {
+    if (previousSetupOpen.current && !onboardingOpen) setModelRefresh((v) => v + 1);
+    previousSetupOpen.current = onboardingOpen;
+  }, [onboardingOpen]);
   const [model, setModel] = useState<ModelRef | undefined>(initial.model);
   const [effort, setEffort] = useState<EffortLevel | ''>(initial.effort);
   const [fastMode, setFastMode] = useState(false);
@@ -170,7 +178,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [harness, acpAgent]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [harness, acpAgent, projectRoot, modelRefresh]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedModel = models.find((m) => model && m.id === model.model && m.provider === model.provider);
   const effortOptions = effortOptionsFor(descriptor, selectedModel);
@@ -356,7 +364,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
                   <button key={h.id} type="button" className={`harness-card ${harness === h.id ? 'active' : ''}`} onClick={() => setHarness(h.id)}>
                     <div className="harness-card-top">
                       <span className="harness-card-name">{h.name}</span>
-                      {av ? av.available ? <Badge tone={av.authenticated === false ? 'amber' : 'green'}>{av.authenticated === false ? 'not logged in' : av.version ? av.version.replace(/[^\d.]+.*$/, '') || 'ready' : 'ready'}</Badge> : <Badge tone="red">missing</Badge> : availabilityError ? (
+                      {av ? <Badge tone={harnessStatus(h.id, av).tone}>{harnessStatus(h.id, av).label}</Badge> : availabilityError ? (
                         <span
                           className="link-btn"
                           role="button"
@@ -381,6 +389,8 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
             )}
           </Field>
 
+          <Button size="sm" onClick={() => useStore.getState().openOnboarding(harness)}>Set up / sign in</Button>
+          <p className="muted small">Setup opens above this dialog and keeps your prompt and session options.</p>
           {harness === 'acp' && (
             <Field label="ACP agent">
               <select value={acpAgent} onChange={(e) => setAcpAgent(e.target.value)}>
@@ -407,6 +417,8 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
               onSelect={(m) => setModel(m ? { provider: m.provider, model: m.id } : undefined)}
             />
           </Field>
+          <Button size="sm" variant="ghost" icon="refresh" disabled={modelsLoading} onClick={() => { setModelRefresh((v) => v + 1); void refreshAvailability(); }}>Recheck models and sign-in</Button>
+          {modelsError && <p className="muted small">Any listed suggestions may be fallbacks, not verified account access. Use Set up / sign in to repair the connection.</p>}
           <div className="row gap12">
             <Field label="Reasoning effort">
               <select value={selectedEffort} onChange={(e) => setEffort(e.target.value as EffortLevel | '')} disabled={!descriptor.capabilities.effort || noEffort} title={noEffort ? `${selectedModel?.displayName ?? 'This model'} does not support reasoning effort` : undefined}>

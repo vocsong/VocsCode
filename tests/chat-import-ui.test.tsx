@@ -253,9 +253,12 @@ describe('chat import UI', () => {
     settings.unmount();
     render(<OnboardingWizard />);
     fireEvent.click(screen.getByRole('button', { name: 'Import chats from Claude Code or Codex' }));
-    expect(screen.getByText('step 4/4 — Import chats')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Import chats', level: 2 })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Scan Claude Code' })).toBeTruthy();
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('providers:list', undefined));
     expect(invoke.mock.calls.some(([channel]) => channel === 'sessions:importList')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(screen.getByRole('heading', { name: 'What would you like to use?' })).toBeTruthy();
+    expect(invoke.mock.calls.some(([channel]) => channel === 'settings:update')).toBe(false);
   });
 });

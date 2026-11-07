@@ -12,7 +12,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 import { expectQuietWindow, isolatedEnv, seedSettings } from './e2e-ui';
@@ -23,8 +23,9 @@ const require = createRequire(import.meta.url);
 const shots = path.join(root, 'tests', 'artifacts');
 let app: ElectronApplication | null = null;
 
-afterAll(async () => {
+afterEach(async () => {
   await app?.close().catch(() => undefined);
+  app = null;
 });
 
 const SID = 's_view_e2e';
@@ -73,7 +74,53 @@ const usage = (patch: Partial<SessionMeta['usage']> = {}): SessionMeta['usage'] 
 /** Overflow of an element's content past its own box, in px; 0 when everything fits. */
 const overflowX = (win: Page, selector: string) => win.locator(selector).evaluateAll((els) => els.map((el) => el.scrollWidth - el.clientWidth));
 
+async function launch(userData: string): Promise<Page> {
+  const home = path.join(userData, 'home');
+  const env = isolatedEnv(userData, {
+    HOME: home, USERPROFILE: home,
+    APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+    CLAUDE_CONFIG_DIR: path.join(userData, 'claude'), CODEX_HOME: path.join(userData, 'codex'), PI_CODING_AGENT_DIR: path.join(userData, 'pi')
+  });
+  for (const key of ['ELECTRON_RENDERER_URL', 'ANTHROPIC_AUTH_TOKEN', 'CODEX_API_KEY', 'CURSOR_API_KEY', 'GOOGLE_API_KEY']) delete env[key];
+  for (const dir of [env.APPDATA, env.LOCALAPPDATA, env.CLAUDE_CONFIG_DIR, env.CODEX_HOME, env.PI_CODING_AGENT_DIR]) await fs.mkdir(dir, { recursive: true });
+  app = await electron.launch({
+    executablePath: require('electron') as string,
+    args: [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+    env,
+    timeout: 60_000
+  });
+  const win = await app.firstWindow();
+  await win.waitForSelector('.brand', { timeout: 60_000 });
+  await expectQuietWindow(app);
+  return win;
+}
+
 describe.runIf(enabled)('electron e2e: session view layout', () => {
+  it('reopens setup from Home without creating a session or changing the returning user’s defaults', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-home-setup-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    const win = await launch(userData);
+    const before = await win.evaluate(() => window.harness.invoke('settings:get', undefined));
+    const open = win.locator('.welcome').getByRole('button', { name: 'Setup guide', exact: true });
+    await open.click();
+    const guide = win.getByRole('dialog', { name: 'Welcome to Vocs Code', exact: true });
+    await guide.getByRole('heading', { name: 'What would you like to use?', exact: true }).waitFor();
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'session-view-05-home-setup.png') });
+    await guide.getByRole('button', { name: 'Close', exact: true }).click();
+    await guide.waitFor({ state: 'hidden' });
+    await expect.poll(() => open.evaluate((el) => el === document.activeElement)).toBe(true);
+    const after = await win.evaluate(() => window.harness.invoke('settings:get', undefined));
+    expect(after.onboardingDone).toBe(true);
+    expect(after.defaultHarness).toBe(before.defaultHarness);
+    expect(after.defaultModelByHarness).toEqual(before.defaultModelByHarness);
+    expect(await win.evaluate(() => window.harness.invoke('sessions:list', undefined))).toEqual([]);
+  }, 60_000);
+
   it('carries changes, run controls, plan, search, Vesta and New session where the redesign puts them, and fits a narrow pane', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-session-view-'));
     const userData = path.join(tmp, 'userData');
@@ -116,15 +163,7 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
       await fs.writeFile(path.join(userData, 'sessions', s.id, 'transcript.jsonl'), items.map((i) => JSON.stringify(i)).join('\n') + '\n');
     }
 
-    app = await electron.launch({
-      executablePath: require('electron') as string,
-      args: [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
-      env: isolatedEnv(userData),
-      timeout: 60_000
-    });
-    const win: Page = await app.firstWindow();
-    await win.waitForSelector('.brand', { timeout: 60_000 });
-    await expectQuietWindow(app);
+    const win = await launch(userData);
     // Wide enough for every header item: 1600 − sidebar − side panel leaves the pane ~900px.
     await win.setViewportSize({ width: 1600, height: 1000 });
     await fs.mkdir(shots, { recursive: true });

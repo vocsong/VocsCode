@@ -21,12 +21,14 @@ import { signInProbe } from '../src/main/remote/relay-url';
 import { SettingsStore } from '../src/main/settings';
 import { PiConfigStore } from '../src/main/pi-config';
 import { AppInstructions } from '../src/main/app-instructions';
+import { openHarnessLogin, readHarnessSetup } from '../src/main/harness-setup';
 import type { SearchIndex } from '../src/main/search';
 import type { TerminalManager } from '../src/main/terminal';
 import { discoverChatImports } from '../src/main/chat-import';
 import type { ChatImportPreview } from '../src/shared/chat-import';
 
 vi.mock('../src/main/chat-import', () => ({ discoverChatImports: vi.fn() }));
+vi.mock('../src/main/harness-setup', async (original) => ({ ...await original<typeof import('../src/main/harness-setup')>(), openHarnessLogin: vi.fn(), readHarnessSetup: vi.fn() }));
 
 const dirs: string[] = [];
 let ws: string;
@@ -116,6 +118,42 @@ function stubDeps(overrides: Partial<Deps> = {}): { registry: HandlerRegistry; d
 }
 
 describe('handler registry', () => {
+  it('allows bounded sign-in only for the desktop owner and refuses forged launch arguments before execution', async () => {
+    const { registry } = stubDeps();
+    const login = vi.mocked(openHarnessLogin).mockReset().mockResolvedValue({ ok: true });
+    for (const actor of ['agent', 'user'] as const) await expect(registry.invoke('harness:login', { harness: 'claude' }, actor)).rejects.toThrow(/desktop owner/);
+    for (const input of [{ harness: 'cursor' }, { harness: 'claude', args: ['--dangerous'] }, { harness: 'codex', device: 'true' }, { harness: 'pi', cwd: '/project' }]) {
+      await expect(registry.invoke('harness:login', input, 'desktop')).rejects.toThrow();
+    }
+    expect(login).not.toHaveBeenCalled();
+    await expect(registry.invoke('harness:login', { harness: 'codex', device: true }, 'desktop')).resolves.toEqual({ ok: true });
+    expect(login).toHaveBeenCalledOnce();
+    expect(login.mock.calls[0]!.slice(1)).toEqual(['codex', true]);
+    expect(isRemoteChannel('harness:login')).toBe(false);
+    expect(agentChannels().includes('harness:login' as never)).toBe(false);
+  });
+
+  it('rejects invalid setup and install ids before their privileged dependencies', async () => {
+    const { registry, deps } = stubDeps();
+    const setup = vi.mocked(readHarnessSetup).mockReset();
+    const install = vi.spyOn(deps.runtime, 'install');
+    await expect(registry.invoke('harness:setup', { harness: 'unknown' }, 'desktop')).rejects.toThrow('Unknown harness');
+    for (const id of ['__proto__', ['pi'], null, 1]) await expect(registry.invoke('harness:install', { id }, 'desktop')).rejects.toThrow('Unsupported');
+    expect(setup).not.toHaveBeenCalled(); expect(install).not.toHaveBeenCalled();
+  });
+
+  it('an explicit readiness refresh bypasses the cached signed-out result', async () => {
+    const { registry, deps } = stubDeps();
+    const probe = vi.spyOn(deps.runtime, 'availability').mockResolvedValue({ available: true, authenticated: false });
+    await registry.invoke('harness:availability', undefined);
+    const initialCalls = probe.mock.calls.length;
+    probe.mockResolvedValue({ available: true, authenticated: true });
+    const cached = await registry.invoke('harness:availability', undefined) as Record<string, { authenticated: boolean }>;
+    expect(cached.claude!.authenticated).toBe(false); expect(probe).toHaveBeenCalledTimes(initialCalls);
+    const fresh = await registry.invoke('harness:availability', { refresh: true }) as Record<string, { authenticated: boolean }>;
+    expect(fresh.claude!.authenticated).toBe(true); expect(probe).toHaveBeenCalledTimes(initialCalls * 2);
+  });
+
   it('validates import sources, opaque identifiers and selection before privileged operations', async () => {
     const { registry, deps } = stubDeps();
     const discover = vi.mocked(discoverChatImports);
