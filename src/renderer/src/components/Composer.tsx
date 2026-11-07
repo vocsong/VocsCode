@@ -17,7 +17,7 @@ import { missionQuestionUsage } from '../../../shared/mission';
 import { commandMission, MISSION_MANAGED_REASON, pauseMissionSession, sendMissionUser } from '../missions';
 import { insertTranscript } from '../../../shared/dictation';
 import { DictationControl, type DictationHandle } from './DictationControl';
-import { SessionControls, SessionMeter } from './SessionControls';
+import { SessionControls } from './SessionControls';
 
 /** With one pane the composer is the only one; in a split, only the active pane's takes focus and inserts. */
 function ownsComposerFocus(sessionId: string): boolean {
@@ -599,44 +599,44 @@ function SessionComposer({ session }: { session: SessionMeta }) {
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste attachments)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… @ files · / commands · ! shell'}
+          placeholder={completed ? 'Ask about the completed Mission…' : session.mission ? 'Message the principal engineer…' : busy ? (caps.steer ? 'Steer the agent…' : 'Queue a follow-up…') : 'Message the agent…'}
           rows={1}
           spellCheck
         />
         <div className="composer-actions">
-          <label className="icon-btn composer-attach" title="Attach files">
-            <Icon name="plus" size={16} />
-            <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
-          </label>
-          {!session.mission && <SessionControls session={session} />}
-          <span className="spacer" />
-          {(session.queued ?? 0) > 0 && <span className="queued-hint" title="Messages waiting for the current turn">{session.queued} queued</span>}
-          {!session.mission && <SessionMeter session={session} />}
-          {canInvoke('dictation:transcribe') && <DictationControl ref={dictation} onText={insertDictation} />}
-          {shellDraft && !completed ? (
-            <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
-              Run
-            </Button>
-          ) : session.mission || missionSending ? (
-            <>
-              <Button size="sm" variant="primary" icon="send" disabled={missionSending || !!questions?.pending || (!text.trim() && !images.length && !files.length)} onClick={() => void send()}>{missionSending ? 'Opening Mission…' : completed ? 'Ask lead' : 'Send to lead'}</Button>
-              {questions?.pending && <Button size="sm" variant="danger" icon="stop" onClick={() => pauseMissionSession(session)}>Cancel answer</Button>}
-            </>
-          ) : busy ? (
-            <>
-              {caps.queue && (
-                <Button size="sm" onClick={() => void send('queue')} title="Send after the current turn">
-                  Queue
-                </Button>
-              )}
-              <Button size="sm" variant="primary" icon={caps.steer ? 'arrowUp' : 'clock'} onClick={() => void send(caps.steer ? 'steer' : 'queue')} title={caps.steer ? 'Steer now' : 'Queue'}>
-                {caps.steer ? 'Steer' : 'Queue'}
+          <div className="composer-config">
+            <label className="icon-btn composer-attach" title="Attach files">
+              <Icon name="plus" size={16} />
+              <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
+            </label>
+            {!session.mission && <SessionControls session={session} />}
+          </div>
+          <div className="composer-submit">
+            {(session.queued ?? 0) > 0 && <span className="queued-hint" title="Messages waiting for the current turn">{session.queued} queued</span>}
+            {canInvoke('dictation:transcribe') && <DictationControl ref={dictation} onText={insertDictation} compact />}
+            {shellDraft && !completed ? (
+              <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
+                Run
               </Button>
-              <Button size="sm" variant="danger" icon="stop" className="btn-icon" onClick={() => pauseMissionSession(session)} title="Interrupt (Esc)" />
-            </>
-          ) : (
-            <Button size="sm" variant="primary" icon="arrowUp" className="send-btn" onClick={() => void send()} disabled={!text.trim() && !images.length && !files.length} title="Send (Enter) · Shift+Enter for a new line" aria-label="Send" />
-          )}
+            ) : session.mission || missionSending ? (
+              <>
+                <Button size="sm" variant="primary" icon="send" disabled={missionSending || !!questions?.pending || (!text.trim() && !images.length && !files.length)} onClick={() => void send()}>{missionSending ? 'Opening Mission…' : completed ? 'Ask lead' : 'Send to lead'}</Button>
+                {questions?.pending && <Button size="sm" variant="danger" icon="stop" onClick={() => pauseMissionSession(session)}>Cancel answer</Button>}
+              </>
+            ) : busy ? (
+              <>
+                {caps.queue && (
+                  <Button size="sm" icon="clock" className="btn-icon" onClick={() => void send('queue')} title="Queue after the current turn" aria-label="Queue after the current turn" />
+                )}
+                <Button size="sm" variant="primary" icon={caps.steer ? 'arrowUp' : 'clock'} onClick={() => void send(caps.steer ? 'steer' : 'queue')} title={caps.steer ? 'Steer now' : 'Queue'}>
+                  {caps.steer ? 'Steer' : 'Queue'}
+                </Button>
+                <Button size="sm" variant="danger" icon="stop" className="btn-icon" onClick={() => pauseMissionSession(session)} title="Interrupt (Esc)" />
+              </>
+            ) : (
+              <Button size="sm" variant="primary" icon="arrowUp" className="send-btn" onClick={() => void send()} disabled={!text.trim() && !images.length && !files.length} title="Send (Enter) · Shift+Enter for a new line" aria-label="Send" />
+            )}
+          </div>
         </div>
       </div>
       {session.mission && (

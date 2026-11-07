@@ -22,7 +22,7 @@ function clock(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-export const DictationControl = forwardRef<DictationHandle, { onText: (text: string) => void }>(function DictationControl({ onText }, handle) {
+export const DictationControl = forwardRef<DictationHandle, { onText: (text: string) => void; compact?: boolean }>(function DictationControl({ onText, compact = false }, handle) {
   const dictation = useStore((s) => s.settings?.dictation) ?? DEFAULT_DICTATION;
   const providerName = useStore((s) => s.settings?.providers?.find((p) => p.id === (s.settings?.dictation ?? DEFAULT_DICTATION).cloud.provider)?.name);
   const toast = useStore((s) => s.toast);
@@ -166,9 +166,9 @@ export const DictationControl = forwardRef<DictationHandle, { onText: (text: str
       >
         {busy ? <Spinner size={14} /> : <Icon name="mic" size={16} />}
       </button>
-      <button type="button" className="dictation-engine" data-testid="dictation-engine" data-engine={dictation.engine} onClick={() => void flipEngine()} disabled={phase !== 'idle'} title={engineTitle}>
+      <button type="button" className={`dictation-engine${compact ? ' compact' : ''}`} data-testid="dictation-engine" data-engine={dictation.engine} onClick={() => void flipEngine()} disabled={phase !== 'idle'} title={engineTitle} aria-label={`Dictation engine: ${local ? 'Local' : 'Cloud'}`}>
         <Icon name={local ? 'cpu' : 'cloud'} size={12} />
-        {local ? 'Local' : 'Cloud'}
+        <span className={compact ? 'sr-only' : undefined}>{local ? 'Local' : 'Cloud'}</span>
       </button>
     </div>
   );

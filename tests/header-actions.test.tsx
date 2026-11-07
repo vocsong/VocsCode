@@ -1,7 +1,7 @@
 // Header: one row — the session's identity (title, harness, folder, branch), what it changed and the
 // view actions. The 3-dot menu is gone, and fork/archive buttons behave exactly like the sidebar
-// row's (same fork menu, same archive flow). The run controls (model, reasoning effort) sit under
-// the composer instead: SessionControls.
+// row's (same fork menu, same archive flow). Model and safety sit under the composer;
+// reasoning effort and usage are in More: SessionControls.
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -193,21 +193,32 @@ describe('composer run controls', () => {
     );
   });
 
-  it('disables the effort pill for a model that takes no effort', () => {
+  it('keeps model and safety visible while effort, Fast and usage live in More', () => {
+    const { container } = setupControls();
+    expect(container.querySelector('[title="Model"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label^="Permission mode:"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label="Reasoning effort"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Session usage"]')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'More session controls' }));
+    expect(screen.getByText('Reasoning effort · default')).toBeTruthy();
+    expect(screen.getByRole('switch', { name: 'Request Fast mode' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Session usage' }));
+    expect(useStore.getState().panelTab).toBe('usage');
+  });
+
+  it('explains when a model takes no effort in More', () => {
     const haiku = { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' };
     const { container } = setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask', model: haiku } as SessionMeta['config'] });
     act(() => useStore.setState({ models: { s_h: [{ id: haiku.model, provider: haiku.provider, displayName: 'Haiku 4.5', supportedEfforts: [] }] } }));
 
-    const pill = container.querySelector('.pill[aria-label="Reasoning effort"]') as HTMLButtonElement;
-    expect(pill.disabled).toBe(true);
-    expect(pill.title).toBe('Haiku 4.5 does not support reasoning effort');
-    // The menu trigger is gone, so nothing can open a list of levels.
-    expect(container.querySelector('[title="Reasoning effort"]')).toBeNull();
+    fireEvent.click(container.querySelector('[aria-label="More session controls"]') as HTMLElement);
+    expect(screen.getByText('Haiku 4.5 does not support reasoning effort')).toBeTruthy();
+    expect(screen.queryByRole('menuitem', { name: 'high' })).toBeNull();
   });
 
   it('offers Claude its own effort levels while the model does not say which it takes', () => {
     const { container } = setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
-    fireEvent.click(container.querySelector('[title="Reasoning effort"]') as HTMLElement);
+    fireEvent.click(container.querySelector('[aria-label="More session controls"]') as HTMLElement);
     const levels = [...document.querySelectorAll('.dropdown-menu .menu-item')].map((item) => item.textContent?.trim());
     expect(levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
   });
@@ -221,7 +232,7 @@ describe('composer run controls', () => {
       return Promise.resolve({});
     });
 
-    fireEvent.click(container.querySelector('[title="Reasoning effort"]') as HTMLElement);
+    fireEvent.click(container.querySelector('[aria-label="More session controls"]') as HTMLElement);
     const high = [...document.querySelectorAll('.dropdown-menu .menu-item')].find((item) => item.textContent?.trim() === 'high') as HTMLElement;
     fireEvent.click(high);
 
@@ -236,7 +247,7 @@ describe('composer run controls', () => {
     invokeMock.mockClear();
     invokeMock.mockImplementation((channel: string) => channel === 'sessions:setEffort' ? Promise.reject(new Error('unsupported')) : Promise.resolve({}));
 
-    fireEvent.click(container.querySelector('[title="Reasoning effort"]') as HTMLElement);
+    fireEvent.click(container.querySelector('[aria-label="More session controls"]') as HTMLElement);
     const high = [...document.querySelectorAll('.dropdown-menu .menu-item')].find((item) => item.textContent?.trim() === 'high') as HTMLElement;
     fireEvent.click(high);
 

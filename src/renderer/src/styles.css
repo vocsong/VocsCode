@@ -2082,15 +2082,33 @@ h4 {
 
 
 
-/* Run controls under the composer: quiet text buttons until pointed at; menus open upward. The
-   group lays its controls straight into the composer's footer row, so a narrow pane wraps them one
-   by one alongside the send group instead of stacking the whole group on lines of its own. */
+/* Keep the model and safety mode visible; secondary settings open upward from More. */
 .run-controls {
   display: contents;
 }
 .run-controls .dropdown-menu {
   top: auto;
   bottom: calc(100% + 6px);
+}
+.run-more-label {
+  padding: 8px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+.run-more-note {
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.run-more-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding: 6px 4px 2px;
 }
 .run-controls .pill {
   gap: 5px;
@@ -2135,7 +2153,7 @@ h4 {
   color: var(--amber);
   background: var(--amber-soft);
 }
-/* Context use and spend, next to the send button. */
+/* Context use and spend, available in More without occupying the send row. */
 .session-meter {
   display: inline-flex;
   align-items: center;
@@ -3316,15 +3334,24 @@ h4 {
   min-height: 50px;
 }
 .pane .composer-actions {
-  justify-content: flex-start;
+  justify-content: space-between;
   flex-wrap: wrap;
-  gap: 2px;
+  gap: 4px 8px;
   padding: 4px 8px 8px 6px;
 }
-/* When a narrow pane wraps the footer, the send group still ends at the right edge. */
-.pane .composer-actions > .spacer + * {
-  margin-left: auto;
+.composer-config,
+.composer-submit {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
 }
+.composer-config { flex: 1 1 290px; }
+.composer-submit { flex: 0 0 auto; margin-left: auto; }
+.composer-config .run-controls > .dropdown:first-child { min-width: 0; flex: 0 1 auto; }
+.composer-config .pill-model { width: 100%; }
+.composer-config .pill-model .pill-text { white-space: nowrap; }
+.composer-submit .btn { white-space: nowrap; }
 .composer-attach {
   border-radius: 8px;
   padding: 6px;
@@ -3407,6 +3434,16 @@ h4 {
 .dictation-engine[data-engine='local'] {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.dictation-engine.compact { width: 28px; height: 28px; justify-content: center; padding: 0; border-color: transparent; }
+.dictation-engine.compact span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 .dictation-local {
   display: flex;
