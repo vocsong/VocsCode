@@ -119,6 +119,11 @@ interface State {
   /** One-shot request to open one subagent run, set by a subagent tool card. */
   subagentReveal: { sessionId: string; runId: string } | null;
   newSessionOpen: boolean;
+  onboardingOpen: boolean;
+  onboardingDismissed: boolean;
+  onboardingHarness: HarnessId | null;
+  openOnboarding(harness?: HarnessId): void;
+  dismissOnboarding(): void;
   /** Project folder the new session dialog is targeting; null until a folder is picked. */
   newSessionRoot: string | null;
   /** Ctrl+N quick picker: choose a known folder, then start a session with defaults. */
@@ -208,6 +213,7 @@ interface State {
   toast(text: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
   refreshAvailability(): Promise<void>;
+  recordHarnessAvailability(harness: HarnessId, availability: HarnessAvailability): void;
   /** Fetches one harness's model catalog, at most once per harness until the model overrides change. */
   ensureModelCatalog(harness: HarnessId): Promise<void>;
   clearTranscriptLocal(id: string): void;
@@ -372,6 +378,9 @@ async function applyLayout(set: Setter, get: Getter, layout: PaneLayout): Promis
   await Promise.all(layout.panes.map((p) => (p.sessionId ? get().loadTranscript(p.sessionId) : undefined)));
 }
 
+let availabilityRequest = 0;
+const availabilityOverrides: Partial<Record<HarnessId, number>> = {};
+
 export const useStore = create<State>((set, get) => ({
   booted: false,
   bootError: null,
@@ -413,6 +422,9 @@ export const useStore = create<State>((set, get) => ({
   fileReveal: null,
   subagentReveal: null,
   newSessionOpen: false,
+  onboardingOpen: false,
+  onboardingDismissed: false,
+  onboardingHarness: null,
   newSessionRoot: null,
   quickSessionOpen: false,
   quickSessionPrefill: undefined,
@@ -1086,12 +1098,29 @@ export const useStore = create<State>((set, get) => ({
   dismissToast(id) {
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
   },
+  openOnboarding(harness) {
+    set({ onboardingOpen: true, onboardingHarness: harness ?? null });
+  },
+  dismissOnboarding() {
+    // Dismissal is transient. Only the guide's explicit Finish/Skip actions persist completion.
+    set({ onboardingOpen: false, onboardingDismissed: true, modelCatalog: {} });
+  },
+  recordHarnessAvailability(harness, availability) {
+    // A setup card is fresher than an already-in-flight whole-app check. Preserve that card's
+    // result without discarding the old check's still-useful results for the other harnesses.
+    availabilityOverrides[harness] = availabilityRequest;
+    set((s) => ({ availability: { ...s.availability, [harness]: availability } }));
+  },
   async refreshAvailability() {
+    const request = ++availabilityRequest;
     try {
-      const availability = await invoke('harness:availability', undefined);
-      set({ availability, availabilityError: null });
+      const availability = await invoke('harness:availability', { refresh: true });
+      if (request === availabilityRequest) {
+        const fresh = Object.fromEntries(Object.entries(availability).filter(([id]) => (availabilityOverrides[id as HarnessId] ?? 0) < request));
+        set((s) => ({ availability: { ...s.availability, ...fresh }, availabilityError: null }));
+      }
     } catch (e) {
-      set({ availabilityError: e instanceof Error ? e.message : String(e) });
+      if (request === availabilityRequest) set({ availabilityError: e instanceof Error ? e.message : String(e) });
     }
   },
 
@@ -1099,12 +1128,13 @@ export const useStore = create<State>((set, get) => ({
     // Present means fetched, failed or in flight: one round trip per harness, not per session.
     if (get().modelCatalog[harness]) return;
     const put = (entry: ModelCatalogEntry) => set((s) => ({ modelCatalog: { ...s.modelCatalog, [harness]: entry } }));
-    put({ models: [], loading: true });
+    const pending: ModelCatalogEntry = { models: [], loading: true };
+    put(pending);
     try {
       const r = await invoke('harness:models', { harness });
-      put({ models: r.models, error: r.error, loading: false });
+      if (get().modelCatalog[harness] === pending) put({ models: r.models, error: r.error, loading: false });
     } catch (e) {
-      put({ models: [], error: (e as Error).message, loading: false });
+      if (get().modelCatalog[harness] === pending) put({ models: [], error: (e as Error).message, loading: false });
     }
   },
   clearTranscriptLocal(id) {

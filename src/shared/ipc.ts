@@ -1,5 +1,6 @@
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type { ControlGrantInput, ControlOwnerState } from './control';
+import type { HarnessSetupStatus, LoginHarnessId } from './harness-setup';
 import type {
   AnalyticsSummary,
   AppInstructionFile,
@@ -179,7 +180,11 @@ export interface IpcContract {
   /** Stops the local server now, freeing its GPU memory; the next local clip starts it again. */
   'dictation:stopLocal': [void, DictationLocalStatus];
 
-  'harness:availability': [{ id?: HarnessId } | void, Partial<Record<HarnessId, HarnessAvailability>>];
+  'harness:availability': [{ id?: HarnessId; refresh?: boolean } | void, Partial<Record<HarnessId, HarnessAvailability>>];
+  /** Fresh selected-runtime and dependency checks; no model request and no credentials returned. */
+  'harness:setup': [{ harness: HarnessId }, HarnessSetupStatus];
+  /** Desktop-owner action only. Opens the selected runtime's vendor login in a terminal. */
+  'harness:login': [{ harness: LoginHarnessId; device?: boolean }, { ok: boolean; error?: string }];
   'harness:models': [
     { harness: HarnessId; acpAgent?: string; projectRoot?: string },
     { models: ModelInfo[]; error?: string }

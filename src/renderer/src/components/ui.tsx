@@ -250,7 +250,7 @@ export function Modal({ title, onClose, children, width = 720, footer }: { title
     const restore = restoreRef.current;
     // An autoFocus child (ConfirmHost) already claimed focus; leave it alone.
     if (dialog && !dialog.contains(document.activeElement)) {
-      const items = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      const items = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => !el.closest('[hidden]'));
       (items[0] ?? dialog).focus();
     }
     return () => {
@@ -259,14 +259,17 @@ export function Modal({ title, onClose, children, width = 720, footer }: { title
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const dialog = dialogRef.current;
+      const dialogs = document.querySelectorAll('.modal[role="dialog"]');
+      // Setup can open above a drafted new session; only the top dialog owns Escape/Tab.
+      if (!dialog || dialogs[dialogs.length - 1] !== dialog || e.defaultPrevented) return;
       if (e.key === 'Escape') {
+        e.stopPropagation();
         onClose();
         return;
       }
       if (e.key !== 'Tab') return;
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-      const items = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      const items = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => !el.closest('[hidden]'));
       if (items.length === 0) return;
       const first = items[0];
       const last = items[items.length - 1];
