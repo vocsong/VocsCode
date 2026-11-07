@@ -108,6 +108,8 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await creationToggle.isChecked()).toBe(true);
     await win.getByRole('button', { name: /Start session/ }).click();
 
+    const more = win.getByRole('button', { name: 'More session controls' });
+    await more.click();
     const toggle = win.getByRole('switch', { name: 'Request Fast mode' });
     await toggle.waitFor({ timeout: 60_000 });
     expect(await toggle.getAttribute('aria-checked')).toBe('true');
@@ -126,6 +128,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await win.getByText(FAST_MODE_COST_WARNING, { exact: true }).isVisible()).toBe(true);
     expect(await toggle.getAttribute('aria-checked')).toBe('false');
     await confirm.click();
+    await more.click();
     await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('true');
     expect(await toggle.innerText()).toContain('requested');
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
@@ -363,10 +366,10 @@ describe.runIf(enabled)('model picker before the first message', () => {
 
     // Started without a prompt, so no harness process exists; the composer's run controls read the same catalog.
     await win.getByRole('button', { name: /Start session/ }).click();
-    const pill = win.locator('.composer .run-controls .pill[aria-label="Reasoning effort"]');
-    // The control is there from the first paint; the catalog arriving is what disables it.
-    await expect.poll(async () => (await pill.count()) === 1 && (await pill.isDisabled()), { timeout: 60_000 }).toBe(true);
-    expect(await pill.getAttribute('title')).toContain('does not support reasoning effort');
+    await win.getByRole('button', { name: 'More session controls' }).click();
+    const note = win.locator('.composer .run-more-note');
+    await expect.poll(() => note.innerText(), { timeout: 60_000 }).toContain('does not support reasoning effort');
+    expect(await win.getByRole('menuitem', { name: 'high', exact: true }).count()).toBe(0);
     const sessions = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
     expect(sessions).toHaveLength(1);
     expect(sessions[0].config.effort).toBeNull();
