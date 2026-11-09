@@ -95,6 +95,9 @@ export interface SessionManagerDeps {
   disposeWaitMs?: number;
 }
 
+/** How stale a session's `lastViewedAt` may get before viewing it again rewrites the stamp. */
+const VIEW_STAMP_REFRESH_MS = 5 * 60_000;
+
 /** An ordinary Stop gives a disposing adapter this long (above every adapter's own shutdown
  * deadline) before the session is released anyway; the disposal itself carries on regardless. */
 const ORDINARY_DISPOSE_WAIT_MS = 20_000;
@@ -951,9 +954,20 @@ export class SessionManager {
   async markViewed(id: string): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    // Every return to the window re-views what is on screen. With no mark to clear and a fresh
+    // stamp, Recent's order would not change: skip rewriting the index and broadcasting the list.
+    if (meta.unseenAt === undefined && meta.lastViewedAt !== undefined && Date.now() - meta.lastViewedAt < VIEW_STAMP_REFRESH_MS) return meta;
+    const before = { unseenAt: meta.unseenAt, unseenFailed: meta.unseenFailed, lastViewedAt: meta.lastViewedAt };
     delete meta.unseenAt;
+    delete meta.unseenFailed;
     meta.lastViewedAt = Date.now();
-    await this.deps.store.upsert(meta);
+    try {
+      await this.deps.store.upsert(meta);
+    } catch (e) {
+      // Disk still has the mark; keep memory agreeing with it so the next view retries.
+      Object.assign(meta, before);
+      throw e;
+    }
     this.pushSessions();
     return meta;
   }
@@ -1600,6 +1614,7 @@ export class SessionManager {
       meta.lastUserMessageAt = userItem.ts;
       // Writing to a session is looking at it.
       delete meta.unseenAt;
+      delete meta.unseenFailed;
     }
     // A session named from a dialog prompt or a goal is already carrying a placeholder, and that
     // placeholder is the better one: it was cut from what the user wrote, not from a `/goal …`
@@ -2680,6 +2695,8 @@ export class SessionManager {
     // An interrupt is the user's own doing, and a Mission worker is never a sidebar row.
     if (turn.status !== 'interrupted' && !meta.archived && meta.mission?.role !== 'worker' && !this.deps.isViewing?.(meta.id)) {
       meta.unseenAt = turn.ts;
+      if (turn.status === 'failed') meta.unseenFailed = true;
+      else delete meta.unseenFailed;
       this.schedulePersist(meta);
       this.pushSessions();
     }
@@ -2993,6 +3010,10 @@ export class SessionManager {
       pinned: undefined,
       pinnedAt: undefined,
       archived: undefined,
+      // Nobody has looked at a fork yet, and nothing it did has finished unviewed.
+      unseenAt: undefined,
+      unseenFailed: undefined,
+      lastViewedAt: undefined,
       // Writer claims belong to the source's runtimes; a fork has run nothing yet.
       workspaceWriterClaims: undefined,
       cwd: own?.path ?? src.cwd,

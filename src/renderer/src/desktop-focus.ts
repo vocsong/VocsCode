@@ -31,12 +31,24 @@ export function useSessionViewing(): void {
   const visible = useStore((s) => s.visibleSessionIds);
   const windowFocused = useStore((s) => s.desktopFocus?.windowFocused === true);
   const key = visible.join('\n');
+  // Sessions on screen that carry a mark: one that gains a mark while counted is counted again.
+  const unseenKey = useStore((s) => s.sessions.filter((x) => x.unseenAt !== undefined && s.visibleSessionIds.includes(x.id)).map((x) => x.id).join('\n'));
 
+  // A session leaving the screen is reported at once, so a turn ending just after it left is
+  // marked; additions are debounced to where a fast switch settles.
+  const reported = useRef<string[]>([]);
   useEffect(() => {
     if (isWeb) return;
-    const timer = setTimeout(() => {
-      void invoke('desktop:setVisible', { sessionIds: key ? key.split('\n') : [] }).catch(() => undefined);
-    }, 250);
+    const next = key ? key.split('\n') : [];
+    // Best-effort: a failed report must never surface as a toast in the middle of a switch.
+    const report = (sessionIds: string[]) => {
+      reported.current = sessionIds;
+      void invoke('desktop:setVisible', { sessionIds }).catch(() => undefined);
+    };
+    const kept = reported.current.filter((id) => next.includes(id));
+    if (kept.length < reported.current.length) report(kept);
+    if (next.every((id) => reported.current.includes(id))) return;
+    const timer = setTimeout(() => report(next), 250);
     return () => clearTimeout(timer);
   }, [key]);
 
@@ -53,7 +65,8 @@ export function useSessionViewing(): void {
       clearTimeout(timer);
       timers.current.delete(id);
     }
-    for (const id of [...counted.current]) if (!ids.includes(id)) counted.current.delete(id);
+    const marked = unseenKey ? unseenKey.split('\n') : [];
+    for (const id of [...counted.current]) if (!ids.includes(id) || marked.includes(id)) counted.current.delete(id);
     for (const id of ids) {
       if (timers.current.has(id) || counted.current.has(id)) continue;
       timers.current.set(id, setTimeout(() => {
@@ -63,7 +76,7 @@ export function useSessionViewing(): void {
         void invoke('sessions:markViewed', { id }).catch(() => undefined);
       }, VIEW_DWELL_MS));
     }
-  }, [key, windowFocused]);
+  }, [key, windowFocused, unseenKey]);
   useEffect(() => () => {
     timers.current.forEach(clearTimeout);
     timers.current.clear();

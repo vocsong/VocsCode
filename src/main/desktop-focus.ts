@@ -61,3 +61,10 @@ export class DesktopFocusTracker {
     this.deps.push(this.state());
   }
 }
+
+/** A reloading or crashed renderer shows nothing until it reports its panes again: without this, a
+ *  turn ending in the last-reported sessions while the window stays focused would count as seen. */
+export function forgetVisibleOnRendererReset(contents: NodeJS.EventEmitter, tracker: Pick<DesktopFocusTracker, 'setVisible'>): void {
+  contents.on('did-start-loading', () => tracker.setVisible([]));
+  contents.on('render-process-gone', () => tracker.setVisible([]));
+}

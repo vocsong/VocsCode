@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
-import { DesktopFocusTracker } from '../src/main/desktop-focus';
+import { EventEmitter } from 'node:events';
+import { DesktopFocusTracker, forgetVisibleOnRendererReset } from '../src/main/desktop-focus';
 import { createHandlerRegistry, type HandlerDeps } from '../src/main/handlers';
 import { SettingsStore } from '../src/main/settings';
 import type { DesktopFocus } from '../src/shared/types';
@@ -73,6 +74,19 @@ describe('DesktopFocusTracker', () => {
     // The visible set is local bookkeeping: paired browsers never receive it.
     expect(pushes.every((p) => !('visible' in p) && !('sessionIds' in p))).toBe(true);
     expect(Object.keys(focus.state()).sort()).toEqual(['at', 'sessionId', 'windowFocused']);
+  });
+
+  it('forgets what was on screen when the renderer reloads or dies, so a turn ending then is not seen', () => {
+    for (const event of ['did-start-loading', 'render-process-gone']) {
+      const { focus } = tracker(new Set(['s1']));
+      const contents = new EventEmitter();
+      forgetVisibleOnRendererReset(contents, focus);
+      focus.setWindowFocused(true);
+      focus.setVisible(['s1']);
+      expect(focus.isViewing('s1')).toBe(true);
+      contents.emit(event, {}, {});
+      expect(focus.isViewing('s1'), event).toBe(false);
+    }
   });
 
   it('does not hand out its live state', () => {

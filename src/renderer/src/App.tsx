@@ -135,7 +135,7 @@ export function App() {
       } else if (e.key === 'Escape' && !st.newSessionOpen && !st.quickSessionOpen && !st.paletteOpen && !st.searchOpen) {
         // Escape interrupts the agent only when nothing else would consume it: no open menu, dialog or
         // popover, and focus is on the page body or an empty composer.
-        if (document.querySelector('.dropdown-menu, .modal, .popover, .session-rename, .find-bar')) return;
+        if (document.querySelector('.dropdown-menu, .modal, .popover, .activity-tray, .session-rename, .find-bar')) return;
         const el = document.activeElement as HTMLElement | null;
         const onBody = !el || el === document.body;
         const onEmptyComposer = el?.tagName === 'TEXTAREA' && el.closest('.composer') !== null && !(el as HTMLTextAreaElement).value;

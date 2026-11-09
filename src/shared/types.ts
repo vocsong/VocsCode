@@ -841,6 +841,8 @@ export interface SessionMeta {
    * window). Present means "done · not viewed"; cleared once the session is viewed or the user sends.
    */
   unseenAt?: number;
+  /** The unviewed turn behind `unseenAt` failed; the session itself is usually back to idle by then. */
+  unseenFailed?: boolean;
   /** Epoch ms this session last counted as viewed; the activity tray's Recent list orders by it. */
   lastViewedAt?: number;
   harnessRef: HarnessRef;

@@ -41,7 +41,14 @@ export function ActivityMenu({ className, triggerClassName, label, title, childr
   useEffect(() => clearTimer, []);
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // Escape belongs to the tray while it is open: App's window-level Escape would otherwise
+      // interrupt the running turn (focus is often on the body after a hover-open).
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    };
     const onDown = (e: MouseEvent) => { if (!region.current?.contains(e.target as Node)) close(); };
     document.addEventListener('keydown', onKey);
     document.addEventListener('mousedown', onDown);
@@ -120,7 +127,8 @@ function ActivityTray({ onClose }: { onClose: () => void }) {
         <div className="activity-section-label">{label}</div>
         {list.map((s) => (
           <button key={s.id} type="button" className="activity-row" data-testid="activity-row" onClick={() => void openSession(s)}>
-            <StatusDot status={s.status} />
+            {/* A failed turn has usually returned the session to idle; the dot says how it ended. */}
+            <StatusDot status={s.unseenAt !== undefined && s.unseenFailed ? 'error' : s.status} />
             <span className="activity-row-main">
               <span className="activity-row-title">{s.title}</span>
               <span className="activity-row-meta">{`${basename(s.config.projectRoot)} · ${harnessShort(s.config.harness)}`}</span>
@@ -135,8 +143,8 @@ function ActivityTray({ onClose }: { onClose: () => void }) {
   return (
     <div ref={ref} className="activity-tray" role="dialog" aria-label="Session activity" data-testid="activity-tray" onKeyDown={onKeyDown}>
       {section('Needs you', needs, () => 'Pending')}
-      {/* The last message is when the running turn began. */}
-      {section('Running', running, (s) => relTime(s.lastUserMessageAt ?? s.updatedAt))}
+      {/* No turn-start time exists, and the last user message can be hours before a goal's turn. */}
+      {section('Running', running, () => 'Working')}
       {section('Done · not viewed', done, (s) => relTime(s.unseenAt!))}
       {section('Recent', recent, (s) => relTime(s.lastViewedAt!))}
       {empty && <div className="activity-empty">Nothing running and no recent sessions yet.</div>}

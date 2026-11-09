@@ -15,6 +15,7 @@ import type { RuntimeResolver } from '../src/main/runtime';
 import type { SettingsStore } from '../src/main/settings';
 import type { MissionOwnership } from '../src/shared/mission';
 import type { HarnessAdapter } from '../src/main/harness/types';
+import { REMOTE_CHANNELS } from '../src/shared/remote-channels';
 
 const dirs: string[] = [];
 afterAll(() => {
@@ -70,15 +71,21 @@ describe('marking a turn that finished unviewed', () => {
     const f = await fixture(session());
     f.finishTurn('completed', 5_000);
     expect(f.get().unseenAt).toBe(5_000);
+    expect(f.get().unseenFailed).toBeUndefined();
     expect(f.isViewing).toHaveBeenCalledWith('s1');
     expect(f.pushSessions).toHaveBeenCalled();
     expect(f.pushSessions.mock.lastCall?.[0].find((s: SessionMeta) => s.id === 's1')?.unseenAt).toBe(5_000);
   });
 
-  it('marks a failed turn too', async () => {
+  it('marks a failed turn too, and remembers that it failed', async () => {
     const f = await fixture(session());
     f.finishTurn('failed');
     expect(f.get().unseenAt).toBe(5_000);
+    expect(f.get().unseenFailed).toBe(true);
+    // A later turn that succeeds, still unviewed, is no longer a failure to flag.
+    f.finishTurn('completed', 6_000);
+    expect(f.get().unseenAt).toBe(6_000);
+    expect(f.get().unseenFailed).toBeUndefined();
   });
 
   it('never marks a turn the user interrupted', async () => {
@@ -137,16 +144,33 @@ describe('sending', () => {
 
 describe('markViewed', () => {
   it('clears the mark and stamps the view without reshuffling the sidebar', async () => {
-    const f = await fixture(session({ unseenAt: 5_000, updatedAt: 100 }));
+    const f = await fixture(session({ unseenAt: 5_000, unseenFailed: true, updatedAt: 100 }));
     const before = Date.now();
     const meta = await f.manager.markViewed('s1');
     expect(meta.unseenAt).toBeUndefined();
+    expect(meta.unseenFailed).toBeUndefined();
     expect('unseenAt' in meta).toBe(false);
     expect(meta.lastViewedAt).toBeGreaterThanOrEqual(before);
     // The sidebar orders by updatedAt when there is no user message: viewing must not move a row.
     expect(meta.updatedAt).toBe(100);
     expect(f.upsert).toHaveBeenCalledTimes(1);
     expect(f.pushSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the write when there is no mark and the view was stamped in the last five minutes', async () => {
+    const f = await fixture(session({ lastViewedAt: Date.now() - 60_000 }));
+    const meta = await f.manager.markViewed('s1');
+    expect(f.upsert).not.toHaveBeenCalled();
+    expect(f.pushSessions).not.toHaveBeenCalled();
+    expect(meta.id).toBe('s1');
+  });
+
+  it('refreshes a view stamp older than five minutes', async () => {
+    const f = await fixture(session({ lastViewedAt: Date.now() - 6 * 60_000 }));
+    const before = Date.now();
+    const meta = await f.manager.markViewed('s1');
+    expect(meta.lastViewedAt).toBeGreaterThanOrEqual(before);
+    expect(f.upsert).toHaveBeenCalledTimes(1);
   });
 
   it('rejects an unknown session', async () => {
@@ -159,6 +183,19 @@ describe('markViewed', () => {
     const registry = createHandlerRegistry({ sessions: f.manager, log: () => undefined } as unknown as HandlerDeps);
     const meta = (await registry.invoke('sessions:markViewed', { id: 's1' })) as SessionMeta;
     expect(meta.unseenAt).toBeUndefined();
-    await expect(registry.invoke('sessions:markViewed', { id: '../etc' })).rejects.toThrow();
+    await expect(registry.invoke('sessions:markViewed', { id: '../etc' })).rejects.toThrow('Invalid Mission/session identifier');
+    await expect(registry.invoke('sessions:markViewed', { id: 's1', extra: 1 } as never)).rejects.toThrow();
+  });
+
+  it('keeps the mark when the write fails, so memory never disagrees with disk', async () => {
+    const f = await fixture(session({ unseenAt: 5_000, unseenFailed: true, lastViewedAt: 1 }));
+    f.upsert.mockRejectedValueOnce(new Error('disk full'));
+    await expect(f.manager.markViewed('s1')).rejects.toThrow('disk full');
+    expect(f.get()).toMatchObject({ unseenAt: 5_000, unseenFailed: true, lastViewedAt: 1 });
+    expect(f.pushSessions).not.toHaveBeenCalled();
+  });
+
+  it('is a desktop-only channel, never on the remote surface', () => {
+    expect(REMOTE_CHANNELS.has('sessions:markViewed' as never)).toBe(false);
   });
 });

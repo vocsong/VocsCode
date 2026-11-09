@@ -166,6 +166,21 @@ describe('the tray', () => {
     expect(rows[1].querySelector('.activity-row-time')?.textContent).toBe('12m ago');
   });
 
+  it('shows a failed unviewed turn as an error even though the session went back to idle', () => {
+    renderSidebar([session('ok', { unseenAt: 20 }), session('bad', { unseenAt: 10, unseenFailed: true })]);
+    fireEvent.click(screen.getByTestId('activity-trigger'));
+    const rows = screen.getAllByTestId('activity-row');
+    expect(rows[0].querySelector('.status-dot')?.classList.contains('status-idle')).toBe(true);
+    expect(rows[1].querySelector('.status-dot')?.classList.contains('status-error')).toBe(true);
+  });
+
+  it('says a running session is working rather than guessing when its turn began', () => {
+    // A goal or Mission turn can start hours after the last message the user sent.
+    renderSidebar([session('r1', { status: 'running', lastUserMessageAt: Date.now() - 3 * 3_600_000 })]);
+    fireEvent.click(screen.getByTestId('activity-trigger'));
+    expect(screen.getByTestId('activity-row').querySelector('.activity-row-time')?.textContent).toBe('Working');
+  });
+
   it('says so when there is nothing to show', () => {
     renderSidebar([session('s1')]);
     fireEvent.click(screen.getByTestId('activity-trigger'));

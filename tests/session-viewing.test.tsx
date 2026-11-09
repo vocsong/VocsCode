@@ -98,6 +98,30 @@ describe('counting a session as viewed', () => {
     expect(reports.some((c) => JSON.stringify(c) === JSON.stringify(['desktop:setVisible', { sessionIds: ['s1'] }]))).toBe(false);
   });
 
+  it('reports a session leaving the screen at once, so a turn ending just after is not counted as seen', async () => {
+    const useStore = await setup();
+    await act(async () => { useStore.setState({ visibleSessionIds: ['s1'] }); });
+    await act(async () => { vi.advanceTimersByTime(250); });
+    invoke.mockClear();
+    // Switching s1 out for s2: s1 must be gone from main's set before the debounce settles.
+    await act(async () => { useStore.setState({ visibleSessionIds: ['s2'] }); });
+    expect(invoke).toHaveBeenCalledWith('desktop:setVisible', { sessionIds: [] });
+    await act(async () => { vi.advanceTimersByTime(250); });
+    expect(invoke).toHaveBeenLastCalledWith('desktop:setVisible', { sessionIds: ['s2'] });
+  });
+
+  it('counts a session again when it gains a mark while already on screen', async () => {
+    const useStore = await setup();
+    const meta = { id: 's1', title: 't', createdAt: 1, updatedAt: 1, config: { harness: 'native', projectRoot: '/p', permissionMode: 'ask' }, cwd: '/p', status: 'idle', harnessRef: {}, usage: {} } as never;
+    await act(async () => { useStore.setState({ sessions: [meta], visibleSessionIds: ['s1'], ...focused(true) }); });
+    await act(async () => { vi.advanceTimersByTime(1_500); });
+    expect(markViewedCalls()).toHaveLength(1);
+    // Main marked it anyway (it had not heard s1 was on screen yet): the dot must not stick.
+    await act(async () => { useStore.setState({ sessions: [{ ...(meta as object), unseenAt: 99 } as never] }); });
+    await act(async () => { vi.advanceTimersByTime(1_500); });
+    expect(markViewedCalls()).toHaveLength(2);
+  });
+
   it('never reports or marks from a browser', async () => {
     const useStore = await setup('browser');
     await act(async () => { useStore.setState({ visibleSessionIds: ['s1'], ...focused(true) }); });
