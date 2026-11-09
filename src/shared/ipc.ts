@@ -310,6 +310,8 @@ export interface IpcContract {
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
   /** Persists a pinned-section drag reorder: ids in their new display order. */
   'sessions:pinOrder': [{ ids: string[] }, void];
+  /** The desktop viewed this session: clears "done · not viewed". Local-only. */
+  'sessions:markViewed': [{ id: string }, SessionMeta];
   'sessions:send': [{ id: string; input: UserInput; idempotencyKey?: string }, void];
   /** Replaces a sent message, discards its later transcript items, and runs it again. */
   'sessions:editAndResend': [{ id: string; userItemId: string; input: UserInput }, TranscriptItem[]];

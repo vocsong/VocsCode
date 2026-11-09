@@ -836,6 +836,13 @@ export interface SessionMeta {
   statusDetail?: string;
   /** User-picked display label for the status badge; shown instead of the status name until cleared. */
   statusLabel?: string;
+  /**
+   * Epoch ms a turn ended while nobody was looking at this session (not on screen in the focused
+   * window). Present means "done · not viewed"; cleared once the session is viewed or the user sends.
+   */
+  unseenAt?: number;
+  /** Epoch ms this session last counted as viewed; the activity tray's Recent list orders by it. */
+  lastViewedAt?: number;
   harnessRef: HarnessRef;
   /**
    * Set when the harness has to be handed the conversation on its next message: a fork into another
