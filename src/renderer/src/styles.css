@@ -1232,6 +1232,7 @@ h4 {
   display: none;
 }
 .sidebar-top {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1272,6 +1273,100 @@ h4 {
   flex: 1 1 min-content;
   margin-left: 10px;
 }
+/* The badges are one button that opens the activity tray; they keep the cluster's wrapping. */
+.sidebar-status-trigger {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 2px;
+  margin: -2px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.sidebar-status-trigger:hover,
+.sidebar-status-trigger[aria-expanded='true'] {
+  background: var(--bg-hover);
+}
+/* The tray hangs from the header row, as wide as the sidebar (or wider, over the main view). */
+.activity-tray {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 8px;
+  z-index: 60;
+  width: max(calc(100% - 16px), 300px);
+  max-height: 70vh;
+  overflow: auto;
+  padding: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.activity-section + .activity-section {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.activity-section-label {
+  padding: 4px 8px 2px;
+  color: var(--fg-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.activity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.activity-row:hover,
+.activity-row:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+.activity-row-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.activity-row-title,
+.activity-row-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-row-title {
+  font-weight: 500;
+}
+.activity-row-meta,
+.activity-row-time {
+  color: var(--fg-muted);
+  font-size: 11.5px;
+}
+.activity-row-time {
+  flex-shrink: 0;
+}
+.activity-empty {
+  padding: 10px 8px;
+  color: var(--fg-muted);
+}
+
 /* The primary action and the app's other places, above the session list. */
 .sidebar-nav {
   display: flex;
@@ -1397,6 +1492,13 @@ h4 {
 .project-fold-btn:hover {
   background: var(--bg-hover);
   color: var(--fg);
+}
+.project-unseen {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
 }
 .project-count {
   flex-shrink: 0;
@@ -1690,8 +1792,17 @@ h4 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-row.active .session-title {
+.session-row.active .session-title,
+.session-row.unseen .session-title {
   font-weight: 600;
+}
+/* A turn finished here while nobody was looking; cleared once the session is viewed. */
+.session-unseen-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 /* The harness as a tinted square and its name, quieter than a filled badge. */
 .session-harness {
