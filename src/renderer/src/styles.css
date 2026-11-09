@@ -2150,7 +2150,18 @@ h4 {
   color: var(--amber);
 }
 .model-menu {
-  width: 300px;
+  width: 320px;
+}
+/* A short-list row keeps the model name whole; the catalog's label truncates instead. */
+.model-menu-models .menu-item-label {
+  flex: 0 1 auto;
+  max-width: 80%;
+}
+.model-menu-models .menu-item-hint {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+  text-align: right;
 }
 .model-menu-wide {
   width: 380px;
