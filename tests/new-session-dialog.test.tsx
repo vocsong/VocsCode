@@ -256,4 +256,34 @@ describe('NewSessionDialog', () => {
     const call = invoke.mock.calls.find(([channel]) => channel === 'sessions:create');
     expect((call?.[1] as { config: { useWorktree?: boolean } }).config.useWorktree).toBe(false);
   });
+
+  // The setup entry point is for a harness that is not ready; a signed-in harness with a catalog hides it.
+  const sonnet = { id: 'claude-sonnet-5', provider: 'anthropic', displayName: 'Claude Sonnet 5' };
+  it.each([
+    { name: 'a signed-in harness with a model catalog', harness: 'claude', availability: { available: true, authenticated: true, authMethod: 'subscription' }, catalog: { models: [sonnet] }, shown: false },
+    { name: 'the built-in loop with a provider model', harness: 'native', availability: { available: true, authenticated: 'unknown' }, catalog: { models: [sonnet] }, shown: false },
+    { name: 'a signed-out harness', harness: 'claude', availability: { available: true, authenticated: false }, catalog: { models: [sonnet] }, shown: true },
+    { name: 'a harness whose sign-in cannot be verified', harness: 'claude', availability: { available: true, authenticated: 'unknown' }, catalog: { models: [sonnet] }, shown: true },
+    { name: 'a missing runtime', harness: 'cursor', availability: { available: false }, catalog: { models: [sonnet] }, shown: true },
+    { name: 'a failed model discovery', harness: 'claude', availability: { available: true, authenticated: true }, catalog: { models: [sonnet], error: 'Claude model discovery failed; showing the saved catalog.' }, shown: true },
+    { name: 'the built-in loop with no provider models', harness: 'native', availability: { available: true, authenticated: 'unknown' }, catalog: { models: [] }, shown: true },
+  ])('offers Set up / sign in only when setup is needed: $name', async ({ harness, availability, catalog, shown }) => {
+    const openOnboarding = vi.fn();
+    useStore.setState({ settings: { ...settings, defaultHarness: harness }, availability: { [harness]: availability }, openOnboarding } as never);
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'harness:models') return catalog;
+      if (channel === 'git:folderIsRepo') return { isRepo: true };
+      return {};
+    });
+    render(<NewSessionDialog />);
+    const start = screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+
+    const setup = screen.queryByRole('button', { name: 'Set up / sign in' });
+    expect(!!setup).toBe(shown);
+    if (setup) {
+      fireEvent.click(setup);
+      expect(openOnboarding).toHaveBeenCalledWith(harness);
+    }
+  });
 });
