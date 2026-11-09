@@ -1,7 +1,7 @@
 /** The sidebar header's activity tray: what needs you, what is running, what finished since you last
  *  looked and what you viewed recently, across every folder. Hovering the trigger opens it after a
  *  short pause and leaving closes it; a click pins it open until Escape, a click outside, or a row. */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { SessionMeta } from '../../../shared/types';
 import { activitySections } from '../activity';
 import { invoke } from '../api';
@@ -39,7 +39,9 @@ export function ActivityMenu({ className, triggerClassName, label, title, childr
   };
 
   useEffect(() => clearTimer, []);
-  useEffect(() => {
+  // Attached in the same commit that shows the tray: a hover-open lands from a timer, and an Escape
+  // arriving before a passive effect ran would reach App's handler and interrupt the turn.
+  useLayoutEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
