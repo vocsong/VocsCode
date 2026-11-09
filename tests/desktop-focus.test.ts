@@ -8,6 +8,7 @@ import { DesktopFocusTracker } from '../src/main/desktop-focus';
 import { createHandlerRegistry, type HandlerDeps } from '../src/main/handlers';
 import { SettingsStore } from '../src/main/settings';
 import type { DesktopFocus } from '../src/shared/types';
+import { REMOTE_CHANNELS } from '../src/shared/remote-channels';
 
 const dirs: string[] = [];
 function tmpDir(prefix: string): string {
@@ -55,6 +56,25 @@ describe('DesktopFocusTracker', () => {
     expect(pushes).toHaveLength(3);
   });
 
+  it('counts a session as viewed only while it is on screen and the window is focused', () => {
+    const { focus, pushes } = tracker(new Set(['s1', 's2']));
+    expect(focus.isViewing('s1')).toBe(false);
+    focus.setVisible(['s1']);
+    // On screen but the window is behind another app: not viewed.
+    expect(focus.isViewing('s1')).toBe(false);
+    focus.setWindowFocused(true);
+    expect(focus.isViewing('s1')).toBe(true);
+    expect(focus.isViewing('s2')).toBe(false);
+    focus.setWindowFocused(false);
+    expect(focus.isViewing('s1')).toBe(false);
+    focus.setWindowFocused(true);
+    focus.setVisible([]);
+    expect(focus.isViewing('s1')).toBe(false);
+    // The visible set is local bookkeeping: paired browsers never receive it.
+    expect(pushes.every((p) => !('visible' in p) && !('sessionIds' in p))).toBe(true);
+    expect(Object.keys(focus.state()).sort()).toEqual(['at', 'sessionId', 'windowFocused']);
+  });
+
   it('does not hand out its live state', () => {
     const { focus } = tracker(new Set());
     const state = focus.state();
@@ -76,5 +96,24 @@ describe('desktop focus handlers', () => {
     expect(await registry.invoke('desktop:focus', undefined)).toMatchObject({ sessionId: 's1', windowFocused: false });
     await registry.invoke('desktop:setFocus', { sessionId: 'nope' });
     expect(await registry.invoke('desktop:focus', undefined)).toMatchObject({ sessionId: null });
+  });
+
+  it('records the visible panes and rejects a malformed report', async () => {
+    const { focus } = tracker(new Set(['s1']));
+    const registry = createHandlerRegistry({
+      settings: new SettingsStore(tmpDir('settings')),
+      desktopFocus: focus,
+      log: () => undefined
+    } as unknown as HandlerDeps);
+
+    focus.setWindowFocused(true);
+    await registry.invoke('desktop:setVisible', { sessionIds: ['s1'] });
+    expect(focus.isViewing('s1')).toBe(true);
+    await expect(registry.invoke('desktop:setVisible', { sessionIds: 's1' } as never)).rejects.toThrow();
+    expect(focus.isViewing('s1')).toBe(true);
+  });
+
+  it('keeps the visible-pane report off the remote surface', () => {
+    expect(REMOTE_CHANNELS.has('desktop:setVisible' as never)).toBe(false);
   });
 });

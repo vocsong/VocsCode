@@ -807,6 +807,8 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
   win.on('closed', () => {
     log('debug', 'window closed');
     mainWindow = null;
+    // A closed window shows nothing: a turn that ends now was not seen, whatever the last blur said.
+    onWindowFocus(false);
   });
   // Presence for paired browsers: they follow the desktop only while its window is foregrounded.
   win.on('focus', () => onWindowFocus(true));

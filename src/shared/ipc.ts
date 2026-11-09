@@ -139,6 +139,8 @@ export interface IpcContract {
 
   /** The renderer reports the session it is showing; local only, never on the remote surface. */
   'desktop:setFocus': [{ sessionId: string | null }, void];
+  /** The sessions in the panes on screen; local-only, so main can tell whether a finished turn was seen. */
+  'desktop:setVisible': [{ sessionIds: string[] }, void];
   /** The session the desktop is on, for a paired browser to open by default. */
   'desktop:focus': [void, DesktopFocus];
 
