@@ -118,8 +118,8 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await creationToggle.isChecked()).toBe(true);
     await win.getByRole('button', { name: /Start session/ }).click();
 
-    const more = win.getByRole('button', { name: 'More session controls' });
-    await more.click();
+    // Fast mode lives in the model menu, beside the model it depends on.
+    await win.click('.composer .run-controls .pill[title="Model"]');
     const toggle = win.getByRole('switch', { name: 'Request Fast mode' });
     await toggle.waitFor({ timeout: 60_000 });
     expect(await toggle.getAttribute('aria-checked')).toBe('true');
@@ -127,6 +127,8 @@ describe.runIf(enabled)('model picker before the first message', () => {
     const saved = async () => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
     expect((await saved())[0].config.effort).toBe('high');
+    // The effort the session runs with reads beside the model, not behind a menu.
+    expect(await win.locator('.composer .pill[title="Model"] .pill-effort').innerText()).toBe('high');
 
     await toggle.click();
     await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('false');
@@ -138,7 +140,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await win.getByText(FAST_MODE_COST_WARNING, { exact: true }).isVisible()).toBe(true);
     expect(await toggle.getAttribute('aria-checked')).toBe('false');
     await confirm.click();
-    await more.click();
+    await win.click('.composer .run-controls .pill[title="Model"]');
     await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('true');
     expect(await toggle.innerText()).toContain('requested');
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
@@ -167,7 +169,12 @@ describe.runIf(enabled)('model picker before the first message', () => {
     // Nothing was ever sent, so the harness never spawned: this is the state that used to be empty.
     expect(await win.locator('.transcript .item').count()).toBe(0);
 
+    // The pill opens a short list first; the full catalog is one step in, under More models.
     await win.click('.composer .run-controls .pill[title="Model"]');
+    await win.locator('.composer .model-menu-models .menu-item').first().waitFor({ timeout: 20_000 });
+    expect(await win.locator('.composer .model-menu').getByRole('menuitem', { name: /^Effort/ }).count()).toBe(1);
+    await win.screenshot({ path: path.join(shots, 'models-00-model-menu.png') });
+    await win.getByRole('menuitem', { name: /^More models/ }).click();
     const picker = win.locator('.model-picker');
     await picker.waitFor({ timeout: 10_000 });
     await picker.locator('.mp-row').first().waitFor({ timeout: 20_000 });
@@ -190,6 +197,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     // A gateway id that no catalog lists can still be typed and sticks: a bare id is adopted under
     // the provider already in use, and the pill names it that way.
     await win.click('.composer .run-controls .pill[title="Model"]');
+    await win.getByRole('menuitem', { name: /^More models/ }).click();
     const picker2 = win.locator('.model-picker');
     await picker2.waitFor({ timeout: 10_000 });
     await picker2.locator('.mp-search input').fill('acme-custom-1');
@@ -376,10 +384,12 @@ describe.runIf(enabled)('model picker before the first message', () => {
 
     // Started without a prompt, so no harness process exists; the composer's run controls read the same catalog.
     await win.getByRole('button', { name: /Start session/ }).click();
-    await win.getByRole('button', { name: 'More session controls' }).click();
+    await win.click('.composer .run-controls .pill[title="Model"]');
     const note = win.locator('.composer .run-more-note');
     await expect.poll(() => note.innerText(), { timeout: 60_000 }).toContain('does not support reasoning effort');
     expect(await win.getByRole('menuitem', { name: 'high', exact: true }).count()).toBe(0);
+    expect(await win.locator('.composer .model-menu').getByRole('menuitem', { name: /^Effort/ }).isDisabled()).toBe(true);
+    expect(await win.locator('.composer .pill[title="Model"] .pill-effort').count()).toBe(0);
     const sessions = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
     expect(sessions).toHaveLength(1);
     expect(sessions[0].config.effort).toBeNull();

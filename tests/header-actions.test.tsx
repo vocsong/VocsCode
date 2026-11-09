@@ -1,7 +1,7 @@
 // Header: one row — the session's identity (title, harness, folder, branch), what it changed and the
 // view actions. The 3-dot menu is gone, and fork/archive buttons behave exactly like the sidebar
-// row's (same fork menu, same archive flow). Model and usage stay under the composer;
-// effort, permission and Fast mode are in More: SessionControls.
+// row's (same fork menu, same archive flow). Model, effort, permission and usage stay under the
+// composer: SessionControls.
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -180,6 +180,7 @@ describe('composer run controls', () => {
     expect(pill.textContent).toContain('deepseek/deepseek-v4-flash');
 
     fireEvent.click(pill);
+    fireEvent.click(screen.getByRole('menuitem', { name: /^More models/ }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'openrouter/deepseek/deepseek-flash' } });
     fireEvent.click(screen.getByRole('button', { name: 'Use “openrouter/deepseek/deepseek-flash”' }));
 
@@ -193,33 +194,76 @@ describe('composer run controls', () => {
     );
   });
 
-  it('keeps the model visible while effort, permission and Fast mode live in More', () => {
-    const { container } = setupControls();
-    expect(container.querySelector('[title="Model"]')).toBeTruthy();
-    expect(container.querySelector('[aria-label^="Permission mode:"]')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'More session controls' }));
-    expect(screen.getByText('Reasoning effort · default')).toBeTruthy();
-    expect(screen.getByText('Permission mode · Ask')).toBeTruthy();
-    expect(screen.getByRole('switch', { name: 'Request Fast mode' })).toBeTruthy();
+  it('shows effort beside the model and the permission mode as its own pill, with no More menu', () => {
+    const { container } = setupControls({ activeEffort: 'high' });
+    const pill = container.querySelector('[title="Model"]') as HTMLElement;
+    expect(pill.querySelector('.pill-effort')?.textContent).toBe('high');
+    expect(screen.queryByRole('button', { name: 'More session controls' })).toBeNull();
+
+    const permission = screen.getByRole('button', { name: 'Permission mode: Ask' });
+    fireEvent.click(permission);
     fireEvent.click(screen.getByRole('menuitem', { name: /Accept edits/ }));
     expect(invokeMock).toHaveBeenCalledWith('sessions:setPermissionMode', { id: 's_h', mode: 'accept-edits' });
   });
 
-  it('explains when a model takes no effort in More', () => {
+  it('reads default beside the model while no effort was chosen', () => {
+    const { container } = setupControls();
+    expect((container.querySelector('[title="Model"] .pill-effort') as HTMLElement).textContent).toBe('default');
+  });
+
+  it('explains when a model takes no effort, and drops effort from the pill', () => {
     const haiku = { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' };
     const { container } = setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask', model: haiku } as SessionMeta['config'] });
     act(() => useStore.setState({ models: { s_h: [{ id: haiku.model, provider: haiku.provider, displayName: 'Haiku 4.5', supportedEfforts: [] }] } }));
+    expect(container.querySelector('[title="Model"] .pill-effort')).toBeNull();
 
-    fireEvent.click(container.querySelector('[aria-label="More session controls"]') as HTMLElement);
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    expect((screen.getByRole('menuitem', { name: /^Effort/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText('Haiku 4.5 does not support reasoning effort')).toBeTruthy();
     expect(screen.queryByRole('menuitem', { name: 'high' })).toBeNull();
   });
 
-  it('offers Claude its own effort levels while the model does not say which it takes', () => {
+  it('offers Claude its own effort levels under Effort while the model does not say which it takes', () => {
     const { container } = setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
-    fireEvent.click(container.querySelector('[aria-label="More session controls"]') as HTMLElement);
-    const levels = [...document.querySelectorAll('.dropdown-menu .menu-item')].slice(0, 5).map((item) => item.textContent?.trim());
-    expect(levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Effort/ }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent?.trim())).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    // Back returns to the model list without closing the menu.
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(screen.getByRole('menuitem', { name: /^Effort/ })).toBeTruthy();
+  });
+
+  it('lists starred catalog models plus the current one, and switches with one click', async () => {
+    const catalog = [
+      { id: 'opus', provider: 'anthropic', displayName: 'Opus' },
+      { id: 'fable', provider: 'anthropic', displayName: 'Fable' },
+      { id: 'sonnet', provider: 'anthropic', displayName: 'Sonnet' },
+      { id: 'haiku', provider: 'anthropic', displayName: 'Haiku' },
+      { id: 'mini', provider: 'anthropic', displayName: 'Mini' }
+    ];
+    // A star for a model this catalog does not list stays out of the short list.
+    useStore.setState({ settings: { providers: [], favoriteModels: [{ provider: 'anthropic', model: 'mini' }, { provider: 'openai', model: 'gpt-x' }] } } as never);
+    const { container } = setupControls({ activeModel: { provider: 'anthropic', model: 'sonnet' } });
+    act(() => useStore.setState({ models: { s_h: catalog } }));
+
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    const rows = [...document.querySelectorAll('.model-menu-models .menu-item-label')].map((row) => row.textContent);
+    expect(rows).toEqual(['anthropic/sonnet', 'anthropic/mini']);
+    fireEvent.click(screen.getByRole('menuitem', { name: /anthropic\/mini/ }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sessions:setModel', { id: 's_h', model: { provider: 'anthropic', model: 'mini' } }));
+  });
+
+  it('falls back to the first catalog models without stars, and keeps the full picker under More models', () => {
+    const catalog = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => ({ id, provider: 'p', displayName: id.toUpperCase() }));
+    useStore.setState({ settings: { providers: [], favoriteModels: [] } } as never);
+    const { container } = setupControls({ activeModel: { provider: 'p', model: 'f' } });
+    act(() => useStore.setState({ models: { s_h: catalog } }));
+
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    expect([...document.querySelectorAll('.model-menu-models .menu-item-label')].map((row) => row.textContent)).toEqual(['p/a', 'p/b', 'p/c', 'p/d', 'p/f']);
+    fireEvent.click(screen.getByRole('menuitem', { name: /^More models/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'p/e' } });
+    expect(screen.getByRole('button', { name: /p\/e/ })).toBeTruthy();
   });
 
   it('remembers a successful reasoning effort switch for the next session', async () => {
@@ -231,9 +275,9 @@ describe('composer run controls', () => {
       return Promise.resolve({});
     });
 
-    fireEvent.click(container.querySelector('[aria-label="More session controls"]') as HTMLElement);
-    const high = [...document.querySelectorAll('.dropdown-menu .menu-item')].find((item) => item.textContent?.trim() === 'high') as HTMLElement;
-    fireEvent.click(high);
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Effort/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'high' }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sessions:setEffort', { id: 's_h', effort: 'high' }));
     expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
@@ -246,9 +290,9 @@ describe('composer run controls', () => {
     invokeMock.mockClear();
     invokeMock.mockImplementation((channel: string) => channel === 'sessions:setEffort' ? Promise.reject(new Error('unsupported')) : Promise.resolve({}));
 
-    fireEvent.click(container.querySelector('[aria-label="More session controls"]') as HTMLElement);
-    const high = [...document.querySelectorAll('.dropdown-menu .menu-item')].find((item) => item.textContent?.trim() === 'high') as HTMLElement;
-    fireEvent.click(high);
+    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Effort/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'high' }));
 
     await waitFor(() => expect(useStore.getState().toasts.some((toast) => toast.text.includes('unsupported'))).toBe(true));
     expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());

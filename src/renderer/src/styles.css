@@ -2082,7 +2082,7 @@ h4 {
 
 
 
-/* Model stays visible; effort, permission and Fast mode open upward from More. */
+/* Model (with effort beside it) and permission pills; their menus open upward from the composer. */
 .run-controls {
   display: contents;
 }
@@ -2131,9 +2131,37 @@ h4 {
 .run-controls .pill-model {
   color: var(--fg);
   font-weight: 500;
+  max-width: 340px;
 }
 .run-controls .pill-model > .icon:first-child {
   color: var(--accent);
+}
+/* The model name truncates first; effort and the Fast request stay readable beside it. */
+.pill-effort,
+.pill-fast {
+  flex: none;
+  color: var(--fg-muted);
+  font-weight: 400;
+}
+.pill-fast {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--amber);
+}
+.model-menu {
+  width: 300px;
+}
+.model-menu-wide {
+  width: 380px;
+}
+.model-menu .menu-item > .icon:last-child:not([data-icon='check']) {
+  color: var(--fg-faint);
+}
+.model-menu-back {
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 600;
 }
 .pill-text {
   min-width: 0;

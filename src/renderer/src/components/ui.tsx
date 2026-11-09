@@ -226,13 +226,14 @@ export function Dropdown({
   );
 }
 
-export function MenuItem({ children, onClick, active, danger, hint, disabled }: { children: React.ReactNode; onClick?: () => void; active?: boolean; danger?: boolean; hint?: string; disabled?: boolean }) {
+export function MenuItem({ children, onClick, active, danger, hint, disabled, trailing }: { children: React.ReactNode; onClick?: () => void; active?: boolean; danger?: boolean; hint?: string; disabled?: boolean; trailing?: React.ReactNode }) {
   const inMenu = React.useContext(MenuContext);
   return (
     <button type="button" role={inMenu ? 'menuitem' : undefined} className={`menu-item ${active ? 'active' : ''} ${danger ? 'danger' : ''}`} onClick={onClick} disabled={disabled}>
       <span className="menu-item-label">{children}</span>
       {hint && <span className="menu-item-hint">{hint}</span>}
       {active && <Icon name="check" size={14} />}
+      {trailing}
     </button>
   );
 }
