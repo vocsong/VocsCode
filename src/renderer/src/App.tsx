@@ -23,7 +23,7 @@ import { handleCustomShortcut } from './shortcuts';
 import { createTerminal } from './terminal/host';
 import { applyTheme } from './theme';
 import { isTopLevelSession, pauseMissionSession } from './missions';
-import { useReportDesktopFocus } from './desktop-focus';
+import { useReportDesktopFocus, useSessionViewing } from './desktop-focus';
 import { activeComposer } from './panes';
 
 export function App() {
@@ -45,6 +45,7 @@ export function App() {
   const session = useActiveSession();
   // Tell main (and through it, paired browsers) which session this window is on.
   useReportDesktopFocus();
+  useSessionViewing();
 
   useEffect(() => {
     void boot();

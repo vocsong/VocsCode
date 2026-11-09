@@ -9,7 +9,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { harnessShort } from '../format';
 import { isTopLevelSession } from '../missions';
-import { MIN_PANE_PX, SESSION_DRAG_TYPE, dropZoneAt, type DropZone, type PaneLayout, type SessionPane } from '../panes';
+import { MIN_PANE_PX, SESSION_DRAG_TYPE, dropZoneAt, visiblePaneSessions, type DropZone, type PaneLayout, type SessionPane } from '../panes';
 import { sortSessionRows } from '../sessionOrder';
 import { toastError, useStore } from '../store';
 import { Composer } from './Composer';
@@ -43,6 +43,14 @@ export function SessionPanes({ empty }: { empty: React.ReactNode }) {
     ro.observe(el);
     return () => ro.disconnect();
   }, [split, layout.orientation, layout.panes.length]);
+
+  // What is on screen decides whether a finished turn was seen (useSessionViewing). Another view
+  // replacing the panes unmounts them, so nothing counts as visible then.
+  const visibleKey = visiblePaneSessions(layout, narrow).join('\n');
+  useEffect(() => {
+    useStore.setState({ visibleSessionIds: visibleKey ? visibleKey.split('\n') : [] });
+  }, [visibleKey]);
+  useEffect(() => () => useStore.setState({ visibleSessionIds: [] }), []);
 
   return (
     <div ref={ref} className={`panes panes-${layout.orientation}${split ? ' split' : ''}${narrow ? ' narrow' : ''}`} data-testid="session-panes">
