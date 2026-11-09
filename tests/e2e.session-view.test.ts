@@ -2,7 +2,8 @@
  * Electron end-to-end for the session view's layout: a one-row header that carries the working
  * tree's changes, the visible usage readout and More menu under the composer, a turn's work behind one
  * chip with its plan still on screen, the title bar's search and Vesta launcher, the sidebar's New
- * session entry, and a header that sheds detail in a narrow split pane instead of overflowing it.
+ * session entry, a header that sheds detail in a narrow split pane instead of overflowing it, and the
+ * sidebar's activity tray reaching a session that finished unviewed in a collapsed folder.
  * Sessions, transcripts and a git checkout with uncommitted work are seeded on disk, so no harness
  * and no provider key are involved; review screenshots land in tests/artifacts/session-view-*.png.
  * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
@@ -258,4 +259,69 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     expect(await win.locator('.pane.active .header').getByRole('button', { name: 'Close pane' }).count()).toBe(1);
     await win.screenshot({ path: path.join(shots, 'session-view-04-split.png') });
   }, 180_000);
+
+  it('finds a session that finished unviewed in a collapsed folder from the activity tray, and clears it once viewed', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-activity-'));
+    const userData = path.join(tmp, 'userData');
+    const alpha = path.join(tmp, 'alpha');
+    const beta = path.join(tmp, 'beta');
+    for (const dir of [userData, alpha, beta]) await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(alpha, { folders: [alpha, beta], recentProjects: [alpha, beta], collapsedFolders: [beta] }));
+    const meta = (id: string, title: string, projectRoot: string, patch: Partial<SessionMeta> = {}): SessionMeta => ({
+      id, title, createdAt: T, updatedAt: T, lastUserMessageAt: T,
+      config: { harness: 'native', projectRoot, permissionMode: 'ask' }, cwd: projectRoot, status: 'idle', harnessRef: {}, usage: usage(), ...patch
+    });
+    const DONE = 's_activity_done';
+    // The first row opens on boot; the unviewed one sits in the folded-away folder.
+    const sessions = [meta('s_activity_here', 'Current work', alpha), meta(DONE, 'Migrate the billing tables', beta, { unseenAt: Date.now() - 12 * 60_000 })];
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
+    for (const s of sessions) {
+      await fs.mkdir(path.join(userData, 'sessions', s.id), { recursive: true });
+      await fs.writeFile(path.join(userData, 'sessions', s.id, 'transcript.jsonl'), JSON.stringify({ id: 'u1', kind: 'user', ts: T, text: s.title }) + '\n');
+    }
+
+    const win = await launch(userData);
+    await win.setViewportSize({ width: 1280, height: 800 });
+    const trigger = win.getByTestId('activity-trigger');
+    await expect.poll(() => trigger.textContent()).toContain('1 done');
+    // The collapsed folder says it holds something unviewed even though its rows are hidden.
+    await expect.poll(() => win.getByTestId('project-unseen').textContent()).toBe('●1');
+    await expect.poll(() => win.locator(`[data-session-id="${DONE}"]`).count()).toBe(0);
+
+    await trigger.hover();
+    const tray = win.getByTestId('activity-tray');
+    await tray.waitFor();
+    expect(await tray.locator('.activity-section-label').allTextContents()).toEqual(['Done · not viewed']);
+    const row = tray.getByTestId('activity-row');
+    expect(await row.locator('.activity-row-title').textContent()).toBe('Migrate the billing tables');
+    expect(await row.locator('.activity-row-meta').textContent()).toBe('beta · Native');
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'session-view-06-activity-tray.png') });
+
+    // As main sees it, the window is behind another app (a quiet run never focuses it; a visible
+    // run might, so say so explicitly).
+    const setFocused = (focused: boolean) => app!.evaluate(({ BrowserWindow }, f) => { BrowserWindow.getAllWindows()[0]!.emit(f ? 'focus' : 'blur'); }, focused);
+    await setFocused(false);
+    await row.click();
+    await tray.waitFor({ state: 'hidden' });
+    // The folder unfolded and the session is open in the active pane.
+    const listRow = win.locator(`[data-session-id="${DONE}"]`);
+    await listRow.waitFor();
+    await expect.poll(() => win.locator('.pane.active .header').textContent()).toContain('Migrate the billing tables');
+
+    // On screen alone is not viewed: with the window unfocused the mark stays.
+    await win.waitForTimeout(2_500);
+    expect(await listRow.getByTestId('session-unseen-dot').count()).toBe(1);
+    expect(await trigger.textContent()).toContain('1 done');
+
+    // Bring the window to the front (as main sees it); after the dwell the mark clears everywhere.
+    await setFocused(true);
+    await expect.poll(() => listRow.getByTestId('session-unseen-dot').count(), { timeout: 10_000 }).toBe(0);
+    await expect.poll(() => win.getByTestId('activity-trigger').getAttribute('aria-label')).toBe('Recent sessions');
+    await expect.poll(async () => {
+      const saved = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
+      const done = saved.find((s) => s.id === DONE)!;
+      return { unseen: 'unseenAt' in done, viewed: typeof done.lastViewedAt };
+    }, { timeout: 10_000 }).toEqual({ unseen: false, viewed: 'number' });
+  }, 120_000);
 });
