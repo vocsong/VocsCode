@@ -136,6 +136,14 @@ describe('cross-harness fork context', () => {
     expect(sent[1].text).toBe('and run it');
   });
 
+  it('starts a fork clean: it never inherits the source\'s "done · not viewed" mark or view stamp', async () => {
+    const { manager } = makeManager({ ...source('claude'), unseenAt: 5_000, unseenFailed: true, lastViewedAt: 4_000 }, conversation);
+    const fork = (await manager.fork('s_src'))!;
+    expect(fork.unseenAt).toBeUndefined();
+    expect(fork.unseenFailed).toBeUndefined();
+    expect(fork.lastViewedAt).toBeUndefined();
+  });
+
   it('does not seed a same-harness fork that stayed in the source directory', async () => {
     sent.length = 0;
     const { manager } = makeManager(source('claude'), conversation);

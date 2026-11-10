@@ -139,6 +139,8 @@ export interface IpcContract {
 
   /** The renderer reports the session it is showing; local only, never on the remote surface. */
   'desktop:setFocus': [{ sessionId: string | null }, void];
+  /** The sessions in the panes on screen; local-only, so main can tell whether a finished turn was seen. */
+  'desktop:setVisible': [{ sessionIds: string[] }, void];
   /** The session the desktop is on, for a paired browser to open by default. */
   'desktop:focus': [void, DesktopFocus];
 
@@ -308,6 +310,8 @@ export interface IpcContract {
   'sessions:pin': [{ id: string; pinned: boolean }, SessionMeta];
   /** Persists a pinned-section drag reorder: ids in their new display order. */
   'sessions:pinOrder': [{ ids: string[] }, void];
+  /** The desktop viewed this session: clears "done · not viewed". Local-only. */
+  'sessions:markViewed': [{ id: string }, SessionMeta];
   'sessions:send': [{ id: string; input: UserInput; idempotencyKey?: string }, void];
   /** Replaces a sent message, discards its later transcript items, and runs it again. */
   'sessions:editAndResend': [{ id: string; userItemId: string; input: UserInput }, TranscriptItem[]];

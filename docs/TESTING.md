@@ -138,6 +138,7 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 | --- | --- |
 | Transcript file mentions, Files panel | `e2e.files` |
 | Sidebar, New Session dialog, session lifecycle | `e2e.terminal` (no key) + `e2e.electron` (live) |
+| Activity tray and "done · not viewed" — the header trigger, `ActivityTray.tsx`, `activity.ts`, the viewing dwell (`useSessionViewing`), `DesktopFocusTracker`'s visible set, `SessionManager.markViewed` / turn-end marking | `tests/activity-tray.test.tsx`, `tests/session-viewing.test.tsx`, `tests/session-unseen.test.ts`, `tests/desktop-focus.test.ts` + `e2e.session-view` (review screenshot `tests/artifacts/session-view-06-activity-tray.png`) |
 | Right-click menus (`components/ContextMenu.tsx`), folder removal | `tests/context-menus.test.tsx`, `tests/folder-remove.test.ts` + `e2e.context-menu` |
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Composer slash commands answered in the transcript (`/doctor`) | `tests/composer-doctor.test.tsx` + `e2e.doctor` |

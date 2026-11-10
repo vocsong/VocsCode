@@ -151,6 +151,22 @@ describe('split view, empty pane holding focus', () => {
   });
 });
 
+describe('Escape with the activity tray open', () => {
+  it('closes a hover-opened tray without interrupting the running turn', async () => {
+    useStore.setState({ sessions: [{ ...A, status: 'running' }, B] } as never);
+    render(<App />);
+    fireEvent.mouseEnter(document.querySelector('[data-testid="activity-trigger"]')!.parentElement!);
+    await waitFor(() => expect(document.querySelector('[data-testid="activity-tray"]')).not.toBeNull());
+    (document.activeElement as HTMLElement | null)?.blur();
+
+    invoke.mockClear();
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(document.querySelector('[data-testid="activity-tray"]')).toBeNull();
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(invoke).not.toHaveBeenCalledWith('sessions:interrupt', expect.anything());
+  });
+});
+
 describe('split view', () => {
   it('renders exactly one pane with no split chrome until the user splits', () => {
     render(<App />);
