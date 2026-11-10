@@ -202,7 +202,7 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.screenshot({ path: path.join(shots, 'session-view-02-work.png') });
     await work.click();
 
-    // The changes chip opens Changes; cost stays visible while permission lives behind More.
+    // The changes chip opens Changes; cost, the model with its effort, and the permission pill stay visible.
     await changes.click();
     await win.locator('.panel-tab.active', { hasText: 'Changes' }).waitFor({ timeout: 10_000 });
     await win.locator('.changes').waitFor({ timeout: 10_000 });
@@ -210,14 +210,12 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     expect(await composer.locator('.run-controls .pill[title="Model"]').innerText()).toContain('anthropic/claude-opus-5-5');
     const meter = composer.getByRole('button', { name: 'Session usage' });
     expect(await meter.innerText()).toMatch(/32%[\s\S]*\$0\.84/);
-    expect(await composer.getByRole('button', { name: 'Permission mode: Edits' }).count()).toBe(0);
-    await composer.getByRole('button', { name: 'More session controls' }).click();
-    expect(await composer.getByText('Permission mode · Edits').count()).toBe(1);
-    await win.screenshot({ path: path.join(shots, 'session-view-05-more.png') });
+    expect(await composer.getByRole('button', { name: 'More session controls' }).count()).toBe(0);
+    await composer.getByRole('button', { name: 'Permission mode: Edits' }).click();
+    await win.screenshot({ path: path.join(shots, 'session-view-05-permission.png') });
     await composer.getByRole('menuitem', { name: /Ask before acting/ }).click();
     await expect.poll(async () => (await win.evaluate(() => window.harness.invoke('sessions:list', undefined))).find((s: SessionMeta) => s.id === SID)?.config.permissionMode).toBe('ask');
-    await composer.getByRole('button', { name: 'More session controls' }).click();
-    expect(await composer.getByText('Permission mode · Ask').count()).toBe(1);
+    await composer.getByRole('button', { name: 'Permission mode: Ask' }).waitFor({ timeout: 10_000 });
     await meter.click();
     await win.locator('.panel-tab.active', { hasText: 'Usage' }).waitFor({ timeout: 10_000 });
 
