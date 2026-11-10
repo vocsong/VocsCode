@@ -44,3 +44,13 @@ export function harnessStatus(harness: HarnessId, status?: HarnessAvailability):
   if (status.authenticated === false) return { label: 'Sign-in needed', tone: 'amber' };
   return { label: 'Sign-in not verified', tone: 'amber' };
 }
+
+/** Whether New Session offers setup: the runtime or sign-in is not ready, or no usable model catalog loaded.
+ *  An unchecked harness is not flagged; ACP's catalog note (models arrive after start) is not a fault. */
+export function harnessNeedsSetup(harness: HarnessId, status: HarnessAvailability | undefined, catalog: { loading: boolean; count: number; error?: string }): boolean {
+  if (!status) return false;
+  if (harnessStatus(harness, status).tone !== 'green' && harness !== 'native') return true;
+  if (!status.available) return true;
+  if (catalog.loading || harness === 'acp') return false;
+  return !!catalog.error || catalog.count === 0;
+}
