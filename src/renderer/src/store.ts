@@ -144,6 +144,8 @@ interface State {
   processSummary: ProcessSummary | null;
   /** Where the desktop window is looking, from desktop:focus / push:desktopFocus. */
   desktopFocus: DesktopFocus | null;
+  /** The sessions in the panes actually on screen (SessionPanes); empty while another view hides them. */
+  visibleSessionIds: string[];
   /** The host's remote policy, pushed over the e2e session; view-only gates write controls. */
   remoteAccess: { viewOnly: boolean };
   /** Text another part of the UI wants Vesta's composer to start from. */
@@ -436,6 +438,7 @@ export const useStore = create<State>((set, get) => ({
   updateState: { status: 'idle' },
   processSummary: null,
   desktopFocus: null,
+  visibleSessionIds: [],
   remoteAccess: { viewOnly: false },
   agentPrefill: null,
   toasts: [],

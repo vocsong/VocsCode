@@ -759,6 +759,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   // The renderer reports where the desktop is; a paired browser reads it and follows the push.
   handle('desktop:setFocus', ({ sessionId }) => deps.desktopFocus?.setSession(sessionId));
+  handle('desktop:setVisible', (input) => deps.desktopFocus?.setVisible(z.strictObject({ sessionIds: z.array(z.string()).max(32) }).parse(input).sessionIds));
   handle('desktop:focus', () => deps.desktopFocus?.state() ?? { sessionId: null, at: 0, windowFocused: false });
 
   handle('settings:get', () => settings.get());
@@ -1255,6 +1256,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
   handle('sessions:pin', ({ id, pinned }) => sessions.setPinned(id, pinned));
   handle('sessions:pinOrder', ({ ids }) => sessions.setPinOrder(ids));
+  handle('sessions:markViewed', (input) => sessions.markViewed(missionIdSchema.parse(z.strictObject({ id: z.string() }).parse(input).id)));
   handle('sessions:send', async ({ id, input, idempotencyKey }) => {
     const session = sessionFor(id);
     if (missionFor(session)) {

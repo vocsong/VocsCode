@@ -9,7 +9,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
 import { AnalyticsStore } from './analytics';
-import { DesktopFocusTracker } from './desktop-focus';
+import { DesktopFocusTracker, forgetVisibleOnRendererReset } from './desktop-focus';
 import { watchEventLoop } from './diag';
 import { setGitLog } from './git';
 import { PRODUCT_APP_ID, resolveAppIdentity } from './identity';
@@ -263,6 +263,8 @@ async function main(): Promise<void> {
     runtime,
     analytics,
     getSecret: (id) => secrets.get(id),
+    // Read on turn end only, long after the tracker below exists.
+    isViewing: (id): boolean => desktopFocus.isViewing(id),
     sharedGitnexus: () => sharedGitnexus.ensure(),
     gitnexusProxyPath: runtime.resource('mcp', 'gitnexus-scope.mjs'),
     memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
@@ -517,7 +519,7 @@ async function main(): Promise<void> {
   // application menu because the system requires one for the app menu and standard shortcuts.
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
-  createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused));
+  createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused), (contents) => forgetVisibleOnRendererReset(contents, desktopFocus));
 
   log('info', `ready in ${Math.round(process.uptime() * 1000)}ms: ${store.list().length} session(s), ${terminals.list().length} terminal tab(s)`);
 
@@ -529,7 +531,7 @@ async function main(): Promise<void> {
   if (analytics.forkSweepPending) void reconcileForkInheritance(analytics, store, logTo);
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused));
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused), (contents) => forgetVisibleOnRendererReset(contents, desktopFocus));
   });
   app.on('window-all-closed', () => {
     // macOS convention: stay resident so the 'activate' dock handler can reopen a window.
@@ -753,7 +755,7 @@ function applyChrome(): void {
   }
 }
 
-function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (focused: boolean) => void): void {
+function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (focused: boolean) => void, watchRenderer: (contents: Electron.WebContents) => void): void {
   const s = settings.get();
   const bounds = s.windowBounds ?? { width: 1440, height: 900 };
   const icon = appIconPath(appRoot);
@@ -807,10 +809,13 @@ function createWindow(settings: SettingsStore, appRoot: string, onWindowFocus: (
   win.on('closed', () => {
     log('debug', 'window closed');
     mainWindow = null;
+    // A closed window shows nothing: a turn that ends now was not seen, whatever the last blur said.
+    onWindowFocus(false);
   });
   // Presence for paired browsers: they follow the desktop only while its window is foregrounded.
   win.on('focus', () => onWindowFocus(true));
   win.on('blur', () => onWindowFocus(false));
+  watchRenderer(win.webContents);
   // A preload failure leaves the renderer with no IPC bridge; the crash, stall and load-failure
   // handlers live with the recovery wiring below.
   win.webContents.on('preload-error', (_e, preloadPath, error) => {

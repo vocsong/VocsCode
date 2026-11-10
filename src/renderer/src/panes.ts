@@ -55,6 +55,13 @@ export function activePane(layout: PaneLayout): SessionPane {
   return layout.panes.find((p) => p.id === layout.activePaneId) ?? layout.panes[0]!;
 }
 
+/** The sessions actually on screen: every pane's, or only the active pane's when the split is too
+ *  narrow to show the others (SessionPanes hides them then). Empty panes show no session. */
+export function visiblePaneSessions(layout: PaneLayout, narrow: boolean): string[] {
+  const shown = narrow ? [activePane(layout)] : layout.panes;
+  return shown.flatMap((p) => (p.sessionId ? [p.sessionId] : []));
+}
+
 export function paneShowing(layout: PaneLayout, sessionId: string): SessionPane | undefined {
   return layout.panes.find((p) => p.sessionId === sessionId);
 }

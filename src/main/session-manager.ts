@@ -66,6 +66,9 @@ export interface SessionManagerDeps {
   pushSessions: (sessions: SessionMeta[]) => void;
   notify: (sessionId: string, title: string, body: string) => void;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
+  /** Whether this session is on screen in the focused desktop window (DesktopFocusTracker). A turn
+   *  that ends while it is not is marked "done · not viewed"; absent counts as nobody looking. */
+  isViewing?: (sessionId: string) => boolean;
   /** The shared GitNexus MCP endpoint, started lazily. */
   sharedGitnexus?: () => Promise<string | null>;
   /** Path to the scope proxy the harness spawns in place of the GitNexus binary. */
@@ -91,6 +94,9 @@ export interface SessionManagerDeps {
   /** Test seam: how long an ordinary Stop waits for its adapter's disposal before releasing the session. */
   disposeWaitMs?: number;
 }
+
+/** How stale a session's `lastViewedAt` may get before viewing it again rewrites the stamp. */
+const VIEW_STAMP_REFRESH_MS = 5 * 60_000;
 
 /** An ordinary Stop gives a disposing adapter this long (above every adapter's own shutdown
  * deadline) before the session is released anyway; the disposal itself carries on regardless. */
@@ -941,6 +947,31 @@ export class SessionManager {
     return meta;
   }
 
+  /**
+   * The session counted as viewed: clears "done · not viewed" and stamps the view for the activity
+   * tray's Recent list. Like pinning, it must not bump updatedAt — viewing must not reorder rows.
+   */
+  async markViewed(id: string): Promise<SessionMeta> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    // Every return to the window re-views what is on screen. With no mark to clear and a fresh
+    // stamp, Recent's order would not change: skip rewriting the index and broadcasting the list.
+    if (meta.unseenAt === undefined && meta.lastViewedAt !== undefined && Date.now() - meta.lastViewedAt < VIEW_STAMP_REFRESH_MS) return meta;
+    const before = { unseenAt: meta.unseenAt, unseenFailed: meta.unseenFailed, lastViewedAt: meta.lastViewedAt };
+    delete meta.unseenAt;
+    delete meta.unseenFailed;
+    meta.lastViewedAt = Date.now();
+    try {
+      await this.deps.store.upsert(meta);
+    } catch (e) {
+      // Disk still has the mark; keep memory agreeing with it so the next view retries.
+      Object.assign(meta, before);
+      throw e;
+    }
+    this.pushSessions();
+    return meta;
+  }
+
   /** Persists a pinned-section drag reorder: ids in display order get ascending pin stamps. */
   async setPinOrder(ids: string[]): Promise<void> {
     let changed = false;
@@ -1579,7 +1610,12 @@ export class SessionManager {
     this.emit(id, { type: 'item.upsert', item: userItem });
     // The sidebar orders rows by the user's own last message: stamp it before the harness even
     // starts, so the row moves up on the send rather than on whatever the turn does next.
-    if (source === 'user') meta.lastUserMessageAt = userItem.ts;
+    if (source === 'user') {
+      meta.lastUserMessageAt = userItem.ts;
+      // Writing to a session is looking at it.
+      delete meta.unseenAt;
+      delete meta.unseenFailed;
+    }
     // A session named from a dialog prompt or a goal is already carrying a placeholder, and that
     // placeholder is the better one: it was cut from what the user wrote, not from a `/goal …`
     // command the app composed. Keep it on screen and let the model replace it.
@@ -2655,6 +2691,15 @@ export class SessionManager {
       turn.status === 'failed' ? 'warn' : 'info',
       `[${meta.id}] turn ${turn.status}${turn.durationMs !== undefined ? ` in ${(turn.durationMs / 1000).toFixed(1)}s` : ''}${turn.usage ? ` (${turn.usage.inputTokens} in / ${turn.usage.outputTokens} out)` : ''}${turn.costUsd ? ` $${turn.costUsd.toFixed(4)}` : ''}${turn.error ? `: ${turn.error}` : ''}`
     );
+    // A turn that ends with nobody looking stays "done · not viewed" until the session is viewed.
+    // An interrupt is the user's own doing, and a Mission worker is never a sidebar row.
+    if (turn.status !== 'interrupted' && !meta.archived && meta.mission?.role !== 'worker' && !this.deps.isViewing?.(meta.id)) {
+      meta.unseenAt = turn.ts;
+      if (turn.status === 'failed') meta.unseenFailed = true;
+      else delete meta.unseenFailed;
+      this.schedulePersist(meta);
+      this.pushSessions();
+    }
     const active = this.active.get(meta.id);
     if (this.settings().notifications && turn.status !== 'interrupted' && (!meta.mission || turn.status !== 'completed')) {
       this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);
@@ -2965,6 +3010,10 @@ export class SessionManager {
       pinned: undefined,
       pinnedAt: undefined,
       archived: undefined,
+      // Nobody has looked at a fork yet, and nothing it did has finished unviewed.
+      unseenAt: undefined,
+      unseenFailed: undefined,
+      lastViewedAt: undefined,
       // Writer claims belong to the source's runtimes; a fork has run nothing yet.
       workspaceWriterClaims: undefined,
       cwd: own?.path ?? src.cwd,
