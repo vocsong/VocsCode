@@ -41,6 +41,16 @@ export async function fetchProviderModels(provider: ProviderConfig, apiKey: stri
     return models.map((m) => ({ ...cursorModelToInfo(m), provider: provider.id }));
   }
   if (provider.kind === 'anthropic') {
+    // Without a credential the SDK throws an unreadable auth error. A Claude subscription sign-in
+    // belongs to Claude Code, not this catalog, so say where its models come from instead.
+    const authHeader = Object.keys(provider.headers ?? {}).some((h) => /^(x-api-key|authorization)$/i.test(h));
+    if (!apiKey && !authHeader && !process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+      throw new Error(
+        `No API key stored${provider.envKey ? ` and ${provider.envKey} is not set` : ''}, so the model catalog cannot be fetched. ` +
+          'A Claude subscription sign-in does not need one: the Claude Agent SDK model picker lists the models its Claude Code runtime knows. ' +
+          'For a newer model, add its id under Models.'
+      );
+    }
     const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, defaultHeaders: provider.headers });
     const out: ModelInfo[] = [];
     for await (const m of client.models.list({ limit: 100 })) {
