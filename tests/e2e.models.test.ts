@@ -544,9 +544,27 @@ describe.runIf(enabled)('first-run setup through real desktop boundaries', () =>
       await openNewSession(win);
       expect(await win.locator('.harness-card.active').innerText()).toContain('Native loop');
       await expect.poll(() => win.locator('.mp-row.active .mp-name').getAttribute('title'), { timeout: 30_000 }).toBe(`${id}/fixture-chat`);
+      // The longest status a card can show must stay inside its own column, not slide under the model picker.
+      const cards = win.locator('.harness-card');
+      await expect.poll(() => win.locator('.harness-card .badge').count(), { timeout: 30_000 }).toBe(await cards.count());
+      expect(await win.locator('.ns-grid').evaluate((grid) => {
+        for (const badge of grid.querySelectorAll('.harness-card .badge')) badge.textContent = 'Subscription sign-in detected';
+        const col = grid.querySelector('.ns-col')!.getBoundingClientRect();
+        return [...grid.querySelectorAll<HTMLElement>('.harness-card')].filter((card) => {
+          const r = card.getBoundingClientRect();
+          return r.left < col.left - 1 || r.right > col.right + 1 || card.scrollWidth > card.clientWidth + 1;
+        }).length;
+      })).toBe(0);
+      const setupButton = win.getByRole('button', { name: 'Set up / sign in', exact: true });
+      // A ready harness with a catalog hides the setup entry point.
+      expect(await setupButton.count()).toBe(0);
       const prompt = win.getByPlaceholder('What should the agent do?');
       await prompt.fill('Keep this unsent draft while I check setup');
-      await win.getByRole('button', { name: 'Set up / sign in', exact: true }).click();
+      // With its only provider switched off the built-in loop has no model, so setup is offered.
+      const provider = (await win.evaluate(() => window.harness.invoke('providers:list', undefined))).find((p: ProviderConfig) => p.id === id)!;
+      await win.evaluate((p) => window.harness.invoke('providers:save', p), { ...provider, enabled: false });
+      await win.getByRole('button', { name: 'Recheck models and sign-in', exact: true }).click();
+      await setupButton.click();
       const recovery = win.getByRole('dialog', { name: 'Welcome to Vocs Code', exact: true });
       await recovery.getByRole('heading', { name: 'Connect Native loop', exact: true }).waitFor();
       await expect.poll(() => recovery.locator('.setup-provider select').inputValue()).toBe(id);

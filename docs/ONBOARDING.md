@@ -2,7 +2,9 @@
 
 The guide sets up **one working agent**, not every engine or utility service. Open it on first run,
 from Home → **Setup guide**, Settings → **Harnesses**, the **Harness logins** card in Providers &
-keys, or New Session → **Set up / sign in**. The New Session overlay keeps the unsent prompt and
+keys, or New Session → **Set up / sign in**. That button appears only while the selected harness
+needs setup: its runtime is missing, its sign-in is missing or unverified, or its model catalog failed
+to load or is empty (the built-in loop with no enabled provider). The New Session overlay keeps the unsent prompt and
 options beneath it. Closing setup refreshes that dialog's catalog rather than reusing an old
 sign-in failure.
 

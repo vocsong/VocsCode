@@ -5245,12 +5245,15 @@ body.resizing {
 .ns-summary code {
   color: var(--accent);
 }
+/* minmax(0, …) and the wrapping header keep a long status badge inside its card; a plain 1fr
+   column grows to the badge's nowrap width and pushes the cards into the model column. */
 .harness-cards {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
 }
 .harness-card {
+  min-width: 0;
   text-align: left;
   border: 1px solid var(--border);
   background: var(--bg-elev);
@@ -5267,9 +5270,14 @@ body.resizing {
 }
 .harness-card-top {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
-  gap: 6px;
+  gap: 4px 6px;
+}
+.harness-card-top .badge {
+  max-width: 100%;
+  white-space: normal;
 }
 .harness-card-name {
   font-weight: 600;
