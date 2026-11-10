@@ -7,14 +7,19 @@ import { invoke, modKey } from '../api';
 import { basename, harnessShort, harnessTone, relTime } from '../format';
 import { archiveSession, removeFolder } from '../sessionActions';
 import { isTopLevelSession } from '../missions';
+import { activitySections } from '../activity';
 import { sortSessionRows } from '../sessionOrder';
 import { useStore, toastError } from '../store';
 import { canSplit, paneShowing, SESSION_DRAG_TYPE } from '../panes';
 import { Resizer } from './Resizer';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
 import { FolderBranch } from './FolderBranch';
+import { ActivityMenu } from './ActivityTray';
 import { ForkIntoDropdown } from './ForkInto';
 import { askConfirm, Badge, Button, Dropdown, Icon, Kbd, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
+
+/** Sessions in a folder whose last turn finished while nobody was looking. */
+const unseenIn = (list: SessionMeta[]): number => list.filter((s) => s.unseenAt !== undefined).length;
 
 /** Icon choices for folder headers (names from the renderer icon set). */
 const FOLDER_ICONS = [
@@ -257,6 +262,8 @@ export function Sidebar() {
 
   const awaiting = sessions.filter((s) => isTopLevelSession(s) && s.status === 'awaiting').length;
   const running = sessions.filter((s) => isTopLevelSession(s) && s.status === 'running').length;
+  const done = activitySections(sessions, null).done.length;
+  const plural = (n: number) => `${n} ${n === 1 ? 'session' : 'sessions'}`;
 
   return (
     <aside className="sidebar">
@@ -265,17 +272,27 @@ export function Sidebar() {
           <Icon name="logo" size={22} />
           <span>Vocs Code</span>
         </div>
-        {(running > 0 || awaiting > 0) && (
-          <div className="sidebar-status">
+        {(running > 0 || awaiting > 0 || done > 0) && (
+          <ActivityMenu className="sidebar-status" triggerClassName="sidebar-status-trigger" title="Show session activity">
             {running > 0 && <Badge tone="blue">{running} running</Badge>}
             {awaiting > 0 && (
-              <Badge tone="red" title={`${awaiting} ${awaiting === 1 ? 'session' : 'sessions'} awaiting approval`}>
+              <Badge tone="red" title={`${plural(awaiting)} awaiting approval`}>
                 {awaiting} awaiting
               </Badge>
             )}
-          </div>
+            {done > 0 && (
+              <Badge tone="green" title={`${plural(done)} finished since you last looked`}>
+                {done} done
+              </Badge>
+            )}
+          </ActivityMenu>
         )}
         <div className="sidebar-top-actions">
+          {running === 0 && awaiting === 0 && done === 0 && (
+            <ActivityMenu className="" triggerClassName="btn btn-ghost btn-sm btn-icon" label="Recent sessions" title="Recent sessions">
+              <Icon name="clock" size={14} />
+            </ActivityMenu>
+          )}
           <Button variant="ghost" size="sm" icon="search" className="btn-icon" onClick={() => useStore.getState().openSearch(true)} title="Search sessions (Ctrl+Shift+F)" aria-label="Search sessions" />
           <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
         </div>
@@ -364,6 +381,11 @@ export function Sidebar() {
                 {basename(g.root)}
               </button>
               {isCollapsed && g.list.length > 0 && <span className="project-count">{g.list.length}</span>}
+              {isCollapsed && unseenIn(g.list) > 0 && (
+                <span className="project-unseen" data-testid="project-unseen" title={`${plural(unseenIn(g.list))} finished since you last looked`}>
+                  ●{unseenIn(g.list)}
+                </span>
+              )}
               <FolderBranch root={g.root} expanded={!isCollapsed} />
               <button
                 type="button"
@@ -497,7 +519,7 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
   const indicator = dnd.overId === s.id && dnd.dragId && dnd.dragId !== s.id ? (dnd.pos === 'before' ? ' drag-above' : ' drag-below') : '';
   return (
     <div
-      className={`session-row ${active ? 'active' : ''}${inPane ? ' in-pane' : ''}${dragClass}${indicator}`}
+      className={`session-row ${active ? 'active' : ''}${inPane ? ' in-pane' : ''}${s.unseenAt !== undefined ? ' unseen' : ''}${dragClass}${indicator}`}
       data-testid="session-row"
       data-session-id={s.id}
       draggable={canDrag}
@@ -560,6 +582,7 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
           />
         ) : (
           <div className="session-title">
+            {s.unseenAt !== undefined && <span className="session-unseen-dot" data-testid="session-unseen-dot" title="Finished since you last looked" />}
             <span title="Click to rename" onClick={(e) => { e.stopPropagation(); startRename(); }}>{s.title}</span>
           </div>
         )}
