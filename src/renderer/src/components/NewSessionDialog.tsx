@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { AppSettings, EffortLevel, FileAttachment, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { branchNameFromText, branchPrefixOptions, branchSlug, normalizeBranchPrefix } from '../../../shared/branch-prefix';
 import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
-import { harnessStatus } from '../../../shared/harness-setup';
+import { harnessNeedsSetup, harnessStatus } from '../../../shared/harness-setup';
 import { FAST_MODE_COST_WARNING, fastModeSupport } from '../../../shared/fast-mode';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
 import { invoke } from '../api';
@@ -389,8 +389,12 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
             )}
           </Field>
 
-          <Button size="sm" onClick={() => useStore.getState().openOnboarding(harness)}>Set up / sign in</Button>
-          <p className="muted small">Setup opens above this dialog and keeps your prompt and session options.</p>
+          {harnessNeedsSetup(harness, availability[harness], { loading: modelsLoading, count: models.length, error: modelsError }) && (
+            <>
+              <Button size="sm" onClick={() => useStore.getState().openOnboarding(harness)}>Set up / sign in</Button>
+              <p className="muted small">Setup opens above this dialog and keeps your prompt and session options.</p>
+            </>
+          )}
           {harness === 'acp' && (
             <Field label="ACP agent">
               <select value={acpAgent} onChange={(e) => setAcpAgent(e.target.value)}>
