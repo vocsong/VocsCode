@@ -75,6 +75,35 @@ describe.skipIf(process.platform !== 'win32')('Claude SDK runtime selection on W
     await fs.writeFile(binary, '');
     expect(resolver.resolve('claude')).toEqual({ path: binary, source: 'bundled' });
   });
+
+  // `npm i -g @anthropic-ai/claude-code` (what `claude update` refreshes) writes this shim layout.
+  async function npmShim(dir: string): Promise<string> {
+    const binary = path.join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
+    await fs.mkdir(path.dirname(binary), { recursive: true });
+    await fs.writeFile(binary, '');
+    await fs.writeFile(path.join(dir, 'claude.cmd'), '@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n');
+    return binary;
+  }
+
+  it.each(['auto', 'system'] as const)('runs the native binary behind a global npm shim over the bundled runtime (%s)', async (runtime) => {
+    const { root } = await fixture(runtime);
+    const resolver = new RuntimeResolver({ appRuntimeDir: path.join(root, 'empty-runtime'), resourcesDir: root, appRoot: root }, () => ({ binaries: {}, claude: { runtime }, codex: { runtime: 'auto' } }) as AppSettings);
+    const bundled = path.join(root, 'node_modules', '@anthropic-ai', 'claude-agent-sdk-win32-x64', 'claude.exe');
+    await fs.mkdir(path.dirname(bundled), { recursive: true });
+    await fs.writeFile(bundled, '');
+    const globalDir = path.join(root, 'npm-global');
+    await fs.mkdir(globalDir);
+    const binary = await npmShim(globalDir);
+    process.env.PATH = globalDir;
+    clearWhichCache();
+    expect(resolver.resolve('claude')).toEqual({ path: binary, source: 'system' });
+  });
+
+  it('runs the binary an app-runtime install put behind its shim, so the settings update takes effect', async () => {
+    const { root, resolver } = await fixture('auto');
+    const binary = await npmShim(path.join(root, 'runtime'));
+    expect(resolver.resolve('claude')).toEqual({ path: binary, source: 'app-runtime' });
+  });
 });
 
 describe('bundled runtime intent', () => {

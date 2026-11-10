@@ -1,4 +1,4 @@
-import { promises as fs, statSync } from 'node:fs';
+import { promises as fs, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import type { AppSettings, HarnessAvailability, HarnessBinarySource, HarnessId, HarnessUpdate } from '../shared/types';
@@ -34,6 +34,22 @@ const whichCache = new Map<string, string | null>();
 
 export function clearWhichCache(): void {
   whichCache.clear();
+}
+
+/**
+ * The native executable an npm cmd-shim launches (`"%dp0%\node_modules\…\claude.exe" %*`), when it
+ * exists. Claude Code's npm package ships a native binary behind its shim, so a global install is
+ * launchable without the shim; a shim that runs a script under Node has no such target.
+ */
+export function cmdShimExecutable(shim: string): string | null {
+  try {
+    const target = /"%dp0%\\([^"%]+\.exe)"/i.exec(readFileSync(shim, 'utf8'))?.[1];
+    if (!target) return null;
+    const exe = path.join(path.dirname(shim), target);
+    return statSync(exe).isFile() ? exe : null;
+  } catch {
+    return null;
+  }
 }
 
 export function which(cmd: string, extraDirs: string[] = []): string | null {
@@ -327,6 +343,10 @@ export class RuntimeResolver {
     // spawned without a shell on Windows. Never report it as available, even if the bundled
     // binary has gone missing or the user requested system-only mode.
     if (tool === 'claude' && isWin && sys && /\.(cmd|bat)$/i.test(sys)) {
+      // An npm install of Claude Code (global, or in the app runtime dir) puts its native binary
+      // behind the shim. That is the install the user updates, so it wins over the bundled one.
+      const behind = cmdShimExecutable(sys);
+      if (behind) return { path: behind, source: sys.startsWith(this.paths.appRuntimeDir) ? 'app-runtime' : 'system' };
       if (!systemOnly && bundled) return { path: bundled, source: 'bundled' };
       // A shim earlier on PATH need not hide a real executable later on PATH.
       const native = which('claude.exe', this.appRuntimeBin());
