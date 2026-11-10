@@ -29,7 +29,7 @@ export function FastModePill({ session }: { session: SessionMeta }) {
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setError(message);
-      // Confirmation closes the More menu; still surface a failure after this control unmounts.
+      // Confirmation closes the model menu; still surface a failure after this control unmounts.
       toast(`Fast mode change failed: ${message}`, 'error');
     } finally {
       setPending(false);
