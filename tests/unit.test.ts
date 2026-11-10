@@ -601,6 +601,33 @@ describe('model mapping', () => {
   });
 });
 
+describe('Anthropic model catalog without a key', () => {
+  it('explains the subscription path instead of the SDK auth error, and sends no request', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', '');
+    let requests = 0;
+    const server = await listenOnce((_req, res) => {
+      requests++;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ data: [], has_more: false }));
+    });
+    try {
+      const provider: ProviderConfig = { id: 'anthropic', kind: 'anthropic', name: 'Anthropic', baseUrl: server.url, envKey: 'ANTHROPIC_API_KEY', hasApiKey: false, models: [], enabled: true };
+      const error = await fetchProviderModels(provider, undefined).then(
+        () => undefined,
+        (e: unknown) => e
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('No API key stored and ANTHROPIC_API_KEY is not set');
+      expect((error as Error).message).toContain('add its id under Models');
+      expect(requests).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      await server.close();
+    }
+  });
+});
+
 describe('OpenRouter reasoning effort', () => {
   it('reads the exact levels and default from the OpenRouter catalog', async () => {
     const server = await listenOnce((_req, res) => {
