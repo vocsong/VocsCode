@@ -48,7 +48,7 @@ beforeEach(() => {
   apiMode.platform = 'win32';
   record = missionFixture({ originSessionId: 'source', planRevision: 2, specificationRevision: 3, status: 'awaiting_execution_approval', pendingProposal: { id: 'proposal-three', specificationRevision: 3, planRevision: 2, assistantMessageId: 'proposal-message', requestedAt: 1 } });
   settings = { folders: ['/project'], recentProjects: ['/project'], folderStyles: {}, collapsedFolders: [], defaultHarness: 'native', defaultPermissionMode: 'ask', defaultModelByHarness: {}, acpAgents: [], providers: [], mission: record.config, goalDefaults: {}, sidebarWidth: 250, panelWidth: 450 } as unknown as AppSettings;
-  useStore.setState({ settings, sessions: [ordinary(), owned('lead'), owned('worker')], missions: { mission: record }, missionErrors: {}, missionInspector: null, activeId: 'source', transcripts: {}, loaded: {}, transcriptErrors: {}, drafts: {}, composerHistory: {}, composerInsert: null, modelCatalog: { native: { models: [], loading: false } }, models: {}, panelTab: 'goal', panelBottomTab: 'mcp', panelBottomOpened: [], newSessionKind: 'normal', newSessionRoot: '/project', newMissionSourceId: null, toasts: [], archiving: {}, history: [], historyIndex: -1 });
+  useStore.setState({ settings, sessions: [ordinary(), owned('lead'), owned('worker')], missions: { mission: record }, missionErrors: {}, missionInspector: null, activeId: 'source', transcripts: {}, loaded: {}, transcriptErrors: {}, drafts: {}, composerHistory: {}, composerInsert: null, modelCatalog: { native: { models: [], loading: false } }, models: {}, panelTab: 'goal', fileReveal: null, panelBottomTab: 'mcp', panelBottomOpened: [], newSessionKind: 'normal', newSessionRoot: '/project', newMissionSourceId: null, toasts: [], archiving: {}, history: [], historyIndex: -1 });
   invokeMock.mockReset().mockImplementation(async (channel: string, input?: { id?: string; control?: { action: string } }) => {
     if (channel === 'missions:get') return record;
     if (channel === 'missions:list') return [record];
@@ -728,6 +728,31 @@ describe('Mission navigation, inspection and workspace safety', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Mission result' }));
     await waitFor(() => expect((screen.getByLabelText('Mission workspace') as HTMLSelectElement).value).toBe(''));
     expect(screen.getByTestId('mission-changes').textContent).toContain('Mission result');
+  });
+
+  it('resolves shortened transcript files in the lead workspace rather than integration', async () => {
+    const base = { baseCommitSha: 'a'.repeat(40), contentHash: 'b'.repeat(64) };
+    record.workspaces = [
+      { id: 'integration-workspace', role: 'integration', path: '/integration', branch: 'result', base },
+      { id: 'lead-workspace', role: 'lead', path: '/workspaces/lead', branch: 'lead', ownerSessionId: 'lead', base }
+    ];
+    const original = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (channel, input) => {
+      if (channel === 'fs:resolve') return { status: 'resolved', path: 'src/tools.ts' };
+      if (channel === 'fs:read') return { content: 'lead workspace preview', truncated: false };
+      return original(channel, input);
+    });
+    useStore.setState({ missions: { mission: record }, panelTab: 'files' });
+    render(<RightPanel session={owned('lead')} />);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('fs:list', { sessionId: 'lead', relPath: undefined, missionWorkspaceId: undefined }));
+    act(() => useStore.getState().revealFile('lead', 'tools.ts'));
+    await screen.findByText('lead workspace preview');
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'fs:resolve')).toEqual([
+      ['fs:resolve', { sessionId: 'lead', path: 'tools.ts', missionWorkspaceId: 'lead-workspace' }]
+    ]);
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'fs:read')).toEqual([
+      ['fs:read', { sessionId: 'lead', path: 'src/tools.ts', maxBytes: 200_000, missionWorkspaceId: 'lead-workspace' }]
+    ]);
   });
 
   it('disables generic fork and rewind while leaving ordinary session messages editable', () => {

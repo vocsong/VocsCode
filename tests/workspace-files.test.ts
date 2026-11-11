@@ -3,8 +3,11 @@ import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { listWorkspaceFiles, MAX_IMAGE_BYTES, readWorkspaceFile, readWorkspaceImage } from '../src/main/workspace-files';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { listWorkspaceFiles, MAX_IMAGE_BYTES, readWorkspaceFile, readWorkspaceImage, resolveWorkspaceFile } from '../src/main/workspace-files';
+import { createHandlerRegistry, type HandlerDeps } from '../src/main/handlers';
+import type { SessionMeta } from '../src/shared/types';
+import { missionFixture } from './support/mission-fixture';
 
 const tempDirs: string[] = [];
 
@@ -19,6 +22,7 @@ function workspace(): { container: string; root: string; sibling: string } {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -174,5 +178,181 @@ describe('readWorkspaceImage', () => {
     await fs.truncate(big, MAX_IMAGE_BYTES + 1);
 
     await expect(readWorkspaceImage(root, 'huge.png')).resolves.toEqual({ mimeType: 'image/png', data: '', size: MAX_IMAGE_BYTES + 1, tooLarge: true });
+  });
+});
+
+
+describe('resolveWorkspaceFile', () => {
+  async function put(root: string, name: string): Promise<void> {
+    await fs.mkdir(path.dirname(path.join(root, name)), { recursive: true });
+    await fs.writeFile(path.join(root, name), name);
+  }
+
+  it('prefers the exact regular file, including files in skipped directories', async () => {
+    const { root } = workspace();
+    await put(root, 'notes.md');
+    await put(root, 'docs/notes.md');
+    await put(root, 'node_modules/pkg/notes.md');
+    const scan = vi.spyOn(fs, 'opendir');
+    await expect(resolveWorkspaceFile(root, 'notes.md')).resolves.toEqual({ status: 'resolved', path: 'notes.md' });
+    await expect(resolveWorkspaceFile(root, 'node_modules/pkg/notes.md')).resolves.toEqual({ status: 'resolved', path: 'node_modules/pkg/notes.md' });
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it('matches component suffixes and bare basenames, never discarding supplied directories', async () => {
+    const { root } = workspace();
+    await put(root, 'src/api/tools.ts');
+    await put(root, 'src/notapi/tools.ts');
+    await expect(resolveWorkspaceFile(root, 'api/tools.ts')).resolves.toEqual({ status: 'resolved', path: 'src/api/tools.ts' });
+    await expect(resolveWorkspaceFile(root, 'missing/tools.ts')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(root, 'tools.ts')).resolves.toEqual({ status: 'ambiguous', paths: ['src/api/tools.ts', 'src/notapi/tools.ts'] });
+    await expect(resolveWorkspaceFile(root, 'Tools.ts')).resolves.toEqual(process.platform === 'win32'
+      ? { status: 'ambiguous', paths: ['src/api/tools.ts', 'src/notapi/tools.ts'] }
+      : { status: 'missing' });
+    await expect(resolveWorkspaceFile(root, 'API/TOOLS.ts')).resolves.toEqual(process.platform === 'win32'
+      ? { status: 'resolved', path: 'src/api/tools.ts' }
+      : { status: 'missing' });
+    await put(root, 'nested/unique.md');
+    await expect(resolveWorkspaceFile(root, 'unique.md')).resolves.toEqual({ status: 'resolved', path: 'nested/unique.md' });
+  });
+
+  it('skips generated/dependency trees and never resolves directories', async () => {
+    const { root } = workspace();
+    for (const dir of ['.git', '.vocs-code', 'node_modules', 'dist', 'out', 'build', '.next', '.venv', 'venv', 'target']) await put(root, `${dir}/hidden.ts`);
+    await fs.mkdir(path.join(root, 'nested', 'directory.ts'), { recursive: true });
+    await expect(resolveWorkspaceFile(root, 'hidden.ts')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(root, 'directory.ts')).resolves.toEqual({ status: 'missing' });
+    await put(root, 'other/nested/file.md');
+    await fs.mkdir(path.join(root, 'nested', 'file.md'));
+    await expect(resolveWorkspaceFile(root, 'nested/file.md')).resolves.toEqual({ status: 'missing' });
+  });
+
+  it('rejects malformed and unsafe paths before accessing the filesystem', async () => {
+    const realpath = vi.spyOn(fs, 'realpath');
+    const stat = vi.spyOn(fs, 'lstat');
+    for (const target of [null, undefined, {}, [], 42, '', ' ', '/etc/passwd', '../file', 'a/../file', 'a/..', 'C:/file', 'C:file', String.raw`\\host\share`, 'a\u0000b', 'a\nb', 'a\u007fb', 'https://host/file', 'a:b', 'a?b']) {
+      await expect(resolveWorkspaceFile('/unused', target as string)).rejects.toThrow();
+    }
+    expect(realpath).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+  });
+
+  it('searches only the current worktree, not its project or sibling worktrees', async () => {
+    const { root } = workspace();
+    const cwd = path.join(root, '.vocs-code', 'worktrees', 'current');
+    await put(root, 'src/project-only.ts');
+    await put(path.join(root, '.vocs-code', 'worktrees', 'other'), 'src/sibling-only.ts');
+    await put(cwd, 'src/current.ts');
+    await expect(resolveWorkspaceFile(cwd, 'project-only.ts')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(cwd, 'sibling-only.ts')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(cwd, 'current.ts')).resolves.toEqual({ status: 'resolved', path: 'src/current.ts' });
+  });
+
+  it('allows safe exact symlinks but never follows links during fallback or falls back after escape', async () => {
+    const { root, sibling } = workspace();
+    await put(root, 'actual/inside.md');
+    await put(root, 'actual/outside.md');
+    await put(root, 'actual/missing.md');
+    await put(sibling, 'outside.md');
+    await fs.symlink(path.join(root, 'actual', 'inside.md'), path.join(root, 'alias.md'), 'file');
+    await fs.symlink(sibling, path.join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    await fs.symlink(path.join(sibling, 'outside.md'), path.join(root, 'outside.md'), 'file');
+    await fs.symlink(path.join(root, 'actual'), path.join(root, 'safe-dir'), process.platform === 'win32' ? 'junction' : 'dir');
+    await fs.mkdir(path.join(root, 'links'));
+    await fs.symlink(path.join(root, 'actual', 'inside.md'), path.join(root, 'links', 'fallback.md'), 'file');
+    await fs.symlink(path.join(root, 'gone.md'), path.join(root, 'dangling.md'), 'file');
+    await put(root, 'actual/dangling.md');
+    await expect(resolveWorkspaceFile(root, 'alias.md')).resolves.toEqual({ status: 'resolved', path: 'alias.md' });
+    await expect(resolveWorkspaceFile(root, 'safe-dir/inside.md')).resolves.toEqual({ status: 'resolved', path: 'safe-dir/inside.md' });
+    await expect(resolveWorkspaceFile(root, 'inside.md')).resolves.toEqual({ status: 'resolved', path: 'actual/inside.md' });
+    await expect(resolveWorkspaceFile(root, 'outside.md')).rejects.toThrow(/outside workspace/i);
+    await expect(resolveWorkspaceFile(root, 'escape/missing.md')).rejects.toThrow(/outside workspace/i);
+    await expect(resolveWorkspaceFile(root, 'safe-dir/missing-other.md')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(root, 'absent/alias.md')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(root, 'fallback.md')).resolves.toEqual({ status: 'missing' });
+    await expect(resolveWorkspaceFile(root, 'dangling.md')).resolves.toEqual({ status: 'missing' });
+  });
+
+  it('preserves missing-root and non-ENOENT exact errors without scanning', async () => {
+    const { root } = workspace();
+    await expect(resolveWorkspaceFile(root, 'file.md')).rejects.toThrow(`${path.resolve(root)} no longer exists`);
+    await put(root, 'blocker');
+    const scan = vi.spyOn(fs, 'opendir');
+    await expect(resolveWorkspaceFile(root, 'blocker/file.md')).rejects.toMatchObject({ code: 'ENOTDIR' });
+    const denied = Object.assign(new Error('denied'), { code: 'EACCES' });
+    vi.spyOn(fs, 'lstat').mockRejectedValue(denied);
+    await expect(resolveWorkspaceFile(root, 'file.md')).rejects.toBe(denied);
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it('reports incomplete on any unreadable subtree instead of declaring a unique match', async () => {
+    const { root } = workspace();
+    await put(root, 'readable/unique.md');
+    await fs.mkdir(path.join(root, 'unreadable'));
+    const original = fs.opendir.bind(fs);
+    vi.spyOn(fs, 'opendir').mockImplementation((async (dir: string) => {
+      if (String(dir).endsWith('unreadable')) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return original(dir);
+    }) as typeof fs.opendir);
+    await expect(resolveWorkspaceFile(root, 'unique.md')).resolves.toEqual({ status: 'incomplete' });
+  });
+
+  it('bounds visited entries and matches without expensive filesystem fixtures', async () => {
+    const { root } = workspace();
+    await fs.mkdir(root, { recursive: true });
+    let visited = 0;
+    let matches = false;
+    vi.spyOn(fs, 'opendir').mockImplementation((async () => ({
+      async *[Symbol.asyncIterator]() {
+        for (let i = 0; i < 50_001; i++) {
+          visited++;
+          yield { name: matches || i === 0 ? 'hit.md' : `${i}.md`, isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false };
+        }
+      }
+    })) as unknown as typeof fs.opendir);
+    await expect(resolveWorkspaceFile(root, 'hit.md')).resolves.toEqual({ status: 'incomplete' });
+    expect(visited).toBe(50_001);
+    matches = true;
+    visited = 0;
+    await expect(resolveWorkspaceFile(root, 'hit.md')).resolves.toEqual({ status: 'incomplete' });
+    expect(visited).toBe(100);
+  });
+
+  it('validates the registered IPC payload before scoped filesystem access and uses session cwd', async () => {
+    const { root, sibling } = workspace();
+    await put(root, 'nested/current.md');
+    await put(sibling, 'project-only.md');
+    const get = vi.fn(() => ({ id: 'session', cwd: root, config: { projectRoot: sibling } } as SessionMeta));
+    const registry = createHandlerRegistry({ sessions: { get }, desktop: {}, runtime: {}, log: vi.fn(), push: vi.fn() } as unknown as HandlerDeps);
+    const realpath = vi.spyOn(fs, 'realpath');
+    for (const input of [null, [], {}, { sessionId: 'session', path: 4 }, { sessionId: 'session', path: '../file' }, { sessionId: '../bad', path: 'file' }, { sessionId: 'session', path: 'file', missionWorkspaceId: 4 }, { sessionId: 'session', path: 'file', missionWorkspaceId: '../bad' }, { sessionId: 'session', path: 'file', cwd: sibling }]) {
+      await expect(registry.invoke('fs:resolve', input)).rejects.toThrow();
+    }
+    expect(realpath).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    await expect(registry.invoke('fs:resolve', { sessionId: 'session', path: 'current.md' })).resolves.toEqual({ status: 'resolved', path: 'nested/current.md' });
+    await expect(registry.invoke('fs:resolve', { sessionId: 'session', path: 'project-only.md' })).resolves.toEqual({ status: 'missing' });
+    await expect(registry.invoke('fs:resolve', { sessionId: 'session', path: 'current.md', missionWorkspaceId: 'unowned' })).rejects.toThrow(/owning Mission lead/);
+    await registry.shutdown();
+  });
+
+  it('resolves Mission leads against integration by default and honors an explicit owned workspace', async () => {
+    const { root, sibling } = workspace();
+    await put(root, 'lead/selected.md');
+    await put(sibling, 'integration/selected.md');
+    const leadPath = await fs.realpath(root);
+    const integrationPath = await fs.realpath(sibling);
+    const session = { id: 'lead', cwd: leadPath, config: { projectRoot: leadPath }, mission: { missionId: 'mission', role: 'lead' } } as SessionMeta;
+    const record = missionFixture({
+      id: 'mission', leadSessionId: 'lead', workspaces: [
+        { id: 'lead-workspace', role: 'lead', path: leadPath, branch: 'mission/lead', ownerSessionId: 'lead', base: { baseCommitSha: 'base', contentHash: 'tree' } },
+        { id: 'integration-workspace', role: 'integration', path: integrationPath, branch: 'mission/integration', base: { baseCommitSha: 'base', contentHash: 'tree' } }
+      ]
+    });
+    const registry = createHandlerRegistry({ sessions: { get: () => session }, missions: { get: () => record }, desktop: {}, runtime: {}, log: vi.fn(), push: vi.fn() } as unknown as HandlerDeps);
+    await expect(registry.invoke('fs:resolve', { sessionId: 'lead', path: 'selected.md' })).resolves.toEqual({ status: 'resolved', path: 'integration/selected.md' });
+    await expect(registry.invoke('fs:resolve', { sessionId: 'lead', path: 'selected.md', missionWorkspaceId: 'lead-workspace' })).resolves.toEqual({ status: 'resolved', path: 'lead/selected.md' });
+    await expect(registry.invoke('fs:resolve', { sessionId: 'lead', path: 'selected.md', missionWorkspaceId: 'unknown' })).rejects.toThrow(/unavailable or cleaned/);
+    await registry.shutdown();
   });
 });

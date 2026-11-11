@@ -92,7 +92,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
         <div className="panel-body">
           {session.mission && (tab === 'changes' || tab === 'files') && (mission ? <MissionWorkspacePicker record={mission} value={workspaceId} onChange={(id) => setWorkspace({ sessionId: session.id, id })} /> : <div className="pad muted">Loading Mission workspace state…</div>)}
           {tab === 'changes' && (session.mission ? mission && <MissionChanges record={mission} workspaceId={workspaceId} /> : <ChangesTab session={session} />)}
-          {tab === 'files' && (!session.mission || mission) && <FilesTab key={`${session.id}:${workspaceId}`} session={fileSession} missionWorkspaceId={workspaceId || undefined} />}
+          {tab === 'files' && (!session.mission || mission) && <FilesTab key={`${session.id}:${workspaceId}:${fileSession.cwd}`} session={fileSession} missionWorkspaceId={workspaceId || undefined} />}
           {tab === 'branches' && (session.mission ? <div className="pad muted">Mission integration and delivery are managed by the principal engineer. Inspect the delivery target and result in Mission; generic Git publish controls are unavailable.</div> : <BranchesTab session={session} />)}
           {tab === 'goal' && (session.mission ? <MissionPanel session={session} /> : <GoalTab session={session} />)}
           {tab === 'usage' && <>{mission && <div className="pad"><MissionUsage record={mission} /><p className="muted small">The breakdown below is this lead session only, not the Mission total.</p></div>}<UsageTabPanel session={session} /></>}
@@ -261,29 +261,44 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
   const reveal = useStore((s) => s.fileReveal);
   /** Line to scroll the raw preview to once the file content is on screen. */
   const [scrollLine, setScrollLine] = useState<number | null>(null);
-  /** The session this component instance currently belongs to; responses from other sessions are dropped. */
-  const liveId = useRef(session.id);
+  const [matches, setMatches] = useState<{ reference: string; paths: string[]; line?: number } | null>(null);
+  const [resolving, setResolving] = useState(false);
+  /** Keyed by session and workspace; discard pending work after leaving this Files tab. */
+  const mounted = useRef(true);
   /** Monotonic read id so a slow earlier read cannot overwrite a file opened after it. */
   const readSeq = useRef(0);
   /** StrictMode runs mount effects twice; the same reveal must not start two reads. */
   const consumedReveal = useRef<FileReveal | null>(null);
 
+  const current = (seq: number) => mounted.current && readSeq.current === seq;
+  const navigate = (dir: string) => {
+    readSeq.current++;
+    setMatches(null);
+    setResolving(false);
+    setPreview(null);
+    setScrollLine(null);
+    setPath(dir);
+  };
   const openFile = async (rel: string, line?: number) => {
     const sid = session.id;
     const seq = ++readSeq.current;
+    setMatches(null);
+    setResolving(false);
+    const slash = rel.replace(/\\/g, '/').lastIndexOf('/');
+    setPath(slash >= 0 ? rel.slice(0, slash).replace(/\\/g, '/') : '');
     try {
       const scope = session.mission ? { missionWorkspaceId } : {};
       // Image bytes decoded as text are noise, so images take their own read and render as a picture.
       const r = imageMimeType(rel)
         ? { content: '', truncated: false, image: await invoke('fs:readImage', { sessionId: sid, path: rel, ...scope }) }
         : await invoke('fs:read', { sessionId: sid, path: rel, maxBytes: 200_000, ...scope });
-      if (liveId.current !== sid || readSeq.current !== seq) return;
+      if (!current(seq)) return;
       const p = rel.replace(/\\/g, '/');
       setPreview({ path: p, ...r });
       setMdView(/\.(?:md|markdown)$/i.test(p));
       setScrollLine(line && line > 0 ? line : null);
     } catch (err) {
-      if (liveId.current === sid && readSeq.current === seq) toast(invokeErrorMessage(err), 'error');
+      if (current(seq)) toast(invokeErrorMessage(err), 'error');
     }
   };
   /** The panel cannot preview a file outside the session folder, but the desktop can point the
@@ -303,20 +318,20 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
   };
 
   useEffect(() => {
-    liveId.current = session.id;
-    readSeq.current += 1;
-    setPath('');
-    setEntries([]);
-    setPreview(null);
-    setMdView(false);
-    setScrollLine(null);
-  }, [session.id]);
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   // A transcript file link asks for one path; list its folder and preview it, then clear the request
   // so remounting the tab does not reopen a file the user has since navigated away from.
   useEffect(() => {
     if (!reveal || reveal.sessionId !== session.id || consumedReveal.current === reveal) return;
     consumedReveal.current = reveal;
     useStore.getState().consumeFileReveal();
+    const seq = ++readSeq.current;
+    setMatches(null);
+    setResolving(false);
+    setPreview(null);
+    setScrollLine(null);
     const rel = workspaceRelativePath(session.cwd, reveal.path);
     if (rel === null) {
       void showOutside(reveal.path.trim());
@@ -325,13 +340,29 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
     const dir = /[\\/]$/.test(reveal.path.trim());
     const clean = rel.replace(/\/+$/, '');
     if (dir || clean === '') {
-      setPreview(null);
       setPath(clean);
       return;
     }
-    const slash = clean.lastIndexOf('/');
-    setPath(slash >= 0 ? clean.slice(0, slash) : '');
-    void openFile(clean, reveal.line);
+    // Older/limited transports retain exact-path opening rather than invoking an unavailable channel.
+    if (!canInvoke('fs:resolve')) {
+      void openFile(clean, reveal.line);
+      return;
+    }
+    setResolving(true);
+    void invoke('fs:resolve', { sessionId: session.id, path: clean, ...(session.mission ? { missionWorkspaceId } : {}) })
+      .then((result) => {
+        if (!current(seq)) return;
+        setResolving(false);
+        if (result.status === 'resolved') void openFile(result.path, reveal.line);
+        else if (result.status === 'ambiguous') setMatches({ reference: clean, paths: result.paths, line: reveal.line });
+        else if (result.status === 'missing') toast(`${clean} was not found in ${session.cwd}`, 'error');
+        else toast(`Could not finish searching for ${clean}. Use its full workspace-relative path.`, 'error');
+      })
+      .catch((err) => {
+        if (!current(seq)) return;
+        setResolving(false);
+        toast(invokeErrorMessage(err), 'error');
+      });
   }, [reveal, session.id]); // eslint-disable-line react-hooks/exhaustive-deps
   // Once the raw preview is mounted, bring the mentioned line into view. The pre grows with its
   // content, so the panel body is what actually scrolls.
@@ -355,10 +386,10 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
     let stale = false;
     invoke('fs:list', { sessionId: sid, relPath: path || undefined, ...(session.mission ? { missionWorkspaceId } : {}) })
       .then((list) => {
-        if (!stale && liveId.current === sid) setEntries(list);
+        if (!stale && mounted.current) setEntries(list);
       })
       .catch((e) => {
-        if (!stale && liveId.current === sid) toast(invokeErrorMessage(e), 'error');
+        if (!stale && mounted.current) toast(invokeErrorMessage(e), 'error');
       });
     return () => {
       stale = true;
@@ -380,15 +411,34 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
   return (
     <div className="files">
       <div className="crumbs">
-        <button type="button" onClick={() => setPath('')}>{session.cwd.split(/[\\/]/).pop()}</button>
+        <button type="button" onClick={() => navigate('')}>{session.cwd.split(/[\\/]/).pop()}</button>
         {crumbs.map((c, i) => (
           <React.Fragment key={i}>
             <span className="muted">/</span>
-            <button type="button" onClick={() => setPath(crumbs.slice(0, i + 1).join('/'))}>{c}</button>
+            <button type="button" onClick={() => navigate(crumbs.slice(0, i + 1).join('/'))}>{c}</button>
           </React.Fragment>
         ))}
       </div>
-      {preview ? (
+      {resolving ? (
+        <div className="pad row gap8" role="status">
+          <Spinner /> Finding file…
+          <Button size="sm" variant="ghost" onClick={() => navigate(path)}>Cancel</Button>
+        </div>
+      ) : matches ? (
+        <section className="file-match-list" aria-label="Choose a file">
+          <div className="pad">
+            <strong>Choose a file</strong>
+            <p className="muted small">More than one file matches <code>{matches.reference}</code>. Select the full path to open.</p>
+            <Button size="sm" variant="ghost" onClick={() => navigate(path)}>Cancel</Button>
+          </div>
+          {matches.paths.map((candidate) => (
+            <button className="file-row" type="button" key={candidate} title={candidate} onClick={() => void openFile(candidate, matches.line)}>
+              <Icon name="file" size={13} />
+              <span className="file-path">{candidate}</span>
+            </button>
+          ))}
+        </section>
+      ) : preview ? (
         <div className="file-preview">
           <div className="file-preview-head">
             <span className="mono">{preview.path}</span>
@@ -403,7 +453,7 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
               />
             )}
             {!session.mission && <Button size="sm" variant="ghost" icon="external" onClick={() => void invoke('app:openInEditor', { path: `${session.cwd}/${preview.path}`, sessionId: session.id })} title="Open in editor" />}
-            <Button size="sm" variant="ghost" icon="x" onClick={() => setPreview(null)} title="Close preview" />
+            <Button size="sm" variant="ghost" icon="x" onClick={() => navigate(path)} title="Close preview" />
           </div>
           {preview.image !== undefined ? (
             <div className="file-image">
@@ -442,7 +492,7 @@ function FilesTab({ session, missionWorkspaceId }: { session: SessionMeta; missi
               type="button"
               className="file-row"
               onClick={async () => {
-                if (e.isDir) setPath(e.path.replace(/\\/g, '/'));
+                if (e.isDir) navigate(e.path.replace(/\\/g, '/'));
                 else void openFile(e.path);
               }}
             >

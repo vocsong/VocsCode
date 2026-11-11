@@ -60,6 +60,22 @@ resources/processes the read-only Windows process-table reader (Toolhelp snapsho
 tests             unit + format + review-fixes run offline; smoke and e2e are opt-in
 ```
 
+## Transcript file references
+
+Chat file links open in Files within the session's `cwd` (the worktree checkout, not the
+original project root). `fs:resolve` checks the exact relative file first, then searches for
+whole-component suffix matches: `tools.ts` can resolve to `src/app/api/mcp/tools.ts`, and
+`api/mcp/tools.ts` retains its directory context. One match opens automatically; multiple
+matches require the user to choose a full path. Line numbers survive both paths.
+
+Fallback discovery skips dependency/generated directories (`node_modules`, `.git`, `dist`,
+`out`, `build`, `.next`, `.venv`, `venv`, `target`, `.vocs-code`) and does not follow symlinks.
+Exact contained paths there still open. Scans are bounded to 50,000 entries and fewer than
+100 matches; incomplete or unreadable scans ask for a full path instead of guessing.
+Absolute paths outside the session are never remapped into it. Mission resolution and reads
+use the same selected workspace; no sibling checkout or project-root fallback is allowed.
+Transports without `fs:resolve` retain exact-path opening.
+
 ## Harness matrix
 
 | Harness | Engine | Approvals | Models | MCP |

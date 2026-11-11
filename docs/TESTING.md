@@ -136,7 +136,7 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 
 | You changed | Required suite(s) |
 | --- | --- |
-| Transcript file mentions, Files panel | `e2e.files` |
+| Transcript file mentions, Files panel, workspace file resolution | `tests/file-refs.test.ts`, `tests/file-links.test.tsx`, `tests/workspace-files.test.ts`, `tests/handler-registry.test.ts` + `e2e.files`; Mission-scoped file resolution also needs `tests/mission-handlers.test.ts`, `tests/mission-ui.test.tsx` |
 | Sidebar, New Session dialog, session lifecycle | `e2e.terminal` (no key) + `e2e.electron` (live) |
 | Activity tray and "done · not viewed" — the header trigger, `ActivityTray.tsx`, `activity.ts`, the viewing dwell (`useSessionViewing`), `DesktopFocusTracker`'s visible set, `SessionManager.markViewed` / turn-end marking | `tests/activity-tray.test.tsx`, `tests/session-viewing.test.tsx`, `tests/session-unseen.test.ts`, `tests/desktop-focus.test.ts` + `e2e.session-view` (review screenshot `tests/artifacts/session-view-06-activity-tray.png`) |
 | Right-click menus (`components/ContextMenu.tsx`), folder removal | `tests/context-menus.test.tsx`, `tests/folder-remove.test.ts` + `e2e.context-menu` |
