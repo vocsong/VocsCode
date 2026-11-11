@@ -33,7 +33,8 @@ afterEach(async () => {
 });
 
 async function rig() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-mission-handler-'));
+  // Provisioned Mission roots are canonical, including macOS's /var → /private/var alias.
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-mission-handler-')));
   dirs.push(dir);
   const root = path.join(dir, 'project');
   const leadPath = path.join(dir, 'lead');
@@ -523,6 +524,39 @@ describe('Mission resource ownership at generic handlers', () => {
     r.patch({ workspaces: r.record().workspaces.map((w) => w.role === 'worker' ? { ...w, cleanedAt: 2 } : w) });
     await expect(r.registry.invoke('fs:list', { sessionId: 'lead', missionWorkspaceId: 'worker-workspace' })).rejects.toThrow(/cleaned/);
     expect(await r.registry.invoke('fs:read', { sessionId: 'lead', path: '../worker/worker.txt' })).toEqual({ content: '', truncated: false });
+  });
+
+  it('resolves file mentions against exactly the same selected Mission root as file reads', async () => {
+    const r = await rig();
+    for (const [root, content] of [[r.root, 'source'], [r.leadPath, 'lead'], [r.workerPath, 'worker'], [r.integrationPath, 'integration'], [r.verificationPath, 'verification']] as const) {
+      await fs.mkdir(path.join(root, content));
+      await fs.writeFile(path.join(root, content, 'result.txt'), content);
+    }
+    for (const [missionWorkspaceId, content] of [[undefined, 'integration'], ['lead-workspace', 'lead'], ['worker-workspace', 'worker'], ['integration-workspace', 'integration'], ['verification-workspace', 'verification']] as const) {
+      const scope = { sessionId: 'lead', ...(missionWorkspaceId ? { missionWorkspaceId } : {}) };
+      await expect(r.registry.invoke('fs:resolve', { ...scope, path: 'result.txt' })).resolves.toEqual({ status: 'resolved', path: `${content}/result.txt` });
+      await expect(r.registry.invoke('fs:read', { ...scope, path: `${content}/result.txt` })).resolves.toEqual({ content, truncated: false });
+    }
+    await fs.writeFile(path.join(r.leadPath, 'lead-only.txt'), 'lead');
+    await fs.writeFile(path.join(r.workerPath, 'worker-only.txt'), 'worker');
+    await fs.writeFile(path.join(r.root, 'source-only.txt'), 'source');
+    for (const p of ['lead-only.txt', 'worker-only.txt', 'source-only.txt']) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId: 'lead', path: p })).resolves.toEqual({ status: 'missing' });
+    }
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 'lead', missionWorkspaceId: 'lead-workspace', path: 'worker-only.txt' })).resolves.toEqual({ status: 'missing' });
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 'worker', path: 'worker-only.txt' })).resolves.toEqual({ status: 'resolved', path: 'worker-only.txt' });
+  });
+
+  it('rejects foreign, unauthorized and cleaned Mission file-resolution scopes before returning paths', async () => {
+    const r = await rig();
+    await fs.writeFile(path.join(r.workerPath, 'worker.txt'), 'retained candidate');
+    for (const sessionId of ['source', 'worker']) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId, missionWorkspaceId: 'worker-workspace', path: 'worker.txt' })).rejects.toThrow(/owning Mission lead/);
+    }
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 'lead', missionWorkspaceId: 'foreign', path: 'worker.txt' })).rejects.toThrow(/unavailable/);
+    r.patch({ workspaces: r.record().workspaces.map((w) => w.role === 'worker' ? { ...w, cleanedAt: 2 } : w) });
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 'lead', missionWorkspaceId: 'worker-workspace', path: 'worker.txt' })).rejects.toThrow(/cleaned/);
+    await expect(r.registry.invoke('fs:read', { sessionId: 'lead', missionWorkspaceId: 'worker-workspace', path: 'worker.txt' })).rejects.toThrow(/cleaned/);
   });
 
   it('compares immutable baseline to accepted tree in integration, not lead edits or the live index', async () => {

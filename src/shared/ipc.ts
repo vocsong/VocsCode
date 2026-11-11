@@ -75,6 +75,13 @@ import type { MissionCommandRequest } from './mission-command';
 import type { WorkspaceImage } from './image-files';
 import type { ProcessEndResult, ProcessList, ProcessSummary, ProcessTarget } from './processes';
 
+/** Paths are session/workspace-relative, with forward slashes. Incomplete scans cannot pick a file. */
+export type WorkspaceFileResolution =
+  | { status: 'resolved'; path: string }
+  | { status: 'ambiguous'; paths: string[] }
+  | { status: 'missing' }
+  | { status: 'incomplete' };
+
 /** Readable text exports fail explicitly rather than silently truncating a saved artifact. */
 export const TEXT_EXPORT_MAX_BYTES = 1024 * 1024;
 
@@ -426,6 +433,8 @@ export interface IpcContract {
   /** Mission leads default to integration; tool-file reveals select the explicit lead workspace. */
   'fs:list': [{ sessionId: string; relPath?: string; missionWorkspaceId?: string }, FsEntry[]];
   'fs:search': [{ sessionId: string; query: string; limit?: number; missionWorkspaceId?: string }, string[]];
+  /** Exact file first, then a bounded component-suffix search within the selected workspace. */
+  'fs:resolve': [{ sessionId: string; path: string; missionWorkspaceId?: string }, WorkspaceFileResolution];
   /** `binary` comes with empty content: the file is not text the panel can show. */
   'fs:read': [{ sessionId: string; path: string; maxBytes?: number; missionWorkspaceId?: string }, { content: string; truncated: boolean; binary?: boolean }];
   /** An image file as base64 for the Files panel preview; null outside the workspace or for a non-image path. */
