@@ -119,18 +119,34 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     await win.screenshot({ path: path.join(shots, 'files-03-inline-images.png') });
   }, 120_000);
 
-  it('clicking a file path in a reply previews that file', async () => {
+  it('resolves exact and shortened reply paths within the session checkout and previews the chosen file', async () => {
     const tmp = path.join(os.tmpdir(), `vocs-code-files-${Date.now()}`);
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
-    await fs.mkdir(path.join(project, 'src'), { recursive: true });
+    const checkout = path.join(tmp, 'checkout');
+    await fs.mkdir(project, { recursive: true });
+    await fs.mkdir(path.join(checkout, 'src', 'app', 'api', 'mcp'), { recursive: true });
     await fs.mkdir(userData, { recursive: true });
     const body = Array.from({ length: 400 }, (_, i) => `export const line${i + 1} = ${i + 1};`).join('\n') + '\n';
-    await fs.writeFile(path.join(project, 'src', 'hello.ts'), body);
+    await fs.writeFile(path.join(checkout, 'src', 'hello.ts'), body);
+    const toolsBody = 'export const sessionCheckoutTools = true;\n';
+    await fs.writeFile(path.join(checkout, 'src', 'app', 'api', 'mcp', 'tools.ts'), toolsBody);
+    await fs.writeFile(path.join(project, 'tools.ts'), 'PROJECT_ROOT_TOOLS_MUST_NOT_OPEN');
+    await fs.writeFile(path.join(project, 'SideGuard-Q-2026-10.zip'), 'PROJECT_ROOT_ONLY_MUST_NOT_OPEN');
+    const exactBody = 'export const exactRootFile = true;\n';
+    await fs.writeFile(path.join(checkout, 'exact.ts'), exactBody);
+    await fs.writeFile(path.join(checkout, 'src', 'exact.ts'), 'NESTED_EXACT_MUST_NOT_OPEN');
+    // Create the later-sorting candidate first: the chooser must still show sorted relative paths.
+    const candidates = ['src/alpha/duplicate.ts', 'src/zeta/duplicate.ts'];
+    const duplicateBody = 'export const chosenZetaFile = true;\n';
+    for (const candidate of [...candidates].reverse()) {
+      await fs.mkdir(path.dirname(path.join(checkout, candidate)), { recursive: true });
+      await fs.writeFile(path.join(checkout, candidate), candidate === candidates[1] ? duplicateBody : 'ALPHA_MUST_NOT_OPEN_AUTOMATICALLY');
+    }
     // A 1x1 PNG beside it: the panel must draw it, not dump its bytes as text.
-    await fs.writeFile(path.join(project, 'src', 'pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
+    await fs.writeFile(path.join(checkout, 'src', 'pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
     // A zip's local file header: binary, so the panel must say so rather than decode it.
-    await fs.writeFile(path.join(project, 'src', 'bundle.zip'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]));
+    await fs.writeFile(path.join(checkout, 'src', 'bundle.zip'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]));
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
     const sid = 's_file_e2e';
@@ -140,7 +156,7 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       config: { harness: 'native', projectRoot: project, permissionMode: 'ask' },
-      cwd: project,
+      cwd: checkout,
       status: 'idle',
       harnessRef: {},
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
@@ -154,8 +170,9 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
       ...history,
       { id: 'u1', kind: 'user', ts: Date.now(), text: 'Where is the greeting?' },
       { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'It lives in `src/hello.ts:300`, right at the top.' },
-      // A bare name the folder does not have (the agent meant a bundle in another repository), and a zip it does have.
-      { id: 'a2', kind: 'assistant', ts: Date.now(), text: 'Import `SideGuard-Q-2026-10.zip`; the local copy is `src/bundle.zip`.' }
+      // The missing name exists only in config.projectRoot, never in the session checkout.
+      { id: 'a2', kind: 'assistant', ts: Date.now(), text: 'Import `SideGuard-Q-2026-10.zip`; the local copy is `src/bundle.zip`.' },
+      { id: 'a3', kind: 'assistant', ts: Date.now(), text: 'Inspect `tools.ts`, `api/mcp/tools.ts`, `exact.ts`, and `duplicate.ts`.' }
     ];
     await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
     await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
@@ -199,6 +216,8 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     const notFound = win.locator('.toast-error', { hasText: 'SideGuard-Q-2026-10.zip was not found in' });
     await notFound.waitFor({ timeout: 10_000 });
     expect(await notFound.innerText()).not.toMatch(/ENOENT|realpath/);
+    expect(await notFound.innerText()).toContain(checkout);
+    expect(await notFound.innerText()).not.toContain(project);
     expect(await win.locator('.toast', { hasText: 'Error invoking remote method' }).count()).toBe(0);
 
     // The zip that is there opens as a binary file with no text dump.
@@ -207,6 +226,50 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     await win.getByText('Binary file, no text preview.', { exact: true }).waitFor({ timeout: 10_000 });
     expect(await win.locator('.file-preview pre').count()).toBe(0);
     await win.screenshot({ path: path.join(shots, 'files-04-missing-and-binary.png') });
+
+    // Short mentions resolve against the session checkout, not the configured project root.
+    // Keep these clicks before history search, which virtualizes away the recent replies.
+    const shortRefs = win.locator('[data-item-id="a3"]');
+    const expectFile = async (relativePath: string, content: string) => {
+      await expect.poll(() => win.locator('.file-preview-head .mono').innerText(), { timeout: 10_000 }).toBe(relativePath);
+      expect(await win.locator('.file-preview pre').innerText()).toBe(content);
+      expect(await win.getByRole('region', { name: 'Choose a file', exact: true }).count()).toBe(0);
+    };
+    await shortRefs.getByRole('link', { name: 'tools.ts', exact: true }).click();
+    await expectFile('src/app/api/mcp/tools.ts', toolsBody);
+    await win.locator('.file-preview-head button[title="Close preview"]').click();
+    await shortRefs.getByRole('link', { name: 'api/mcp/tools.ts', exact: true }).click();
+    await expectFile('src/app/api/mcp/tools.ts', toolsBody);
+
+    // An existing literal path wins even when a nested file has the same basename.
+    await shortRefs.getByRole('link', { name: 'exact.ts', exact: true }).click();
+    await expectFile('exact.ts', exactBody);
+    await win.locator('.file-preview-head button[title="Close preview"]').click();
+
+    // An ambiguous basename must not silently preview either file before a choice.
+    const chooser = win.getByRole('region', { name: 'Choose a file', exact: true });
+    const expectChoices = async () => {
+      await chooser.waitFor({ state: 'visible', timeout: 10_000 });
+      expect(await win.locator('.file-match-list .file-row').allTextContents()).toEqual(candidates);
+      expect(await chooser.getByRole('button').count()).toBe(3);
+      for (const candidate of candidates) {
+        expect(await chooser.getByRole('button', { name: candidate, exact: true }).count()).toBe(1);
+      }
+      expect(await win.locator('.file-preview').count()).toBe(0);
+    };
+    await shortRefs.getByRole('link', { name: 'duplicate.ts', exact: true }).click();
+    await expectChoices();
+    await win.screenshot({ path: path.join(shots, 'files-05-path-chooser.png') });
+    await chooser.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await chooser.waitFor({ state: 'hidden', timeout: 10_000 });
+    expect(await win.locator('.file-preview').count()).toBe(0);
+    expect(await win.locator('.file-match-list .file-row').count()).toBe(0);
+    await win.locator('.file-list').waitFor({ state: 'visible', timeout: 10_000 });
+
+    await shortRefs.getByRole('link', { name: 'duplicate.ts', exact: true }).click();
+    await expectChoices();
+    await chooser.getByRole('button', { name: candidates[1], exact: true }).click();
+    await expectFile(candidates[1], duplicateBody);
 
     // Deep search temporarily reveals history, then returns to a bounded list at the match.
     await win.getByRole('button', { name: 'Search sessions', exact: true }).click();
