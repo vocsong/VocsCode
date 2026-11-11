@@ -67,6 +67,8 @@ export function SessionPanes({ empty }: { empty: React.ReactNode }) {
 function PaneView({ pane, active, split, size, empty }: { pane: SessionPane; active: boolean; split: boolean; size: number; empty: React.ReactNode }) {
   const session = useStore((s) => (pane.sessionId ? s.sessions.find((x) => x.id === pane.sessionId) : undefined));
   const [zone, setZone] = useState<DropZone | null>(null);
+  const [fileOver, setFileOver] = useState(false);
+  const attach = useRef<((files: File[]) => void) | null>(null);
   const focus = () => {
     if (!active) useStore.getState().focusPane(pane.id);
   };
@@ -85,6 +87,33 @@ function PaneView({ pane, active, split, size, empty }: { pane: SessionPane; act
     const next = e.relatedTarget as Node | null;
     if (next && e.currentTarget.contains(next)) return;
     setZone(null);
+    setFileOver(false);
+  };
+
+  // Files dragged in from the OS attach to this pane's composer, wherever on the pane they land.
+  const isFileDrag = (e: React.DragEvent) => e.dataTransfer.types.includes('Files');
+  const onFileDragOver = (e: React.DragEvent<HTMLElement>) => {
+    if (!isFileDrag(e) || !attach.current) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    setFileOver(true);
+  };
+  const onFileDrop = (e: React.DragEvent<HTMLElement>) => {
+    if (!isFileDrag(e)) return;
+    // Never let a dropped file navigate the window away, even where it cannot be attached.
+    e.preventDefault();
+    setFileOver(false);
+    const target = attach.current;
+    if (!target) return;
+    const items = [...(e.dataTransfer.items ?? [])];
+    const dropped = [...e.dataTransfer.files].filter((file, i) => {
+      if (!items[i]?.webkitGetAsEntry?.()?.isDirectory) return true;
+      useStore.getState().toast(`${file.name} is a folder — attach the files inside it, or mention it with @.`, 'error');
+      return false;
+    });
+    if (!dropped.length) return;
+    focus();
+    target(dropped);
   };
   const onDrop = (e: React.DragEvent<HTMLElement>) => {
     if (!isSessionDrag(e)) return;
@@ -106,14 +135,16 @@ function PaneView({ pane, active, split, size, empty }: { pane: SessionPane; act
       onPointerDownCapture={focus}
       onFocusCapture={focus}
       onDragOverCapture={onDragOver}
+      onDragOver={onFileDragOver}
       onDragLeave={onDragLeave}
       onDropCapture={onDrop}
+      onDrop={onFileDrop}
     >
       {session ? (
         <>
           <Header session={session} paneId={pane.id} />
           <Transcript session={session} active={active} />
-          <Composer key={session.id} session={session} />
+          <Composer key={session.id} session={session} attachRef={attach} />
         </>
       ) : split ? (
         <PanePicker pane={pane} />
@@ -121,6 +152,11 @@ function PaneView({ pane, active, split, size, empty }: { pane: SessionPane; act
         empty
       )}
       {zone && <div className={`pane-drop pane-drop-${zone}`} aria-hidden />}
+      {fileOver && !zone && (
+        <div className="pane-drop pane-drop-files" data-testid="file-drop-overlay" aria-hidden>
+          <span>Drop to attach</span>
+        </div>
+      )}
     </section>
   );
 }

@@ -25,14 +25,17 @@ function ownsComposerFocus(sessionId: string): boolean {
   return st.layout.panes.length === 1 || st.activeId === sessionId;
 }
 
-export function Composer({ session }: { session: SessionMeta }) {
+/** Where the pane hands files dropped anywhere on it; set only while a writable composer is mounted. */
+export type AttachFilesRef = React.MutableRefObject<((files: File[]) => void) | null>;
+
+export function Composer({ session, attachRef }: { session: SessionMeta; attachRef?: AttachFilesRef }) {
   const archived = useStore((s) => session.mission && s.missions[session.mission.missionId]?.archived);
   if (session.mission && (session.archived || archived)) return <div className="pad muted">Archived Mission — read-only. Restore the Mission before messaging the principal engineer.</div>;
   if (session.mission?.role === 'worker') return <div className="pad muted">Managed specialist — read-only. Ask the principal engineer in the Mission conversation.</div>;
-  return <SessionComposer session={session} />;
+  return <SessionComposer session={session} attachRef={attachRef} />;
 }
 
-function SessionComposer({ session }: { session: SessionMeta }) {
+function SessionComposer({ session, attachRef }: { session: SessionMeta; attachRef?: AttachFilesRef }) {
   const missionPending = useRef(false);
   const [missionSending, setMissionSending] = useState(false);
   const mission = useStore((s) => session.mission && s.missions[session.mission.missionId]);
@@ -530,6 +533,20 @@ function SessionComposer({ session }: { session: SessionMeta }) {
     setImages((prev) => [...prev, ...added.images]);
     setFiles((prev) => [...prev, ...added.files]);
   };
+
+  // A file dropped anywhere on the pane lands here, and the caret follows so typing can go on.
+  const addFilesRef = useRef(addFiles);
+  addFilesRef.current = addFiles;
+  useEffect(() => {
+    if (!attachRef) return;
+    attachRef.current = (dropped) => {
+      void addFilesRef.current(dropped);
+      ref.current?.focus();
+    };
+    return () => {
+      attachRef.current = null;
+    };
+  }, [attachRef]);
 
   const onPaste = (e: React.ClipboardEvent) => {
     const pasted = [...(e.clipboardData?.files ?? [])];

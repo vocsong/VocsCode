@@ -94,6 +94,19 @@ describe.runIf(enabled)('vision capability UI', () => {
     await win.getByRole('button', { name: 'Remove notes.txt' }).click();
     expect(await win.getByText('notes.txt', { exact: true }).count()).toBe(0);
 
+    // A file dragged from the OS and dropped anywhere on the session attaches the same way.
+    const dropped = await win.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(['dropped contents'], 'dropped.txt', { type: 'text/plain' }));
+      return dt;
+    });
+    await win.dispatchEvent('.transcript', 'dragover', { dataTransfer: dropped });
+    await win.getByTestId('file-drop-overlay').waitFor();
+    await win.dispatchEvent('.transcript', 'drop', { dataTransfer: dropped });
+    await win.getByText('dropped.txt', { exact: true }).waitFor();
+    expect(await win.getByTestId('file-drop-overlay').count()).toBe(0);
+    await win.getByRole('button', { name: 'Remove dropped.txt' }).click();
+
     await win.setInputFiles('.composer-actions input[type=file]', imageFile);
     const warn = win.locator('.composer-warn');
     await warn.waitFor({ timeout: 10_000 });
