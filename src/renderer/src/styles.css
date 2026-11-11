@@ -387,6 +387,19 @@ h4 {
 .pane-drop-bottom {
   top: 50%;
 }
+.pane-drop-files {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+}
+.pane-drop-files span {
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--accent);
+  font-weight: 600;
+}
 .pane-picker {
   flex: 1;
   display: flex;
