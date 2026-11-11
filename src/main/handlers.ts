@@ -48,7 +48,7 @@ import type { DesktopFocusTracker } from './desktop-focus';
 import type { ProcessTracker } from './process-tracker';
 import { relayUrl, signInAvailable } from './remote/relay-url';
 import { transcriptPage } from '../shared/transcript-page';
-import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceImage } from './workspace-files';
+import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceImage, resolveWorkspaceFile, validateWorkspaceFileTarget } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
 import { DictationService } from './dictation/service';
@@ -1607,6 +1607,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:issueComments', ({ sessionId, number }) => gitIssueComments(cwdOf(sessionId), number));
   handle('git:prComments', ({ sessionId, number }) => gitPullRequestComments(cwdOf(sessionId), number));
 
+  handle('fs:resolve', async (input) => {
+    const { sessionId, path: target, missionWorkspaceId } = z.strictObject({ sessionId: missionIdSchema, path: z.string(), missionWorkspaceId: missionIdSchema.optional() }).parse(input);
+    const relative = validateWorkspaceFileTarget(target);
+    return resolveWorkspaceFile((await missionReadScope(sessionId, missionWorkspaceId)).cwd, relative);
+  });
   handle('fs:list', async ({ sessionId, relPath, missionWorkspaceId }) => listWorkspaceFiles((await missionReadScope(sessionId, missionWorkspaceId)).cwd, relPath));
   handle('fs:search', async ({ sessionId, query, limit, missionWorkspaceId }) => {
     const root = (await missionReadScope(sessionId, missionWorkspaceId)).cwd;

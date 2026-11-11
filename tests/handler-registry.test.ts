@@ -117,6 +117,21 @@ function stubDeps(overrides: Partial<Deps> = {}): { registry: HandlerRegistry; d
   return { registry: createHandlerRegistry(deps), deps, calls, pushes, logs };
 }
 
+async function fileResolveRig() {
+  const dir = tmpDir('resolve');
+  const cwd = path.join(dir, 'current');
+  const projectRoot = path.join(dir, 'project');
+  const sibling = path.join(dir, 'sibling');
+  await Promise.all([cwd, projectRoot, sibling].map((p) => fs.mkdir(p)));
+  const { registry, deps } = stubDeps();
+  const meta = deps.sessions.get('s_test')!;
+  meta.cwd = cwd;
+  meta.config.projectRoot = projectRoot;
+  const other: SessionMeta = { ...meta, id: 's_sibling', cwd: sibling };
+  deps.sessions.get = (id) => id === meta.id ? meta : id === other.id ? other : undefined;
+  return { registry, cwd, projectRoot, sibling };
+}
+
 describe('handler registry', () => {
   it('allows bounded sign-in only for the desktop owner and refuses forged launch arguments before execution', async () => {
     const { registry } = stubDeps();
@@ -284,7 +299,7 @@ describe('handler registry', () => {
   it('serves a representative set of channels', () => {
     const { registry } = stubDeps();
     const channels = registry.channels();
-    for (const c of ['sessions:list', 'settings:get', 'terminal:input', 'git:summary', 'fs:read', 'approvals:respond', 'analytics:summary', 'window:zoom']) {
+    for (const c of ['sessions:list', 'settings:get', 'terminal:input', 'git:summary', 'fs:read', 'fs:resolve', 'approvals:respond', 'analytics:summary', 'window:zoom']) {
       expect(channels).toContain(c);
     }
   });
@@ -490,6 +505,75 @@ describe('handler registry', () => {
     const search = (await registry.invoke('fs:search', { sessionId: 's_test', query: 'txt' })) as string[];
     expect(search).toHaveLength(2);
     expect(search).toEqual(expect.arrayContaining(['a.txt', 'sub/b.txt']));
+  });
+
+  it('resolves an exact file from the session cwd before suffix matches or the configured project root', async () => {
+    const r = await fileResolveRig();
+    await fs.mkdir(path.join(r.cwd, 'nested'));
+    await fs.writeFile(path.join(r.cwd, 'notes.md'), 'current worktree');
+    await fs.writeFile(path.join(r.cwd, 'nested', 'notes.md'), 'another suffix match');
+    await fs.writeFile(path.join(r.projectRoot, 'notes.md'), 'project checkout');
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: 'notes.md' })).resolves.toEqual({ status: 'resolved', path: 'notes.md' });
+    await expect(r.registry.invoke('fs:read', { sessionId: 's_test', path: 'notes.md' })).resolves.toEqual({ content: 'current worktree', truncated: false });
+  });
+
+  it('resolves unique basenames and component suffixes, never partial directory names or a different suffix', async () => {
+    const r = await fileResolveRig();
+    await fs.mkdir(path.join(r.cwd, 'src', 'components'), { recursive: true });
+    await fs.writeFile(path.join(r.cwd, 'src', 'components', 'Widget.tsx'), 'widget');
+    for (const p of ['Widget.tsx', 'components/Widget.tsx']) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: p })).resolves.toEqual({ status: 'resolved', path: 'src/components/Widget.tsx' });
+    }
+    for (const p of ['ponents/Widget.tsx', 'other/Widget.tsx', 'Widget.ts', 'absent.tsx']) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: p })).resolves.toEqual({ status: 'missing' });
+    }
+  });
+
+  it('returns every ambiguous relative path rather than choosing the first basename match', async () => {
+    const r = await fileResolveRig();
+    for (const dir of ['a', 'b']) {
+      await fs.mkdir(path.join(r.cwd, dir));
+      await fs.writeFile(path.join(r.cwd, dir, 'shared.ts'), dir);
+    }
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: 'shared.ts' })).resolves.toEqual({ status: 'ambiguous', paths: ['a/shared.ts', 'b/shared.ts'] });
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: 'b/shared.ts' })).resolves.toEqual({ status: 'resolved', path: 'b/shared.ts' });
+  });
+
+  it('never falls back to the project checkout or another session workspace', async () => {
+    const r = await fileResolveRig();
+    await fs.writeFile(path.join(r.projectRoot, 'project-only.ts'), 'project');
+    await fs.mkdir(path.join(r.sibling, 'src'));
+    await fs.writeFile(path.join(r.sibling, 'src', 'sibling-only.ts'), 'sibling');
+    for (const p of ['project-only.ts', 'sibling-only.ts', 'src/sibling-only.ts']) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: p })).resolves.toEqual({ status: 'missing' });
+    }
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 's_sibling', path: 'sibling-only.ts' })).resolves.toEqual({ status: 'resolved', path: 'src/sibling-only.ts' });
+  });
+
+  it('skips dependency and generated directories during fallback but permits an exact file there', async () => {
+    const r = await fileResolveRig();
+    const skipped = ['node_modules', 'dist', 'out', 'build', '.next', '.vocs-code'];
+    for (const dir of skipped) {
+      await fs.mkdir(path.join(r.cwd, dir));
+      await fs.writeFile(path.join(r.cwd, dir, 'generated.ts'), dir);
+    }
+    await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: 'generated.ts' })).resolves.toEqual({ status: 'missing' });
+    for (const dir of skipped) {
+      await expect(r.registry.invoke('fs:resolve', { sessionId: 's_test', path: `${dir}/generated.ts` })).resolves.toEqual({ status: 'resolved', path: `${dir}/generated.ts` });
+    }
+  });
+
+  it('rejects malformed file-resolution requests, unknown sessions, absolute paths and traversal', async () => {
+    const { registry } = stubDeps();
+    for (const req of [
+      undefined, null, {}, { sessionId: 's_test' }, { path: 'a.txt' },
+      { sessionId: '', path: 'a.txt' }, { sessionId: '../s_test', path: 'a.txt' }, { sessionId: 1, path: 'a.txt' },
+      { sessionId: 's_missing', path: 'a.txt' }, { sessionId: 's_test', path: null }, { sessionId: 's_test', path: 1 },
+      { sessionId: 's_test', path: 'a.txt', root: ws }, { sessionId: 's_test', path: 'a.txt', missionWorkspaceId: 1 }
+    ]) await expect(registry.invoke('fs:resolve', req)).rejects.toThrow();
+    for (const p of ['', '\0', '/etc/passwd', 'C:\\private\\file.txt', 'C:/private/file.txt', '//server/share/file.txt', '\\\\server\\share\\file.txt', '../a.txt', 'sub/../../a.txt', 'sub/../a.txt', '..\\a.txt']) {
+      await expect(registry.invoke('fs:resolve', { sessionId: 's_test', path: p })).rejects.toThrow();
+    }
   });
 
   it('delegates desktop affordances and keeps the URL guard on openExternal', async () => {
