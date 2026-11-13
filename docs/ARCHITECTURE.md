@@ -158,6 +158,9 @@ commands its CLI accepts (`supportedCommands()` on init, refreshed on `commands_
 that list — or, before the harness has started, a `goal` skill on disk — names `goal`, the composer
 forwards `/goal …` to the harness and the app sets no goal of its own. Every other session keeps the
 app's goal engine. Settings → Goal defaults (`preferHarness`) forces the app driver everywhere.
+App-driven kickoff and check-in prompts keep the verbatim objective in `<goal>` and host guidance in
+`<execution_instructions>`. Check-ins prioritize execution rather than repeated review; the completion
+audit is requested only once the goal is achieved and verified.
 
 ## Layering rules
 
