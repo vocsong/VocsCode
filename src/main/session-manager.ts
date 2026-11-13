@@ -855,7 +855,7 @@ export class SessionManager {
   }
 
   private goalKickoffPrompt(goal: GoalState): string {
-    return `You have a persistent goal for this session:\n\n${goal.objective}\n\nWork toward it autonomously. When you believe it is fully achieved and verified, run a completion audit (restate deliverables, map each requirement to concrete evidence, note gaps) and end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line. If anything is missing, keep working instead of declaring completion.`;
+    return `You have a persistent goal for this session:\n\n<goal>\n${goal.objective}\n</goal>\n\n<execution_instructions>\nWork toward the goal above autonomously. When you believe it is fully achieved and verified, run a completion audit (restate deliverables, map each requirement to concrete evidence, note gaps) and end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line. If anything is missing, keep working instead of declaring completion.\n</execution_instructions>`;
   }
 
   async delete(id: string, removeWt = false): Promise<void> {
@@ -2739,7 +2739,7 @@ export class SessionManager {
     goal.updatedAt = Date.now();
     this.deps.log('info', `[${meta.id}] goal continuation ${goal.iterations}/${goal.maxIterations} scheduled`);
     this.schedulePersist(meta);
-    const prompt = `Goal check-in ${goal.iterations}/${goal.maxIterations}. The active goal is:\n\n${goal.objective}\n\nReview what has been done so far, verify against real evidence, and continue working toward the goal. If it is now fully achieved, end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line after a brief completion audit. Otherwise keep going without asking for permission to continue.`;
+    const prompt = `Goal check-in ${goal.iterations}/${goal.maxIterations}.\n\n<goal>\n${goal.objective}\n</goal>\n\n<execution_instructions>\nContinue executing the goal above. Use prior results as context and avoid repeating completed work; prioritize concrete progress.\nOnly when the goal is fully achieved and verified, provide a brief completion audit and end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line. Otherwise keep working without asking for permission to continue.\n</execution_instructions>`;
     this.scheduleGoalContinuation(meta.id, prompt);
   }
 

@@ -107,6 +107,10 @@ describe.runIf(enabled)('electron e2e: delegated /goal', () => {
     await win.locator('.composer textarea').press('Enter');
     await expect.poll(() => win.locator('.goal textarea').inputValue()).toBe('fix mid-session delivery');
     await win.getByText(/You have a persistent goal for this session:/).waitFor({ timeout: 30_000 });
+    const items = await win.evaluate(() => window.harness.invoke('sessions:transcript', { id: 's_goal_app' }));
+    const kickoffs = items.filter((item) => item.kind === 'user' && item.text.startsWith('You have a persistent goal for this session:'));
+    expect(kickoffs).toHaveLength(1);
+    expect(kickoffs[0]).toMatchObject({ text: expect.stringContaining('<goal>\nfix mid-session delivery\n</goal>\n\n<execution_instructions>\n') });
 
     // And back: the delegated state is per session, not a one-way switch.
     await win.getByTestId('session-row').filter({ hasText: 'Harness goal' }).click();

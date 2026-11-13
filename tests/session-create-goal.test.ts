@@ -136,6 +136,40 @@ describe('session create with a goal', () => {
     expect(mocks.sent[0].input.text).toContain('ship the release');
   });
 
+  it('separates a Pi goal from execution instructions on kickoff and every check-in', async () => {
+    vi.useFakeTimers();
+    const manager = await makeManager();
+    let meta: SessionMeta | undefined;
+    try {
+      const objective = 'Find one more candidate that beats the previous best, including validation.\nUse parallel subagents to try wild adjustments.';
+      meta = await create(manager, 'pi', { goal: objective });
+      await vi.waitFor(() => expect(mocks.sent).toHaveLength(1));
+      expect(meta.nativeGoal).toBeUndefined();
+      expect(mocks.sent[0]).toMatchObject({ harness: 'pi', input: { text: `You have a persistent goal for this session:\n\n<goal>\n${objective}\n</goal>\n\n<execution_instructions>\nWork toward the goal above autonomously. When you believe it is fully achieved and verified, run a completion audit (restate deliverables, map each requirement to concrete evidence, note gaps) and end your reply with the exact token GOAL_COMPLETE on its own line. If anything is missing, keep working instead of declaring completion.\n</execution_instructions>` } });
+
+      const ctx = mocks.contexts.get(meta.id)!;
+      // Exercise multiple check-ins so the objective stays intact as the loop advances.
+      for (let iteration = 1; iteration <= 2; iteration++) {
+        ctx.emit({ type: 'item.upsert', item: { id: `answer-${iteration}`, kind: 'assistant', ts: Date.now(), text: 'Testing another candidate.' } });
+        ctx.emit({ type: 'item.upsert', item: { id: `turn-${iteration}`, kind: 'turn', ts: Date.now(), status: 'completed' } });
+        ctx.emit({ type: 'status', status: 'idle' });
+        await vi.advanceTimersByTimeAsync(1_500);
+        expect(mocks.sent).toHaveLength(iteration + 1);
+        expect(mocks.sent[iteration]).toMatchObject({ harness: 'pi', input: { text: `Goal check-in ${iteration}/25.\n\n<goal>\n${objective}\n</goal>\n\n<execution_instructions>\nContinue executing the goal above. Use prior results as context and avoid repeating completed work; prioritize concrete progress.\nOnly when the goal is fully achieved and verified, provide a brief completion audit and end your reply with the exact token GOAL_COMPLETE on its own line. Otherwise keep working without asking for permission to continue.\n</execution_instructions>` } });
+      }
+
+      ctx.emit({ type: 'item.upsert', item: { id: 'final-answer', kind: 'assistant', ts: Date.now(), text: 'Validated a better candidate.\nGOAL_COMPLETE' } });
+      ctx.emit({ type: 'item.upsert', item: { id: 'final-turn', kind: 'turn', ts: Date.now(), status: 'completed' } });
+      ctx.emit({ type: 'status', status: 'idle' });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(meta.goal).toMatchObject({ objective, status: 'complete', iterations: 2 });
+      expect(mocks.sent).toHaveLength(3);
+    } finally {
+      if (meta) await manager.stop(meta.id);
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the app goal on Claude when the harness preference is off', async () => {
     process.env.CLAUDE_CONFIG_DIR = await configDirWithGoalSkill();
     const manager = await makeManager({ goalDefaults: { autoContinue: true, maxIterations: 25, preferHarness: false } });
