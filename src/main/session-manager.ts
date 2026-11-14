@@ -265,6 +265,8 @@ export class SessionManager {
   private managedDispatches = new Map<string, { canceled: boolean }>();
   private persistTimers = new Map<string, NodeJS.Timeout>();
   private gitStateTimers = new Map<string, NodeJS.Timeout>();
+  /** A newer refresh invalidates an older network response, even if both finish while idle. */
+  private gitStateVersions = new Map<string, number>();
   /** Sessions whose restored git state was re-checked once after boot. */
   private gitStateChecked = new Set<string>();
   /**
@@ -396,13 +398,22 @@ export class SessionManager {
     this.persistTimers.delete(id);
   }
 
-  /** Schedules a PR/merge status check shortly after a turn ends in an isolated worktree. */
-  private scheduleGitStateCheck(id: string, delayMs = 4_000): void {
+  private invalidateGitStateCheck(id: string): number {
     const prev = this.gitStateTimers.get(id);
     if (prev) clearTimeout(prev);
+    this.gitStateTimers.delete(id);
+    const version = (this.gitStateVersions.get(id) ?? 0) + 1;
+    this.gitStateVersions.set(id, version);
+    return version;
+  }
+
+  /** Schedules a PR/merge status check shortly after a turn ends in an isolated worktree. */
+  private scheduleGitStateCheck(id: string, delayMs = 4_000, retriesLeft = 2): void {
+    const version = this.invalidateGitStateCheck(id);
+    this.gitStateChecked.add(id);
     const timer = setTimeout(() => {
       this.gitStateTimers.delete(id);
-      void this.checkGitState(id, true);
+      void this.checkGitState(id, version, retriesLeft);
     }, delayMs);
     timer.unref?.();
     this.gitStateTimers.set(id, timer);
@@ -419,11 +430,13 @@ export class SessionManager {
   }
 
   /** Reflects the session branch's PR/merge state in the sidebar status label. */
-  private async checkGitState(id: string, recheck: boolean): Promise<void> {
+  private async checkGitState(id: string, version: number, retriesLeft: number): Promise<void> {
     const meta = this.get(id);
-    if (!meta || !meta.worktreeBranch) return;
-    if (!this.gitStateCheckable(meta.status)) return;
-    let state: BranchGitState;
+    if (!meta || !meta.worktreeBranch || !this.gitStateCheckable(meta.status) || meta.status === 'merged') return;
+    const { cwd, worktreeBranch } = meta;
+    const current = () => this.get(id) === meta && this.gitStateVersions.get(id) === version
+      && meta.cwd === cwd && meta.worktreeBranch === worktreeBranch && this.gitStateCheckable(meta.status) && meta.status !== 'merged';
+    let failed = false;
     try {
       const others = this.deps.store.list().filter((s) => s.id !== id && s.worktreeBranch).map((s) => s.worktreeBranch!);
       const q: SessionPrQuery = {
@@ -433,24 +446,32 @@ export class SessionManager {
         createdAfter: meta.createdAt,
         updatedBefore: meta.updatedAt
       };
-      state = await branchGitState(meta.cwd, meta.worktreeBranch, q);
+      const state: BranchGitState = await branchGitState(cwd, worktreeBranch, q);
+      // Network responses must not overwrite a newer refresh, a deleted session or live work.
+      if (!current()) return;
+      if (state.unknown) {
+        failed = true;
+        this.deps.log('debug', `[${id}] pr/merge status unavailable; keeping ${meta.status}`);
+        return;
+      }
+      const next: SessionStatus = state.merged ? 'merged' : state.pr ? 'pr' : 'idle';
+      if (meta.status === next) return;
+      // Git evidence may upgrade a stopped harness, never downgrade it back to idle.
+      if (meta.status === 'stopped' && next === 'idle') return;
+      meta.status = next;
+      meta.statusDetail = undefined;
+      this.schedulePersist(meta);
+      this.pushSessions();
     } catch (e) {
+      failed = true;
       this.deps.log('warn', `pr/merge status check failed: ${errorMessage(e)}`);
-      return;
+    } finally {
+      // Rearm even when the result is unchanged or GitHub failed. Previously the same-state
+      // early return silently ended polling after the first OPEN result.
+      if (current() && (meta.status === 'pr' || (failed && retriesLeft > 0))) {
+        this.scheduleGitStateCheck(id, SessionManager.GIT_STATE_RECHECK_MS, meta.status === 'pr' ? 2 : retriesLeft - 1);
+      }
     }
-    // The check can take seconds over the network; the session may have moved on.
-    if (!this.gitStateCheckable(meta.status)) return;
-    const next: SessionStatus = state.merged ? 'merged' : state.pr ? 'pr' : 'idle';
-    if (meta.status === next || meta.status === 'merged' || meta.status === 'error') return;
-    // A stopped harness stays stopped unless the branch is actually pr/merged: git evidence
-    // may upgrade the status, never downgrade it back to idle.
-    if (meta.status === 'stopped' && next === 'idle') return;
-    meta.status = next;
-    meta.statusDetail = undefined;
-    this.schedulePersist(meta);
-    this.pushSessions();
-    // Parked on 'pr': keep polling so the label flips to 'merged' once it lands.
-    if (next === 'pr' && recheck) this.scheduleGitStateCheck(id, SessionManager.GIT_STATE_RECHECK_MS);
   }
 
   /** Only idle/pr/stopped sessions take a label update; live or already-final statuses are left alone. */
@@ -486,7 +507,9 @@ export class SessionManager {
     const out: PrRef[] = [];
     for (const m of raw.matchAll(/github\.com[/:]([\w.-]+)\/([\w.-]+?)\/pull\/(\d+)/g)) {
       const ref: PrRef = { repo: `${m[1]}/${m[2]}`, number: Number(m[3]) };
-      if (!out.some((p) => p.repo === ref.repo && p.number === ref.number)) out.push(ref);
+      const previous = out.findIndex((p) => p.repo === ref.repo && p.number === ref.number);
+      if (previous >= 0) out.splice(previous, 1);
+      out.push(ref); // preserve last-mention order, not first appearance
     }
     this.prRefsCache.set(id, { stamp, refs: out });
     return out;
@@ -1266,6 +1289,7 @@ export class SessionManager {
     this.active.set(id, active);
     const controlled = this.controlled.get(id);
     if (controlled) controlled.runtime = active;
+    this.invalidateGitStateCheck(id);
     meta.status = 'starting';
     meta.statusDetail = `Starting ${HARNESS_BY_ID[meta.config.harness].name}…`;
     this.pushSessions();
@@ -2490,6 +2514,11 @@ export class SessionManager {
       case 'status': {
         if (meta) {
           if (event.status === 'idle' && active && active.approvals.size) break; // still awaiting
+          if (!this.gitStateCheckable(event.status)) {
+            // A turn that starts and stops while a lookup is in flight must not inherit
+            // that old turn's PR result, even if it never emits idle.
+            this.invalidateGitStateCheck(sessionId);
+          }
           // The harness process exiting says nothing about the branch's git state: a session
           // parked on pr/merged keeps its git-derived status instead of flipping to stopped.
           const gitParked = event.status === 'stopped' && (meta.status === 'pr' || meta.status === 'merged');
@@ -2515,6 +2544,7 @@ export class SessionManager {
           // Status events are the live source of truth for the sidebar. Terminal statuses also
           // persist above, but every transition must be published immediately.
           this.pushSessions();
+          if (event.status === 'stopped' && !gitParked) this.scheduleGitStateCheck(meta.id);
           if (event.status === 'idle') {
             this.scheduleAutoCompaction(meta.id);
             this.scheduleGitStateCheck(meta.id);

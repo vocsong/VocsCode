@@ -218,6 +218,22 @@ Layering is enforced by convention and by `tsconfig` project boundaries:
 - Dictation never hands the renderer a key or a model: the renderer records and encodes a 16 kHz WAV, and main transcribes it with the engine in settings (`dictation:transcribe`, desktop only, not a remote channel). The local engine runs only what it downloaded from the pinned whisper.cpp release (`WHISPER_RELEASE`, `WHISPER_BUILDS`, `LOCAL_MODELS` in `shared/dictation.ts`), and a file gets its final name only after its size and sha256 match; bumping the release means re-pinning every asset's size and digest. Its server holds GPU memory only while in use — the idle timeout, a switch to the cloud engine and quit all stop it.
 - A session's usage counts only the money it spent itself. Turn rows are the itemized ledger and `SessionMeta.usage` is the counter over it; a fork carries the conversation, never the ledger.
 
+## Session PR labels
+
+Sidebar PR/Merged labels come from `SessionManager`, not the Git panel's separate refresh.
+A worktree session's most recently mentioned GitHub PR owns its label; earlier open PRs do
+not mask a newer merge. Transcript refs are deduplicated in last-mention order; a known PR
+outside the bounded repository list is queried directly, never replaced by an older branch
+match. This label selection does not change `/merge`'s conservative ambiguity checks across
+all session refs.
+
+Idle/stopped turns schedule a check after four seconds; successful app PR/merge actions after one
+second. Restored PR sessions resume staggered checks and continue every two minutes even
+when the result is unchanged. Failed or unavailable lookups preserve the label and retry;
+non-PR sessions get at most two retries per trigger. A pushed remote-tracking branch alone
+cannot confirm a PR or squash merge. Newer refreshes invalidate older network responses;
+live work, deleted sessions and merged terminal states cannot be overwritten by them.
+
 ## Mission ownership
 
 [Mission guide](MISSIONS.md) · [status and support matrix](MISSION-STATUS.md) · [specification](MISSION-SPEC-v0.2.md)
