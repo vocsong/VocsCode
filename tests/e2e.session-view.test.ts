@@ -1,6 +1,6 @@
 /**
  * Electron end-to-end for the session view's layout: a one-row header that carries the working
- * tree's changes, the visible usage readout and More menu under the composer, a turn's work behind one
+ * tree's changes, the compact context readout and options menus under the composer, a turn's work behind one
  * chip with its plan still on screen, the title bar's search and Vesta launcher, the sidebar's New
  * session entry, a header that sheds detail in a narrow split pane instead of overflowing it, and the
  * sidebar's activity tray reaching a session that finished unviewed in a collapsed folder.
@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { PushPayloads } from '../src/shared/ipc';
 import { expectQuietWindow, isolatedEnv, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -86,7 +87,8 @@ async function launch(userData: string): Promise<Page> {
   for (const dir of [env.APPDATA, env.LOCALAPPDATA, env.CLAUDE_CONFIG_DIR, env.CODEX_HOME, env.PI_CODING_AGENT_DIR]) await fs.mkdir(dir, { recursive: true });
   app = await electron.launch({
     executablePath: require('electron') as string,
-    args: [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+    // No real credentials: keep the isolated fixture off the macOS login Keychain.
+    args: [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`, ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : [])],
     env,
     timeout: 60_000
   });
@@ -203,22 +205,29 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.screenshot({ path: path.join(shots, 'session-view-02-work.png') });
     await work.click();
 
-    // The changes chip opens Changes; cost, the model with its effort, and the permission pill stay visible.
+    // The changes chip opens Changes; the compact model and context stay visible, spend lives in options.
     await changes.click();
     await win.locator('.panel-tab.active', { hasText: 'Changes' }).waitFor({ timeout: 10_000 });
     await win.locator('.changes').waitFor({ timeout: 10_000 });
     const composer = win.locator('.pane.active .composer');
-    expect(await composer.locator('.run-controls .pill[title="Model"]').innerText()).toContain('anthropic/claude-opus-5-5');
+    const model = composer.locator('.run-controls .pill[title="Model"]');
+    expect(await model.innerText()).toMatch(/claude-opus-5-5|Opus 5\.5/i);
+    expect(await model.innerText()).not.toContain('anthropic/');
+    expect(await model.getAttribute('aria-label')).toContain('anthropic/claude-opus-5-5');
     const meter = composer.getByRole('button', { name: 'Session usage' });
-    expect(await meter.innerText()).toMatch(/32%[\s\S]*\$0\.84/);
+    expect(await meter.innerText()).toBe('32%');
     expect(await composer.getByRole('button', { name: 'More session controls' }).count()).toBe(0);
     await composer.getByRole('button', { name: 'Permission mode: Edits' }).click();
     await win.screenshot({ path: path.join(shots, 'session-view-05-permission.png') });
     await composer.getByRole('menuitem', { name: /Ask before acting/ }).click();
     await expect.poll(async () => (await win.evaluate(() => window.harness.invoke('sessions:list', undefined))).find((s: SessionMeta) => s.id === SID)?.config.permissionMode).toBe('ask');
     await composer.getByRole('button', { name: 'Permission mode: Ask' }).waitFor({ timeout: 10_000 });
-    await meter.click();
+    await composer.getByRole('button', { name: 'Composer options', exact: true }).click();
+    const usageItem = win.getByRole('menuitem', { name: /Session usage/ });
+    expect(await usageItem.innerText()).toContain('$0.84');
+    await usageItem.click();
     await win.locator('.panel-tab.active', { hasText: 'Usage' }).waitFor({ timeout: 10_000 });
+    await win.keyboard.press('Escape');
 
     // The title bar names the session and opens the command palette.
     const search = win.locator('.titlebar-search');
@@ -252,10 +261,127 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await expect.poll(() => win.locator('.pane .header').count()).toBe(2);
     await expect.poll(async () => (await win.locator('.pane .header').evaluateAll((els) => els.map((el) => el.getAttribute('data-width')))).every((w) => w !== 'wide')).toBe(true);
     expect(await win.locator('.pane .header-crumbs:visible').count()).toBe(0);
-    for (const over of await overflowX(win, '.pane .header-title')) expect(over).toBeLessThanOrEqual(1);
-    for (const over of await overflowX(win, '.pane .composer-actions')) expect(over).toBeLessThanOrEqual(1);
+    await expect.poll(async () => (await overflowX(win, '.pane .header-title')).every((over) => over <= 1)).toBe(true);
+    await expect.poll(async () => (await overflowX(win, '.pane .composer-actions')).every((over) => over <= 1)).toBe(true);
     expect(await win.locator('.pane.active .header').getByRole('button', { name: 'Close pane' }).count()).toBe(1);
     await win.screenshot({ path: path.join(shots, 'session-view-04-split.png') });
+  }, 180_000);
+
+  it('keeps a crowded busy composer on one row with every action reachable at wide and narrow widths', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-composer-crowded-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await seedProject(project);
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { theme: 'dark', agent: { enabled: false } }));
+    const model = { provider: 'anthropic', model: 'claude-opus-4-6[1m]' };
+    const displayName = 'Claude Opus 4.6 · Extended context (1M tokens)';
+    const session: SessionMeta = {
+      id: SID, title: 'Crowded composer regression', createdAt: T, updatedAt: T + 10, lastUserMessageAt: T,
+      config: { harness: 'claude', projectRoot: project, permissionMode: 'full-auto', model, effort: 'high', fastMode: true },
+      cwd: project, status: 'idle', harnessRef: {},
+      usage: usage({ inputTokens: 482_000, outputTokens: 61_000, costUsd: 12.34, turns: 1, contextTokens: 640_000, contextWindow: 1_000_000 })
+    };
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
+    await fs.mkdir(path.join(userData, 'sessions', SID), { recursive: true });
+    await fs.writeFile(path.join(userData, 'sessions', SID, 'transcript.jsonl'), transcript().map((item) => JSON.stringify(item)).join('\n') + '\n');
+    const win = await launch(userData);
+    await win.setViewportSize({ width: 1600, height: 1000 });
+    await win.locator(`[data-session-id="${SID}"]`).click();
+    await win.locator('.work-head').waitFor({ timeout: 30_000 });
+    const settings = await win.evaluate(() => window.harness.invoke('settings:get', undefined));
+    const composer = win.locator('.pane.active .composer');
+    const box = composer.locator('.composer-box');
+    const footer = composer.locator('.composer-actions');
+    await composer.locator('textarea').fill('Keep the public API compatible while completing the rate limiter.');
+    await fs.mkdir(shots, { recursive: true });
+
+    // Startup intentionally resets saved running sessions. Push through the real typed preload
+    // bridge after transcript loading instead: status/meta events do not replace renderer session
+    // metadata, but sessionsChanged does. Main stays idle, so no harness or provider is started.
+    // A visible local run must not let the viewing dwell publish main's deliberately idle
+    // fixture back over this renderer-only busy state while screenshots/menus are exercised.
+    await app!.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]!.emit('blur'); });
+    const busy: PushPayloads['push:sessionsChanged'] = [{ ...session, status: 'running', queued: 3, fastModeStatus: { state: 'on' } }];
+    const models: PushPayloads['push:sessionEvent'] = {
+      sessionId: SID, ts: Date.now(),
+      event: { type: 'models', models: [{ provider: model.provider, id: model.model, displayName, supportedEfforts: ['low', 'medium', 'high'] }] }
+    };
+    for (const theme of ['dark', 'light'] as const) {
+      const themed: PushPayloads['push:settingsChanged'] = { ...settings, theme };
+      await app!.evaluate(({ BrowserWindow }, payload) => {
+        const contents = BrowserWindow.getAllWindows()[0]!.webContents;
+        contents.send('push:settingsChanged', payload.themed);
+        contents.send('push:sessionsChanged', payload.busy);
+        contents.send('push:sessionEvent', payload.models);
+      }, { themed, busy, models });
+      await expect.poll(() => win.locator('html').getAttribute('data-theme')).toBe(theme);
+      const modelPill = footer.locator('.pill[title="Model"]');
+      await expect.poll(() => modelPill.locator('.pill-text').innerText()).toBe(displayName);
+      expect(await modelPill.getAttribute('aria-label')).toBe(`Model: ${model.provider}/${model.model} · Effort: high · Fast on`);
+      await footer.getByRole('button', { name: 'Permission mode: Full', exact: true }).waitFor();
+
+      for (const width of [780, 520, 440, 320]) {
+        // Exercise the real container-query layout, independently of the CI screen's maximum size.
+        await box.evaluate((el, w) => { el.style.width = `${w}px`; el.style.maxWidth = 'none'; }, width);
+        await expect.poll(async () => Math.round((await box.boundingBox())!.width)).toBe(width);
+        const steer = footer.getByRole('button', { name: 'Steer', exact: true });
+        const sendOptions = footer.getByRole('button', { name: 'Send options', exact: true });
+        await steer.waitFor();
+        await sendOptions.waitFor();
+        await footer.getByRole('button', { name: 'Interrupt (Esc)', exact: true }).waitFor();
+        expect(await footer.getByRole('button', { name: 'Queue', exact: true }).count()).toBe(0);
+        const meter = footer.locator('.session-meter');
+        await expect.poll(() => meter.isVisible()).toBe(width > 440);
+        if (width > 440) expect(await meter.innerText()).toBe('64%');
+        expect(await footer.innerText()).not.toContain('$12.34');
+
+        // Not just scrollWidth: a wrapped row can have no horizontal overflow. Every visible
+        // button must share the same centre line, remain inside the footer, and not overlap a neighbour.
+        await expect.poll(() => footer.evaluate((el) => {
+          const row = el.getBoundingClientRect();
+          const buttons = [...el.querySelectorAll('button')].filter((button) => button.getBoundingClientRect().width > 0 && getComputedStyle(button).visibility !== 'hidden');
+          const rects = buttons.map((button) => button.getBoundingClientRect()).sort((a, b) => a.left - b.left);
+          return {
+            nowrap: getComputedStyle(el).flexWrap === 'nowrap',
+            overflow: el.scrollWidth <= el.clientWidth + 1,
+            centred: rects.length > 0 && rects.every((r) => Math.abs((r.top + r.bottom - rects[0].top - rects[0].bottom) / 2) <= 1),
+            contained: rects.every((r) => r.left >= row.left - 1 && r.right <= row.right + 1 && r.top >= row.top - 1 && r.bottom <= row.bottom + 1),
+            separate: rects.every((r, i) => i === 0 || r.left >= rects[i - 1].right - 1)
+          };
+        }), { message: `${theme} composer at ${width}px` }).toEqual({ nowrap: true, overflow: true, centred: true, contained: true, separate: true });
+        await box.screenshot({ path: path.join(shots, `session-view-07-crowded-${theme}-${width}.png`) });
+
+        await sendOptions.click();
+        const queue = win.getByRole('menuitem', { name: /Queue/ });
+        await queue.waitFor();
+        expect(await queue.innerText()).toContain('After the current turn');
+        expect(await queue.isEnabled()).toBe(true);
+        // Do not submit: this fixture models renderer state, not a running provider turn.
+        await win.keyboard.press('Escape');
+        await queue.waitFor({ state: 'hidden' });
+
+        await footer.getByRole('button', { name: 'Composer options', exact: true }).click();
+        const usageItem = win.getByRole('menuitem', { name: /Session usage/ });
+        expect(await usageItem.innerText()).toContain('$12.34');
+        expect(await usageItem.innerText()).toContain('64% context');
+        expect(await win.getByRole('status').filter({ hasText: '3 messages waiting for the current turn' }).count()).toBe(1);
+        const attach = win.getByRole('menuitem', { name: 'Attach files', exact: true });
+        await attach.waitFor();
+        // Reach the real file input from the menu even when the inline attach button is hidden.
+        const chooser = win.waitForEvent('filechooser');
+        await attach.click();
+        await (await chooser).setFiles([]);
+        await footer.getByRole('button', { name: 'Composer options', exact: true }).click();
+        await usageItem.click();
+        await win.locator('.panel-tab.active', { hasText: 'Usage' }).waitFor();
+        await usageItem.waitFor({ state: 'hidden' });
+      }
+    }
+    const saved = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
+    expect(saved).toHaveLength(1);
+    expect(saved[0].status).toBe('idle');
+    expect(saved[0].queued ?? 0).toBe(0);
   }, 180_000);
 
   it('finds a session that finished unviewed in a collapsed folder from the activity tray, and clears it once viewed', async () => {

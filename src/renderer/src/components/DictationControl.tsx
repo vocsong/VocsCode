@@ -1,15 +1,15 @@
 /**
  * The composer's mic: click (or Ctrl+Shift+Space in the composer) to start, again to stop. The clip
  * goes to main, which transcribes it with the engine in Settings → Voice, and the transcript lands
- * at the caret — it is never sent on its own. The chip beside the mic flips between the cloud
- * engine and the local one, so a GPU busy with something else (a game) never has to be touched.
+ * at the caret — it is never sent on its own. Composer options switches between the cloud engine
+ * and the local one, so a GPU busy with something else (a game) never has to be touched.
  */
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { DEFAULT_DICTATION, localModel } from '../../../shared/dictation';
 import { invoke } from '../api';
 import { MAX_DICTATION_SECONDS, bytesToBase64, startRecording, type Recording } from '../dictation';
 import { useStore } from '../store';
-import { Icon, Spinner } from './ui';
+import { Dropdown, Icon, MenuItem, Spinner } from './ui';
 import { openSettings } from './SettingsView';
 
 export interface DictationHandle {
@@ -22,7 +22,7 @@ function clock(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-export const DictationControl = forwardRef<DictationHandle, { onText: (text: string) => void }>(function DictationControl({ onText }, handle) {
+export const DictationControl = forwardRef<DictationHandle, { onText: (text: string) => void; menuItems?: (close: () => void) => React.ReactNode }>(function DictationControl({ onText, menuItems }, handle) {
   const dictation = useStore((s) => s.settings?.dictation) ?? DEFAULT_DICTATION;
   const providerName = useStore((s) => s.settings?.providers?.find((p) => p.id === (s.settings?.dictation ?? DEFAULT_DICTATION).cloud.provider)?.name);
   const toast = useStore((s) => s.toast);
@@ -146,14 +146,6 @@ export const DictationControl = forwardRef<DictationHandle, { onText: (text: str
 
   return (
     <div className={`dictation ${phase}`} style={{ '--dictation-level': level } as React.CSSProperties}>
-      {phase === 'recording' && (
-        <>
-          <span className="dictation-clock mono small" data-testid="dictation-clock">{clock(elapsed)}</span>
-          <button type="button" className="icon-btn" onClick={cancel} title="Discard this recording" aria-label="Discard recording">
-            <Icon name="x" size={14} />
-          </button>
-        </>
-      )}
       <button
         type="button"
         className={`icon-btn dictation-mic${phase === 'recording' ? ' is-recording' : ''}`}
@@ -164,12 +156,47 @@ export const DictationControl = forwardRef<DictationHandle, { onText: (text: str
         title={phase === 'recording' ? 'Stop and transcribe (Ctrl+Shift+Space)' : phase === 'transcribing' ? 'Transcribing…' : 'Dictate (Ctrl+Shift+Space)'}
         aria-label={phase === 'recording' ? 'Stop dictation' : 'Start dictation'}
       >
+        {phase === 'recording' && <span className="dictation-clock mono small" data-testid="dictation-clock" aria-hidden>{clock(elapsed)}</span>}
         {busy ? <Spinner size={14} /> : <Icon name="mic" size={16} />}
       </button>
-      <button type="button" className="dictation-engine" data-testid="dictation-engine" data-engine={dictation.engine} onClick={() => void flipEngine()} disabled={phase !== 'idle'} title={engineTitle}>
-        <Icon name={local ? 'cpu' : 'cloud'} size={12} />
-        {local ? 'Local' : 'Cloud'}
-      </button>
+      <div className="dictation-options">
+        <Dropdown
+          align="right"
+          width={300}
+          trigger={() => (
+            <button type="button" className="icon-btn" title="Composer options" aria-label="Composer options">
+              <Icon name="more" size={16} />
+            </button>
+          )}
+        >
+          {(close) => (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                className="menu-item"
+                data-testid="dictation-engine"
+                data-engine={dictation.engine}
+                onClick={() => { close(); void flipEngine(); }}
+                disabled={phase !== 'idle'}
+                title={engineTitle}
+              >
+                <span className="menu-item-label">
+                  <Icon name={local ? 'cpu' : 'cloud'} size={14} />
+                  Voice: {local ? 'Local' : 'Cloud'}
+                </span>
+              </button>
+              {phase === 'recording' && (
+                <MenuItem onClick={() => { close(); cancel(); }}>
+                  <Icon name="x" size={14} />
+                  Discard recording
+                </MenuItem>
+              )}
+              {menuItems?.(close)}
+            </>
+          )}
+        </Dropdown>
+      </div>
     </div>
   );
 });

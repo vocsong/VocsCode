@@ -109,8 +109,16 @@ so a Claude row without them becomes `[]` only when another row in the same `sup
 answer carries them; a runtime that reports them on no row leaves every model unknown. An ACP effort
 option with no level the app models stays unknown too.
 
+The desktop composer footer stays on one row, including narrow split panes. Its model pill uses
+catalog display text (or the model id), with the full `provider/model` identity in its accessible
+label, tooltip and menu. Effort and Fast settings live in that menu; permissions remain visible.
+Steer is primary while running, with Queue in its adjacent menu; queue-only harnesses get one Queue
+button. Composer options holds dictation's Cloud/Local selector, attachments, cost/context details
+and queued-message counts. Container queries move the inline attachment/context/count controls into
+that menu at narrow widths without changing send or permission semantics.
+
 **Fast mode is a separate, per-session premium-speed preference**, not a reasoning level. The
-New Session dialog and message header expose `SessionConfig.fastMode` (off by default), with a
+New Session dialog and composer's model menu expose `SessionConfig.fastMode` (off by default), with a
 cost warning before opt-in. `shared/fast-mode.ts` limits candidates to first-party OpenAI GPT-5/6
 (excluding Spark) and supported Anthropic Opus models; gateways, Cursor, ACP and Mission presets
 are not supported. Account entitlement is still the provider's decision. Idle-session changes go

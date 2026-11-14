@@ -172,14 +172,16 @@ describe('header actions', () => {
 });
 
 describe('composer run controls', () => {
-  it('names the model by its provider and reads a pasted qualified name back', async () => {
+  it('keeps the provider in accessible details and reads a pasted qualified name back', async () => {
     // A configured provider is what makes the first segment of a typed name a provider.
     useStore.setState({ settings: { providers: [{ id: 'openrouter' }] } } as never);
     const { container } = setupControls({ activeModel: { provider: 'deepseek', model: 'deepseek-v4-flash' } });
     const pill = container.querySelector('[title="Model"]') as HTMLElement;
-    expect(pill.textContent).toContain('deepseek/deepseek-v4-flash');
+    expect(pill.textContent?.trim()).toBe('deepseek-v4-flash');
+    expect(pill.getAttribute('aria-label')).toContain('deepseek/deepseek-v4-flash');
 
     fireEvent.click(pill);
+    expect(screen.getByText('deepseek/deepseek-v4-flash', { selector: '.model-menu-current' })).toBeTruthy();
     fireEvent.click(screen.getByRole('menuitem', { name: /^More models/ }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'openrouter/deepseek/deepseek-flash' } });
     fireEvent.click(screen.getByRole('button', { name: 'Use “openrouter/deepseek/deepseek-flash”' }));
@@ -194,10 +196,13 @@ describe('composer run controls', () => {
     );
   });
 
-  it('shows effort beside the model and the permission mode as its own pill, with no More menu', () => {
+  it('puts effort inside the model menu and keeps permissions as their own pill', () => {
     const { container } = setupControls({ activeEffort: 'high' });
     const pill = container.querySelector('[title="Model"]') as HTMLElement;
-    expect(pill.querySelector('.pill-effort')?.textContent).toBe('high');
+    expect(pill.textContent).not.toContain('high');
+    fireEvent.click(pill);
+    expect(screen.getByRole('menuitem', { name: /^Effort/ }).textContent).toContain('high');
+    fireEvent.mouseDown(document.body);
     expect(screen.queryByRole('button', { name: 'More session controls' })).toBeNull();
 
     const permission = screen.getByRole('button', { name: 'Permission mode: Ask' });
@@ -206,9 +211,10 @@ describe('composer run controls', () => {
     expect(invokeMock).toHaveBeenCalledWith('sessions:setPermissionMode', { id: 's_h', mode: 'accept-edits' });
   });
 
-  it('reads default beside the model while no effort was chosen', () => {
-    const { container } = setupControls();
-    expect((container.querySelector('[title="Model"] .pill-effort') as HTMLElement).textContent).toBe('default');
+  it('reads default in the model menu while no effort was chosen', () => {
+    setupControls();
+    fireEvent.click(screen.getByTitle('Model'));
+    expect(screen.getByRole('menuitem', { name: /^Effort/ }).textContent).toContain('default');
   });
 
   it('explains when a model takes no effort, and drops effort from the pill', () => {
