@@ -233,6 +233,29 @@ describe('live harness smoke', () => {
     expect(usage.at(-1)?.totals.turns).toBe(1);
   });
 
+  it.runIf(want('pi') && process.env.HARNESS_SMOKE_QUESTIONS === '1')('pi asks a structured question and receives selection plus context', async () => {
+    const { ctx, events, items, waitTurn } = await makeCtx('pi');
+    const drafts: ApprovalDraft[] = [];
+    ctx.requestApproval = async (draft) => {
+      drafts.push(draft);
+      if (draft.kind !== 'question' || draft.toolName !== 'ask_user' || draft.questions?.length !== 1) throw new Error('Expected one structured question, not a tool permission.');
+      return { optionId: 'allow', answers: { [draft.questions[0].id]: 'staging' }, note: 'Wait for Friday.' };
+    };
+    const adapter = createAdapter('pi', ctx);
+    cleanups.push(() => adapter.dispose());
+    await adapter.start();
+    await adapter.send({ text: 'Before proceeding, ask me one question using the app structured-question tool, not plain prose: which deployment environment, staging or production? Provide a short description for each option. After my answer, reply exactly STAGING_FRIDAY if I chose staging with context to wait for Friday. Do not deploy anything or call any other tools.' });
+    await waitTurn(170_000);
+    assertSuccessfulTurn(items, events, 'STAGING_FRIDAY');
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].questions?.[0].options?.map((option) => option.label.toLowerCase())).toEqual(['staging', 'production']);
+    expect(drafts[0].questions?.[0].options?.every((option) => Boolean(option.description))).toBe(true);
+    const tools = [...items.values()].filter((item) => item.kind === 'tool');
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({ name: 'ask_user', status: 'done' });
+    expect(tools[0].kind === 'tool' && tools[0].output).toContain('Wait for Friday.');
+  });
+
   it.runIf(want('claude'))('claude agent sdk answers a prompt', async () => {
     const { ctx, items, events, waitTurn, meta } = await makeCtx('claude');
     const adapter = createAdapter('claude', ctx);

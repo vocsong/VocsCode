@@ -11,6 +11,7 @@ import { codexProviderModels } from '../models/codex-catalog';
 import { toCodex } from '../mcp/effective';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY } from './permissions';
+import { questionAnswerWithNote } from './question-answers';
 import { spawnTool } from './spawn';
 import { fastModePricing } from './native/fast-mode-pricing';
 import type { HarnessAdapter, HarnessContext } from './types';
@@ -467,8 +468,12 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         questions: n.questions.map((q) => ({ id: q.id, header: q.header, question: q.question, options: q.options ?? undefined, allowOther: q.isOther, secret: q.isSecret }))
       });
       const answers: Record<string, { answers: string[] }> = {};
+      const note = decision.note?.trim();
       for (const q of n.questions) {
-        const a = decision.answers?.[q.id];
+        // Skip must never leak stale selections; this protocol has no separate denial-note field.
+        const a = decision.optionId === 'allow'
+          ? questionAnswerWithNote(decision.answers?.[q.id], note)
+          : note ? questionAnswerWithNote('The user skipped the question.', note) : undefined;
         answers[q.id] = { answers: a ? [a] : [] };
       }
       return { answers };
