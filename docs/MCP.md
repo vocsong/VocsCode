@@ -573,3 +573,40 @@ afterwards. Vocs Code never bundles the driver or updates it on its own.
 Not yet shipped (see the design doc): one app-owned runtime shared by concurrent sessions,
 in-transcript screenshots of driver actions on tool cards, a window picker in the preview, the
 guidance skill, and the Computer History audit view.
+
+### Native OAuth foundation (opt-in, main process only)
+
+`createNativeMcpOAuth` in `src/main/mcp/oauth.ts` implements an explicit native
+public-client authorization-code flow using the existing MCP SDK. A trusted
+main-process broker supplies the exact HTTPS resource, trusted issuer, approved
+scopes and system-browser opener. Call `authorize()` only after a user sign-in
+request, then pass the controller as `InspectOptions.oauth` to `inspectServer`
+or `connectServer`. HTTP and SSE transports receive the SDK provider and guarded
+fetch. OAuth cannot be combined with configured request headers, preventing the
+SDK from forwarding resource cookies or API keys during issuer discovery; stdio and external harness configurations remain unchanged.
+
+The flow uses an ephemeral IPv4 loopback listener, random callback path and state,
+S256 PKCE, exact resource/issuer checks, no client secret, no HTTP redirects,
+explicit scopes, bounded lifetime and cancellation. A sign-out cancels an in-flight
+login and removes local tokens. Background tool calls cannot launch browser login.
+Remote revocation is not implied by local clear. Caller-owned live connections
+must also be closed when switching accounts or signing out. Bearer requests are
+restricted to the exact resource URL. Legacy SSE servers that redirect messages to
+a different path are rejected, rather than silently forwarding credentials there;
+qualifying a separately authorized endpoint contract is future work.
+
+This is a backend foundation, **not a shipped sign-in UI or universal Vocs account
+login**. Tokens are isolated per controller and memory-only; refresh tokens are
+discarded. Each explicit login registers a fresh public client with its ephemeral
+callback. No master account session, provider key, token or verifier is copied into
+the renderer, server definitions or subprocess configuration. It does not use the
+existing API-key store's obfuscated fallback. Durable renewal and secure OS-vault
+persistence require the account/device revocation contract and are deliberately
+not enabled yet. Browser-only Hub catalog endpoints must not be accessed by
+copying browser cookies into this client.
+
+The SDK integration fixture exercises real discovery, registration, PKCE, loopback
+callback, exchange, HTTP initialization and tool discovery with synthetic tokens.
+No live identity, provider request or production deployment is part of that test.
+Actual desktop browser UX, account switching, SSE OAuth interoperability and
+revocation across devices remain rollout gates.
