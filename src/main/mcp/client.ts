@@ -5,6 +5,7 @@
  */
 import type { McpInspectResult, McpServerDef } from '../../shared/types';
 import { errorMessage } from '../util/async';
+import type { NativeMcpOAuth } from './oauth';
 
 const CLIENT_INFO = { name: 'vocs-code', version: '0.1.0' };
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -14,6 +15,8 @@ export interface InspectOptions {
   timeoutMs?: number;
   /** Extra environment for a stdio server, on top of the inherited one. */
   env?: NodeJS.ProcessEnv;
+  /** Explicit main-process authorization; never copied into server definitions or harness config. */
+  oauth?: NativeMcpOAuth;
 }
 
 interface McpTransportLike {
@@ -63,13 +66,16 @@ async function buildTransport(def: McpServerDef, opts: InspectOptions): Promise<
   }
   if (!def.url) throw new Error('No URL configured');
   const url = new URL(def.url);
+  if (opts.oauth && opts.oauth.resource !== url.href) throw new Error('MCP OAuth resource mismatch');
+  if (opts.oauth && Object.keys(def.headers ?? {}).length) throw new Error('Do not combine MCP OAuth with configured headers');
+  const oauth = opts.oauth ? { authProvider: opts.oauth.provider, fetch: opts.oauth.fetch } : {};
   const requestInit = def.headers && Object.keys(def.headers).length ? { headers: { ...def.headers } } : undefined;
   if (def.transport === 'sse') {
     const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js');
-    return new SSEClientTransport(url, { requestInit });
+    return new SSEClientTransport(url, { requestInit, ...oauth });
   }
   const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
-  return new StreamableHTTPClientTransport(url, { requestInit });
+  return new StreamableHTTPClientTransport(url, { requestInit, ...oauth });
 }
 
 /**
