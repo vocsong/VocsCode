@@ -95,18 +95,24 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
     tokens() { return tokens && Date.now() < expiresAt ? { ...tokens } : undefined; },
     saveTokens(value) {
       if (!active || active.signal.aborted) throw new Error('MCP sign-in is no longer active');
-      if (!value.access_token || value.token_type.toLowerCase() !== 'bearer' || !value.expires_in || value.expires_in <= 0) throw new Error('MCP OAuth requires a bounded bearer token');
+      const deadline = Date.now() + (value.expires_in ?? 0) * 1000;
+      if (!value.access_token || value.token_type.toLowerCase() !== 'bearer' || !value.expires_in || value.expires_in <= 0 || !Number.isSafeInteger(deadline)) throw new Error('MCP OAuth requires a bounded bearer token');
       if (value.scope?.split(' ').some((scope) => !scopes.includes(scope))) throw new Error('MCP OAuth returned an unapproved scope');
       // Renewal needs account/device revocation first. Do not retain refresh tokens yet.
       tokens = { access_token: value.access_token, token_type: value.token_type, expires_in: value.expires_in, ...(value.scope ? { scope: value.scope } : {}) };
-      expiresAt = Date.now() + value.expires_in * 1000;
+      expiresAt = deadline;
     },
     saveCodeVerifier(value) { if (!active || active.signal.aborted) throw new Error('Start an explicit MCP sign-in first'); verifier = value; },
     codeVerifier() { if (!verifier) throw new Error('MCP sign-in verifier is unavailable'); return verifier; },
     async redirectToAuthorization(url) {
       if (!active || active.signal.aborted) throw new Error('MCP sign-in required; authorize explicitly');
       const target = secureUrl(url);
-      if (target.href.split('?')[0] !== discovery?.authorizationServerMetadata?.authorization_endpoint || target.searchParams.get('state') !== state || target.searchParams.get('code_challenge_method') !== 'S256' || target.searchParams.get('resource') !== resource || target.searchParams.get('scope') !== scopes.join(' ')) throw new Error('Unexpected MCP authorization request');
+      const endpoint = discovery?.authorizationServerMetadata?.authorization_endpoint;
+      if (!endpoint) throw new Error('Unexpected MCP authorization request');
+      const expected = secureUrl(endpoint);
+      // The SDK appends OAuth parameters to an endpoint that can already have a query.
+      const fixedQueryChanged = [...expected.searchParams.keys()].some((key) => JSON.stringify(target.searchParams.getAll(key)) !== JSON.stringify(expected.searchParams.getAll(key)));
+      if (target.origin !== expected.origin || target.pathname !== expected.pathname || fixedQueryChanged || target.searchParams.get('state') !== state || target.searchParams.get('code_challenge_method') !== 'S256' || target.searchParams.get('resource') !== resource || target.searchParams.get('scope') !== scopes.join(' ')) throw new Error('Unexpected MCP authorization request');
       await abortable(options.openExternal(target.href), active.signal);
     },
     async validateResourceURL(serverUrl, metadataResource) {
@@ -198,10 +204,26 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
         if (!address || typeof address === 'string') throw new Error('MCP callback unavailable');
         redirect = `http://127.0.0.1:${address.port}${callbackPath}`;
         const { auth } = await import('@modelcontextprotocol/sdk/client/auth.js');
-        const result = await auth(provider, { serverUrl: resource, scope: scopes.join(' '), fetchFn: guardedFetch });
+        // Racing the SDK releases an abandoned sign-in even if a custom fetch/body ignores abort.
+        // Bind every continuation to this attempt so a late response cannot touch a newer login.
+        const attemptProvider = new Proxy(provider, {
+          get(target, key, receiver) {
+            controller.signal.throwIfAborted();
+            const value = Reflect.get(target, key, receiver);
+            return typeof value === 'function' ? (...args: unknown[]) => {
+              controller.signal.throwIfAborted();
+              return Reflect.apply(value, target, args);
+            } : value;
+          }
+        });
+        const attemptFetch: FetchLike = async (input, init) => {
+          controller.signal.throwIfAborted();
+          return guardedFetch(input, { ...init, signal: AbortSignal.any([controller.signal, ...(init?.signal ? [init.signal] : [])]) });
+        };
+        const result = await abortable(auth(attemptProvider, { serverUrl: resource, scope: scopes.join(' '), fetchFn: attemptFetch }), controller.signal);
         if (result !== 'REDIRECT') throw new Error('Expected an interactive MCP sign-in');
         const code = await codePromise;
-        const exchanged = await auth(provider, { serverUrl: resource, authorizationCode: code, scope: scopes.join(' '), fetchFn: guardedFetch });
+        const exchanged = await abortable(auth(attemptProvider, { serverUrl: resource, authorizationCode: code, scope: scopes.join(' '), fetchFn: attemptFetch }), controller.signal);
         if (exchanged !== 'AUTHORIZED' || generation !== current || controller.signal.aborted || !tokens) throw new Error('MCP sign-in was not completed');
       } catch (error) {
         tokens = undefined;

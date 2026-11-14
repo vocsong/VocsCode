@@ -587,8 +587,13 @@ SDK from forwarding resource cookies or API keys during issuer discovery; stdio 
 
 The flow uses an ephemeral IPv4 loopback listener, random callback path and state,
 S256 PKCE, exact resource/issuer checks, no client secret, no HTTP redirects,
-explicit scopes, bounded lifetime and cancellation. A sign-out cancels an in-flight
-login and removes local tokens. Background tool calls cannot launch browser login.
+explicit scopes, bounded lifetime and cancellation. Fixed query parameters on the
+trusted authorization endpoint are preserved and checked before opening the browser.
+A sign-out cancels an in-flight login and removes local tokens. Cancellation and
+timeout release sign-in even if an injected fetch or response parser ignores abort;
+late SDK continuations cannot read or mutate a subsequent attempt. Token expiry
+must produce a safely representable millisecond deadline. Background tool calls
+cannot launch browser login.
 Remote revocation is not implied by local clear. Caller-owned live connections
 must also be closed when switching accounts or signing out. Bearer requests are
 restricted to the exact resource URL. Legacy SSE servers that redirect messages to
@@ -607,6 +612,11 @@ copying browser cookies into this client.
 
 The SDK integration fixture exercises real discovery, registration, PKCE, loopback
 callback, exchange, HTTP initialization and tool discovery with synthetic tokens.
+It also covers fixed endpoint queries and tampering, expiry overflow, and logout,
+caller cancellation and timeout during stalled discovery or token-body parsing,
+including late-response isolation while a fresh sign-in is active and a successful
+authenticated connection afterward. `tests/mcp-oauth.test.ts` is in the no-skip
+develop PR allowlist so these boundaries run in CI, not only the release suite.
 No live identity, provider request or production deployment is part of that test.
 Actual desktop browser UX, account switching, SSE OAuth interoperability and
 revocation across devices remain rollout gates.

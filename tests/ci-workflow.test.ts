@@ -28,7 +28,7 @@ describe('CI tier boundaries', () => {
     expect(prFiles.every((file) => file.startsWith('tests/') && !file.startsWith('tests/e2e.'))).toBe(true);
     expect(prFiles.every((file) => existsSync(path.join(root, file)))).toBe(true);
     expect(prFiles).toEqual(expect.arrayContaining([
-      'tests/review-fixes.test.ts', 'tests/session-resume.test.ts', 'tests/mission-store.test.ts',
+      'tests/review-fixes.test.ts', 'tests/mcp-oauth.test.ts', 'tests/session-resume.test.ts', 'tests/mission-store.test.ts',
       'tests/relay-core.test.ts', 'tests/qr.test.ts', 'tests/web-transport.test.ts'
     ]));
     expect(gate).toMatch(releaseCondition);

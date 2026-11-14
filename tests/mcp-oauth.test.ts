@@ -71,6 +71,37 @@ describe('native MCP OAuth main-process boundary', () => {
     expect(f.oauth.provider.tokens()).toBeUndefined();
   });
 
+  it('preserves fixed authorization endpoint query parameters through real SDK sign-in', async () => {
+    const f = fixture({ authorization_endpoint: `${issuer}authorize?tenant=fixture&audience=hub&audience=models` });
+    const browser = f.browser.getMockImplementation()!;
+    f.browser.mockImplementation(async (url) => {
+      if (f.browser.mock.calls.length !== 1) throw new Error('Forged authorization reached the browser');
+      for (const change of [
+        (target: URL) => target.searchParams.set('tenant', 'other'),
+        (target: URL) => target.searchParams.delete('audience'),
+        (target: URL) => target.searchParams.append('audience', 'other'),
+        (target: URL) => { target.pathname = '/other'; },
+        (target: URL) => { target.hostname = 'evil.example'; }
+      ]) {
+        const forged = new URL(url);
+        change(forged);
+        await expect(f.oauth.provider.redirectToAuthorization(forged)).rejects.toThrow('Unexpected MCP authorization request');
+      }
+      await browser(url);
+    });
+    try {
+      await f.oauth.authorize();
+      const target = new URL(f.browser.mock.calls[0][0]);
+      expect(target.searchParams.get('tenant')).toBe('fixture');
+      expect(target.searchParams.getAll('audience')).toEqual(['hub', 'models']);
+      expect(f.browser).toHaveBeenCalledTimes(1);
+      expect(f.issued).toBe(1);
+      const result = await inspectServer({ id: 'hub', transport: 'http', url: resource }, { oauth: f.oauth });
+      expect(result.ok, result.error).toBe(true);
+      expect(result.tools.map(t => t.name)).toEqual(['list_models']);
+    } finally { f.oauth.clear(); }
+  });
+
   it('refuses a resource/issuer mix-up and PKCE downgrade before browser or token request', async () => {
     for (const override of [{ issuer: 'https://other.example/' }, { token_endpoint: 'https://other.example/token' }, { code_challenge_methods_supported: ['plain'] }]) {
       const f = fixture(override);
@@ -162,6 +193,93 @@ describe('native MCP OAuth main-process boundary', () => {
     const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 301_000);
     try { expect(f.oauth.provider.tokens()).toBeUndefined(); }
     finally { now.mockRestore(); f.oauth.clear(); }
+  });
+
+  it.each([1e308, Number.MAX_SAFE_INTEGER])('rejects token expiry overflow (%s) before a connection can use it', async (expires_in) => {
+    const f = fixture();
+    const original = f.network.getMockImplementation()!;
+    f.network.mockImplementation(async (input, init) => {
+      const response = await original(input, init);
+      return String(input) === `${issuer}token` ? Response.json({ ...await response.json(), expires_in }) : response;
+    });
+    try {
+      await expect(f.oauth.authorize()).rejects.toThrow(/bounded bearer token/);
+      expect(f.issued).toBe(1);
+      expect(f.oauth.provider.tokens()).toBeUndefined();
+    } finally { f.oauth.clear(); }
+  });
+
+  it.each([
+    ['logout', 'discovery'], ['abort', 'discovery'], ['timeout', 'discovery'],
+    ['logout', 'token-body'], ['abort', 'token-body'], ['timeout', 'token-body']
+  ] as const)('releases an uncooperative %s during %s and isolates the next sign-in', async (cancel, stage) => {
+    const f = fixture({}, cancel === 'timeout' ? 500 : 5000);
+    const original = f.network.getMockImplementation()!;
+    let release!: () => void;
+    let requested!: () => void;
+    const started = new Promise<void>(resolve => { requested = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    f.network.mockImplementation(async (input, init) => {
+      if (stage === 'discovery') {
+        requested();
+        await gate;
+      }
+      const response = await original(input, init);
+      if (stage !== 'token-body' || String(input) !== `${issuer}token`) return response;
+      const staleTokens = { ...await response.json(), access_token: 'stale-token' };
+      const delayed = Response.json(staleTokens);
+      delayed.json = async () => { requested(); await gate; return staleTokens; };
+      return delayed;
+    });
+    const controller = new AbortController();
+    const outcome = f.oauth.authorize(controller.signal).then(
+      () => 'authorized',
+      (error: unknown) => error instanceof Error ? error.message : String(error)
+    );
+    let timer: NodeJS.Timeout | undefined;
+    let next: Promise<void> | undefined;
+    let releaseNext!: () => void;
+    const nextGate = new Promise<void>(resolve => { releaseNext = resolve; });
+    try {
+      await started;
+      if (cancel === 'logout') f.oauth.clear();
+      if (cancel === 'abort') controller.abort();
+      const result = await Promise.race([
+        outcome,
+        new Promise<string>(resolve => { timer = setTimeout(() => resolve('still pending'), 1500); })
+      ]);
+      expect(result).toMatch(/cancelled|timed out/);
+      expect(f.oauth.provider.tokens()).toBeUndefined();
+      let nextRequested!: () => void;
+      const nextStarted = new Promise<void>(resolve => { nextRequested = resolve; });
+      f.network.mockImplementation(async (input, init) => {
+        const response = await original(input, init);
+        if (String(input) === `${issuer}token`) { nextRequested(); await nextGate; }
+        return response;
+      });
+      next = f.oauth.authorize();
+      void next.catch(() => undefined);
+      await nextStarted;
+      const calls = f.network.mock.calls.length;
+      release();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(f.network).toHaveBeenCalledTimes(calls);
+      expect(f.browser).toHaveBeenCalledTimes(stage === 'discovery' ? 1 : 2);
+      expect(f.issued).toBe(stage === 'discovery' ? 1 : 2);
+      expect(f.oauth.provider.tokens()).toBeUndefined();
+      releaseNext();
+      await next;
+      const connection = await inspectServer({ id: 'hub', transport: 'http', url: resource }, { oauth: f.oauth });
+      expect(connection.ok, connection.error).toBe(true);
+      expect(connection.tools.map(t => t.name)).toEqual(['list_models']);
+      expect((await f.oauth.provider.tokens())?.access_token).toBe('secret-token');
+    } finally {
+      clearTimeout(timer);
+      f.oauth.clear();
+      release();
+      releaseNext();
+      await Promise.allSettled([outcome, next]);
+    }
   });
 
   it('never forwards resource bearer tokens to a different issuer origin', async () => {
