@@ -11,7 +11,7 @@ import { useSessionModels } from '../models';
 import { setSessionEffort } from '../sessionActions';
 import { NO_COMPOSER_HISTORY, useStore } from '../store';
 import * as host from '../terminal/host';
-import { Button, Icon, Kbd } from './ui';
+import { Button, Dropdown, Icon, Kbd, MenuItem } from './ui';
 import { parseMissionCommand } from '../../../shared/mission-command';
 import { missionQuestionUsage } from '../../../shared/mission';
 import { commandMission, MISSION_MANAGED_REASON, pauseMissionSession, sendMissionUser } from '../missions';
@@ -57,6 +57,7 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
   const [histIdx, setHistIdx] = useState(-1);
   const ref = useRef<HTMLTextAreaElement>(null);
   const dictation = useRef<DictationHandle>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const toast = useStore((s) => s.toast);
   const providers = useStore((s) => s.settings?.providers) ?? [];
   const composerInsert = useStore((s) => s.composerInsert);
@@ -555,6 +556,12 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
     void addFiles(pasted);
   };
 
+  const secondaryItems = (close: () => void) => <>
+    <MenuItem onClick={() => { close(); fileInput.current?.click(); }}>Attach files</MenuItem>
+    {!session.mission && <MenuItem hint={`${fmtCost(session.usage.costUsd)}${session.usage.contextWindow && session.usage.contextTokens ? ` · ${Math.round(100 * session.usage.contextTokens / session.usage.contextWindow)}% context` : ''}`} onClick={() => { close(); useStore.getState().setPanelTab('usage'); }}>Session usage</MenuItem>}
+    {(session.queued ?? 0) > 0 && <div className="run-more-note" role="status">{session.queued} messages waiting for the current turn</div>}
+  </>;
+
   return (
     <div className="composer">
       {completed && <div className="composer-hint muted small" data-testid="mission-question-scope">
@@ -616,20 +623,24 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste attachments)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now, queue button waits for the turn)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… @ files · / commands · ! shell'}
+          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste attachments)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now; send menu to queue)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… @ files · / commands · ! shell'}
           rows={1}
           spellCheck
         />
         <div className="composer-actions">
-          <label className="icon-btn composer-attach" title="Attach files">
+          <button type="button" className="icon-btn composer-attach" title="Attach files" aria-label="Attach files" onClick={() => fileInput.current?.click()}>
             <Icon name="plus" size={16} />
-            <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
-          </label>
+          </button>
+          <input ref={fileInput} type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
           {!session.mission && <SessionControls session={session} />}
           <span className="spacer" />
-          {(session.queued ?? 0) > 0 && <span className="queued-hint" title="Messages waiting for the current turn">{session.queued} queued</span>}
+          {(session.queued ?? 0) > 0 && <span className="queued-hint" title="Messages waiting for the current turn">{session.queued}<span className="queued-label"> queued</span></span>}
           {!session.mission && <SessionMeter session={session} />}
-          {canInvoke('dictation:transcribe') && <DictationControl ref={dictation} onText={insertDictation} />}
+          {canInvoke('dictation:transcribe') ? <DictationControl ref={dictation} onText={insertDictation} menuItems={secondaryItems} /> : (
+            <Dropdown align="right" width={260} trigger={() => <button type="button" className="icon-btn" title="Composer options" aria-label="Composer options"><Icon name="more" size={16} /></button>}>
+              {secondaryItems}
+            </Dropdown>
+          )}
           {shellDraft && !completed ? (
             <Button size="sm" variant="primary" icon="terminal" onClick={() => void send()} disabled={!text.trim().slice(1).trim()} title="Run in this session's terminal without sending anything to the agent">
               Run
@@ -641,14 +652,14 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
             </>
           ) : busy ? (
             <>
-              {caps.queue && (
-                <Button size="sm" onClick={() => void send('queue')} title="Send after the current turn">
-                  Queue
+              <div className="composer-send-group">
+                <Button size="sm" variant="primary" icon={caps.steer ? 'arrowUp' : 'clock'} onClick={() => void send(caps.steer ? 'steer' : 'queue')} title={caps.steer ? 'Steer now (Enter)' : 'Queue (Enter)'} aria-label={caps.steer ? 'Steer' : 'Queue'}>
+                  <span className="composer-send-label">{caps.steer ? 'Steer' : 'Queue'}</span>
                 </Button>
-              )}
-              <Button size="sm" variant="primary" icon={caps.steer ? 'arrowUp' : 'clock'} onClick={() => void send(caps.steer ? 'steer' : 'queue')} title={caps.steer ? 'Steer now' : 'Queue'}>
-                {caps.steer ? 'Steer' : 'Queue'}
-              </Button>
+                {caps.steer && caps.queue && <Dropdown align="right" width={240} trigger={() => <Button size="sm" variant="primary" className="composer-send-options" icon="chevron" title="Send options" aria-label="Send options" />}>
+                  {(close) => <MenuItem hint="After the current turn" onClick={() => { close(); void send('queue'); }}>Queue</MenuItem>}
+                </Dropdown>}
+              </div>
               <Button size="sm" variant="danger" icon="stop" className="btn-icon" onClick={() => pauseMissionSession(session)} title="Interrupt (Esc)" />
             </>
           ) : (

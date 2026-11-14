@@ -115,23 +115,66 @@ describe('new-session Fast mode request', () => {
 });
 
 describe('composer Fast mode request', () => {
-  it('keeps cost and the labelled Queue/Steer actions visible while busy', async () => {
+  it('keeps Steer primary, queues through its menu, and puts cost in composer options', async () => {
     const busy = session({ status: 'running', usage: { ...session().usage, costUsd: 6.11 } });
     seed(busy);
     render(<Composer session={busy} />);
-    const input = screen.getByPlaceholderText('Steer the agent… (Enter sends now, queue button waits for the turn)');
-    const meter = screen.getByRole('button', { name: 'Session usage' });
+    const input = screen.getByRole('textbox');
+    expect(screen.queryByRole('button', { name: 'Queue' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Composer options' }));
+    const meter = screen.getByRole('menuitem', { name: /Session usage/ });
     expect(meter.textContent).toContain('$6.11');
-    expect(screen.getByText('Queue', { selector: 'button' })).toBeTruthy();
+    fireEvent.click(meter);
+    expect(useStore.getState().panelTab).toBe('usage');
+    fireEvent.mouseDown(document.body);
     expect(screen.getByRole('button', { name: 'Steer' })).toBeTruthy();
     fireEvent.change(input, { target: { value: 'after this turn' } });
-    fireEvent.click(screen.getByText('Queue', { selector: 'button' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Queue/ }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:send', { id: busy.id, input: expect.objectContaining({ text: 'after this turn', mode: 'queue' }) }));
     fireEvent.change(input, { target: { value: 'adjust now' } });
     fireEvent.click(screen.getByRole('button', { name: 'Steer' }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:send', { id: busy.id, input: expect.objectContaining({ text: 'adjust now', mode: 'steer' }) }));
-    fireEvent.click(meter);
-    expect(useStore.getState().panelTab).toBe('usage');
+    expect(invoke.mock.calls.filter(([channel]) => channel === 'sessions:send')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Interrupt (Esc)' }));
+    expect(invoke).toHaveBeenCalledWith('sessions:interrupt', { id: busy.id });
+  });
+
+  it('offers one Queue action for a queue-only harness and preserves Enter semantics', async () => {
+    const busy = session({ status: 'running', config: { ...session().config, harness: 'codex-exec' } });
+    seed(busy);
+    gate.allowed = false; // Options remain reachable when dictation is unavailable.
+    render(<Composer session={busy} />);
+    expect(screen.getAllByRole('button', { name: 'Queue' })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Send options' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Composer options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Session usage/ }));
+    expect(screen.queryByRole('menu')).toBeNull();
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: 'follow up' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+    fireEvent.change(input, { target: { value: 'another follow up' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(invoke.mock.calls.filter(([channel]) => channel === 'sessions:send')).toEqual([
+      ['sessions:send', { id: busy.id, input: { text: 'follow up', mode: 'queue', images: undefined, files: undefined } }],
+      ['sessions:send', { id: busy.id, input: { text: 'another follow up', mode: 'queue', images: undefined, files: undefined } }]
+    ]));
+  });
+
+  it('keeps Enter as Steer after dismissing the Queue menu', async () => {
+    const busy = session({ status: 'running' });
+    seed(busy);
+    render(<Composer session={busy} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Send options' }));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('menuitem', { name: /Queue/ })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Send options' }));
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: 'adjust now' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(invoke.mock.calls.filter(([channel]) => channel === 'sessions:send')).toEqual([
+      ['sessions:send', { id: busy.id, input: { text: 'adjust now', mode: 'steer', images: undefined, files: undefined } }]
+    ]));
   });
 
   it('requires visible cost confirmation, waits for IPC, and never claims requested means on', async () => {
