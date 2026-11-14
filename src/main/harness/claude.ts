@@ -40,6 +40,7 @@ import { UsageReporter } from '../util/usage-reporter';
 import { SUBAGENT_TOOLS, ClaudeSubagentRuns, type NestedAssistantLike, type TaskNotificationLike, type TaskProgressLike, type TaskStartedLike, type TaskUpdatedLike } from './claude-subagents';
 import { gateAction, isOutsideWorkspace, isTrustedMissionCoordination, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
 import { projectInstructionBlock } from './project-instructions';
+import { questionAnswerWithNote } from './question-answers';
 import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext, MissionReadiness } from './types';
 
@@ -575,10 +576,10 @@ export class ClaudeAdapter implements HarnessAdapter {
         allowOther: true
       }))
     });
-    if (decision.optionId !== 'allow') return { behavior: 'deny', message: 'The user skipped the question.' };
+    if (decision.optionId !== 'allow') return { behavior: 'deny', message: decision.note?.trim() || 'The user skipped the question.' };
     const answers: Record<string, string> = {};
     qs.forEach((q, i) => {
-      const a = decision.answers?.[String(i)];
+      const a = questionAnswerWithNote(decision.answers?.[String(i)], decision.note);
       if (a !== undefined) answers[String(q.question ?? '')] = a;
     });
     return { behavior: 'allow', updatedInput: { ...input, answers } };
