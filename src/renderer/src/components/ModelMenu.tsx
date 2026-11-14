@@ -101,6 +101,7 @@ export function ModelMenu({
   const short = quickModels(models, favorites, current);
   return (
     <div ref={ref} className="model-menu">
+      {current && <div className="model-menu-current">{modelName(current.provider, current.model)}</div>}
       <div className="model-menu-models">
         {short.map((m) => (
           <MenuItem key={`${m.provider}::${m.id}`} active={isCurrent(m)} hint={m.displayName && m.displayName !== m.id ? m.displayName : undefined} onClick={() => { close(); if (!isCurrent(m)) onSelect(m); }}>

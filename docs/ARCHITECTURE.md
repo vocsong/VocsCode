@@ -109,8 +109,16 @@ so a Claude row without them becomes `[]` only when another row in the same `sup
 answer carries them; a runtime that reports them on no row leaves every model unknown. An ACP effort
 option with no level the app models stays unknown too.
 
+The desktop composer footer stays on one row, including narrow split panes. Its model pill uses
+catalog display text (or the model id), with the full `provider/model` identity in its accessible
+label, tooltip and menu. Effort and Fast settings live in that menu; permissions remain visible.
+Steer is primary while running, with Queue in its adjacent menu; queue-only harnesses get one Queue
+button. Composer options holds dictation's Cloud/Local selector, attachments, cost/context details
+and queued-message counts. Container queries move the inline attachment/context/count controls into
+that menu at narrow widths without changing send or permission semantics.
+
 **Fast mode is a separate, per-session premium-speed preference**, not a reasoning level. The
-New Session dialog and message header expose `SessionConfig.fastMode` (off by default), with a
+New Session dialog and composer's model menu expose `SessionConfig.fastMode` (off by default), with a
 cost warning before opt-in. `shared/fast-mode.ts` limits candidates to first-party OpenAI GPT-5/6
 (excluding Spark) and supported Anthropic Opus models; gateways, Cursor, ACP and Mission presets
 are not supported. Account entitlement is still the provider's decision. Idle-session changes go
@@ -132,11 +140,33 @@ probe too. Static Codex models are only a fallback when live discovery is unavai
 
 **Pi's tool set is Vocs Code's, on Pi's implementations.** `resources/pi/vocs-code-tools.ts`
 registers Pi's own `grep`, `find` and `ls` definitions under the names `rg`, `glob` and `ls`, so a Pi
-session starts with `read, bash, edit, write, rg, glob, ls` active and never needs a shell to search
+session starts with `read, bash, edit, write, rg, glob, ls, ask_user` active and never needs a shell to search
 or list. They are extension tools, which is what makes them active by default while still honouring
 `--tools`, `--exclude-tools` and `--no-tools`; a `--tools` allowlist could not express that default
 because it also filters MCP and subagent tools. Pi's built-in `grep`/`find` stay inactive, and
 delegated Pi subagents — separate in-process sessions with per-agent tool lists — keep them.
+
+**Structured questions are distinct from tool permissions.** Ordinary Pi sessions expose the
+app-owned `ask_user` tool through `vocs-code-tools.ts` / `question-tool.ts`. It asks one question at
+a time with optional described choices, a typed alternative and additional context. Pi's built-in
+tool set has no question tool, and its example TUI `custom()` dialogs do not work in RPC mode; the
+app uses a bounded, versioned, nonce-bound `VCODE_QUESTION::` select envelope instead. The adapter
+normalizes it into the same question card as Claude's `AskUserQuestion` and Codex's
+`requestUserInput`, then returns answer and context separately in a JSON RPC value. Cancellation,
+malformed/stale replies and unavailable UI never become fabricated user choices. A question is not
+a permission grant, including in Full access. Managed Mission sessions retain their broker-only
+question channel, and subagent/Vesta runtimes do not gain this tool.
+
+Question cards show option descriptions upfront, keep optional context separate from choosing or
+typing an answer, and retain the submitted choice/context in compact history. Empty structured
+answers cannot be submitted. Pi's serialized response budget is validated in the card and by
+SessionManager before the pending dialog is consumed, so an oversized pasted response remains
+editable and can be corrected instead of becoming an irreversible tool error. `ApprovalDecision`
+continues to store raw `answers` plus `note`; Claude and Codex append the note as explicitly labeled
+model-facing context at their adapter boundary. Skip never forwards a stale selected choice. Raw
+third-party Pi dialogs can require exact scalar values, so their normalized requests set
+`supportsQuestionComment: false` instead of offering a comment field that would be discarded or
+corrupt an extension's response. Ordinary tool-permission note semantics are unchanged.
 
 Delegated agents differ too. A Claude session's subagents run on the **session's own model**: the
 adapter sets `CLAUDE_CODE_SUBAGENT_MODEL` to it and, while the project pins no model of its own,
@@ -248,7 +278,7 @@ Across all harnesses a dangerous command (`rm -rf`, force-push, `sudo`, piping c
 - API keys are encrypted with Electron `safeStorage` and never leave the machine except to the provider you configured.
 - The renderer runs sandboxed with context isolation; all privileged work happens in the main process behind a typed IPC contract.
 - ACP read requests intentionally allow the agent's `readTextFile` callback to open absolute paths, matching the read policy of the other harnesses; approvals gate writes and commands, not reads. Use ACP with an agent you trust if the machine contains sensitive files outside the project.
-- "Full access" disables every prompt and sandbox. Use it only in disposable environments.
+- "Full access" disables permission prompts and sandboxing, not genuine clarification questions. Use it only in disposable environments.
 
 ## Usage analytics
 

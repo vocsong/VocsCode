@@ -2206,7 +2206,7 @@ h4 {
 
 
 
-/* Model (with effort beside it) and permission pills; their menus open upward from the composer. */
+/* Compact model and permission pills; secondary settings live in the model menu. */
 .run-controls {
   display: contents;
 }
@@ -2255,23 +2255,18 @@ h4 {
 .run-controls .pill-model {
   color: var(--fg);
   font-weight: 500;
-  max-width: 340px;
+  max-width: 220px;
+  width: 100%;
 }
 .run-controls .pill-model > .icon:first-child {
   color: var(--accent);
 }
-/* The model name truncates first; effort and the Fast request stay readable beside it. */
-.pill-effort,
-.pill-fast {
-  flex: none;
+.model-menu-current {
+  padding: 8px;
   color: var(--fg-muted);
-  font-weight: 400;
-}
-.pill-fast {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  color: var(--amber);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--border);
 }
 .model-menu {
   width: 320px;
@@ -3292,15 +3287,34 @@ h4 {
 .approval-remote {
   padding: 4px 0 2px;
 }
-.approval-note {
-  flex: 1;
-  min-width: 180px;
+.approval-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
   font-size: 12px;
+  color: var(--fg-muted);
+}
+.approval-field input,
+.approval-field textarea {
+  color: var(--fg);
+}
+.approval-note {
   background: transparent;
   border-style: dashed;
+  resize: vertical;
 }
 .approval-note:focus {
   border-style: solid;
+}
+.approval-saved-note {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.approval-note-label {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-bottom: 4px;
 }
 .approval-files {
   display: flex;
@@ -3337,12 +3351,67 @@ h4 {
   letter-spacing: 0.04em;
 }
 .approval-qopts {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
-  flex-wrap: wrap;
+}
+.approval-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--fg);
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.approval-choice:hover:not(:disabled) {
+  border-color: var(--fg-muted);
+}
+.approval-choice.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.approval-choice:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.approval-choice:disabled,
+.approval-field input:disabled,
+.approval-field textarea:disabled,
+.approval-cmd:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.approval-choice-label {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 500;
+}
+.approval-choice-label .icon {
+  flex-shrink: 0;
+  color: var(--accent);
+  margin-top: 2px;
+}
+.approval-choice-desc {
+  display: block;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.approval-qtext,
+.approval-answer {
+  overflow-wrap: anywhere;
 }
 .approval-answer {
   color: var(--accent);
+  white-space: pre-wrap;
 }
 
 /* Diff */
@@ -3443,6 +3512,7 @@ h4 {
   background: var(--bg);
   display: flex;
   flex-direction: column;
+  container-type: inline-size;
 }
 .composer-box:focus-within {
   border-color: var(--accent);
@@ -3458,11 +3528,61 @@ h4 {
   max-height: 320px;
 }
 .composer-actions {
+  position: relative;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px 8px;
+  white-space: nowrap;
+}
+.composer-actions > :not(.run-controls):not(.spacer) {
+  flex-shrink: 0;
+}
+.composer-actions .dropdown {
+  position: static;
+}
+.composer-actions .dropdown-menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+  max-width: 100%;
+  white-space: normal;
+}
+.composer-actions .model-menu {
+  max-width: calc(100cqw - 12px);
+}
+.composer-actions .run-controls > .dropdown:first-child {
+  flex: 0 1 220px;
+  min-width: 38px;
+}
+.composer-actions .run-controls > .dropdown:last-child:not(:first-child) {
+  flex: none;
+}
+.composer-send-group {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px 8px;
-  justify-content: flex-end;
+}
+.composer-send-group:has(.dropdown) > .btn {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+.composer-send-group .composer-send-options {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  border-left-color: color-mix(in srgb, currentColor 25%, transparent);
+  padding-inline: 5px;
+}
+@container (max-width: 520px) {
+  .composer-actions .queued-label { display: none; }
+  .composer-actions .run-controls .pill { padding-inline: 5px; }
+}
+@container (max-width: 440px) {
+  /* These actions remain in Composer options; permission and send/stop never disappear. */
+  .composer-actions > .composer-attach,
+  .composer-actions > .session-meter,
+  .composer-actions > .queued-hint { display: none; }
+}
+@container (max-width: 340px) {
+  .composer-send-label { display: none; }
+  .composer-actions .pill-model > .icon:last-child { display: none; }
 }
 /* Desktop session pane: the composer floats on the conversation's ground as one card — the prompt
    above, the controls it is sent with along its foot. The transcript fades out behind it. (The web
@@ -3502,17 +3622,18 @@ h4 {
 }
 .pane .composer-actions {
   justify-content: flex-start;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 2px;
   padding: 4px 8px 8px 6px;
 }
-/* When a narrow pane wraps the footer, the send group still ends at the right edge. */
-.pane .composer-actions > .spacer + * {
-  margin-left: auto;
-}
-.composer-attach {
+.composer-actions > .icon-btn {
+  border: none;
+  background: transparent;
   border-radius: 8px;
   padding: 6px;
+}
+.composer-actions > .icon-btn:hover {
+  background: var(--bg-hover);
 }
 .composer-actions .queued-hint {
   padding: 2px 8px;
@@ -3520,7 +3641,7 @@ h4 {
   background: var(--blue-soft);
   font-size: 11.5px;
 }
-/* Send is a round arrow; the busy state's Queue / Steer / Stop keep their labels. */
+/* Send is a round arrow; a busy turn offers Steer with Queue in its split-button menu. */
 .btn.send-btn {
   width: 32px;
   height: 32px;
@@ -3564,8 +3685,15 @@ h4 {
   transition: box-shadow 80ms linear;
 }
 .dictation-clock {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
   color: var(--red);
-  padding: 0 2px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
   font-variant-numeric: tabular-nums;
 }
 .dictation-engine {
