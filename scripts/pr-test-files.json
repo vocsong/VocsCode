@@ -26,6 +26,8 @@
   "tests/mission-state.test.ts",
   "tests/mission-store.test.ts",
   "tests/review-fixes.test.ts",
+  "tests/mcp-oauth.test.ts",
+  "tests/mcp-oauth-transport-race.test.ts",
   "tests/session-event-seq.test.ts",
   "tests/session-resume.test.ts",
   "tests/session-create-goal.test.ts",
