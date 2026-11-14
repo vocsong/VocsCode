@@ -1,5 +1,5 @@
-import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
+import React, { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { ApprovalDecision, ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
 import { invoke } from '../api';
 import { useCanInvoke, useTranscriptCapabilities } from '../capabilities';
 import { fmtCost, fmtDuration, fmtRate, fmtTokens } from '../format';
@@ -8,6 +8,7 @@ import { useStore } from '../store';
 import { MISSION_MANAGED_REASON } from '../missions';
 import { chunkKey, estimateChunkHeight, windowRange, type RenderChunk } from '../transcript-window';
 import { useStreamingMarkdown } from '../use-streaming-markdown';
+import { validateQuestionResponse } from '../../../shared/question-response';
 import { useMarkdownImages } from '../use-markdown-images';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
 import { DiffView } from './DiffView';
@@ -926,12 +927,38 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
   const [note, setNote] = useState('');
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [editedCommand, setEditedCommand] = useState<string | null>(null);
+  const [responseState, setResponseState] = useState<'idle' | 'sending' | 'sent'>('idle');
+  const [validationError, setValidationError] = useState<string | null>(null);
+  useEffect(() => setValidationError(null), [answers, note]);
+  const responding = useRef(false);
+  const fieldId = useId();
   const decided = !!item.decision;
+  const locked = decided || !canRespond || responseState !== 'idle';
+  const questionComment = req.kind === 'question' && req.supportsQuestionComment !== false;
+  const emptyQuestion = questionComment && !Object.values(answers).some((answer) => answer.trim()) && !note.trim();
+  const noteLabel = req.kind === 'question' ? 'Additional context (optional)' : 'Note for the agent (sent with Deny only)';
+  const decisionKind = req.options.find((o) => o.id === item.decision?.optionId)?.kind ?? item.decision?.optionId ?? '';
   const respond = (optionId: string) => {
-    const decision: { optionId: string; note?: string; answers?: Record<string, string>; updatedInput?: unknown } = { optionId, note: note.trim() || undefined };
+    if (locked || responding.current) return;
+    const option = req.options.find((o) => o.id === optionId);
+    const sendsNote = questionComment || (req.kind !== 'question' && (option?.kind === 'deny' || option?.kind === 'deny_always'));
+    const decision: ApprovalDecision = { optionId, note: sendsNote ? note.trim() || undefined : undefined };
     if (req.questions?.length) decision.answers = answers;
     if (editedCommand !== null && editedCommand !== req.command && req.input && typeof req.input === 'object') decision.updatedInput = { ...(req.input as Record<string, unknown>), command: editedCommand };
-    void invoke('approvals:respond', { sessionId, requestId: req.id, decision }).catch((e: unknown) => {
+    try {
+      validateQuestionResponse(req, decision);
+    } catch (error) {
+      setValidationError(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    responding.current = true;
+    setResponseState('sending');
+    void invoke('approvals:respond', { sessionId, requestId: req.id, decision }).then(() => {
+      // Keep the draft locked until the persisted decision arrives, not just until IPC resolves.
+      setResponseState('sent');
+    }).catch((e: unknown) => {
+      responding.current = false;
+      setResponseState('idle');
       toast(`Approval could not be sent: ${e instanceof Error ? e.message : String(e)}`, 'error');
     });
   };
@@ -944,47 +971,81 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
           {req.description && <span className="approval-desc">{req.description}</span>}
         </span>
         <Badge tone="neutral">{req.harness}</Badge>
-        {decided && <Badge tone={/deny|reject|cancel/.test(item.decision!.optionId) ? 'red' : 'green'}>{labelFor(req, item.decision!.optionId)}</Badge>}
+        {decided && <Badge tone={/deny|reject|cancel/.test(decisionKind) ? 'red' : 'green'}>{labelFor(req, item.decision!.optionId)}</Badge>}
       </div>
       {req.command !== undefined && (
         decided ? (
           <pre className="approval-cmd mono">{req.command}</pre>
         ) : (
-          <textarea className="approval-cmd mono editable" value={editedCommand ?? req.command} onChange={(e) => setEditedCommand(e.target.value)} rows={Math.min(6, (req.command.match(/\n/g)?.length ?? 0) + 1)} spellCheck={false} />
+          <textarea className="approval-cmd mono editable" aria-label="Command" disabled={locked} value={editedCommand ?? req.command} onChange={(e) => setEditedCommand(e.target.value)} rows={Math.min(6, (req.command.match(/\n/g)?.length ?? 0) + 1)} spellCheck={false} />
         )
       )}
       {req.cwd && req.command !== undefined && <div className="approval-cwd muted small">in {req.cwd}</div>}
       {req.changes?.length ? <ChangesPreview changes={req.changes} /> : null}
-      {req.questions?.map((q) => (
-        <div key={q.id} className="approval-question">
-          {q.header && <div className="approval-qhead">{q.header}</div>}
-          <div className="approval-qtext">{q.question}</div>
-          {q.options?.length ? (
-            <div className="approval-qopts">
-              {q.options.map((o) => (
-                <button key={o.label} type="button" className={`chip ${answers[q.id] === o.label ? 'active' : ''}`} disabled={decided} onClick={() => setAnswers(answers[q.id] === o.label ? Object.fromEntries(Object.entries(answers).filter(([id]) => id !== q.id)) : { ...answers, [q.id]: o.label })} aria-pressed={answers[q.id] === o.label} title={o.description}>
-                  {o.label}
-                </button>
-              ))}
-            </div>
-          ) : null}
-          {(q.allowOther || !q.options?.length) && !decided && (
-            <input type={q.secret ? 'password' : 'text'} placeholder="Type an answer" value={answers[q.id] && !q.options?.some((o) => o.label === answers[q.id]) ? answers[q.id] : ''} onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })} />
-          )}
-          {decided && item.decision?.answers?.[q.id] && <div className="approval-answer">→ {item.decision.answers[q.id]}</div>}
-        </div>
-      ))}
-      {!decided && canRespond && (
-        <>
-          <div className="approval-actions">
-            {req.options.map((o) => (
-              <Button key={o.id} className={`approval-opt opt-${o.kind}`} variant={o.kind === 'allow' ? 'primary' : o.kind === 'allow_session' || o.kind === 'allow_always' ? 'default' : 'ghost'} size="sm" onClick={() => respond(o.id)} title={o.description}>
-                {o.label}
-              </Button>
-            ))}
+      {req.questions?.map((q, qi) => {
+        const questionId = `${fieldId}-question-${qi}`;
+        const savedAnswer = /deny|reject|cancel/.test(decisionKind) ? undefined : item.decision?.answers?.[q.id];
+        const savedOption = !q.secret && q.options?.find((o) => o.label === savedAnswer);
+        return (
+          <div key={q.id} className="approval-question" role="group" aria-labelledby={questionId}>
+            {q.header && <div className="approval-qhead">{q.header}</div>}
+            <div className="approval-qtext" id={questionId}>{q.question}</div>
+            {decided ? (
+              savedAnswer ? (
+                <div className="approval-answer">
+                  <span>{q.secret ? 'Answer hidden' : savedAnswer}</span>
+                  {savedOption && savedOption.description && <span className="approval-choice-desc">{savedOption.description}</span>}
+                </div>
+              ) : <div className="muted small">No answer provided</div>
+            ) : (
+              <>
+                {q.options?.length ? (
+                  <div className="approval-qopts">
+                    {q.options.map((o, oi) => {
+                      const descriptionId = `${questionId}-option-${oi}`;
+                      return (
+                        <button key={o.label} type="button" className={`approval-choice ${answers[q.id] === o.label ? 'active' : ''}`} disabled={locked} onClick={() => setAnswers(answers[q.id] === o.label ? Object.fromEntries(Object.entries(answers).filter(([id]) => id !== q.id)) : { ...answers, [q.id]: o.label })} aria-label={o.label} aria-pressed={answers[q.id] === o.label} aria-describedby={o.description ? descriptionId : undefined}>
+                          <span className="approval-choice-label">{o.label}{answers[q.id] === o.label && <Icon name="check" size={14} />}</span>
+                          {o.description && <span className="approval-choice-desc" id={descriptionId}>{o.description}</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                {(q.allowOther || !q.options?.length) && (
+                  <label className="approval-field">
+                    <span>Type an answer</span>
+                    <input type={q.secret ? 'password' : 'text'} placeholder="Type an answer" aria-describedby={questionId} disabled={locked} value={answers[q.id] && !q.options?.some((o) => o.label === answers[q.id]) ? answers[q.id] : ''} onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })} />
+                  </label>
+                )}
+              </>
+            )}
           </div>
-          <input className="approval-note" placeholder="Add a note for the agent (sent with Deny)…" value={note} onChange={(e) => setNote(e.target.value)} />
-        </>
+        );
+      })}
+      {decided && item.decision?.note && (
+        <div className="approval-saved-note">
+          <div className="approval-note-label">{req.kind === 'question' ? 'Additional context' : 'Note for the agent'}</div>
+          <div>{item.decision.note}</div>
+        </div>
+      )}
+      {!decided && (req.kind !== 'question' || questionComment) && (
+        <label className="approval-field">
+          <span>{noteLabel}</span>
+          <textarea className="approval-note" rows={2} disabled={locked} value={note} onChange={(e) => setNote(e.target.value)} />
+        </label>
+      )}
+      {!decided && validationError && <div className="callout warn small" role="alert">{validationError}</div>}
+      {!decided && emptyQuestion && <div className="muted small" id={`${fieldId}-response-hint`}>Choose an option, type an answer, or add context to continue.</div>}
+      {!decided && canRespond && (
+        <div className="approval-actions">
+          {req.options.map((o) => (
+            <Button key={o.id} className={`approval-opt opt-${o.kind}`} variant={o.kind === 'allow' ? 'primary' : o.kind === 'allow_session' || o.kind === 'allow_always' ? 'default' : 'ghost'} size="sm" disabled={locked || (emptyQuestion && o.kind === 'allow')} aria-describedby={emptyQuestion && o.kind === 'allow' ? `${fieldId}-response-hint` : undefined} onClick={() => respond(o.id)} title={o.description}>
+              {o.label}
+            </Button>
+          ))}
+          {responseState !== 'idle' && <span className="muted small" role="status">{responseState === 'sending' ? 'Sending response…' : 'Response sent'}</span>}
+        </div>
       )}
       {!decided && !canRespond && <div className="approval-remote muted small">Decide on your computer</div>}
     </div>
