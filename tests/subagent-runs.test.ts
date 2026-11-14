@@ -8,7 +8,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LIMITS, RunStore, addUsage, emptyCall, emptyTotals } from '../resources/pi/subagent-runs';
-import { costsByModel, parseRunFile } from '../src/shared/subagents';
+import { costsByModel, parseRunFile, summarizeRun } from '../src/shared/subagents';
 
 const tempDirs: string[] = [];
 afterEach(async () => {
@@ -51,6 +51,63 @@ describe('run file round-trip', () => {
     expect(parsed!.endedAt).toBeGreaterThan(0);
   });
 
+  it.each([
+    { label: 'explicit effort', requestedThinkingLevel: 'high', thinkingLevel: 'high' },
+    { label: 'clamped effort', requestedThinkingLevel: 'xhigh', thinkingLevel: 'high' },
+    { label: 'inherited effort', requestedThinkingLevel: undefined, thinkingLevel: 'medium' },
+    { label: 'disabled effort', requestedThinkingLevel: undefined, thinkingLevel: 'off' },
+    { label: 'unknown effective effort', requestedThinkingLevel: 'high', thinkingLevel: undefined }
+  ])('persists and summarizes $label without conflating requested and effective levels', async ({ label, ...effort }) => {
+    const dir = await tempDir();
+    const store = new RunStore(dir);
+    const meta = { runId: 'agent_effort', agent: 'Explore', description: label, mode: 'foreground' as const, cwd: process.cwd(), startedAt: 1, ...effort };
+    await store.start(meta);
+    await store.end(meta.runId, 'completed', emptyTotals());
+    await store.flush();
+
+    const text = await fs.readFile(store.fileFor(meta.runId), 'utf8');
+    const header = JSON.parse(text.split('\n')[0]!);
+    const parsed = parseRunFile(text)!;
+    const summary = summarizeRun(parsed);
+    for (const key of ['requestedThinkingLevel', 'thinkingLevel'] as const) {
+      expect(header[key]).toBe(effort[key]);
+      expect(parsed.meta[key]).toBe(effort[key]);
+      expect(summary[key]).toBe(effort[key]);
+      if (effort[key] === undefined) {
+        expect(parsed.meta).not.toHaveProperty(key);
+        expect(summary).not.toHaveProperty(key);
+      }
+    }
+    expect(parsed.status).toBe('completed');
+  });
+
+  it('retains effort from a restated header without losing the transcript, calls or terminal state', async () => {
+    const dir = await tempDir();
+    const store = new RunStore(dir);
+    const meta = { runId: 'agent_restate', agent: 'Explore', description: 'Work', mode: 'foreground' as const, cwd: process.cwd(), startedAt: 1, requestedThinkingLevel: 'xhigh' };
+    await store.start(meta);
+    await store.item(meta.runId, { id: 'i1', ts: 2, kind: 'assistant', text: 'Recorded before the effective level was known.' });
+    await store.call(meta.runId, emptyCall(0));
+    await store.end(meta.runId, 'completed', { ...emptyTotals(), turns: 1 });
+    await store.start({ ...meta, thinkingLevel: 'high' });
+    await store.flush();
+
+    const parsed = parseRunFile(await fs.readFile(store.fileFor(meta.runId), 'utf8'))!;
+    expect(parsed.meta).toMatchObject({ requestedThinkingLevel: 'xhigh', thinkingLevel: 'high' });
+    expect(summarizeRun(parsed)).toMatchObject({ requestedThinkingLevel: 'xhigh', thinkingLevel: 'high', status: 'completed', turns: 1 });
+    expect(parsed.items).toEqual([{ id: 'i1', ts: 2, kind: 'assistant', text: 'Recorded before the effective level was known.' }]);
+    expect(parsed.calls).toEqual([emptyCall(0)]);
+    expect(parsed.endedAt).toBeGreaterThan(0);
+  });
+
+  it('ignores malformed effort metadata rather than presenting it as an effective level', () => {
+    const parsed = parseRunFile(JSON.stringify({ t: 'run', runId: 'agent_invalid', requestedThinkingLevel: 1, thinkingLevel: { level: 'high' } }))!;
+    expect(parsed.meta).not.toHaveProperty('requestedThinkingLevel');
+    expect(parsed.meta).not.toHaveProperty('thinkingLevel');
+    expect(summarizeRun(parsed)).not.toHaveProperty('requestedThinkingLevel');
+    expect(summarizeRun(parsed)).not.toHaveProperty('thinkingLevel');
+  });
+
   it('keeps a run that never ended in the running state', async () => {
     const dir = await tempDir();
     const store = new RunStore(dir);
@@ -59,6 +116,10 @@ describe('run file round-trip', () => {
     const parsed = parseRunFile(await fs.readFile(store.fileFor('agent_2'), 'utf8'));
     expect(parsed!.status).toBe('running');
     expect(parsed!.items).toEqual([]);
+    expect(parsed!.meta).not.toHaveProperty('requestedThinkingLevel');
+    expect(parsed!.meta).not.toHaveProperty('thinkingLevel');
+    expect(summarizeRun(parsed!)).not.toHaveProperty('requestedThinkingLevel');
+    expect(summarizeRun(parsed!)).not.toHaveProperty('thinkingLevel');
   });
 
   it('rejects a file with no run header and skips malformed lines', async () => {
@@ -128,6 +189,31 @@ describe('run store limits and failure handling', () => {
     await store.flush();
     const parsed = parseRunFile(await fs.readFile(store.fileFor('agent_6'), 'utf8'))!;
     expect(parsed.items[0]!.text!.length).toBe(LIMITS.itemChars + 1);
+  });
+
+  it('recovers effort metadata when a restated header follows a failed append', async () => {
+    const dir = await tempDir();
+    const onError = vi.fn();
+    const store = new RunStore(dir, onError);
+    const meta = { runId: 'agent_recover', agent: 'Explore', description: 'Work', mode: 'foreground' as const, cwd: process.cwd(), startedAt: 1, requestedThinkingLevel: 'high' };
+    const append = vi.spyOn(fs, 'appendFile').mockRejectedValueOnce(new Error('temporary disk failure'));
+    try {
+      await expect(store.start(meta)).resolves.toBeUndefined();
+      await store.start({ ...meta, thinkingLevel: 'medium' });
+      await store.item(meta.runId, { id: 'i1', ts: 2, kind: 'assistant', text: 'Recovered.' });
+      await store.end(meta.runId, 'completed', { ...emptyTotals(), turns: 1 });
+      await store.flush();
+
+      const parsed = parseRunFile(await fs.readFile(store.fileFor(meta.runId), 'utf8'))!;
+      expect(onError).toHaveBeenCalledExactlyOnceWith('subagent run store write failed: temporary disk failure');
+      expect(append).toHaveBeenCalledTimes(4);
+      expect(parsed.meta).toMatchObject({ requestedThinkingLevel: 'high', thinkingLevel: 'medium' });
+      expect(summarizeRun(parsed)).toMatchObject({ requestedThinkingLevel: 'high', thinkingLevel: 'medium', status: 'completed', turns: 1 });
+      expect(parsed.items).toEqual([{ id: 'i1', ts: 2, kind: 'assistant', text: 'Recovered.' }]);
+      expect(parsed.calls).toEqual([]);
+    } finally {
+      append.mockRestore();
+    }
   });
 
   it('never throws when the run directory cannot be created, and reports once', async () => {

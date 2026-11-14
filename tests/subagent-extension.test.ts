@@ -59,6 +59,9 @@ interface FakeChild {
   steers: string[];
   aborted: boolean;
   disposed: boolean;
+  readonly model: { provider?: string; id?: string };
+  readonly thinkingLevel: string;
+  getAvailableThinkingLevels(): string[];
   driver: ((child: FakeChild) => Promise<void>) | null;
   /** Resolves a never-finishing driver when the run is aborted, the way a real abort ends prompt(). */
   abortHook: (() => void) | null;
@@ -76,6 +79,7 @@ interface HarnessOptions {
   childDriver?: (child: FakeChild) => Promise<void>;
   select?: (title: string, options: readonly string[]) => Promise<string | undefined>;
   cwd?: string;
+  childThinkingLevel?: string;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -134,6 +138,9 @@ function harness(options: HarnessOptions = {}) {
         steers: [],
         aborted: false,
         disposed: false,
+        model: opts.model as { provider?: string; id?: string },
+        thinkingLevel: options.childThinkingLevel ?? String(opts.thinkingLevel ?? 'off'),
+        getAvailableThinkingLevels: () => ['off', 'low', 'medium', 'high'],
         driver: options.childDriver ?? null,
         abortHook: null,
         subscribe(listener) {
@@ -145,7 +152,7 @@ function harness(options: HarnessOptions = {}) {
           this.emit({ type: 'message_start', message: { role: 'assistant' } });
           if (this.driver) await this.driver(this);
           this.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'DONE' }], stopReason: 'stop' });
-          this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'DONE' }], stopReason: 'stop', model: 'claude-sonnet-4-5', provider: 'anthropic', usage: { input: 100, output: 20, cost: { total: 0.05 } } } });
+          this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'DONE' }], stopReason: 'stop', model: this.model.id, provider: this.model.provider, usage: { input: 100, output: 20, cost: { total: 0.05 } } } });
         },
         async steer(text) {
           this.steers.push(text);
@@ -219,6 +226,10 @@ describe('registration', () => {
     expect(subagent.description).toContain('Plan');
     expect(subagent.promptGuidelines.join(' ')).toContain('subagent_result');
     expect(subagent.promptGuidelines.join(' ')).toMatch(/prefer it over any other delegation tool/i);
+    expect(subagent.parameters.thinkingLevel.enum).toEqual(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+    expect(subagent.promptGuidelines.join(' ')).toContain('exactly the requested number');
+    expect(subagent.promptGuidelines.join(' ')).toContain('do not silently substitute');
+    expect(subagent.promptGuidelines.join(' ')).toContain('do not change settings or switch execution modes to bypass a cap');
   });
 
   it('advertises project agent files after session_start and reports readiness', async () => {
@@ -287,10 +298,134 @@ describe('foreground runs', () => {
     await expect(h.tools.get('subagent')!.execute('call_1', { ...subagentCall, type: 'nope' }, undefined, undefined, h.parentCtx)).rejects.toThrow(/Unknown subagent type "nope".*Explore/s);
   });
 
-  it('rejects an unavailable pinned model', async () => {
+  it('rejects an unavailable per-call model', async () => {
     const h = harness();
     await createVocsCodeSubagents(h.pi as never, h.deps);
     await expect(h.tools.get('subagent')!.execute('call_1', { ...subagentCall, model: 'ghost/model' }, undefined, undefined, h.parentCtx)).rejects.toThrow(/not available/i);
+  });
+});
+
+describe('model and effort controls', () => {
+  it('overrides the child model and effort without changing the parent and persists the configuration', async () => {
+    const dir = await tempDir();
+    const h = harness();
+    process.env.VOCS_CODE_SUBAGENT_DIR = dir;
+    h.parentCtx.thinkingLevel = 'high';
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const result = await h.tools.get('subagent')!.execute('c', { ...subagentCall, model: 'other/reasoner', thinkingLevel: 'medium' }, undefined, undefined, h.parentCtx);
+    expect(h.sessionOptions).toHaveLength(1);
+    expect(h.sessionOptions[0]).toMatchObject({ model: { provider: 'other', id: 'reasoner' }, thinkingLevel: 'medium' });
+    expect(h.parentCtx).toMatchObject({ model: { provider: 'anthropic', id: 'claude-sonnet-4-5' }, thinkingLevel: 'high' });
+    expect(result.details).toMatchObject({ status: 'completed', model: 'reasoner', provider: 'other', requestedThinkingLevel: 'medium', thinkingLevel: 'medium', turns: 1 });
+    expect(result.content[0].text).toContain('other/reasoner');
+    expect(result.content[0].text).toContain('medium effort');
+    const file = await fs.readFile(path.join(dir, `${result.details.runId}.jsonl`), 'utf8');
+    // Exercise the writer independently of the app reader, which has its own compatibility tests.
+    const headers = file.trim().split('\n').map((line) => JSON.parse(line)).filter((row) => row.t === 'run');
+    expect(headers.at(-1)).toMatchObject({ requestedThinkingLevel: 'medium', thinkingLevel: 'medium', model: 'reasoner' });
+  });
+
+  it('uses an agent pin by default but lets an explicit model override it', async () => {
+    const dir = await tempDir();
+    await fs.mkdir(path.join(dir, '.pi', 'agents'), { recursive: true });
+    await fs.writeFile(path.join(dir, '.pi', 'agents', 'reviewer.md'), '---\nname: reviewer\nmodel: pinned/reasoner\nmcp: false\n---\nReview.');
+    const h = harness({ cwd: dir });
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    await h.fire('session_start');
+    const spawn = (model?: string) => h.tools.get('subagent')!.execute('c', { ...subagentCall, type: 'reviewer', ...(model ? { model } : {}) }, undefined, undefined, h.parentCtx);
+    expect((await spawn()).details).toMatchObject({ provider: 'pinned', model: 'reasoner', thinkingLevel: 'medium' });
+    expect((await spawn('other/reasoner')).details).toMatchObject({ provider: 'other', model: 'reasoner' });
+  });
+
+  it.each(['', 'reasoner', '/reasoner', 'other/'])('rejects malformed explicit model %j rather than inheriting', async (model) => {
+    const h = harness();
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    await expect(h.tools.get('subagent')!.execute('c', { ...subagentCall, model }, undefined, undefined, h.parentCtx)).rejects.toThrow(/not available/i);
+    expect(h.children).toHaveLength(0);
+  });
+
+  it('refuses a model substitution before the child prompt', async () => {
+    const h = harness();
+    const create = h.deps.createAgentSession;
+    h.deps.createAgentSession = (options) => create({ ...options, model: { provider: 'other', id: 'fallback' } });
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    await expect(h.tools.get('subagent')!.execute('c', { ...subagentCall, model: 'requested/reasoner' }, undefined, undefined, h.parentCtx)).rejects.toThrow(/replaced.*child not started/);
+    expect(h.children[0]).toMatchObject({ disposed: true, prompts: [] });
+  });
+
+  it('inherits effort when omitted and reports the SDK effective level rather than pretending it was honored', async () => {
+    const h = harness({ childThinkingLevel: 'off' });
+    h.parentCtx.thinkingLevel = 'high';
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const result = await h.tools.get('subagent')!.execute('c', subagentCall, undefined, undefined, h.parentCtx);
+    expect(h.sessionOptions[0].thinkingLevel).toBe('high');
+    expect(result.details).toMatchObject({ status: 'completed', thinkingLevel: 'off' });
+    expect(result.details.requestedThinkingLevel).toBeUndefined();
+  });
+
+  it.each(['turbo', '', 'Medium', null, 3])('rejects invalid effort %j before creating a child', async (thinkingLevel) => {
+    const h = harness();
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    await expect(h.tools.get('subagent')!.execute('c', { ...subagentCall, thinkingLevel }, undefined, undefined, h.parentCtx)).rejects.toThrow(/thinking level/i);
+    expect(h.children).toHaveLength(0);
+    expect(eventsOf(h)).toEqual([]);
+  });
+
+  it('refuses an explicit effort the SDK clamps, disposes the child, and never prompts it', async () => {
+    const h = harness({ childThinkingLevel: 'off' });
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    await expect(h.tools.get('subagent')!.execute('c', { ...subagentCall, thinkingLevel: 'medium' }, undefined, undefined, h.parentCtx)).rejects.toThrow(/medium.*off.*not started/i);
+    expect(h.children).toHaveLength(1);
+    expect(h.children[0]).toMatchObject({ disposed: true, prompts: [] });
+    expect(eventsOf(h).filter((event) => event.kind === 'end')).toMatchObject([{ status: 'error', totals: { turns: 0 } }]);
+  });
+
+  it('returns the selected configuration immediately for a running background child and in listings', async () => {
+    const h = harness({ childDriver: neverFinishes });
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const result = await h.tools.get('subagent')!.execute('c', { ...subagentCall, background: true, model: 'other/reasoner', thinkingLevel: 'medium' }, undefined, undefined, h.parentCtx);
+    expect(result.details).toMatchObject({ status: 'running', model: 'reasoner', provider: 'other', requestedThinkingLevel: 'medium', thinkingLevel: 'medium' });
+    expect(result.content[0].text).toContain('other/reasoner');
+    expect(result.content[0].text).toContain('medium effort');
+    const listed = await h.tools.get('subagent_result')!.execute('l', {});
+    expect(listed.details.runs).toMatchObject([{ model: 'reasoner', thinkingLevel: 'medium' }]);
+    await h.fire('session_shutdown');
+  });
+
+  it('publishes effective configuration after delayed creation even while the first child prompt is pending', async () => {
+    const dir = await tempDir();
+    const entered = deferred<void>(), created = deferred<void>();
+    const h = harness({ childDriver: neverFinishes });
+    process.env.VOCS_CODE_SUBAGENT_DIR = dir;
+    const create = h.deps.createAgentSession;
+    h.deps.createAgentSession = async (options) => { entered.resolve(); await created.promise; return create(options); };
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const pending = h.tools.get('subagent')!.execute('c', { ...subagentCall, background: true, thinkingLevel: 'medium' }, undefined, undefined, h.parentCtx);
+    await entered.promise;
+    expect(eventsOf(h).map((event) => event.kind)).toEqual(['start']);
+    created.resolve();
+    const result = await pending;
+    const configured = eventsOf(h).filter((event) => event.kind === 'configuration');
+    expect(configured).toHaveLength(1);
+    expect(configured[0]).toMatchObject({ runId: result.details.runId, thinkingLevel: 'medium', requestedThinkingLevel: 'medium' });
+    const parsed = parseRunFile(await fs.readFile(path.join(dir, `${result.details.runId}.jsonl`), 'utf8'))!;
+    expect(parsed.meta).toMatchObject({ thinkingLevel: 'medium', requestedThinkingLevel: 'medium' });
+    expect(parsed.calls).toEqual([]);
+    expect(parsed.status).toBe('running');
+    await h.fire('session_shutdown');
+  });
+
+  it('runs exactly five requested background children with independent configurations within configured limits', async () => {
+    const h = harness({ childDriver: neverFinishes });
+    await fs.writeFile(path.join(process.env.PI_CODING_AGENT_DIR!, 'subagents.json'), JSON.stringify({ maxConcurrent: 5 }));
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    const results = await Promise.all(Array.from({ length: 5 }, (_, i) => h.tools.get('subagent')!.execute(`c${i}`, { ...subagentCall, background: true, model: 'other/reasoner', thinkingLevel: 'medium' }, undefined, undefined, h.parentCtx)));
+    expect(new Set(results.map((result) => result.details.runId)).size).toBe(5);
+    expect(h.children).toHaveLength(5);
+    expect(h.sessionOptions.map((options) => options.thinkingLevel)).toEqual(Array(5).fill('medium'));
+    await expect(h.tools.get('subagent')!.execute('extra', { ...subagentCall, background: true }, undefined, undefined, h.parentCtx)).rejects.toThrow(/5 active subagent runs/);
+    await h.fire('session_shutdown');
+    expect(eventsOf(h).filter((event) => event.kind === 'end')).toHaveLength(5);
   });
 });
 

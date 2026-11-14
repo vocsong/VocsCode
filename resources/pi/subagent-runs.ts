@@ -23,6 +23,9 @@ export interface RunMeta {
   mode: RunMode;
   provider?: string;
   model?: string;
+  /** Explicit per-call effort, if requested. The effective SDK level is recorded separately. */
+  requestedThinkingLevel?: string;
+  thinkingLevel?: string;
   cwd: string;
   startedAt: number;
 }

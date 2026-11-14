@@ -20,7 +20,10 @@ export default function (pi) {
     baseUrl: 'http://127.0.0.1:1/never-used',
     api: 'vocs-offline-script',
     apiKey: 'offline-fixture-not-a-credential',
-    models: [{ id: 'scripted', name: 'Scripted', reasoning: false, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 10000 }],
+    models: [
+      { id: 'scripted', name: 'Scripted', reasoning: false, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 10000 },
+      { id: 'reasoner', name: 'Scripted reasoner', reasoning: true, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 10000 },
+    ],
     streamSimple(model, context, options) {
       const stream = createAssistantMessageEventStream();
       queueMicrotask(() => {
@@ -47,7 +50,8 @@ export default function (pi) {
           }
           // IMAGES_OK proves the attached image survived the whole Pi pipeline; the tool flows and
           // tool-result turns keep replying COMPAT_OK.
-          message.content = calls.length ? calls.map((call) => ({ type: 'toolCall', ...call })) : [{ type: 'text', text: images ? 'IMAGES_OK' : 'COMPAT_OK' }];
+          const reply = content === 'REPORT_CONFIG' ? `CONFIG_OK:${model.id}:${options?.reasoning ?? 'off'}` : images ? 'IMAGES_OK' : 'COMPAT_OK';
+          message.content = calls.length ? calls.map((call) => ({ type: 'toolCall', ...call })) : [{ type: 'text', text: reply }];
           message.stopReason = calls.length ? 'toolUse' : 'stop';
           stream.push({ type: 'start', partial: message });
           for (const [contentIndex, part] of message.content.entries()) {
