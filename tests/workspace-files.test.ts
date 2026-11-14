@@ -248,39 +248,69 @@ describe('resolveWorkspaceFile', () => {
     await expect(resolveWorkspaceFile(cwd, 'current.ts')).resolves.toEqual({ status: 'resolved', path: 'src/current.ts' });
   });
 
-  it('allows safe exact symlinks but never follows links during fallback or falls back after escape', async () => {
+  it('allows safe exact links but never follows links during fallback or falls back after escape', async () => {
     const { root, sibling } = workspace();
     await put(root, 'actual/inside.md');
-    await put(root, 'actual/outside.md');
-    await put(root, 'actual/missing.md');
+    await put(root, 'nested/escape/missing.md');
+    await put(root, 'actual/dangling-dir/dangling-only.md');
+    await put(root, 'node_modules/link-target/fallback.md');
     await put(sibling, 'outside.md');
-    await fs.symlink(path.join(root, 'actual', 'inside.md'), path.join(root, 'alias.md'), 'file');
-    await fs.symlink(sibling, path.join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
-    await fs.symlink(path.join(sibling, 'outside.md'), path.join(root, 'outside.md'), 'file');
-    await fs.symlink(path.join(root, 'actual'), path.join(root, 'safe-dir'), process.platform === 'win32' ? 'junction' : 'dir');
+    const directoryLink = process.platform === 'win32' ? 'junction' : 'dir';
+    await fs.symlink(sibling, path.join(root, 'escape'), directoryLink);
+    await fs.symlink(path.join(root, 'actual'), path.join(root, 'safe-dir'), directoryLink);
     await fs.mkdir(path.join(root, 'links'));
-    await fs.symlink(path.join(root, 'actual', 'inside.md'), path.join(root, 'links', 'fallback.md'), 'file');
-    await fs.symlink(path.join(root, 'gone.md'), path.join(root, 'dangling.md'), 'file');
-    await put(root, 'actual/dangling.md');
-    await expect(resolveWorkspaceFile(root, 'alias.md')).resolves.toEqual({ status: 'resolved', path: 'alias.md' });
+    await fs.symlink(path.join(root, 'node_modules', 'link-target'), path.join(root, 'links', 'fallback-dir'), directoryLink);
+    const gone = path.join(root, 'gone');
+    await fs.mkdir(gone);
+    await fs.symlink(gone, path.join(root, 'dangling-dir'), directoryLink);
+    await fs.rmdir(gone);
+    expect((await fs.lstat(path.join(root, 'dangling-dir'))).isSymbolicLink()).toBe(true);
+    await expect(fs.realpath(path.join(root, 'dangling-dir'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const scan = vi.spyOn(fs, 'opendir');
     await expect(resolveWorkspaceFile(root, 'safe-dir/inside.md')).resolves.toEqual({ status: 'resolved', path: 'safe-dir/inside.md' });
-    await expect(resolveWorkspaceFile(root, 'inside.md')).resolves.toEqual({ status: 'resolved', path: 'actual/inside.md' });
-    await expect(resolveWorkspaceFile(root, 'outside.md')).rejects.toThrow(/outside workspace/i);
+    await expect(resolveWorkspaceFile(root, 'links/fallback-dir/fallback.md')).resolves.toEqual({ status: 'resolved', path: 'links/fallback-dir/fallback.md' });
+    await expect(resolveWorkspaceFile(root, 'escape/outside.md')).rejects.toThrow(/outside workspace/i);
     await expect(resolveWorkspaceFile(root, 'escape/missing.md')).rejects.toThrow(/outside workspace/i);
+    await expect(resolveWorkspaceFile(root, 'dangling-dir/dangling-only.md')).resolves.toEqual({ status: 'missing' });
+    expect(scan).not.toHaveBeenCalled();
+    await expect(resolveWorkspaceFile(root, 'inside.md')).resolves.toEqual({ status: 'resolved', path: 'actual/inside.md' });
     await expect(resolveWorkspaceFile(root, 'safe-dir/missing-other.md')).resolves.toEqual({ status: 'missing' });
-    await expect(resolveWorkspaceFile(root, 'absent/alias.md')).resolves.toEqual({ status: 'missing' });
     await expect(resolveWorkspaceFile(root, 'fallback.md')).resolves.toEqual({ status: 'missing' });
-    await expect(resolveWorkspaceFile(root, 'dangling.md')).resolves.toEqual({ status: 'missing' });
+
+    // Windows junctions above exercise directory boundaries without file-symlink privileges.
+    // POSIX additionally keeps the native file-link cases; junctions are not file symlinks.
+    if (process.platform !== 'win32') {
+      await put(root, 'actual/outside.md');
+      await put(root, 'actual/dangling.md');
+      await fs.symlink(path.join(root, 'actual', 'inside.md'), path.join(root, 'alias.md'), 'file');
+      await fs.symlink(path.join(sibling, 'outside.md'), path.join(root, 'outside.md'), 'file');
+      await fs.symlink(path.join(root, 'actual', 'inside.md'), path.join(root, 'links', 'fallback-file.md'), 'file');
+      await fs.symlink(path.join(root, 'gone.md'), path.join(root, 'dangling.md'), 'file');
+      await expect(resolveWorkspaceFile(root, 'alias.md')).resolves.toEqual({ status: 'resolved', path: 'alias.md' });
+      await expect(resolveWorkspaceFile(root, 'outside.md')).rejects.toThrow(/outside workspace/i);
+      await expect(resolveWorkspaceFile(root, 'absent/alias.md')).resolves.toEqual({ status: 'missing' });
+      await expect(resolveWorkspaceFile(root, 'fallback-file.md')).resolves.toEqual({ status: 'missing' });
+      await expect(resolveWorkspaceFile(root, 'dangling.md')).resolves.toEqual({ status: 'missing' });
+    }
   });
 
   it('preserves missing-root and non-ENOENT exact errors without scanning', async () => {
     const { root } = workspace();
+    const scan = vi.spyOn(fs, 'opendir');
     await expect(resolveWorkspaceFile(root, 'file.md')).rejects.toThrow(`${path.resolve(root)} no longer exists`);
     await put(root, 'blocker');
-    const scan = vi.spyOn(fs, 'opendir');
-    await expect(resolveWorkspaceFile(root, 'blocker/file.md')).rejects.toMatchObject({ code: 'ENOTDIR' });
+    // A real blocked descendant reports ENOENT on Windows, not POSIX's ENOTDIR.
+    const notDirectory = Object.assign(new Error('not a directory'), { code: 'ENOTDIR' });
+    const blocked = path.join(await fs.realpath(root), 'blocker', 'file.md');
+    const original = fs.lstat.bind(fs);
+    const stat = vi.spyOn(fs, 'lstat').mockImplementation((async (file: string) => {
+      if (file === blocked) throw notDirectory;
+      return original(file);
+    }) as typeof fs.lstat);
+    await expect(resolveWorkspaceFile(root, 'blocker/file.md')).rejects.toBe(notDirectory);
     const denied = Object.assign(new Error('denied'), { code: 'EACCES' });
-    vi.spyOn(fs, 'lstat').mockRejectedValue(denied);
+    stat.mockRejectedValue(denied);
     await expect(resolveWorkspaceFile(root, 'file.md')).rejects.toBe(denied);
     expect(scan).not.toHaveBeenCalled();
   });
