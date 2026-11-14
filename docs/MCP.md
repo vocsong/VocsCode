@@ -620,3 +620,12 @@ develop PR allowlist so these boundaries run in CI, not only the release suite.
 No live identity, provider request or production deployment is part of that test.
 Actual desktop browser UX, account switching, SSE OAuth interoperability and
 revocation across devices remain rollout gates.
+
+
+SDK transports must use the controller's `transport()` context, not its mutable
+controller provider. Each context is bound to one authorization generation and
+lifetime. It permits token reads/invalidation and requests to the exact MCP
+resource only; it cannot discover an issuer, mutate PKCE/client state or launch
+browser authorization. A new sign-in or logout invalidates old contexts, including
+401 continuations whose response body completes after the connection is closed.
+Connection creation during explicit sign-in is rejected until that sign-in ends.

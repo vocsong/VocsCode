@@ -19,8 +19,11 @@ export interface NativeMcpOAuthOptions {
 /** Tokens stay memory-only in this first slice; no fallback to plaintext/obfuscated disk storage. */
 export interface NativeMcpOAuth {
   readonly resource: string;
+  /** Controller inspection/testing only. Transports must use transport(), never this mutable provider. */
   readonly provider: OAuthClientProvider;
   readonly fetch: FetchLike;
+  /** One noninteractive, account-generation-bound SDK transport context. */
+  transport(): { authProvider: OAuthClientProvider; fetch: FetchLike };
   authorize(signal?: AbortSignal): Promise<void>;
   /** Local logout/cancel. Remote revocation is a separate issuer operation. */
   clear(): void;
@@ -150,8 +153,40 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
     expiresAt = 0;
   }
 
+  function transport(): { authProvider: OAuthClientProvider; fetch: FetchLike } {
+    if (active) throw new Error('Wait for explicit MCP sign-in to finish before connecting');
+    const epoch = generation;
+    const owner = lifetime;
+    const assertCurrent = () => {
+      if (epoch !== generation || owner.signal.aborted) throw new Error('MCP connection authorization is no longer current');
+    };
+    const operational = new Set<PropertyKey>(['tokens', 'invalidateCredentials']);
+    const authProvider = new Proxy(provider, {
+      get(target, key, receiver) {
+        assertCurrent();
+        if (!operational.has(key)) throw new Error('MCP sign-in required; authorize explicitly');
+        const value = Reflect.get(target, key, receiver);
+        return typeof value === 'function' ? (...args: unknown[]) => {
+          assertCurrent();
+          return Reflect.apply(value, target, args);
+        } : value;
+      }
+    });
+    const fetch: FetchLike = async (input, init) => {
+      assertCurrent();
+      if (secureUrl(input).href !== resource) throw new Error('MCP connection cannot perform OAuth discovery or authorization');
+      const response = await guardedFetch(input, { ...init, signal: AbortSignal.any([owner.signal, ...(init?.signal ? [init.signal] : [])]) });
+      if (epoch !== generation || owner.signal.aborted) {
+        await response.body?.cancel();
+        assertCurrent();
+      }
+      return response;
+    };
+    return { authProvider, fetch };
+  }
+
   return {
-    resource, provider, fetch: guardedFetch, clear,
+    resource, provider, fetch: guardedFetch, clear, transport,
     async authorize(signal) {
       if (active) throw new Error('MCP sign-in is already in progress');
       clear();

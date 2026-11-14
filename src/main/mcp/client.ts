@@ -68,7 +68,7 @@ async function buildTransport(def: McpServerDef, opts: InspectOptions): Promise<
   const url = new URL(def.url);
   if (opts.oauth && opts.oauth.resource !== url.href) throw new Error('MCP OAuth resource mismatch');
   if (opts.oauth && Object.keys(def.headers ?? {}).length) throw new Error('Do not combine MCP OAuth with configured headers');
-  const oauth = opts.oauth ? { authProvider: opts.oauth.provider, fetch: opts.oauth.fetch } : {};
+  const oauth = opts.oauth ? opts.oauth.transport() : {};
   const requestInit = def.headers && Object.keys(def.headers).length ? { headers: { ...def.headers } } : undefined;
   if (def.transport === 'sse') {
     const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js');
