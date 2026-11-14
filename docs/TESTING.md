@@ -41,6 +41,12 @@ a config edit, so a change to `package.json`, the lockfile, a `tsconfig*.json` o
 vite/vitest/electron-vite config runs the whole offline suite instead. A diff no test reaches (docs
 only) runs nothing and passes. Extra arguments go to vitest.
 
+`tests/workspace-files.test.ts` exercises real directory junctions on Windows and directory
+symlinks on POSIX for exact resolution, escapes, fallback non-traversal and dangling links. POSIX
+also exercises native file symlinks; the Windows junction checks do not claim file-symlink UX
+coverage or require file-symlink privileges. Non-ENOENT propagation injects `lstat` errors because
+a blocked descendant can report ENOENT on Windows rather than ENOTDIR.
+
 Failures the release gate finds are fixed on `develop` with a normal PR before the ship PR merges.
 Add or extend a test when behavior changes; permission-gating changes must keep
 `tests/review-fixes.test.ts` passing and extend execution-level coverage. Screenshots land in

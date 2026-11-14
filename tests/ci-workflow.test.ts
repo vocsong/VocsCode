@@ -29,7 +29,7 @@ describe('CI tier boundaries', () => {
     expect(prFiles.every((file) => existsSync(path.join(root, file)))).toBe(true);
     expect(prFiles).toEqual(expect.arrayContaining([
       'tests/review-fixes.test.ts', 'tests/session-resume.test.ts', 'tests/mission-store.test.ts',
-      'tests/relay-core.test.ts', 'tests/qr.test.ts', 'tests/web-transport.test.ts'
+      'tests/relay-core.test.ts', 'tests/qr.test.ts', 'tests/web-transport.test.ts', 'tests/workspace-files.test.ts'
     ]));
     expect(gate).toMatch(releaseCondition);
     expect(gate).toContain('name: Full offline suite');
