@@ -50,6 +50,12 @@ function statusLabel(status: SubagentRunSummary['status']): string {
   return status === 'running' ? 'running' : status;
 }
 
+function effortLabel({ requestedThinkingLevel, thinkingLevel }: Pick<SubagentRunSummary, 'requestedThinkingLevel' | 'thinkingLevel'>): string {
+  if (!thinkingLevel && !requestedThinkingLevel) return '';
+  const requested = requestedThinkingLevel && requestedThinkingLevel !== thinkingLevel ? ` (requested ${requestedThinkingLevel})` : '';
+  return ` · effort ${thinkingLevel ?? 'unknown'}${requested}`;
+}
+
 export function SubagentsTab({ session }: { session: SessionMeta }) {
   const [runs, setRuns] = useState<SubagentRunSummary[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -193,7 +199,7 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
                   <span className="subagent-desc">{run.description || run.runId}</span>
                     <span className="subagent-meta muted small">
                     {run.mode === 'background' ? 'background · ' : ''}
-                    {run.model ?? 'session model'} · {run.turns} turn{run.turns === 1 ? '' : 's'} · {run.toolUses} tool{run.toolUses === 1 ? '' : 's'}
+                    {run.model ?? 'session model'}{effortLabel(run)} · {run.turns} turn{run.turns === 1 ? '' : 's'} · {run.toolUses} tool{run.toolUses === 1 ? '' : 's'}
                     {run.costUsd ? ` · ${fmtCost(run.costUsd)}` : ''}
                   </span>
                 </button>
@@ -209,7 +215,7 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
                 {support.control && detail.status === 'running' && <Button size="sm" variant="ghost" icon="stop" onClick={() => stopRun(detail.meta.runId)}>Stop</Button>}
               </div>
               <div className="subagent-detail-stats muted small">
-                {detail.meta.provider ? `${detail.meta.provider}/${detail.meta.model ?? ''}` : detail.meta.model ?? 'session model'} · {detail.totals.turns} turn{detail.totals.turns === 1 ? '' : 's'} ·{' '}
+                {detail.meta.provider ? `${detail.meta.provider}/${detail.meta.model ?? ''}` : detail.meta.model ?? 'session model'}{effortLabel(detail.meta)} · {detail.totals.turns} turn{detail.totals.turns === 1 ? '' : 's'} ·{' '}
                 {detail.totals.toolUses} tool{detail.totals.toolUses === 1 ? '' : 's'} · {fmtDuration(detail.totals.durationMs)}
                 {detail.totals.costUsd ? ` · ${fmtCost(detail.totals.costUsd)}` : ''}
               </div>

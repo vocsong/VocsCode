@@ -56,6 +56,16 @@ const NOTIFY_MARKER = 'VCODE_SUBAGENT::';
 const COMPLETION_TYPE = 'vocs-code-subagent-done';
 const COMPLETION_DEBOUNCE_MS = 2_000;
 const RESULT_CHARS = 200_000;
+const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+interface SubagentParams {
+  description: string;
+  prompt: string;
+  type?: string;
+  background?: boolean;
+  model?: string;
+  thinkingLevel?: string;
+}
 
 /** What the extension needs from the running Pi runtime. Injectable so the gate and run manager
  * can be exercised offline against a scripted child session instead of a live model. */
@@ -127,6 +137,8 @@ interface ChildSession {
   dispose(): void | Promise<void>;
   readonly messages: Array<Record<string, unknown>>;
   readonly model?: ModelLike;
+  readonly thinkingLevel: string;
+  getAvailableThinkingLevels?(): readonly string[];
   readonly modelRuntime?: { registerProvider(id: string, config: unknown): void };
 }
 
@@ -138,6 +150,10 @@ interface ActiveRun {
   mode: 'foreground' | 'background';
   status: RunStatus;
   startedAt: number;
+  provider?: string;
+  model?: string;
+  requestedThinkingLevel?: string;
+  thinkingLevel?: string;
   session: ChildSession | null;
   output: string;
   error?: string;
@@ -168,6 +184,11 @@ function usageForPi(totals: RunTotals): Record<string, unknown> {
     totalTokens: totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: totals.costUsd },
   };
+}
+
+function configurationOf(run: ActiveRun): string {
+  const model = run.provider && run.model ? `${run.provider}/${run.model}` : run.model ?? 'session model';
+  return `${model}${run.thinkingLevel ? ` · ${run.thinkingLevel} effort` : ''}`;
 }
 
 function textOf(message: Record<string, unknown> | undefined): string {
@@ -402,7 +423,10 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
 
   const activeCount = (kind?: 'background' | 'foreground'): number => [...runs.values()].filter((r) => r.status === 'running' && (!kind || r.mode === kind)).length;
 
-  const startRun = async (params: { description: string; prompt: string; type?: string; background?: boolean; model?: string }, ctx: CtxLike, signal: AbortSignal | undefined): Promise<ActiveRun> => {
+  const startRun = async (params: SubagentParams, ctx: CtxLike, signal: AbortSignal | undefined): Promise<ActiveRun> => {
+    if (params.thinkingLevel !== undefined && !THINKING_LEVELS.includes(params.thinkingLevel as typeof THINKING_LEVELS[number])) {
+      throw new Error(`Invalid thinking level "${params.thinkingLevel}". Use ${THINKING_LEVELS.join(', ')} or omit it to inherit the parent level.`);
+    }
     const agent = findAgent(agents, params.type) ?? findAgent(agents, 'general-purpose') ?? BUILTIN_AGENTS[0]!;
     if (params.type && !findAgent(agents, params.type)) {
       const names = agents.map((a) => a.name).join(', ');
@@ -427,6 +451,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
       mode: params.background ? 'background' : 'foreground',
       status: 'running',
       startedAt: Date.now(),
+      requestedThinkingLevel: params.thinkingLevel,
       session: null,
       output: '',
       totals: emptyTotals(),
@@ -459,9 +484,9 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
         }
       })();
       let model: unknown;
-      if (params.model) {
+      if (params.model !== undefined) {
         const slash = params.model.indexOf('/');
-        if (slash > 0) model = ctx.modelRegistry?.find?.(params.model.slice(0, slash), params.model.slice(slash + 1));
+        if (slash > 0 && slash < params.model.length - 1) model = ctx.modelRegistry?.find?.(params.model.slice(0, slash), params.model.slice(slash + 1));
         if (!model) throw new Error(`Model "${params.model}" is not available; use provider/model-id or omit it to inherit the session model.`);
       } else if (agent.model) {
         model = ctx.modelRegistry?.find?.(agent.model.provider, agent.model.model);
@@ -470,17 +495,22 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
         model = ctx.model;
       }
 
-      await store?.start({
+      run.provider = (model as ModelLike | undefined)?.provider;
+      run.model = (model as ModelLike | undefined)?.id;
+      const recordConfiguration = () => store?.start({
         runId,
         agent: agent.name,
         description: params.description,
         mode: run.mode,
-        provider: (model as ModelLike | undefined)?.provider,
-        model: (model as ModelLike | undefined)?.id,
+        provider: run.provider,
+        model: run.model,
+        requestedThinkingLevel: run.requestedThinkingLevel,
+        thinkingLevel: run.thinkingLevel,
         cwd,
         startedAt: run.startedAt,
       });
-      notify({ kind: 'start', runId, agent: agent.name, description: params.description, mode: run.mode, provider: (model as ModelLike | undefined)?.provider, model: (model as ModelLike | undefined)?.id, startedAt: run.startedAt, cwd });
+      await recordConfiguration();
+      notify({ kind: 'start', runId, agent: agent.name, description: params.description, mode: run.mode, provider: run.provider, model: run.model, requestedThinkingLevel: run.requestedThinkingLevel, startedAt: run.startedAt, cwd });
 
       // A child gets the session's MCP tools unless its agent definition opts out (`mcp: false`),
       // the same opt-out the app's own templates use for its read-only Explore and Plan agents.
@@ -506,10 +536,25 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
         tools: [...toolNamesFor(agent), ...childMcpTools],
         excludeTools: [...EXCLUDED_CHILD_TOOLS],
         ...(model ? { model } : {}),
-        ...(ctx.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
+        ...((params.thinkingLevel ?? ctx.thinkingLevel) !== undefined ? { thinkingLevel: params.thinkingLevel ?? ctx.thinkingLevel } : {}),
       });
       run.session = created.session;
       registerProviderForChild(ctx, run.session);
+      run.thinkingLevel = run.session.thinkingLevel;
+      const selectedProvider = run.provider, selectedModel = run.model;
+      run.provider = run.session.model?.provider;
+      run.model = run.session.model?.id;
+      // The SDK clamps unsupported effort during construction. Never spend on a different explicit
+      // configuration: record the effective selection, then reject before the child's first prompt.
+      await recordConfiguration();
+      notify({ kind: 'configuration', runId, provider: run.provider, model: run.model, requestedThinkingLevel: run.requestedThinkingLevel, thinkingLevel: run.thinkingLevel });
+      if (selectedModel && (run.model !== selectedModel || run.provider !== selectedProvider)) {
+        throw new Error(`Model "${selectedProvider}/${selectedModel}" was replaced by "${run.provider}/${run.model}"; child not started.`);
+      }
+      if (params.thinkingLevel !== undefined && run.thinkingLevel !== params.thinkingLevel) {
+        const supported = run.session.getAvailableThinkingLevels?.().join(', ') ?? 'unknown';
+        throw new Error(`Requested thinking level "${params.thinkingLevel}" resolved to "${run.thinkingLevel ?? 'unknown'}" for ${run.provider}/${run.model}; child not started. Supported levels: ${supported}. Choose a supported level or another model; do not silently substitute.`);
+      }
 
       run.session.subscribe((event) => {
         run.events = run.events.then(() => handleChildEvent(run, event));
@@ -615,8 +660,10 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     description: run.description,
     mode: run.mode,
     status: run.status,
-    model: run.calls.at(-1)?.model ?? undefined,
-    provider: run.calls.at(-1)?.provider ?? undefined,
+    model: run.calls.at(-1)?.model ?? run.model,
+    provider: run.calls.at(-1)?.provider ?? run.provider,
+    requestedThinkingLevel: run.requestedThinkingLevel,
+    thinkingLevel: run.thinkingLevel,
     turns: run.totals.turns,
     toolUses: run.totals.toolUses,
     costUsd: run.totals.costUsd,
@@ -635,6 +682,9 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
       promptSnippet: 'Run a self-contained task in a child agent (foreground or background)',
       promptGuidelines: [
         'Use subagent to delegate a self-contained search or multi-step task to a child agent instead of doing everything inline; prefer it over any other delegation tool such as Agent or Task when both are available.',
+        'For subagent requests that specify a model, reasoning effort, or number of agents, honor those choices: pass model and thinkingLevel explicitly to every requested child, issue exactly the requested number of subagent calls, and do not silently substitute models, lower effort, or reduce the count. If a choice is ambiguous or unavailable, report the blocker rather than guess.',
+        'For subagent orchestration, use background: true to keep the main agent free to coordinate, then collect and consolidate every requested result. Respect concurrency limits; do not change settings or switch execution modes to bypass a cap. If simultaneous execution cannot fit, report the limit; use waves only when the request permits them. Leave unspecified choices autonomous.',
+        'Subagent children share the workspace, not the parent conversation: give each a self-contained task and coordinate overlapping edits.',
         'Use subagent_result to read a background run\'s output by id, and subagent_steer to redirect a run that went the wrong way.',
         'Vocs Code subagent runs inherit this session\'s permission mode: a child that needs approval asks through the same approval card, so do not avoid subagents to "avoid prompts".',
       ],
@@ -643,21 +693,22 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
         prompt: Type.String({ description: 'The task for the subagent. Self-contained: it cannot see this conversation.' }),
         type: Type.Optional(Type.String({ description: `Agent type. One of: ${agents.map((a) => a.name).join(', ')}. Defaults to general-purpose.` })),
         background: Type.Optional(Type.Boolean({ description: 'Run detached and report back when finished. Defaults to false (foreground: this turn waits for the result).' })),
-        model: Type.Optional(Type.String({ description: 'Override the model as provider/model-id. Defaults to the agent type\'s pin, else this session\'s model.' })),
+        model: Type.Optional(Type.String({ description: 'Override the model as an exact provider/model-id; unavailable models fail rather than fall back. Defaults to the agent type\'s pin, else this session\'s model.' })),
+        thinkingLevel: Type.Optional(Type.String({ enum: [...THINKING_LEVELS], description: 'Reasoning effort for this child only. Defaults to the parent thinking level. Explicit unsupported levels fail before the child is prompted; putting an effort instruction in prompt does not configure it.' })),
       }),
-      execute: async (_toolCallId: string, params: { description: string; prompt: string; type?: string; background?: boolean; model?: string }, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: CtxLike) => {
+      execute: async (_toolCallId: string, params: SubagentParams, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: CtxLike) => {
         parentCtx = ctx;
         await agentsReady;
         await refreshMode();
         const run = await startRun(params, ctx, signal);
         if (run.mode === 'background') {
           return {
-            content: [{ type: 'text', text: `Started ${run.agent.name} in the background as ${run.id}. It will report back when finished; use subagent_result ${run.id} for its output.` }],
+            content: [{ type: 'text', text: `Started ${run.agent.name} in the background as ${run.id} (${configurationOf(run)}). It will report back when finished; use subagent_result ${run.id} for its output.` }],
             details: runSummary(run),
           };
         }
         await run.execution;
-        const statusLine = `${run.agent.name} ${run.status} — ${run.totals.turns} turn(s), ${run.totals.toolUses} tool call(s), ${(run.totals.durationMs / 1000).toFixed(1)}s${run.totals.costUsd ? `, $${run.totals.costUsd.toFixed(4)}` : ''}`;
+        const statusLine = `${run.agent.name} ${run.status} — ${configurationOf(run)}, ${run.totals.turns} turn(s), ${run.totals.toolUses} tool call(s), ${(run.totals.durationMs / 1000).toFixed(1)}s${run.totals.costUsd ? `, $${run.totals.costUsd.toFixed(4)}` : ''}`;
         const body = run.output || run.error || '(no output)';
         return { content: [{ type: 'text', text: `${body}\n\n[${statusLine}]` }], details: runSummary(run), usage: usageForPi(run.totals) };
       },
@@ -677,7 +728,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
           if (!run) throw new Error(`No subagent run "${params.runId}" in this session. Omit runId to list the runs.`);
           return { content: [{ type: 'text', text: JSON.stringify(runSummary(run), null, 2) }], details: runSummary(run) };
         }
-        const list = [...runs.values()].map((run) => ({ runId: run.id, agent: run.agent.name, status: run.status, description: run.description, mode: run.mode }));
+        const list = [...runs.values()].map((run) => ({ runId: run.id, agent: run.agent.name, status: run.status, description: run.description, mode: run.mode, provider: run.provider, model: run.model, requestedThinkingLevel: run.requestedThinkingLevel, thinkingLevel: run.thinkingLevel }));
         return { content: [{ type: 'text', text: list.length ? JSON.stringify(list, null, 2) : 'No subagent runs in this session.' }], details: { runs: list } };
       },
     });

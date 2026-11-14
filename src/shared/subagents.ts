@@ -55,6 +55,10 @@ export interface SubagentRunMeta {
   mode: SubagentRunMode;
   provider?: string;
   model?: string;
+  /** Explicit per-call request, not an inherited default. */
+  requestedThinkingLevel?: string;
+  /** Effective level reported by the Pi SDK, which may differ from the request. */
+  thinkingLevel?: string;
   cwd: string;
   startedAt: number;
 }
@@ -118,6 +122,8 @@ export interface SubagentRunSummary {
   status: SubagentRunStatus;
   provider?: string;
   model?: string;
+  requestedThinkingLevel?: string;
+  thinkingLevel?: string;
   startedAt: number;
   endedAt?: number;
   costUsd: number;
@@ -134,6 +140,8 @@ export function summarizeRun(run: SubagentRun): SubagentRunSummary {
     status: run.status,
     ...(run.meta.provider ? { provider: run.meta.provider } : {}),
     ...(run.meta.model ? { model: run.meta.model } : {}),
+    ...(run.meta.requestedThinkingLevel !== undefined ? { requestedThinkingLevel: run.meta.requestedThinkingLevel } : {}),
+    ...(run.meta.thinkingLevel !== undefined ? { thinkingLevel: run.meta.thinkingLevel } : {}),
     startedAt: run.meta.startedAt,
     ...(run.endedAt ? { endedAt: run.endedAt } : {}),
     costUsd: run.totals.costUsd,
@@ -177,6 +185,8 @@ export function parseRunFile(text: string): SubagentRun | null {
         mode: record.mode === 'background' ? 'background' : 'foreground',
         ...(typeof record.provider === 'string' ? { provider: record.provider } : {}),
         ...(typeof record.model === 'string' ? { model: record.model } : {}),
+        ...(typeof record.requestedThinkingLevel === 'string' ? { requestedThinkingLevel: record.requestedThinkingLevel } : {}),
+        ...(typeof record.thinkingLevel === 'string' ? { thinkingLevel: record.thinkingLevel } : {}),
         cwd: typeof record.cwd === 'string' ? record.cwd : '',
         startedAt: numberOr(record.startedAt)
       };

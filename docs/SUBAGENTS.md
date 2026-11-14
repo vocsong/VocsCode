@@ -80,7 +80,7 @@ Names deliberately avoid the third-party extension's (`Agent`, `SubagentWorkflow
 
 | Tool | Purpose |
 | --- | --- |
-| `subagent` | Spawn a run. `{ description, prompt, type?, background?, model? }` |
+| `subagent` | Spawn a run. `{ description, prompt, type?, background?, model?, thinkingLevel? }` |
 | `subagent_result` | Fetch a finished (or running) run's output and stats by `runId` |
 | `subagent_steer` | Send a mid-run instruction to a background run |
 
@@ -91,6 +91,41 @@ Names deliberately avoid the third-party extension's (`Agent`, `SubagentWorkflow
   concurrently under pi's parallel tool execution.
 - `promptSnippet` / `promptGuidelines` describe the tools and state plainly that `subagent` is the
   Vocs Code tool to prefer over any other delegation tool that may be present.
+
+### Explicit model, effort and agent-count requests
+
+A request such as “use five subagents on `<provider>/<model-id>` at medium effort while you
+orchestrate and consolidate” is delegated as five ordinary `subagent` calls, each with `model`,
+`thinkingLevel: "medium"`, a self-contained task and `background: true`. The main agent is instructed
+to honor explicit counts and settings, collect every result, and report ambiguous or unavailable
+choices rather than guess or silently reduce the team. Count/task decomposition remains the main
+agent's responsibility, not a natural-language parser or a new batch scheduler. Unspecified choices
+remain autonomous.
+
+- **Model precedence:** per-call `model` → agent-definition pin → parent session model. Overrides
+  require an exact catalog `provider/model-id`; unavailable selections fail instead of falling back.
+- **Effort:** `thinkingLevel` accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`,
+  subject to the selected model and installed Pi runtime. Omission inherits the parent's current
+  thinking level (or SDK defaults if unavailable). A child's settings never change its parent or
+  siblings. An effort instruction inside `prompt` is not an effort setting.
+- **Strict explicit selection:** after creating the child, the extension checks its actual SDK model
+  and thinking level before sending any prompt. If an explicit effort is clamped or cannot be
+  verified, the child is disposed and the tool reports an error without making a child model call.
+  Inherited effort may still be clamped for a different model; its effective level is reported.
+  These are Pi thinking levels, not a guarantee of identical provider-native reasoning budgets.
+- **Visibility:** launch/results and `subagent_result` include model and effective effort. Durable
+  run metadata and the run panel retain optional `requestedThinkingLevel` and effective
+  `thinkingLevel` separately; legacy records do not invent an effort value. A rejected selection can
+  show both the requested and SDK-effective levels, with an error and zero model calls.
+- **Limits:** five simultaneous background children need `maxConcurrent` of at least five in
+  Settings → Pi → Subagents. The main agent must not change settings or switch execution modes to
+  evade a cap; waves are appropriate only when the request permits them. There is no waiting queue.
+- **Workspace:** child contexts are separate, but files are shared. Allocate non-overlapping edits
+  or coordinate them explicitly; ordinary Pi subagents do not create isolated worktrees.
+
+The parent's OpenRouter catalog-effort payload override is not installed in children. An explicit
+level unsupported by the child's Pi SDK fails clearly; it does not borrow the parent's override or
+write a shared effort file.
 
 Concurrency follows the user's pi-subagents settings (`<agentDir>/subagents.json`), re-read on every
 spawn so a change in Settings applies without restarting the session. `maxConcurrent` (default **4**)
@@ -275,7 +310,7 @@ the forcing.
 process. One JSON record per line:
 
 ```json
-{"t":"run","runId":"…","agent":"Explore","description":"…","mode":"foreground","model":{"provider":"…","model":"…"},"cwd":"…","startedAt":0}
+{"t":"run","runId":"…","agent":"Explore","description":"…","mode":"foreground","provider":"…","model":"…","requestedThinkingLevel":"medium","thinkingLevel":"medium","cwd":"…","startedAt":0}
 {"t":"item","item":{"id":"…","kind":"tool","name":"grep","summary":"…","status":"done"}}
 {"t":"call","index":0,"model":{"provider":"…","model":"…"},"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0,"costUsd":0,"durationMs":0,"stopReason":"toolUse","toolsInvoked":["grep"]}
 {"t":"end","status":"completed","totals":{"turns":0,"toolUses":0,"costUsd":0,"durationMs":0},"endedAt":0}
@@ -283,14 +318,18 @@ process. One JSON record per line:
 
 (`provider`/`model` are top-level strings on the `run` record in the shipped writer; the writer in
 `resources/pi/subagent-runs.ts` is the authority, and `src/shared/subagents.ts` parses it.)
-Items are append-only upserts: the last record for an id wins, which is how a running tool card and
-its result become one item.
+A `run` header may be restated after child creation to record the effective SDK configuration;
+readers replace metadata without dropping existing items, calls or terminal state. Effort fields
+are optional and absent from older records. Items are append-only upserts: the last record for an
+id wins, which is how a running tool card and its result become one item.
 
 Sessions keep their existing `sessions/<id>/transcript.jsonl` untouched — subagent detail never
 pollutes the parent transcript, its search index, or its analytics scan.
 
 **Notifications** (extension → app, parent session) carry the same facts live, as
-`VCODE_SUBAGENT::` notify payloads with `kind` of `start` | `item` | `call` | `end`. `pi.ts`
+`VCODE_SUBAGENT::` notify payloads with `kind` of `start` | `configuration` | `item` | `call` | `end`.
+`configuration` follows the effective header write and refreshes the panel even while the first
+child model call is pending. `pi.ts`
 translates them into `SessionEvent { type: 'subagent.run', run }` for the UI and, on the terminal
 record, `SessionEvent { type: 'subagent', completion }` for analytics.
 
@@ -369,7 +408,7 @@ Per `AGENTS.md`, everything below must actually execute — no silent skips.
 | Layer | Coverage |
 | --- | --- |
 | Unit | Agent-file discovery and precedence, frontmatter parsing, tool allowlists; gate decision table across all five modes, dangerous commands, outside-workspace paths, symlink/junction escapes; run-file append/read and the reader's traversal rejections; per-call stats roll-up; the extension driven by a scripted child session (caps, gating, lifecycle, live events); the harness bridge (`pi.ts` subagent notifications → events); analytics attribution of background spend; the Subagents tab over a stubbed bridge. For the Claude side: the model pair the adapter sets (and withholds), the Claude definition format and its one-field edit, and the Models view over a stubbed bridge. |
-| Integration (real pi CLI, offline scripted provider) | `tests/pi-subagents.integration.test.ts`: tools registered alongside the third-party ones, a foreground child runs and its run file parses, an unknown type is rejected, and a child command is **approved once and denied once — the denied one never runs**. |
+| Integration (real pi CLI, offline scripted provider) | `tests/pi-subagents.integration.test.ts`: tools registered alongside the third-party ones, a foreground child runs and its run file parses, explicit model/effort reaches a reasoning-capable scripted provider, unsupported effort makes zero child model calls, exactly five background children retain independent efforts, an unknown type is rejected, and a child command is **approved once and denied once — the denied one never runs**. |
 | Electron E2E (offline) | `tests/e2e.subagents.test.ts`: seeded transcript + run file drive the split, the strip, the run list, the detail with its per-call table and the card's `open run` link (plus a reload); a Claude session's Models view, which refuses to write a definition for a built-in and rewrites only the `model:` line of one the project already has; and — under `VOCS_CODE_PI_INTEGRATION=1` — a real pi session whose recorded run reaches the panel. `tests/e2e.pi-tools.test.ts` asserts each bundled pi resource is copied byte-for-byte. |
 | Packaged | `npm run dist:dir` + the subagent and pi suites against `HARNESS_E2E_EXE`, because the extension is a bundled resource. |
 | Live (manual) | `HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=pi` and the packaged Electron run. |

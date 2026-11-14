@@ -139,6 +139,22 @@ describe('Pi subagent activity bridge', () => {
     expect(completions[0]!.usage).toBeUndefined();
   });
 
+  it('refreshes the panel from a configuration notification before any child model call finishes', () => {
+    const { notify, events } = host();
+    notify('VCODE_SUBAGENT::', start('agent_config'));
+    notify('VCODE_SUBAGENT::', { kind: 'configuration', runId: 'agent_config', provider: 'other', model: 'reasoner', thinkingLevel: 'medium', nonce: 'retired-process' });
+    expect(events.filter((event) => event.type === 'subagent.run')).toHaveLength(1);
+    notify('VCODE_SUBAGENT::', { kind: 'configuration', runId: 'agent_config', provider: 'other', model: 'reasoner', thinkingLevel: 'medium' });
+    const runs = events.filter((event): event is Extract<SessionEvent, { type: 'subagent.run' }> => event.type === 'subagent.run');
+    expect(runs).toHaveLength(2);
+    expect(runs[1].run).toMatchObject({ runId: 'agent_config', provider: 'other', model: 'reasoner', status: 'running', turns: 0, toolUses: 0, costUsd: 0 });
+    expect(events.filter((event) => event.type === 'subagent')).toHaveLength(0);
+    notify('VCODE_SUBAGENT::', { kind: 'end', runId: 'agent_config', status: 'completed' });
+    notify('VCODE_SUBAGENT::', { kind: 'configuration', runId: 'agent_config', model: 'late' });
+    expect(events.filter((event) => event.type === 'subagent.run')).toHaveLength(3);
+    expect(events.filter((event) => event.type === 'subagent')).toHaveLength(1);
+  });
+
   it('carries a background run\'s spend, which the session totals never saw', () => {
     const { notify, events } = host();
     notify('VCODE_SUBAGENT::', start('agent_2', { mode: 'background' }));

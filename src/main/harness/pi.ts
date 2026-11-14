@@ -822,6 +822,14 @@ export class PiAdapter implements HarnessAdapter {
       return;
     }
     const run = this.subagentRuns.get(runId);
+    if (kind === 'configuration' && run) {
+      // Child construction can outlast the panel's initial refresh. The effective configuration is
+      // durable before this notification; publish a refresh even while its first model call waits.
+      run.provider = text(payload.provider) ?? run.provider;
+      run.model = text(payload.model) ?? run.model;
+      this.ctx.emit({ type: 'subagent.run', run: { runId, agent: run.agent, description: run.description, mode: run.mode, status: 'running', provider: run.provider, model: run.model, costUsd: run.costUsd, turns: run.turns, toolUses: run.toolUses, startedAt: run.startedAt } });
+      return;
+    }
     if (kind === 'call' && run) {
       const call = (payload.call ?? {}) as Record<string, unknown>;
       run.costUsd += number(call.costUsd);
