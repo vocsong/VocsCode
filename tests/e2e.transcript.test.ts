@@ -11,7 +11,7 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import type { SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { ApprovalRequest, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { expectQuietWindow, isolatedEnv, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -191,7 +191,7 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     expect(await completionTimes(reopened)).toEqual(originalTimes);
   }, 180_000);
 
-  it('lets a pending question option be chosen, switched and unselected', async () => {
+  it('shows question details, keeps context separate from the answer, and renders saved decisions', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-question-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -211,18 +211,25 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
       harnessRef: {},
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 1 }
     };
+    const questionRequest: ApprovalRequest = {
+      id: 'ap1', sessionId: sid, harness: 'claude', kind: 'question', title: 'Claude has a question', toolName: 'AskUserQuestion',
+      options: [{ id: 'allow', label: 'Answer', kind: 'allow' }, { id: 'deny', label: 'Skip', kind: 'deny' }],
+      questions: [{
+        id: '0', question: 'Which environment?', allowOther: true,
+        options: [
+          { label: 'staging', description: 'Test safely before shipping to customers.' },
+          { label: 'production', description: 'Ship directly to all customers.' }
+        ]
+      }],
+      createdAt: T + 1
+    };
     const items: TranscriptItem[] = [
       { id: 'u1', kind: 'user', ts: T, text: 'Deploy it.' },
+      { id: 'ap1', kind: 'approval', ts: T + 1, request: questionRequest },
       {
-        id: 'ap1',
-        kind: 'approval',
-        ts: T + 1,
-        request: {
-          id: 'ap1', sessionId: sid, harness: 'claude', kind: 'question', title: 'Claude has a question', toolName: 'AskUserQuestion',
-          options: [{ id: 'allow', label: 'Answer', kind: 'allow' }, { id: 'deny', label: 'Skip', kind: 'deny' }],
-          questions: [{ id: '0', question: 'Which environment?', options: [{ label: 'staging' }, { label: 'production' }], allowOther: true }],
-          createdAt: T + 1
-        }
+        id: 'ap2', kind: 'approval', ts: T + 2,
+        request: { ...questionRequest, id: 'ap2', title: 'Previous deployment' },
+        decision: { optionId: 'allow', answers: { '0': 'production' }, note: 'Only after the review is complete.' }
       }
     ];
     await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
@@ -240,22 +247,56 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     await win.waitForSelector('.brand', { timeout: 60_000 });
     await expectQuietWindow(app);
 
-    const staging = win.locator('.approval-qopts .chip', { hasText: 'staging' });
-    const production = win.locator('.approval-qopts .chip', { hasText: 'production' });
+    // This disk seed has no live pending approval in the host. Exercise UI state only;
+    // actual submission delivery belongs to the live question suite, not a click on Answer here.
+    const card = win.locator('.approval.pending');
+    const staging = card.getByRole('button', { name: 'staging', exact: true });
+    const production = card.getByRole('button', { name: 'production', exact: true });
     await staging.waitFor({ timeout: 30_000 });
-    const active = win.locator('.approval-qopts .chip.active');
+    expect(await staging.locator('.approval-choice-desc').isVisible()).toBe(true);
+    expect(await production.locator('.approval-choice-desc').isVisible()).toBe(true);
+    await expect(staging.getAttribute('aria-describedby')).resolves.toBe(await staging.locator('.approval-choice-desc').getAttribute('id'));
+    const active = card.locator('.approval-choice[aria-pressed="true"]');
     expect(await active.count()).toBe(0);
 
-    await staging.click();
-    await expect(active.allInnerTexts()).resolves.toEqual(['staging']);
+    // Native buttons remain keyboard reachable and retain toggle/deselect behavior.
+    await staging.focus();
+    await staging.press('Space');
+    await expect(active.getAttribute('aria-label')).resolves.toBe('staging');
     await production.click();
-    await expect(active.allInnerTexts()).resolves.toEqual(['production']);
-
-    // The same chip a second time puts the question back to unanswered.
+    await expect(active.getAttribute('aria-label')).resolves.toBe('production');
     await production.click();
     expect(await active.count()).toBe(0);
     await expect(production.getAttribute('aria-pressed')).resolves.toBe('false');
+
+    const context = card.getByRole('textbox', { name: 'Additional context (optional)' });
+    await context.fill('Use the release branch.');
+    const alternative = card.getByRole('textbox', { name: 'Type an answer' });
+    await alternative.fill('preview');
+    expect(await active.count()).toBe(0);
+    await staging.click();
+    await expect(alternative.inputValue()).resolves.toBe('');
+    await expect(context.inputValue()).resolves.toBe('Use the release branch.');
+    expect(await context.evaluate((el) => !!(el.compareDocumentPosition(el.closest('.approval')!.querySelector('.approval-actions')!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+
+    const saved = win.locator('.approval.decided');
+    expect(await saved.getByText('production', { exact: true }).isVisible()).toBe(true);
+    expect(await saved.getByText('Ship directly to all customers.', { exact: true }).isVisible()).toBe(true);
+    expect(await saved.getByText('Only after the review is complete.', { exact: true }).isVisible()).toBe(true);
+    expect(await saved.getByText('staging', { exact: true }).count()).toBe(0);
+    expect(await saved.getByRole('textbox').count()).toBe(0);
+    expect(await saved.getByRole('button').count()).toBe(0);
     await fs.mkdir(shots, { recursive: true });
-    await win.screenshot({ path: path.join(shots, 'transcript-04-question-unselected.png') });
+    await win.screenshot({ path: path.join(shots, 'transcript-04-question-context.png') });
+
+    // A split transcript can leave the card very little width. Descriptions and context must
+    // remain readable without horizontal scrolling, in both system color schemes.
+    await card.evaluate((element) => { element.style.maxWidth = '360px'; });
+    expect(await card.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    for (const option of [staging, production]) expect(await option.locator('.approval-choice-desc').isVisible()).toBe(true);
+    await card.screenshot({ path: path.join(shots, 'question-card-light-narrow.png') });
+    await win.emulateMedia({ colorScheme: 'dark' });
+    expect(await card.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await card.screenshot({ path: path.join(shots, 'question-card-dark-narrow.png') });
   }, 120_000);
 });

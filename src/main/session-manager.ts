@@ -31,6 +31,7 @@ import { nativeGoalCommand } from '../shared/goal-driver';
 import { fastModeSupport } from '../shared/fast-mode';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { modelName } from '../shared/model-names';
+import { validateQuestionResponse } from '../shared/question-response';
 import { skillInstalled } from './skills';
 import { createAdapter } from './harness/registry';
 import { ownedAdapter } from './process-context';
@@ -2386,9 +2387,11 @@ export class SessionManager {
       this.deps.log('debug', `[${sessionId}] approval ${requestId} answered "${decision.optionId}" but is no longer pending`);
       return;
     }
+    const item = active.liveItems.get(requestId);
+    // A rejected response must leave both the pending dialog and its editable audit card intact.
+    if (item?.kind === 'approval') validateQuestionResponse(item.request, decision);
     active.approvals.delete(requestId);
     d.resolve(decision);
-    const item = active.liveItems.get(requestId);
     // Audit trail for what the user allowed the agent to do; the command itself is on the transcript card.
     this.deps.log('info', `[${sessionId}] approval ${requestId} → ${decision.optionId}${item && item.kind === 'approval' ? ` (${item.request.title.slice(0, 120)})` : ''}`);
     if (item && item.kind === 'approval') {

@@ -1059,6 +1059,10 @@ export interface ApprovalRequest {
   changes?: FileChange[];
   options: ApprovalOption[];
   questions?: ApprovalQuestion[];
+  /** Raw extension dialogs may need an exact scalar response and cannot carry extra context. */
+  supportsQuestionComment?: boolean;
+  /** Optional serialized response budget for a single-question RPC envelope. */
+  maxQuestionResponseLength?: number;
   createdAt: number;
   /** Related transcript tool item id, when known. */
   toolItemId?: string;

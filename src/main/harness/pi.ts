@@ -15,6 +15,8 @@ import type { HarnessAdapter, HarnessContext, MissionReadiness } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 import { MISSION_SERVER_ID } from '../../../resources/pi/vocs-code-mission';
 import { PI_FAST_MODE_COMMAND, PI_FAST_MODE_MARKER } from '../../../resources/pi/vocs-code-fast-mode';
+import { parseQuestionPayload, QUESTION_MARKER, QUESTION_RESPONSE_LIMIT, QUESTION_TOOL } from '../../../resources/pi/question-tool';
+import { questionResponse } from '../../shared/question-response';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { installPiAgentOverrides } from '../pi-agents';
@@ -1031,6 +1033,24 @@ export class PiAdapter implements HarnessAdapter {
     switch (req.method) {
       case 'select': {
         const title = req.title ?? '';
+        if (title.startsWith(QUESTION_MARKER)) {
+          try {
+            const question = parseQuestionPayload(title.slice(QUESTION_MARKER.length), this.extensionNonce);
+            const decision = await this.ctx.requestApproval({
+              kind: 'question', title: 'Pi has a question', toolName: QUESTION_TOOL, toolItemId: question.toolCallId,
+              supportsQuestionComment: true, maxQuestionResponseLength: QUESTION_RESPONSE_LIMIT,
+              options: [{ id: 'allow', label: 'Answer', kind: 'allow' }, { id: 'deny', label: 'Skip', kind: 'deny' }],
+              questions: [{ id: 'answer', header: question.header, question: question.question, options: question.options, allowOther: question.allowOther }],
+            });
+            respond({ value: JSON.stringify(questionResponse(decision, 'answer')) });
+          } catch {
+            // Malformed/stale dialogs and an interrupted host request must always unblock Pi,
+            // without turning model text or a missing response into a fabricated user answer.
+            this.ctx.log('warn', 'pi: structured question was invalid or interrupted');
+            respond({ cancelled: true });
+          }
+          return;
+        }
         if (title.startsWith(PI_APPROVAL_MARKER)) {
           let payload: { tool: string; toolCallId?: string; input: Record<string, unknown>; summary?: string } = { tool: 'tool', input: {} };
           try {
@@ -1061,6 +1081,7 @@ export class PiAdapter implements HarnessAdapter {
         const decision = await this.ctx.requestApproval({
           kind: 'question',
           title: title || 'pi asks',
+          supportsQuestionComment: false,
           options: [
             { id: 'allow', label: 'Choose', kind: 'allow' },
             { id: 'deny', label: 'Cancel', kind: 'cancel' }
@@ -1089,6 +1110,7 @@ export class PiAdapter implements HarnessAdapter {
         const decision = await this.ctx.requestApproval({
           kind: 'question',
           title: req.title ?? 'Input requested',
+          supportsQuestionComment: false,
           options: [
             { id: 'allow', label: 'Submit', kind: 'allow' },
             { id: 'deny', label: 'Cancel', kind: 'cancel' }
