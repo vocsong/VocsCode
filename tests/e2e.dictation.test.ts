@@ -4,7 +4,7 @@
  * OpenAI-compatible provider pointed at a local HTTP server stands in for the cloud — so the suite
  * proves what jsdom cannot: the microphone opens in the real window, the clip reaches the provider
  * as a 16 kHz mono WAV, and the transcript lands in the draft without anything being sent. It also
- * flips the Cloud / Local chip and checks the choice is saved and, with no local model downloaded,
+ * flips Voice: Cloud / Local in Composer options and checks the choice is saved and, with no local model downloaded,
  * that Settings → Voice opens with the download offered. No provider key; requires `npm run build`
  * first; gated by VOCS_CODE_E2E_UI=1.
  */
@@ -83,7 +83,8 @@ describe.runIf(enabled)('electron e2e: dictation', () => {
 
     const packaged = process.env.HARNESS_E2E_EXE;
     // Chromium's fake capture device and auto-accepted permission prompt: a real getUserMedia, no hardware.
-    const media = ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'];
+    // The fixture never reads real credentials; avoid prompting for the macOS login Keychain.
+    const media = ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : [])];
     app = await electron.launch({
       executablePath: packaged || (require('electron') as string),
       args: packaged ? [`--user-data-dir=${userData}`, ...media] : [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`, ...media],
@@ -96,10 +97,38 @@ describe.runIf(enabled)('electron e2e: dictation', () => {
 
     const box = win.locator('.composer textarea');
     await box.fill('Please');
-    const chip = win.getByTestId('dictation-engine');
-    await expect.poll(() => chip.innerText()).toBe('Cloud');
+    const options = win.getByRole('button', { name: 'Composer options', exact: true });
+    const engine = win.getByTestId('dictation-engine');
+    expect(await engine.count()).toBe(0);
+    expect(await options.getAttribute('aria-haspopup')).toBe('menu');
+    expect(await options.getAttribute('aria-expanded')).toBe('false');
+    await options.focus();
+    await win.keyboard.press('Enter');
+    await expect.poll(() => engine.innerText()).toBe('Voice: Cloud');
+    expect(await engine.getAttribute('role')).toBe('menuitem');
+    expect(await engine.getAttribute('data-engine')).toBe('cloud');
+    expect(await options.getAttribute('aria-expanded')).toBe('true');
+    await expect.poll(() => engine.evaluate((element) => element === document.activeElement)).toBe(true);
+    await win.keyboard.press('Escape');
+    expect(await options.getAttribute('aria-expanded')).toBe('false');
+    expect(await options.evaluate((element) => element === document.activeElement)).toBe(true);
 
+    // Opening options leaves capture running; a disabled engine cannot switch or dismiss the menu.
     const mic = win.getByTestId('dictation-mic');
+    await mic.click();
+    await expect.poll(() => mic.getAttribute('aria-pressed'), { timeout: 15_000 }).toBe('true');
+    await options.click();
+    expect(await engine.isDisabled()).toBe(true);
+    await engine.locator('.menu-item-label').dispatchEvent('click');
+    expect(await options.getAttribute('aria-expanded')).toBe('true');
+    expect(await mic.getAttribute('aria-pressed')).toBe('true');
+    await win.getByTestId('dictation-clock').waitFor();
+    await win.getByRole('menuitem', { name: 'Discard recording', exact: true }).click();
+    await expect.poll(() => mic.getAttribute('aria-pressed')).toBe('false');
+    expect(await options.getAttribute('aria-expanded')).toBe('false');
+    expect(await box.inputValue()).toBe('Please');
+    expect(uploads).toHaveLength(0);
+
     await mic.click();
     await expect.poll(() => mic.getAttribute('aria-pressed'), { timeout: 15_000 }).toBe('true');
     await win.getByTestId('dictation-clock').waitFor();
@@ -127,13 +156,22 @@ describe.runIf(enabled)('electron e2e: dictation', () => {
     expect(await win.locator('.transcript .msg').count()).toBe(0);
     expect(await mic.getAttribute('aria-pressed')).toBe('false');
 
-    // The chip saves the engine. No local model is downloaded here, so Settings → Voice opens
+    // The menu saves the engine. No local model is downloaded here, so Settings → Voice opens
     // with the download offered instead of a mic that would fail on the next click.
-    await chip.click();
+    await options.click();
+    await win.getByRole('menuitem', { name: 'Voice: Cloud', exact: true }).click();
     await win.getByTestId('voice-settings').waitFor({ timeout: 15_000 });
     const saved = async () => JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8')).dictation;
     await expect.poll(async () => (await saved()).engine).toBe('local');
-    await expect.poll(() => win.getByTestId('dictation-local-status').innerText(), { timeout: 15_000 }).toMatch(/Download \(\d+ MB\)/);
+    const localStatus = await win.evaluate(() => window.harness.invoke('dictation:status', undefined));
+    if (localStatus.supported) {
+      await expect.poll(() => win.getByTestId('dictation-local-status').innerText(), { timeout: 15_000 }).toMatch(/Download \(\d+ MB\)/);
+    } else {
+      // Platforms without a pinned build explain that limitation instead of offering a download.
+      expect(localStatus.detail).toBeTruthy();
+      await win.getByRole('region', { name: 'Local transcription', exact: true }).getByText(localStatus.detail!, { exact: true }).waitFor();
+      expect(await win.getByTestId('dictation-local-status').count()).toBe(0);
+    }
 
     // Both engines remain configurable, independently of which one the mic currently uses.
     const dictation = win.getByRole('region', { name: 'Dictation', exact: true });

@@ -75,7 +75,8 @@ async function launch(userData: string): Promise<Page> {
   // requestSingleInstanceLock() runs before VOCS_CODE_USER_DATA is applied, so a run started while
   // the app is open would exit silently; --user-data-dir is a Chromium switch and lands earlier.
   const packaged = process.env.HARNESS_E2E_EXE;
-  const args = [...(packaged ? [] : [path.join(root, 'out', 'main', 'index.js')]), `--user-data-dir=${userData}`];
+  // These isolated model fixtures must not prompt for access to the macOS login Keychain.
+  const args = [...(packaged ? [] : [path.join(root, 'out', 'main', 'index.js')]), `--user-data-dir=${userData}`, ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : [])];
   const app = await electron.launch({ executablePath: packaged || (require('electron') as string), args, env, timeout: 60_000 });
   apps.push(app);
   const win: Page = await app.firstWindow();
@@ -127,8 +128,13 @@ describe.runIf(enabled)('model picker before the first message', () => {
     const saved = async () => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
     expect((await saved())[0].config.effort).toBe('high');
-    // The effort the session runs with reads beside the model, not behind a menu.
-    expect(await win.locator('.composer .pill[title="Model"] .pill-effort').innerText()).toBe('high');
+    // The compact pill shows only the model; effort remains in its accessible name and menu hint.
+    const modelPill = win.locator('.composer .pill[title="Model"]');
+    expect(await modelPill.locator('.pill-text').innerText()).toBe('GPT 5.4');
+    expect(await modelPill.locator('.pill-text').getAttribute('title')).toBe('openai/gpt-5.4');
+    expect(await modelPill.getAttribute('aria-label')).toContain('Model: openai/gpt-5.4');
+    expect(await modelPill.getAttribute('aria-label')).toContain('high');
+    expect(await win.locator('.composer .model-menu').getByRole('menuitem', { name: /^Effort/ }).locator('.menu-item-hint').innerText()).toBe('high');
 
     await toggle.click();
     await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('false');
@@ -188,21 +194,22 @@ describe.runIf(enabled)('model picker before the first message', () => {
 
     // Picking one sticks even with no process to tell about it.
     const first = picker.locator('.mp-row .mp-select').first();
-    // The row is named `provider/id`, and that qualified name is what the composer's model pill then shows.
+    // The row is named `provider/id`; the compact model pill preserves that qualified name in its tooltip.
     const picked = (await first.locator('.mp-name').getAttribute('title')) ?? '';
     expect(picked).toContain('/');
     await first.click();
-    await win.waitForSelector(`.pill[title="Model"]:has-text("${picked}")`, { timeout: 10_000 });
+    await expect.poll(() => win.locator('.composer .pill[title="Model"] .pill-text').getAttribute('title'), { timeout: 10_000 }).toBe(picked);
 
     // A gateway id that no catalog lists can still be typed and sticks: a bare id is adopted under
-    // the provider already in use, and the pill names it that way.
+    // the provider already in use, and the pill's tooltip retains that qualified name.
     await win.click('.composer .run-controls .pill[title="Model"]');
     await win.getByRole('menuitem', { name: /^More models/ }).click();
     const picker2 = win.locator('.model-picker');
     await picker2.waitFor({ timeout: 10_000 });
     await picker2.locator('.mp-search input').fill('acme-custom-1');
     await picker2.getByRole('button', { name: 'Use “acme-custom-1”' }).click();
-    await win.waitForSelector(`.pill[title="Model"]:has-text("${picked.split('/')[0]}/acme-custom-1")`, { timeout: 10_000 });
+    await expect.poll(() => win.locator('.composer .pill[title="Model"] .pill-text').getAttribute('title'), { timeout: 10_000 }).toBe(`${picked.split('/')[0]}/acme-custom-1`);
+    expect(await win.locator('.composer .pill[title="Model"] .pill-text').innerText()).toBe('acme-custom-1');
   }, 180_000);
 
   it.each([
@@ -389,7 +396,8 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await expect.poll(() => note.innerText(), { timeout: 60_000 }).toContain('does not support reasoning effort');
     expect(await win.getByRole('menuitem', { name: 'high', exact: true }).count()).toBe(0);
     expect(await win.locator('.composer .model-menu').getByRole('menuitem', { name: /^Effort/ }).isDisabled()).toBe(true);
-    expect(await win.locator('.composer .pill[title="Model"] .pill-effort').count()).toBe(0);
+    expect(await win.locator('.composer .model-menu').getByRole('menuitem', { name: /^Effort/ }).locator('.menu-item-hint').innerText()).toBe('Not supported');
+    expect(await win.locator('.composer .pill[title="Model"]').getAttribute('aria-label')).not.toContain('high');
     const sessions = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
     expect(sessions).toHaveLength(1);
     expect(sessions[0].config.effort).toBeNull();
@@ -560,9 +568,13 @@ describe.runIf(enabled)('first-run setup through real desktop boundaries', () =>
       expect(await setupButton.count()).toBe(0);
       const prompt = win.getByPlaceholder('What should the agent do?');
       await prompt.fill('Keep this unsent draft while I check setup');
-      // With its only provider switched off the built-in loop has no model, so setup is offered.
-      const provider = (await win.evaluate(() => window.harness.invoke('providers:list', undefined))).find((p: ProviderConfig) => p.id === id)!;
-      await win.evaluate((p) => window.harness.invoke('providers:save', p), { ...provider, enabled: false });
+      // Settings normalization restores omitted built-ins. Disable those too so the fixture
+      // genuinely has no models, rather than retaining another provider's static catalog.
+      await win.evaluate(async () => {
+        const settings = await window.harness.invoke('settings:get', undefined);
+        await window.harness.invoke('settings:update', { providers: settings.providers.map((p) => ({ ...p, enabled: false })) });
+      });
+      expect((await win.evaluate((projectRoot) => window.harness.invoke('harness:models', { harness: 'native', projectRoot }), project)).models).toEqual([]);
       await win.getByRole('button', { name: 'Recheck models and sign-in', exact: true }).click();
       await setupButton.click();
       const recovery = win.getByRole('dialog', { name: 'Welcome to Vocs Code', exact: true });

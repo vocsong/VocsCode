@@ -1,5 +1,5 @@
 /** Composer dictation: the mic records, main transcribes, and the transcript lands at the caret
- *  without being sent; the Cloud / Local chip flips the saved engine and, when the local model is
+ *  without being sent; the Composer options menu flips the saved engine and, when the local model is
  *  missing, takes the user to Settings → Voice. The microphone itself is stubbed (jsdom has none). */
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -31,6 +31,8 @@ vi.mock('../src/renderer/src/dictation', async (original) => ({ ...(await origin
 
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { Composer } from '../src/renderer/src/components/Composer';
+import { DictationControl } from '../src/renderer/src/components/DictationControl';
+import { MenuItem } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
 import { DEFAULT_DICTATION } from '../src/shared/dictation';
 import type { AppSettings, SessionMeta } from '../src/shared/types';
@@ -143,10 +145,14 @@ describe('composer dictation', () => {
     await waitFor(() => expect(useStore.getState().drafts['s1']).toBe('fix the login bug'));
   });
 
-  it('flips the saved engine from the chip, and opens Settings → Voice when the local model is missing', async () => {
-    const { getByTestId } = mount('cloud');
+  it('flips the saved engine from the options menu, and opens Settings → Voice when the local model is missing', async () => {
+    const { getByTestId, getByRole, queryByTestId } = mount('cloud');
+    expect(queryByTestId('dictation-engine')).toBeNull();
+    fireEvent.click(getByRole('button', { name: 'Composer options' }));
     const chip = getByTestId('dictation-engine');
-    expect(chip.textContent).toBe('Cloud');
+    expect(chip.textContent).toBe('Voice: Cloud');
+    expect(chip.getAttribute('role')).toBe('menuitem');
+    expect(chip.getAttribute('data-engine')).toBe('cloud');
     expect(chip.getAttribute('title')).toContain('Dictating with OpenRouter (cloud)');
 
     await act(async () => {
@@ -158,13 +164,84 @@ describe('composer dictation', () => {
   });
 
   it('switches back to cloud without asking anything of the local engine', async () => {
-    const { getByTestId } = mount('local');
+    const { getByTestId, getByRole, queryByRole } = mount('local');
+    fireEvent.click(getByRole('button', { name: 'Composer options' }));
     const chip = getByTestId('dictation-engine');
-    expect(chip.textContent).toBe('Local');
+    expect(chip.textContent).toBe('Voice: Local');
+    expect(chip.getAttribute('data-engine')).toBe('local');
     await act(async () => {
       fireEvent.click(chip);
     });
     expect(invokeMock).toHaveBeenCalledWith('settings:update', { dictation: { ...DEFAULT_DICTATION, engine: 'cloud' } });
     expect(invokeMock).not.toHaveBeenCalledWith('dictation:status', undefined);
+    expect(queryByRole('menu')).toBeNull();
+  });
+
+  it('exposes an accessible keyboard menu and restores focus on Escape', () => {
+    const { getByRole } = mount();
+    const options = getByRole('button', { name: 'Composer options' });
+    expect(options.getAttribute('title')).toBe('Composer options');
+    expect(options.getAttribute('aria-haspopup')).toBe('menu');
+    expect(options.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(options);
+    expect(options.getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(getByRole('menuitem', { name: 'Voice: Cloud' }));
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(options.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(options);
+  });
+
+  it('keeps the mic mounted and the menu open when its disabled engine is clicked, then discards without transcribing', async () => {
+    const { mic, ta, getByRole, getByTestId, queryByRole } = mount();
+    fireEvent.change(ta, { target: { value: 'keep this draft' } });
+    fireEvent.click(mic);
+    await waitFor(() => expect(mic.getAttribute('aria-pressed')).toBe('true'));
+    expect(queryByRole('menuitem', { name: 'Discard recording' })).toBeNull();
+    fireEvent.click(getByRole('button', { name: 'Composer options' }));
+    const engine = getByRole('menuitem', { name: 'Voice: Cloud' }) as HTMLButtonElement;
+    expect(engine.disabled).toBe(true);
+    // Browsers can bubble clicks from descendants of disabled buttons.
+    fireEvent.click(engine.querySelector('span')!);
+    expect(getByRole('menu')).toBeTruthy();
+    expect(getByTestId('dictation-mic')).toBe(mic);
+    expect(mic.getAttribute('aria-pressed')).toBe('true');
+    expect(getByTestId('dictation-clock').textContent).toBe('0:00');
+    expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
+    fireEvent.click(getByRole('menuitem', { name: 'Discard recording' }));
+    expect(recording.cancel).toHaveBeenCalledTimes(1);
+    expect(recording.stop).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalledWith('dictation:transcribe', expect.anything());
+    expect(mic.getAttribute('aria-pressed')).toBe('false');
+    expect(ta.value).toBe('keep this draft');
+    expect(queryByRole('menu')).toBeNull();
+  });
+
+  it('disables switching while opening the mic and while transcribing', async () => {
+    let open: (r: typeof recording) => void = () => undefined;
+    let release: () => void = () => undefined;
+    startRecording.mockImplementationOnce(() => new Promise((resolve) => (open = resolve)));
+    transcribeGate = new Promise((resolve) => (release = resolve));
+    const { mic, getByRole } = mount();
+    fireEvent.click(mic);
+    fireEvent.click(getByRole('button', { name: 'Composer options' }));
+    expect((getByRole('menuitem', { name: 'Voice: Cloud' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => open(recording));
+    fireEvent.click(mic);
+    expect((getByRole('menuitem', { name: 'Voice: Cloud' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => release());
+    expect((getByRole('menuitem', { name: 'Voice: Cloud' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('renders injected composer actions after the voice items with keyboard navigation', () => {
+    useStore.setState({ settings: settings('cloud') });
+    const attach = vi.fn();
+    const { getByRole, getAllByRole } = render(<DictationControl onText={() => undefined} menuItems={(close) => <MenuItem onClick={() => { close(); attach(); }}>Attach files</MenuItem>} />);
+    fireEvent.click(getByRole('button', { name: 'Composer options' }));
+    const items = getAllByRole('menuitem');
+    expect(items.map((item) => item.textContent)).toEqual(['Voice: Cloud', 'Attach files']);
+    fireEvent.keyDown(items[0], { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.click(items[1]);
+    expect(attach).toHaveBeenCalledTimes(1);
   });
 });
