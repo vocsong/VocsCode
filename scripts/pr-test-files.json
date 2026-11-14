@@ -10,6 +10,7 @@
   "tests/chat-import-continuation.test.ts",
   "tests/chat-import-ui.test.tsx",
   "tests/handler-registry.test.ts",
+  "tests/workspace-files.test.ts",
   "tests/approval-card.test.tsx",
   "tests/pi-questions.test.ts",
   "tests/claude-questions.test.ts",
