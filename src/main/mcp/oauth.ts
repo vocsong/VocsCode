@@ -12,6 +12,11 @@ export interface NativeMcpOAuthOptions {
   scopes: string[];
   /** System browser, not an embedded renderer. Called only by an explicit authorize(). */
   openExternal: (url: string) => Promise<void>;
+  /** Main-selected registered public client; omitted preserves generic dynamic registration. */
+  clientId?: string;
+  /** Main-selected registered loopback path, never renderer input. */
+  callbackPath?: string;
+  maxTokenAgeSeconds?: number;
   timeoutMs?: number;
   fetch?: FetchLike;
 }
@@ -24,6 +29,8 @@ export interface NativeMcpOAuth {
   readonly fetch: FetchLike;
   /** One noninteractive, account-generation-bound SDK transport context. */
   transport(): { authProvider: OAuthClientProvider; fetch: FetchLike };
+  /** Main-process snapshot with the original expiry deadline, never exposed over IPC. */
+  credentialSnapshot(): { token: OAuthTokens; expiresAt: number } | undefined;
   authorize(signal?: AbortSignal): Promise<void>;
   /** Local logout/cancel. Remote revocation is a separate issuer operation. */
   clear(): void;
@@ -58,6 +65,9 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
   const origins = new Set([new URL(resource).origin, new URL(issuer).origin]);
   if (!options.scopes.length || options.scopes.some((scope) => !/^[\x21\x23-\x5b\x5d-\x7e]+$/.test(scope))) throw new Error('Explicit OAuth scopes are required');
   const scopes = [...new Set(options.scopes)];
+  if (options.clientId && !/^[A-Za-z0-9._-]{1,128}$/.test(options.clientId)) throw new Error('Invalid public client ID');
+  if (options.callbackPath && !/^\/[A-Za-z0-9/_-]{1,128}$/.test(options.callbackPath)) throw new Error('Invalid loopback callback path');
+  if (options.maxTokenAgeSeconds !== undefined && (!Number.isSafeInteger(options.maxTokenAgeSeconds) || options.maxTokenAgeSeconds <= 0)) throw new Error('Invalid token lifetime limit');
   let tokens: OAuthTokens | undefined;
   let client: OAuthClientInformationMixed | undefined;
   let discovery: OAuthDiscoveryState | undefined;
@@ -90,9 +100,10 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
       return { client_name: 'Vocs Code', redirect_uris: redirect ? [redirect] : [], grant_types: ['authorization_code'], response_types: ['code'], token_endpoint_auth_method: 'none', scope: scopes.join(' ') };
     },
     state() { if (!state) throw new Error('Start an explicit MCP sign-in first'); return state; },
-    clientInformation() { return client; },
+    clientInformation() { return options.clientId ? { client_id: options.clientId, token_endpoint_auth_method: 'none' } : client; },
     saveClientInformation(value) {
       if (!active || active.signal.aborted || value.client_secret || ('token_endpoint_auth_method' in value && value.token_endpoint_auth_method !== 'none')) throw new Error('Desktop OAuth requires a public client');
+      if (options.clientId && value.client_id !== options.clientId) throw new Error('Registered client cannot be replaced');
       client = value;
     },
     tokens() { return tokens && Date.now() < expiresAt ? { ...tokens } : undefined; },
@@ -100,6 +111,7 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
       if (!active || active.signal.aborted) throw new Error('MCP sign-in is no longer active');
       const deadline = Date.now() + (value.expires_in ?? 0) * 1000;
       if (!value.access_token || value.token_type.toLowerCase() !== 'bearer' || !value.expires_in || value.expires_in <= 0 || !Number.isSafeInteger(deadline)) throw new Error('MCP OAuth requires a bounded bearer token');
+      if (options.maxTokenAgeSeconds && value.expires_in > options.maxTokenAgeSeconds) throw new Error('Token exceeds approved lifetime');
       if (value.scope?.split(' ').some((scope) => !scopes.includes(scope))) throw new Error('MCP OAuth returned an unapproved scope');
       // Renewal needs account/device revocation first. Do not retain refresh tokens yet.
       tokens = { access_token: value.access_token, token_type: value.token_type, expires_in: value.expires_in, ...(value.scope ? { scope: value.scope } : {}) };
@@ -187,6 +199,7 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
 
   return {
     resource, provider, fetch: guardedFetch, clear, transport,
+    credentialSnapshot: () => tokens && Date.now() < expiresAt ? { token: { ...tokens }, expiresAt } : undefined,
     async authorize(signal) {
       if (active) throw new Error('MCP sign-in is already in progress');
       clear();
@@ -198,7 +211,7 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) controller.abort();
       const timer = setTimeout(abort, options.timeoutMs ?? 120_000);
-      const callbackPath = `/oauth/${randomBytes(24).toString('hex')}`;
+      const callbackPath = options.callbackPath ?? `/oauth/${randomBytes(24).toString('hex')}`;
       state = randomBytes(32).toString('base64url');
       let finish!: (code: string) => void;
       let fail!: (error: Error) => void;

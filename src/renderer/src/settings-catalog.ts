@@ -57,6 +57,10 @@ export const SETTINGS_PAGES = [
     { label: 'Utility model', description: 'A fast model for session titles and worktree names.', keywords: 'background cheap naming flash model', anchor: 'assistant-models' },
     { label: 'Vesta assistant', description: 'Show or hide the floating assistant and choose its Pi model.', keywords: 'floating agent vesta pi assistant enabled', anchor: 'assistant-vesta' },
   ] },
+  { id: 'account', label: 'Vocs account', icon: 'shield', group: 'Connections', description: 'Sign in to the isolated staging account service and inspect your Hub catalog.', saveHint: 'Staging only · Temporary, memory-only session', topics: [
+    { label: 'Staging sign-in', description: 'Connect your Vocs identity using the system browser, or sign out.', keywords: 'login auth identity account cancel logout', anchor: 'vocs-account-login' },
+    { label: 'Hub connections', description: 'Read your account’s permitted MCP connections without granting tool access.', keywords: 'mcp catalog cloud staging refresh', anchor: 'vocs-account-catalog' },
+  ] },
   { id: 'providers', label: 'Providers & keys', icon: 'key', group: 'Connections', description: 'Connect your models. Keep credentials in the OS keychain, not in configuration.', saveHint: 'Keys and new providers have explicit Save actions', topics: [
     { label: 'Providers & API keys', description: 'Enable providers, save or test keys and configure endpoints.', keywords: 'openai anthropic openrouter deepseek ollama lmstudio api key secrets base url custom', anchor: 'providers-catalog' },
     { label: 'Harness logins', description: 'Check agent login status and available CLI updates.', keywords: 'login authentication credentials updates codex claude pi', anchor: 'providers-logins' },

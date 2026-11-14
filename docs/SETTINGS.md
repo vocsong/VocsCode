@@ -15,7 +15,7 @@ save/dismissal behavior and repair paths.
 | --- | --- |
 | Workspace | General, Appearance, Shortcuts, Terminal, Voice |
 | Agent behavior | Session defaults, Instructions, Mission, Vesta & utility |
-| Connections | Providers & keys, Harnesses, Pi, ACP agents |
+| Connections | Vocs account, Providers & keys, Harnesses, Pi, ACP agents |
 | System | Import chats, Remote access, About & doctor |
 
 General is the starting point for daily preferences and common destinations. Appearance owns the
@@ -108,3 +108,7 @@ The suite also tests real preference writes, restart persistence, keyboard navig
 filtering, every catalogue search anchor, search reset/Escape, and every page at multiple compact
 widths. Section-specific suites continue to exercise their own production
 boundaries; the navigation suite is not a substitute for those flows.
+
+## Staging Vocs account
+
+Vocs account is an explicit staging-only sign-in and read-only Hub catalog experiment. Credentials stay in the main process; the settings page receives only safe descriptive status. Sign-in uses the system browser, cancellation and sign-out clear local account state, and sessions are memory-only for at most five minutes. Local work remains available signed out. Viewing a connection neither installs it nor authorizes tools or paid execution. See [desktop acceptance](ACCOUNT-STAGING-TEST.md).

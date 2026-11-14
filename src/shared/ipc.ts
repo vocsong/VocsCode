@@ -1,3 +1,4 @@
+import type { VocsAccountState } from './vocs-account';
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type { ControlGrantInput, ControlOwnerState } from './control';
 import type { HarnessSetupStatus, LoginHarnessId } from './harness-setup';
@@ -150,6 +151,13 @@ export interface IpcContract {
   'desktop:setVisible': [{ sessionIds: string[] }, void];
   /** The session the desktop is on, for a paired browser to open by default. */
   'desktop:focus': [void, DesktopFocus];
+
+  /** Local desktop owner only; no tokens, URLs or client configuration accepted. */
+  'vocsAccount:get': [void, VocsAccountState];
+  'vocsAccount:signIn': [void, VocsAccountState];
+  'vocsAccount:cancel': [void, VocsAccountState];
+  'vocsAccount:signOut': [void, VocsAccountState];
+  'vocsAccount:refresh': [void, VocsAccountState];
 
   'settings:get': [void, AppSettings];
   'settings:update': [Partial<AppSettings>, AppSettings];
