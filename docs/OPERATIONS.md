@@ -66,7 +66,7 @@ longer registered with the relay` (its credential was rejected — revoked, or a
 falls back to enrolling and keeps its identity), `remote: forgot N browser pairing(s)` (reconciled
 against the relay's registry; the offline mirror was re-keyed), `remote: pairing refused by the relay`
 and `…maximum number of paired devices` (the per-account cap: ten browsers, five computers),
-`remote: waiting for this computer to be added in the browser (Connect with GitHub)` and
+`remote: waiting for this computer to be added in the browser (Connect with Vocs)` and
 `remote: this computer was added in the browser (device …)` (the signed-in path; it gives up after
 ten minutes with `the sign-in page expired`).
 

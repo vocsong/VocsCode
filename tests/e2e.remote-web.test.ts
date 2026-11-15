@@ -391,7 +391,7 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     expect(await page.locator('style').count()).toBe(0);
   }, 240_000);
 
-  it('adds a computer with Connect with GitHub, then pairs another from the signed-in list, with no code or secret', async () => {
+  it('adds a computer with Connect with Vocs, then pairs another from the signed-in list, with no code or secret', async () => {
     relay = await startLocalRelay();
     landing = await startTestLanding(relay.origin, relay.enrollToken, 'e2e-owner', 'vocs-v1', relay.accountAssertionSecret);
     // Desktops with no enrollment secret: they go through the landing, as they would at code.vocs.io.
@@ -417,7 +417,7 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     await page.locator('.w-session-name').getByText('Office session').waitFor({ timeout: 30_000 });
     expect(await office.host.isRegistered()).toBe(true);
 
-    // A second computer, added from its own Connect with GitHub, is picked from the list: no code.
+    // A second computer, added from its own Connect with Vocs, is picked from the list: no code.
     const lab = await desk('Lab', '', '', { enable: false, focus: 'Lab-s1' });
     let labLink = '';
     await lab.host.signIn(landing.origin, async (url) => void (labLink = url), 'Lab PC');

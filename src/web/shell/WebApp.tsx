@@ -365,9 +365,9 @@ export function WebApp({ client, transport, account, initialCode, connectHash }:
               <Button variant="ghost" icon="x" onClick={() => { setSheet('none'); void client.unpair(); }}>Unpair this browser</Button>
               {account.status === 'signed-in' && (
                 <div className="w-account">
-                  <span className="account-name">Signed in as @{account.account.login}</span>
+                  <span className="account-name">Signed in as {account.account.login}</span>
                   <form method="post" action="/logout" className="account-signout">
-                    <button type="submit" className="btn btn-ghost btn-sm">Sign out of GitHub</button>
+                    <button type="submit" className="btn btn-ghost btn-sm">Sign out</button>
                   </form>
                 </div>
               )}

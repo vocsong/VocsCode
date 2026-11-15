@@ -689,7 +689,7 @@ describe('relay offline mirror (opaque sealed blobs)', () => {
   });
 });
 
-describe('owner actions: Connect with GitHub and pairing from a signed-in browser', () => {
+describe('owner actions: Connect with Vocs and pairing from a signed-in browser', () => {
   const newNonce = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
 
   it('registers a desktop only after the owner grants its hash, sealing the credential to its key, once', async () => {

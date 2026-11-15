@@ -92,7 +92,7 @@ export function pairingTokenContext(code: string, webDeviceId: string): unknown[
 }
 
 /** Authenticated context of a desktop's sealed credential from a signed-in owner's approval
- *  ("Connect with GitHub"): it opens only for this one-time secret's hash and the device it minted. */
+ *  ("Connect with Vocs"): it opens only for this one-time secret's hash and the device it minted. */
 export function enrollTokenContext(nonceHash: string, hostDeviceId: string): unknown[] {
   return ['relay.enroll-token', nonceHash, hostDeviceId];
 }

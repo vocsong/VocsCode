@@ -10,7 +10,7 @@ export function relayUrl(env: NodeJS.ProcessEnv = process.env): string {
 const PROBE_TTL_MS = 60_000;
 const probes = new Map<string, { at: number; value: boolean; pending?: Promise<void> }>();
 
-/** Whether the relay's origin offers Connect with GitHub. The landing's login gate answers
+/** Whether the relay's origin offers Connect with Vocs. The landing's login gate answers
  *  `/v1/me` with 401 for a signed-out caller; while the gate is off it answers 503, and a bare
  *  relay (a local `wrangler dev`, the test relay) has no such route. Never blocks: it returns the
  *  last answer (false until the first probe lands) and refreshes it in the background at most

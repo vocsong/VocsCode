@@ -255,7 +255,7 @@ describe('remote host token and trust lifecycle', () => {
 
 });
 
-describe('Connect with GitHub: adding and pairing through a signed-in owner', () => {
+describe('Connect with Vocs: adding and pairing through a signed-in owner', () => {
   /** What the landing does for a signed-in, allowlisted session: owner requests reach the relay
    *  with its enrollment secret in place of whatever Authorization the browser sent. */
   const asOwner: typeof fetch = (input, init = {}) => {

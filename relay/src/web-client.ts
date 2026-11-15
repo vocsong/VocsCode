@@ -318,7 +318,7 @@ export class RelayClient {
     return body.filter((h): h is OwnerHost => !!h && typeof h === 'object' && typeof (h as OwnerHost).deviceId === 'string' && typeof (h as OwnerHost).name === 'string');
   }
 
-  /** Adds the computer that clicked Connect with GitHub, known here only by its connect hash. */
+  /** Adds the computer that clicked Connect with Vocs, known here only by its connect hash. */
   async addComputer(relayBase: string, nonceHash: string): Promise<void> {
     await this.ownerFetch(relayBase, '/v1/owner/enroll-grant', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nonceHash }) });
   }
