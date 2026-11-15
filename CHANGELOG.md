@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.9.0](https://github.com/vocsong/VocsCode/compare/v0.8.0...v0.9.0) (2026-11-15)
+
+
+### Features
+
+* **account:** add staging sign-in and read-only Hub catalog ([#495](https://github.com/vocsong/VocsCode/issues/495)) ([30a7080](https://github.com/vocsong/VocsCode/commit/30a708036c6e2f9c95296761a4af43a37b6ecf98))
+* **account:** sign in to production Vocs by default ([#499](https://github.com/vocsong/VocsCode/issues/499)) ([cb24980](https://github.com/vocsong/VocsCode/commit/cb24980652c364c27e8d34c23ff81e23e57f2af2))
+* add gated remote MCP control and desktop grants ([cc79b2a](https://github.com/vocsong/VocsCode/commit/cc79b2ac98b8e31f4326689e22424f9f50269e43))
+* add per-session Fast mode controls and provider wiring ([#458](https://github.com/vocsong/VocsCode/issues/458)) ([705b141](https://github.com/vocsong/VocsCode/commit/705b141d46e9051266a049f45bb0f6ffd85b7b2c))
+* add Pi questions and answer context ([990f976](https://github.com/vocsong/VocsCode/commit/990f976bde7e20f924a0890fcedea63a35b0a5bf))
+* attach files dropped onto a session pane ([#486](https://github.com/vocsong/VocsCode/issues/486)) ([9a27a48](https://github.com/vocsong/VocsCode/commit/9a27a483282768e1ef34b7ddc45edc115d7f5263))
+* declutter session composer controls ([#480](https://github.com/vocsong/VocsCode/issues/480)) ([f440120](https://github.com/vocsong/VocsCode/commit/f4401208e15df1588c7b878015975b2ad608f772))
+* **dictation:** voice to text in the composer, cloud or local whisper.cpp ([#461](https://github.com/vocsong/VocsCode/issues/461)) ([0412dd3](https://github.com/vocsong/VocsCode/commit/0412dd3d09956dcc9eafdefef17770416f16c045))
+* guide agent installation, sign-in and model setup ([#479](https://github.com/vocsong/VocsCode/issues/479)) ([0061c50](https://github.com/vocsong/VocsCode/commit/0061c50bd90369e4837e4a800a240763444dbb48))
+* Import Claude Code and Codex chat histories ([#471](https://github.com/vocsong/VocsCode/issues/471)) ([ce73097](https://github.com/vocsong/VocsCode/commit/ce73097cda9cae1c735719de9216067f32801697))
+* **mcp:** add explicit native OAuth foundation ([#490](https://github.com/vocsong/VocsCode/issues/490)) ([b50afca](https://github.com/vocsong/VocsCode/commit/b50afca08fac6346dcc6d4c5542d4b5d367d2432))
+* preview transcript Markdown images on click ([50b7e98](https://github.com/vocsong/VocsCode/commit/50b7e9814ca6e644559d5e78bd3db84be1983528))
+* **processes:** track every process the app starts in a Processes panel ([#459](https://github.com/vocsong/VocsCode/issues/459)) ([1a33a96](https://github.com/vocsong/VocsCode/commit/1a33a96eb381058dd99b0a533a68b0ccc1adcdee))
+* redesign settings with task-based navigation and search ([#476](https://github.com/vocsong/VocsCode/issues/476)) ([717305a](https://github.com/vocsong/VocsCode/commit/717305a1d6f99d090d394b5fa56412cdd8a5ee45))
+* redesign the session view ([d3549a5](https://github.com/vocsong/VocsCode/commit/d3549a5ebd56c76826e371c92edcca559f3ce088))
+* show effort beside the model and give permission its own pill ([#482](https://github.com/vocsong/VocsCode/issues/482)) ([1d4a628](https://github.com/vocsong/VocsCode/commit/1d4a6282245934fb4ff27eb9fcc3b87a24882d8f))
+* show running, unviewed and recent sessions in a sidebar activity tray ([#483](https://github.com/vocsong/VocsCode/issues/483)) ([6e3f0e9](https://github.com/vocsong/VocsCode/commit/6e3f0e9e28cbfbbe108ffae1d1bf68dcbccba069))
+* track user-entered input tokens in analytics ([#475](https://github.com/vocsong/VocsCode/issues/475)) ([b3e9a8b](https://github.com/vocsong/VocsCode/commit/b3e9a8bf7898d230f6ad7c216b716d68b9ebf363))
+
+
+### Bug Fixes
+
+* **account:** explain a sign-in cancelled by leaving and drop the misleading status retry ([#497](https://github.com/vocsong/VocsCode/issues/497)) ([264990a](https://github.com/vocsong/VocsCode/commit/264990a1d3272c2da1ce1a3e2098e24e0b5d83ca))
+* **approvals:** let a chosen question option be unselected ([#470](https://github.com/vocsong/VocsCode/issues/470)) ([1f4e1e5](https://github.com/vocsong/VocsCode/commit/1f4e1e53e0fa510041027aa073ae5add1d87d07b))
+* explain the Anthropic models refresh when no API key is set ([#484](https://github.com/vocsong/VocsCode/issues/484)) ([8169be9](https://github.com/vocsong/VocsCode/commit/8169be9c7fa60160e9b8cb747c79a010b0653855))
+* **files:** say a mentioned file is missing, show outside files in their folder ([#467](https://github.com/vocsong/VocsCode/issues/467)) ([c984c94](https://github.com/vocsong/VocsCode/commit/c984c947875c120692eef15f2b3a0b82ee3e9dfd))
+* keep harness cards in their column and offer setup only when needed ([#481](https://github.com/vocsong/VocsCode/issues/481)) ([a7a727d](https://github.com/vocsong/VocsCode/commit/a7a727d6cd1c640e2d4dfae453af038e2e39918b))
+* **models:** name Claude models from the display name when the description is a tagline ([#498](https://github.com/vocsong/VocsCode/issues/498)) ([f1f1f05](https://github.com/vocsong/VocsCode/commit/f1f1f05eda40f06b988b9fa568a10a806d142fbd))
+* preserve Pi MCP images and verify packaged startup ([2a5c8db](https://github.com/vocsong/VocsCode/commit/2a5c8dbe41ccd95cbc98e43d081d99f0e8d9fc02))
+* preserve settings drafts and Pi configuration updates ([#477](https://github.com/vocsong/VocsCode/issues/477)) ([b9f149e](https://github.com/vocsong/VocsCode/commit/b9f149e112aae57ee1db85e7e7b47dca4930e8d6))
+* **processes:** keep what a session starts through an exiting launcher under that session ([#462](https://github.com/vocsong/VocsCode/issues/462)) ([dc251b1](https://github.com/vocsong/VocsCode/commit/dc251b14c6bfe9f5a96387df34ee849f0a75eb9a))
+* **remote:** require local approval before trusting pairing results ([#464](https://github.com/vocsong/VocsCode/issues/464)) ([2a09346](https://github.com/vocsong/VocsCode/commit/2a0934675bddf8cbcfb00f0f21c0a273240bea84))
+* **remote:** say Vocs, not GitHub, for code.vocs.io sign-in ([#502](https://github.com/vocsong/VocsCode/issues/502)) ([fc6ce17](https://github.com/vocsong/VocsCode/commit/fc6ce17a1af77c674ce57445db9825fd51995473))
+* resolve shortened chat file links within the session worktree ([#487](https://github.com/vocsong/VocsCode/issues/487)) ([44f4766](https://github.com/vocsong/VocsCode/commit/44f476609824eee3db4261acaaf393ccaf9444a1))
+* route OpenCode Go utility completions with session headers ([#469](https://github.com/vocsong/VocsCode/issues/469)) ([7fc8347](https://github.com/vocsong/VocsCode/commit/7fc834759de0712f60845bb640b6d47a5f697d24))
+* run the Claude Code installed behind an npm shim instead of the bundled one ([#485](https://github.com/vocsong/VocsCode/issues/485)) ([73d3629](https://github.com/vocsong/VocsCode/commit/73d36295bce2e8d85c56347d54cf47e4c0c37a9e))
+* separate goal objectives from continuation guidance ([e275fed](https://github.com/vocsong/VocsCode/commit/e275fedd68141e246ce44461c0acd293c42a7a85))
+* **ui:** keep composer controls on a single row ([e2e0107](https://github.com/vocsong/VocsCode/commit/e2e0107f991d18ed40fc3998dfd60387f20ea8ed))
+
 ## [0.8.0](https://github.com/vocsong/VocsCode/compare/v0.7.0...v0.8.0) (2026-10-12)
 
 
