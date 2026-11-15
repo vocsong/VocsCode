@@ -7,7 +7,7 @@ import fsSync from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry } from '../src/main/handlers';
+import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry, type HandlerDeps } from '../src/main/handlers';
 import { PUSH_CHANNELS } from '../src/shared/ipc';
 import { agentChannels } from '../src/shared/agent-manifest';
 import { isRemoteChannel, isRemotePushChannel } from '../src/shared/remote-channels';
@@ -133,6 +133,23 @@ async function fileResolveRig() {
 }
 
 describe('handler registry', () => {
+  it('keeps all account channels local-only and accepts no endpoint/credential configuration', async () => {
+    const snapshot = { realm: 'staging', status: 'signed_out', refreshing: false, revision: 0, connections: [] } as const;
+    const account = { get: vi.fn(() => snapshot), signIn: vi.fn(async () => snapshot), cancel: vi.fn(() => snapshot), signOut: vi.fn(async () => snapshot), refresh: vi.fn(async () => snapshot), dispose: vi.fn() };
+    const { registry } = stubDeps({ vocsAccount: account as unknown as NonNullable<HandlerDeps['vocsAccount']> });
+    for (const action of ['get', 'signIn', 'cancel', 'signOut', 'refresh'] as const) {
+      const channel = `vocsAccount:${action}`;
+      for (const actor of ['user', 'agent'] as const) await expect(registry.invoke(channel, undefined, actor)).rejects.toThrow(/desktop owner/);
+      for (const input of [{}, { issuer: 'https://evil.invalid' }, { token: 'secret' }, null]) await expect(registry.invoke(channel, input, 'desktop')).rejects.toThrow(/do not accept configuration/);
+      expect(account[action]).not.toHaveBeenCalled();
+      await expect(registry.invoke(channel, undefined, 'desktop')).resolves.toEqual(snapshot);
+      expect(account[action]).toHaveBeenCalledTimes(1);
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels().includes(channel as never)).toBe(false);
+    }
+    await registry.shutdown(); expect(account.dispose).toHaveBeenCalledTimes(1);
+  });
+
   it('allows bounded sign-in only for the desktop owner and refuses forged launch arguments before execution', async () => {
     const { registry } = stubDeps();
     const login = vi.mocked(openHarnessLogin).mockReset().mockResolvedValue({ ok: true });
