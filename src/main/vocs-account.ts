@@ -1,26 +1,43 @@
-/** Staging-only account broker. No persistence, resource grants or harness configuration writes. */
+/** Vocs account broker. No persistence, resource grants or harness configuration writes. */
 import { z } from 'zod';
-import type { VocsAccountState } from '../shared/vocs-account';
+import type { VocsAccountRealm, VocsAccountState } from '../shared/vocs-account';
 import { createNativeMcpOAuth, type NativeMcpOAuth, type NativeMcpOAuthOptions } from './mcp/oauth';
-export const VOCS_STAGING = Object.freeze({
-  issuer: 'https://vocs-login-staging.vocs.workers.dev/api/auth',
-  identityIssuer: 'https://vocs-login-staging.vocs.workers.dev',
-  hub: 'https://vocs-mcp-staging.vocs.workers.dev',
-  resource: 'https://vocs-mcp-staging.vocs.workers.dev/api/connections'
+export const VOCS_REALMS = Object.freeze({
+  production: Object.freeze({
+    issuer: 'https://auth.vocs.io/api/auth',
+    identityIssuer: 'https://auth.vocs.io',
+    hub: 'https://mcp.vocs.io',
+    resource: 'https://mcp.vocs.io/api/connections'
+  }),
+  staging: Object.freeze({
+    issuer: 'https://vocs-login-staging.vocs.workers.dev/api/auth',
+    identityIssuer: 'https://vocs-login-staging.vocs.workers.dev',
+    hub: 'https://vocs-mcp-staging.vocs.workers.dev',
+    resource: 'https://vocs-mcp-staging.vocs.workers.dev/api/connections'
+  })
 });
-const catalogSchema = z.strictObject({
-  version: z.literal(1),
-  account: z.strictObject({ id: z.string().regex(/^[a-f0-9]{64}$/), identityIssuer: z.literal(VOCS_STAGING.identityIssuer) }),
-  connections: z.array(z.strictObject({
-    id: z.literal('openrouter'), name: z.literal('OpenRouter'), transport: z.literal('streamable-http'),
-    resource: z.literal(`${VOCS_STAGING.hub}/openrouter`), authorizationServer: z.union([z.literal(VOCS_STAGING.hub), z.null()]),
-    accountScopes: z.array(z.literal('models:read')).min(1).max(1), authorization: z.enum(['oauth_required', 'unavailable']), executionReadiness: z.literal('not_checked')
-  }).refine(c => (c.authorization === 'oauth_required') === (c.authorizationServer !== null))).max(1),
-  policy: z.strictObject({ authorizationRequiredPerResource: z.literal(true), localServersSynced: z.literal(false), offlineCloudAccess: z.literal(false) })
-});
+export const VOCS_STAGING = VOCS_REALMS.staging;
+/** Main-process choice only: the renderer can never pick an issuer. Production unless a
+ *  developer launches with `VOCS_CODE_ACCOUNT_REALM=staging`. */
+export function vocsAccountRealm(env: NodeJS.ProcessEnv = process.env): VocsAccountRealm {
+  return env.VOCS_CODE_ACCOUNT_REALM === 'staging' ? 'staging' : 'production';
+}
+function catalogSchema(target: (typeof VOCS_REALMS)[VocsAccountRealm]) {
+  return z.strictObject({
+    version: z.literal(1),
+    account: z.strictObject({ id: z.string().regex(/^[a-f0-9]{64}$/), identityIssuer: z.literal(target.identityIssuer) }),
+    connections: z.array(z.strictObject({
+      id: z.literal('openrouter'), name: z.literal('OpenRouter'), transport: z.literal('streamable-http'),
+      resource: z.literal(`${target.hub}/openrouter`), authorizationServer: z.union([z.literal(target.hub), z.null()]),
+      accountScopes: z.array(z.literal('models:read')).min(1).max(1), authorization: z.enum(['oauth_required', 'unavailable']), executionReadiness: z.literal('not_checked')
+    }).refine(c => (c.authorization === 'oauth_required') === (c.authorizationServer !== null))).max(1),
+    policy: z.strictObject({ authorizationRequiredPerResource: z.literal(true), localServersSynced: z.literal(false), offlineCloudAccess: z.literal(false) })
+  });
+}
 class CatalogAccessDenied extends Error {}
-const missingAccess = 'This account has no staging Hub catalog access. Ask the staging administrator to enable it, then sign in again.';
 interface Options {
+  /** Defaults to production. Chosen by main (see `vocsAccountRealm`), never by the renderer. */
+  realm?: VocsAccountRealm;
   openExternal(url: string): Promise<void>;
   fetch?: typeof fetch;
   /** Test seam only; production always uses the real SDK controller. */
@@ -56,7 +73,13 @@ async function json(response: Response, signal: AbortSignal): Promise<unknown> {
   } finally { void reader.cancel().catch(() => undefined); }
 }
 export function createVocsAccount(options: Options) {
-  let state: VocsAccountState = { realm: 'staging', status: 'signed_out', refreshing: false, revision: 0, connections: [] };
+  const realm: VocsAccountRealm = options.realm ?? 'production';
+  const target = VOCS_REALMS[realm];
+  const schema = catalogSchema(target);
+  const missingAccess = realm === 'staging'
+    ? 'This account has no staging Hub catalog access. Ask the staging administrator to enable it, then sign in again.'
+    : 'This Vocs account has no Hub catalog access yet. Ask the Vocs administrator to enable it, then sign in again.';
+  let state: VocsAccountState = { realm, status: 'signed_out', refreshing: false, revision: 0, connections: [] };
   let oauth: NativeMcpOAuth | undefined;
   let generation = 0;
   let active: AbortController | undefined;
@@ -67,7 +90,7 @@ export function createVocsAccount(options: Options) {
     active?.abort(); active = undefined;
     oauth?.clear(); oauth = undefined;
     clearTimeout(expiry); expiry = undefined;
-    state = { realm: 'staging', status: 'signed_out', refreshing: false, revision: state.revision + 1, connections: [], ...(error ? { error } : {}) };
+    state = { realm, status: 'signed_out', refreshing: false, revision: state.revision + 1, connections: [], ...(error ? { error } : {}) };
   }
   function get(): VocsAccountState {
     if (state.expiresAt && state.expiresAt <= Date.now()) clear('Session expired. Sign in again.');
@@ -77,9 +100,9 @@ export function createVocsAccount(options: Options) {
     const token = client.credentialSnapshot()?.token;
     if (!token || token.scope !== 'catalog:read' || !token.expires_in || token.expires_in > 300) throw new Error('Invalid account token');
     const context = client.transport();
-    const response = await bounded(context.fetch(VOCS_STAGING.resource, { method: 'GET', headers: { Authorization: `Bearer ${token.access_token}`, Accept: 'application/json' }, signal: controller.signal }), controller.signal);
+    const response = await bounded(context.fetch(target.resource, { method: 'GET', headers: { Authorization: `Bearer ${token.access_token}`, Accept: 'application/json' }, signal: controller.signal }), controller.signal);
     if (response.status !== 200 || response.redirected) { void response.body?.cancel().catch(() => undefined); if (response.status === 403) throw new CatalogAccessDenied(); throw new Error('Account catalog denied'); }
-    const value = catalogSchema.parse(await json(response, controller.signal));
+    const value = schema.parse(await json(response, controller.signal));
     if (epoch !== generation || controller.signal.aborted) throw new Error('Account operation interrupted');
     if (state.accountId && state.accountId !== value.account.id) throw new Error('Account changed unexpectedly');
     update({ accountId: value.account.id, connections: value.connections });
@@ -92,7 +115,7 @@ export function createVocsAccount(options: Options) {
     update({ status: 'signing_in', error: undefined });
     try {
       const client = (options.createOAuth ?? createNativeMcpOAuth)({
-        resource: VOCS_STAGING.resource, issuer: VOCS_STAGING.issuer, scopes: ['catalog:read'], clientId: 'vocs-code', callbackPath: '/oauth/vocs', maxTokenAgeSeconds: 300,
+        resource: target.resource, issuer: target.issuer, scopes: ['catalog:read'], clientId: 'vocs-code', callbackPath: '/oauth/vocs', maxTokenAgeSeconds: 300,
         openExternal: options.openExternal, fetch: options.fetch, timeoutMs: options.timeoutMs
       });
       oauth = client;
@@ -134,7 +157,7 @@ export function createVocsAccount(options: Options) {
     if (token) {
       const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 5000);
       try {
-        const response = await bounded((options.fetch ?? fetch)(`${VOCS_STAGING.issuer}/oauth2/revoke`, {
+        const response = await bounded((options.fetch ?? fetch)(`${target.issuer}/oauth2/revoke`, {
           method: 'POST', redirect: 'manual', signal: controller.signal,
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ client_id: 'vocs-code', token, token_type_hint: 'access_token' })

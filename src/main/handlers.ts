@@ -1,4 +1,4 @@
-import { createVocsAccount, type VocsAccountBroker } from './vocs-account';
+import { createVocsAccount, vocsAccountRealm, type VocsAccountBroker } from './vocs-account';
 /** Transport-agnostic handler registry: every invoke channel, bound once, Electron-free.
  *  ipc.ts binds it to Electron's ipcMain; the remote host (docs/REMOTE-ACCESS.md) binds
  *  the same registry to its WebSocket transport. Electron affordances arrive via
@@ -219,7 +219,7 @@ function missionDeliveryBranches(mission: MissionRecord): string[] {
 
 export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const { settings, secrets, sessions, terminals, runtime } = deps;
-  const vocsAccount = deps.vocsAccount ?? createVocsAccount({ openExternal: url => deps.desktop.openExternal(url) });
+  const vocsAccount = deps.vocsAccount ?? createVocsAccount({ realm: vocsAccountRealm(), openExternal: url => deps.desktop.openExternal(url) });
   const piConfig =
     deps.piConfig ??
     new PiConfigStore({

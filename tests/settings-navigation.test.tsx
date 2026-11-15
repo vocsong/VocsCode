@@ -22,11 +22,12 @@ afterEach(cleanup);
 function nav(name: string) { return within(screen.getByRole('navigation', { name: 'Settings sections' })).getByRole('button', { name }); }
 
 describe('task-oriented settings navigation', () => {
-  it('finds staging account sign-in and read-only Hub catalog in Connections', async () => {
+  it('finds Vocs account sign-in and read-only Hub catalog in Connections', async () => {
     render(<SettingsView />);
     fireEvent.click(nav('Vocs account'));
     expect(screen.getByRole('heading', { name: 'Vocs account', level: 1 })).toBeTruthy();
-    expect(screen.getByText('Staging only')).toBeTruthy();
+    expect(screen.getByText(/Sign-in opens your system browser at auth.vocs.io/)).toBeTruthy();
+    expect(screen.queryByText('Staging only')).toBeNull();
     expect(screen.getByRole('region', { name: 'Hub connections' })).toBeTruthy();
     fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), { target: { value: 'catalog' } });
     fireEvent.click(screen.getByRole('button', { name: /Hub connections/ }));
