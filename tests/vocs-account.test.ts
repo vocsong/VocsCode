@@ -1,25 +1,27 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { createVocsAccount, VOCS_STAGING } from '../src/main/vocs-account';
+import { createVocsAccount, VOCS_REALMS, VOCS_STAGING, vocsAccountRealm } from '../src/main/vocs-account';
+import type { VocsAccountRealm } from '../src/shared/vocs-account';
 
-const account = (id = 'a'.repeat(64)) => ({
-  version: 1, account: { id, identityIssuer: VOCS_STAGING.identityIssuer },
-  connections: [{ id: 'openrouter', name: 'OpenRouter', transport: 'streamable-http', resource: VOCS_STAGING.hub + '/openrouter', authorizationServer: VOCS_STAGING.hub, accountScopes: ['models:read'], authorization: 'oauth_required', executionReadiness: 'not_checked' }],
+const account = (id = 'a'.repeat(64), T: { identityIssuer: string; hub: string } = VOCS_STAGING) => ({
+  version: 1, account: { id, identityIssuer: T.identityIssuer },
+  connections: [{ id: 'openrouter', name: 'OpenRouter', transport: 'streamable-http', resource: T.hub + '/openrouter', authorizationServer: T.hub, accountScopes: ['models:read'], authorization: 'oauth_required', executionReadiness: 'not_checked' }],
   policy: { authorizationRequiredPerResource: true, localServersSynced: false, offlineCloudAccess: false }
 });
 const brokers: ReturnType<typeof createVocsAccount>[] = [];
 afterEach(() => { for (const broker of brokers.splice(0)) broker.dispose(); vi.useRealTimers(); });
 function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => resolve = r); return { promise, resolve }; }
-function fixture(tokenOptions: Record<string, unknown> = {}) {
+function fixture(tokenOptions: Record<string, unknown> = {}, realm: VocsAccountRealm | null = 'staging') {
+  const T = VOCS_REALMS[realm ?? 'production'];
   let browserUrl: URL | undefined;
   const calls: string[] = [];
-  const catalog = vi.fn(async () => Response.json(account()));
+  const catalog = vi.fn(async () => Response.json(account(undefined, T)));
   const revoke = vi.fn(async () => new Response(null, { status: 200 }));
   const exchange = vi.fn(async () => Response.json({ access_token: 'private-native-token', token_type: 'Bearer', expires_in: 300, scope: 'catalog:read', ...tokenOptions }));
   const network = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input); calls.push(url);
     expect(init?.redirect).toBe('manual');
-    if (url === VOCS_STAGING.resource) {
+    if (url === T.resource) {
       expect(init?.method).toBe('GET');
       expect(new Headers(init?.headers).get('authorization')).toBe('Bearer private-native-token');
       return catalog();
@@ -27,17 +29,17 @@ function fixture(tokenOptions: Record<string, unknown> = {}) {
     expect(new Headers(init?.headers).has('authorization')).toBe(false);
     expect(new Headers(init?.headers).has('cookie')).toBe(false);
     expect(new Headers(init?.headers).has('origin')).toBe(false);
-    if (url.includes('.well-known/oauth-protected-resource')) return Response.json({ resource: VOCS_STAGING.resource, authorization_servers: [VOCS_STAGING.issuer], scopes_supported: ['catalog:read'] });
+    if (url.includes('.well-known/oauth-protected-resource')) return Response.json({ resource: T.resource, authorization_servers: [T.issuer], scopes_supported: ['catalog:read'] });
     if (url.includes('.well-known/')) return Response.json({
-      issuer: VOCS_STAGING.issuer, authorization_endpoint: VOCS_STAGING.issuer + '/oauth2/authorize', token_endpoint: VOCS_STAGING.issuer + '/oauth2/token',
+      issuer: T.issuer, authorization_endpoint: T.issuer + '/oauth2/authorize', token_endpoint: T.issuer + '/oauth2/token',
       response_types_supported: ['code'], grant_types_supported: ['authorization_code'], token_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256']
     });
     const params = new URLSearchParams(String(init?.body));
     expect(params.get('client_id')).toBe('vocs-code');
     expect(params.has('client_secret')).toBe(false);
-    if (url === VOCS_STAGING.issuer + '/oauth2/revoke') { expect(params.get('token')).toBe('private-native-token'); return revoke(); }
-    if (url === VOCS_STAGING.issuer + '/oauth2/token') {
-      expect(params.get('resource')).toBe(VOCS_STAGING.resource);
+    if (url === T.issuer + '/oauth2/revoke') { expect(params.get('token')).toBe('private-native-token'); return revoke(); }
+    if (url === T.issuer + '/oauth2/token') {
+      expect(params.get('resource')).toBe(T.resource);
       expect(new URL(params.get('redirect_uri')!).pathname).toBe('/oauth/vocs');
       expect(createHash('sha256').update(params.get('code_verifier')!).digest('base64url')).toBe(browserUrl!.searchParams.get('code_challenge'));
       return exchange();
@@ -47,14 +49,14 @@ function fixture(tokenOptions: Record<string, unknown> = {}) {
   const openExternal = vi.fn(async (url: string) => {
     browserUrl = new URL(url);
     expect(browserUrl.searchParams.get('client_id')).toBe('vocs-code');
-    expect(browserUrl.searchParams.get('resource')).toBe(VOCS_STAGING.resource);
+    expect(browserUrl.searchParams.get('resource')).toBe(T.resource);
     expect(browserUrl.searchParams.get('scope')).toBe('catalog:read');
     const callback = new URL(browserUrl.searchParams.get('redirect_uri')!);
     expect(callback.hostname).toBe('127.0.0.1'); expect(callback.pathname).toBe('/oauth/vocs');
     callback.searchParams.set('code', 'synthetic-code'); callback.searchParams.set('state', browserUrl.searchParams.get('state')!);
     expect((await fetch(callback)).status).toBe(200);
   });
-  const broker = createVocsAccount({ fetch: network as typeof fetch, openExternal, timeoutMs: 2000 }); brokers.push(broker);
+  const broker = createVocsAccount({ ...(realm ? { realm } : {}), fetch: network as typeof fetch, openExternal, timeoutMs: 2000 }); brokers.push(broker);
   return { broker, network, calls, catalog, revoke, exchange, openExternal };
 }
 describe('staging account broker: actual SDK and loopback boundary', () => {
@@ -134,5 +136,28 @@ describe('staging account broker: actual SDK and loopback boundary', () => {
   it('does not leak synchronous controller construction errors', async () => {
     const broker = createVocsAccount({ openExternal: async () => {}, createOAuth: () => { throw new Error('PRIVATE_DETAIL'); } }); brokers.push(broker);
     const state = await broker.signIn(); expect(state.status).toBe('signed_out'); expect(state.error).not.toContain('PRIVATE_DETAIL');
+  });
+});
+
+describe('account realm', () => {
+  it('is production unless main is launched with VOCS_CODE_ACCOUNT_REALM=staging', () => {
+    expect(vocsAccountRealm({})).toBe('production');
+    expect(vocsAccountRealm({ VOCS_CODE_ACCOUNT_REALM: 'staging' })).toBe('staging');
+    expect(vocsAccountRealm({ VOCS_CODE_ACCOUNT_REALM: 'https://evil.test' })).toBe('production');
+  });
+  it('signs in against auth.vocs.io and reads the mcp.vocs.io catalog by default', async () => {
+    const f = fixture({}, null); // no realm option at all
+    const state = await f.broker.signIn();
+    expect(state).toMatchObject({ realm: 'production', status: 'signed_in', connections: [{ resource: 'https://mcp.vocs.io/openrouter' }] });
+    expect(f.calls).toContain('https://mcp.vocs.io/api/connections');
+    expect(f.calls).toContain('https://auth.vocs.io/api/auth/oauth2/token');
+    expect(f.calls.some((url) => url.includes('staging'))).toBe(false);
+  });
+  it('rejects a catalog from the other realm', async () => {
+    const f = fixture({}, 'production');
+    f.catalog.mockImplementation(async () => Response.json(account(undefined, VOCS_STAGING)));
+    const state = await f.broker.signIn();
+    expect(state).toMatchObject({ realm: 'production', status: 'signed_out', connections: [] });
+    expect(state.accountId).toBeUndefined();
   });
 });

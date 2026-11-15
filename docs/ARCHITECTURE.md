@@ -322,9 +322,12 @@ rates or provider-token mix charts.
 - The terminal tab's directory tracking relies on the shell announcing its cwd (OSC 7, or OSC 9;9 as Windows Terminal profiles do); shells without such a prompt hook show the directory they started in.
 - The Subagents panel covers pi and Claude runs; `subagentSupport` in `src/shared/subagents.ts` is the one answer for what each harness offers. Claude's per-call dollars are estimated from the shared pricing table (its SDK reports tokens, not cost), and its SDK can interrupt a turn but not one child, so the panel offers it no per-run stop/steer and no Agents view — that view edits `.pi/agents`, which a Claude session does not run with. Its **Models** view instead lists the agent types with the model each will run on, and edits the model of a definition the project already has; it never writes one, because a definition named after a built-in replaces that built-in rather than adjusting it.
 
-### Staging Vocs account and Hub catalog
+### Vocs account and Hub catalog
 
-`main/vocs-account.ts` owns an explicit, staging-only account flow independently of harnesses.
+`main/vocs-account.ts` owns an explicit account flow independently of harnesses. Its realm is
+production (`auth.vocs.io` issuer, `mcp.vocs.io` catalog) unless main is launched with
+`VOCS_CODE_ACCOUNT_REALM=staging`; the renderer never chooses an issuer or catalog, and a
+catalog that names the other realm is rejected.
 It configures the native OAuth controller with a static public client and fixed loopback callback,
 keeps five-minute credentials only in main-process memory, and validates the exact Hub catalog
 contract before returning descriptive state. Each cancellation/sign-out/expiry invalidates its
