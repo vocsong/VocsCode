@@ -38,6 +38,13 @@ This is an opt-in staging experiment, not a mandatory login gate or persistent a
 
 An empty catalog may be correct: shared identity and current Hub membership are separate gates. Do not insert live permission rows or bypass admission just to make the screen show a connection.
 
+## If sign-in is refused
+
+Two separate staging databases gate this flow, and either one can refuse it:
+
+- **Identity (Vocs Login staging, D1 `vocs-login-staging`).** Admission needs a live `vocs_invitation` row: not revoked and not past `expires_at`. Invitations expire, so an account that worked last week can be refused today. The issuer then sends `error=access_denied` back to the desktop loopback, and the app shows "Sign-in or catalog access could not be completed" within seconds. Before vocs.io PR 44 the browser stopped on `/login-error` and the app waited out its two-minute timeout. Check with an aggregate-only query, never printing emails: `SELECT datetime(expires_at/1000,'unixepoch'), revoked_at FROM vocs_invitation`. Renewing an invitation is an operator action; scope it to the intended row.
+- **Hub (D1 `vocs-mcp-staging-login`).** Sign-in succeeds but the catalog is refused: the app says the account has no staging Hub catalog access. The catalog needs `dashboard:manage` in `hub_login_permission`, and OpenRouter also needs `models:read`. Setting `hub_login_principal.disabled_at` suspends the account without deleting grants.
+
 ## What a passing cloud fixture does not establish
 
 Local protocol/IPC/UI tests can validate synthetic callbacks, token isolation, schema checks and races. They do not prove your PC's browser handoff, Windows firewall/loopback behavior, OS accessibility or real-account consent. Cloud Electron launch may be blocked by its Unix-socket environment; if so, the PR stays draft pending the actual PC E2E/visual run. Do not bypass app single-instance or sandbox behavior to claim a real app pass.

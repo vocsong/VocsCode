@@ -58,6 +58,31 @@ describe('staging Vocs account settings', () => {
     await act(async () => sign.resolve(connected()));
     expect(screen.queryByText('OpenRouter')).toBeNull();
   });
+  it('says on the next visit that leaving cancelled the sign-in, and clears it on the next action', async () => {
+    const sign = deferred<VocsAccountState>();
+    api.invoke.mockImplementation((c) => c === 'vocsAccount:signIn' ? sign.promise : Promise.resolve(out()));
+    const view = render(<VocsAccountSettings />); await screen.findByText('Signed out');
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in to staging' }));
+    view.unmount();
+    render(<VocsAccountSettings />); await screen.findByText('Signed out');
+    expect(screen.getByText(/Sign-in was cancelled because you left this page/)).toBeTruthy();
+    api.invoke.mockImplementation((c) => c === 'vocsAccount:signIn' ? new Promise(() => undefined) : Promise.resolve(out()));
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in to staging' }));
+    expect(screen.queryByText(/Sign-in was cancelled because you left this page/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel sign-in' }));
+    await screen.findByText('Signed out');
+    cleanup();
+    // A visit that did not leave a pending sign-in shows no such notice.
+    render(<VocsAccountSettings />); await screen.findByText('Signed out');
+    expect(screen.queryByText(/you left this page/)).toBeNull();
+  });
+  it('offers sign-in, not a status re-read, after a refused or expired sign-in', async () => {
+    api.invoke.mockResolvedValue({ ...out(), error: 'Session expired. Sign in again.' });
+    await ready();
+    expect(screen.getByRole('alert').textContent).toContain('Session expired. Sign in again.');
+    expect(screen.queryByRole('button', { name: 'Retry status' })).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Sign in to staging' }).disabled).toBe(false);
+  });
   it('renders descriptive catalog only and an account switch wins a pending refresh', async () => {
     const refresh = deferred<VocsAccountState>();
     api.invoke.mockImplementation((c) => c === 'vocsAccount:refresh' ? refresh.promise : Promise.resolve(c === 'vocsAccount:signOut' ? out(5) : c === 'vocsAccount:signIn' ? { ...connected(6), accountId: 'opaque-account-b', connections: [] } : connected()));
