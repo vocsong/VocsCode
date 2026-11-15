@@ -398,7 +398,7 @@ describe('relay route table', () => {
   });
 });
 
-describe('owner routes: Connect with GitHub and pairing from a signed-in browser', () => {
+describe('owner routes: Connect with Vocs and pairing from a signed-in browser', () => {
   const owner = { authorization: 'Bearer enroll-secret', 'content-type': 'application/json' };
   const nonceHash = 'ab'.repeat(32);
 

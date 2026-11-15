@@ -1346,7 +1346,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   const [relay, setRelay] = useState(DEFAULT_REMOTE_ORIGIN);
   // A registered computer has its own relay credential: the enrollment secret is a first-time step.
   const [storedRegistered, setRegistered] = useState(false);
-  // The relay's origin has a GitHub sign-in (the landing's login gate): each computer must be
+  // The relay's origin has a Vocs sign-in (the landing's login gate): each computer must be
   // enrolled through its signed-in account, never the incumbent account's shared legacy secret.
   const [signInAvailable, setSignInAvailable] = useState(false);
   const [enroll, setEnroll] = useState('');
@@ -1421,7 +1421,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
   const statusLine = state ? `${state.status}${state.detail ? ` — ${state.detail}` : ''}` : 'unknown';
   // Live from the host once it runs (a sign-in that just finished shows at once), stored otherwise.
   const registered = storedRegistered || state?.registered === true;
-  // An unregistered computer on a relay with GitHub sign-in: that is the way in, not the secret.
+  // An unregistered computer on a relay with Vocs sign-in: that is the way in, not the secret.
   const offerSignIn = !registered && signInAvailable;
   const signingIn = state?.signIn;
 
@@ -1438,7 +1438,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
       </p>
       {!config.enabled && (offerSignIn ? (
         <ol className="muted small" data-testid="remote-steps">
-          <li>Connect with GitHub: your browser opens; sign in and click Add this computer.</li>
+          <li>Connect with Vocs: your browser opens; sign in and click Add this computer.</li>
           <li>That browser then asks to pair; click Allow here.</li>
           <li>On your phone, open {webHost}/app, sign in the same way and tap this computer.</li>
         </ol>
@@ -1452,7 +1452,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
       {signingIn && (
         <div className="small" data-testid="remote-sign-in-waiting">
           <p>
-            Finish in your browser: sign in with GitHub, check that the page shows <strong data-testid="remote-sign-in-code">{signingIn.checkCode}</strong>,
+            Finish in your browser: sign in with your Vocs account, check that the page shows <strong data-testid="remote-sign-in-code">{signingIn.checkCode}</strong>,
             and click Add this computer.{' '}
             <button type="button" className="link-btn" onClick={() => void invoke('app:openExternal', { url: signingIn.link })}>
               Open the page again
@@ -1461,7 +1461,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
         </div>
       )}
       {!registered && !offerSignIn && !signingIn && (
-        <Field label="Enrollment secret" hint="Legacy/manual enrollment for the original v1 account only. New GitHub accounts must use Connect with GitHub so their computers stay in their own account. Stored in the OS keychain.">
+        <Field label="Enrollment secret" hint="Legacy/manual enrollment for the original v1 account only. New accounts must use Connect with Vocs so their computers stay in their own account. Stored in the OS keychain.">
           <input data-testid="remote-enroll" type="password" value={enroll} placeholder="Paste the secret" onChange={(e) => setEnroll(e.target.value)} />
         </Field>
       )}
@@ -1469,7 +1469,7 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
         {offerSignIn && !signingIn ? (
           <>
             <Button size="sm" variant="primary" data-testid="remote-sign-in" disabled={busy} onClick={() => void act(() => invoke('remote:signIn', undefined))}>
-              {busy ? 'Opening your browser…' : 'Connect with GitHub'}
+              {busy ? 'Opening your browser…' : 'Connect with Vocs'}
             </Button>
           </>
         ) : !signingIn ? (

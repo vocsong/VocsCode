@@ -19,7 +19,7 @@ export interface AccountResolution {
   authenticated: boolean;
   /** `state:<accountId>` may inherit the pre-account vault for the incumbent account only. */
   allowLegacyMigration: boolean;
-  /** The GitHub login, for the signed-in UI only. */
+  /** A display label for the signed-in UI only ("Vocs account" with Vocs Login). */
   login?: string;
 }
 

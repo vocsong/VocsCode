@@ -125,7 +125,7 @@ export const ROUTES: Route[] = [
   { method: 'GET', path: '/mirror/', prefix: true, auth: 'device', run: mirrorGetSession },
   { method: 'PUT', path: '/mirror/', prefix: true, auth: 'host', run: mirrorPutSession },
   { method: 'DELETE', path: '/mirror/', prefix: true, auth: 'host', run: mirrorDeleteSession },
-  // Owner actions: add a computer that clicked Connect with GitHub, list this account's computers,
+  // Owner actions: add a computer that clicked Connect with Vocs, list this account's computers,
   // and ask one to pair a browser. Both the verified account assertion and landing service credential
   // are required. The desktop still approves each pairing.
   { method: 'POST', path: '/owner/enroll-grant', auth: 'owner', rate: { bucket: 'enroll-grant', limit: 10, windowMs: 60_000 }, run: ownerEnrollGrant },

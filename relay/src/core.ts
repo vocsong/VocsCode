@@ -433,10 +433,10 @@ export async function registerHostDevice(store: RelayStorage, input: { accountId
   return { hostToken, deviceId: id };
 }
 
-// --- Owner actions: "Connect with GitHub" enrollment and browser-initiated pairing ---
+// --- Owner actions: "Connect with Vocs" enrollment and browser-initiated pairing ---
 //
 // The owner is whoever holds the enrollment secret: in production the landing Worker, acting for
-// a GitHub session on its allowlist. A desktop that clicked Connect with GitHub holds a one-time
+// a GitHub session on its allowlist. A desktop that clicked Connect with Vocs holds a one-time
 // secret (the nonce) and opens the web client with only its SHA-256; the owner grants that hash,
 // and the desktop redeems the nonce for its credential, sealed to its own key.
 

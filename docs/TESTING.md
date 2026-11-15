@@ -66,7 +66,7 @@ app in Electron's Chromium from that local relay: the native WebSocket, IndexedD
 reload, the static CSP, the pairing link, the computer switcher, a streamed terminal typed into and
 unpair;
 and, through `tests/support/test-landing.ts` (a stand-in for the landing that signs per-account
-assertions, gates owner routes and isolates accounts), Connect with GitHub, account switching and
+assertions, gates owner routes and isolates accounts), Connect with Vocs, account switching and
 pairing from the signed-in computer list. `e2e.remote` drives the desktop side of the same flow in
 the real app. The opt-in **deployed** smoke runs the flow against the incumbent production account;
 it needs the enrollment secret and a signed-in session cookie kept outside the repo:
