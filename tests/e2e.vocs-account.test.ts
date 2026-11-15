@@ -35,6 +35,12 @@ describe.runIf(enabled)('Vocs staging account desktop settings', () => {
         const achievedWidth = await app.evaluate(({ BrowserWindow }, width) => { const window = BrowserWindow.getAllWindows()[0]; window.setMinimumSize(600, 600); window.setSize(width, 800); return window.getBounds().width; }, width);
         expect(achievedWidth).toBe(width);
         await win.waitForTimeout(100);
+        // Below the breakpoint the sidebar floats over the page as a drawer; close it so the
+        // screenshot shows the account page, then prove its main control is actually reachable
+        // (a trial click fails while anything covers the button).
+        const backdrop = win.locator('.sidebar-backdrop');
+        if (await backdrop.isVisible()) await backdrop.click({ position: { x: width - 20, y: 400 } });
+        await win.getByRole('button', { name: 'Sign in to staging' }).click({ trial: true, timeout: 5000 });
         const geometry = await win.locator('.vocs-account-settings').evaluate((el) => ({ width: el.clientWidth, scroll: el.scrollWidth }));
         expect(geometry.scroll).toBeLessThanOrEqual(geometry.width + 1);
         await fs.mkdir(path.resolve('tests/artifacts'), { recursive: true });
