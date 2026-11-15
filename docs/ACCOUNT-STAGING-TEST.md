@@ -67,6 +67,7 @@ npx vitest run tests/vocs-account.test.ts tests/vocs-account-settings.test.tsx t
 $env:VOCS_CODE_E2E_UI = '1'
 npx vitest run tests/e2e.vocs-account.test.ts tests/e2e.layout.test.ts
 Remove-Item Env:VOCS_CODE_E2E_UI
+$env:VOCS_CODE_ACCOUNT_REALM = 'staging'
 $env:VOCS_CODE_USER_DATA = Join-Path $env:TEMP ('vocs-account-manual-' + [guid]::NewGuid())
 npm run preview
 ```
