@@ -80,10 +80,15 @@ export function VocsAccountSettings() {
         {(error || state?.error) && <div className="vocs-account-error" role="alert"><p>{error || state?.error}</p><Button disabled={!!busy} onClick={() => void retry()}>Retry status</Button></div>}
         {connected && <dl className="vocs-account-details"><div><dt>Account</dt><dd data-testid="vocs-account-id">{state.accountId}</dd></div><div><dt>Session</dt><dd>{state.expiresAt ? `Expires at ${new Date(state.expiresAt).toLocaleTimeString()}` : 'Temporary session'}</dd></div></dl>}
         <div className="vocs-account-actions">
-          {signingIn ? <Button key="cancel-sign-in" onClick={() => void action('cancel')} disabled={busy === 'cancel'}>Cancel sign-in</Button> : connected ? <>
+          {/* The sign-in button stays mounted, disabled, while waiting, and Cancel sits beside it:
+              the second click of a double-click must land on it, never on Cancel. */}
+          {connected ? <>
             <Button disabled={!!busy || state.refreshing} onClick={() => void action('refresh')}>{busy === 'refresh' || state.refreshing ? 'Refreshing…' : 'Refresh connections'}</Button>
             <Button disabled={busy === 'signOut'} onClick={() => void action('signOut')}>Sign out</Button>
-          </> : <Button key="start-sign-in" variant="primary" disabled={!state || !!busy} onClick={() => void action('signIn')}>Sign in to staging</Button>}
+          </> : <>
+            <Button key="start-sign-in" variant="primary" disabled={!state || !!busy || signingIn} onClick={() => void action('signIn')}>Sign in to staging</Button>
+            {signingIn && <Button key="cancel-sign-in" onClick={() => void action('cancel')} disabled={busy === 'cancel'}>Cancel sign-in</Button>}
+          </>}
         </div>
         <p className="muted">This session lasts up to five minutes and is kept only in memory. Restarting or signing out clears it. Persistent sign-in is not enabled.</p>
       </>}

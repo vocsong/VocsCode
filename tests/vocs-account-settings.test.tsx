@@ -33,6 +33,21 @@ describe('staging Vocs account settings', () => {
     expect(screen.queryByText('opaque-account-a')).toBeNull();
     expect(screen.queryByText('OpenRouter')).toBeNull();
   });
+  it('keeps the sign-in button in place, disabled, so a double-click never lands on Cancel', async () => {
+    const sign = deferred<VocsAccountState>();
+    api.invoke.mockImplementation((channel) => channel === 'vocsAccount:signIn' ? sign.promise : Promise.resolve(out()));
+    await ready();
+    const button = screen.getByRole<HTMLButtonElement>('button', { name: 'Sign in to staging' });
+    fireEvent.click(button);
+    // A real double-click's second click hits whatever is at the same point: the same, now disabled, node.
+    expect(button.isConnected).toBe(true);
+    expect(button.disabled).toBe(true);
+    expect(button.nextElementSibling?.textContent).toBe('Cancel sign-in');
+    fireEvent.click(button);
+    expect(api.invoke.mock.calls.filter(([c]) => c === 'vocsAccount:cancel')).toHaveLength(0);
+    expect(api.invoke.mock.calls.filter(([c]) => c === 'vocsAccount:signIn')).toHaveLength(1);
+    expect(screen.getByText('Waiting for browser sign-in…')).toBeTruthy();
+  });
   it('cancel on leaving prevents a pending browser sign-in from leaking into the next page', async () => {
     const sign = deferred<VocsAccountState>();
     api.invoke.mockImplementation((c) => c === 'vocsAccount:signIn' ? sign.promise : Promise.resolve(out()));
