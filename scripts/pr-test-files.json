@@ -28,6 +28,8 @@
   "tests/review-fixes.test.ts",
   "tests/mcp-oauth.test.ts",
   "tests/mcp-oauth-transport-race.test.ts",
+  "tests/vocs-account.test.ts",
+  "tests/vocs-account-settings.test.tsx",
   "tests/session-event-seq.test.ts",
   "tests/session-resume.test.ts",
   "tests/session-create-goal.test.ts",

@@ -141,9 +141,9 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     desktop: desktopBridge(deps)
   });
   for (const channel of registry.channels()) ipcMain.handle(channel, (event, req: unknown) => {
-    if (channel.startsWith('control:') || channel === 'harness:login') {
+    if (channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel === 'harness:login') {
       const contents = deps.getWindow()?.webContents;
-      if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) throw new Error(channel === 'harness:login' ? 'Harness sign-in requires the local desktop owner.' : 'External control grants require the local desktop owner.');
+      if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) throw new Error(channel.startsWith('vocsAccount:') ? 'Vocs account sign-in requires the local desktop owner.' : channel === 'harness:login' ? 'Harness sign-in requires the local desktop owner.' : 'External control grants require the local desktop owner.');
     }
     return registry.invoke(channel, req, 'desktop');
   });

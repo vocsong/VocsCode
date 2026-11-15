@@ -193,3 +193,18 @@
   .settings-preview-caption { left: 55px; }
   .settings-result-icon { display: none; }
 }
+
+/* Account state never contains credentials; long resource/account IDs wrap at narrow widths. */
+.settings .vocs-account-heading, .settings .vocs-account-actions, .settings .vocs-account-connection-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+.settings .vocs-account-badge { display: inline-block; border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px; font-size: 10px; font-weight: 600; color: var(--fg-muted); background: var(--bg-sunken); }
+.settings .vocs-account-status { font-weight: 600; }
+.settings .vocs-account-details { display: grid; gap: 12px; margin: 18px 0; }
+.settings .vocs-account-details > div { display: grid; grid-template-columns: 65px minmax(0, 1fr); gap: 12px; }
+.settings .vocs-account-details dt { color: var(--fg-muted); }
+.settings .vocs-account-details dd { margin: 0; overflow-wrap: anywhere; }
+.settings .vocs-account-connections { list-style: none; padding: 0; margin: 8px 0; }
+.settings .vocs-account-connections li { border-bottom: 1px solid var(--border); padding: 10px 0; min-width: 0; }
+.settings .vocs-account-connections li:last-child { border-bottom: 0; }
+.settings .vocs-account-connections p { margin: 8px 0; line-height: 1.65; }
+.settings .vocs-account-resource { font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; }
+.settings .vocs-account-error { border-left: 2px solid var(--accent); padding-left: 12px; margin: 12px 0; }

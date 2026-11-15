@@ -321,3 +321,19 @@ rates or provider-token mix charts.
 - ACP agents expose models only after the session starts; pick the model from the header once the agent is up.
 - The terminal tab's directory tracking relies on the shell announcing its cwd (OSC 7, or OSC 9;9 as Windows Terminal profiles do); shells without such a prompt hook show the directory they started in.
 - The Subagents panel covers pi and Claude runs; `subagentSupport` in `src/shared/subagents.ts` is the one answer for what each harness offers. Claude's per-call dollars are estimated from the shared pricing table (its SDK reports tokens, not cost), and its SDK can interrupt a turn but not one child, so the panel offers it no per-run stop/steer and no Agents view — that view edits `.pi/agents`, which a Claude session does not run with. Its **Models** view instead lists the agent types with the model each will run on, and edits the model of a definition the project already has; it never writes one, because a definition named after a built-in replaces that built-in rather than adjusting it.
+
+### Staging Vocs account and Hub catalog
+
+`main/vocs-account.ts` owns an explicit, staging-only account flow independently of harnesses.
+It configures the native OAuth controller with a static public client and fixed loopback callback,
+keeps five-minute credentials only in main-process memory, and validates the exact Hub catalog
+contract before returning descriptive state. Each cancellation/sign-out/expiry invalidates its
+generation and clears catalog data; refreshing never treats stale metadata as authorization.
+Local sign-out precedes bounded best-effort remote token revocation.
+
+The five `vocsAccount:*` requests accept no URLs, credentials or arbitrary configuration. Both
+the transport-agnostic registry and Electron owner-main-frame boundary reject remote/agent
+callers. Main owns expiry and request cancellation; renderer revisions/generations prevent stale
+UI results. Registry shutdown disposes the broker. This does not persist sessions, mutate MCP
+configuration, grant tool access or require login for local editing. Settings presents the
+catalog read-only; live desktop acceptance is documented in `ACCOUNT-STAGING-TEST.md`.
