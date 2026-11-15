@@ -1,3 +1,4 @@
+import { createVocsAccount, type VocsAccountBroker } from './vocs-account';
 /** Transport-agnostic handler registry: every invoke channel, bound once, Electron-free.
  *  ipc.ts binds it to Electron's ipcMain; the remote host (docs/REMOTE-ACCESS.md) binds
  *  the same registry to its WebSocket transport. Electron affordances arrive via
@@ -100,6 +101,7 @@ export interface MissionHandlerService {
 }
 
 export interface HandlerDeps {
+  vocsAccount?: VocsAccountBroker;
   settings: SettingsStore;
   secrets: SecretStore;
   sessions: SessionManager;
@@ -217,6 +219,7 @@ function missionDeliveryBranches(mission: MissionRecord): string[] {
 
 export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const { settings, secrets, sessions, terminals, runtime } = deps;
+  const vocsAccount = deps.vocsAccount ?? createVocsAccount({ openExternal: url => deps.desktop.openExternal(url) });
   const piConfig =
     deps.piConfig ??
     new PiConfigStore({
@@ -252,6 +255,17 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     handlers.set(channel, fn as (req: never) => unknown);
   }
 
+  for (const [channel, action] of [
+    ['vocsAccount:get', () => vocsAccount.get()],
+    ['vocsAccount:signIn', () => vocsAccount.signIn()],
+    ['vocsAccount:cancel', () => vocsAccount.cancel()],
+    ['vocsAccount:signOut', () => vocsAccount.signOut()],
+    ['vocsAccount:refresh', () => vocsAccount.refresh()]
+  ] as const) handle(channel, input => {
+    if (input !== undefined) throw new Error('Account commands do not accept configuration.');
+    return action();
+  });
+
   if (deps.control) {
     const control = deps.control;
     handle('control:get', () => control.ownerState());
@@ -261,6 +275,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   }
 
   async function invokeChannel(channel: string, req: unknown, actor: 'user' | 'agent' | 'desktop' = 'user'): Promise<unknown> {
+    if (channel.startsWith('vocsAccount:') && actor !== 'desktop') throw new Error('Vocs account sign-in requires the local desktop owner.');
     if (channel.startsWith('control:') && actor !== 'desktop') throw new Error('External control grants require the local desktop owner.');
     if (channel === 'harness:login' && actor !== 'desktop') throw new Error('Harness sign-in requires the local desktop owner.');
     const fn = handlers.get(channel as IpcChannel);
@@ -1743,6 +1758,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       else await assertOrdinaryWorkspace(target);
     },
     shutdown: async () => {
+      vocsAccount.dispose();
       await Promise.all([vesta.dispose(), dictationService?.dispose()]);
     }
   };

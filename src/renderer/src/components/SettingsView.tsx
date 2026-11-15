@@ -22,6 +22,7 @@ import { InstructionsSection } from './InstructionsSection';
 import { MissionSettings } from './mission/MissionSettings';
 import { VoiceSection } from './VoiceSettings';
 import { ControlSettings } from './ControlSettings';
+import { VocsAccountSettings } from './VocsAccountSettings';
 import { ChatImport } from './ChatImport';
 
 import { SETTINGS_GROUPS, SETTINGS_PAGES, searchSettings, type SettingsSection } from '../settings-catalog';
@@ -154,6 +155,7 @@ export function SettingsView() {
               {section === 'mission' && <MissionSettings settings={settings} />}
               {section === 'shortcuts' && <ShortcutsSection settings={settings} />}
               {section === 'terminal' && <TerminalSection settings={settings} update={update} />}
+              {section === 'account' && <VocsAccountSettings />}
               {section === 'providers' && <Providers settings={settings} />}
               {section === 'voice' && <VoiceSection settings={settings} />}
               {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
