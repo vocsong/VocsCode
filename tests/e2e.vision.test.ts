@@ -82,9 +82,10 @@ describe.runIf(enabled)('vision capability UI', () => {
     await win.fill('textarea[placeholder="What should the agent do?"]', 'hello');
     await win.click('button:has-text("Start session")');
     await win.waitForSelector('.header', { timeout: 30_000 });
-    // start() publishes the model list before the turn fails for the missing key.
-    // The pill names the model the same way the picker did: provider first.
-    await win.waitForSelector('.pill:has-text("deepseek/deepseek-v4-flash")', { timeout: 30_000 });
+    // start() publishes the model list before the turn fails for the missing key. The pill shows
+    // the model's display name and keeps the provider-first ref the picker used as its title.
+    await win.waitForSelector('.pill-model .pill-text[title="deepseek/deepseek-v4-flash"]', { timeout: 30_000 });
+    expect(await win.locator('.pill-model .pill-text').innerText()).toBe('DeepSeek V4 Flash');
 
     // Files can be picked without triggering an image-capability warning.
     expect(await win.locator('.composer-warn').count()).toBe(0);
