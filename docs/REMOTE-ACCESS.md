@@ -312,9 +312,10 @@ handler runs, and the whole surface is unit-tested in plain Node (`tests/relay-r
 of relying on review. The public pairing endpoints also carry in-memory fixed-window rate limits.
 **Deployed.** The relay and landing Worker share the `code.vocs.io` origin through a service
 binding (vocs.io PR #18); the landing forwards `/app` and `/v1` including REST and `/v1/ws/*`
-WebSockets, with no CORS hop or second DNS record. The GitHub login gate is live on the landing:
-`/app` redirects signed-out visitors to GitHub OAuth, and the landing's allowlist controls who may
-sign in. **Live since 2026-09-26** (v0.7.0): the relay and the landing run per-account Hubs,
+WebSockets, with no CORS hop or second DNS record. The login gate is live on the landing: since
+2026-11-16 `/app` redirects signed-out visitors to **Vocs Login** (`auth.vocs.io`, the shared Vocs
+identity), and the landing's operator-managed `VOCS_ACCOUNTS` map controls who may sign in (it
+replaced the GitHub OAuth gate and its `ALLOWED_LOGINS` allowlist). **Live since 2026-09-26** (v0.7.0): the relay and the landing run per-account Hubs,
 account assertions, account-bound enrollment and pairing, and the relay's direct `workers.dev`
 endpoint is disabled so browser traffic must pass through the gate. The incumbent login stays mapped
 to `vocs-v1`. Do not enable another login until the two-account live check passes.
@@ -354,7 +355,7 @@ mirror (§6.5).
 
 The `ENROLL_TOKEN` remains a legacy/manual capability for the incumbent `vocs-v1` account and a
 service credential the landing Worker uses for owner actions. New accounts are enrolled through the
-signed-in **Connect with GitHub** grant, which binds the one-time desktop nonce to the account; the
+signed-in **Connect with Vocs** grant, which binds the one-time desktop nonce to the account; the
 nonce-only desktop poll resolves through a short-lived enrollment directory. The shared secret is
 never used as an account selector. Once enrolled, a desktop uses its own device credential, so
 rotating the legacy secret never strands it.
@@ -413,13 +414,15 @@ Web (browser)                Relay                      Desktop (host)
 | Tokens bound to signing keys | An access token is issued only for a signature by the device key; the refresh credential alone authorizes nothing |
 | E2E under the relay | Established session payloads are opaque; a compromised relay can still deny service, misroute and manipulate pairing metadata |
 
-#### 6.3.1 Connect with GitHub: no secret, no code
+#### 6.3.1 Connect with Vocs: no secret, no code
 
-The landing's GitHub gate maps the stable numeric GitHub subject to an account. The incumbent subject
-maps to `vocs-v1`; all other allowlisted subjects map to `github:<id>`. `/v1/me` returns that account
+The landing's Vocs Login gate maps each admitted Vocs subject to its relay account through the
+operator-managed `VOCS_ACCOUNTS` map: the incumbent owner maps to `vocs-v1`, and accounts created in
+the GitHub era keep their `github:<id>` ids, so no Hub, device id or mirror moves. (Until 2026-11-16
+the gate was GitHub OAuth, mapping the stable numeric GitHub subject the same way.) `/v1/me` returns that account
 id to the web client, which partitions its IndexedDB vault by account. Pre-account session cookies
 lack a subject and are rejected once; the user signs in again. The desktop offers
-**Connect with GitHub** for new-account enrollment.
+**Connect with Vocs** for new-account enrollment.
 
 - **Account assertion.** For each signed-in `/v1/*` request, including browser API calls and WebSocket
   upgrades, the landing strips caller-supplied identity headers and signs
@@ -432,7 +435,7 @@ lack a subject and are rejected once; the user signs in again. The desktop offer
 - **Owner routes.** `/v1/owner/*` still require the landing's `RELAY_ENROLL_TOKEN` plus the verified
   account assertion. The Worker replaces any browser Authorization, strips its session cookie, and
   refuses writes whose `Origin` is not `https://code.vocs.io`.
-- **Adding a computer.** Connect with GitHub makes the desktop generate a one-time secret (32 random
+- **Adding a computer.** Connect with Vocs makes the desktop generate a one-time secret (32 random
   bytes) and open `code.vocs.io/app?connect=<its SHA-256>`; the secret itself never leaves the
   desktop. After sign-in (the link survives the OAuth redirect in signed state), the page shows a
   check code derived from the hash, which the desktop shows too, and asks before it grants anything.
@@ -560,9 +563,9 @@ security bar must go up, not sideways:
   does not revoke tokens or delete a stored mirror.
 - **Transport.** TLS + e2e payload encryption; replayed ciphertext is rejected, and API access
   needs short-lived proof-of-possession tokens.
-- **A Connect with GitHub link someone else sent (§6.3.1).** Signing in and clicking **Add this
+- **A Connect with Vocs link someone else sent (§6.3.1).** Signing in and clicking **Add this
   computer** on it would register the sender's desktop into the account. Mitigations: the page asks
-  first and names the risk ("continue only if you just clicked Connect with GitHub"), it shows a check
+  first and names the risk ("continue only if you just clicked Connect with Vocs"), it shows a check
   code the real desktop displays next to the button that opened it, owner writes are same-origin
   only, and a browser still reaches a computer only after that computer's Allow. Registered
   computers are listed in Settings and can be revoked (or all at once).

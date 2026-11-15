@@ -73,7 +73,7 @@ export function PairScreen({ client, account, initialCode, storageError, onPaire
             <div className="w-owner-hosts">
               <h2>Your computers</h2>
               {hosts.length === 0 && (
-                <p className="w-hint">None yet. On your computer, open Vocs Code → Settings → Remote access and choose Connect with GitHub.</p>
+                <p className="w-hint">None yet. On your computer, open Vocs Code → Settings → Remote access and choose Connect with Vocs.</p>
               )}
               <ul className="w-list">
                 {hosts.map((host) => (
@@ -144,9 +144,9 @@ export function PairScreen({ client, account, initialCode, storageError, onPaire
           </details>
           {signedIn && (
             <div className="w-account">
-              <span className="account-name">Signed in as @{account.account.login}</span>
+              <span className="account-name">Signed in as {account.account.login}</span>
               <form method="post" action="/logout" className="account-signout">
-                <button type="submit" className="btn btn-ghost btn-sm">Sign out of GitHub</button>
+                <button type="submit" className="btn btn-ghost btn-sm">Sign out</button>
               </form>
             </div>
           )}

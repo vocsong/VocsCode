@@ -36,7 +36,7 @@ the deployed smoke.
 
 | Roadmap item | Delivered | Still needs (owner) |
 | --- | --- | --- |
-| §2.1 Login gate | Live on `code.vocs.io`: allowlisted GitHub sessions gate `/app`, own `/v1/me`, and drive Connect with GitHub owner routes; the same `ACCOUNT_ASSERTION_SECRET` is provisioned on both Workers | Run `npm run test:remote-live` and the two-account check before adding more users (**user**) |
+| §2.1 Login gate | Live on `code.vocs.io`: allowlisted GitHub sessions gate `/app`, own `/v1/me`, and drive Connect with Vocs owner routes; the same `ACCOUNT_ASSERTION_SECRET` is provisioned on both Workers | Run `npm run test:remote-live` and the two-account check before adding more users (**user**) |
 | §2.2 CI flakes | Timer attribution, analytics recovery, subagent cap race; post-merge CI on `develop` green | — |
 | §2.3 Deploy loop | Protected `deploy-relay` workflow, run from release tags with approval; the account-aware release and the one before it both deployed through it; rollback runbook | — |
 | §2.4 Live path testable | Deployed smoke passing against production; the same flow against local workerd in `npm test`; real-browser e2e; 14 workerd DO tests. These found three runtime bugs no fake could (§2.4) | — |
@@ -83,9 +83,11 @@ before the dry-run and the deploy.
 
 ### 2.1 Login gate and account identity
 
-**Login gate: live.** `code.vocs.io/app` redirects signed-out visitors to GitHub OAuth. The landing
-Worker checks `ALLOWED_LOGINS`, issues a signed session, and returns `/v1/me` for the signed-in
-account. The desktop's **Connect with GitHub** flow and owner computer list are also live.
+**Login gate: live, on Vocs Login since 2026-11-16.** `code.vocs.io/app` redirects signed-out
+visitors to Vocs Login (`auth.vocs.io`, product client `vocs-code-web`). The landing Worker exchanges
+the code server-to-server, admits only Vocs subjects listed in its `VOCS_ACCOUNTS` map, issues a
+signed session, and returns `/v1/me` (`{login: "Vocs account", accountId}`) for the signed-in
+account. It replaced the GitHub OAuth gate; account ids did not change. The desktop's **Connect with Vocs** flow and owner computer list are also live.
 
 **Account isolation is live (2026-09-26).** The landing maps the stable GitHub numeric user id to
 an account id (`vocs-v1` for incumbent id `7744354`; `github:<id>` for others); existing pre-account
@@ -115,12 +117,14 @@ the two-account live check.
   `/v1/pair/claim`, `/v1/pair/poll` and `/v1/owner/*` require it at the relay. Device tokens remain
   the authority for device operations.
 - **`GET /v1/me`** (session-authed) so the SPA can show the account and offer log out.
-- **Env:** `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SESSION_SECRET`, `ACCOUNT_ASSERTION_SECRET`,
-  `ALLOWED_LOGINS` secrets and `LEGACY_GITHUB_USER_ID` setting on the landing Worker. The relay has
+- **Env:** `SESSION_SECRET`, `ACCOUNT_ASSERTION_SECRET`, `VOCS_ACCOUNTS` and `RELAY_ENROLL_TOKEN`
+  secrets on the landing Worker, plus the `vocs-code-web` client row in Vocs Login. (The GitHub-era
+  `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `ALLOWED_LOGINS` and `LEGACY_GITHUB_USER_ID` are no
+  longer read.) The relay has
   the same `ACCOUNT_ASSERTION_SECRET`. An explicit `AUTH_GATE_MODE=disabled` keeps the pre-activation
   preview behavior; once enabled, missing/invalid config fails closed (503), never silently opens `/app`.
 - **Allowlist is not signup.** Each admitted GitHub subject gets an isolated relay account, but
-  signup, billing and account recovery remain out of scope. `ALLOWED_LOGINS` still controls access.
+  signup, billing and account recovery remain out of scope. `VOCS_ACCOUNTS` controls access.
 
 **Files.** vocs.io `code/worker/index.ts`, `code/wrangler.jsonc`, `code/worker/index.test.mjs`;
 Vocs-Code's `src/web/transport/vault.ts` partitions browser credentials by account and keeps account
@@ -377,14 +381,13 @@ Gotchas:
 
 | Secret | Where | Used by | Rotation |
 | --- | --- | --- | --- |
-| `ENROLL_TOKEN` | relay Worker secret; the landing holds a copy as `RELAY_ENROLL_TOKEN` | legacy `vocs-v1` manual enrollment and signed owner routes; new accounts use Connect with GitHub | [runbook](../relay/README.md#enrollment-secret); paired desktops keep working |
+| `ENROLL_TOKEN` | relay Worker secret; the landing holds a copy as `RELAY_ENROLL_TOKEN` | legacy `vocs-v1` manual enrollment and signed owner routes; new accounts use Connect with Vocs | [runbook](../relay/README.md#enrollment-secret); paired desktops keep working |
 | `ACCOUNT_ASSERTION_SECRET` | identical secret on landing `vocs-code` and relay `vocs-relay` | signed account assertions | rotate both Workers together; a mismatch fails closed |
 | `DEVICE_ROUTE_SECRET` | relay `vocs-relay` only; keep stable | MACed tenant routing hints in new device ids | do not rotate without a versioned device-id migration; it is not an account credential |
 | Device refresh credentials | desktop secret store (`secrets.ts`, safeStorage); account-partitioned browser IndexedDB | buying access tokens, with a device-key signature | revoke the device; re-pair |
 | `SESSION_SECRET` | landing `vocs-code` Worker secret | session and OAuth state signing (§2.1) | invalidates all sessions |
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | landing Worker secrets | GitHub OAuth (§2.1) | rotate in the GitHub app settings |
-| `ALLOWED_LOGINS` | landing Worker secret | who may log in (§2.1); each allowed GitHub ID gets a separate account | add/remove login; revoke devices for removed users separately |
-| `LEGACY_GITHUB_USER_ID` | landing Worker var (`7744354`) | maps the incumbent GitHub subject to `vocs-v1` | do not change without a data migration |
+| `VOCS_ACCOUNTS` | landing Worker secret | who may sign in (§2.1): `<vocs subject>=<relay account id>`; the owner maps to `vocs-v1` | add/remove an entry (removal ends that account's sessions); never remap an account id without a data migration; revoke devices for removed users separately |
+| `vocs-code-web` SSO client | Vocs Login `vocs_sso_client` row | the landing's sign-in handoff (§2.1) | disable the row to stop new sign-ins |
 | `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` | protected GitHub `relay-production` environment secrets (not provisioned) | relay deploy workflow | rotate in the Cloudflare dashboard |
 
 Local development keeps both relay secrets outside the repos. The workerd suites generate throwaway

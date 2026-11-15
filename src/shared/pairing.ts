@@ -28,11 +28,11 @@ export function pairingLink(relayUrl: string | undefined, code: string): string 
   return `${remoteOrigin(relayUrl)}/app?code=${encodeURIComponent(code)}`;
 }
 
-/** SHA-256 hex of a desktop's one-time "Connect with GitHub" secret: the only part of it that
+/** SHA-256 hex of a desktop's one-time "Connect with Vocs" secret: the only part of it that
  *  leaves the desktop before the owner grants it. */
 export const CONNECT_HASH_PATTERN = /^[0-9a-f]{64}$/;
 
-/** The page a desktop opens for "Connect with GitHub": sign in, then add this computer. */
+/** The page a desktop opens for "Connect with Vocs": sign in, then add this computer. */
 export function connectLink(relayUrl: string | undefined, nonceHash: string): string {
   return `${remoteOrigin(relayUrl)}/app?connect=${nonceHash}`;
 }

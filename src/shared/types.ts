@@ -1582,7 +1582,7 @@ export interface RemoteState {
   onlineClients: string[];
   /** Mirrors the view-only policy so both shells can hide write controls without a round trip. */
   viewOnly: boolean;
-  /** Connect with GitHub in progress: the page opened in the browser, and the code it must show. */
+  /** Connect with Vocs in progress: the page opened in the browser, and the code it must show. */
   signIn?: { link: string; checkCode: string };
   /** This computer holds its own relay credential, live with every state push (remote:get also
    *  answers it from storage before remote access was ever enabled). */
@@ -1603,7 +1603,7 @@ export type RemoteAuditAction =
   | 'revoke-all'
   /** The relay stopped accepting this desktop's credential (it was revoked). */
   | 'host-revoked'
-  /** Connect with GitHub: the browser was opened to add this computer, and when it was added. */
+  /** Connect with Vocs: the browser was opened to add this computer, and when it was added. */
   | 'sign-in-start'
   | 'sign-in-registered'
   /** The offline mirror was re-keyed because a browser that could read it lost its pairing. */

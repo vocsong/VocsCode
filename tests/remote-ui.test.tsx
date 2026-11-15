@@ -209,7 +209,7 @@ describe('remote access settings (P4)', () => {
   });
 });
 
-describe('Connect with GitHub in remote access settings', () => {
+describe('Connect with Vocs in remote access settings', () => {
   const offline = (over: Record<string, unknown> = {}) => ({
     config: { enabled: false },
     state: { status: 'off', onlineClients: [], viewOnly: false },
@@ -221,14 +221,14 @@ describe('Connect with GitHub in remote access settings', () => {
     ...over
   });
 
-  it('uses Connect with GitHub when an account gate is available and hides the shared legacy secret', async () => {
+  it('uses Connect with Vocs when an account gate is available and hides the shared legacy secret', async () => {
     invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'remote:get' ? offline() : { status: 'connecting' }));
     useStore.setState({ settings: { ...baseSettings, remote: { enabled: false } } as AppSettings });
     render(<SettingsView />);
     fireEvent.click(screen.getByText('Remote access'));
     const signIn = await screen.findByTestId('remote-sign-in');
     expect(screen.queryByTestId('remote-enroll')).toBeNull();
-    expect(screen.getByTestId('remote-steps').textContent).toContain('Connect with GitHub: your browser opens; sign in and click Add this computer.');
+    expect(screen.getByTestId('remote-steps').textContent).toContain('Connect with Vocs: your browser opens; sign in and click Add this computer.');
     fireEvent.click(signIn);
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:signIn', undefined));
 
