@@ -109,6 +109,6 @@ filtering, every catalogue search anchor, search reset/Escape, and every page at
 widths. Section-specific suites continue to exercise their own production
 boundaries; the navigation suite is not a substitute for those flows.
 
-## Staging Vocs account
+## Vocs account
 
-Vocs account is an explicit staging-only sign-in and read-only Hub catalog experiment. Credentials stay in the main process; the settings page receives only safe descriptive status. Sign-in uses the system browser, cancellation and sign-out clear local account state, and sessions are memory-only for at most five minutes. Local work remains available signed out. Viewing a connection neither installs it nor authorizes tools or paid execution. See [desktop acceptance](ACCOUNT-STAGING-TEST.md).
+Vocs account is an explicit sign-in with your Vocs identity (`auth.vocs.io`) and a read-only view of your Vocs Hub catalog (`mcp.vocs.io`). Developers can target the staging services by launching with `VOCS_CODE_ACCOUNT_REALM=staging`; the page then shows a Staging only badge. Credentials stay in the main process; the settings page receives only safe descriptive status. Sign-in uses the system browser, cancellation and sign-out clear local account state, and sessions are memory-only for at most five minutes. Local work remains available signed out. Viewing a connection neither installs it nor authorizes tools or paid execution. See [desktop acceptance](ACCOUNT-STAGING-TEST.md).

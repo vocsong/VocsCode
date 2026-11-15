@@ -19,6 +19,17 @@ describe('staging Vocs account settings', () => {
     expect(screen.getByText(/Persistent sign-in is not enabled/)).toBeTruthy();
     expect(api.invoke.mock.calls).toEqual([['vocsAccount:get', undefined]]);
   });
+  it('labels production without staging wording and keeps staging labels behind the staging realm', async () => {
+    api.invoke.mockResolvedValue({ ...out(), realm: 'production' });
+    render(<VocsAccountSettings />); await screen.findByText('Signed out');
+    expect(screen.queryByText('Staging only')).toBeNull();
+    expect(screen.getByText(/Sign-in opens your system browser at auth.vocs.io/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Sign in with Vocs' })).toBeTruthy();
+    expect(screen.queryByText(/staging/i)).toBeNull();
+    api.invoke.mockResolvedValue({ ...connected(4), realm: 'production' });
+    await act(async () => { await new Promise((r) => setTimeout(r, 2100)); });
+    expect(screen.getByText('Connected to Vocs')).toBeTruthy();
+  });
   it('deduplicates sign-in and cancels without accepting an abandoned completion', async () => {
     const sign = deferred<VocsAccountState>();
     api.invoke.mockImplementation((channel) => channel === 'vocsAccount:signIn' ? sign.promise : Promise.resolve(out(channel === 'vocsAccount:cancel' ? 4 : 1)));
