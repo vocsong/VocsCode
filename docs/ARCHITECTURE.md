@@ -49,7 +49,7 @@ src/renderer      React 19 + zustand UI
 src/web           the browser shell at code.vocs.io/app (plain Vite build into relay/public/app)
   transport/      RelayTransport (window.harness over the e2e session, local `can` gate) + mirror backend + IndexedDB vault
   shell/          WebApp root, connection state, account probe, viewport keyboard inset
-  screens/        pairing, Connect with GitHub, sessions home, one session
+  screens/        pairing, Connect with Vocs, sessions home, one session
   sheets/         bottom sheets: computers, devices, new session, terminal
   terminal/       the live terminal: stream controller, headless-xterm screen model, key mapping, view
   components/     web composer, session header, status chip, connection banner

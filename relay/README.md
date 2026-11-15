@@ -61,7 +61,7 @@ never enable additional logins between those deployments. After any deploy, run 
 is also the landing Worker's service credential for owner routes. On `/v1/owner/*`, the relay now
 requires both that credential and a valid account assertion from the landing; the assertion scopes
 computer list, enrollment grant and browser pair request to the signed-in GitHub subject. New GitHub
-accounts enroll via **Connect with GitHub**; they must not be given the incumbent's manual secret.
+accounts enroll via **Connect with Vocs**; they must not be given the incumbent's manual secret.
 An enrolled desktop starts every later pairing with its own device credential, so rotating the legacy
 secret leaves paired devices working. Rotation does not revoke devices; to cut off a lost or
 compromised device use Revoke (or Settings → Remote access → Revoke all, the kill switch).
@@ -76,7 +76,7 @@ To rotate the **legacy enrollment secret**:
 3. In the vocs.io repo, run `npx wrangler secret put RELAY_ENROLL_TOKEN -c code/wrangler.jsonc` with
    the same value; owner routes will refuse requests if the copies differ.
 4. Only legacy `vocs-v1` desktops that have **never** paired need the enrollment secret, and only
-   where sign-in is unavailable. New GitHub accounts use Connect with GitHub, which binds enrollment
+   where sign-in is unavailable. New GitHub accounts use Connect with Vocs, which binds enrollment
    to their own account; the Settings fallback is hidden when the gate is available.
 5. A desktop the relay no longer recognizes (revoked, or pointed at a different relay) may need the
    current legacy value to re-enroll. Start one pairing, then let the code expire or deny it, and

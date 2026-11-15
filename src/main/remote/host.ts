@@ -43,7 +43,7 @@ const ACCESS_REFRESH_MARGIN_MS = 60_000;
 const RECONNECT_MS = 3000;
 /** Owner-requested pairings have the same five-minute local decision window as minted codes. */
 const PAIRING_REQUEST_TIMEOUT_MS = 5 * 60_000;
-/** Connect with GitHub: how often to ask whether the owner added this computer, and for how long
+/** Connect with Vocs: how often to ask whether the owner added this computer, and for how long
  *  (the relay keeps an owner's grant ten minutes). */
 const SIGN_IN_POLL_MS = 2000;
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
@@ -106,7 +106,7 @@ export class RemoteHost {
     sent: boolean;
   } | undefined;
   private pairingAttempt = 0;
-  /** Connect with GitHub, while the owner has not added this computer yet. */
+  /** Connect with Vocs, while the owner has not added this computer yet. */
   private signingIn: { link: string; checkCode: string } | undefined;
   private readonly sessions = new Map<string, Session>();
   /** Serialize handshake and ciphertext delivery per peer, not across unrelated clients. */
@@ -204,7 +204,7 @@ export class RemoteHost {
     await this.connect();
   }
 
-  /** Connect with GitHub: register this computer through a signed-in browser instead of the
+  /** Connect with Vocs: register this computer through a signed-in browser instead of the
    *  enrollment secret. A one-time secret stays here; only its SHA-256 goes into the page `open`
    *  shows, where the owner signs in and adds this computer. Meanwhile this desktop polls the
    *  relay with the secret, and receives its credential sealed to its own key. An already
@@ -220,8 +220,8 @@ export class RemoteHost {
     const nonceHash = createHash('sha256').update(nonce).digest('hex');
     this.signingIn = { link: connectLink(relayUrl, nonceHash), checkCode: connectCheckCode(nonceHash) };
     this.status = 'connecting';
-    this.detail = 'finish in your browser: sign in with GitHub and add this computer';
-    this.deps.log('info', 'remote: waiting for this computer to be added in the browser (Connect with GitHub)');
+    this.detail = 'finish in your browser: sign in with your Vocs account and add this computer';
+    this.deps.log('info', 'remote: waiting for this computer to be added in the browser (Connect with Vocs)');
     this.deps.audit?.record('sign-in-start');
     this.push();
     await open(this.signingIn.link);
@@ -306,7 +306,7 @@ export class RemoteHost {
   }
 
   /** Requests a pairing code. An enrolled desktop authenticates as itself; the shared enrollment
-   *  secret remains only for legacy `vocs-v1` manual enrollment. New accounts use Connect with GitHub. */
+   *  secret remains only for legacy `vocs-v1` manual enrollment. New accounts use Connect with Vocs. */
   async startPairing(hostName: string): Promise<{ code: string; expiresAt: number }> {
     const creds = this.creds;
     if (!creds) throw new Error('remote access is not enabled');

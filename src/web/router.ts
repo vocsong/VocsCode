@@ -1,5 +1,5 @@
 /** Hash routes for the web shell (docs/REMOTE-ACCESS.md §4): a session is a deep link
- *  `#/h/<host>/s/<session>`; `#/` is home. The pairing code and the Connect-with-GitHub hash are
+ *  `#/h/<host>/s/<session>`; `#/` is home. The pairing code and the Connect-with-Vocs hash are
  *  query parameters (`?code=`, `?connect=`) that the shell reads once and scrubs from the address
  *  bar, so neither lingers in history. Routing never reloads the page. */
 import { CONNECT_HASH_PATTERN, PAIRING_CODE_PATTERN } from '@shared/pairing';
@@ -19,7 +19,7 @@ export function pairingCodeFromUrl(search: string): string | null {
   return PAIRING_CODE_PATTERN.test(code) ? code : null;
 }
 
-/** The Connect-with-GitHub hash, when this URL carries exactly one valid one. */
+/** The Connect-with-Vocs hash, when this URL carries exactly one valid one. */
 export function connectHashFromUrl(search: string): string | null {
   const params = new URLSearchParams(search);
   const hashes = params.getAll('connect');
