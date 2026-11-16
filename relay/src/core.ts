@@ -72,6 +72,8 @@ export interface PairingRecord {
   /** SHA-256 of the claim's private poll capability, never the plaintext capability. */
   pollTokenHash?: string;
   expiresAt: number;
+  /** The account's revocation epoch when the pairing started (absent on older records: 0). */
+  epoch?: number;
 }
 
 export class PairError extends Error {
@@ -114,6 +116,19 @@ function randomCode(): string {
 const deviceKey = (accountId: string, deviceId: string) => `device:${accountId}:${deviceId}`;
 const codeKey = (code: string) => `pair:${code}`;
 const socketTicketKey = (accountId: string, deviceId: string) => `ws-ticket:${accountId}:${deviceId}`;
+const epochKey = (accountId: string) => `revocation-epoch:${accountId}`;
+
+/** The account's revocation epoch: revoke all raises it. Every admission (pairing approval,
+ *  enrollment redemption) carries the epoch its authority was issued under and re-checks it inside
+ *  the transaction that mints the device, so authority issued before a revoke all cannot mint after
+ *  it. Accounts and records from before the epoch existed read as 0. */
+export async function revocationEpoch(store: RelayStorage, accountId: string): Promise<number> {
+  return epochValue(await store.get<unknown>(epochKey(accountId)));
+}
+
+function epochValue(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
 
 export const SOCKET_TICKET_TTL_MS = 30_000;
 interface SocketTicketRecord {
@@ -218,7 +233,8 @@ export async function startPairing(
     hostPub: input.hostPub,
     ...(input.hostDeviceId ? { hostDeviceId: input.hostDeviceId } : {}),
     status: 'pending',
-    expiresAt: now + PAIRING_TTL_MS
+    expiresAt: now + PAIRING_TTL_MS,
+    epoch: await revocationEpoch(store, input.accountId)
   };
   await store.put(codeKey(record.code), record);
   await sweepExpired(store, now);
@@ -346,6 +362,13 @@ async function resolvePairingUnlocked(
   const webToken = randomToken();
   const sealedToken = await sealToKey(record.webPub.enc, webToken, pairingTokenContext(record.code, webDeviceId));
   return store.transaction(async (tx) => {
+    // Everything above ran outside this transaction, and a revoke all, an expiry sweep or a
+    // replaced claim may have landed since. Mint only from the exact claim that was signed, still
+    // stored and still under the account's current revocation epoch; deleting it below is part of
+    // this same commit, so it is consumed exactly once.
+    const current = await tx.get<PairingRecord>(key);
+    if (!current || stable(current) !== stable(record)) throw new PairError('invalid');
+    if (epochValue(current.epoch) !== (await revocationEpoch(tx, record.accountId))) throw new PairError('invalid');
     const devices = (await tx.list<DeviceRecord>(`device:${record.accountId}:`)).map(([, d]) => d);
     // The signature above proves the approver holds hostPub's private key, so a registered host
     // with that key is this desktop. A pairing started with a device credential names it exactly.
@@ -454,29 +477,42 @@ interface EnrollGrantRecord {
   hostName?: string;
   sealedToken?: SealedToKey;
   expiresAt: number;
+  /** The account's revocation epoch when the owner granted it (absent on older records: 0). */
+  epoch?: number;
 }
 
 const enrollKey = (accountId: string, nonceHash: string) => `enroll:${accountId}:${nonceHash}`;
 
-/** The owner approves the desktop that holds the nonce behind `nonceHash`. */
-export async function grantEnrollment(store: RelayStore, input: { accountId: string; nonceHash: string }, now: number): Promise<{ expiresAt: number }> {
+/** A grant counts only until it expires and only under the epoch it was issued in: one written
+ *  across a revoke all is as gone as one revoke all deleted, for redemption and reporting alike. */
+function liveGrant(record: EnrollGrantRecord | undefined, epoch: number, now: number): record is EnrollGrantRecord {
+  return !!record && now < record.expiresAt && epochValue(record.epoch) === epoch;
+}
+
+/** The owner approves the desktop that holds the nonce behind `nonceHash`. `epoch` is the revocation
+ *  epoch the caller read before it began granting (and bound the directory pointer under): a
+ *  revoke all in between leaves this grant unredeemable, and reported as missing. */
+export async function grantEnrollment(store: RelayStore, input: { accountId: string; nonceHash: string; epoch?: number }, now: number): Promise<{ expiresAt: number }> {
   if (typeof input.nonceHash !== 'string' || !NONCE_HASH.test(input.nonceHash)) throw new PairError('invalid');
   const key = enrollKey(input.accountId, input.nonceHash);
+  const current = await revocationEpoch(store, input.accountId);
   const existing = await store.get<EnrollGrantRecord>(key);
-  if (existing?.status === 'redeemed' && now < existing.expiresAt) throw new PairError('used');
-  const record: EnrollGrantRecord = { nonceHash: input.nonceHash, status: 'granted', expiresAt: now + ENROLL_GRANT_TTL_MS };
+  if (existing?.status === 'redeemed' && liveGrant(existing, current, now)) throw new PairError('used');
+  const epoch = input.epoch ?? current;
+  const record: EnrollGrantRecord = { nonceHash: input.nonceHash, status: 'granted', expiresAt: now + ENROLL_GRANT_TTL_MS, epoch };
   await store.put(key, record);
   for (const [stale, grant] of await store.list<EnrollGrantRecord>(`enroll:${input.accountId}:`)) {
-    if (now >= grant.expiresAt) await store.delete(stale);
+    if (stale !== key && !liveGrant(grant, current, now)) await store.delete(stale);
   }
   return { expiresAt: record.expiresAt };
 }
 
-/** Where an owner's grant stands, so the page that granted it can pair with the new computer. */
+/** Where an owner's grant stands, so the page that granted it can pair with the new computer. A
+ *  grant from before the last revoke all reads as missing: it can never be redeemed. */
 export async function enrollmentStatus(store: RelayStore, input: { accountId: string; nonceHash: string }, now: number): Promise<{ status: 'missing' | 'granted' | 'redeemed'; hostDeviceId?: string; hostName?: string }> {
   if (typeof input.nonceHash !== 'string' || !NONCE_HASH.test(input.nonceHash)) throw new PairError('invalid');
   const record = await store.get<EnrollGrantRecord>(enrollKey(input.accountId, input.nonceHash));
-  if (!record || now >= record.expiresAt) return { status: 'missing' };
+  if (!liveGrant(record, await revocationEpoch(store, input.accountId), now)) return { status: 'missing' };
   return record.status === 'redeemed' ? { status: 'redeemed', hostDeviceId: record.hostDeviceId, hostName: record.hostName } : { status: 'granted' };
 }
 
@@ -484,12 +520,13 @@ export type Redemption = { status: 'pending' } | { status: 'registered'; hostDev
 
 /** The desktop proves it holds the granted nonce and receives its refresh credential, sealed to the
  *  encryption key it registers. Before the owner grants it the answer is `pending`, which is also
- *  what an unknown or expired nonce gets: the endpoint is public and reveals nothing. A desktop key
- *  the relay already knows keeps its host id (every browser paired with it greets that id); only
- *  its credential is rotated. */
+ *  what an unknown, expired or revoked nonce gets: the endpoint is public and reveals nothing. A
+ *  desktop key the relay already knows keeps its host id (every browser paired with it greets that
+ *  id); only its credential is rotated. `bindingEpoch` is the revocation epoch the enrollment
+ *  directory's pointer was bound under, when the redemption arrived through the directory. */
 export async function redeemEnrollment(
   store: RelayStore,
-  input: { accountId: string; nonce: string; hostPub: PublicIdentity; name: string; platform: string; deviceRouteSecret?: string },
+  input: { accountId: string; nonce: string; hostPub: PublicIdentity; name: string; platform: string; deviceRouteSecret?: string; bindingEpoch?: number },
   now: number
 ): Promise<Redemption> {
   if (typeof input.nonce !== 'string' || !NONCE.test(input.nonce)) throw new PairError('invalid');
@@ -497,7 +534,8 @@ export async function redeemEnrollment(
   const key = enrollKey(input.accountId, nonceHash);
   return withPairCode(store, key, async () => {
     const record = await store.get<EnrollGrantRecord>(key);
-    if (!record || now >= record.expiresAt) return { status: 'pending' };
+    const epoch = await revocationEpoch(store, input.accountId);
+    if (!liveGrant(record, epoch, now) || (input.bindingEpoch !== undefined && input.bindingEpoch !== epoch)) return { status: 'pending' };
     if (record.status === 'redeemed') {
       if (!record.sealedToken || !record.hostDeviceId) return { status: 'pending' };
       // Same nonce, same sealed credential: only the key that registered can open it.
@@ -511,7 +549,12 @@ export async function redeemEnrollment(
     const hostToken = randomToken();
     // Sealed before the transaction, like a browser's credential: the plaintext never reaches storage.
     const sealedToken = await sealToKey(input.hostPub.enc, hostToken, enrollTokenContext(nonceHash, hostDeviceId));
-    await store.transaction(async (tx) => {
+    const minted = await store.transaction(async (tx) => {
+      // A revoke all may have retired this grant while the credential was being sealed: mint only
+      // from the exact grant read above, still stored and still under the current epoch.
+      const current = await tx.get<EnrollGrantRecord>(key);
+      if (!current || stable(current) !== stable(record)) return false;
+      if ((await revocationEpoch(tx, input.accountId)) !== epoch) return false;
       const devices = (await tx.list<DeviceRecord>(`device:${input.accountId}:`)).map(([, d]) => d);
       const existing = devices.find((d) => d.deviceId === hostDeviceId);
       if (existing) {
@@ -521,7 +564,9 @@ export async function redeemEnrollment(
         await registerHostDevice(tx, { accountId: input.accountId, name: input.name, platform: input.platform, pub: input.hostPub, deviceId: hostDeviceId, token: hostToken, deviceRouteSecret: input.deviceRouteSecret }, now);
       }
       await tx.put(key, { ...record, status: 'redeemed', hostDeviceId, hostName: existing?.name ?? input.name, sealedToken } satisfies EnrollGrantRecord);
+      return true;
     });
+    if (!minted) return { status: 'pending' };
     return { status: 'registered', hostDeviceId, sealedToken };
   });
 }
@@ -550,7 +595,8 @@ export async function requestPairing(
     webPlatform: input.webPlatform,
     webPub: input.webPub,
     pollTokenHash: await hashToken(pollToken),
-    expiresAt: now + PAIRING_TTL_MS
+    expiresAt: now + PAIRING_TTL_MS,
+    epoch: await revocationEpoch(store, input.accountId)
   };
   await store.put(codeKey(record.code), record);
   await sweepExpired(store, now);
@@ -695,8 +741,10 @@ export async function revokeDevice(store: RelayStore, accountId: string, deviceI
 }
 
 /** The kill switch (§6.5): every device of the account except the desktop pulling it — each
- *  browser and every other computer — plus pending pairings and the mirrors of revoked hosts. The
- *  caller keeps its identity and its own mirror, which it re-keys. */
+ *  browser and every other computer — plus pending pairings, outstanding enrollment grants and the
+ *  mirrors of revoked hosts. It raises the account's revocation epoch in the same commit, so an
+ *  approval or redemption already past its own checks cannot mint afterwards. The caller keeps its
+ *  identity and its own mirror, which it re-keys. */
 export async function revokeAllExcept(store: RelayStore, accountId: string, keepDeviceId: string): Promise<string[]> {
   const { victims, hosts } = await store.transaction(async (tx) => {
     const victims: string[] = [];
@@ -710,6 +758,10 @@ export async function revokeAllExcept(store: RelayStore, accountId: string, keep
     // In-flight pairings die with it: a code shown a minute ago must not mint a new device. One
     // Hub holds exactly one account, so every pairing record here is this account's.
     for (const [key] of await tx.list<PairingRecord>('pair:')) await tx.delete(key);
+    // So do enrollment grants the owner approved but no desktop redeemed yet. The enrollment
+    // directory's pointers to them were bound under the old epoch, which this Hub now refuses.
+    for (const [key] of await tx.list<EnrollGrantRecord>(`enroll:${accountId}:`)) await tx.delete(key);
+    await tx.put(epochKey(accountId), (await revocationEpoch(tx, accountId)) + 1);
     return { victims, hosts };
   });
   for (const host of hosts) await clearMirror(store, accountId, host);
