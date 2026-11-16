@@ -483,28 +483,36 @@ interface EnrollGrantRecord {
 
 const enrollKey = (accountId: string, nonceHash: string) => `enroll:${accountId}:${nonceHash}`;
 
+/** A grant counts only until it expires and only under the epoch it was issued in: one written
+ *  across a revoke all is as gone as one revoke all deleted, for redemption and reporting alike. */
+function liveGrant(record: EnrollGrantRecord | undefined, epoch: number, now: number): record is EnrollGrantRecord {
+  return !!record && now < record.expiresAt && epochValue(record.epoch) === epoch;
+}
+
 /** The owner approves the desktop that holds the nonce behind `nonceHash`. `epoch` is the revocation
  *  epoch the caller read before it began granting (and bound the directory pointer under): a
- *  revoke all in between leaves this grant unredeemable. */
+ *  revoke all in between leaves this grant unredeemable, and reported as missing. */
 export async function grantEnrollment(store: RelayStore, input: { accountId: string; nonceHash: string; epoch?: number }, now: number): Promise<{ expiresAt: number }> {
   if (typeof input.nonceHash !== 'string' || !NONCE_HASH.test(input.nonceHash)) throw new PairError('invalid');
   const key = enrollKey(input.accountId, input.nonceHash);
+  const current = await revocationEpoch(store, input.accountId);
   const existing = await store.get<EnrollGrantRecord>(key);
-  if (existing?.status === 'redeemed' && now < existing.expiresAt) throw new PairError('used');
-  const epoch = input.epoch ?? await revocationEpoch(store, input.accountId);
+  if (existing?.status === 'redeemed' && liveGrant(existing, current, now)) throw new PairError('used');
+  const epoch = input.epoch ?? current;
   const record: EnrollGrantRecord = { nonceHash: input.nonceHash, status: 'granted', expiresAt: now + ENROLL_GRANT_TTL_MS, epoch };
   await store.put(key, record);
   for (const [stale, grant] of await store.list<EnrollGrantRecord>(`enroll:${input.accountId}:`)) {
-    if (now >= grant.expiresAt) await store.delete(stale);
+    if (stale !== key && !liveGrant(grant, current, now)) await store.delete(stale);
   }
   return { expiresAt: record.expiresAt };
 }
 
-/** Where an owner's grant stands, so the page that granted it can pair with the new computer. */
+/** Where an owner's grant stands, so the page that granted it can pair with the new computer. A
+ *  grant from before the last revoke all reads as missing: it can never be redeemed. */
 export async function enrollmentStatus(store: RelayStore, input: { accountId: string; nonceHash: string }, now: number): Promise<{ status: 'missing' | 'granted' | 'redeemed'; hostDeviceId?: string; hostName?: string }> {
   if (typeof input.nonceHash !== 'string' || !NONCE_HASH.test(input.nonceHash)) throw new PairError('invalid');
   const record = await store.get<EnrollGrantRecord>(enrollKey(input.accountId, input.nonceHash));
-  if (!record || now >= record.expiresAt) return { status: 'missing' };
+  if (!liveGrant(record, await revocationEpoch(store, input.accountId), now)) return { status: 'missing' };
   return record.status === 'redeemed' ? { status: 'redeemed', hostDeviceId: record.hostDeviceId, hostName: record.hostName } : { status: 'granted' };
 }
 
@@ -526,9 +534,8 @@ export async function redeemEnrollment(
   const key = enrollKey(input.accountId, nonceHash);
   return withPairCode(store, key, async () => {
     const record = await store.get<EnrollGrantRecord>(key);
-    if (!record || now >= record.expiresAt) return { status: 'pending' };
     const epoch = await revocationEpoch(store, input.accountId);
-    if (epochValue(record.epoch) !== epoch || (input.bindingEpoch !== undefined && input.bindingEpoch !== epoch)) return { status: 'pending' };
+    if (!liveGrant(record, epoch, now) || (input.bindingEpoch !== undefined && input.bindingEpoch !== epoch)) return { status: 'pending' };
     if (record.status === 'redeemed') {
       if (!record.sealedToken || !record.hostDeviceId) return { status: 'pending' };
       // Same nonce, same sealed credential: only the key that registered can open it.
