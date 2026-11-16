@@ -1,18 +1,21 @@
 /** Desktop-side token and trust lifecycle (docs/REMOTE-ACCESS.md §6.2, §6.5): the real RemoteHost
  *  and RelayClient against the test relay, which serves the production route table and router.
  *  Covers what happens after pairing — expired access tokens, revocation from another device,
- *  mirror-key rotation and a desktop that was itself revoked. */
+ *  mirror-key rotation (and the order of mirror writes around it), mirror clears that fail and
+ *  are retried, and a desktop that was itself revoked. */
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { memoryVault, RelayClient, type WebCredentials } from '../relay/src/web-client';
 import { RemoteAudit } from '../src/main/remote/audit';
 import { RemoteHost } from '../src/main/remote/host';
+import { RemoteMirror } from '../src/main/remote/mirror';
 import type { HandlerRegistry } from '../src/main/handlers';
 import type { DeviceRecord } from '../relay/src/core';
-import { generateIdentity, publicOf } from '../src/shared/crypto';
+import { generateIdentity, importAesKey, openBlob, publicOf, sealBlob, type SealedBlob } from '../src/shared/crypto';
+import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 import { ACCOUNT, ENROLL, FakeRelay } from './fake-relay';
 import { connectCheckCode } from '../src/shared/pairing';
 
@@ -50,6 +53,7 @@ interface Rig {
   host: RemoteHost;
   secrets: Map<string, string>;
   audit: RemoteAudit;
+  logs: Array<{ level: string; message: string }>;
   rotations: () => number;
   browser: () => { client: RelayClient };
   pair: (client: RelayClient, name: string) => Promise<WebCredentials>;
@@ -61,7 +65,7 @@ afterEach(async () => {
   for (const rig of rigs.splice(0)) await rig.cleanup();
 });
 
-async function rig(): Promise<Rig> {
+async function rig(opts: { onMirrorRotated?: () => void; mirrorRetryMs?: number; mirrorLateWriteMs?: number } = {}): Promise<Rig> {
   const relay = new FakeRelay();
   const port = await relay.start();
   const base = `http://127.0.0.1:${port}`;
@@ -70,14 +74,20 @@ async function rig(): Promise<Rig> {
   await audit.load();
   const secrets = new Map<string, string>();
   let rotated = 0;
+  const logs: Array<{ level: string; message: string }> = [];
   const host = new RemoteHost({
     registry: () => ({ channels: () => ['sessions:list'], invoke: async () => [{ id: 's1', title: 'Lifecycle host' }] } as unknown as HandlerRegistry),
     secrets: { get: async (key) => secrets.get(key), set: async (key, value) => void secrets.set(key, value) },
     pushState: () => undefined,
-    log: () => undefined,
+    log: (level, message) => void logs.push({ level, message }),
     broadcast: () => undefined,
     audit,
-    onMirrorRotated: () => void rotated++
+    onMirrorRotated: () => {
+      rotated++;
+      opts.onMirrorRotated?.();
+    },
+    mirrorRetryMs: opts.mirrorRetryMs,
+    mirrorLateWriteMs: opts.mirrorLateWriteMs
   });
   const clients: RelayClient[] = [];
   const created: Rig = {
@@ -86,6 +96,7 @@ async function rig(): Promise<Rig> {
     host,
     secrets,
     audit,
+    logs,
     rotations: () => rotated,
     browser: () => {
       const client = new RelayClient({ vault: memoryVault(), wsFactory });
@@ -342,5 +353,297 @@ describe('Connect with Vocs: adding and pairing through a signed-in owner', () =
     await new RelayClient({ vault: memoryVault(), wsFactory, fetchImpl: asOwner }).addComputer(r.base, nonceHash);
     await sleep(2500);
     expect(await desktop.isRegistered()).toBe(false);
+  });
+});
+
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+interface MirrorWrite {
+  method: string;
+  path: string;
+  status: number | 'network error' | 'late';
+  blob?: SealedBlob;
+}
+
+/** Records every mirror write the desktop sends, in the order the relay answered them. `hold`
+ *  pauses a request before it reaches the relay; `fail` answers it without reaching the relay;
+ *  `late` fails it on the desktop with a transport error while the request itself still reaches
+ *  the relay that many milliseconds later (recorded with status 'late'). */
+function watchMirrorWrites(opts: {
+  hold?: (method: string, path: string) => Promise<void> | undefined;
+  fail?: (method: string, path: string) => Response | Error | undefined;
+  late?: (method: string, path: string) => number | undefined;
+} = {}) {
+  const writes: MirrorWrite[] = [];
+  const deliveries: Array<Promise<void>> = [];
+  const original = globalThis.fetch;
+  const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (method === 'GET' || !url.pathname.startsWith('/v1/mirror')) return original(input, init);
+    await opts.hold?.(method, url.pathname);
+    const blob = method === 'PUT' && typeof init?.body === 'string' ? (JSON.parse(init.body) as SealedBlob) : undefined;
+    const lateMs = opts.late?.(method, url.pathname);
+    if (lateMs !== undefined) {
+      writes.push({ method, path: url.pathname, status: 'network error' });
+      deliveries.push(
+        sleep(lateMs)
+          .then(() => original(input, init))
+          .then((res) => void writes.push({ method, path: url.pathname, status: res.status === 200 ? 'late' : res.status }))
+      );
+      throw new TypeError('fetch failed');
+    }
+    const failure = opts.fail?.(method, url.pathname);
+    if (failure instanceof Error) {
+      writes.push({ method, path: url.pathname, status: 'network error' });
+      throw failure;
+    }
+    const res = failure ?? (await original(input, init));
+    writes.push({ method, path: url.pathname, status: res.status, blob });
+    return res;
+  });
+  return { writes, deliveries, restore: () => spy.mockRestore() };
+}
+
+async function opens(secret: string, blob: SealedBlob): Promise<boolean> {
+  try {
+    await openBlob(await importAesKey(secret), blob);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const mirroredSession = { id: 's1', title: 'Mirrored', status: 'idle', updatedAt: 1, config: { harness: 'native', projectRoot: '/repo' } } as unknown as SessionMeta;
+const mirroredItems = [{ id: 'm1', kind: 'user', ts: 1, text: 'mirrored text' }] as TranscriptItem[];
+
+describe('offline mirror writes around key rotation and clearing', () => {
+  it('clears a re-keyed mirror only after an upload already sent under the old key has landed', async () => {
+    let mirror: RemoteMirror | null = null;
+    const r = await rig({ onMirrorRotated: () => mirror?.sync() });
+    const { client } = r.browser();
+    const creds = await r.pair(client, 'Browser');
+    const oldSecret = r.host.mirrorSecret()!;
+    const arrived = deferred();
+    const release = deferred();
+    let held = false;
+    const relay = watchMirrorWrites({
+      hold: (method, path) => {
+        if (held || method !== 'PUT' || path !== '/v1/mirror/s1') return undefined;
+        held = true;
+        arrived.resolve();
+        return release.promise;
+      }
+    });
+    try {
+      mirror = new RemoteMirror({
+        host: () => r.host,
+        sessions: () => [mirroredSession],
+        transcript: async () => mirroredItems,
+        enabled: () => true,
+        debounceMs: 5,
+        log: () => undefined
+      });
+      mirror.notify('s1');
+      await arrived.promise;
+      // The snapshot sealed under the current key is on its way to the relay; now re-key.
+      const revoking = r.host.revokeDevice(creds.webDeviceId);
+      await until(() => r.host.mirrorSecret() !== oldSecret, 'the key rotation');
+      await sleep(150);
+      release.resolve();
+      await revoking;
+      const newSecret = r.host.mirrorSecret()!;
+      await until(() => relay.writes.filter((w) => w.method === 'PUT').length >= 4, 'the re-sealed mirror');
+      await sleep(50);
+
+      const tag = async (w: MirrorWrite) => {
+        if (!w.blob) return `${w.method} ${w.path}`;
+        const key = (await opens(oldSecret, w.blob)) ? 'old-key' : (await opens(newSecret, w.blob)) ? 'new-key' : 'unreadable';
+        return `${w.method} ${w.path} ${key}`;
+      };
+      const tagged = await Promise.all(relay.writes.map(tag));
+      expect(tagged.slice(0, 3)).toEqual(['PUT /v1/mirror old-key', 'PUT /v1/mirror/s1 old-key', 'DELETE /v1/mirror']);
+      expect(tagged.slice(3).sort()).toEqual(['PUT /v1/mirror new-key', 'PUT /v1/mirror/s1 new-key']);
+      // What the relay holds now opens only with the new key.
+      const stored = (await r.relay.store.list<{ blob?: SealedBlob }>('mirror:')).flatMap(([, v]) => (v.blob ? [v.blob] : []));
+      expect(stored).toHaveLength(2);
+      for (const blob of stored) {
+        expect(await opens(oldSecret, blob)).toBe(false);
+        expect(await opens(newSecret, blob)).toBe(true);
+      }
+    } finally {
+      mirror?.stop();
+      relay.restore();
+    }
+  });
+
+  it('does not send a mirror upload whose publication was superseded', async () => {
+    const r = await rig();
+    await r.pair(r.browser().client, 'Browser');
+    const relay = watchMirrorWrites();
+    try {
+      const blob = await sealBlob(await importAesKey(r.host.mirrorSecret()!), { hostName: 'Test PC', updatedAt: 1, sessions: [] });
+      expect(await r.host.putMirror('index', undefined, blob, () => false)).toBe(false);
+      expect(relay.writes).toEqual([]);
+      expect(await r.host.putMirror('index', undefined, blob, () => true)).toBe(true);
+      expect(relay.writes.map((w) => `${w.method} ${w.path} ${w.status}`)).toEqual(['PUT /v1/mirror 200']);
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it('reports a failed mirror clear and repeats it before the next upload', async () => {
+    const r = await rig();
+    await r.pair(r.browser().client, 'Browser');
+    let failures = 1;
+    const relay = watchMirrorWrites({
+      fail: (method, path) => (method === 'DELETE' && path === '/v1/mirror' && failures-- > 0 ? new Response('unavailable', { status: 503 }) : undefined)
+    });
+    try {
+      expect(await r.host.clearMirror()).toBe(false);
+      expect(r.logs.filter((l) => l.level === 'warn' && l.message.includes('mirror clear failed'))).toHaveLength(1);
+      expect(r.audit.list().filter((e) => e.action === 'mirror-clear-failed')).toHaveLength(1);
+
+      const blob = await sealBlob(await importAesKey(r.host.mirrorSecret()!), { hostName: 'Test PC', updatedAt: 1, sessions: [] });
+      expect(await r.host.putMirror('index', undefined, blob)).toBe(true);
+      expect(relay.writes.map((w) => `${w.method} ${w.path} ${w.status}`)).toEqual(['DELETE /v1/mirror 503', 'DELETE /v1/mirror 200', 'PUT /v1/mirror 200']);
+      expect(r.audit.list().filter((e) => e.action === 'mirror-clear-recovered')).toHaveLength(1);
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it('retries a failed mirror clear on its own when nothing else is published', async () => {
+    const r = await rig({ mirrorRetryMs: 20 });
+    await r.pair(r.browser().client, 'Browser');
+    let failures = 1;
+    const relay = watchMirrorWrites({
+      fail: (method, path) => (method === 'DELETE' && path === '/v1/mirror' && failures-- > 0 ? new TypeError('fetch failed') : undefined)
+    });
+    try {
+      expect(await r.host.clearMirror()).toBe(false);
+      await until(() => relay.writes.some((w) => w.method === 'DELETE' && w.status === 200), 'the retried clear');
+      await sleep(100);
+      expect(relay.writes.map((w) => `${w.method} ${w.path} ${w.status}`)).toEqual(['DELETE /v1/mirror network error', 'DELETE /v1/mirror 200']);
+      expect(r.audit.list().filter((e) => e.action === 'mirror-clear-failed')).toHaveLength(1);
+      expect(r.audit.list().filter((e) => e.action === 'mirror-clear-recovered')).toHaveLength(1);
+    } finally {
+      relay.restore();
+    }
+  });
+});
+
+describe('offline mirror clear retries', () => {
+  const sealedIndex = async (r: Rig) => sealBlob(await importAesKey(r.host.mirrorSecret()!), { hostName: 'Test PC', updatedAt: 1, sessions: [] });
+  const storedSessions = async (r: Rig) =>
+    (await r.relay.store.list<{ blob?: SealedBlob }>('mirror:'))
+      .map(([key]) => key)
+      .filter((key) => key.includes(':s:'))
+      .map((key) => key.slice(key.lastIndexOf(':s:') + 3))
+      .sort();
+
+  it('repeats the one owed clear for a burst of uploads and keeps every upload it accepted', async () => {
+    const r = await rig();
+    await r.pair(r.browser().client, 'Browser');
+    let failures = 2;
+    const relay = watchMirrorWrites({
+      fail: (method, path) => (method === 'DELETE' && path === '/v1/mirror' && failures-- > 0 ? new Response('unavailable', { status: 503 }) : undefined)
+    });
+    try {
+      const blob = await sealedIndex(r);
+      const ids = Array.from({ length: 8 }, (_, i) => `s${i + 1}`);
+      expect(await r.host.clearMirror()).toBe(false);
+      // A burst behind a clear that fails again: one retry for all of them, and none publishes.
+      const first = await Promise.all(ids.map((id) => r.host.putMirror('session', id, blob)));
+      expect(first).toEqual(ids.map(() => false));
+      // The next burst: one more retry, which succeeds, then every upload lands and stays.
+      const second = await Promise.all(ids.map((id) => r.host.putMirror('session', id, blob)));
+      expect(second).toEqual(ids.map(() => true));
+      await sleep(100);
+      const deletes = relay.writes.filter((w) => w.method === 'DELETE').map((w) => w.status);
+      expect(deletes).toEqual([503, 503, 200]);
+      const lastDelete = relay.writes.findLastIndex((w) => w.method === 'DELETE');
+      expect(relay.writes.slice(lastDelete + 1).every((w) => w.method === 'PUT' && w.status === 200)).toBe(true);
+      expect(await storedSessions(r)).toEqual([...ids].sort());
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it('clears once more after an upload that failed in transit may still reach the relay', async () => {
+    let enabled = true;
+    const r = await rig({ mirrorLateWriteMs: 400 });
+    await r.pair(r.browser().client, 'Browser');
+    const relay = watchMirrorWrites({ late: (method, path) => (method === 'PUT' && path === '/v1/mirror/s1' ? 150 : undefined) });
+    const mirror = new RemoteMirror({
+      host: () => r.host,
+      sessions: () => [mirroredSession],
+      transcript: async () => mirroredItems,
+      enabled: () => enabled,
+      debounceMs: 5,
+      log: () => undefined
+    });
+    try {
+      mirror.notify('s1');
+      await until(() => relay.writes.some((w) => w.path === '/v1/mirror/s1') && relay.writes.some((w) => w.path === '/v1/mirror'), 'the index upload, and the snapshot upload failing in transit');
+      enabled = false;
+      await mirror.disable();
+      await Promise.all(relay.deliveries);
+      await sleep(50);
+      const order = relay.writes.map((w) => `${w.method} ${w.path} ${w.status}`);
+      // The index and the failed snapshot upload finish in either order; everything after is exact.
+      expect(order.slice(0, 2).sort()).toEqual(['PUT /v1/mirror 200', 'PUT /v1/mirror/s1 network error']);
+      expect(order.slice(2)).toEqual(['DELETE /v1/mirror 200', 'PUT /v1/mirror/s1 late', 'DELETE /v1/mirror 200']);
+      expect(await storedSessions(r)).toEqual([]);
+    } finally {
+      mirror.stop();
+      relay.restore();
+    }
+  });
+
+  it('does not retry a failed clear on a timer while remote access is paused, and retries on reconnect', async () => {
+    const r = await rig({ mirrorRetryMs: 20 });
+    await r.pair(r.browser().client, 'Browser');
+    await r.host.disable();
+    let failures = 1;
+    const relay = watchMirrorWrites({
+      fail: (method, path) => (method === 'DELETE' && path === '/v1/mirror' && failures-- > 0 ? new Response('unavailable', { status: 503 }) : undefined)
+    });
+    try {
+      expect(await r.host.clearMirror()).toBe(false);
+      await sleep(200);
+      expect(relay.writes.map((w) => `${w.method} ${w.status}`)).toEqual(['DELETE 503']);
+      await r.host.enable(r.base, ENROLL);
+      await until(() => relay.writes.some((w) => w.method === 'DELETE' && w.status === 200), 'the clear retried on reconnect');
+      await sleep(100);
+      expect(relay.writes.map((w) => `${w.method} ${w.status}`)).toEqual(['DELETE 503', 'DELETE 200']);
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it('backs off only between timer retries, not on retries an upload starts', async () => {
+    const r = await rig({ mirrorRetryMs: 100 });
+    await r.pair(r.browser().client, 'Browser');
+    let failures = 4;
+    const relay = watchMirrorWrites({
+      fail: (method, path) => (method === 'DELETE' && path === '/v1/mirror' && failures-- > 0 ? new Response('unavailable', { status: 503 }) : undefined)
+    });
+    try {
+      const blob = await sealedIndex(r);
+      expect(await r.host.clearMirror()).toBe(false);
+      for (let i = 0; i < 3; i++) expect(await r.host.putMirror('index', undefined, blob)).toBe(false);
+      const afterUploads = Date.now();
+      expect(relay.writes.filter((w) => w.method === 'DELETE')).toHaveLength(4);
+      // The timer still runs at its first delay: the upload-started attempts did not stretch it.
+      await until(() => relay.writes.some((w) => w.method === 'DELETE' && w.status === 200), 'the timer retry', 2000);
+      expect(Date.now() - afterUploads).toBeLessThan(400);
+    } finally {
+      relay.restore();
+    }
   });
 });
