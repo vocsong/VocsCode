@@ -33,7 +33,7 @@ interface ScopeApi {
   filterTools(tools: unknown): Array<{ name: string }>;
   filterListReposText(text: string, allow: AllowEntry[]): string;
   parseSseJson(text: string): unknown;
-  UpstreamClient: new (options: { url: string; fetch?: typeof fetch }) => {
+  UpstreamClient: new (options: { url: string; fetch?: typeof fetch; headers?: Record<string, string> }) => {
     sessionId: string | null;
     initialize(): Promise<unknown>;
     request(method: string, params?: unknown): Promise<unknown>;
@@ -408,5 +408,34 @@ describe('UpstreamClient over Streamable HTTP', () => {
     const result = await client.request('tools/list', {});
     expect(result).toEqual({ method: 'tools/list' });
     expect(server.state.initCount).toBe(2);
+  });
+});
+
+describe('UpstreamClient redirects', () => {
+  const servers: http.Server[] = [];
+  afterEach(async () => {
+    for (const server of servers.splice(0)) {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  async function listen(handler: http.RequestListener): Promise<string> {
+    const server = http.createServer(handler);
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  }
+
+  it.each([301, 302, 303, 307, 308])('fails on a %i and sends nothing to the other origin', async (status) => {
+    const seen: Array<{ method?: string; key?: string | string[] }> = [];
+    const other = await listen((req, res) => { seen.push({ method: req.method, key: req.headers['x-api-key'] }); req.resume(); res.writeHead(404).end(); });
+    const configured = await listen((req, res) => { req.resume(); res.writeHead(status, { Location: `${other}/api/mcp` }).end(); });
+    expect(other).not.toBe(configured);
+    const client = new scope.UpstreamClient({ url: `${configured}/api/mcp`, headers: { 'X-API-Key': 'fixture-key' } });
+    const outcome: unknown = await client.initialize().then(() => 'resolved', (error: unknown) => error);
+    expect(seen).toEqual([]);
+    expect(outcome).toBeInstanceOf(Error);
+    expect(String(outcome)).toMatch(/redirect/i);
   });
 });
