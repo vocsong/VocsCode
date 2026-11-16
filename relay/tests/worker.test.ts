@@ -412,6 +412,11 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(typeof env.DEVICE_LIMIT?.limit).toBe('function');
     expect(typeof env.ADDRESS_LIMIT?.limit).toBe('function');
     const claim = () => accountRequest('/v1/pair/claim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'ABCD2345', webPub: {} }) });
+    // The emulated limiter's windows are aligned to the wall clock (one per minute). Start the
+    // burst well inside a window, or a rollover mid-burst resets the edge count and the Hub's own
+    // limiter answers the eleventh request instead.
+    const toRollover = 60_000 - (Date.now() % 60_000);
+    if (toRollover < 5_000) await new Promise((resolve) => setTimeout(resolve, toRollover + 100));
     const statuses: Array<[number, string | null]> = [];
     for (let i = 0; i < 11; i++) {
       const res = await claim();
@@ -422,7 +427,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(statuses[10]).toEqual([429, 'edge']);
     // Another address still gets through.
     expect((await accountRequest('/v1/pair/claim', { method: 'POST', headers: { 'cf-connecting-ip': '198.51.100.200', 'content-type': 'application/json' }, body: '{}' })).status).toBe(400);
-  });
+  }, 20_000);
 
   it('applies route budgets before authentication and still takes an authenticated mirror upload', async () => {
     const { hostId, hostToken } = await pair();
