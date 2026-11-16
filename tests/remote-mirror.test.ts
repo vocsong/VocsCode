@@ -1,7 +1,8 @@
 /** Unit tests for the offline mirror builder (src/main/remote/mirror.ts): debounced snapshot
- *  uploads, index refresh, size capping and clearing when the policy is turned off. The builder
- *  talks to a stub host, so no relay is involved. */
-import { describe, expect, it } from 'vitest';
+ *  uploads, index refresh, size capping, clearing when the policy is turned off, and fencing a
+ *  publication that is still in progress when mirroring is disabled, stopped, re-keyed or loses its
+ *  host. The builder talks to a stub host, so no relay is involved. */
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { capItems, MAX_SNAPSHOT_BYTES, RemoteMirror } from '../src/main/remote/mirror';
 import { MIRROR_MAX_BLOB_CHARS } from '../relay/src/core';
 import { importAesKey, openBlob, randomKeyB64 } from '../src/shared/crypto';
@@ -10,6 +11,21 @@ import type { RemoteHost } from '../src/main/remote/host';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Holds a snapshot right after it is sealed, so a test can change the policy, key or host while
+ *  the ciphertext exists but has not been handed to the host yet. Index blobs pass straight through. */
+const sealHold = vi.hoisted(() => ({ snapshot: null as null | (() => Promise<void>) }));
+vi.mock('../src/shared/crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/shared/crypto')>();
+  return {
+    ...actual,
+    sealBlob: async (key: CryptoKey, plaintext: unknown) => {
+      const sealed = await actual.sealBlob(key, plaintext);
+      if (plaintext && typeof plaintext === 'object' && 'items' in plaintext) await sealHold.snapshot?.();
+      return sealed;
+    }
+  };
+});
 
 function session(id: string, updatedAt: number): SessionMeta {
   return { id, title: `Title ${id}`, status: 'idle', updatedAt, config: { harness: 'native', projectRoot: '/repo' } } as unknown as SessionMeta;
@@ -152,5 +168,173 @@ describe('offline mirror builder', () => {
 
     await mirror.disable();
     expect(cleared).toBe(1);
+  });
+});
+
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+async function until(check: () => boolean, what: string, ms = 2000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await sleep(5);
+  }
+}
+
+async function opens(secret: string, blob: { iv: string; ct: string }): Promise<boolean> {
+  try {
+    await openBlob(await importAesKey(secret), blob);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type Pause = 'transcript' | 'seal' | 'put';
+
+/** One snapshot upload held at `pause` (the transcript read, right after sealing, or on its way
+ *  to the relay) while the test changes the policy, the key or the host. The stub relay records
+ *  each write in the order it applies them. */
+function heldUpload(pause: Pause) {
+  const state = { enabled: true, secret: randomKeyB64(), hostPresent: true };
+  const reached = deferred();
+  const release = deferred();
+  let held = false;
+  const hold = async () => {
+    if (held) return;
+    held = true;
+    reached.resolve();
+    await release.promise;
+  };
+  const blobs = new Map<string, { iv: string; ct: string }>();
+  const events: string[] = [];
+  const writes: Array<{ at: string; blob: { iv: string; ct: string } }> = [];
+  const host = {
+    mirrorSecret: () => state.secret,
+    putMirror: async (kind: 'index' | 'session', id: string | undefined, blob: { iv: string; ct: string }) => {
+      if (kind === 'session' && pause === 'put') await hold();
+      const at = kind === 'index' ? 'index' : `session:${id}`;
+      blobs.set(at, blob);
+      writes.push({ at, blob });
+      events.push(`put:${at}`);
+      return true;
+    },
+    clearMirror: async () => {
+      blobs.clear();
+      events.push('clear');
+      return true;
+    },
+    mirroredSessions: async () => [...blobs.keys()].filter((k) => k.startsWith('session:')).map((k) => k.slice('session:'.length)),
+    deleteMirrorSession: async (id: string) => {
+      blobs.delete(`session:${id}`);
+      events.push(`delete:session:${id}`);
+    }
+  } as unknown as RemoteHost;
+  sealHold.snapshot = pause === 'seal' ? hold : null;
+  const mirror = new RemoteMirror({
+    host: () => (state.hostPresent ? host : null),
+    sessions: () => [session('s1', 1)],
+    transcript: async () => {
+      if (pause === 'transcript') await hold();
+      return [item('m1', 'mirrored text')];
+    },
+    enabled: () => state.enabled,
+    debounceMs: 5,
+    log: () => undefined
+  });
+  return {
+    state,
+    host,
+    blobs,
+    events,
+    writes,
+    mirror,
+    release: () => release.resolve(),
+    /** Starts the upload and returns once it is held, with the index already published. */
+    start: async () => {
+      mirror.notify('s1');
+      await reached.promise;
+      await until(() => events.includes('put:index'), 'the index upload');
+    }
+  };
+}
+
+/** Lets a released upload run to completion (transcript, sealing, the stub put). */
+const settle = () => sleep(60);
+
+describe('offline mirror publication fencing', () => {
+  afterEach(() => {
+    sealHold.snapshot = null;
+  });
+
+  for (const pause of ['transcript', 'seal'] as const) {
+    it(`publishes nothing once mirroring is disabled while a snapshot is held at the ${pause} step`, async () => {
+      const t = heldUpload(pause);
+      await t.start();
+      t.state.enabled = false;
+      await t.mirror.disable();
+      t.release();
+      await settle();
+      expect(t.events).toEqual(['put:index', 'clear']);
+      expect(t.blobs.size).toBe(0);
+    });
+
+    it(`never sends ciphertext under a rotated key when the key changes at the ${pause} step`, async () => {
+      const t = heldUpload(pause);
+      await t.start();
+      const oldSecret = t.state.secret;
+      // What RemoteHost does on rotation: swap the key, drop the relay copy, then re-sync.
+      t.state.secret = randomKeyB64();
+      await t.host.clearMirror();
+      t.mirror.sync();
+      t.release();
+      await settle();
+      expect(t.events.slice(0, 2)).toEqual(['put:index', 'clear']);
+      // Only the re-sync publishes after the clear: one index and one snapshot, both new-key.
+      expect(t.events.slice(2).sort()).toEqual(['put:index', 'put:session:s1']);
+      const afterClear = t.writes.slice(1);
+      for (const write of afterClear) {
+        expect(await opens(oldSecret, write.blob)).toBe(false);
+        expect(await opens(t.state.secret, write.blob)).toBe(true);
+      }
+      expect([...t.blobs.keys()].sort()).toEqual(['index', 'session:s1']);
+    });
+  }
+
+  it('waits for a snapshot already on its way to the relay before clearing, so the clear removes it', async () => {
+    const t = heldUpload('put');
+    await t.start();
+    t.state.enabled = false;
+    const disabling = t.mirror.disable();
+    await sleep(20);
+    // The clear must not overtake the write in flight.
+    expect(t.events).toEqual(['put:index']);
+    t.release();
+    await disabling;
+    await settle();
+    expect(t.events).toEqual(['put:index', 'put:session:s1', 'clear']);
+    expect(t.blobs.size).toBe(0);
+  });
+
+  it('publishes nothing to a host that went away while a sealed snapshot was held', async () => {
+    const t = heldUpload('seal');
+    await t.start();
+    t.state.hostPresent = false;
+    t.release();
+    await settle();
+    expect(t.events).toEqual(['put:index']);
+  });
+
+  it('publishes nothing after the mirror is stopped while the transcript is being read', async () => {
+    const t = heldUpload('transcript');
+    await t.start();
+    t.mirror.stop();
+    t.release();
+    await settle();
+    expect(t.events).toEqual(['put:index']);
   });
 });

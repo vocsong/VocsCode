@@ -47,6 +47,17 @@ const PAIRING_REQUEST_TIMEOUT_MS = 5 * 60_000;
  *  (the relay keeps an owner's grant ten minutes). */
 const SIGN_IN_POLL_MS = 2000;
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
+/** A mirror clear the relay did not confirm is retried after this, doubling up to the cap. */
+const MIRROR_CLEAR_RETRY_MS = 15_000;
+const MIRROR_CLEAR_RETRY_MAX_MS = 5 * 60_000;
+
+/** A mirror upload whose publication went stale (mirroring off, re-keyed, host gone) before its
+ *  request left: it is dropped, not sent. */
+class MirrorWriteSuperseded extends Error {
+  constructor() {
+    super('mirror upload superseded');
+  }
+}
 
 interface PendingPairingRequest {
   code: string;
@@ -116,6 +127,18 @@ export class RemoteHost {
   /** The short-lived relay access token (§6.2), in memory only. */
   private access: { token: string; expiresAt: number; deviceId: string } | null = null;
   private refreshing: Promise<string> | null = null;
+  /** Mirror uploads between their fence check and the relay's answer; a clear waits for them so
+   *  it always lands after them. */
+  private readonly mirrorWrites = new Set<Promise<unknown>>();
+  /** Mirror clears asked for, and the newest one the relay confirmed. While they differ the relay
+   *  may still hold blobs that should be gone: uploads retry the clear first, and a timer retries
+   *  it in the meantime. */
+  private mirrorClearsRequested = 0;
+  private mirrorClearedThrough = 0;
+  private mirrorClearing: Promise<boolean> | null = null;
+  private mirrorClearFailing = false;
+  private mirrorRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private mirrorRetryDelay = 0;
   /** A connect is between its start and opening its socket (it may be buying an access token). */
   private connectInFlight = false;
   private connectAttempt = 0;
@@ -141,6 +164,8 @@ export class RemoteHost {
       viewOnly?: () => boolean;
       /** The mirror key changed (a browser holding it lost its pairing): re-seal and re-upload. */
       onMirrorRotated?: () => void;
+      /** First retry delay for a mirror clear the relay did not confirm; tests shrink it. */
+      mirrorRetryMs?: number;
       /** P3.5: the terminals a browser may watch; absent when terminals are unavailable. */
       terminals?: () => TerminalSource | null;
       /** Separate delegated controller boundary; never a browser invoke or approval channel. */
@@ -244,6 +269,8 @@ export class RemoteHost {
     this.pairingAttempt++;
     this.clearPairing();
     this.signingIn = undefined;
+    // A mirror clear still owed is retried on the next connect or upload, not while paused.
+    this.cancelMirrorClearRetry();
     this.push();
   }
 
@@ -441,26 +468,104 @@ export class RemoteHost {
     return this.creds?.mirrorKey ?? null;
   }
 
-  /** Publishes a sealed mirror blob to the relay. False when not enrolled or the relay refused it. */
-  async putMirror(kind: 'index' | 'session', sessionId: string | undefined, blob: SealedBlob): Promise<boolean> {
+  /** Publishes a sealed mirror blob to the relay. False when not enrolled, when a mirror clear the
+   *  relay has not confirmed still fails, when `current` reports the upload went stale (asked
+   *  after every wait, right before the request leaves), or when the relay refused it. */
+  async putMirror(kind: 'index' | 'session', sessionId: string | undefined, blob: SealedBlob, current: () => boolean = () => true): Promise<boolean> {
     if (!this.enrolled()) return false;
+    // Nothing new lands next to blobs a clear should have removed: finish that clear first.
+    if (!(await this.settleMirrorClear()) || !current()) return false;
     const path = kind === 'index' ? '/v1/mirror' : `/v1/mirror/${encodeURIComponent(sessionId ?? '')}`;
-    const res = await this.relayFetch(path, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(blob)
-    }).catch(() => null);
+    const write = this.relayFetch(
+      path,
+      { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(blob) },
+      current
+    );
+    this.mirrorWrites.add(write);
+    let res: Response | null;
+    try {
+      res = await write;
+    } catch (e) {
+      if (e instanceof MirrorWriteSuperseded) return false;
+      res = null;
+    } finally {
+      this.mirrorWrites.delete(write);
+    }
     if (!res?.ok) this.deps.log('warn', `remote: mirror upload refused (${res?.status ?? 'network error'})`);
     return !!res?.ok;
   }
 
-  /** Drops the whole mirror at the relay (used when the user turns mirroring off). */
-  async clearMirror(): Promise<void> {
-    if (!this.enrolled()) return;
-    await this.relayFetch('/v1/mirror', { method: 'DELETE' }).catch(() => undefined);
+  /** Drops the whole mirror at the relay (mirroring turned off, or the key rotated). Waits for
+   *  uploads already on their way so the clear lands after them. False when the relay did not
+   *  confirm it: the failure is logged and audited, and the clear is retried (on a timer, on the
+   *  next connect, and before the next upload) until the relay confirms it. */
+  async clearMirror(): Promise<boolean> {
+    const ticket = ++this.mirrorClearsRequested;
+    const run = (this.mirrorClearing ?? Promise.resolve(true)).then(() => this.runMirrorClear(ticket));
+    this.mirrorClearing = run;
+    void run.finally(() => {
+      if (this.mirrorClearing === run) this.mirrorClearing = null;
+    });
+    return run;
   }
 
   // --- internals ---
+
+  private mirrorClearPending(): boolean {
+    return this.mirrorClearedThrough < this.mirrorClearsRequested;
+  }
+
+  /** True once no mirror clear is owed: waits for one in progress, and retries one that failed. */
+  private async settleMirrorClear(): Promise<boolean> {
+    if (this.mirrorClearing) await this.mirrorClearing;
+    if (!this.mirrorClearPending()) return true;
+    return this.clearMirror();
+  }
+
+  private async runMirrorClear(ticket: number): Promise<boolean> {
+    if (this.mirrorClearedThrough >= ticket) return true;
+    this.cancelMirrorClearRetry();
+    if (this.enrolled()) {
+      await Promise.allSettled([...this.mirrorWrites]);
+      try {
+        const res = await this.relayFetch('/v1/mirror', { method: 'DELETE' });
+        if (!res.ok) throw new Error(`relay answered ${res.status}`);
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        this.deps.log('warn', `remote: mirror clear failed, will retry: ${why}`);
+        if (!this.mirrorClearFailing) this.deps.audit?.record('mirror-clear-failed', { detail: why });
+        this.mirrorClearFailing = true;
+        this.scheduleMirrorClearRetry();
+        return false;
+      }
+    }
+    // Not enrolled: nothing of this desktop's is reachable, and the relay drops a revoked
+    // desktop's mirror along with it.
+    this.mirrorClearedThrough = Math.max(this.mirrorClearedThrough, ticket);
+    this.mirrorRetryDelay = 0;
+    if (this.mirrorClearFailing) {
+      this.mirrorClearFailing = false;
+      this.deps.log('info', 'remote: mirror clear succeeded on retry');
+      this.deps.audit?.record('mirror-clear-recovered');
+    }
+    return true;
+  }
+
+  private scheduleMirrorClearRetry(): void {
+    if (this.mirrorRetryTimer) return;
+    const first = this.deps.mirrorRetryMs ?? MIRROR_CLEAR_RETRY_MS;
+    this.mirrorRetryDelay = this.mirrorRetryDelay ? Math.min(this.mirrorRetryDelay * 2, Math.max(first, MIRROR_CLEAR_RETRY_MAX_MS)) : first;
+    this.mirrorRetryTimer = setTimeout(() => {
+      this.mirrorRetryTimer = null;
+      if (this.mirrorClearPending()) void this.clearMirror();
+    }, this.mirrorRetryDelay);
+    this.mirrorRetryTimer.unref?.();
+  }
+
+  private cancelMirrorClearRetry(): void {
+    if (this.mirrorRetryTimer) clearTimeout(this.mirrorRetryTimer);
+    this.mirrorRetryTimer = null;
+  }
 
   private clearPairing(): void {
     this.pendingRequest = undefined;
@@ -522,13 +627,16 @@ export class RemoteHost {
   }
 
   /** An authenticated relay REST call as this device. A 401 means the access token expired or was
-   *  dropped: prove possession once more and retry, then report whatever the relay says. */
-  private async relayFetch(path: string, init: RequestInit = {}): Promise<Response> {
+   *  dropped: prove possession once more and retry, then report whatever the relay says.
+   *  `proceed` is asked right before each request leaves (after the token wait); when it says no,
+   *  nothing is sent and the call rejects with MirrorWriteSuperseded. */
+  private async relayFetch(path: string, init: RequestInit = {}, proceed?: () => boolean): Promise<Response> {
     const creds = this.creds;
     if (!creds?.deviceId) throw new Error('remote access is not enrolled');
     const url = `${this.base()}${path}${path.includes('?') ? '&' : '?'}device=${encodeURIComponent(creds.deviceId)}`;
     for (let attempt = 0; ; attempt++) {
       const token = await this.accessToken();
+      if (proceed && !proceed()) throw new MirrorWriteSuperseded();
       const res = await fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
       if (res.status !== 401 || attempt > 0) return res;
       if (this.access?.token === token) this.access = null;
@@ -592,6 +700,8 @@ export class RemoteHost {
     creds.mirrorKey = randomKeyB64();
     await this.saveCreds();
     this.deps.audit?.record('mirror-rotate', { detail: why });
+    // Uploads still sealed under the old key are dropped by their fence; any already on the wire
+    // land first, then this clear removes them. A failed clear is retried before the re-upload.
     await this.clearMirror();
     this.deps.onMirrorRotated?.();
     for (const clientId of [...this.sessions.keys()]) await this.sendTo(clientId, { type: 'mirror.key', key: creds.mirrorKey });
@@ -683,6 +793,7 @@ export class RemoteHost {
       this.deps.log('info', `remote: relay connection open (${enrolled ? 'online' : 'awaiting enrollment'})`);
       this.push();
       if (enrolled) void this.reconcile();
+      if (enrolled && this.mirrorClearPending()) void this.clearMirror();
     });
     ws.on('message', (data) => void this.onMessage(String(data), ws));
     ws.on('close', (code: number) => {

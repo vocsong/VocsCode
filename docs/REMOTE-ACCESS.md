@@ -305,7 +305,12 @@ returns public metadata only), and the **offline encrypted transcript mirror** â
 the desktop, which seals an index plus per-session snapshots with a shared mirror key
 (handed to each browser sealed inside the e2e session) and uploads them as opaque, bounded,
 30-day-TTL blobs; the web client opens them locally and renders a read-only sidebar and
-transcript while the desktop is unreachable. The relay's HTTP surface is now a
+transcript while the desktop is unreachable. Each upload is fenced against the mirror's
+generation, the host and the key it sealed with, re-checked after every await and right before
+the request leaves, so turning the mirror off, stopping it or re-keying it drops an upload still
+in progress instead of publishing it; a clear waits for uploads already on the wire, and a clear
+the relay does not confirm is audited (`mirror-clear-failed`) and retried before the next upload,
+on reconnect and on a backoff timer. The relay's HTTP surface is now a
 **deny-by-default route table** (`relay/src/routes.ts`): every route declares the auth it needs
 (`public`/`account`/`owner`/`enroll`/`device`/`web`/`host`), the dispatcher authorizes before the
 handler runs, and the whole surface is unit-tested in plain Node (`tests/relay-routes.test.ts`) instead

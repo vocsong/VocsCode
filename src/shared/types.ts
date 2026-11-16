@@ -1610,6 +1610,9 @@ export type RemoteAuditAction =
   | 'mirror-rotate'
   | 'mirror-enable'
   | 'mirror-disable'
+  /** The relay did not confirm a mirror clear; it is retried until it does (then 'mirror-clear-recovered'). */
+  | 'mirror-clear-failed'
+  | 'mirror-clear-recovered'
   | 'client-connect'
   | 'client-disconnect'
   | 'handshake-failed'
