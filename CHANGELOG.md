@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.1](https://github.com/vocsong/VocsCode/compare/v0.9.0...v0.9.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **mcp:** keep HTTP and SSE MCP clients on their configured origin ([#507](https://github.com/vocsong/VocsCode/issues/507)) ([cd4a4f5](https://github.com/vocsong/VocsCode/commit/cd4a4f58beea8fb119150b8ca3653daff6de4794))
+* **mcp:** reserve built-in MCP server ids and trust built-ins by provenance ([#510](https://github.com/vocsong/VocsCode/issues/510)) ([c64891b](https://github.com/vocsong/VocsCode/commit/c64891b8c42154887f5db74b089670a3ff73a712))
+* **relay:** enforce rate limits and body budgets before authentication work ([#508](https://github.com/vocsong/VocsCode/issues/508)) ([0baefe4](https://github.com/vocsong/VocsCode/commit/0baefe48d927b7ad189ccfcc495db0f346e380d2))
+* **relay:** retire enrollment grants on revoke-all and recheck admission inside the minting transaction ([#506](https://github.com/vocsong/VocsCode/issues/506)) ([d43a4c2](https://github.com/vocsong/VocsCode/commit/d43a4c24ab164faa8fed38ad90cf8cb617715c0a))
+* **remote:** fence offline mirror publication against disable and key rotation ([#509](https://github.com/vocsong/VocsCode/issues/509)) ([8be92ce](https://github.com/vocsong/VocsCode/commit/8be92cec3f382d2921898b453d2bfdd81f11aec9))
+
 ## [0.9.0](https://github.com/vocsong/VocsCode/compare/v0.8.0...v0.9.0) (2026-11-15)
 
 
