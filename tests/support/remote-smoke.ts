@@ -125,6 +125,9 @@ export async function remoteSmoke(options: {
     const url = new URL(String(input));
     const headers = new Headers(init.headers);
     if (url.pathname.startsWith('/v1/')) {
+      // A browser sends its page's Origin on every non-GET request; the landing refuses a signed-in
+      // write without it, as it should a cross-site form.
+      if (options.sessionCookie && (init.method ?? 'GET').toUpperCase() !== 'GET') headers.set('origin', url.origin);
       if (options.sessionCookie) headers.set('cookie', options.sessionCookie);
       else if (options.accountAssertionSecret) {
         headers.set(ACCOUNT_ASSERTION_HEADER, await createAccountAssertion(accountId, init.method ?? 'GET', url.pathname, options.accountAssertionSecret));
