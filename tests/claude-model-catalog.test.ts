@@ -209,6 +209,23 @@ describe('Claude model catalog', () => {
     ]);
   });
 
+  it('names the recommendation after the model it points at when the runtime describes it as a sentence', async () => {
+    // The bundled runtime, in some account states, describes the default row this way; the pill
+    // showed "anthropic/Use the default model (currently Opus 5.5) (recommended)".
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      { value: 'default', resolvedModel: 'claude-opus-5-5', displayName: 'Default (recommended)', description: 'Use the default model (currently Opus 5.5) · Best for everyday, complex tasks' },
+      { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5', displayName: 'Sonnet 5.5', description: 'Most efficient for simpler tasks' }
+    ]), close: vi.fn() });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+
+    const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' })], runtime);
+
+    expect(r.models.slice(0, 2).map((m) => [m.id, m.displayName])).toEqual([
+      ['claude-opus-5-5', 'Opus 5.5 (recommended)'],
+      ['claude-sonnet-5-5', 'Sonnet 5.5']
+    ]);
+  });
+
   it('does not offer Opus Plan Mode, even when the runtime lists opusplan before the model it resolves to', async () => {
     // Claude Code 0.3.280 lists opusplan only when the user's model setting is opusplan, and resolves
     // it to the execution model. Pinned, it would become a "Opus Plan Mode" row that runs plain Sonnet.

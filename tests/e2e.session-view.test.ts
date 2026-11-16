@@ -208,14 +208,14 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.screenshot({ path: path.join(shots, 'session-view-02-work.png') });
     await work.click();
 
-    // The changes chip opens Changes; the compact model and context stay visible, spend lives in options.
+    // The changes chip opens Changes; the provider/model and context stay visible, spend lives in options.
     await changes.click();
     await win.locator('.panel-tab.active', { hasText: 'Changes' }).waitFor({ timeout: 10_000 });
     await win.locator('.changes').waitFor({ timeout: 10_000 });
     const composer = win.locator('.pane.active .composer');
     const model = composer.locator('.run-controls .pill[title="Model"]');
-    expect(await model.innerText()).toMatch(/claude-opus-5-5|Opus 5\.5/i);
-    expect(await model.innerText()).not.toContain('anthropic/');
+    expect(await model.locator('.pill-text').innerText()).toMatch(/^anthropic\/(claude-opus-5-5|Opus 5\.5)/i);
+    expect(await model.locator('.pill-effort').innerText()).toBe('default');
     expect(await model.getAttribute('aria-label')).toContain('anthropic/claude-opus-5-5');
     const meter = composer.getByRole('button', { name: 'Session usage' });
     expect(await meter.innerText()).toBe('32%');
