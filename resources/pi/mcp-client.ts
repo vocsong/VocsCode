@@ -18,6 +18,8 @@ export interface PiMcpServerConfig {
   url?: string;
   headers?: Record<string, string>;
   timeoutMs?: number;
+  /** App-owned provenance: which built-in this is. Only the host sets it (see vocs-code-mcp.ts). */
+  builtin?: string;
 }
 
 export interface PiMcpTool {

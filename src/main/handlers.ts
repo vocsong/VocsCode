@@ -39,7 +39,7 @@ import { clearWhichCache, clearRuntimeProbeCache, HARNESS_PACKAGES, runCapture, 
 import { assertHarnessId, openHarnessLogin, readHarnessSetup, withAppCredentials } from './harness-setup';
 import type { SecretStore } from './secrets';
 import type { SessionManager } from './session-manager';
-import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
+import { mcpServersSaveError, normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
 import { PiConfigStore, runPiCommand } from './pi-config';
 import { AppInstructions } from './app-instructions';
@@ -1020,7 +1020,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('mcp:project', ({ sessionId }) => projectInfo(mcpScope(sessionId)));
   handle('mcp:project:save', async ({ sessionId, servers }) => {
     const scope = mcpScope(sessionId);
-    const r = await writeProjectMcp(scope.cwd, normalizeMcpServers(servers));
+    const next = normalizeMcpServers(servers);
+    const refused = mcpServersSaveError(next, (await readProjectMcp(scope.cwd)).servers);
+    if (refused) return { ok: false, error: refused };
+    const r = await writeProjectMcp(scope.cwd, next);
     if (!r.ok) deps.log('warn', `[${sessionId}] could not write ${r.file}: ${r.error ?? 'unknown error'}`);
     return { ok: r.ok, error: r.error };
   });
@@ -1051,14 +1054,21 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     // Sentence punctuation also avoids electron-vite's ESM shim mistaking this literal for an import.
     if (!incoming.length) return { ok: false, error: 'No MCP servers to import.' };
     if (to === 'global') {
-      await settings.update({ mcpServers: mergeById(settings.get().mcpServers ?? [], incoming) });
+      const current = settings.get().mcpServers ?? [];
+      const merged = mergeById(current, incoming);
+      const refused = mcpServersSaveError(merged, current);
+      if (refused) return { ok: false, error: refused };
+      await settings.update({ mcpServers: merged });
       return { ok: true };
     }
     if (!sessionId) return { ok: false, error: 'No session' };
     const scope = mcpScope(sessionId);
     const current = await readProjectMcp(scope.cwd);
     if (current.error) return { ok: false, error: current.error };
-    const r = await writeProjectMcp(scope.cwd, mergeById(current.servers, incoming));
+    const merged = mergeById(current.servers, incoming);
+    const refused = mcpServersSaveError(merged, current.servers);
+    if (refused) return { ok: false, error: refused };
+    const r = await writeProjectMcp(scope.cwd, merged);
     return { ok: r.ok, error: r.error };
   });
   handle('mcp:export', async ({ sessionId }) => {

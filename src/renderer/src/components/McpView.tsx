@@ -5,6 +5,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { McpServerDef, McpStoreInfo } from '../../../shared/types';
 import { MCP_BUILTIN_IDS } from '../../../shared/types';
+import { mcpIdIssues } from '../../../shared/mcp-ids';
 import { invoke } from '../api';
 import { useStore } from '../store';
 import { McpServerForm, emptyServer, serverSummary } from './McpServerForm';
@@ -26,6 +27,9 @@ export function McpView() {
   const servers = useMemo(() => settings?.mcpServers ?? [], [settings]);
   // The built-in is not a user entry; a same-named leftover in the store is inert and hidden here.
   const userServers = useMemo(() => servers.filter((d) => !MCP_BUILTIN_IDS.includes(d.id)), [servers]);
+  // A server saved under a name that folds onto a built-in's, or onto another server's, is never
+  // loaded; it stays listed with the reason so it can be renamed or removed.
+  const notLoaded = useMemo(() => new Map(mcpIdIssues(userServers).map((issue) => [issue.id, issue.reason])), [userServers]);
   const builtinOff = (id: string) => (settings?.mcpDisabledBuiltins ?? []).includes(id);
   const setBuiltinGlobally = (id: string, on: boolean) => {
     const cur = settings?.mcpDisabledBuiltins ?? [];
@@ -45,13 +49,19 @@ export function McpView() {
     void load();
   }, [load]);
 
-  const save = async (list: McpServerDef[]) => {
-    await invoke('settings:update', { mcpServers: list });
+  const save = async (list: McpServerDef[]): Promise<boolean> => {
+    try {
+      await invoke('settings:update', { mcpServers: list });
+      return true;
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+      return false;
+    }
   };
 
   const upsert = async (def: McpServerDef) => {
     const exists = userServers.some((s) => s.id === def.id);
-    await save(exists ? userServers.map((s) => (s.id === def.id ? { ...s, ...def } : s)) : [...userServers, def]);
+    if (!(await save(exists ? userServers.map((s) => (s.id === def.id ? { ...s, ...def } : s)) : [...userServers, def]))) return;
     setEditing(null);
     toast(exists ? 'Server updated' : 'Server added', 'success');
   };
@@ -59,7 +69,7 @@ export function McpView() {
   const remove = async (def: McpServerDef) => {
     const ok = await askConfirm({ title: `Remove "${def.id}"?`, body: <>It stops being offered to every harness. Nothing on disk is deleted.</>, confirmLabel: 'Remove', danger: true });
     if (!ok) return;
-    await save(userServers.filter((s) => s.id !== def.id));
+    if (!(await save(userServers.filter((s) => s.id !== def.id)))) return;
     if (editing?.id === def.id) setEditing(null);
   };
 
@@ -160,12 +170,14 @@ export function McpView() {
                         {h}
                       </Badge>
                     ))}
+                    {notLoaded.has(def.id) && <Badge tone="amber">not loaded</Badge>}
                     <span className="spacer" />
                     <Button size="sm" variant="ghost" icon="edit" title="Edit" onClick={() => setEditing({ ...def })} />
                     <Button size="sm" variant="ghost" icon="trash" title="Remove" onClick={() => void remove(def)} />
                   </div>
                   <code className="mcp-cmd mono">{serverSummary(def)}</code>
                   {def.description && <div className="mcp-desc muted small">{def.description}</div>}
+                  {notLoaded.has(def.id) && <div className="mcp-error small" data-testid="mcp-not-loaded">{notLoaded.get(def.id)}</div>}
                 </div>
               )
             )}

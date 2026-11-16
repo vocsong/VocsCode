@@ -38,7 +38,10 @@ interface PiLike {
 }
 
 export interface McpBridgeTool extends PiToolDefinition {
-  /** The app's own memory server may mark a tool read-only; only that server is trusted for it. */
+  /**
+   * The app's own memory server may mark a tool read-only; only that server is trusted for it, and
+   * only when the host's provenance marker says the definition is that server.
+   */
   readOnly: boolean;
   /** App-owned coordination mutates Mission records, NOT a read-only MCP annotation. */
   missionCoordination?: boolean;
@@ -85,6 +88,9 @@ export function parseMcpConfig(json: unknown): PiMcpServerConfig[] {
     const headers = stringRecord(item.headers);
     if (headers) cfg.headers = headers;
     if (typeof item.timeoutMs === 'number' && Number.isFinite(item.timeoutMs) && item.timeoutMs > 0) cfg.timeoutMs = item.timeoutMs;
+    // The host writes this file into its own session directory, and sets `builtin` only on the
+    // definitions it built for its own servers; a user or repository definition never carries it.
+    if (typeof item.builtin === 'string' && item.builtin) cfg.builtin = item.builtin;
     servers.push(cfg);
   }
   return servers;
@@ -173,7 +179,57 @@ export default async function vocsCodeMcp(pi: PiLike): Promise<void> {
 }
 
 /** The app's own memory server, mirroring VOCS_MEMORY_SERVER_ID in src/main/mcp/memory.ts. */
-const MEMORY_SERVER = 'vocs_memory';
+const MEMORY_SERVER = 'vocs-memory';
+
+/**
+ * The app's built-in server ids, mirroring `MCP_BUILTIN_IDS` in src/shared/types.ts. Their names are
+ * reserved in every spelling that folds to the same tool names (see `reservedKey`).
+ */
+export const BUILTIN_SERVERS: readonly string[] = [CODE_GRAPH_SERVER, MEMORY_SERVER, 'cua-driver', MISSION_SERVER_ID];
+
+/**
+ * Mirrors `mcpIdKey` in src/shared/mcp-ids.ts: case and every run of `-`, `_`, `.` fold together.
+ * tests/pi-mcp-builtin-trust.test.ts pins this and the list above to the host's copies.
+ */
+export function reservedKey(id: string): string {
+  return String(id ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+/** The built-in a name folds onto, if any; mirrors `reservedBuiltinFor` in src/shared/mcp-ids.ts. */
+export function reservedBuiltinName(id: string): string | undefined {
+  return BUILTIN_SERVERS.find((builtin) => reservedKey(builtin) === reservedKey(id));
+}
+
+/** The built-in a definition is, by its host-set provenance and exact id; never by name alone. */
+function provenance(cfg: PiMcpServerConfig): string | undefined {
+  return cfg.builtin && BUILTIN_SERVERS.includes(cfg.builtin) && cfg.id === cfg.builtin ? cfg.builtin : undefined;
+}
+
+/**
+ * Drops a server this bridge must not load, with a line on stderr: one whose name folds onto a
+ * built-in's without being that built-in, and a second one whose tool names would collide with an
+ * earlier server's. Both checks also run in the host; this is the last place they can.
+ */
+function admitServers(servers: PiMcpServerConfig[]): PiMcpServerConfig[] {
+  const seen = new Map<string, string>();
+  const admitted: PiMcpServerConfig[] = [];
+  for (const cfg of servers) {
+    const reserved = reservedBuiltinName(cfg.id);
+    if (reserved && provenance(cfg) !== reserved) {
+      console.error(`[vocs-code-mcp] skipping MCP server "${cfg.id}": the name is reserved for the built-in ${reserved} server`);
+      continue;
+    }
+    const key = sanitizeToolName(cfg.id);
+    const holder = seen.get(key);
+    if (holder !== undefined) {
+      console.error(`[vocs-code-mcp] skipping MCP server "${cfg.id}": its tool names collide with "${holder}"`);
+      continue;
+    }
+    seen.set(key, cfg.id);
+    admitted.push(cfg);
+  }
+  return admitted;
+}
 
 /**
  * State shared by every session in this pi process — the parent and each subagent child. A child is
@@ -207,6 +263,7 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
   }
   // Reserved identity cannot be supplied by a file or a sanitization collision.
   if (servers.some((cfg) => sanitizeToolName(cfg.id) === 'vocs_mission')) throw new Error('Mission MCP configuration must be ephemeral and host-owned.');
+  servers = admitServers(servers);
   if (managed) {
     let injected: PiMcpServerConfig[];
     try { injected = parseMcpConfig(JSON.parse(ephemeral ?? '')); }
@@ -244,21 +301,28 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
       throw new Error('Required Mission MCP surface is incompatible.');
     }
 
-    const serverId = sanitizeToolName(cfg.id);
-    const guidelines = serverId === CODE_GRAPH_SERVER ? CODE_GRAPH_GUIDELINES : undefined;
+    // Trust follows the host-set provenance, never the server's name or its tool annotations.
+    const builtin = mission ? undefined : provenance(cfg);
+    const guidelines = builtin === CODE_GRAPH_SERVER ? CODE_GRAPH_GUIDELINES : undefined;
 
     for (const tool of listed) {
       const description = tool.description ?? 'MCP tool ' + tool.name + ' from ' + cfg.id;
+      // Managed coordination uses its own namespace, not the ordinary MCP approval category.
+      // The Mission gate validates this exact broker-derived list; these are not read-only tools.
+      const name = mission ? tool.name : toolNameFor(cfg.id, tool.name);
+      // Two tool names that fold together would register one name for two tools; keep the first.
+      if (tools.some((registered) => registered.name === name)) {
+        console.error(`[vocs-code-mcp] skipping MCP tool "${tool.name}" from "${cfg.id}": its name collides with another tool`);
+        continue;
+      }
       tools.push({
-        // Managed coordination uses its own namespace, not the ordinary MCP approval category.
-        // The Mission gate validates this exact broker-derived list; these are not read-only tools.
-        name: mission ? tool.name : toolNameFor(cfg.id, tool.name),
+        name,
         label: cfg.id + ': ' + tool.name,
         description,
         promptSnippet: promptSnippetFor(tool.description, tool.name),
         ...(guidelines ? { promptGuidelines: [...guidelines] } : {}),
         parameters: tool.inputSchema && typeof tool.inputSchema === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
-        readOnly: serverId === MEMORY_SERVER && tool.readOnly === true,
+        readOnly: builtin === MEMORY_SERVER && tool.readOnly === true,
         ...(mission ? { missionCoordination: true } : {}),
         async execute(_id, params) {
           let result;
