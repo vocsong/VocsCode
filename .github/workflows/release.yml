@@ -1,9 +1,10 @@
 name: release
 
 # Builds the installers for a version tag and attaches them to the GitHub
-# Release. Triggered by the tag release-please pushes (v*), or dispatched
-# manually with a tag when the default-token recursion rule blocked it.
-# See docs/RELEASING.md.
+# Release. Triggered by the tag push (v*), or dispatched manually with a tag
+# when the default-token recursion rule blocked it. Either way the
+# verify-tag gate runs first: nothing builds unless the tag's commit is on
+# master and CI passed on that exact commit. See docs/RELEASING.md.
 on:
   push:
     tags: ['v*']
@@ -14,10 +15,21 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  verify-tag:
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/verify-release-tag.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+
   build:
+    needs: verify-tag
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -33,10 +45,11 @@ jobs:
       # No signing certs yet; skip the identity search so mac builds don't fail.
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
-      - uses: actions/checkout@v4
+      # The verified commit, not the tag name: a tag moved after the gate cannot change the build.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+          ref: ${{ needs.verify-tag.outputs.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
