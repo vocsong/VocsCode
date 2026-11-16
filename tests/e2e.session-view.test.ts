@@ -181,6 +181,9 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     // innerText reads a hidden element's text too, so every header item is first waited on as visible.
     const crumbs = titleRow.locator('.header-crumbs');
     await crumbs.waitFor({ state: 'visible', timeout: 30_000 });
+    // The folder crumb renders first; the branch arrives with the session's git summary, which
+    // loads asynchronously, so wait for it rather than reading the crumbs once.
+    await crumbs.getByText('feat/rate-limit', { exact: true }).waitFor({ timeout: 30_000 });
     expect(await crumbs.innerText()).toContain('feat/rate-limit');
     expect(await head.locator('.header-controls').count()).toBe(0);
     expect(await head.getAttribute('data-width')).toBe('wide');
