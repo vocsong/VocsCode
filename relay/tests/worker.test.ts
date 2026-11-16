@@ -3,6 +3,8 @@ import { abortAllDurableObjects, evictDurableObject, runInDurableObject, SELF } 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { hashToken, PairError, resolvePairing, type RelayStorage, type RelayStore } from '../src/core';
 import { ACCOUNT_ASSERTION_HEADER, createAccountAssertion, INTERNAL_ACCOUNT_ID_HEADER } from '../src/account';
+import { MAX_BODY_BYTES, SMALL_BODY_BYTES } from '../src/edge';
+import { randomToken } from '../src/core';
 import { generateIdentity, openSealedToKey, pairingDecisionPayload, pairingTokenContext, publicOf, sign, tokenProofPayload, type Identity, type SealedToKey } from '../../src/shared/crypto';
 import type { Env as RelayEnv } from '../src/worker';
 
@@ -96,8 +98,8 @@ async function accessToken(device: string, refresh: string, identity: Identity):
   return (await issued.json<{ accessToken: string }>()).accessToken;
 }
 
-/** A web device written straight into storage, with `token` already granted as an access token:
- *  for the socket-glue tests that are not about how tokens are obtained. */
+/** A web device written straight into storage, with `token` (relay-minted shape) already granted
+ *  as an access token: for the socket-glue tests that are not about how tokens are obtained. */
 async function seedBrowser(webId: string, token: string): Promise<void> {
   await runInDurableObject(hub(), async (_instance, state) => {
     await state.storage.put(`device:${env.RELAY_ACCOUNT}:${webId}`, {
@@ -420,6 +422,24 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect((await accountRequest('/v1/pair/claim', { method: 'POST', headers: { 'cf-connecting-ip': '198.51.100.200', 'content-type': 'application/json' }, body: '{}' })).status).toBe(400);
   });
 
+  it('applies route budgets before authentication and still takes an authenticated mirror upload', async () => {
+    const { hostId, hostToken } = await pair();
+    // No credential: refused at the edge, whatever the body.
+    expect((await request(`/v1/mirror/s_1?device=${hostId}`, { method: 'PUT', body: 'x'.repeat(256 * 1024) })).status).toBe(401);
+    expect((await request(`/v1/mirror/s_1?device=${hostId}`, { method: 'PUT', headers: { Authorization: 'Bearer wrong' }, body: '{}' })).status).toBe(401);
+    // A control route takes kilobytes even from a real device; the mirror takes its megabytes.
+    const pairing = await request(`/v1/pair/start?device=${hostId}`, { method: 'POST', headers: { Authorization: `Bearer ${hostToken}` }, body: 'x'.repeat(SMALL_BODY_BYTES + 1) });
+    expect(pairing.status).toBe(413);
+    const blob = { iv: 'AAAAAAAAAAAAAAAA', ct: 'B'.repeat(1_900_000) };
+    const put = await request(`/v1/mirror/s_1?device=${hostId}`, { method: 'PUT', headers: { Authorization: `Bearer ${hostToken}`, 'content-type': 'application/json' }, body: JSON.stringify(blob) });
+    expect(put.status).toBe(200);
+    const read = await request(`/v1/mirror/s_1?device=${hostId}`, { headers: { Authorization: `Bearer ${hostToken}` } });
+    expect(await read.json()).toEqual(blob);
+    expect((await request(`/v1/mirror/s_1?device=${hostId}`, { method: 'PUT', headers: { Authorization: `Bearer ${hostToken}` }, body: 'x'.repeat(MAX_BODY_BYTES + 1) })).status).toBe(413);
+    // Routes the Hub does not serve are answered at the edge.
+    expect((await request('/v1/nothing-here')).status).toBe(404);
+  });
+
   it('drops malformed and unsupported host frames without delivering them to a paired browser', async () => {
     const { hostId, hostToken, webId, webToken } = await pair();
     const host = await open('host', hostId, hostToken);
@@ -462,7 +482,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
 
   it('requires a real upgrade before consuming a ticket and rejects replay, bearer URL, and revocation', async () => {
     const webId = 'w_ticket_test';
-    const token = 'local-test-token';
+    const token = randomToken();
     await seedBrowser(webId, token);
     const ticket = await ticketFor(webId, token);
     const path = `/v1/ws/client?device=${webId}&ticket=${ticket}`;
@@ -488,7 +508,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
 
   it('consumes only once across DO eviction and fresh upgrade', async () => {
     const webId = 'w_evicted_ticket';
-    const token = 'eviction-test-token';
+    const token = randomToken();
     await seedBrowser(webId, token);
     const ticket = await ticketFor(webId, token);
     await evictDurableObject(hub());
@@ -502,7 +522,7 @@ describe('relay Hub in the Cloudflare runtime', () => {
 
   it('restores persisted ciphertext after eviction and a fresh socket upgrade', async () => {
     const webId = 'w_reconnect';
-    const token = 'local-test-token';
+    const token = randomToken();
     await seedBrowser(webId, token);
     await runInDurableObject(hub(), async (_instance, state) => {
       await state.storage.put(`q:${webId}`, [{ t: 'd', seq: 8, payload: { salt: 's', seq: 8, ct: 'AAAA' } }]);
