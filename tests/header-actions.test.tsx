@@ -172,12 +172,12 @@ describe('header actions', () => {
 });
 
 describe('composer run controls', () => {
-  it('keeps the provider in accessible details and reads a pasted qualified name back', async () => {
+  it('names the provider in the pill and reads a pasted qualified name back', async () => {
     // A configured provider is what makes the first segment of a typed name a provider.
     useStore.setState({ settings: { providers: [{ id: 'openrouter' }] } } as never);
     const { container } = setupControls({ activeModel: { provider: 'deepseek', model: 'deepseek-v4-flash' } });
     const pill = container.querySelector('[title="Model"]') as HTMLElement;
-    expect(pill.textContent?.trim()).toBe('deepseek-v4-flash');
+    expect(pill.querySelector('.pill-text')?.textContent).toBe('deepseek/deepseek-v4-flash');
     expect(pill.getAttribute('aria-label')).toContain('deepseek/deepseek-v4-flash');
 
     fireEvent.click(pill);
@@ -196,10 +196,10 @@ describe('composer run controls', () => {
     );
   });
 
-  it('puts effort inside the model menu and keeps permissions as their own pill', () => {
+  it('shows effort beside the model and in the model menu, and keeps permissions as their own pill', () => {
     const { container } = setupControls({ activeEffort: 'high' });
     const pill = container.querySelector('[title="Model"]') as HTMLElement;
-    expect(pill.textContent).not.toContain('high');
+    expect(pill.querySelector('.pill-effort')?.textContent).toBe('high');
     fireEvent.click(pill);
     expect(screen.getByRole('menuitem', { name: /^Effort/ }).textContent).toContain('high');
     fireEvent.mouseDown(document.body);
@@ -215,6 +215,18 @@ describe('composer run controls', () => {
     setupControls();
     fireEvent.click(screen.getByTitle('Model'));
     expect(screen.getByRole('menuitem', { name: /^Effort/ }).textContent).toContain('default');
+  });
+
+  it('names the model provider-first in the pill, with the effort beside it as its own lighter label', () => {
+    const opus = { provider: 'anthropic', model: 'claude-opus-5-5' };
+    const { container } = setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask', model: opus, effort: 'xhigh' } as SessionMeta['config'] });
+    act(() => useStore.setState({ models: { s_h: [{ id: opus.model, provider: opus.provider, displayName: 'Opus 5.5', supportedEfforts: ['low', 'high', 'xhigh'] }] } }));
+    const pill = container.querySelector('[title="Model"]') as HTMLElement;
+    expect(pill.querySelector('.pill-text')?.textContent).toBe('anthropic/Opus 5.5');
+    expect(pill.querySelector('.pill-text')?.getAttribute('title')).toBe('anthropic/claude-opus-5-5');
+    expect(pill.querySelector('.pill-effort')?.textContent).toBe('xhigh');
+    // Effort follows the name, so the name truncates first and the effort stays readable.
+    expect(pill.querySelector('.pill-text')?.nextElementSibling).toBe(pill.querySelector('.pill-effort'));
   });
 
   it('explains when a model takes no effort, and drops effort from the pill', () => {
