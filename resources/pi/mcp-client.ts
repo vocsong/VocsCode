@@ -154,6 +154,23 @@ class StdioTransport implements PiTransport {
   }
 }
 
+/** The configured URL, which must be http(s); every request goes to exactly this URL. */
+function httpUrl(cfg: PiMcpServerConfig): URL {
+  const url = new URL(cfg.url ?? '');
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`MCP server "${cfg.id}" URL must use http or https, not ${url.protocol}`);
+  }
+  return url;
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** A response that points somewhere else; a 304 or a bare 300 is an answer, not a redirect. */
+function isRedirect(response: Response): boolean {
+  if (response.type === 'opaqueredirect' || REDIRECT_STATUSES.has(response.status)) return true;
+  return response.status >= 300 && response.status < 400 && response.headers.has('location');
+}
+
 /** JSON-RPC 2.0 over HTTP POST, accepting a plain JSON or SSE-framed response. */
 class HttpTransport implements PiTransport {
   private closed = false;
@@ -181,15 +198,22 @@ class HttpTransport implements PiTransport {
   private async post(message: JsonRpcMessage): Promise<void> {
     if (this.closed) throw new Error(`MCP http transport for "${this.cfg.id}" is closed`);
     if (!this.cfg.url) throw new Error(`MCP server "${this.cfg.id}" has no url`);
-    const response = await fetch(this.cfg.url, {
+    const url = httpUrl(this.cfg);
+    // Configured headers are for the configured server only: never follow a redirect elsewhere.
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         accept: 'application/json, text/event-stream',
         ...(this.cfg.headers ?? {})
       },
-      body: JSON.stringify(message)
+      body: JSON.stringify(message),
+      redirect: 'manual'
     });
+    if (isRedirect(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`MCP server "${this.cfg.id}" redirected (HTTP ${response.status}); update its URL in the server settings`);
+    }
     if (!response.ok) throw new Error(`MCP server "${this.cfg.id}" returned HTTP ${response.status}`);
     const body = await response.text();
     if (!body.trim()) return;
@@ -233,6 +257,7 @@ export class PiMcpConnection {
     }
     if (cfg.transport === 'stdio' && !cfg.command) throw new Error(`MCP server "${cfg.id}" has no command`);
     if (cfg.transport === 'http' && !cfg.url) throw new Error(`MCP server "${cfg.id}" has no url`);
+    if (cfg.transport === 'http') httpUrl(cfg);
 
     let connection: PiMcpConnection | undefined;
     try {

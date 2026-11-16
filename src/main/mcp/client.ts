@@ -3,6 +3,7 @@
  * loop will reuse it to merge MCP tools into its tool set (docs/MCP.md §6). The SDK is imported
  * lazily so nothing is loaded until a user actually probes a server. No Electron imports.
  */
+import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { McpInspectResult, McpServerDef } from '../../shared/types';
 import { errorMessage } from '../util/async';
 import type { NativeMcpOAuth } from './oauth';
@@ -66,16 +67,55 @@ async function buildTransport(def: McpServerDef, opts: InspectOptions): Promise<
   }
   if (!def.url) throw new Error('No URL configured');
   const url = new URL(def.url);
+  if (!isHttpUrl(url)) throw new Error(`MCP server URL must use http or https, not ${url.protocol}`);
   if (opts.oauth && opts.oauth.resource !== url.href) throw new Error('MCP OAuth resource mismatch');
   if (opts.oauth && Object.keys(def.headers ?? {}).length) throw new Error('Do not combine MCP OAuth with configured headers');
-  const oauth = opts.oauth ? opts.oauth.transport() : {};
+  const oauth = opts.oauth ? opts.oauth.transport() : undefined;
+  const guarded = originBoundFetch(url, oauth?.fetch);
+  const auth = oauth ? { authProvider: oauth.authProvider } : {};
   const requestInit = def.headers && Object.keys(def.headers).length ? { headers: { ...def.headers } } : undefined;
   if (def.transport === 'sse') {
     const { SSEClientTransport } = await import('@modelcontextprotocol/sdk/client/sse.js');
-    return new SSEClientTransport(url, { requestInit, ...oauth });
+    // The SSE stream's GET prefers eventSourceInit.fetch over fetch, so both carry the guard.
+    return new SSEClientTransport(url, { requestInit, ...auth, fetch: guarded, eventSourceInit: { fetch: guarded } });
   }
   const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
-  return new StreamableHTTPClientTransport(url, { requestInit, ...oauth });
+  return new StreamableHTTPClientTransport(url, { requestInit, ...auth, fetch: guarded });
+}
+
+/**
+ * The fetch every HTTP and SSE transport uses. Configured headers are meant for the configured
+ * server only, so a request must stay on that server's origin and a redirect ends the request
+ * instead of being followed: the user updates the URL rather than the client choosing a new host.
+ */
+export function originBoundFetch(endpoint: URL, base: FetchLike = fetch): FetchLike {
+  // Only http(s) has a comparable origin: every other scheme's origin is the opaque "null".
+  if (!isHttpUrl(endpoint)) throw new Error(`MCP server URL must use http or https, not ${endpoint.protocol}`);
+  return async (input, init) => {
+    const target = new URL(input instanceof URL ? input.href : String(input));
+    if (!isHttpUrl(target) || target.origin !== endpoint.origin) {
+      throw new Error(`MCP request to ${isHttpUrl(target) ? target.origin : target.protocol} refused: only ${endpoint.origin} is configured for this server`);
+    }
+    // Set last, so neither the SDK nor the SSE client's own `redirect: 'follow'` can override it.
+    const response = await base(input, { ...init, redirect: 'manual' });
+    if (isRedirect(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`The MCP server redirected (HTTP ${response.status}); update its URL in the server settings`);
+    }
+    return response;
+  };
+}
+
+function isHttpUrl(url: URL): boolean {
+  return url.protocol === 'http:' || url.protocol === 'https:';
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** A response that points somewhere else; a 304 or a bare 300 is an answer, not a redirect. */
+function isRedirect(response: Response): boolean {
+  if (response.type === 'opaqueredirect' || REDIRECT_STATUSES.has(response.status)) return true;
+  return response.status >= 300 && response.status < 400 && response.headers.has('location');
 }
 
 /**
