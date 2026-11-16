@@ -109,22 +109,22 @@ describe('relay edge rate limits', () => {
   });
 
   it('limits authenticated routes and sockets too, per address and per device, before the Hub is asked', async () => {
-    const address = limiter(3);
+    const address = limiter(6);
     const device = limiter(1);
     const { call, seen } = entry({ ADDRESS_LIMIT: address, DEVICE_LIMIT: device });
     expect((await call('/v1/devices?device=w_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(200);
     expect((await call('/v1/devices?device=w_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(429);
-    // Another device behind the same address has its own budget, under the address ceiling.
+    // Another device behind the same address has its own budget, and so does another route.
     expect((await call('/v1/devices?device=w_2', undefined, { method: 'GET', headers: asDevice })).status).toBe(200);
-    expect((await call('/v1/devices?device=w_3', undefined, { method: 'GET', headers: asDevice })).status).toBe(429);
     expect((await call('/v1/ws/ticket?device=w_1', undefined, { headers: asDevice })).status).toBe(200);
     expect((await call('/v1/mirror/s_1?device=h_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(200);
-    // Every session id shares one budget: a fresh path does not buy a fresh counter.
+    // Every session id shares the device's budget: a fresh path does not buy a fresh counter.
     expect((await call('/v1/mirror/s_2?device=h_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(429);
-    expect((await call('/v1/ws/host?device=h_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(200);
-    expect(address.keys().sort()).toEqual(['GET /v1/devices|198.51.100.7', 'GET /v1/mirror/|198.51.100.7', 'GET /v1/ws/host|198.51.100.7', 'POST /v1/ws/ticket|198.51.100.7']);
+    // The address total is one counter across every device route: the seventh request is refused.
+    expect((await call('/v1/ws/host?device=h_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(429);
+    expect(address.keys()).toEqual(['198.51.100.7']);
     expect(device.keys()).toContain('GET /v1/mirror/|h_1|198.51.100.7');
-    expect(seen).toEqual(['/devices', '/devices', '/ws/ticket', '/mirror/s_1', '/ws/host']);
+    expect(seen).toEqual(['/devices', '/devices', '/ws/ticket', '/mirror/s_1']);
   });
 
   it('answers unknown routes and methods at the edge, and passes through without bindings', async () => {
@@ -207,6 +207,73 @@ describe('relay edge budgets for shared and rotating addresses', () => {
       }
       const index = await call(`/v1/mirror?device=${desktop}`, '198.51.100.7', { method: 'PUT', headers: asDevice, body: '{}' });
       if (index.status !== 200) refused.push(`round ${round} index: ${index.status}`);
+    }
+    expect(refused).toEqual([]);
+  });
+
+  it('caps one address with a single total across every device route, however many device ids it names', async () => {
+    const { limits, limiters } = configured();
+    const total = limits.ADDRESS_LIMIT;
+    expect(total).toBeGreaterThan(0);
+    const { call, seen } = entry(limiters);
+    const routes: Array<[string, (device: string) => string, string | undefined]> = [
+      ['POST', (d) => `/v1/ws/ticket?device=${d}`, undefined],
+      ['GET', (d) => `/v1/ws/host?device=${d}`, undefined],
+      ['GET', (d) => `/v1/ws/client?device=${d}&ticket=${randomToken()}`, undefined],
+      ['GET', (d) => `/v1/devices?device=${d}`, undefined],
+      ['DELETE', (d) => `/v1/devices?device=${d}&target=x`, undefined],
+      ['POST', (d) => `/v1/devices/revoke-all?device=${d}`, undefined],
+      ['GET', (d) => `/v1/mirrors?device=${d}`, undefined],
+      ['GET', (d) => `/v1/mirror?device=${d}`, undefined],
+      ['PUT', (d) => `/v1/mirror?device=${d}`, '{}'],
+      ['DELETE', (d) => `/v1/mirror?device=${d}`, undefined],
+      ['GET', (d) => `/v1/mirror/s_1?device=${d}`, undefined],
+      ['PUT', (d) => `/v1/mirror/s_1?device=${d}`, '{}'],
+      ['DELETE', (d) => `/v1/mirror/s_1?device=${d}`, undefined]
+    ];
+    const statuses: number[] = [];
+    for (let i = 0; i <= total; i++) {
+      const [method, path, body] = routes[i % routes.length];
+      const headers = method === 'GET' && path('x').includes('ticket=') ? {} : asDevice;
+      statuses.push((await call(path(legacyId(i % 2 ? 'h' : 'w')), '198.51.100.7', { method, headers, body })).status);
+    }
+    expect(statuses.slice(0, total).every((status) => status === 200)).toBe(true);
+    expect(statuses[total]).toBe(429);
+    expect(seen).toHaveLength(total);
+  });
+
+  it('takes three syncing desktops, a busy one, their browsers, pairing and token refreshes behind one address', async () => {
+    const { limiters } = configured();
+    const { call } = entry(limiters);
+    const ip = '198.51.100.7';
+    const refused: string[] = [];
+    const expectOk = async (label: string, response: Promise<Response>) => {
+      const status = (await response).status;
+      if (status !== 200) refused.push(`${label}: ${status}`);
+    };
+    // Three desktops' first sync: fifty sessions and the index each.
+    for (const desktop of [legacyId('h'), legacyId('h'), legacyId('h')]) {
+      for (let s = 0; s < 50; s++) await expectOk(`sync ${desktop} s_${s}`, call(`/v1/mirror/s_${s}?device=${desktop}`, ip, { method: 'PUT', headers: asDevice, body: '{}' }));
+      await expectOk(`sync ${desktop} index`, call(`/v1/mirror?device=${desktop}`, ip, { method: 'PUT', headers: asDevice, body: '{}' }));
+    }
+    // A busy desktop: ten active sessions re-uploaded every four seconds for a minute, plus the index.
+    const busy = legacyId('h');
+    for (let round = 0; round < 15; round++) {
+      for (let s = 0; s < 10; s++) await expectOk(`busy s_${s}`, call(`/v1/mirror/s_${s}?device=${busy}`, ip, { method: 'PUT', headers: asDevice, body: '{}' }));
+      await expectOk(`busy index ${round}`, call(`/v1/mirror?device=${busy}`, ip, { method: 'PUT', headers: asDevice, body: '{}' }));
+    }
+    // Their browsers: socket tickets, device lists and a few offline transcripts.
+    for (let b = 0; b < 4; b++) {
+      const browser = legacyId('w');
+      for (let i = 0; i < 3; i++) await expectOk(`browser ticket ${b}`, call(`/v1/ws/ticket?device=${browser}`, ip, { headers: asDevice }));
+      await expectOk(`browser devices ${b}`, call(`/v1/devices?device=${browser}`, ip, { method: 'GET', headers: asDevice }));
+      for (let s = 0; s < 5; s++) await expectOk(`browser mirror ${b}`, call(`/v1/mirror/s_${s}?device=${browser}&host=${busy}`, ip, { method: 'GET', headers: asDevice }));
+    }
+    // Pairing and token refreshes have their own budgets and still go through.
+    await expectOk('pair start', call('/v1/pair/start', ip, { headers: { authorization: 'Bearer enroll-secret' }, body: '{}' }));
+    for (let i = 0; i < 4; i++) {
+      await expectOk('token challenge', call(`/v1/token/challenge?device=${legacyId('w')}`, ip, { headers: asDevice }));
+      await expectOk('token', call(`/v1/token?device=${legacyId('w')}`, ip, { headers: asDevice, body: '{}' }));
     }
     expect(refused).toEqual([]);
   });

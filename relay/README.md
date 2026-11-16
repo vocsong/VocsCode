@@ -55,10 +55,9 @@ order:
 
 1. **An edge rate limit** keyed on method, route and caller (an IPv4 address, or the /64 of an IPv6
    one). Pairing uses `PAIR_LIMIT` (10/min), token exchange `TOKEN_LIMIT` (30/min, however many
-   device ids a caller names), polling and owner routes `POLL_LIMIT` (120/min). Socket, device and
-   mirror routes share an address ceiling, `ADDRESS_LIMIT` (600/min), so devices behind one NAT are
-   not squeezed into one device's budget. Each route has its own counter; every session id under
-   `/v1/mirror/` shares one.
+   device ids a caller names), polling and owner routes `POLL_LIMIT` (120/min); each of these
+   routes has its own counter. Socket, device and mirror routes together share one total per
+   address, `ADDRESS_LIMIT` (400/min), whatever route or device id a request names.
 2. **A declared-size check**: a `Content-Length` over the route's budget is refused (413) unread.
    Mirror uploads (`PUT /v1/mirror`, `PUT /v1/mirror/<id>`) get 2,500,000 bytes; every other route
    16 KiB.
@@ -67,8 +66,10 @@ order:
    so the refusal is the same whether or not the device exists. Pairing and owner routes are
    refused by the Worker's account-assertion check, also before any body is read. A route that
    takes no body (GET) is refused one (400).
-4. **A per-device limit** on socket, device and mirror routes, `DEVICE_LIMIT` (300/min per device
-   and address): room for a desktop's first mirror sync or many active sessions re-uploading.
+4. **A per-device limit** on socket, device and mirror routes, `DEVICE_LIMIT` (300/min per route,
+   device and address; every session id under `/v1/mirror/` shares one): room for a desktop's first
+   mirror sync or many active sessions re-uploading, so devices behind one NAT are not squeezed into
+   one device's budget.
 5. **A bounded, timed body read**: bytes are counted as they stream, so a missing or understated
    `Content-Length` is cut off at the budget (413), and a body that has not arrived in full within
    10 s (60 s for mirror uploads) is abandoned (408).

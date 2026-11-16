@@ -25,7 +25,7 @@ export interface EdgeLimiters {
   TOKEN_LIMIT?: EdgeLimiter;
   /** Device routes, per device and address: one desktop's or browser's own traffic. */
   DEVICE_LIMIT?: EdgeLimiter;
-  /** Device routes, per address: the ceiling every device behind one address shares. */
+  /** Device routes, per address: one total across all of them, shared by every device behind it. */
   ADDRESS_LIMIT?: EdgeLimiter;
 }
 
@@ -53,8 +53,10 @@ export interface EdgeRoute {
   /** Exact path, or a prefix when `prefix` is set. Every id under a prefix shares one budget. */
   path: string;
   prefix?: boolean;
-  /** Consulted for every request on the route, keyed on route and caller address. */
+  /** Consulted for every request on the route, keyed on route and caller address — or on the
+   *  caller alone when `callerWide`, so the budget is one total across every such route. */
   binding: keyof EdgeLimiters;
+  callerWide?: boolean;
   /** Consulted once the credential has the route's shape, keyed on route, device and address, so
    *  devices sharing an address (NAT) each get their own budget under the address ceiling. */
   deviceBinding?: keyof EdgeLimiters;
@@ -63,7 +65,7 @@ export interface EdgeRoute {
   bulk?: boolean;
 }
 
-const DEVICE = { binding: 'ADDRESS_LIMIT', deviceBinding: 'DEVICE_LIMIT' } as const;
+const DEVICE = { binding: 'ADDRESS_LIMIT', callerWide: true, deviceBinding: 'DEVICE_LIMIT' } as const;
 
 /** The Worker's view of the Hub's route table (relay/src/routes.ts) plus the two sockets. A route
  *  missing here is a 404 at the edge; tests/relay-edge.test.ts checks every Hub route is listed. */
@@ -83,9 +85,10 @@ const EDGE_ROUTES: EdgeRoute[] = [
   { method: 'GET', path: '/v1/owner/enroll-grant', binding: 'POLL_LIMIT', credential: 'none' },
   { method: 'GET', path: '/v1/owner/hosts', binding: 'POLL_LIMIT', credential: 'none' },
   { method: 'POST', path: '/v1/owner/pair-request', binding: 'PAIR_LIMIT', credential: 'none' },
-  // Device routes: an address ceiling for everyone behind it, then each device's own budget. A
-  // desktop's first mirror sync uploads up to ~50 sessions at once, and a busy one re-uploads each
-  // active session every few seconds; each route (not each session id) has its own counters.
+  // Device routes: one total per address across all of them (whatever route or device id a request
+  // names), then each device's own budget per route. A desktop's first mirror sync uploads up to ~50
+  // sessions at once, and a busy one re-uploads each active session every few seconds; every
+  // session id under a prefix shares its route's per-device counter.
   { method: 'POST', path: '/v1/ws/ticket', ...DEVICE, credential: 'device' },
   { method: 'GET', path: '/v1/ws/host', ...DEVICE, credential: 'host-socket' },
   { method: 'GET', path: '/v1/ws/client', ...DEVICE, credential: 'ticket' },
@@ -122,7 +125,8 @@ export function edgeRouteFor(method: string, pathname: string): EdgeRoute | null
 function limitKey(route: EdgeRoute, request: Request, device?: string): string {
   const caller = callerKey(request.headers.get('cf-connecting-ip'));
   const bucket = `${route.method} ${route.path}`;
-  return device === undefined ? `${bucket}|${caller}` : `${bucket}|${device}|${caller}`;
+  if (device !== undefined) return `${bucket}|${device}|${caller}`;
+  return route.callerWide ? caller : `${bucket}|${caller}`;
 }
 
 /** A 429 when the edge limit for this endpoint is spent; null to pass the request on. A
