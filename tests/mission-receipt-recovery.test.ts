@@ -14,6 +14,7 @@ import { MissionDeliveryService } from '../src/main/mission/delivery';
 import { MissionWorkspaces } from '../src/main/mission/workspaces';
 import { MissionVerification } from '../src/main/mission/verification';
 import { checkOwnershipDirectory, processOwnershipIntents } from '../src/main/mission/process-ownership';
+import { WINDOWS_SUPERVISOR_STARTUP_MS } from '../src/main/owned-windows-job';
 import { SessionManager } from '../src/main/session-manager';
 import { SessionStore } from '../src/main/store';
 import { defaultSettings, type SettingsStore } from '../src/main/settings';
@@ -40,8 +41,18 @@ let root: string, project: string, data: string, crash: string;
 let runtime: MissionRuntime, sessions: SessionManager, settings: ReturnType<typeof defaultSettings>;
 let contexts: Map<string, HarnessContext>, sends: number, sequence: number;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim();
-// Windows CI Git and real Job receipts can take longer than 30 seconds; still fail within a bounded operation window.
-const wait = (assertion: () => void) => vi.waitFor(assertion, { timeout: 75_000, interval: 25 });
+// Every case runs exactly one real host check, and the operation waiting on it stays in_flight for as
+// long as the product allows that check: up to WINDOWS_SUPERVISOR_STARTUP_MS for its Windows Job
+// supervisor to start (PowerShell and its Add-Type compile, ~23 s per start on GitHub's Windows
+// runners and longer when cold), then the check's own timeout plus the 15 s grace check-process.ts
+// adds after `ready`. A tighter budget fails a live operation on a slow start; one past the bound
+// still fails an operation that never settles.
+const CHECK_TIMEOUT_MS = 10_000;
+const CHECK_BOUND_MS = WINDOWS_SUPERVISOR_STARTUP_MS + CHECK_TIMEOUT_MS + 15_000;
+// Host Git, journal and receipt work around that check (~350 Git processes per integration).
+const HOST_WORK_MS = 75_000;
+const wait = (assertion: () => void) => vi.waitFor(assertion, { timeout: HOST_WORK_MS + CHECK_BOUND_MS, interval: 25 });
+const CASE_TIMEOUT_MS = 90_000 + CHECK_BOUND_MS;
 const current = (id: string) => runtime.service.get(id)!;
 const operation = (id: string, opId: string) => current(id).operations.find((op) => op.id === opId)!;
 
@@ -86,7 +97,7 @@ async function start(kind: 'candidate' | 'target' = 'candidate', value = 'candid
   if (publication) git(project, 'push', path.join(root, 'remote.git'), 'main');
   const record = await runtime.service.create({ idempotencyKey: 'receipt', projectRoot: project, objective: 'Recover exact completed receipts', mode: 'autonomous', permissionMode: 'full-auto' });
   await wait(() => expect(sends).toBe(1));
-  const check = { id: 'behavior', name: 'Actual combined content', kind: 'behavior', command: `node -e "require('node:assert').equal(require('node:fs').readFileSync('${kind === 'target' ? 'remote.txt' : 'a.txt'}','utf8').trim(),'${kind === 'target' ? 'target' : checkValue}')"`, criterionIds: ['outcome'], required: true, heavy: false, timeoutMs: 10_000 };
+  const check = { id: 'behavior', name: 'Actual combined content', kind: 'behavior', command: `node -e "require('node:assert').equal(require('node:fs').readFileSync('${kind === 'target' ? 'remote.txt' : 'a.txt'}','utf8').trim(),'${kind === 'target' ? 'target' : checkValue}')"`, criterionIds: ['outcome'], required: true, heavy: false, timeoutMs: CHECK_TIMEOUT_MS };
   await tool(record.id, 'mission_plan_update', { expectedPlanRevision: current(record.id).planRevision,
     plan: { ...current(record.id).plan, criteria: [{ id: 'outcome', description: 'The actual content is checked', required: true, evidenceKinds: ['behavior'] }] }, checks: [check],
     tasks: kind === 'target' ? [] : [{ id: 'task', revision: 1, specificationRevision: 1, objective: 'Change a.txt', scope: 'a.txt', ownedPaths: ['a.txt'], exclusions: [], dependsOn: [], decisionRefs: [], sharedContracts: [], requiredTools: ['write'], criteria: [], verificationIds: [], assignment: { kind: 'lead' }, required: true }] });
@@ -305,7 +316,7 @@ describe.each(['candidate', 'target'] as const)('production %s integration recov
       expect(restored.blockers.some((blocker) => !blocker.resolvedAt && /No exact atomic promotion receipt/.test(blocker.message))).toBe(true);
     }
     expect(await repositoryState()).toEqual(source);
-  }, 90_000);
+  }, CASE_TIMEOUT_MS);
 
   it.each(['before', 'after'] as const)('recovers %s coordinator-journal acknowledgment with the exact persisted checks', async (when) => {
     const { id } = await start(kind);
@@ -316,7 +327,7 @@ describe.each(['candidate', 'target'] as const)('production %s integration recov
     expect(current(id).blockers.filter((blocker) => !blocker.resolvedAt)).toEqual([]);
     expect(current(id).acceptedRevision).toEqual(await runtime.workspaces.acceptedRevision(id));
     expect(await repositoryState()).toEqual(source);
-  }, 90_000);
+  }, CASE_TIMEOUT_MS);
 });
 
 it('does not infer an empty-delta promotion from accepted-tree equality', async () => {
@@ -327,7 +338,7 @@ it('does not infer an empty-delta promotion from accepted-tree equality', async 
   expect(operation(id, opId).state).toBe('failed'); expect(current(id).tasks[0].status).toBe('accepted');
   expect(current(id).candidates[0].integratedRevision).toBeUndefined();
   expect(current(id).blockers.some((blocker) => !blocker.resolvedAt && /No exact atomic promotion receipt/.test(blocker.message))).toBe(true);
-}, 90_000);
+}, CASE_TIMEOUT_MS);
 
 it.each(['evidence', 'authorization', 'policy'] as const)('retains a completed integration blocker when its %s fence differs', async (field) => {
   const { id, before } = await start(); const opId = await failIntegration(id, 'candidate', 'git', 'after');
@@ -339,7 +350,7 @@ it.each(['evidence', 'authorization', 'policy'] as const)('retains a completed i
   await restartFromCrash();
   expect(operation(id, opId).state).toBe('failed'); expect(current(id).acceptedRevision).toEqual(before.acceptedRevision);
   expect(current(id).blockers.some((blocker) => !blocker.resolvedAt && blocker.message.startsWith(`Integration ${opId} `))).toBe(true);
-}, 90_000);
+}, CASE_TIMEOUT_MS);
 
 it('keeps a known rejected candidate/base attempt immutable even for a new explicit request', async () => {
   const { id } = await start('candidate', 'candidate', 'not-candidate');
@@ -359,7 +370,7 @@ it('keeps a known rejected candidate/base attempt immutable even for a new expli
   expect(current(id).blockers.filter((blocker) => !blocker.resolvedAt)).toEqual([]);
   expect(current(id).evidence).toEqual(evidence);
   expect(current(id).operations.filter((op) => op.kind === 'integrate').map((op) => op.state)).toEqual(['failed', 'failed']);
-}, 90_000);
+}, CASE_TIMEOUT_MS);
 
 it.each(['before', 'after'] as const)('wires completed local delivery inspection after %s journal acknowledgment loss without another commit', async (when) => {
   const { id, opId, receiptFile } = await failDelivery(when);
@@ -389,7 +400,7 @@ it.each(['before', 'after'] as const)('wires completed local delivery inspection
   expect(current(id).completionReport).toEqual(completed.completionReport);
   expect(runtime.store.get(id)?.completionReport).toEqual(completed.completionReport);
   expect(replay).not.toHaveBeenCalled(); expect(createAdapter).toHaveBeenCalledTimes(starts); replay.mockRestore();
-}, 90_000);
+}, CASE_TIMEOUT_MS);
 
 it.each(['partial', 'mismatch', 'authorization'] as const)('blocks %s delivery receipts on actual runtime recovery without repeating external effects', async (failure) => {
   const { id, opId, receiptFile } = await failDelivery('before');
@@ -407,7 +418,7 @@ it.each(['partial', 'mismatch', 'authorization'] as const)('blocks %s delivery r
   expect(current(id).blockers.some((blocker) => !blocker.resolvedAt && blocker.message.startsWith(`Delivery ${opId} `))).toBe(true);
   expect(await fs.readFile(receiptFile)).toEqual(receiptBytes); expect(await repositoryState()).toEqual(source);
   await expect(runtime.service.control({ missionId: id, expectedRevision: current(id).revision, idempotencyKey: 'blocked-resume', control: { action: 'resume' } })).rejects.toThrow();
-}, 90_000);
+}, CASE_TIMEOUT_MS);
 
 describe('production remote delivery recovery (explicit GitHub fixture, real bare Git)', () => {
   it.each([
@@ -459,7 +470,7 @@ describe('production remote delivery recovery (explicit GitHub fixture, real bar
       // Do not probe the absent merge object through Git either: partial clones can lazy-fetch.
       expect(fixture.calls.slice(callCount).some(({ args }) => args.includes(`${api.pr!.mergeCommit!.oid}^{tree}`))).toBe(false);
     }
-  }, 90_000);
+  }, CASE_TIMEOUT_MS);
 
   it.each(['pushed without PR', 'open without merge', 'foreign PR', 'stale merged content', 'revoked authorization', 'uncertain owner'] as const)('keeps %s blocked without replay or false completion', async (failure) => {
     const merge = ['open without merge', 'stale merged content', 'uncertain owner'].includes(failure);
@@ -489,7 +500,7 @@ describe('production remote delivery recovery (explicit GitHub fixture, real bar
     expect(current(id).evidence).toEqual(evidence); expect(effects()).toEqual(counts);
     expect(await fs.readFile(receiptFile)).toEqual(bytes); expect(await repositoryState()).toEqual(source);
     expect(git(remote, 'for-each-ref', '--format=%(refname) %(objectname)')).toBe(remoteRefs);
-  }, 90_000);
+  }, CASE_TIMEOUT_MS);
 
   it('rejects foreign or mismatched remote merge objects before importing a recovered delivery', async () => {
     const fixture = await loseRemoteDelivery('merge_pr', 'merging'), { id, opId, receiptFile, api, effects } = fixture;
@@ -509,7 +520,7 @@ describe('production remote delivery recovery (explicit GitHub fixture, real bar
     expect(current(id).blockers.some((blocker) => !blocker.resolvedAt && /Invalid exact merge commit receipt/.test(blocker.message))).toBe(true);
     await expect(runtime.service.control({ missionId: id, expectedRevision: current(id).revision, idempotencyKey: 'invalid-merge-resume', control: { action: 'resume' } })).rejects.toThrow();
     expect(effects()).toEqual(counts); expect(await fs.readFile(receiptFile)).toEqual(bytes); expect(await repositoryState()).toEqual(source);
-  }, 90_000);
+  }, CASE_TIMEOUT_MS);
 });
 
 it('does not substitute a completed integration marker for missing process ownership proof', async () => {
@@ -522,4 +533,4 @@ it('does not substitute a completed integration marker for missing process owner
   expect(operation(id, opId).state).toBe('reconciling'); expect(current(id).acceptedRevision).toEqual(before.acceptedRevision);
   expect(current(id).blockers.some((blocker) => !blocker.resolvedAt && /External ownership is uncertain/.test(blocker.message))).toBe(true);
   expect(await repositoryState()).toEqual(source);
-}, 90_000);
+}, CASE_TIMEOUT_MS);
