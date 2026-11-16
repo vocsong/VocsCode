@@ -73,9 +73,9 @@ order:
    `Content-Length` is cut off at the budget (413), and a body that has not arrived in full within
    10 s (60 s for mirror uploads) is abandoned (408).
 
-The Hub keeps its own per-address limits and verifies every credential. The controller endpoint
-(`/v1/control/mcp`, disabled in production) is rate limited here and bounds its own body. Edge
-limits are counted per Cloudflare location.
+The Hub keeps its own in-memory per-caller limits, counting callers the same way, and verifies every
+credential. The controller endpoint (`/v1/control/mcp`, disabled in production) is rate limited here
+and bounds its own body. Edge limits are counted per Cloudflare location.
 
 The landing Worker at `code.vocs.io` forwards `/app` and `/v1` (REST and WebSockets under
 `/v1/ws/*`) through a service binding. It is a **separate repo and deployment** (`vocs.io`:
@@ -142,7 +142,7 @@ secret.
 - `src/hub.ts` — frame routing between desktops and browsers, shared by the Durable Object and the
   test relay (`tests/fake-relay.ts`) so local suites run the production rules
 - `src/edge.ts` — the Worker's front door: the edge route table, rate limits, credential shapes, body budgets and deadlines
-- `src/rate.ts` — in-memory fixed-window rate limiter inside the Hub
+- `src/rate.ts` — in-memory fixed-window rate limiter inside the Hub, and how both limiters key a caller
 - `src/worker.ts` — the Worker, per-account Hub Durable Object and short-lived EnrollmentDirectory (platform glue)
 - `src/web-client.ts` — the browser-side pairing, tokens, vault and e2e transport (DOM-free, unit-tested)
 - `src/page.ts` — the web page logic (bundled to `app/app.js` via `npm run relay:page` at the repo root)
