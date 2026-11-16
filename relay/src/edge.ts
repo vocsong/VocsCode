@@ -1,14 +1,15 @@
 /** The relay Worker's front door (docs/REMOTE-ACCESS.md §7). Every `/v1` request is classified
  *  here before it costs more than header parsing: a route the Hub does not serve is answered at
  *  once, and every route — authenticated ones included, since authentication has not happened yet
- *  — passes an edge rate limit keyed on route and address, a credential-shape check, a route-sized
- *  body budget and a body-read deadline. Only then is the body buffered and the Hub woken.
+ *  — passes an edge rate limit keyed on route and caller address, a credential-shape check, a
+ *  route-sized body budget and a body-read deadline; device routes then pass a per-device limit
+ *  too. Only then is the body buffered and the Hub woken.
  *  Cloudflare-free — the bindings are structural — so tests/relay-edge.test.ts runs it in plain
  *  Node.
  *
  *  The edge counters (Workers Rate Limiting) live at each Cloudflare location, cost no Durable
  *  Object work, and survive the Hub hibernating, which resets the Hub's own in-memory limiter.
- *  They are eventually consistent and per location: an abuse brake, not a global ceiling. */
+ *  They are per location and eventually consistent: an abuse brake, not accounting. */
 import { CONTROL_PATH } from './control-auth';
 import { json } from './routes';
 
@@ -21,6 +22,10 @@ export interface EdgeLimiters {
   PAIR_LIMIT?: EdgeLimiter;
   POLL_LIMIT?: EdgeLimiter;
   TOKEN_LIMIT?: EdgeLimiter;
+  /** Device routes, per device and address: one desktop's or browser's own traffic. */
+  DEVICE_LIMIT?: EdgeLimiter;
+  /** Device routes, per address: the ceiling every device behind one address shares. */
+  ADDRESS_LIMIT?: EdgeLimiter;
 }
 
 /** Pairing, token, owner and device-control bodies are a few hundred bytes of JSON. */
@@ -47,13 +52,17 @@ export interface EdgeRoute {
   /** Exact path, or a prefix when `prefix` is set. Every id under a prefix shares one budget. */
   path: string;
   prefix?: boolean;
+  /** Consulted for every request on the route, keyed on route and caller address. */
   binding: keyof EdgeLimiters;
-  /** Key on the device as well as the address, so no one drains another device from elsewhere. */
-  perDevice?: boolean;
+  /** Consulted once the credential has the route's shape, keyed on route, device and address, so
+   *  devices sharing an address (NAT) each get their own budget under the address ceiling. */
+  deviceBinding?: keyof EdgeLimiters;
   credential: Credential;
   /** Takes a mirror blob; every other route gets the small budget. */
   bulk?: boolean;
 }
+
+const DEVICE = { binding: 'ADDRESS_LIMIT', deviceBinding: 'DEVICE_LIMIT' } as const;
 
 /** The Worker's view of the Hub's route table (relay/src/routes.ts) plus the two sockets. A route
  *  missing here is a 404 at the edge; tests/relay-edge.test.ts checks every Hub route is listed. */
@@ -62,8 +71,10 @@ const EDGE_ROUTES: EdgeRoute[] = [
   // The account assertion on these is verified in the Worker before any Hub is selected.
   { method: 'POST', path: '/v1/pair/claim', binding: 'PAIR_LIMIT', credential: 'none' },
   { method: 'GET', path: '/v1/pair/poll', binding: 'POLL_LIMIT', credential: 'none' },
-  { method: 'POST', path: '/v1/token/challenge', binding: 'TOKEN_LIMIT', perDevice: true, credential: 'device' },
-  { method: 'POST', path: '/v1/token', binding: 'TOKEN_LIMIT', perDevice: true, credential: 'device' },
+  // Keyed on the address alone: devices refresh about hourly, and naming more device ids must not
+  // buy more attempts. Other addresses keep their own budgets.
+  { method: 'POST', path: '/v1/token/challenge', binding: 'TOKEN_LIMIT', credential: 'device' },
+  { method: 'POST', path: '/v1/token', binding: 'TOKEN_LIMIT', credential: 'device' },
   // Polled while the owner signs in, like /pair/poll; the one-time secret is in the body.
   { method: 'POST', path: '/v1/enroll/redeem', binding: 'POLL_LIMIT', credential: 'none' },
   // Owner routes also need the landing's service credential, which the Hub checks.
@@ -71,21 +82,22 @@ const EDGE_ROUTES: EdgeRoute[] = [
   { method: 'GET', path: '/v1/owner/enroll-grant', binding: 'POLL_LIMIT', credential: 'none' },
   { method: 'GET', path: '/v1/owner/hosts', binding: 'POLL_LIMIT', credential: 'none' },
   { method: 'POST', path: '/v1/owner/pair-request', binding: 'PAIR_LIMIT', credential: 'none' },
-  // Device routes. A desktop's first mirror sync uploads up to ~50 sessions at once, well inside
-  // the poll budget; each route (not each session id) has its own counter.
-  { method: 'POST', path: '/v1/ws/ticket', binding: 'POLL_LIMIT', credential: 'device' },
-  { method: 'GET', path: '/v1/ws/host', binding: 'POLL_LIMIT', credential: 'host-socket' },
-  { method: 'GET', path: '/v1/ws/client', binding: 'POLL_LIMIT', credential: 'ticket' },
-  { method: 'GET', path: '/v1/devices', binding: 'POLL_LIMIT', credential: 'device' },
-  { method: 'DELETE', path: '/v1/devices', binding: 'POLL_LIMIT', credential: 'device' },
-  { method: 'POST', path: '/v1/devices/revoke-all', binding: 'POLL_LIMIT', credential: 'device' },
-  { method: 'GET', path: '/v1/mirrors', binding: 'POLL_LIMIT', credential: 'device' },
-  { method: 'GET', path: '/v1/mirror', binding: 'POLL_LIMIT', credential: 'device' },
-  { method: 'PUT', path: '/v1/mirror', binding: 'POLL_LIMIT', credential: 'device', bulk: true },
-  { method: 'DELETE', path: '/v1/mirror', binding: 'POLL_LIMIT', credential: 'device' },
-  { method: 'GET', path: '/v1/mirror/', prefix: true, binding: 'POLL_LIMIT', credential: 'device' },
-  { method: 'PUT', path: '/v1/mirror/', prefix: true, binding: 'POLL_LIMIT', credential: 'device', bulk: true },
-  { method: 'DELETE', path: '/v1/mirror/', prefix: true, binding: 'POLL_LIMIT', credential: 'device' },
+  // Device routes: an address ceiling for everyone behind it, then each device's own budget. A
+  // desktop's first mirror sync uploads up to ~50 sessions at once, and a busy one re-uploads each
+  // active session every few seconds; each route (not each session id) has its own counters.
+  { method: 'POST', path: '/v1/ws/ticket', ...DEVICE, credential: 'device' },
+  { method: 'GET', path: '/v1/ws/host', ...DEVICE, credential: 'host-socket' },
+  { method: 'GET', path: '/v1/ws/client', ...DEVICE, credential: 'ticket' },
+  { method: 'GET', path: '/v1/devices', ...DEVICE, credential: 'device' },
+  { method: 'DELETE', path: '/v1/devices', ...DEVICE, credential: 'device' },
+  { method: 'POST', path: '/v1/devices/revoke-all', ...DEVICE, credential: 'device' },
+  { method: 'GET', path: '/v1/mirrors', ...DEVICE, credential: 'device' },
+  { method: 'GET', path: '/v1/mirror', ...DEVICE, credential: 'device' },
+  { method: 'PUT', path: '/v1/mirror', ...DEVICE, credential: 'device', bulk: true },
+  { method: 'DELETE', path: '/v1/mirror', ...DEVICE, credential: 'device' },
+  { method: 'GET', path: '/v1/mirror/', prefix: true, ...DEVICE, credential: 'device' },
+  { method: 'PUT', path: '/v1/mirror/', prefix: true, ...DEVICE, credential: 'device', bulk: true },
+  { method: 'DELETE', path: '/v1/mirror/', prefix: true, ...DEVICE, credential: 'device' },
   // The controller endpoint reads and bounds its own body (control-auth.ts); limited here only.
   { method: 'POST', path: CONTROL_PATH, binding: 'POLL_LIMIT', credential: 'none' }
 ];
@@ -106,10 +118,44 @@ export function edgeRouteFor(method: string, pathname: string): EdgeRoute | null
   return match.kind === 'route' ? match.route : null;
 }
 
-function limitKey(route: EdgeRoute, url: URL, request: Request): string {
-  const ip = request.headers.get('cf-connecting-ip') ?? 'unknown';
+/** The caller as the limits count it: an IPv4 address, or the /64 an IPv6 address sits in (one
+ *  subscriber is usually handed a whole /64). An IPv4-mapped IPv6 address counts as its IPv4. */
+export function callerKey(ip: string | null): string {
+  if (!ip) return 'unknown';
+  const value = ip.trim().toLowerCase().replace(/%.*$/, '');
+  if (!value.includes(':')) return value;
+  const groups = ipv6Groups(value);
+  if (!groups) return value;
+  if (groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff) {
+    return [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join('.');
+  }
+  return `${groups.slice(0, 4).map((g) => g.toString(16)).join(':')}::/64`;
+}
+
+/** The eight 16-bit groups of a textual IPv6 address, or null when it is not one. */
+function ipv6Groups(value: string): number[] | null {
+  let text = value;
+  const v4 = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (v4) {
+    const b = v4.slice(1).map(Number);
+    if (b.some((n) => n > 255)) return null;
+    text = `${text.slice(0, v4.index)}${((b[0] << 8) | b[1]).toString(16)}:${((b[2] << 8) | b[3]).toString(16)}`;
+  }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 1 ? missing !== 0 : missing < 1) return null;
+  const groups = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill('0'), ...tail];
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16));
+}
+
+function limitKey(route: EdgeRoute, request: Request, device?: string): string {
+  const caller = callerKey(request.headers.get('cf-connecting-ip'));
   const bucket = `${route.method} ${route.path}`;
-  return route.perDevice ? `${bucket}|${url.searchParams.get('device') ?? ''}|${ip}` : `${bucket}|${ip}`;
+  return device === undefined ? `${bucket}|${caller}` : `${bucket}|${device}|${caller}`;
 }
 
 /** A 429 when the edge limit for this endpoint is spent; null to pass the request on. A
@@ -118,13 +164,12 @@ export async function edgeLimited(request: Request, limiters: EdgeLimiters): Pro
   const url = new URL(request.url);
   const match = matchEdge(request.method, url.pathname);
   if (match.kind !== 'route') return null;
-  return limit(match.route, url, request, limiters);
+  return limit(limiters[match.route.binding], limitKey(match.route, request));
 }
 
-async function limit(route: EdgeRoute, url: URL, request: Request, limiters: EdgeLimiters): Promise<Response | null> {
-  const limiter = limiters[route.binding];
+async function limit(limiter: EdgeLimiter | undefined, key: string): Promise<Response | null> {
   if (!limiter) return null;
-  const { success } = await limiter.limit({ key: limitKey(route, url, request) });
+  const { success } = await limiter.limit({ key });
   return success ? null : json({ error: 'rate limited' }, 429, { 'retry-after': '60', 'x-relay-limit': 'edge' });
 }
 
@@ -169,8 +214,8 @@ export interface Admitted {
 }
 
 /** Everything the edge decides from the request line and headers alone, in cost order: route,
- *  rate limit (consulted for every routed request, before any refusal), declared body size, then
- *  credential shape. A Response is the refusal; nothing has been read or looked up. */
+ *  address rate limit (consulted for every routed request, before any refusal), body size, credential
+ *  shape, then the device's own limit. A Response is the refusal; nothing has been read or looked up. */
 export async function admit(request: Request, limiters: EdgeLimiters): Promise<Admitted | Response> {
   const url = new URL(request.url);
   const refuse = async (response: Response): Promise<Response> => {
@@ -182,13 +227,21 @@ export async function admit(request: Request, limiters: EdgeLimiters): Promise<A
   if (match.kind === 'none') return refuse(json({ error: 'not found' }, 404));
   if (match.kind === 'method') return refuse(json({ error: 'method not allowed' }, 405, { allow: match.methods.join(', ') }));
   const { route } = match;
-  const limited = await limit(route, url, request, limiters);
+  const limited = await limit(limiters[route.binding], limitKey(route, request));
   if (limited) return refuse(limited);
-  const maxBody = route.bulk ? MAX_BODY_BYTES : SMALL_BODY_BYTES;
   const declared = request.headers.get('content-length');
+  // A route that takes no body (GET) is refused one rather than forwarded with it unread.
+  if (route.method === 'GET' && (request.body !== null || request.headers.has('transfer-encoding') || (declared !== null && declared !== '0'))) {
+    return refuse(json({ error: 'invalid' }, 400));
+  }
+  const maxBody = route.bulk ? MAX_BODY_BYTES : SMALL_BODY_BYTES;
   if (declared !== null && (!/^\d{1,15}$/.test(declared) || Number(declared) > maxBody)) return refuse(json({ error: 'too large' }, 413));
   const refused = credentialRefusal(route, url, request);
   if (refused) return refuse(refused);
+  if (route.deviceBinding) {
+    const device = await limit(limiters[route.deviceBinding], limitKey(route, request, url.searchParams.get('device') ?? ''));
+    if (device) return refuse(device);
+  }
   return { maxBody, deadlineMs: route.bulk ? BULK_BODY_DEADLINE_MS : SMALL_BODY_DEADLINE_MS };
 }
 

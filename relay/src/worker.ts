@@ -44,6 +44,8 @@ export interface Env {
   PAIR_LIMIT?: RateLimit;
   POLL_LIMIT?: RateLimit;
   TOKEN_LIMIT?: RateLimit;
+  DEVICE_LIMIT?: RateLimit;
+  ADDRESS_LIMIT?: RateLimit;
 }
 
 function storageAdapter(storage: DurableObjectStorage | DurableObjectTransaction): RelayStorage {

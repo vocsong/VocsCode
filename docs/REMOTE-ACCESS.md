@@ -572,9 +572,7 @@ security bar must go up, not sideways:
 - **Load on the public relay.** Every `/v1` route, authenticated or not, passes an edge rate limit,
   a route-sized body budget (16 KiB; 2.5 MB for mirror uploads) with a read deadline, and a
   credential-shape check before the Worker reads a body or wakes a Hub (`relay/src/edge.ts`,
-  [relay/README.md](../relay/README.md#request-budgets)). Edge counters are per location and per
-  address, so they brake one source rather than set a global ceiling; that and per-device socket
-  quotas are open follow-ups.
+  [relay/README.md](../relay/README.md#request-budgets)). Edge counters are per Cloudflare location.
 - **A Connect with Vocs link someone else sent (§6.3.1).** Signing in and clicking **Add this
   computer** on it would register the sender's desktop into the account. Mitigations: the page asks
   first and names the risk ("continue only if you just clicked Connect with Vocs"), it shows a check

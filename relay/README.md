@@ -41,7 +41,7 @@ backward compatible: it went live on 2026-09-25, ahead of a release, and desktop
 cannot connect until they run the new code. They keep their pairings, because their old device
 token is now their refresh credential; a browser simply reloads the page.
 
-The rate limits in `wrangler.jsonc` (`ratelimits`, namespaces 4101–4103) are Workers Rate Limiting
+The rate limits in `wrangler.jsonc` (`ratelimits`, namespaces 4101–4105) are Workers Rate Limiting
 bindings: checked at the edge before a request can wake the Hub, per Cloudflare location, eventually
 consistent. Each `namespace_id` must be unique within the Cloudflare account; change them if another
 Worker already uses those numbers.
@@ -53,32 +53,29 @@ wakes a Durable Object. A route the Hub does not serve is answered there (404/40
 route — authenticated ones included, because authentication has not happened yet — then passes, in
 order:
 
-1. **An edge rate limit** keyed on method, route and caller address (token routes also on the
-   device). Pairing uses `PAIR_LIMIT` (10/min), token exchange `TOKEN_LIMIT` (30/min), and polling,
-   owner, socket, device and mirror routes `POLL_LIMIT` (120/min), each route with its own counter;
-   every session id under `/v1/mirror/` shares one.
+1. **An edge rate limit** keyed on method, route and caller (an IPv4 address, or the /64 of an IPv6
+   one). Pairing uses `PAIR_LIMIT` (10/min), token exchange `TOKEN_LIMIT` (30/min, however many
+   device ids a caller names), polling and owner routes `POLL_LIMIT` (120/min). Socket, device and
+   mirror routes share an address ceiling, `ADDRESS_LIMIT` (600/min), so devices behind one NAT are
+   not squeezed into one device's budget. Each route has its own counter; every session id under
+   `/v1/mirror/` shares one.
 2. **A declared-size check**: a `Content-Length` over the route's budget is refused (413) unread.
    Mirror uploads (`PUT /v1/mirror`, `PUT /v1/mirror/<id>`) get 2,500,000 bytes; every other route
    16 KiB.
 3. **A credential-shape check**: device routes need a `device` id and a bearer of the relay-minted
    token shape, sockets their bearer or ticket, enrollment its bearer secret. Nothing is looked up,
    so the refusal is the same whether or not the device exists. Pairing and owner routes are
-   refused by the Worker's account-assertion check, also before any body is read.
-4. **A bounded, timed body read**: bytes are counted as they stream, so a missing or understated
+   refused by the Worker's account-assertion check, also before any body is read. A route that
+   takes no body (GET) is refused one (400).
+4. **A per-device limit** on socket, device and mirror routes, `DEVICE_LIMIT` (300/min per device
+   and address): room for a desktop's first mirror sync or many active sessions re-uploading.
+5. **A bounded, timed body read**: bytes are counted as they stream, so a missing or understated
    `Content-Length` is cut off at the budget (413), and a body that has not arrived in full within
    10 s (60 s for mirror uploads) is abandoned (408).
 
 The Hub keeps its own per-address limits and verifies every credential. The controller endpoint
-(`/v1/control/mcp`, disabled in production) is rate limited here and bounds its own body.
-
-Not covered yet, and the next steps:
-
-- **Distributed load.** Edge counters are per Cloudflare location and per address: they brake one
-  source, not a fleet of addresses or locations. A global ceiling needs a Durable Object counter or
-  Cloudflare WAF rate-limiting rules on the zone.
-- **Socket quotas.** Raw frames and offline queues are bounded in the Hub, and socket upgrades pass
-  the edge limit, but there is no cap on open sockets per device or account and no per-socket
-  message rate.
+(`/v1/control/mcp`, disabled in production) is rate limited here and bounds its own body. Edge
+limits are counted per Cloudflare location.
 
 The landing Worker at `code.vocs.io` forwards `/app` and `/v1` (REST and WebSockets under
 `/v1/ws/*`) through a service binding. It is a **separate repo and deployment** (`vocs.io`:

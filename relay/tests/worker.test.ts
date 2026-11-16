@@ -409,6 +409,8 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(typeof env.PAIR_LIMIT?.limit).toBe('function');
     expect(typeof env.POLL_LIMIT?.limit).toBe('function');
     expect(typeof env.TOKEN_LIMIT?.limit).toBe('function');
+    expect(typeof env.DEVICE_LIMIT?.limit).toBe('function');
+    expect(typeof env.ADDRESS_LIMIT?.limit).toBe('function');
     const claim = () => accountRequest('/v1/pair/claim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'ABCD2345', webPub: {} }) });
     const statuses: Array<[number, string | null]> = [];
     for (let i = 0; i < 11; i++) {

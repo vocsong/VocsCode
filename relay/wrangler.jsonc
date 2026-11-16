@@ -18,12 +18,15 @@
   "workers_dev": false,
   // Edge rate limits (Workers Rate Limiting), checked in the Worker on every /v1 route before its
   // body is read or the Hub wakes (relay/src/edge.ts); the Hub keeps its own in-memory limits too.
-  // Counters are per Cloudflare location and eventually consistent: not a global ceiling. Each
-  // namespace_id must be unique within the Cloudflare account.
+  // Counters are per Cloudflare location and eventually consistent. Each namespace_id must be
+  // unique within the Cloudflare account.
   "ratelimits": [
     { "name": "PAIR_LIMIT", "namespace_id": "4101", "simple": { "limit": 10, "period": 60 } },
     { "name": "POLL_LIMIT", "namespace_id": "4102", "simple": { "limit": 120, "period": 60 } },
-    { "name": "TOKEN_LIMIT", "namespace_id": "4103", "simple": { "limit": 30, "period": 60 } }
+    { "name": "TOKEN_LIMIT", "namespace_id": "4103", "simple": { "limit": 30, "period": 60 } },
+    // Device routes: each device's own budget, and the ceiling all devices behind one address share.
+    { "name": "DEVICE_LIMIT", "namespace_id": "4104", "simple": { "limit": 300, "period": 60 } },
+    { "name": "ADDRESS_LIMIT", "namespace_id": "4105", "simple": { "limit": 600, "period": 60 } }
   ]
   // Secrets: ENROLL_TOKEN, ACCOUNT_ASSERTION_SECRET (shared with landing), DEVICE_ROUTE_SECRET (stable relay-only key)
 }

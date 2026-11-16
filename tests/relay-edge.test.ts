@@ -3,6 +3,7 @@
  *  before a request can wake the Hub or touch storage. Runs the real entry logic in Node with
  *  counting stand-ins for the Workers Rate Limiting bindings; the workerd suite checks the bindings
  *  exist in the real runtime config. */
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hashToken, randomToken } from '../relay/src/core';
 import {
@@ -61,6 +62,18 @@ function entry(limiters: EdgeLimiters = {}) {
   return { call, seen };
 }
 
+/** Fake limiters with the limits `relay/wrangler.jsonc` deploys, all inside one window. */
+function configured() {
+  const text = readFileSync(new URL('../relay/wrangler.jsonc', import.meta.url), 'utf8');
+  const config = JSON.parse(text.replace(/^\s*\/\/.*$/gm, '')) as { ratelimits: Array<{ name: string; simple: { limit: number } }> };
+  const limits = Object.fromEntries(config.ratelimits.map((r) => [r.name, r.simple.limit])) as Record<string, number>;
+  const limiters = Object.fromEntries(config.ratelimits.map((r) => [r.name, limiter(r.simple.limit)])) as EdgeLimiters;
+  return { limits, limiters };
+}
+
+/** A device id in the historical opaque format: anyone can make one up. */
+const legacyId = (kind: 'h' | 'w') => `${kind}_${randomToken(8)}`;
+
 const deviceToken = randomToken();
 const asDevice = { authorization: `Bearer ${deviceToken}` };
 
@@ -85,7 +98,7 @@ describe('relay edge rate limits', () => {
     expect(pair.keys().sort()).toEqual(['POST /v1/pair/claim|198.51.100.7', 'POST /v1/pair/claim|203.0.113.9', 'POST /v1/pair/start|198.51.100.7']);
   });
 
-  it('keys token endpoints by device and address, so no one drains another device from elsewhere', async () => {
+  it('keys token endpoints by address, so no one drains another device\'s refresh from elsewhere', async () => {
     const token = limiter(1);
     const { call } = entry({ TOKEN_LIMIT: token });
     expect((await call('/v1/token/challenge?device=w_victim', '198.51.100.7', { headers: asDevice })).status).toBe(200);
@@ -95,18 +108,23 @@ describe('relay edge rate limits', () => {
     expect((await call('/v1/token?device=w_other', '198.51.100.7', { headers: asDevice })).status).toBe(200);
   });
 
-  it('limits authenticated routes and sockets too, per route and address, before the Hub is asked', async () => {
-    const poll = limiter(1);
-    const { call, seen } = entry({ POLL_LIMIT: poll });
+  it('limits authenticated routes and sockets too, per address and per device, before the Hub is asked', async () => {
+    const address = limiter(3);
+    const device = limiter(1);
+    const { call, seen } = entry({ ADDRESS_LIMIT: address, DEVICE_LIMIT: device });
     expect((await call('/v1/devices?device=w_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(200);
     expect((await call('/v1/devices?device=w_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(429);
+    // Another device behind the same address has its own budget, under the address ceiling.
+    expect((await call('/v1/devices?device=w_2', undefined, { method: 'GET', headers: asDevice })).status).toBe(200);
+    expect((await call('/v1/devices?device=w_3', undefined, { method: 'GET', headers: asDevice })).status).toBe(429);
     expect((await call('/v1/ws/ticket?device=w_1', undefined, { headers: asDevice })).status).toBe(200);
     expect((await call('/v1/mirror/s_1?device=h_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(200);
     // Every session id shares one budget: a fresh path does not buy a fresh counter.
     expect((await call('/v1/mirror/s_2?device=h_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(429);
     expect((await call('/v1/ws/host?device=h_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(200);
-    expect(poll.keys().sort()).toEqual(['GET /v1/devices|198.51.100.7', 'GET /v1/mirror/|198.51.100.7', 'GET /v1/ws/host|198.51.100.7', 'POST /v1/ws/ticket|198.51.100.7']);
-    expect(seen).toEqual(['/devices', '/ws/ticket', '/mirror/s_1', '/ws/host']);
+    expect(address.keys().sort()).toEqual(['GET /v1/devices|198.51.100.7', 'GET /v1/mirror/|198.51.100.7', 'GET /v1/ws/host|198.51.100.7', 'POST /v1/ws/ticket|198.51.100.7']);
+    expect(device.keys()).toContain('GET /v1/mirror/|h_1|198.51.100.7');
+    expect(seen).toEqual(['/devices', '/devices', '/ws/ticket', '/mirror/s_1', '/ws/host']);
   });
 
   it('answers unknown routes and methods at the edge, and passes through without bindings', async () => {
@@ -132,7 +150,98 @@ describe('relay edge rate limits', () => {
   });
 });
 
+describe('relay edge budgets for shared and rotating addresses', () => {
+  it('holds one address to its token budget however many device ids it names', async () => {
+    const token = limiter(1);
+    const { call, seen } = entry({ TOKEN_LIMIT: token });
+    const statuses: number[] = [];
+    for (let i = 0; i < 20; i++) statuses.push((await call(`/v1/token/challenge?device=${legacyId('w')}`, '198.51.100.7', { headers: asDevice })).status);
+    expect(statuses[0]).toBe(200);
+    expect(statuses.slice(1).every((status) => status === 429)).toBe(true);
+    expect(seen).toHaveLength(1);
+    // Another address keeps its own budget.
+    expect((await call(`/v1/token/challenge?device=${legacyId('w')}`, '192.0.2.44', { headers: asDevice })).status).toBe(200);
+  });
+
+  it('counts every address in one IPv6 /64 as one caller', async () => {
+    const pair = limiter(1);
+    const { call } = entry({ PAIR_LIMIT: pair });
+    const statuses: number[] = [];
+    for (let i = 1; i <= 20; i++) statuses.push((await call('/v1/pair/claim', `2001:db8:1:2::${i.toString(16)}`)).status);
+    expect(statuses.filter((status) => status === 200)).toHaveLength(1);
+    // Another spelling of the same /64; a neighbouring /64 is another caller.
+    expect((await call('/v1/pair/claim', '2001:DB8:1:2:ffff:0:0:1')).status).toBe(429);
+    expect((await call('/v1/pair/claim', '2001:db8:1:3::1')).status).toBe(200);
+    // An IPv4-mapped address is that IPv4 address; IPv4 neighbours stay separate.
+    expect((await call('/v1/pair/claim', '198.51.100.7')).status).toBe(200);
+    expect((await call('/v1/pair/claim', '::ffff:198.51.100.7')).status).toBe(429);
+    expect((await call('/v1/pair/claim', '198.51.100.8')).status).toBe(200);
+    expect(new Set(pair.keys()).size).toBe(4);
+  });
+
+  it('takes the first mirror sync of three desktops behind one address at the deployed limits', async () => {
+    const { limiters } = configured();
+    const { call } = entry(limiters);
+    const refused: string[] = [];
+    for (const desktop of [legacyId('h'), legacyId('h'), legacyId('h')]) {
+      for (let s = 0; s < 50; s++) {
+        const response = await call(`/v1/mirror/s_${s}?device=${desktop}`, '198.51.100.7', { method: 'PUT', headers: asDevice, body: '{}' });
+        if (response.status !== 200) refused.push(`${desktop} s_${s}: ${response.status}`);
+      }
+      const index = await call(`/v1/mirror?device=${desktop}`, '198.51.100.7', { method: 'PUT', headers: asDevice, body: '{}' });
+      if (index.status !== 200) refused.push(`${desktop} index: ${index.status}`);
+    }
+    expect(refused).toEqual([]);
+  });
+
+  it('takes a busy desktop\'s uploads at the deployed limits', async () => {
+    // Ten sessions active for a minute, each re-uploaded every four seconds, plus the index.
+    const { limiters } = configured();
+    const { call } = entry(limiters);
+    const desktop = legacyId('h');
+    const refused: string[] = [];
+    for (let round = 0; round < 15; round++) {
+      for (let s = 0; s < 10; s++) {
+        const response = await call(`/v1/mirror/s_${s}?device=${desktop}`, '198.51.100.7', { method: 'PUT', headers: asDevice, body: '{}' });
+        if (response.status !== 200) refused.push(`round ${round} s_${s}: ${response.status}`);
+      }
+      const index = await call(`/v1/mirror?device=${desktop}`, '198.51.100.7', { method: 'PUT', headers: asDevice, body: '{}' });
+      if (index.status !== 200) refused.push(`round ${round} index: ${index.status}`);
+    }
+    expect(refused).toEqual([]);
+  });
+
+  it('caps one address at the deployed ceiling however many device ids it names', async () => {
+    const { limits, limiters } = configured();
+    const ceiling = limits.ADDRESS_LIMIT;
+    expect(ceiling).toBeGreaterThan(0);
+    const { call, seen } = entry(limiters);
+    const statuses: number[] = [];
+    for (let i = 0; i <= ceiling; i++) statuses.push((await call(`/v1/mirror/s_1?device=${legacyId('h')}`, '198.51.100.7', { method: 'PUT', headers: asDevice, body: '{}' })).status);
+    expect(statuses.slice(0, ceiling).every((status) => status === 200)).toBe(true);
+    expect(statuses[ceiling]).toBe(429);
+    expect(seen).toHaveLength(ceiling);
+  });
+});
+
 describe('relay edge body budgets', () => {
+  it('refuses a body on a route that takes none, without reading it', async () => {
+    const { call, seen } = entry();
+    expect((await call('/v1/devices?device=w_1', undefined, { method: 'GET', headers: { ...asDevice, 'transfer-encoding': 'chunked' } })).status).toBe(400);
+    expect((await call('/v1/devices?device=w_1', undefined, { method: 'GET', headers: { ...asDevice, 'content-length': '5' } })).status).toBe(400);
+    // A runtime that hands a GET a body stream: refused unread, not forwarded.
+    const body = metered(1024);
+    const hub = () => ({ fetch: async (request: Request) => { seen.push(new URL(request.url).pathname); return new Response('from the hub'); } });
+    const withBody = { url: 'https://relay.test/v1/mirror/s_1?device=h_1', method: 'GET', headers: new Headers({ ...asDevice, 'cf-connecting-ip': '198.51.100.7' }), body: body.stream } as unknown as Request;
+    const refused = await forwardToHub(withBody, {}, hub).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(Response);
+    expect((refused as Response).status).toBe(400);
+    expect(body.meter.pulled).toBe(0);
+    expect(seen).toEqual([]);
+    // Without a body, the same requests go through.
+    expect((await call('/v1/devices?device=w_1', undefined, { method: 'GET', headers: asDevice })).status).toBe(200);
+  });
+
   it('buffers a mirror upload within its budget for the Hub', async () => {
     const bodies: string[] = [];
     const hub = () => ({ fetch: async (request: Request) => { bodies.push(await request.text()); return new Response('ok'); } });
@@ -214,6 +323,8 @@ interface TestEnv {
   PAIR_LIMIT: ReturnType<typeof limiter>;
   POLL_LIMIT: ReturnType<typeof limiter>;
   TOKEN_LIMIT: ReturnType<typeof limiter>;
+  DEVICE_LIMIT: ReturnType<typeof limiter>;
+  ADDRESS_LIMIT: ReturnType<typeof limiter>;
   HUB: { idFromName(name: string): string; get(id: string): { fetch(request: Request): Promise<Response> } };
   ENROLLMENTS: { idFromName(name: string): string; get(id: string): { fetch(request: Request): Promise<Response> } };
 }
@@ -245,12 +356,14 @@ function relay(allow = 1000) {
     DEVICE_ROUTE_SECRET: 'edge-test-device-route-secret-32-bytes-minimum',
     PAIR_LIMIT: limiter(allow),
     POLL_LIMIT: limiter(allow),
-    TOKEN_LIMIT: limiter(allow)
+    TOKEN_LIMIT: limiter(allow),
+    DEVICE_LIMIT: limiter(allow),
+    ADDRESS_LIMIT: limiter(allow)
   } as TestEnv;
   const hub = new Hub({ storage, getWebSockets: () => [], getTags: () => [] }, env);
   env.HUB = { idFromName: (name) => name, get: () => ({ fetch: (request) => { counts.hubCalls++; return hub.fetch(request); } }) };
   env.ENROLLMENTS = { idFromName: (name) => name, get: () => ({ fetch: async () => { counts.hubCalls++; return new Response('{}'); } }) };
-  const limiterCalls = () => env.PAIR_LIMIT.calls() + env.POLL_LIMIT.calls() + env.TOKEN_LIMIT.calls();
+  const limiterCalls = () => env.PAIR_LIMIT.calls() + env.POLL_LIMIT.calls() + env.TOKEN_LIMIT.calls() + env.DEVICE_LIMIT.calls() + env.ADDRESS_LIMIT.calls();
   const send = async (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
     headers.set('cf-connecting-ip', '203.0.113.77');
@@ -282,7 +395,7 @@ describe('relay Worker budgets before authentication', () => {
   });
 
   it('stops well-formed but unknown credentials at the edge limit once the budget is spent', async () => {
-    const { counts, limiterCalls, send } = relay(5);
+    const { env, counts, send } = relay(5);
     const statuses: number[] = [];
     let pulled = 0;
     for (let i = 0; i < 8; i++) {
@@ -294,7 +407,7 @@ describe('relay Worker budgets before authentication', () => {
       pulled += body.meter.pulled;
     }
     expect(statuses).toEqual([401, 401, 401, 401, 401, 429, 429, 429]);
-    expect(limiterCalls()).toBe(8);
+    expect(env.ADDRESS_LIMIT.calls()).toBe(8);
     // Only the admitted five were read and looked up; the limited three cost nothing.
     expect(pulled).toBe(5 * 1024);
     expect(counts.deviceReads).toBe(5);
