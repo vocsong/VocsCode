@@ -1,11 +1,12 @@
 /**
- * A compact model pill opens the full provider/model identity, Effort and Fast controls.
+ * The model pill reads provider/model with the reasoning effort beside it in a lighter weight, and
+ * opens the full model identity, Effort and Fast controls.
  * Permissions stay visible; the context ring opens Usage. Secondary details live in menus.
  */
 import React from 'react';
 import type { ModelInfo, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
-import { modelRefName, parseTypedModel } from '../../../shared/model-names';
+import { modelName, modelRefName, parseTypedModel } from '../../../shared/model-names';
 import { invoke } from '../api';
 import { fmtCost, fmtTokens } from '../format';
 import { setSessionEffort } from '../sessionActions';
@@ -47,7 +48,9 @@ export function SessionControls({ session }: { session: SessionMeta }) {
         align="left"
         trigger={(open) => (
           <button type="button" className={`pill pill-model ${open ? 'open' : ''}`} title="Model" aria-label={`Model: ${modelDetail}`}>
-            <Icon name="sparkles" size={13} /> <span className="pill-text" title={modelRefName(current)}>{currentInfo?.displayName ?? current?.model ?? 'Default model'}</span>
+            {/* Provider first: the same model can be reached through more than one provider. */}
+            <Icon name="sparkles" size={13} /> <span className="pill-text" title={modelRefName(current)}>{current ? modelName(current.provider, currentInfo?.displayName ?? current.model) : 'Default model'}</span>
+            {effortLabel && <span className="pill-effort">{effortLabel}</span>}
             <Icon name="chevron" size={12} />
           </button>
         )}
