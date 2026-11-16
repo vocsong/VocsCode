@@ -27,7 +27,7 @@ function info(over: Partial<McpProjectInfo> = {}): McpProjectInfo {
     projectRoot: 'G:/repo', file: 'G:/repo/.mcp.json', display: 'G:/repo/.mcp.json', exists: true,
     repo: [repoServer], global: [], state: {},
     builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: false, claimed: false }],
-    detected: [], effective: [{ def: repoServer, scope: 'repo', enabled: false, reason: 'not-enabled' }],
+    detected: [], effective: [{ def: repoServer, scope: 'repo', enabled: false, reason: 'not-enabled' }], rejected: [],
     harness: 'claude', support: 'inject', ...over
   };
 }
@@ -93,6 +93,23 @@ describe('MCP panel tab', () => {
     invoke.mockResolvedValue(info({ state: { enabledRepo: ['repo-db'] }, effective: [{ def: repoServer, scope: 'repo', enabled: true }] }));
     await act(async () => { fireEvent.click(screen.getByText('Enable')); });
     expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { enabledRepo: ['repo-db'] } });
+  });
+
+  it('shows why a repo server under a reserved name is not loaded, instead of offering to enable it', async () => {
+    const alias = { id: 'vocs_memory', transport: 'stdio' as const, command: 'node', args: ['x.mjs'] };
+    const reason = '"vocs_memory" is reserved for the built-in vocs-memory server. Choose another name.';
+    invoke.mockResolvedValue(info({
+      repo: [alias],
+      effective: [{ def: alias, scope: 'repo', enabled: false, reason: 'reserved' }],
+      rejected: [{ id: 'vocs_memory', scope: 'repo', reason }, { id: 'gitnexus', scope: 'repo', reason: '"gitnexus" is reserved for the built-in gitnexus server. Choose another name.' }]
+    }));
+    await act(async () => { render(<McpTab session={session()} />); });
+    expect(screen.getAllByTestId('mcp-not-loaded').map((n) => n.textContent)).toEqual([
+      '"gitnexus" is reserved for the built-in gitnexus server. Choose another name.',
+      reason
+    ]);
+    expect(screen.getByText('not loaded')).toBeTruthy();
+    expect(screen.queryByText(/Review servers before enabling them/)).toBeNull();
   });
 });
 

@@ -3,8 +3,9 @@
  * need to show. The one place that knows about settings, the repo file and the secret store at
  * the same time; adapters only ever see the resolved list through `ctx.mcpServers()`.
  */
-import type { AppSettings, HarnessId, McpBuiltinInfo, McpProjectInfo, McpProjectState, McpServerDef } from '../../shared/types';
+import type { AppSettings, HarnessId, McpBuiltinInfo, McpProjectInfo, McpProjectState, McpRejectedServer, McpServerDef } from '../../shared/types';
 import { MCP_BUILTIN_IDS } from '../../shared/types';
+import { mcpIdIssues } from '../../shared/mcp-ids';
 import { HARNESS_BY_ID } from '../../shared/harness-meta';
 import { which } from '../runtime';
 import { builtinEntries, effectiveEntries, effectiveServers, normalizeStdio, resolveVars, type ResolvedServer } from './effective';
@@ -53,6 +54,17 @@ export interface SessionScope {
 
 function stateFor(settings: AppSettings, projectRoot: string): McpProjectState {
   return settings.mcpProjectState?.[projectRoot] ?? {};
+}
+
+/**
+ * User and repository servers that are never loaded for their name, with the reason the MCP surfaces
+ * show. The repo list is the file as written, including an entry under a built-in's exact id.
+ */
+export function rejectedServers(globals: readonly McpServerDef[], repo: readonly McpServerDef[]): McpRejectedServer[] {
+  return [
+    ...mcpIdIssues(repo).map((issue): McpRejectedServer => ({ id: issue.id, scope: 'repo', reason: issue.reason })),
+    ...mcpIdIssues(globals).map((issue): McpRejectedServer => ({ id: issue.id, scope: 'global', reason: issue.reason }))
+  ];
 }
 
 /** The app-shipped built-in servers, with the installed binary preferred over `npx`. */
@@ -145,6 +157,7 @@ export async function resolveForSession(scope: SessionScope, deps: McpHostDeps):
   const repoDefs = repo.servers.filter((d) => !isBuiltinServerId(d.id));
   const chosen = effectiveServers({ global: globals, repo: repoDefs, state, harness: scope.harness, support, builtin: builtinDefs(scope.settings) });
   if (repo.error) deps.log?.('warn', `mcp: ${repo.file} could not be used: ${repo.error}`);
+  for (const r of rejectedServers(globals, repo.servers)) deps.log?.('warn', `mcp ${r.id} (${r.scope}) not loaded: ${r.reason}`);
   const out: ResolvedServer[] = await resolveBuiltins(scope, state, deps);
   for (const def of chosen) {
     const resolved = await resolveVars(def, { env: process.env, secret: (name) => deps.getSecret(secretKeyFor(name)) });
@@ -218,6 +231,7 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
     state,
     builtin,
     detected,
+    rejected: rejectedServers(globals, repo.servers),
     effective: [
       ...builtinEntries({ builtin: defs, state, globalDisabled, harness: scope.harness, support }),
       ...effectiveEntries({ global: globals, repo: repoDefs, state, harness: scope.harness, support, builtin: defs })

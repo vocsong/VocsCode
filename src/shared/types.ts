@@ -182,6 +182,13 @@ export interface McpServerDef {
   description?: string;
   /** A master switch independent of the per-repo ones. Built-ins use it for opt-in (Cua). */
   disabled?: boolean;
+  /**
+   * Provenance: which of the app's own servers this definition is. Set only where the app builds
+   * its built-in definitions; every reader of a user or repository definition constructs a fresh
+   * object and never copies it, so no id, label or tool annotation can supply it. Trust that only a
+   * built-in may have (the memory server's read-only tools) keys on this, never on `id`.
+   */
+  builtin?: string;
 }
 
 /** Ids of the MCP servers this app ships itself. A same-named user entry is not theirs to edit, so it is ignored everywhere. */
@@ -274,7 +281,8 @@ export type McpScope = 'global' | 'repo' | 'builtin';
 export type McpSupport = 'none' | 'inject' | 'client' | 'inherit';
 
 /** Why a defined server is not part of a session's effective set. */
-export type McpSkipReason = 'disabled' | 'not-enabled' | 'shadowed' | 'harness-filtered' | 'not-injected';
+/** `reserved`: the name folds onto a built-in's. `duplicate`: it folds onto another server's in the same scope. */
+export type McpSkipReason = 'disabled' | 'not-enabled' | 'shadowed' | 'harness-filtered' | 'not-injected' | 'reserved' | 'duplicate';
 
 /** One row of the effective set for a session. */
 export interface McpEffectiveEntry {
@@ -332,8 +340,17 @@ export interface McpProjectInfo {
   builtin: McpBuiltinInfo[];
   detected: McpStoreInfo[];
   effective: McpEffectiveEntry[];
+  /** User and repository servers that are never loaded because of their name, with the reason to show. */
+  rejected: McpRejectedServer[];
   harness: HarnessId;
   support: McpSupport;
+}
+
+/** A defined server refused for its name: it folds onto a built-in's, or onto another server's. */
+export interface McpRejectedServer {
+  id: string;
+  scope: 'global' | 'repo';
+  reason: string;
 }
 
 /** Result of probing one server with the app's own MCP client ("Test connection"). */

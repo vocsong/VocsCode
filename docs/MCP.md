@@ -234,8 +234,12 @@ invisible to the model — and the built-in code graph also carries a `promptGui
 graph is reached for before grep. The approvals extension gates every `mcp__*` tool, since a server
 tool's blast radius is unknown; only full-auto lets it through unprompted — with one exception: the
 app's own memory server marks its read-only tools (`annotations.readOnlyHint`) and those run
-unprompted and survive plan mode, in the parent and in every subagent child. Trust is by server
-identity (`vocs_memory`), so a server the app does not own can never inherit it. The bridge is
+unprompted and survive plan mode, in the parent and in every subagent child. Trust is by
+provenance: the app sets `builtin` on the definitions it builds for its own servers, every reader of
+a user or repository definition rebuilds it without that field, and the bridge trusts a read-only
+annotation only from the definition marked `vocs-memory`. A server's name, label or annotations never
+confer it, and the bridge refuses to load a server whose name folds onto a built-in's without that
+marker, or whose tool names would collide with an earlier server's. The bridge is
 process-wide, and a subagent child registers the same tools over the parent's connections instead of
 spawning its own copy of every server.
 
@@ -324,8 +328,8 @@ and ACP. Log lines redact resolved values.
 **Tool calls stay behind the existing gates.** Claude's `canUseTool` already treats
 `mcp__*` as mutating (it is not in `READ_ONLY_TOOLS`), so MCP tools prompt below Full
 access — keep that. The native loop does the same, with one exception: the app's own
-memory server may mark its read-only tools (`readOnlyHint`), and only that server is
-trusted to do so — a tool from a server the app does not own always asks below Full
+memory server may mark its read-only tools (`readOnlyHint`), and only the definition the app
+built for it (its `builtin` provenance, never its name) is trusted to do so — a tool from a server the app does not own always asks below Full
 access, even in Auto mode, and is hidden in plan mode. Codex runs MCP tool calls inside its own sandbox/approval model;
 note in the UI that Vocs Code does not add a prompt there. Elicitation requests (Codex
 app-server today, native client in P2) become `'elicitation'` approvals instead of
@@ -489,6 +493,13 @@ Rules:
 - The built-in always wins over a same-id global or `.mcp.json` entry (the user's old manual
   `gitnexus` server is shadowed, not injected twice). Such an entry is dropped from the settings
   store on load, and the MCP page neither lists it nor offers a same-id id to the add form.
+- Built-in names are reserved in every spelling a harness folds into the same tool names: case,
+  and any run of `-`, `_` or `.` (`src/shared/mcp-ids.ts`), so `vocs_memory`, `Vocs.Memory` or
+  `GitNexus` name a built-in too. Two user servers in one scope may not fold together either, and a
+  repo entry shadows a global one with the same folded name. Saving such a definition (the MCP
+  page, the repo tab, import, Vesta's tools) is refused with the reason; one already on disk stays
+  listed as *not loaded* with the reason, is never selected for a session, and does not block an
+  unrelated save.
 - It injects into every harness whose `mcp` support is `inject` or `client`, on by default. The
   MCP page's built-in row switches it off everywhere (`mcpDisabledBuiltins`); a repo keeps itself
   out of the shared server with `disabledBuiltin` — the switch above the share toggle on the

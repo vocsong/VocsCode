@@ -13,6 +13,7 @@ import type {
   McpSupport,
   HarnessId
 } from '../../shared/types';
+import { mcpIdIssues, mcpIdKey, type McpIdIssue } from '../../shared/mcp-ids';
 
 export interface EffectiveInput {
   global: McpServerDef[];
@@ -25,24 +26,32 @@ export interface EffectiveInput {
 }
 
 /**
- * Every defined server with its verdict for this session. A repo entry shadows a global one of
- * the same id, because the repo is the more specific scope.
+ * Every defined server with its verdict for this session. Names compare by their folded key
+ * (`mcpIdKey`), the form a harness turns them into: one that folds onto a built-in's is never
+ * loaded, nor is a second one in the same scope folding onto an earlier one. A repo entry shadows a
+ * global one of the same key, because the repo is the more specific scope.
  */
 export function effectiveEntries(input: EffectiveInput): McpEffectiveEntry[] {
   const { global, repo, state, harness, support } = input;
   const injectable = support === 'inject' || support === 'client';
   const disabledGlobal = new Set(state.disabledGlobal ?? []);
   const enabledRepo = new Set(state.enabledRepo ?? []);
-  const liveRepoIds = new Set(repo.filter((d) => enabledRepo.has(d.id)).map((d) => d.id));
   const builtinIds = new Set((input.builtin ?? []).map((d) => d.id));
+  const issues = new Map<McpServerDef, McpIdIssue['kind']>();
+  for (const list of [repo, global]) {
+    for (const issue of mcpIdIssues(list)) issues.set(list[issue.index], issue.kind);
+  }
+  const liveRepoKeys = new Set(repo.filter((d) => enabledRepo.has(d.id) && !issues.has(d)).map((d) => mcpIdKey(d.id)));
 
   const verdict = (def: McpServerDef, scope: 'global' | 'repo'): McpEffectiveEntry => {
     const off = (reason: McpEffectiveEntry['reason']): McpEffectiveEntry => ({ def, scope, enabled: false, reason });
     if (builtinIds.has(def.id)) return off('shadowed');
+    const issue = issues.get(def);
+    if (issue) return off(issue);
     if (scope === 'global') {
       if (def.disabled) return off('disabled');
       if (disabledGlobal.has(def.id)) return off('disabled');
-      if (liveRepoIds.has(def.id)) return off('shadowed');
+      if (liveRepoKeys.has(mcpIdKey(def.id))) return off('shadowed');
     } else if (!enabledRepo.has(def.id)) {
       return off('not-enabled');
     }

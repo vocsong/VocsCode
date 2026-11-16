@@ -119,7 +119,10 @@ export function McpTab({ session }: { session: SessionMeta }) {
 
   const builtin = info.builtin.find((entry) => entry.def.id === 'gitnexus');
   const cua = info.builtin.find((entry) => entry.def.id === 'cua-driver');
-  const pending = info.repo.filter((d) => !(info.state.enabledRepo ?? []).includes(d.id));
+  // Entries refused for their name are never loaded; they show the reason instead of an Enable prompt.
+  const notLoaded = new Map((info.rejected ?? []).filter((r) => r.scope === 'repo').map((r) => [r.id, r.reason]));
+  const pending = info.repo.filter((d) => !(info.state.enabledRepo ?? []).includes(d.id) && !notLoaded.has(d.id));
+  const unlisted = [...notLoaded].filter(([id]) => !info.repo.some((d) => d.id === id));
 
   return (
     <div className="mcp-tab">
@@ -205,6 +208,9 @@ export function McpTab({ session }: { session: SessionMeta }) {
         </div>
         <div className="mcp-path mono" title={info.file}>{info.exists ? info.display : `${info.display} (not created yet)`}</div>
         {info.error && <div className="skills-error">{info.error}</div>}
+        {unlisted.map(([id, reason]) => (
+          <div key={id} className="mcp-error small" data-testid="mcp-not-loaded">{reason}</div>
+        ))}
         {pending.length > 0 && (
           <div className="mcp-trust">
             <div className="mcp-trust-head"><Icon name="alert" size={13} /> Review servers before enabling them</div>
@@ -228,12 +234,14 @@ export function McpTab({ session }: { session: SessionMeta }) {
               <Toggle checked={(info.state.enabledRepo ?? []).includes(d.id)} disabled={busy} onChange={(v) => void setRepoEnabled(d.id, v)} label={<span className="sr-only">Enable {d.id}</span>} />
               <span className="mcp-name">{d.id}</span>
               <Badge tone={d.transport === 'stdio' ? 'neutral' : 'blue'}>{d.transport}</Badge>
+              {notLoaded.has(d.id) && <Badge tone="amber">not loaded</Badge>}
               <span className="spacer" />
               <Button size="sm" variant="ghost" icon="edit" title={`Edit ${d.id}`} onClick={() => setEditing({ ...d })} />
               <Button size="sm" variant="ghost" icon="trash" title={`Remove ${d.id}`} onClick={() => void removeRepo(d)} />
             </div>
             <code className="mcp-cmd mono">{serverSummary(d)}</code>
             {d.description && <div className="mcp-desc muted small">{d.description}</div>}
+            {notLoaded.has(d.id) && <div className="mcp-error small" data-testid="mcp-not-loaded">{notLoaded.get(d.id)}</div>}
           </div>
         ))}
         {editing && !info.repo.some((s) => s.id === editing.id) && (

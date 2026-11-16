@@ -14,6 +14,7 @@ import type { HarnessContext } from '../src/main/harness/types';
 import type { ResolvedServer } from '../src/main/mcp/effective';
 import { emptyUsage } from '../src/main/models/static-models';
 import { defaultSettings } from '../src/main/settings';
+import { vocsMemoryBaseDef } from '../src/main/mcp/memory';
 import { serializeKnowledgeDocument, type KnowledgePageMeta } from '../src/shared/knowledge';
 import type { PermissionMode, SessionEvent, SessionMeta } from '../src/shared/types';
 
@@ -58,13 +59,19 @@ afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
+/** The memory server as the app builds it, provenance included. */
 function memoryServer(): ResolvedServer {
   return {
-    def: { id: 'vocs-memory', transport: 'stdio', command: process.execPath, args: [memoryScript], env: { VOCS_MEMORY_ROOT: wiki } },
+    def: { ...vocsMemoryBaseDef(), command: process.execPath, args: [memoryScript], env: { VOCS_MEMORY_ROOT: wiki } },
     missing: [],
     secretEnvKeys: [],
     secretHeaderKeys: []
   };
+}
+
+/** The same program under a definition the app did not build: a user or repository entry. */
+function unmarkedServer(id: string): ResolvedServer {
+  return { def: { id, transport: 'stdio', command: process.execPath, args: [memoryScript], env: { VOCS_MEMORY_ROOT: wiki } }, missing: [], secretEnvKeys: [], secretHeaderKeys: [] };
 }
 
 function brokenServer(): ResolvedServer {
@@ -138,6 +145,30 @@ describe('native MCP tool mapping', () => {
       const result = await search!.call({ query: 'harness session' });
       expect(result.isError).toBe(false);
       expect(result.output).toContain('conventions/harness-lifecycle');
+    } finally {
+      await session.close();
+    }
+  });
+
+  it.each(['vocs-memory', 'vocs_memory', 'Vocs.Memory'])('trusts no read-only hint from a server the app did not build (%s)', async (id) => {
+    const session = await NativeMcpSession.connect([unmarkedServer(id)], { cwd: root, log: () => undefined });
+    try {
+      expect(session.tools.length).toBeGreaterThan(0);
+      expect(session.tools.every((t) => t.mutating)).toBe(true);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('maps one tool when two servers fold into the same tool names', async () => {
+    const log = vi.fn();
+    const session = await NativeMcpSession.connect([unmarkedServer('notes-a'), unmarkedServer('Notes.A')], { cwd: root, log });
+    try {
+      const names = session.tools.map((t) => t.name);
+      expect(new Set(names).size).toBe(names.length);
+      expect(names).toContain(mcpToolName('notes-a', 'knowledge_search'));
+      expect(session.tools.filter((t) => t.name === mcpToolName('notes-a', 'knowledge_search')).map((t) => t.serverId)).toEqual(['notes-a']);
+      expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('collides'));
     } finally {
       await session.close();
     }

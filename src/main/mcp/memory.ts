@@ -39,7 +39,8 @@ export function vocsMemoryBaseDef(): McpServerDef {
     transport: 'stdio',
     command: 'node',
     args: [],
-    description: 'Project knowledge wiki (architecture, decisions, conventions, gotchas)'
+    description: 'Project knowledge wiki (architecture, decisions, conventions, gotchas)',
+    builtin: VOCS_MEMORY_SERVER_ID
   };
 }
 
