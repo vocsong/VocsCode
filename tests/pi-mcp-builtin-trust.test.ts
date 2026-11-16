@@ -9,7 +9,9 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import vocsCodeApprovals from '../resources/pi/vocs-code-approvals';
 import { DECLINED_REASON, PLAN_REASON } from '../resources/pi/subagent-gate';
-import { loadMcpBridge, mcpReadOnlyToolNames, mcpToolNames } from '../resources/pi/vocs-code-mcp';
+import { BUILTIN_SERVERS, loadMcpBridge, mcpReadOnlyToolNames, mcpToolNames, reservedBuiltinName, reservedKey } from '../resources/pi/vocs-code-mcp';
+import { MCP_BUILTIN_IDS } from '../src/shared/types';
+import { mcpIdKey, reservedBuiltinFor } from '../src/shared/mcp-ids';
 import { memoryServerDef, vocsMemoryBaseDef } from '../src/main/mcp/memory';
 import { annotatedTools, stubPiMcpBridge, type StubbedBridge } from './support/pi-mcp-stub';
 
@@ -123,5 +125,24 @@ describe('reserved and duplicate names in the bridge', () => {
     const tools = await loadMcpBridge();
     expect(tools.map((t) => t.name)).toEqual(['mcp__notes__get_item']);
     expect(tools[0].label).toBe('notes: get-item');
+  });
+});
+
+describe('the bridge mirrors the host name rules', () => {
+  // pi loads the bridge on its own, so it carries copies; these pin them to the host's.
+  it('reserves exactly the host built-in ids', () => {
+    expect([...BUILTIN_SERVERS].sort()).toEqual([...MCP_BUILTIN_IDS].sort());
+  });
+
+  const names = [
+    ...MCP_BUILTIN_IDS,
+    'vocs_memory', 'vocs.memory', 'Vocs-Memory', 'VOCS__MEMORY', '_vocs-memory_', 'vocs-memory.', 'vocsmemory', 'vocs-memory-2',
+    'GitNexus', 'gitnexus_', 'git-nexus', 'Git.Nexus', 'cua_driver', 'CUA.DRIVER', 'cua-driver-x', 'Vocs.Mission', 'vocs_missions',
+    'notes', 'my-server', 'My_Server', 'a..b', 'A-B', '2server', 'x', 'x.', 'X_'
+  ];
+
+  it.each(names)('folds %s the way the host does', (name) => {
+    expect(reservedKey(name)).toBe(mcpIdKey(name));
+    expect(reservedBuiltinName(name)).toBe(reservedBuiltinFor(name));
   });
 });

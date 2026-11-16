@@ -185,11 +185,19 @@ const MEMORY_SERVER = 'vocs-memory';
  * The app's built-in server ids, mirroring `MCP_BUILTIN_IDS` in src/shared/types.ts. Their names are
  * reserved in every spelling that folds to the same tool names (see `reservedKey`).
  */
-const BUILTIN_SERVERS = [CODE_GRAPH_SERVER, MEMORY_SERVER, 'cua-driver', MISSION_SERVER_ID];
+export const BUILTIN_SERVERS: readonly string[] = [CODE_GRAPH_SERVER, MEMORY_SERVER, 'cua-driver', MISSION_SERVER_ID];
 
-/** Mirrors `mcpIdKey` in src/shared/mcp-ids.ts: case and every run of `-`, `_`, `.` fold together. */
-function reservedKey(id: string): string {
+/**
+ * Mirrors `mcpIdKey` in src/shared/mcp-ids.ts: case and every run of `-`, `_`, `.` fold together.
+ * tests/pi-mcp-builtin-trust.test.ts pins this and the list above to the host's copies.
+ */
+export function reservedKey(id: string): string {
   return String(id ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+/** The built-in a name folds onto, if any; mirrors `reservedBuiltinFor` in src/shared/mcp-ids.ts. */
+export function reservedBuiltinName(id: string): string | undefined {
+  return BUILTIN_SERVERS.find((builtin) => reservedKey(builtin) === reservedKey(id));
 }
 
 /** The built-in a definition is, by its host-set provenance and exact id; never by name alone. */
@@ -206,7 +214,7 @@ function admitServers(servers: PiMcpServerConfig[]): PiMcpServerConfig[] {
   const seen = new Map<string, string>();
   const admitted: PiMcpServerConfig[] = [];
   for (const cfg of servers) {
-    const reserved = BUILTIN_SERVERS.find((id) => reservedKey(id) === reservedKey(cfg.id));
+    const reserved = reservedBuiltinName(cfg.id);
     if (reserved && provenance(cfg) !== reserved) {
       console.error(`[vocs-code-mcp] skipping MCP server "${cfg.id}": the name is reserved for the built-in ${reserved} server`);
       continue;

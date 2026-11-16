@@ -70,6 +70,17 @@ describe('global MCP definitions', () => {
     expect(store.get().mcpServers.map((d) => d.id)).toEqual(['my-server']);
   });
 
+  it('never refuses removing a server because of a collision already stored elsewhere', async () => {
+    const dir = await temp('vocs-reserved-settings-');
+    await writeFile(path.join(dir, 'settings.json'), JSON.stringify({ mcpServers: [http('x'), http('X'), http('x.')] }), 'utf8');
+    const store = new SettingsStore(dir);
+    await store.load();
+    // Removing `x` changes which server `x.` is reported against, not whether it was already flagged.
+    await expect(store.update({ mcpServers: [http('X'), http('x.')] })).resolves.toBeTruthy();
+    expect(store.get().mcpServers.map((d) => d.id)).toEqual(['X', 'x.']);
+    expect(mcpServersSaveError([http('X'), http('x.'), http('X_')], store.get().mcpServers)).toMatch(/"X_".*"X"/);
+  });
+
   it.each(ALIASES)('keeps a stored %s visible as not loaded and never selects it', async (id) => {
     const dir = await temp('vocs-reserved-settings-');
     await writeFile(path.join(dir, 'settings.json'), JSON.stringify({ mcpServers: [http(id), http('files')] }), 'utf8');

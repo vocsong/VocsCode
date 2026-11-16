@@ -334,13 +334,15 @@ function normalizeCustomLabels(stored: unknown): string[] {
  * Why a list of MCP server definitions about to be saved must be refused, or null: a name that folds
  * onto a built-in's, or onto another server's in the same list (see shared/mcp-ids.ts). Only a
  * problem the list introduces counts. One already in `current` was saved before this rule and stays
- * on disk, shown as not loaded with its reason, so it does not block an unrelated save.
+ * on disk, shown as not loaded with its reason, so it does not block an unrelated save. Known problems
+ * match by id and kind, not reason text: a collision's reason names the other server, which changes
+ * when that server is removed, and removing a server must never be refused for it.
  */
 export function mcpServersSaveError(incoming: unknown, current: readonly McpServerDef[]): string | null {
   if (!Array.isArray(incoming)) return null;
   const ids = incoming.map((raw) => ({ id: raw && typeof raw === 'object' && typeof (raw as { id?: unknown }).id === 'string' ? (raw as { id: string }).id.trim() : '' }));
-  const known = new Set(mcpIdIssues(current).map((issue) => `${issue.id}\n${issue.reason}`));
-  return mcpIdIssues(ids.filter((d) => d.id)).find((issue) => !known.has(`${issue.id}\n${issue.reason}`))?.reason ?? null;
+  const known = new Set(mcpIdIssues(current).map((issue) => `${issue.id}\n${issue.kind}`));
+  return mcpIdIssues(ids.filter((d) => d.id)).find((issue) => !known.has(`${issue.id}\n${issue.kind}`))?.reason ?? null;
 }
 
 /**
