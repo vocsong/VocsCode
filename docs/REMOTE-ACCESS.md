@@ -444,7 +444,7 @@ lack a subject and are rejected once; the user signs in again. The desktop offer
   its nonce through the directory and receives its refresh credential sealed to its own key
   (`enrollTokenContext`). Re-granting the same live hash to a different account is refused. A key
   already registered to that account keeps its host id, and the computer cap applies. Unknown,
-  expired and not-yet-granted secrets all answer `pending`.
+  expired, revoked and not-yet-granted secrets all answer `pending`.
 - **Pairing.** A signed-in browser lists only that account's computers (`GET /v1/owner/hosts`) and
   may ask one to pair (`POST /v1/owner/pair-request`). Code-based claims and their polls also require
   the same account assertion; a code never transfers a desktop between accounts. The relay sends a
@@ -489,8 +489,14 @@ proves the device.
   reconcile their paired-browser lists against the relay's registry, and re-key the mirror a
   revoked browser could read.
 - **Revoke all (the kill switch).** Settings → Remote access revokes every other device of the
-  account — browsers and other computers — cancels pending pairing codes, drops revoked hosts'
-  mirrors and re-keys this desktop's. The desktop keeps its identity and stays connected.
+  account — browsers and other computers — cancels pending pairing codes and outstanding
+  enrollment grants, drops revoked hosts' mirrors and re-keys this desktop's. The desktop keeps its
+  identity and stays connected. It also raises the account's **revocation epoch** in the same
+  commit. Pairing records, enrollment grants and enrollment-directory pointers carry the epoch they
+  were issued under (records written before the epoch existed read as 0), and device admission
+  rechecks it inside the transaction that mints the device: a pairing approval re-reads and consumes
+  the exact claim it verified, and an enrollment redemption the exact grant, so authority issued
+  before a revoke all mints nothing after it.
 - **Pause remote access.** The toggle closes the desktop socket and drops live sessions; it does
   **not** invalidate relay tokens or delete a previously uploaded mirror (use Revoke all).
 - **A revoked desktop** (its refresh credential rejected) keeps its identity and paired list and

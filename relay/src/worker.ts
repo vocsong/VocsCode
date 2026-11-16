@@ -15,6 +15,10 @@ import { authorizeSocket, BROADCAST_TAG, handleHttp, json, type RouteContext } f
 const ACCOUNT_STORAGE_KEY = '__vocs_account_id__';
 const DIRECTORY_NAME = 'connect-enrollment-v1';
 const DIRECTORY_KEY_PREFIX = 'nonce:';
+/** Directory → Hub only: the revocation epoch a forwarded redemption's pointer was bound under. The
+ *  public Worker strips every `x-vocs-internal-*` header, so no caller can set it. */
+const INTERNAL_ENROLL_EPOCH_HEADER = 'x-vocs-internal-enroll-epoch';
+const EPOCH = /^(0|[1-9][0-9]{0,14})$/;
 const NONCE_HASH = /^[0-9a-f]{64}$/;
 const NONCE = /^[A-Za-z0-9_-]{43}$/;
 const encoder = new TextEncoder();
@@ -127,13 +131,14 @@ export class Hub {
     });
   }
 
-  private context(request: Request, accountId: string): RouteContext {
+  private context(request: Request, accountId: string, enrollBindingEpoch?: number): RouteContext {
     return {
       store: this.store,
       accountId,
       enrollToken: this.env.ENROLL_TOKEN,
       accountAuthenticated: request.headers.get(INTERNAL_ACCOUNT_AUTH_HEADER) === '1',
       deviceRouteSecret: this.env.DEVICE_ROUTE_SECRET,
+      ...(enrollBindingEpoch === undefined ? {} : { enrollBindingEpoch }),
       bindEnrollment: async (input) => {
         const directory = this.env.ENROLLMENTS.get(this.env.ENROLLMENTS.idFromName(DIRECTORY_NAME));
         const response = await directory.fetch(new Request('https://enrollments/bind', {
@@ -169,7 +174,10 @@ export class Hub {
       url.pathname = '/enroll/redeem';
       const headers = new Headers(request.headers);
       const body = await request.arrayBuffer();
-      return handleHttp(new Request(url.toString(), { method: 'POST', headers, body }), this.context(request, accountId));
+      // A malformed epoch never matches the account's, so the redemption stays pending.
+      const epoch = request.headers.get(INTERNAL_ENROLL_EPOCH_HEADER);
+      const bindingEpoch = epoch === null ? undefined : EPOCH.test(epoch) ? Number(epoch) : -1;
+      return handleHttp(new Request(url.toString(), { method: 'POST', headers, body }), this.context(request, accountId, bindingEpoch));
     }
     if (url.pathname === '/ws/host' || url.pathname === '/ws/client') {
       // Do not burn a single-use ticket for a plain GET or malformed upgrade.
@@ -217,6 +225,9 @@ export class Hub {
 interface EnrollmentBinding {
   accountId: string;
   expiresAt: number;
+  /** The account's revocation epoch when the owner granted it (absent on older pointers: 0). The
+   *  tenant Hub refuses a pointer from before its last revoke all. */
+  epoch?: number;
 }
 
 /** Short-lived global nonce-hash → account pointer for the desktop's nonce-only redemption poll.
@@ -242,14 +253,16 @@ export class EnrollmentDirectory {
       const accountId = input.accountId;
       const expiresAt = input.expiresAt;
       const nonceHash = input.nonceHash;
+      const epoch = input.epoch ?? 0;
       if (typeof nonceHash !== 'string' || !NONCE_HASH.test(nonceHash) || !isAccountId(accountId) ||
           typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt <= now ||
-          expiresAt > now + ENROLL_GRANT_TTL_MS + 60_000) return json({ error: 'invalid' }, 400);
+          expiresAt > now + ENROLL_GRANT_TTL_MS + 60_000 ||
+          typeof epoch !== 'number' || !Number.isSafeInteger(epoch) || epoch < 0) return json({ error: 'invalid' }, 400);
       const key = `${DIRECTORY_KEY_PREFIX}${nonceHash}`;
       await this.store.transaction(async (tx) => {
         const current = await tx.get<EnrollmentBinding>(key);
         if (current && current.expiresAt > now && current.accountId !== accountId) throw new PairError('used');
-        await tx.put(key, { accountId, expiresAt } satisfies EnrollmentBinding);
+        await tx.put(key, { accountId, expiresAt, epoch } satisfies EnrollmentBinding);
         for (const [stale, record] of await tx.list<EnrollmentBinding>(DIRECTORY_KEY_PREFIX)) {
           if (now >= record.expiresAt) await tx.delete(stale);
         }
@@ -278,7 +291,11 @@ export class EnrollmentDirectory {
     const hub = this.env.HUB.get(this.env.HUB.idFromName(binding.accountId));
     const internal = new Request('https://hub/__internal/enroll/redeem', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', [INTERNAL_ACCOUNT_ID_HEADER]: binding.accountId },
+      headers: {
+        'content-type': 'application/json',
+        [INTERNAL_ACCOUNT_ID_HEADER]: binding.accountId,
+        [INTERNAL_ENROLL_EPOCH_HEADER]: String(typeof binding.epoch === 'number' && Number.isSafeInteger(binding.epoch) && binding.epoch >= 0 ? binding.epoch : 0)
+      },
       body: JSON.stringify(body)
     });
     return hub.fetch(internal);

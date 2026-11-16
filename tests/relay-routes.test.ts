@@ -440,6 +440,32 @@ describe('owner routes: Connect with Vocs and pairing from a signed-in browser',
     expect((await handleHttp(req('POST', '/enroll/redeem', { body: '{' }), ctx())).status).toBe(400);
   });
 
+  it('binds an enrollment pointer under the current revocation epoch and refuses one bound before revoke all', async () => {
+    const { ctx, store } = harness();
+    const binds: Array<{ nonceHash: string; epoch: number }> = [];
+    const bindEnrollment: RouteContext['bindEnrollment'] = async (input) => void binds.push(input);
+    const me = await testDevice(store, 'host', { now: T });
+    const desktop = await generateIdentity();
+    const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
+    const hash = await hashToken(nonce);
+    const grant = () => handleHttp(req('POST', '/owner/enroll-grant', { headers: owner, body: JSON.stringify({ nonceHash: hash }) }), ctx({ bindEnrollment }));
+    const redeem = (enrollBindingEpoch: number) => handleHttp(req('POST', '/enroll/redeem', { body: JSON.stringify({ nonce, hostPub: publicOf(desktop), name: 'Work PC' }) }), ctx({ enrollBindingEpoch }));
+
+    expect((await grant()).status).toBe(200);
+    expect(binds.at(-1)).toMatchObject({ nonceHash: hash, epoch: 0 });
+    const revokeAll = await handleHttp(req('POST', `/devices/revoke-all?device=${me.deviceId}`, { headers: { authorization: `Bearer ${me.access}` } }), ctx());
+    expect(revokeAll.status).toBe(200);
+    expect(await (await redeem(0)).json()).toEqual({ status: 'pending' });
+
+    // The owner grants again: the pointer is rebound under the new epoch, and only that one redeems.
+    expect((await grant()).status).toBe(200);
+    expect(binds.at(-1)).toMatchObject({ nonceHash: hash, epoch: 1 });
+    expect(await (await redeem(0)).json()).toEqual({ status: 'pending' });
+    expect(await (await redeem(-1)).json()).toEqual({ status: 'pending' });
+    expect(await (await redeem(1)).json()).toMatchObject({ status: 'registered' });
+    expect((await store.list('device:a:')).length).toBe(2);
+  });
+
   it('sends a pairing request to the named desktop only, lists it with presence, and refuses an offline one', async () => {
     const sentToHost: string[] = [];
     const sentToOthers: string[] = [];
