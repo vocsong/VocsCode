@@ -23,8 +23,8 @@ export function isBuiltinServerId(id: string): boolean {
 /** The built-in definition, before the per-session env is attached. */
 export function gitnexusBaseDef(installedPath?: string | null): McpServerDef {
   return installedPath
-    ? { id: GITNEXUS_SERVER_ID, transport: 'stdio', command: installedPath, args: ['mcp'], description: 'GitNexus code knowledge graph' }
-    : { id: GITNEXUS_SERVER_ID, transport: 'stdio', command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'], description: 'GitNexus code knowledge graph' };
+    ? { id: GITNEXUS_SERVER_ID, transport: 'stdio', command: installedPath, args: ['mcp'], description: 'GitNexus code knowledge graph', builtin: GITNEXUS_SERVER_ID }
+    : { id: GITNEXUS_SERVER_ID, transport: 'stdio', command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'], description: 'GitNexus code knowledge graph', builtin: GITNEXUS_SERVER_ID };
 }
 
 /** GitNexus's own home resolution: `GITNEXUS_HOME`, else `~/.gitnexus`. */

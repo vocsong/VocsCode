@@ -81,11 +81,18 @@ export class NativeMcpSession {
       }
       connections.push(result.connection);
       for (const tool of result.connection.tools) {
-        // Only the app's own memory server is trusted to declare a tool read-only.
-        const readOnly = def.id === VOCS_MEMORY_SERVER_ID && tool.readOnly === true;
+        // Only the app's own memory server is trusted to declare a tool read-only, and only by the
+        // provenance the app set on the definition it built, never by the server's name.
+        const readOnly = def.builtin === VOCS_MEMORY_SERVER_ID && def.id === VOCS_MEMORY_SERVER_ID && tool.readOnly === true;
         const description = tool.description ? `${tool.description} (MCP server: ${def.id})` : `${def.id}: ${tool.name}`;
+        const name = mcpToolName(def.id, tool.name);
+        // Two tool names that fold together would give one name two tools; keep the first.
+        if (tools.some((registered) => registered.name === name)) {
+          opts.log('warn', `native mcp: ${def.id} tool ${tool.name} skipped: its name collides with another tool`);
+          continue;
+        }
         tools.push({
-          name: mcpToolName(def.id, tool.name),
+          name,
           description,
           parameters: tool.inputSchema && typeof tool.inputSchema === 'object' ? (tool.inputSchema as Record<string, unknown>) : { type: 'object', properties: {} },
           mutating: !readOnly,

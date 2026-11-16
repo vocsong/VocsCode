@@ -43,6 +43,7 @@ const MCP_INFO: McpProjectInfo = {
   file: 'G:/proj/a/.mcp.json',
   display: '.mcp.json',
   exists: false,
+  rejected: [],
   repo: [],
   global: [],
   state: {},

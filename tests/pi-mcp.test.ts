@@ -14,6 +14,8 @@ import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError, typ
 import { PiMcpConnection } from '../resources/pi/mcp-client';
 import vocsCodeMcp, { closeMcpBridge, mcpReadOnlyToolNames, mcpToolNames, parseMcpConfig, promptSnippetFor, registerMcpTools, sanitizeToolName, toolNameFor } from '../resources/pi/vocs-code-mcp';
 import { MissionToolBroker } from '../src/main/mission/tools';
+import { gitnexusBaseDef } from '../src/main/mcp/gitnexus';
+import { vocsMemoryBaseDef } from '../src/main/mcp/memory';
 import { reduceMission, type MissionMutation } from '../src/main/mission/state';
 import { missionFixture } from './support/mission-fixture';
 import { PiOfflineRunner, piIntegrationPaths, type PiEvent } from './pi-offline-runner';
@@ -245,7 +247,8 @@ describe('vocsCodeMcp extension', () => {
     const configPath = path.join(dir, 'mcp.json');
     await writeFile(
       configPath,
-      JSON.stringify({ servers: [{ id: 'gitnexus', transport: 'stdio', command: process.execPath, args: [FIXTURE] }] }),
+      // The host's own definition: the code-graph nudge follows its provenance, not the name.
+      JSON.stringify({ servers: [{ ...gitnexusBaseDef(), command: process.execPath, args: [FIXTURE] }] }),
       'utf8'
     );
     process.env.VOCS_CODE_MCP_CONFIG = configPath;
@@ -564,7 +567,7 @@ describe('shared MCP bridge (a child session reuses the parent connections)', ()
     const configPath = path.join(root, 'mcp.json');
     await writeFile(
       configPath,
-      JSON.stringify({ servers: [{ id: 'vocs-memory', transport: 'stdio', command: process.execPath, args: [MEMORY_SERVER], env: { VOCS_MEMORY_ROOT: path.join(root, 'wiki') } }] }),
+      JSON.stringify({ servers: [{ ...vocsMemoryBaseDef(), command: process.execPath, args: [MEMORY_SERVER], env: { VOCS_MEMORY_ROOT: path.join(root, 'wiki') } }] }),
       'utf8'
     );
     process.env.VOCS_CODE_MCP_CONFIG = configPath;

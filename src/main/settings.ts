@@ -14,6 +14,7 @@ import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
 import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
+import { mcpIdIssues } from '../shared/mcp-ids';
 import { CODEX_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from './models/static-models';
 import { readJson, writeJson } from './util/fs';
 
@@ -329,7 +330,24 @@ function normalizeCustomLabels(stored: unknown): string[] {
   return out;
 }
 
-/** Keep only well-formed MCP server definitions; a malformed entry must not reach a harness. */
+/**
+ * Why a list of MCP server definitions about to be saved must be refused, or null: a name that folds
+ * onto a built-in's, or onto another server's in the same list (see shared/mcp-ids.ts). Only a
+ * problem the list introduces counts. One already in `current` was saved before this rule and stays
+ * on disk, shown as not loaded with its reason, so it does not block an unrelated save.
+ */
+export function mcpServersSaveError(incoming: unknown, current: readonly McpServerDef[]): string | null {
+  if (!Array.isArray(incoming)) return null;
+  const ids = incoming.map((raw) => ({ id: raw && typeof raw === 'object' && typeof (raw as { id?: unknown }).id === 'string' ? (raw as { id: string }).id.trim() : '' }));
+  const known = new Set(mcpIdIssues(current).map((issue) => `${issue.id}\n${issue.reason}`));
+  return mcpIdIssues(ids.filter((d) => d.id)).find((issue) => !known.has(`${issue.id}\n${issue.reason}`))?.reason ?? null;
+}
+
+/**
+ * Keep only well-formed MCP server definitions; a malformed entry must not reach a harness. Each
+ * definition is rebuilt field by field, so app-only fields (the `builtin` provenance) never come
+ * from what was stored or sent.
+ */
 export function normalizeMcpServers(stored: unknown): McpServerDef[] {
   if (!Array.isArray(stored)) return [];
   const out: McpServerDef[] = [];
@@ -585,6 +603,10 @@ export class SettingsStore {
       const missionChanged = Object.hasOwn(input, 'mission') || Object.hasOwn(input, 'missionProjects');
       if (this.blockedMission && missionChanged && !(Object.hasOwn(input, 'mission') && Object.hasOwn(input, 'missionProjects'))) {
         throw new MissionConfigError('mission', 'Stored Mission settings are invalid. Replace both the configuration and project overrides explicitly.');
+      }
+      if (Object.hasOwn(input, 'mcpServers')) {
+        const refused = mcpServersSaveError(input.mcpServers, this.settings.mcpServers ?? []);
+        if (refused) throw new Error(refused);
       }
       const next = normalizeSettings({ ...this.settings, ...input });
       if (missionChanged) {
