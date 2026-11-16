@@ -99,10 +99,13 @@ export function claudeModelToInfo(m: ClaudeSdkModelInfo, reportsEffort = false):
  * description's lead ("Opus 5.5 · Best for…") or the whole description ("Sonnet 5") beside a bare
  * alias display name ("Sonnet"); newer builds (2.1.3xx) put it in the display name ("Opus 5.5") and
  * a tagline in the description ("For complex work…"). The recommended row's display name is always
- * "Default (recommended)", so its description carries the name in both shapes.
+ * "Default (recommended)", so its description carries the name in both shapes — either as the
+ * name itself or, in some account states, as "Use the default model (currently Opus 5.5)".
  */
 function claudeRowName(m: ClaudeSdkModelInfo, recommended: boolean): string | undefined {
   const description = m.description?.trim() ?? '';
+  const currently = recommended ? /\(currently ([^)]+)\)/.exec(description)?.[1]?.trim() : undefined;
+  if (currently) return currently;
   const [lead, ...tagline] = description.split(' · ');
   if (tagline.length) return lead.trim() || undefined;
   const display = m.displayName?.trim();

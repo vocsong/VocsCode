@@ -2255,11 +2255,17 @@ h4 {
 .run-controls .pill-model {
   color: var(--fg);
   font-weight: 500;
-  max-width: 220px;
+  max-width: 300px;
   width: 100%;
 }
 .run-controls .pill-model > .icon:first-child {
   color: var(--accent);
+}
+/* provider/model truncates first; the effort beside it stays readable, in a lighter weight. */
+.pill-effort {
+  flex: none;
+  color: var(--fg-muted);
+  font-weight: 400;
 }
 .model-menu-current {
   padding: 8px;
@@ -3552,7 +3558,7 @@ h4 {
   max-width: calc(100cqw - 12px);
 }
 .composer-actions .run-controls > .dropdown:first-child {
-  flex: 0 1 220px;
+  flex: 0 1 300px;
   min-width: 38px;
 }
 .composer-actions .run-controls > .dropdown:last-child:not(:first-child) {
@@ -3582,7 +3588,8 @@ h4 {
 }
 @container (max-width: 340px) {
   .composer-send-label { display: none; }
-  .composer-actions .pill-model > .icon:last-child { display: none; }
+  .composer-actions .pill-model > .icon:last-child,
+  .composer-actions .pill-model .pill-effort { display: none; }
 }
 /* Desktop session pane: the composer floats on the conversation's ground as one card — the prompt
    above, the controls it is sent with along its foot. The transcript fades out behind it. (The web

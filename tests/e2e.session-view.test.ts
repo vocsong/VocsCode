@@ -208,14 +208,14 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.screenshot({ path: path.join(shots, 'session-view-02-work.png') });
     await work.click();
 
-    // The changes chip opens Changes; the compact model and context stay visible, spend lives in options.
+    // The changes chip opens Changes; the provider/model and context stay visible, spend lives in options.
     await changes.click();
     await win.locator('.panel-tab.active', { hasText: 'Changes' }).waitFor({ timeout: 10_000 });
     await win.locator('.changes').waitFor({ timeout: 10_000 });
     const composer = win.locator('.pane.active .composer');
     const model = composer.locator('.run-controls .pill[title="Model"]');
-    expect(await model.innerText()).toMatch(/claude-opus-5-5|Opus 5\.5/i);
-    expect(await model.innerText()).not.toContain('anthropic/');
+    expect(await model.locator('.pill-text').innerText()).toMatch(/^anthropic\/(claude-opus-5-5|Opus 5\.5)/i);
+    expect(await model.locator('.pill-effort').innerText()).toBe('default');
     expect(await model.getAttribute('aria-label')).toContain('anthropic/claude-opus-5-5');
     const meter = composer.getByRole('button', { name: 'Session usage' });
     expect(await meter.innerText()).toBe('32%');
@@ -320,7 +320,8 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
       }, { themed, busy, models });
       await expect.poll(() => win.locator('html').getAttribute('data-theme')).toBe(theme);
       const modelPill = footer.locator('.pill[title="Model"]');
-      await expect.poll(() => modelPill.locator('.pill-text').innerText()).toBe(displayName);
+      await expect.poll(() => modelPill.locator('.pill-text').innerText()).toBe(`${model.provider}/${displayName}`);
+      expect(await modelPill.locator('.pill-effort').innerText()).toBe('high');
       expect(await modelPill.getAttribute('aria-label')).toBe(`Model: ${model.provider}/${model.model} · Effort: high · Fast on`);
       await footer.getByRole('button', { name: 'Permission mode: Full', exact: true }).waitFor();
 
