@@ -50,6 +50,9 @@ const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
 /** A mirror clear the relay did not confirm is retried after this, doubling up to the cap. */
 const MIRROR_CLEAR_RETRY_MS = 15_000;
 const MIRROR_CLEAR_RETRY_MAX_MS = 5 * 60_000;
+/** After a mirror upload failed in transit, a clear is repeated once after this delay, in case
+ *  the request still reaches the relay after the first clear. */
+const MIRROR_LATE_WRITE_MS = 5_000;
 
 /** A mirror upload whose publication went stale (mirroring off, re-keyed, host gone) before its
  *  request left: it is dropped, not sent. */
@@ -130,12 +133,19 @@ export class RemoteHost {
   /** Mirror uploads between their fence check and the relay's answer; a clear waits for them so
    *  it always lands after them. */
   private readonly mirrorWrites = new Set<Promise<unknown>>();
+  /** A mirror upload ended without an HTTP answer: its request may still reach the relay later,
+   *  so the next successful clear is repeated once after a short delay. */
+  private mirrorWriteUncertain = false;
   /** Mirror clears asked for, and the newest one the relay confirmed. While they differ the relay
-   *  may still hold blobs that should be gone: uploads retry the clear first, and a timer retries
-   *  it in the meantime. */
+   *  may still hold blobs that should be gone: uploads wait for the clear first, and a timer
+   *  retries it in the meantime. */
   private mirrorClearsRequested = 0;
   private mirrorClearedThrough = 0;
+  /** The one clear run in progress, if any: every retry and every waiting upload joins it rather
+   *  than sending a DELETE of its own. */
   private mirrorClearing: Promise<boolean> | null = null;
+  /** A repeat clear for an upload that failed in transit is not sent before this time. */
+  private mirrorClearNotBefore = 0;
   private mirrorClearFailing = false;
   private mirrorRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private mirrorRetryDelay = 0;
@@ -166,6 +176,8 @@ export class RemoteHost {
       onMirrorRotated?: () => void;
       /** First retry delay for a mirror clear the relay did not confirm; tests shrink it. */
       mirrorRetryMs?: number;
+      /** Delay before repeating a clear after an upload failed in transit; tests shrink it. */
+      mirrorLateWriteMs?: number;
       /** P3.5: the terminals a browser may watch; absent when terminals are unavailable. */
       terminals?: () => TerminalSource | null;
       /** Separate delegated controller boundary; never a browser invoke or approval channel. */
@@ -473,8 +485,12 @@ export class RemoteHost {
    *  after every wait, right before the request leaves), or when the relay refused it. */
   async putMirror(kind: 'index' | 'session', sessionId: string | undefined, blob: SealedBlob, current: () => boolean = () => true): Promise<boolean> {
     if (!this.enrolled()) return false;
-    // Nothing new lands next to blobs a clear should have removed: finish that clear first.
-    if (!(await this.settleMirrorClear()) || !current()) return false;
+    // Nothing new lands next to blobs a clear should have removed: wait until no clear is owed.
+    // The write below is registered synchronously after this loop, so any later clear waits for it.
+    while (this.mirrorClearing || this.mirrorClearPending()) {
+      if (!(await this.runOwedMirrorClear())) return false;
+    }
+    if (!current()) return false;
     const path = kind === 'index' ? '/v1/mirror' : `/v1/mirror/${encodeURIComponent(sessionId ?? '')}`;
     const write = this.relayFetch(
       path,
@@ -487,6 +503,8 @@ export class RemoteHost {
       res = await write;
     } catch (e) {
       if (e instanceof MirrorWriteSuperseded) return false;
+      // No HTTP answer: the request may still be delivered, after a clear that follows.
+      this.mirrorWriteUncertain = true;
       res = null;
     } finally {
       this.mirrorWrites.delete(write);
@@ -500,13 +518,8 @@ export class RemoteHost {
    *  confirm it: the failure is logged and audited, and the clear is retried (on a timer, on the
    *  next connect, and before the next upload) until the relay confirms it. */
   async clearMirror(): Promise<boolean> {
-    const ticket = ++this.mirrorClearsRequested;
-    const run = (this.mirrorClearing ?? Promise.resolve(true)).then(() => this.runMirrorClear(ticket));
-    this.mirrorClearing = run;
-    void run.finally(() => {
-      if (this.mirrorClearing === run) this.mirrorClearing = null;
-    });
-    return run;
+    this.mirrorClearsRequested++;
+    return this.runOwedMirrorClear();
   }
 
   // --- internals ---
@@ -515,49 +528,94 @@ export class RemoteHost {
     return this.mirrorClearedThrough < this.mirrorClearsRequested;
   }
 
-  /** True once no mirror clear is owed: waits for one in progress, and retries one that failed. */
-  private async settleMirrorClear(): Promise<boolean> {
-    if (this.mirrorClearing) await this.mirrorClearing;
-    if (!this.mirrorClearPending()) return true;
-    return this.clearMirror();
+  /** Runs the clear that is owed, or joins the run already in progress: retries never stack
+   *  DELETEs. True once nothing is owed; false when the relay did not confirm it. */
+  private runOwedMirrorClear(fromTimer = false): Promise<boolean> {
+    if (!this.mirrorClearing) {
+      const finish = (ok: boolean) => {
+        if (this.mirrorClearing === run) this.mirrorClearing = null;
+        return ok;
+      };
+      const run: Promise<boolean> = this.runMirrorClears(fromTimer).then(finish, (e: unknown) => {
+        this.deps.log('warn', `remote: mirror clear failed: ${e instanceof Error ? e.message : String(e)}`);
+        this.scheduleMirrorClearRetry(false);
+        return finish(false);
+      });
+      this.mirrorClearing = run;
+    }
+    return this.mirrorClearing;
   }
 
-  private async runMirrorClear(ticket: number): Promise<boolean> {
-    if (this.mirrorClearedThrough >= ticket) return true;
-    this.cancelMirrorClearRetry();
-    if (this.enrolled()) {
-      await Promise.allSettled([...this.mirrorWrites]);
-      try {
-        const res = await this.relayFetch('/v1/mirror', { method: 'DELETE' });
-        if (!res.ok) throw new Error(`relay answered ${res.status}`);
-      } catch (e) {
-        const why = e instanceof Error ? e.message : String(e);
-        this.deps.log('warn', `remote: mirror clear failed, will retry: ${why}`);
-        if (!this.mirrorClearFailing) this.deps.audit?.record('mirror-clear-failed', { detail: why });
-        this.mirrorClearFailing = true;
-        this.scheduleMirrorClearRetry();
-        return false;
-      }
+  private async runMirrorClears(fromTimer: boolean): Promise<boolean> {
+    while (this.mirrorClearPending()) {
+      if (!(await this.attemptMirrorClear(fromTimer))) return false;
+      fromTimer = false;
     }
+    return true;
+  }
+
+  /** One DELETE covering every clear asked for before it is sent. */
+  private async attemptMirrorClear(fromTimer: boolean): Promise<boolean> {
+    this.cancelMirrorClearRetry();
     // Not enrolled: nothing of this desktop's is reachable, and the relay drops a revoked
     // desktop's mirror along with it.
-    this.mirrorClearedThrough = Math.max(this.mirrorClearedThrough, ticket);
+    if (!this.enrolled()) {
+      this.mirrorClearedThrough = this.mirrorClearsRequested;
+      this.mirrorClearNotBefore = 0;
+      this.mirrorClearSucceeded();
+      return true;
+    }
+    const repeat = this.mirrorClearNotBefore > 0;
+    const wait = this.mirrorClearNotBefore - Date.now();
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    await Promise.allSettled([...this.mirrorWrites]);
+    const uncertain = this.mirrorWriteUncertain;
+    this.mirrorWriteUncertain = false;
+    const target = this.mirrorClearsRequested;
+    try {
+      const res = await this.relayFetch('/v1/mirror', { method: 'DELETE' });
+      if (!res.ok) throw new Error(`relay answered ${res.status}`);
+    } catch (e) {
+      this.mirrorWriteUncertain ||= uncertain;
+      const why = e instanceof Error ? e.message : String(e);
+      this.deps.log('warn', `remote: mirror clear failed, will retry: ${why}`);
+      if (!this.mirrorClearFailing) this.deps.audit?.record('mirror-clear-failed', { detail: why });
+      this.mirrorClearFailing = true;
+      this.scheduleMirrorClearRetry(fromTimer);
+      return false;
+    }
+    this.mirrorClearedThrough = Math.max(this.mirrorClearedThrough, target);
+    this.mirrorClearNotBefore = 0;
+    if (uncertain && !repeat) {
+      // An upload that failed in transit may still land after this DELETE: owe one more clear,
+      // sent after a short delay (once; the repeat does not schedule another).
+      this.mirrorClearsRequested++;
+      this.mirrorClearNotBefore = Date.now() + (this.deps.mirrorLateWriteMs ?? MIRROR_LATE_WRITE_MS);
+    }
+    this.mirrorClearSucceeded();
+    return true;
+  }
+
+  private mirrorClearSucceeded(): void {
     this.mirrorRetryDelay = 0;
     if (this.mirrorClearFailing) {
       this.mirrorClearFailing = false;
       this.deps.log('info', 'remote: mirror clear succeeded on retry');
       this.deps.audit?.record('mirror-clear-recovered');
     }
-    return true;
   }
 
-  private scheduleMirrorClearRetry(): void {
-    if (this.mirrorRetryTimer) return;
+  /** Arms the retry timer for an owed clear. Only a failed timer attempt lengthens the delay; an
+   *  attempt an upload started re-arms it at the current delay. Nothing is armed while remote
+   *  access is paused: the next connect or upload retries instead. */
+  private scheduleMirrorClearRetry(backoff: boolean): void {
+    if (this.mirrorRetryTimer || this.status === 'off') return;
     const first = this.deps.mirrorRetryMs ?? MIRROR_CLEAR_RETRY_MS;
-    this.mirrorRetryDelay = this.mirrorRetryDelay ? Math.min(this.mirrorRetryDelay * 2, Math.max(first, MIRROR_CLEAR_RETRY_MAX_MS)) : first;
+    if (!this.mirrorRetryDelay) this.mirrorRetryDelay = first;
+    else if (backoff) this.mirrorRetryDelay = Math.min(this.mirrorRetryDelay * 2, Math.max(first, MIRROR_CLEAR_RETRY_MAX_MS));
     this.mirrorRetryTimer = setTimeout(() => {
       this.mirrorRetryTimer = null;
-      if (this.mirrorClearPending()) void this.clearMirror();
+      if (this.mirrorClearPending()) void this.runOwedMirrorClear(true);
     }, this.mirrorRetryDelay);
     this.mirrorRetryTimer.unref?.();
   }
@@ -793,7 +851,7 @@ export class RemoteHost {
       this.deps.log('info', `remote: relay connection open (${enrolled ? 'online' : 'awaiting enrollment'})`);
       this.push();
       if (enrolled) void this.reconcile();
-      if (enrolled && this.mirrorClearPending()) void this.clearMirror();
+      if (enrolled && this.mirrorClearPending()) void this.runOwedMirrorClear();
     });
     ws.on('message', (data) => void this.onMessage(String(data), ws));
     ws.on('close', (code: number) => {

@@ -308,9 +308,11 @@ the desktop, which seals an index plus per-session snapshots with a shared mirro
 transcript while the desktop is unreachable. Each upload is fenced against the mirror's
 generation, the host and the key it sealed with, re-checked after every await and right before
 the request leaves, so turning the mirror off, stopping it or re-keying it drops an upload still
-in progress instead of publishing it; a clear waits for uploads already on the wire, and a clear
-the relay does not confirm is audited (`mirror-clear-failed`) and retried before the next upload,
-on reconnect and on a backoff timer. The relay's HTTP surface is now a
+in progress instead of publishing it; a clear waits for uploads already on the wire, and is
+repeated once after a short delay when one of them failed in transit (its request may still
+arrive). A clear the relay does not confirm is audited (`mirror-clear-failed`) and retried as one
+owed clear (uploads wait for it, reconnect retries it, and a backoff timer retries it while
+remote access is on). The relay's HTTP surface is now a
 **deny-by-default route table** (`relay/src/routes.ts`): every route declares the auth it needs
 (`public`/`account`/`owner`/`enroll`/`device`/`web`/`host`), the dispatcher authorizes before the
 handler runs, and the whole surface is unit-tested in plain Node (`tests/relay-routes.test.ts`) instead
