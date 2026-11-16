@@ -41,10 +41,42 @@ backward compatible: it went live on 2026-09-25, ahead of a release, and desktop
 cannot connect until they run the new code. They keep their pairings, because their old device
 token is now their refresh credential; a browser simply reloads the page.
 
-The rate limits in `wrangler.jsonc` (`ratelimits`, namespaces 4101–4103) are Workers Rate Limiting
+The rate limits in `wrangler.jsonc` (`ratelimits`, namespaces 4101–4105) are Workers Rate Limiting
 bindings: checked at the edge before a request can wake the Hub, per Cloudflare location, eventually
 consistent. Each `namespace_id` must be unique within the Cloudflare account; change them if another
 Worker already uses those numbers.
+
+## Request budgets
+
+`src/edge.ts` classifies every `/v1` request before the Worker reads its body, selects an account or
+wakes a Durable Object. A route the Hub does not serve is answered there (404/405). Every served
+route — authenticated ones included, because authentication has not happened yet — then passes, in
+order:
+
+1. **An edge rate limit** keyed on method, route and caller (an IPv4 address, or the /64 of an IPv6
+   one). Pairing uses `PAIR_LIMIT` (10/min), token exchange `TOKEN_LIMIT` (30/min, however many
+   device ids a caller names), polling and owner routes `POLL_LIMIT` (120/min); each of these
+   routes has its own counter. Socket, device and mirror routes together share one total per
+   address, `ADDRESS_LIMIT` (400/min), whatever route or device id a request names.
+2. **A declared-size check**: a `Content-Length` over the route's budget is refused (413) unread.
+   Mirror uploads (`PUT /v1/mirror`, `PUT /v1/mirror/<id>`) get 2,500,000 bytes; every other route
+   16 KiB.
+3. **A credential-shape check**: device routes need a `device` id and a bearer of the relay-minted
+   token shape, sockets their bearer or ticket, enrollment its bearer secret. Nothing is looked up,
+   so the refusal is the same whether or not the device exists. Pairing and owner routes are
+   refused by the Worker's account-assertion check, also before any body is read. A route that
+   takes no body (GET) is refused one (400).
+4. **A per-device limit** on socket, device and mirror routes, `DEVICE_LIMIT` (300/min per route,
+   device and address; every session id under `/v1/mirror/` shares one): room for a desktop's first
+   mirror sync or many active sessions re-uploading, so devices behind one NAT are not squeezed into
+   one device's budget.
+5. **A bounded, timed body read**: bytes are counted as they stream, so a missing or understated
+   `Content-Length` is cut off at the budget (413), and a body that has not arrived in full within
+   10 s (60 s for mirror uploads) is abandoned (408).
+
+The Hub keeps its own in-memory per-caller limits, counting callers the same way, and verifies every
+credential. The controller endpoint (`/v1/control/mcp`, disabled in production) is rate limited here
+and bounds its own body. Edge limits are counted per Cloudflare location.
 
 The landing Worker at `code.vocs.io` forwards `/app` and `/v1` (REST and WebSockets under
 `/v1/ws/*`) through a service binding. It is a **separate repo and deployment** (`vocs.io`:
@@ -110,8 +142,8 @@ secret.
 - `src/routes.ts` — the deny-by-default HTTP route table and its account/device authentication (Cloudflare-free, unit-tested)
 - `src/hub.ts` — frame routing between desktops and browsers, shared by the Durable Object and the
   test relay (`tests/fake-relay.ts`) so local suites run the production rules
-- `src/edge.ts` — the Worker's front door: `/v1` only, edge rate limits, bounded bodies
-- `src/rate.ts` — in-memory fixed-window rate limiter inside the Hub
+- `src/edge.ts` — the Worker's front door: the edge route table, rate limits, credential shapes, body budgets and deadlines
+- `src/rate.ts` — in-memory fixed-window rate limiter inside the Hub, and how both limiters key a caller
 - `src/worker.ts` — the Worker, per-account Hub Durable Object and short-lived EnrollmentDirectory (platform glue)
 - `src/web-client.ts` — the browser-side pairing, tokens, vault and e2e transport (DOM-free, unit-tested)
 - `src/page.ts` — the web page logic (bundled to `app/app.js` via `npm run relay:page` at the repo root)

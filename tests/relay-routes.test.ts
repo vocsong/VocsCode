@@ -319,6 +319,22 @@ describe('relay route table', () => {
     expect((await claim()).status).toBe(401);
   });
 
+  it('counts every address in one IPv6 /64 as one caller, and an IPv4-mapped address as its IPv4', async () => {
+    const { ctx } = harness();
+    const body = JSON.stringify({ code: 'ABCD2345', webPub: WEB_PUB });
+    const claim = (ip: string) => handleHttp(req('POST', '/pair/claim', { body }), ctx({ ip }));
+    const statuses: number[] = [];
+    for (let i = 1; i <= 11; i++) statuses.push((await claim(`2001:db8:1:2::${i.toString(16)}`)).status);
+    expect(statuses.slice(0, 10).every((s) => s === 401)).toBe(true);
+    expect(statuses[10]).toBe(429);
+    // Another spelling of the same /64, with a zone id; a neighbouring /64 is another caller.
+    expect((await claim('2001:DB8:1:2:ffff::1%eth0')).status).toBe(429);
+    expect((await claim('2001:db8:1:3::1')).status).toBe(401);
+    for (let i = 0; i < 10; i++) expect((await claim('198.51.100.7')).status).toBe(401);
+    expect((await claim('::ffff:198.51.100.7')).status).toBe(429);
+    expect((await claim('198.51.100.8')).status).toBe(401);
+  });
+
   it('rate limits pairing polls without starving the legitimate polling cadence', async () => {
     const { ctx } = harness();
     const poll = () => handleHttp(req('GET', '/pair/poll?code=ABCD2345'), ctx());

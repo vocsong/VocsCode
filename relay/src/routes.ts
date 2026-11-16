@@ -39,7 +39,7 @@ import {
   type MirrorBlob,
   type RelayStore
 } from './core';
-import type { RateLimiter } from './rate';
+import { callerKey, type RateLimiter } from './rate';
 
 /** The slice of a websocket the router needs (the platform's `WebSocket` satisfies it). */
 export interface SocketLike {
@@ -148,7 +148,7 @@ export async function handleHttp(request: Request, ctx: RouteContext): Promise<R
   if (matched.kind === 'method') return json({ error: 'method not allowed' }, 405, { allow: matched.methods.join(', ') });
   const { route, rest } = matched;
   try {
-    if (route.rate && !ctx.rate.hit(`${route.rate.bucket}:${ctx.ip ?? 'unknown'}`, route.rate.limit, route.rate.windowMs)) {
+    if (route.rate && !ctx.rate.hit(`${route.rate.bucket}:${callerKey(ctx.ip)}`, route.rate.limit, route.rate.windowMs)) {
       return json({ error: 'rate limited' }, 429);
     }
     const device = await authorize(route.auth, request, url, ctx);
