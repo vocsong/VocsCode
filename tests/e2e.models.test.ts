@@ -128,9 +128,10 @@ describe.runIf(enabled)('model picker before the first message', () => {
     const saved = async () => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
     expect((await saved())[0].config.effort).toBe('high');
-    // The compact pill shows only the model; effort remains in its accessible name and menu hint.
+    // The pill reads provider/model with the effort beside it; Fast stays in its accessible name and menu.
     const modelPill = win.locator('.composer .pill[title="Model"]');
-    expect(await modelPill.locator('.pill-text').innerText()).toBe('GPT 5.4');
+    expect(await modelPill.locator('.pill-text').innerText()).toBe('openai/GPT 5.4');
+    expect(await modelPill.locator('.pill-effort').innerText()).toBe('high');
     expect(await modelPill.locator('.pill-text').getAttribute('title')).toBe('openai/gpt-5.4');
     expect(await modelPill.getAttribute('aria-label')).toContain('Model: openai/gpt-5.4');
     expect(await modelPill.getAttribute('aria-label')).toContain('high');
@@ -209,7 +210,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await picker2.locator('.mp-search input').fill('acme-custom-1');
     await picker2.getByRole('button', { name: 'Use “acme-custom-1”' }).click();
     await expect.poll(() => win.locator('.composer .pill[title="Model"] .pill-text').getAttribute('title'), { timeout: 10_000 }).toBe(`${picked.split('/')[0]}/acme-custom-1`);
-    expect(await win.locator('.composer .pill[title="Model"] .pill-text').innerText()).toBe('acme-custom-1');
+    expect(await win.locator('.composer .pill[title="Model"] .pill-text').innerText()).toBe(`${picked.split('/')[0]}/acme-custom-1`);
   }, 180_000);
 
   it.each([

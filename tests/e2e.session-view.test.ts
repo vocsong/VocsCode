@@ -320,7 +320,8 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
       }, { themed, busy, models });
       await expect.poll(() => win.locator('html').getAttribute('data-theme')).toBe(theme);
       const modelPill = footer.locator('.pill[title="Model"]');
-      await expect.poll(() => modelPill.locator('.pill-text').innerText()).toBe(displayName);
+      await expect.poll(() => modelPill.locator('.pill-text').innerText()).toBe(`${model.provider}/${displayName}`);
+      expect(await modelPill.locator('.pill-effort').innerText()).toBe('high');
       expect(await modelPill.getAttribute('aria-label')).toBe(`Model: ${model.provider}/${model.model} · Effort: high · Fast on`);
       await footer.getByRole('button', { name: 'Permission mode: Full', exact: true }).waitFor();
 
