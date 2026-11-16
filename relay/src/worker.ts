@@ -4,7 +4,7 @@
 import type { RelayStorage, RelayStore } from './core';
 import { ENROLL_GRANT_TTL_MS, hashToken, PairError } from './core';
 import { accountIdFromDeviceId, ACCOUNT_ASSERTION_HEADER, INTERNAL_ACCOUNT_AUTH_HEADER, INTERNAL_ACCOUNT_ID_HEADER, isAccountId, LEGACY_ACCOUNT_ID, verifyAccountAssertion } from './account';
-import { forwardToHub } from './edge';
+import { admit, edgeLimited, forwardAdmitted } from './edge';
 import { HubRouter, type SocketRegistry } from './hub';
 import { CONTROL_INTERNAL_PATH, CONTROL_PATH, CONTROLLER_ASSERTION_HEADER, controlHttpError, controlJson, readControlBytes, verifyControllerAssertion } from './control-auth';
 import { ControlHostBridge } from './control-host';
@@ -44,6 +44,8 @@ export interface Env {
   PAIR_LIMIT?: RateLimit;
   POLL_LIMIT?: RateLimit;
   TOKEN_LIMIT?: RateLimit;
+  DEVICE_LIMIT?: RateLimit;
+  ADDRESS_LIMIT?: RateLimit;
 }
 
 function storageAdapter(storage: DurableObjectStorage | DurableObjectTransaction): RelayStorage {
@@ -341,6 +343,8 @@ export default {
     if (url.pathname === CONTROL_PATH) {
       if (env.CONTROL_MCP_ENABLED !== '1') return controlJson({ error: 'not found' }, 404);
       if (request.method !== 'POST' || url.search) return controlJson({ error: 'invalid_request' }, 400);
+      const limited = await edgeLimited(request, env);
+      if (limited) return limited;
       try {
         const body = await readControlBytes(request);
         const assertion = await verifyControllerAssertion(request, body, env.ACCOUNT_ASSERTION_SECRET);
@@ -366,14 +370,21 @@ export default {
       if (authenticated) headers.set(INTERNAL_ACCOUNT_AUTH_HEADER, '1');
       return new Request(source, { headers });
     };
+    // Rate limit, body budget and credential shape before account routing, body reads or any
+    // Durable Object: a route that will need authentication has not had it yet.
+    const admitted = await admit(request, env);
+    if (admitted instanceof Response) return admitted;
     if (url.pathname === '/v1/enroll/redeem') {
       const request_ = stripInternal(request);
-      return forwardToHub(request_, env, () => env.ENROLLMENTS.get(env.ENROLLMENTS.idFromName(DIRECTORY_NAME)));
+      return forwardAdmitted(request_, admitted, () => env.ENROLLMENTS.get(env.ENROLLMENTS.idFromName(DIRECTORY_NAME)));
     }
     const selected = await routeAccount(request, env);
-    if (selected instanceof Response) return selected;
+    if (selected instanceof Response) {
+      await request.body?.cancel().catch(() => undefined);
+      return selected;
+    }
     const routed = stripInternal(request, selected.accountId, selected.authenticated);
     const namespace = env.HUB.get(env.HUB.idFromName(selected.accountId));
-    return forwardToHub(routed, env, () => namespace);
+    return forwardAdmitted(routed, admitted, () => namespace);
   }
 } as ExportedHandler<Env>;
