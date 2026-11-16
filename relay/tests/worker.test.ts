@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { abortAllDurableObjects, evictDurableObject, runInDurableObject, SELF } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { hashToken } from '../src/core';
+import { hashToken, PairError, resolvePairing, type RelayStorage, type RelayStore } from '../src/core';
 import { ACCOUNT_ASSERTION_HEADER, createAccountAssertion, INTERNAL_ACCOUNT_ID_HEADER } from '../src/account';
 import { generateIdentity, openSealedToKey, pairingDecisionPayload, pairingTokenContext, publicOf, sign, tokenProofPayload, type Identity, type SealedToKey } from '../../src/shared/crypto';
 import type { Env as RelayEnv } from '../src/worker';
@@ -160,6 +160,64 @@ async function queued(id: string): Promise<Array<{ t: string; seq: number; paylo
 
 async function tags(tag: string): Promise<string[][]> {
   return runInDurableObject(hub(), async (_instance, state) => state.getWebSockets(tag).map((s) => state.getTags(s)));
+}
+
+/** The Hub's own storage as the relay core sees it, with the next transaction held at its start
+ *  until `resume`: an admission has done its reads and crypto, and other requests may land. */
+function pausedStore(storage: DurableObjectStorage): { store: RelayStore; reached: Promise<void>; resume: () => void } {
+  const adapt = (target: DurableObjectStorage | DurableObjectTransaction): RelayStorage => ({
+    get: (key) => target.get(key),
+    put: (key, value) => target.put(key, value),
+    delete: async (key) => { await target.delete(key); },
+    list: async <T,>(prefix: string) => [...(await target.list<T>({ prefix }))]
+  });
+  let armed = true;
+  let reachedResolve!: () => void;
+  let resume!: () => void;
+  const reached = new Promise<void>((resolve) => { reachedResolve = resolve; });
+  const released = new Promise<void>((resolve) => { resume = resolve; });
+  return {
+    store: {
+      ...adapt(storage),
+      transaction: async (work) => {
+        if (armed) {
+          armed = false;
+          reachedResolve();
+          await released;
+        }
+        return storage.transaction((tx) => work(adapt(tx)));
+      }
+    },
+    reached,
+    resume
+  };
+}
+
+const newNonce = () => {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
+
+async function grantEnrollment(nonce: string): Promise<void> {
+  const granted = await accountRequest('/v1/owner/enroll-grant', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.ENROLL_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ nonceHash: await hashToken(nonce) })
+  });
+  expect(granted.status).toBe(200);
+}
+
+async function redeemEnrollment(nonce: string, identity: Identity): Promise<Record<string, unknown>> {
+  const redeemed = await request('/v1/enroll/redeem', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ nonce, hostPub: publicOf(identity), name: 'new desktop', platform: 'test' })
+  });
+  expect(redeemed.status).toBe(200);
+  return redeemed.json<Record<string, unknown>>();
+}
+
+async function deviceIds(): Promise<string[]> {
+  return runInDurableObject(hub(), async (_instance, state) => [...(await state.storage.list<{ deviceId: string }>({ prefix: 'device:' })).values()].map((d) => d.deviceId).sort());
 }
 
 afterEach(async () => {
@@ -482,5 +540,56 @@ describe('relay Hub in the Cloudflare runtime', () => {
     expect(backlog?.length).toBeLessThan(20);
     expect(new TextEncoder().encode(JSON.stringify(backlog)).byteLength).toBeLessThanOrEqual(512 * 1024);
     expect(backlog?.at(-1)?.seq).toBe(23);
+  });
+
+  it('revoke all retires an owner-approved enrollment grant that no desktop redeemed yet', async () => {
+    const { hostId, hostToken } = await pair();
+    const nonce = newNonce();
+    await grantEnrollment(nonce);
+    const revoked = await request(`/v1/devices/revoke-all?device=${hostId}`, { method: 'POST', headers: { Authorization: `Bearer ${hostToken}` } });
+    expect(revoked.status).toBe(200);
+
+    expect(await redeemEnrollment(nonce, await generateIdentity())).toEqual({ status: 'pending' });
+    expect(await deviceIds()).toEqual([hostId]);
+
+    // A grant the owner makes after the kill switch is fresh authority and still enrolls.
+    const fresh = newNonce();
+    await grantEnrollment(fresh);
+    const registered = await redeemEnrollment(fresh, await generateIdentity());
+    expect(registered).toMatchObject({ status: 'registered' });
+    expect(await deviceIds()).toEqual([hostId, registered.hostDeviceId as string].sort());
+  });
+
+  it('an approval that commits after revoke all mints no device in the Durable Object', async () => {
+    const identity = await generateIdentity();
+    const { hostId, hostToken } = await pair({ identity });
+    const web = await generateIdentity();
+    const webPub = publicOf(web);
+    const started = await request(`/v1/pair/start?device=${encodeURIComponent(hostId)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${hostToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'desktop', hostPub: publicOf(identity) })
+    });
+    expect(started.status).toBe(200);
+    const { code } = await started.json<{ code: string }>();
+    const claim = await accountRequest('/v1/pair/claim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, name: 'late browser', webPub }) });
+    expect(claim.status).toBe(200);
+    const { pollToken } = await claim.json<{ pollToken: string }>();
+    const signature = await sign(identity, pairingDecisionPayload(code, 'approve', webPub));
+
+    const outcome = await runInDurableObject(hub(), async (_instance, state) => {
+      const paused = pausedStore(state.storage);
+      const approving = resolvePairing(paused.store, { code, decision: 'approve', signature }, Date.now(), env.DEVICE_ROUTE_SECRET)
+        .then(() => 'minted', (error: unknown) => (error instanceof PairError ? `refused:${error.code}` : `error:${String(error)}`));
+      await paused.reached;
+      const revoked = await request(`/v1/devices/revoke-all?device=${hostId}`, { method: 'POST', headers: { Authorization: `Bearer ${hostToken}` } });
+      expect(revoked.status).toBe(200);
+      paused.resume();
+      return approving;
+    });
+
+    expect(outcome).toMatch(/^refused:/);
+    expect(await deviceIds()).toEqual([hostId]);
+    expect((await accountRequest(`/v1/pair/poll?code=${code}`, { headers: { Authorization: `Bearer ${pollToken}` } })).status).toBe(401);
   });
 });
