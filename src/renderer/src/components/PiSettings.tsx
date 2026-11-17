@@ -126,11 +126,11 @@ export function PiSection() {
       finishMutation();
     }
   };
-  const savePref = (key: keyof PiPreferences, value: PiPreferences[keyof PiPreferences] | null): void => {
-    void apply(invoke('pi:preferences', { [key]: value } as PiPreferencesPatch));
+  const savePref = (key: keyof PiPreferences, value: PiPreferences[keyof PiPreferences] | null): Promise<void> => {
+    return apply(invoke('pi:preferences', { [key]: value } as PiPreferencesPatch));
   };
-  const saveSubagent = (key: keyof PiSubagentsSettings, value: PiSubagentsSettings[keyof PiSubagentsSettings] | null): void => {
-    void apply(invoke('pi:subagents', { [key]: value } as PiSubagentsPatch));
+  const saveSubagent = (key: keyof PiSubagentsSettings, value: PiSubagentsSettings[keyof PiSubagentsSettings] | null): Promise<void> => {
+    return apply(invoke('pi:subagents', { [key]: value } as PiSubagentsPatch));
   };
 
   const promptFile = setup?.promptFiles.find((f) => f.name === promptName);
@@ -556,13 +556,18 @@ export function PiSection() {
 }
 
 /** Keep unsubmitted text local, but show the confirmed value again once a blur submits it. */
-function NumericPreference({ value, onSave, ...rest }: Pick<React.InputHTMLAttributes<HTMLInputElement>, 'min' | 'max' | 'disabled' | 'placeholder'> & { value?: number; onSave: (value: number | null) => void }) {
+function NumericPreference({ value, onSave, ...rest }: Pick<React.InputHTMLAttributes<HTMLInputElement>, 'min' | 'max' | 'disabled' | 'placeholder'> & { value?: number; onSave: (value: number | null) => Promise<void> }) {
   const [draft, setDraft] = useState<string | null>(null);
+  // The page's value catches up only when a save's reply lands. Until then the field shows, and a
+  // quick second edit is compared with, what was submitted: clearing a value just set must not be
+  // mistaken for “unchanged” against the stale one.
+  const [submitted, setSubmitted] = useState<{ value: number | null } | null>(null);
+  const current = submitted ? submitted.value : value ?? null;
   return (
     <input
       {...rest}
       type="number"
-      value={draft ?? value ?? ''}
+      value={draft ?? current ?? ''}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={(e) => {
         if (draft === null) return;
@@ -570,7 +575,10 @@ function NumericPreference({ value, onSave, ...rest }: Pick<React.InputHTMLAttri
         // Incomplete native number text (e.g. “1e”) is exposed as empty, but is not a deletion.
         if (e.currentTarget.validity.badInput) return;
         const next = draft.trim() === '' ? null : Number(draft);
-        if (next !== (value ?? null)) onSave(next);
+        if (next === current) return;
+        const mine = { value: next };
+        setSubmitted(mine);
+        void onSave(next).finally(() => setSubmitted((latest) => (latest === mine ? null : latest)));
       }}
     />
   );
