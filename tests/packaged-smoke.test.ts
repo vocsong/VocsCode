@@ -25,7 +25,7 @@ describe('packaged-app release gate', () => {
     expect(job).toContain('node scripts/e2e-guard.mjs tests/e2e.packaged.test.ts');
     expect(job).toContain('HARNESS_E2E_EXE: ${{ github.workspace }}/dist/win-unpacked/Vocs Code.exe');
     expect(job).toContain('if: failure()');
-    expect(job).toContain('uses: actions/upload-artifact@v4');
+    expect(job).toMatch(/uses: actions\/upload-artifact@[0-9a-f]{40} # v4\./);
     expect(job).toContain('path: tests/artifacts/packaged-smoke/');
     expect(job).not.toContain('--publish always');
   });
