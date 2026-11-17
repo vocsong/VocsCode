@@ -42,6 +42,21 @@ Worth grepping for when a feature misbehaves:
 - `git … timed out` / `gh … timed out` — why the Changes or Branches panel is missing data.
 - `log file … is not writable` (console only) — the log itself could not be opened; this run is console-only.
 
+## Credential endpoint transport
+
+App-managed provider URLs (catalogs, native chat, background titles/knowledge and cloud dictation)
+and relay overrides require HTTPS/WSS outside literal loopback: `localhost`, normalized IPv4
+`127.0.0.0/8`, or IPv6 `::1`. HTTP/WS on private LAN addresses is refused; there is no insecure
+LAN override. Unsupported schemes, malformed URLs and URL user information are refused without
+including the supplied URL in the error. Put provider keys in the secret store, not URL userinfo.
+
+Provider endpoint edits are validated before settings are written. Legacy unsafe settings still
+load and permit unrelated saves, but the endpoint is refused at use; repair it in Settings →
+Providers & keys. App-owned SDK requests also validate their actual URL (including SDK environment
+defaults). Credential-bearing fetches do not follow redirects: configure the final HTTPS endpoint.
+Configured Claude/Codex routes are validated before app keys are handed to the external runtime;
+CLI-owned configuration and MCP transports are separate policies, not covered by this check.
+
 ## Remote relay operations
 
 The relay and landing deploy separately. The relay deploys with each release: the `vX.Y.Z` tag
@@ -81,7 +96,7 @@ None of these are required to run the app; they exist for headless runs and the 
 | `VOCS_CODE_ACCOUNT_REALM` | main process | `staging` points Settings → Vocs account at the staging identity and Hub services (`vocs-login-staging`, `vocs-mcp-staging`). Anything else, or unset, uses production (`auth.vocs.io`, `mcp.vocs.io`). |
 | `VOCS_CODE_WEB` | main process | `1` starts the localhost web client: serves the built renderer (`npm run build` first) at `http://localhost:5177/?token=…` and bridges the same handler registry to a browser tab. See docs/REMOTE-ACCESS.md. |
 | `VOCS_CODE_WEB_PORT` | main process | Port for the web client. Defaults to `5177`. |
-| `VOCS_CODE_RELAY_URL` | main process | Relay for remote access instead of `https://code.vocs.io`, e.g. `http://localhost:8787` for a local `wrangler dev`. There is no setting for it; `e2e.remote` uses it to reach the test relay. |
+| `VOCS_CODE_RELAY_URL` | main process | Relay for remote access instead of `https://code.vocs.io`; requires HTTPS except literal loopback, e.g. `http://localhost:8787` for a local `wrangler dev`. There is no insecure LAN override or setting for it; `e2e.remote` uses it to reach the test relay. |
 | `VOCS_CODE_SCREENSHOT` | main process | Writes a PNG of the window to this path once the UI has settled, then continues running. |
 | `VOCS_CODE_SCREENSHOT_DELAY` | main process | Milliseconds to wait before that screenshot. Defaults to `2500`. |
 | `VOCS_CODE_AUTOQUIT` | main process | Quits the app after this many milliseconds. Used to bound headless runs. |

@@ -8,6 +8,7 @@ import os from 'node:os';
 import { WebSocket } from 'ws';
 import { enrollTokenContext, generateIdentity, hostAccept, openFrame, openSealedToKey, pairingDecisionPayload, publicOf, randomKeyB64, sealFrame, sign, stable, tokenProofPayload, verify, type Identity, type PublicIdentity, type SealedBlob, type SealedToKey } from '../../shared/crypto';
 import { connectCheckCode, connectLink } from '../../shared/pairing';
+import { assertEndpointUrl, credentialFetch, endpointSocketUrl } from '../../shared/endpoint-policy';
 import { isRemoteChannel, isRemoteHostChannel, isRemotePushChannel, isRemoteReadChannel, REMOTE_FRAME_MAX_BYTES } from '../../shared/remote-channels';
 import { REMOTE_TERMINAL_INPUT_MAX, type RemoteTerminalFrame } from '../../shared/remote-terminal';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
@@ -17,6 +18,8 @@ import type { Logger } from '../log';
 import type { RemoteAudit } from './audit';
 import { projectRemoteValue } from './project';
 import { RemoteTerminalStreams, type TerminalSource } from './terminal-streams';
+
+const relayRequest = credentialFetch();
 
 /** The remote channel manifest (docs/REMOTE-ACCESS.md §5) lives in src/shared/remote-channels.ts
  *  so the web shell imports the same allowlist it is held to. Re-exported because desktop callers
@@ -288,6 +291,7 @@ export class RemoteHost {
 
   /** Loads or creates this computer's identity for `relayUrl`, without connecting. */
   private async prepare(relayUrl: string, enrollToken: string): Promise<void> {
+    const endpoint = assertEndpointUrl(relayUrl);
     this.generation++;
     await this.disable();
     const stored = await this.loadCreds();
@@ -299,8 +303,8 @@ export class RemoteHost {
     if (!this.creds.mirrorKey) this.creds.mirrorKey = randomKeyB64();
     await this.saveCreds();
     // The relay URL is configuration; tokens and keys stay out of the log.
-    this.deps.log('info', `remote: enabled for ${relayUrl} (${stored ? `${Object.keys(stored.clients).length} paired device(s)` : 'new identity'}${this.creds.deviceId ? ', enrolled' : ', not yet enrolled'})`);
-    this.deps.audit?.record('enable', { detail: relayUrl });
+    this.deps.log('info', `remote: enabled for ${endpoint.origin} (${stored ? `${Object.keys(stored.clients).length} paired device(s)` : 'new identity'}${this.creds.deviceId ? ', enrolled' : ', not yet enrolled'})`);
+    this.deps.audit?.record('enable', { detail: endpoint.origin });
   }
 
   /** Polls the relay until the owner adds this computer, the page's grant expires, or remote
@@ -311,7 +315,7 @@ export class RemoteHost {
       const creds = this.creds;
       if (!creds) return;
       try {
-        const res = await fetch(`${this.base()}/v1/enroll/redeem`, {
+        const res = await relayRequest(`${this.base()}/v1/enroll/redeem`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ nonce, hostPub: publicOf(creds.identity), name: hostName, platform: `${process.platform} ${process.arch}` })
@@ -360,7 +364,7 @@ export class RemoteHost {
     // An enrolled desktop pairs as itself. If the relay rejects its credential on the way, the
     // desktop is no longer enrolled and falls back to the enrollment secret.
     let res = this.enrolled() ? await this.relayFetch('/v1/pair/start', init).catch((e: unknown) => (this.enrolled() ? Promise.reject(e) : null)) : null;
-    res ??= await fetch(`${this.base()}/v1/pair/start`, { ...init, headers: { ...init.headers, authorization: `Bearer ${creds.enrollToken ?? ''}` } });
+    res ??= await relayRequest(`${this.base()}/v1/pair/start`, { ...init, headers: { ...init.headers, authorization: `Bearer ${creds.enrollToken ?? ''}` } });
     if (!res.ok) throw new Error(`pair/start failed: ${res.status}`);
     const body = (await res.json()) as { code: string; expiresAt: number };
     if (this.creds !== creds || this.pairingAttempt !== attempt) throw new Error('pairing request cancelled');
@@ -636,7 +640,9 @@ export class RemoteHost {
   }
 
   private base(): string {
-    return (this.creds?.relayUrl ?? '').replace(/\/$/, '');
+    const base = (this.creds?.relayUrl ?? '').replace(/\/$/, '');
+    assertEndpointUrl(base);
+    return base;
   }
 
   /** Registered with the relay: a device id and a refresh credential it still accepts. */
@@ -663,7 +669,7 @@ export class RemoteHost {
     const deviceId = creds.deviceId!;
     const refresh = creds.deviceToken!;
     const query = `?device=${encodeURIComponent(deviceId)}`;
-    const challengeRes = await fetch(`${this.base()}/v1/token/challenge${query}`, { method: 'POST', headers: { authorization: `Bearer ${refresh}` } });
+    const challengeRes = await relayRequest(`${this.base()}/v1/token/challenge${query}`, { method: 'POST', headers: { authorization: `Bearer ${refresh}` } });
     if (challengeRes.status === 401) {
       await this.forgetRegistration(creds, 'this computer is no longer registered with the relay; pair a browser to register it again', refresh);
       throw new Error('relay credential rejected');
@@ -672,7 +678,7 @@ export class RemoteHost {
     const { challenge } = (await challengeRes.json()) as { challenge?: unknown };
     if (typeof challenge !== 'string' || !challenge) throw new Error('relay returned no token challenge');
     const signature = await sign(creds.identity, tokenProofPayload(deviceId, challenge));
-    const tokenRes = await fetch(`${this.base()}/v1/token${query}`, {
+    const tokenRes = await relayRequest(`${this.base()}/v1/token${query}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${refresh}`, 'content-type': 'application/json' },
       body: JSON.stringify({ challenge, signature })
@@ -695,7 +701,7 @@ export class RemoteHost {
     for (let attempt = 0; ; attempt++) {
       const token = await this.accessToken();
       if (proceed && !proceed()) throw new MirrorWriteSuperseded();
-      const res = await fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
+      const res = await relayRequest(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
       if (res.status !== 401 || attempt > 0) return res;
       if (this.access?.token === token) this.access = null;
     }
@@ -806,6 +812,7 @@ export class RemoteHost {
   private async openSocket(): Promise<void> {
     const creds = this.creds;
     if (!creds) return;
+    const socketBase = endpointSocketUrl(this.base()).replace(/\/$/, '');
     const gen = this.generation;
     this.status = 'connecting';
     this.push();
@@ -838,7 +845,7 @@ export class RemoteHost {
       return;
     }
     const device = enrolled ? creds.deviceId! : 'enrolling';
-    const ws = new WebSocket(`${this.base()}/v1/ws/host?device=${encodeURIComponent(device)}`, { headers: { authorization: `Bearer ${auth}` } });
+    const ws = new WebSocket(`${socketBase}/v1/ws/host?device=${encodeURIComponent(device)}`, { headers: { authorization: `Bearer ${auth}` }, followRedirects: false });
     this.ws = ws;
     this.incoming.clear();
     this.controlRequests.clear();

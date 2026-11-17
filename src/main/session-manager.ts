@@ -733,8 +733,8 @@ export class SessionManager {
       fastModeStatus: { state: cfg.fastMode ? 'requested' : 'off' },
       queued: 0
     };
-    // A harness with no system prompt of its own takes the app's instruction layer on its first
-    // message, like the digest below; the flag is cleared once the harness accepted it.
+    // Without an append-system-prompt API, app and session instructions share the first-message
+    // preamble. The flag is cleared only once the harness accepted it, like the digest below.
     if (!HARNESS_BY_ID[cfg.harness].capabilities.systemPrompt) meta.pendingAppInstructions = true;
     // Layer 2: prime the session with the project's curated knowledge digest. The digest names
     // pages rather than pasting them, and never outranks the project's own instruction files.
@@ -1768,14 +1768,21 @@ export class SessionManager {
 
   /**
    * Prefixes the first message of a session with the context its harness could not be given up
-   * front: the transcript of a cross-harness fork, and the knowledge digest for a harness with no
-   * system prompt of its own. Prefixing the user's message — rather than sending a turn of our own —
-   * keeps the transcript showing only what the user typed.
+   * front: app and session instructions, then knowledge and fork context. Engines without an
+   * append-system-prompt API keep their own system prompt; these are first-message instructions.
+   * Prefixing the user's message keeps the transcript showing only what the user typed.
    */
   private async withSessionPreamble(id: string, input: UserInput): Promise<UserInput> {
     const meta = this.get(id);
     if (!meta) return input;
     const parts: string[] = [];
+    if (meta.pendingAppInstructions) {
+      const text = await this.deps.appInstructions?.(meta.config.harness);
+      if (text) parts.push(text);
+      const sessionInstructions = meta.config.appendSystemPrompt?.trim();
+      if (sessionInstructions) parts.push(sessionInstructions);
+    }
+    if (meta.pendingKnowledgeDigest && meta.knowledgeDigest) parts.push(meta.knowledgeDigest);
     if (meta.pendingForkContext) {
       try {
         const context = await this.deps.store.readBlob(id, FORK_CONTEXT_FILE);
@@ -1784,11 +1791,6 @@ export class SessionManager {
         // The blob is written before the flag is set; a read failure only means we have no context.
       }
     }
-    if (meta.pendingAppInstructions) {
-      const text = await this.deps.appInstructions?.(meta.config.harness);
-      if (text) parts.push(text);
-    }
-    if (meta.pendingKnowledgeDigest && meta.knowledgeDigest) parts.push(meta.knowledgeDigest);
     return parts.length ? { ...input, text: `${parts.join('\n\n')}\n\n${input.text}` } : input;
   }
 

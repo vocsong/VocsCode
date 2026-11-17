@@ -31,7 +31,8 @@ import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
 import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp, CuaPreviewSession, clearCuaVersionCache, cuaBaseDef, cuaDefState, cuaInstallCommand, cuaStatus, type GitnexusIndexer, type GitnexusIndexReason } from './mcp';
 import { listHarnessModels } from './harness/registry';
-import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
+import { assertProviderEndpoint, fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
+import { assertEndpointUrl } from '../shared/endpoint-policy';
 import { enrichModelsFromProviders } from './models/static-models';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
@@ -850,6 +851,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     });
   });
   handle('providers:save', async (provider) => {
+    if (provider.baseUrl !== undefined && provider.baseUrl !== '') assertEndpointUrl(provider.baseUrl);
     const s = settings.get();
     const idx = s.providers.findIndex((p) => p.id === provider.id);
     const providers = [...s.providers];
@@ -871,6 +873,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const p = s.providers.find((x) => x.id === id);
     if (!p) return { models: [], error: 'Unknown provider' };
     try {
+      assertProviderEndpoint(p);
       const key = await resolveProviderApiKey(p, (pid) => secrets.get(pid));
       const models = await fetchProviderModels(p, key);
       const providers = s.providers.map((x) => (x.id === id ? { ...x, models, modelsUpdatedAt: Date.now() } : x));
@@ -886,6 +889,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('providers:test', async ({ id }) => {
     const p = settings.get().providers.find((x) => x.id === id);
     if (!p) return { ok: false, detail: 'Unknown provider' };
+    try { assertProviderEndpoint(p); } catch (e) { return { ok: false, detail: errorMessage(e) }; }
     const key = await resolveProviderApiKey(p, (pid) => secrets.get(pid));
     if (!key && !['ollama', 'lmstudio'].includes(p.kind)) return { ok: false, detail: `No API key stored and ${p.envKey ?? 'no env var'} is not set.` };
     return testProvider(p, key);
@@ -1384,20 +1388,22 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       signInAvailable: signInAvailable(relayUrl())
     }));
     handle('remote:signIn', async () => {
+      const relay = relayUrl();
       await settings.update({ remote: { ...remoteConfig(), enabled: true } });
       // The page opens in the default browser; openExternal only ever opens http(s) URLs.
-      await remote.signIn(relayUrl(), (url) => deps.desktop.openExternal(url));
+      await remote.signIn(relay, (url) => deps.desktop.openExternal(url));
       deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
       return remote.state();
     });
     handle('remote:enable', async ({ enrollToken }) => {
+      const relay = relayUrl();
       // The secret registers this computer once; after that it connects with its own credential,
       // so an empty field reuses whatever secret is stored (possibly none).
       const secret = typeof enrollToken === 'string' ? enrollToken.trim() : '';
       if (secret) await secrets.set('remote-enroll', secret);
       // Keep the view-only policy across a reconnect; enable() only replaces relay fields.
       await settings.update({ remote: { ...remoteConfig(), enabled: true } });
-      await remote.enable(relayUrl(), secret || ((await secrets.get('remote-enroll')) ?? ''));
+      await remote.enable(relay, secret || ((await secrets.get('remote-enroll')) ?? ''));
       // The renderer's copy of settings drives the toggle/Disconnect UI, so push it like settings:update.
       deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
       return remote.state();

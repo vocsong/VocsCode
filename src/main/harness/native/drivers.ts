@@ -3,6 +3,8 @@ import OpenAI from 'openai';
 import type { EffortLevel, ImageAttachment, ProviderConfig } from '../../../shared/types';
 import type { NativeToolDef } from './tools';
 import { fastModeSupport } from '../../../shared/fast-mode';
+import { assertProviderEndpoint } from '../../models/providers';
+import { credentialFetch } from '../../../shared/endpoint-policy';
 
 /** Provider-neutral conversation history for the native harness. */
 export type NativeMessage =
@@ -119,7 +121,8 @@ function toAnthropicMessages(history: NativeMessage[], model: string): Anthropic
 }
 
 export async function anthropicStep(p: StepParams): Promise<StepResult> {
-  const client = new Anthropic({ apiKey: p.apiKey, baseURL: p.provider.baseUrl, maxRetries: 2, defaultHeaders: p.provider.headers });
+  assertProviderEndpoint(p.provider);
+  const client = new Anthropic({ apiKey: p.apiKey, baseURL: p.provider.baseUrl, maxRetries: 2, defaultHeaders: p.provider.headers, fetch: credentialFetch() });
   const tools: Anthropic.Tool[] = p.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters as Anthropic.Tool.InputSchema }));
   const adaptive = supportsAdaptiveThinking(p.model);
   const fast = p.fastMode === true && fastModeSupport('native', { provider: p.provider.id, model: p.model }, [p.provider]).supported;
@@ -205,7 +208,8 @@ function openaiHeaders(p: StepParams): Record<string, string> | undefined {
 }
 
 export async function openaiStep(p: StepParams): Promise<StepResult> {
-  const client = new OpenAI({ apiKey: p.apiKey || 'not-needed', baseURL: p.provider.baseUrl, maxRetries: 2, defaultHeaders: openaiHeaders(p) });
+  assertProviderEndpoint(p.provider);
+  const client = new OpenAI({ apiKey: p.apiKey || 'not-needed', baseURL: p.provider.baseUrl, maxRetries: 2, defaultHeaders: openaiHeaders(p), fetch: credentialFetch() });
   const isDeepSeek = p.provider.kind === 'deepseek' || /deepseek/i.test(p.model);
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [{ role: 'system', content: p.system }, ...toOpenAIMessages(p.history, isDeepSeek)];
   const tools: OpenAI.Chat.ChatCompletionTool[] = p.tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));

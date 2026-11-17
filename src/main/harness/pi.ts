@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem, UserInput } from '../../shared/types';
 import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
-import { modelName } from '../../shared/model-names';
+import { modelName, UNKNOWN_MODEL_KEY } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { quoteWin, shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
 import { launchOwnedWindowsJob, spawnIndependentWindowsSupervisor, windowsJobCommandLine, WINDOWS_SUPERVISOR_STARTUP_MS, type OwnedWindowsJob } from '../owned-windows-job';
@@ -934,21 +934,18 @@ export class PiAdapter implements HarnessAdapter {
     if (this.recordedSubagents.has(agentId)) return;
     this.recordedSubagents.add(agentId);
     const costUsd = typeof d.cost === 'number' ? d.cost : typeof d.totalCost === 'number' ? d.totalCost : undefined;
-    const model = this.resolveSubagentModel(this.subagentModelNames.get(agentId));
-    if (costUsd && costUsd > 0) {
-      const ref = model ?? this.ctx.session().activeModel;
-      if (ref?.provider && ref.model) {
-        const key = `${ref.provider}/${ref.model}`;
-        const cur = this.pendingSubagentCost.get(key) ?? { provider: ref.provider, model: ref.model, costUsd: 0 };
-        cur.costUsd += costUsd;
-        this.pendingSubagentCost.set(key, cur);
-      }
+    const model = this.resolveSubagentModel(d.modelName ?? this.subagentModelNames.get(agentId));
+    if (costUsd && Number.isFinite(costUsd) && costUsd > 0) {
+      const key = model ? modelName(model.provider, model.model) : UNKNOWN_MODEL_KEY;
+      const cur = this.pendingSubagentCost.get(key) ?? { ...(model ?? { provider: null, model: null }), costUsd: 0 };
+      cur.costUsd += costUsd;
+      this.pendingSubagentCost.set(key, cur);
     }
     const completion: SubagentCompletion = {
       agentId,
       description: d.description,
       status: d.status ?? 'completed',
-      model: model ?? undefined,
+      model,
       toolUses: typeof d.toolUses === 'number' ? d.toolUses : 0,
       costUsd,
       tokens: typeof d.totalTokens === 'number' ? d.totalTokens : undefined,
@@ -962,26 +959,36 @@ export class PiAdapter implements HarnessAdapter {
       this.subagentRuns.delete(agentId);
     }
     const bits: string[] = [completion.status === 'error' ? 'failed' : 'finished'];
-    if (model) bits.push(`${model.provider}/${model.model}`);
+    bits.push(model ? modelName(model.provider, model.model) : 'model unknown');
     if (completion.toolUses) bits.push(`${completion.toolUses} tool ${completion.toolUses === 1 ? 'use' : 'uses'}`);
     if (completion.tokens) bits.push(`${completion.tokens.toLocaleString()} tokens`);
     if (costUsd) bits.push(`$${costUsd.toFixed(4)}`);
     this.info(`Subagent${d.description ? ` "${d.description}"` : ''}: ${bits.join(' · ')}`, completion.status === 'error' ? 'error' : 'info');
   }
 
-  /** Best-effort match of a pi-subagents display name to a known model, for spend attribution. */
+  /** Resolve a legacy name only when its best match identifies one provider/model, never by order. */
   private resolveSubagentModel(name?: string): ModelRef | null {
     if (!name || !this.models.length) return null;
+    const typed = name.trim();
+    const unique = (matches: ModelInfo[]): ModelRef | null => {
+      const refs = new Map(matches.map((m) => [modelName(m.provider, m.id), { provider: m.provider, model: m.id }]));
+      return refs.size === 1 ? refs.values().next().value ?? null : null;
+    };
+    // Preserve explicit routes before normalization can merge distinct punctuation or providers.
+    const qualified = this.models.filter((m) => modelName(m.provider, m.id) === typed);
+    if (qualified.length) return unique(qualified);
     const norm = (s: string) => s.toLowerCase().replace(/^claude\s+/, '').replace(/[^a-z0-9]/g, '');
-    const target = norm(name);
+    const target = norm(typed);
     if (!target) return null;
-    for (const m of this.models) {
-      if (norm(m.displayName) === target || norm(m.id) === target || norm(modelName(m.provider, m.id)) === target) return { provider: m.provider, model: m.id };
-    }
-    for (const m of this.models) {
-      if (norm(m.displayName).includes(target) || target.includes(norm(m.id))) return { provider: m.provider, model: m.id };
-    }
-    return null;
+    const exact = this.models.filter((m) => norm(m.displayName) === target || norm(m.id) === target || norm(modelName(m.provider, m.id)) === target);
+    if (exact.length) return unique(exact);
+    // An unresolved slashed route must not become a different provider through a fuzzy id match.
+    if (typed.includes('/')) return null;
+    return unique(this.models.filter((m) => {
+      const display = norm(m.displayName);
+      const id = norm(m.id);
+      return (display && display.includes(target)) || (id && target.includes(id));
+    }));
   }
 
   /** Applies the latest per-assistant usage snapshot and publishes a throttled live session update. */

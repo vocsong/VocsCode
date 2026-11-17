@@ -7,6 +7,9 @@
  */
 import type { ModelRef } from './types';
 
+/** Analytics-only unknown identity: no invented provider, displayed as `(unknown)` by modelKeyLabel. */
+export const UNKNOWN_MODEL_KEY = '/(unknown)';
+
 export function modelName(provider: string, model: string): string {
   return `${provider}/${model}`;
 }

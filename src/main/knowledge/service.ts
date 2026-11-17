@@ -19,7 +19,6 @@ import {
   graphNeighbours,
   isPendingStatus,
   isServable,
-  pathForProposal,
   renderKnowledgeDigest,
   serializeKnowledgeDocument,
   type KnowledgeEpisode,
@@ -37,7 +36,7 @@ import {
   type KnowledgeView
 } from '../../shared/knowledge';
 import { errorMessage } from '../util/async';
-import { KnowledgeStore, proposalMeta, writeFileAtomic, type StoredPage } from './store';
+import { KnowledgeStore, writeFileAtomic, type StoredPage } from './store';
 import { bootstrapKnowledge, distillKnowledge, type KnowledgeJobResult, type KnowledgeSynthDeps } from './synth';
 import type { AnchorResolver } from './anchors';
 
@@ -239,39 +238,15 @@ export class KnowledgeService {
 
   /**
    * Records durable knowledge. Ingestion is fully automated: the claim becomes a `current` page
-   * immediately, ranked below anything human-reviewed by the authority ladder. The only refusals
-   * are a claim that was explicitly rejected before (tombstoned) and a missing title/claim.
+   * immediately, ranked below anything human-reviewed by the authority ladder. An implicit id
+   * collision refuses the write; intentionally changing a claim requires an explicit pageId.
    */
   async propose(scope: KnowledgeScope, input: KnowledgeProposalInput, origin: string, sessionId?: string): Promise<KnowledgeProposeResult> {
     const claim = input.claim.trim();
     const title = input.title.trim();
     if (!title || !claim) throw new Error('A proposal needs a title and a one-line claim');
-    if (await this.store.isRejected(scope, claim)) {
-      return { id: '', evidenceCount: 0, rejected: true, promoted: false };
-    }
-    const evidenceCount = await this.store.recordEvidence(scope, claim, sessionId);
-    const targetId = input.pageId ?? pathForProposal(input.kind ?? 'concept', title).replace(/\.md$/, '');
-    const existingPage = await this.store.read(scope, targetId);
-    const pageScope = input.scope ?? this.defaultScope(existingPage);
-    const meta = proposalMeta({
-      id: targetId,
-      title,
-      claim,
-      kind: input.kind,
-      scope: pageScope,
-      branch: pageScope === 'branch' ? scope.branch : undefined,
-      keywords: input.keywords,
-      labels: input.labels,
-      sources: input.sources,
-      anchors: input.anchors,
-      related: input.related,
-      supersedes: input.supersedes,
-      contradicts: input.contradicts,
-      confidence: input.confidence,
-      base: existingPage?.meta
-    });
-    delete meta.targetPageId;
-    const page = await this.store.write(scope, { ...meta, status: 'current', updatedBy: origin }, input.body);
+    const { page, evidenceCount } = await this.store.ingest(scope, { ...input, title, claim }, origin, sessionId);
+    if (!page) return { id: '', evidenceCount: 0, rejected: true, promoted: false };
     for (const superseded of page.meta.supersedes) {
       await this.store.patch(scope, superseded, { status: 'superseded', supersededBy: page.meta.id });
     }
@@ -560,13 +535,6 @@ export class KnowledgeService {
   /* ------------------------------------------------------------------ */
   /* Internals                                                          */
   /* ------------------------------------------------------------------ */
-
-  private defaultScope(existing: KnowledgePage | null): 'repo' | 'branch' {
-    // Knowledge belongs to the project, not to the checkout it was discovered in: a worktree is
-    // deleted with its session, so a page written there would be lost. Branch scope is opt-in
-    // (an explicit `scope: branch` on the proposal) for knowledge that is only true on that branch.
-    return existing?.meta.scope ?? 'repo';
-  }
 
   private summarize(page: KnowledgePage, snippet?: string): KnowledgePageSummary {
     const meta = page.meta;

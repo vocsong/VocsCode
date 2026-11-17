@@ -103,6 +103,7 @@ Local-first, under the project, git-excluded by the existing `.vocs-code/` conve
   _observations/*.jsonl       commit / PR / merge outcomes waiting for distillation
   _evidence.json              claim key → distinct sessions that have seen it
   _rejected.json              claim tombstones, so a job stops refiling a rejection
+  _write.lock/                app/MCP cross-process write mutex (normally absent)
 docs/wiki/                    written only by the explicit Publish action (tracked, committed by the user)
 ```
 
@@ -128,6 +129,22 @@ Decisions behind this layout:
 - **No second copy of L1.** Pages may name a file and a symbol in `anchors:`; those are pointers.
   Nothing stores call graphs, symbol lists or line numbers, because the next `gitnexus analyze`
   makes them false.
+
+### Concurrent writes and recovery
+
+The app and standalone MCP processes share a project-wide filesystem mutex (`_write.lock/`,
+acquired with atomic directory creation). Proposal identity checks, fresh metadata merges and page
+replacement all happen while holding it. A call-start page snapshot, retrieval scan limit or cached
+mtime is never an overwrite guard. Explicit-id updates participate in the same boundary. Pages use
+unique sibling temp files plus rename, so a failed write or crashed writer cannot expose half a page.
+
+Writers wait at most five seconds for a busy lock, then fail without taking it over. **Locks are never
+automatically deleted for age or an apparently dead PID:** a paused writer must not resume into
+another owner's critical section. After a crash, stop **all** app and MCP writers for that project,
+inspect the wiki and remove only its abandoned `_write.lock/` directory before retrying. Leftover
+`*.tmp` siblings are not pages and may also be removed while every writer is stopped. Do not remove
+a lock while another session may still be writing. The lock coordinates Vocs writers, not arbitrary
+external editors; stop them too before repairing damaged page files.
 
 ## Page model
 
@@ -205,8 +222,17 @@ The wiki is easy to generate; keeping it true is the product. The rules:
 - **No accept gate.** Every write is automatic and passive: generated pages and `knowledge_propose`
   land as `status: current` immediately, with `updated_by: agent:*` so they rank below a
   human-reviewed page. There is no approval queue.
-- **One guard, and it is a tombstone.** A rejected claim is recorded in `_rejected.json`; the same
-  claim is refused on sight, so a job cannot refile it every scan. Nothing else blocks a write.
+- **Tombstones and collision-safe identity.** A rejected claim is recorded in `_rejected.json`;
+  the same claim is refused on sight, so a job cannot refile it every scan. Rejection retains its
+  conservative case/punctuation-insensitive match, checked against the full stored claim rather
+  than only its lookup hash; that broader refusal never grants permission to overwrite. Without an explicit
+  `pageId` (app) / `page_id` (MCP), an existing generated id may only be updated for the same full
+  claim with whitespace folded. Case, punctuation and Unicode remain meaningful (`C++` is not
+  `C#`, and an identifier's case can change its meaning); a hash, substring or truncated prefix
+  is not proof. Unrelated claims with the same title, normalized slug or truncated slug fail with
+  a clear error and leave pages, evidence and supersession untouched. Choose a different title for
+  a new page, or pass the existing id explicitly for an intentional claim change. Same-claim repeats
+  keep one page and merge evidence; explicit updates preserve creation time and merge provenance.
 - **The panel is for browsing, not approving.** It searches and reads pages, corrects them, rejects
   or deletes, and publishes to `docs/wiki/`. Rejecting tombstones the claim; accepting is not a step.
 - **Bootstrap is passive, recursive and incremental.** `Generate from docs` walks *every* markdown

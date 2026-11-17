@@ -70,7 +70,7 @@ describe('release tag gate', () => {
   const gate = readWorkflow('verify-release-tag.yml');
 
   it.each([
-    ['release.yml', ['build']],
+    ['release.yml', ['build', 'publish']],
     ['deploy-relay.yml', ['deploy']]
   ])('%s runs verify-tag first and every build/deploy job needs it and builds its verified SHA', (file, expected) => {
     const jobs = jobsOf(file);
@@ -137,6 +137,67 @@ describe('release tag gate', () => {
     expect(gate).toMatch(/CI_WAIT_MINUTES: '\d+'/);
     expect(gate).toMatch(/timeout-minutes: \d+/);
     expect(readWorkflow('ci.yml')).toMatch(/^name: CI$/m);
+  });
+});
+
+describe('draft-first release publication', () => {
+  const release = readWorkflow('release.yml');
+  const jobs = jobsOf('release.yml');
+
+  it('serializes the whole workflow per tag without cancelling an in-flight publisher', () => {
+    expect(release).toContain('group: release-${{ inputs.tag || github.ref_name }}');
+    expect(release).toContain('cancel-in-progress: false');
+  });
+
+  it('builds read-only with updater metadata but no publication credential', () => {
+    const build = jobs.get('build')!;
+    expect(build).toContain('contents: read');
+    expect(build).not.toContain('contents: write');
+    expect(build).not.toMatch(/GH_TOKEN|GITHUB_TOKEN|secrets\./);
+    expect(build).toContain('--publish never');
+    expect(build).not.toContain('--publish always');
+    expect(build).toContain('node scripts/release-artifacts.mjs identity');
+    expect(build).toContain('node scripts/release-artifacts.mjs stage');
+    expect(build).toContain('persist-credentials: false');
+    expect(build).toContain('name: release-${{ matrix.platform }}');
+    expect(build).toContain('overwrite: true');
+    expect(build).not.toContain('github.run_attempt');
+    expect(build).toContain('if-no-files-found: error');
+    expect(build).toContain('path: release-bundle/');
+    for (const platform of ['windows', 'macos', 'linux']) expect(build).toContain(`platform: ${platform}`);
+  });
+
+  it('attests validated build bytes before transfer, with no release-write permission', () => {
+    const build = jobs.get('build')!;
+    expect(build).toContain('id-token: write');
+    expect(build).toContain('attestations: write');
+    expect(build).toContain('RELEASE_WORKFLOW_SHA: ${{ github.workflow_sha }}');
+    expect(build.indexOf('node scripts/release-artifacts.mjs identity')).toBeLessThan(build.indexOf('npx electron-vite build'));
+    expect(build.indexOf('node scripts/release-artifacts.mjs stage')).toBeLessThan(build.indexOf('uses: actions/attest-build-provenance@'));
+    expect(build.indexOf('uses: actions/attest-build-provenance@')).toBeLessThan(build.indexOf('uses: actions/upload-artifact@'));
+    expect(build).toContain('subject-path: release-bundle/*');
+    expect(jobs.get('publish')).not.toMatch(/id-token: write|attestations: write/);
+  });
+
+  it('has one publisher that needs all build legs and the verified tag, and downloads three separate bundles', () => {
+    const publish = jobs.get('publish')!;
+    expect(publish).toBeDefined();
+    expect(needsOf(publish)).toEqual(['verify-tag', 'build']);
+    expect(publish).toContain('contents: write');
+    expect(publish).toContain('node scripts/publish-release.mjs');
+    expect(publish).toContain('GH_TOKEN: ${{ github.token }}');
+    for (const platform of ['windows', 'macos', 'linux']) {
+      expect(publish).toContain(`name: release-${platform}`);
+      expect(publish).toContain(`path: release-bundles/${platform}`);
+    }
+    expect(publish).not.toMatch(/merge-multiple: true|--clobber|release create/);
+  });
+
+  it('keeps automatic tools from exposing an incomplete public release', () => {
+    expect(readWorkflow('release-please.yml')).toContain('skip-github-release: true');
+    const builder = readFileSync(path.join(root, 'electron-builder.yml'), 'utf8');
+    expect(builder).toMatch(/publish:\s*\n\s+provider: github\s*\n\s+releaseType: draft/);
+    expect(prFiles).toEqual(expect.arrayContaining(['tests/release-artifacts.test.ts', 'tests/release-publish.test.ts']));
   });
 });
 
