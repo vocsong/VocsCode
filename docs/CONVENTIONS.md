@@ -51,6 +51,9 @@ whatever issue or PR 3 happens to be.
 - Build output (`out/`, `dist/`), `node_modules/`, and `tests/artifacts/`.
 - API keys or anything read from the OS keychain — not in settings, logs, transcripts, MCP
   definitions, or the repository.
+- Environment files (`.env`, `.env.*`, `.dev.vars`), private keys and certificates (`*.pem`,
+  `*.key`, `*.p12`, `*.pfx`). `.gitignore` covers these; use `git add -f` only for a deliberate,
+  non-secret test fixture, and say so in the PR.
 
 ## Development environment
 
