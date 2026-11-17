@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,10 +8,14 @@ import { createAdapter } from '../src/main/harness/registry';
 import type { HarnessAdapter, HarnessContext } from '../src/main/harness/types';
 import { SessionManager, type SessionManagerDeps } from '../src/main/session-manager';
 import { SessionStore } from '../src/main/store';
+import { ControlJournal } from '../src/main/control/journal';
+import { ControlService } from '../src/main/control/service';
+import { CONTROL_SCOPES } from '../src/shared/control';
 import { defaultSettings } from '../src/main/settings';
 import { emptyUsage } from '../src/main/models/static-models';
 import { deferred } from '../src/main/util/async';
 import * as persistence from '../src/main/util/fs';
+import { writeJson } from '../src/main/util/fs';
 import type { CreateSessionRequest, SessionMeta, UserInput } from '../src/shared/types';
 
 vi.mock('../src/main/harness/registry', () => ({ createAdapter: vi.fn() }));
@@ -98,7 +104,7 @@ async function fixture() {
   return { manager, store, meta, deps, dir, restart };
 }
 
-const control = (operationId = 'operation', beforeDispatch: () => Promise<void> = async () => undefined) => ({ operationId, inputId: `input_${operationId}`, beforeDispatch });
+const control = (operationId = 'operation', beforeDispatch: () => Promise<void> = async () => undefined, beforeStart: () => Promise<void> = async () => undefined, startAllowed: () => void = () => undefined) => ({ operationId, inputId: `input_${operationId}`, beforeStart, startAllowed, beforeDispatch });
 const run = (manager: SessionManager, operationId = 'operation', beforeDispatch?: () => Promise<void>) => manager.runControlled('session', { text: 'Do the task' }, control(operationId, beforeDispatch));
 const pendingTurn = () => { script = async (runtime) => { runtime.begin(); }; };
 const dispatched = async () => { await vi.waitFor(() => expect(runtimes.at(-1)?.adapter.send).toHaveBeenCalledTimes(1)); return runtimes.at(-1)!; };
@@ -249,6 +255,24 @@ describe('exclusive controlled turns', () => {
     await expect(run(manager, 'operation', async () => { throw new Error('revoked'); })).rejects.toThrow('revoked');
     expect(runtimes[0].adapter.send).not.toHaveBeenCalled();
     expect(await run(manager, 'retry')).toMatchObject({ outcome: 'succeeded' });
+  });
+
+  it('a rejected start authorization constructs no runtime, writes no input and releases admission', async () => {
+    const { manager } = await fixture();
+    const denied = manager.runControlled('session', { text: 'Do the task' }, control('operation', undefined, async () => { throw new Error('excluded configuration'); }));
+    await expect(denied).rejects.toThrow('excluded configuration');
+    expect(createAdapter).not.toHaveBeenCalled();
+    expect((await manager.transcript('session')).filter((item) => item.kind === 'user')).toEqual([]);
+    expect(await run(manager, 'retry')).toMatchObject({ outcome: 'succeeded' });
+  });
+
+  it('refuses to start a configuration that changed after its start authorization', async () => {
+    const { manager } = await fixture();
+    const changed = manager.runControlled('session', { text: 'Do the task' }, control('operation', undefined, async () => {
+      manager.get('session')!.config.permissionMode = 'full-auto'; // Any path other than the reserved desktop edits.
+    }));
+    await expect(changed).rejects.toThrow('configuration changed');
+    expect(createAdapter).not.toHaveBeenCalled();
   });
 
   it('interrupts only the exact operation and fences late events before the next ordinary runtime', async () => {
@@ -418,15 +442,15 @@ describe('correlated controller creation', () => {
   it('creates exactly one session concurrently and returns that same durable identity after restart', async () => {
     const { manager, store, dir, restart } = await fixture();
     const req: CreateSessionRequest = { title: 'Created by controller', config: { projectRoot: dir, harness: 'native', permissionMode: 'ask' } };
-    const [first, duplicate] = await Promise.all([manager.createControlled(req, operationId), manager.createControlled(req, operationId)]);
+    const [first, duplicate] = await Promise.all([manager.createControlled(req, operationId, dir), manager.createControlled(req, operationId, dir)]);
     expect(first).toBe(duplicate);
     expect(first.id).toBe('s_control_11111111222243338444555555555555');
     expect(store.list().filter((meta) => meta.controlCreation?.operationId === operationId)).toHaveLength(1);
     const restored = await restart();
-    expect((await restored.manager.createControlled(req, operationId)).id).toBe(first.id);
+    expect((await restored.manager.createControlled(req, operationId, dir)).id).toBe(first.id);
     expect(restored.store.list().filter((meta) => meta.controlCreation?.operationId === operationId)).toHaveLength(1);
     expect(createAdapter).not.toHaveBeenCalled();
-    await expect(restored.manager.createControlled({ ...req, title: 'different payload' }, operationId)).rejects.toThrow('conflicts');
+    await expect(restored.manager.createControlled({ ...req, title: 'different payload' }, operationId, dir)).rejects.toThrow('conflicts');
   });
 
   it('recovers an already-created session after ancillary settings persistence failed without another create effect', async () => {
@@ -435,13 +459,13 @@ describe('correlated controller creation', () => {
     const digest = vi.fn(async () => 'Project guidance');
     deps.knowledgeDigest = digest;
     vi.mocked(deps.settings.update).mockRejectedValueOnce(new Error('settings unavailable'));
-    await expect(manager.createControlled(req, operationId)).rejects.toThrow('settings unavailable');
-    const recovered = await manager.createControlled(req, operationId);
+    await expect(manager.createControlled(req, operationId, dir)).rejects.toThrow('settings unavailable');
+    const recovered = await manager.createControlled(req, operationId, dir);
     expect(recovered.controlCreation?.operationId).toBe(operationId);
     expect(digest).toHaveBeenCalledTimes(1);
     expect(store.list().filter((meta) => meta.controlCreation)).toHaveLength(1);
     const restored = await restart();
-    expect((await restored.manager.createControlled(req, operationId)).id).toBe(recovered.id);
+    expect((await restored.manager.createControlled(req, operationId, dir)).id).toBe(recovered.id);
     expect(digest).toHaveBeenCalledTimes(1);
   });
 
@@ -451,8 +475,8 @@ describe('correlated controller creation', () => {
     const digest = vi.fn(async () => 'Project guidance');
     deps.knowledgeDigest = digest;
     vi.spyOn(store, 'upsert').mockRejectedValueOnce(new Error('index write failed'));
-    await expect(manager.createControlled(req, operationId)).rejects.toThrow('index write failed');
-    await expect(manager.createControlled(req, operationId)).rejects.toThrow('index write failed');
+    await expect(manager.createControlled(req, operationId, dir)).rejects.toThrow('index write failed');
+    await expect(manager.createControlled(req, operationId, dir)).rejects.toThrow('index write failed');
     expect(digest).toHaveBeenCalledTimes(1);
     expect(store.list()).toHaveLength(1);
   });
@@ -460,10 +484,144 @@ describe('correlated controller creation', () => {
   it('refuses invalid identities, implicit dispatch and forged ordinary provenance before effects', async () => {
     const { manager, store, dir } = await fixture();
     const req: CreateSessionRequest = { config: { projectRoot: dir, harness: 'native', permissionMode: 'ask' } };
-    await expect(manager.createControlled(req, '../invalid')).rejects.toThrow('ID');
-    await expect(manager.createControlled({ ...req, initialPrompt: 'run' }, operationId)).rejects.toThrow('initial input');
-    await expect(manager.createControlled({ ...req, goal: 'autonomous' }, operationId)).rejects.toThrow('initial input');
+    await expect(manager.createControlled(req, '../invalid', dir)).rejects.toThrow('ID');
+    await expect(manager.createControlled({ ...req, initialPrompt: 'run' }, operationId, dir)).rejects.toThrow('initial input');
+    await expect(manager.createControlled({ ...req, goal: 'autonomous' }, operationId, dir)).rejects.toThrow('initial input');
     await expect(manager.patch('session', { controlCreation: { operationId, requestHash: 'forged' } })).rejects.toThrow('host-owned');
     expect(store.list()).toHaveLength(1);
+  });
+});
+
+// The real service, journal and manager together; only the harness adapter is scripted.
+describe('controller authorization before privileged effects', () => {
+  async function controlled(project: string, deps: SessionManagerDeps, manager: SessionManager, persist = writeJson) {
+    const settings = deps.settings.get();
+    settings.folders = [project];
+    const journalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-control-journal-'));
+    dirs.push(journalDir);
+    const journal = new ControlJournal(journalDir, persist);
+    await journal.load();
+    const service = new ControlService({ journal, sessions: manager, settings: () => settings, guard: async () => undefined });
+    const state = await service.ownerState();
+    const projectId = state.projects[0]!.id;
+    const principal = { accountId: 'vocs-v1', controllerId: randomUUID(), scopes: [...CONTROL_SCOPES], validUntil: Date.now() + 30_000 };
+    await service.grant({ accountId: principal.accountId, controllerId: principal.controllerId, name: 'Controller', projectIds: [projectId], scopes: [...CONTROL_SCOPES], permissionModes: ['ask'], harnesses: ['native'], expiresAt: Date.now() + 3_600_000 });
+    await service.setEnabled(true);
+    const window = await service.handle(principal, { method: 'windows.create', params: { instanceId: state.instanceId } }) as { admissionWindowId: string };
+    return { settings, journal, service, principal, projectId, intent: { instanceId: state.instanceId, projectId, admissionWindowId: window.admissionWindowId } };
+  }
+
+  it('starts no runtime when the owner widens the session mode while the controller send is being admitted', async () => {
+    const { manager, deps, dir } = await fixture();
+    let pause = false, entered!: () => void, release!: () => void;
+    const saving = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const c = await controlled(dir, deps, manager, async (file, value) => {
+      if (pause && (value as { operations: Array<{ state: string }> }).operations.some((op) => op.state === 'accepted')) { pause = false; entered(); await gate; }
+      await writeJson(file, value);
+    });
+    pause = true;
+    const submitted = c.service.handle(c.principal, { method: 'sessions.send', params: { ...c.intent, sessionId: 'session', idempotencyKey: 'start-race', text: 'Do the task' } });
+    try {
+      await saving;
+      await manager.setPermissionMode('session', 'full-auto');
+    } finally { release(); }
+    await submitted;
+    await c.service.settle();
+    expect(createAdapter).not.toHaveBeenCalled();
+    expect(c.journal.snapshot().operations.map((op) => op.state)).toEqual(['failed']);
+    expect((await manager.transcript('session')).filter((item) => item.kind === 'user')).toEqual([]);
+  });
+
+  it('starts no runtime when the grant is revoked while that runtime is being prepared', async () => {
+    const { manager, deps, dir } = await fixture();
+    const c = await controlled(dir, deps, manager);
+    let entered!: () => void, release!: () => void;
+    const preparing = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    // The last await before the adapter starts: the workspace writer claim.
+    vi.spyOn(manager as unknown as { claimWorkspaceWriter(): Promise<void> }, 'claimWorkspaceWriter').mockImplementationOnce(async () => { entered(); await gate; });
+    await c.service.handle(c.principal, { method: 'sessions.send', params: { ...c.intent, sessionId: 'session', idempotencyKey: 'revoked-while-starting', text: 'Do the task' } });
+    try {
+      await preparing;
+      await c.service.revoke(c.journal.snapshot().grants[0]!.id);
+    } finally { release(); }
+    await c.service.settle();
+    expect(createAdapter).toHaveBeenCalledTimes(1);
+    expect(runtimes[0]!.adapter.start).not.toHaveBeenCalled();
+    expect(runtimes[0]!.adapter.send).not.toHaveBeenCalled();
+    expect(c.journal.snapshot().operations.map((op) => op.state)).toEqual(['failed']);
+    // A withdrawn grant is not a harness failure: the owner's session is left as it was.
+    await vi.waitFor(() => expect(runtimes[0]!.adapter.dispose).toHaveBeenCalledTimes(1));
+    expect(manager.get('session')).toMatchObject({ status: 'idle' });
+    expect(manager.get('session')!.lastError).toBeUndefined();
+    expect((await manager.transcript('session')).filter((item) => item.kind === 'user' || item.kind === 'info')).toEqual([]);
+    await manager.send('session', { text: 'An ordinary desktop turn' });
+    await vi.waitFor(() => expect(runtimes.at(-1)!.adapter.send).toHaveBeenCalledTimes(1));
+  });
+
+  const git =(cwd: string, args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', ...args],
+    { encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' } }).trim();
+  async function repository(dir: string) {
+    const repo = path.join(dir, 'repo'), outside = path.join(dir, 'outside');
+    await fs.mkdir(repo); await fs.mkdir(outside);
+    git(repo, ['init', '-q', '--initial-branch=main']);
+    git(repo, ['commit', '-q', '--allow-empty', '-m', 'init']);
+    return { repo: await fs.realpath(repo), outside };
+  }
+  async function createIn(project: string, deps: SessionManagerDeps, manager: SessionManager) {
+    const c = await controlled(project, deps, manager);
+    c.settings.folderSessionDefaults = { [project]: { harness: 'native', permissionMode: 'ask', useWorktree: true } };
+    await c.service.handle(c.principal, { method: 'sessions.create', params: { ...c.intent, idempotencyKey: 'create', title: 'Controlled worktree' } });
+    await c.service.settle();
+    return c.journal.snapshot().operations[0]!;
+  }
+
+  const link = (target: string, at: string) => fs.symlink(target, at, process.platform === 'win32' ? 'junction' : 'dir');
+  it.each(['nested project', 'linked .vocs-code', 'linked .vocs-code/worktrees', 'linked worktree as project'] as const)('refuses a worktree whose writes would leave the enrolled project (%s) before any write', async (kind) => {
+    const { manager, deps, dir } = await fixture();
+    const { repo, outside } = await repository(dir);
+    let project = repo;
+    const branches = ['main'];
+    if (kind === 'nested project') { project = path.join(repo, 'approved'); await fs.mkdir(project); }
+    else if (kind === 'linked .vocs-code') await link(outside, path.join(repo, '.vocs-code'));
+    else if (kind === 'linked .vocs-code/worktrees') { await fs.mkdir(path.join(repo, '.vocs-code')); await link(outside, path.join(repo, '.vocs-code', 'worktrees')); }
+    else {
+      // Its branch refs and worktree bookkeeping live in the main repository's git directory.
+      git(repo, ['worktree', 'add', '-q', '-b', 'side', path.join(dir, 'linked')]);
+      project = await fs.realpath(path.join(dir, 'linked'));
+      branches.push('side');
+    }
+    const worktrees = git(repo, ['worktree', 'list', '--porcelain']).match(/^worktree /gm)!.length;
+    const operation = await createIn(project, deps, manager);
+    expect(operation.state).toBe('failed');
+    expect(operation.sessionId).toBeUndefined();
+    expect(git(repo, ['branch', '--format=%(refname:short)']).split(/\r?\n/).sort()).toEqual(branches);
+    expect(git(repo, ['worktree', 'list', '--porcelain']).match(/^worktree /gm)).toHaveLength(worktrees);
+    expect(await fs.readdir(outside)).toEqual([]);
+    if (kind === 'nested project') await expect(fs.stat(path.join(repo, '.vocs-code'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(manager.list().filter((meta) => meta.controlCreation)).toEqual([]);
+  });
+
+  it('creates a plain session in the project when the remembered worktree default has no repository to use', async () => {
+    const { manager, deps, dir } = await fixture();
+    await fs.mkdir(path.join(dir, 'plain'));
+    const project = await fs.realpath(path.join(dir, 'plain'));
+    const operation = await createIn(project, deps, manager);
+    expect(operation.state).toBe('succeeded');
+    const session = manager.get(operation.sessionId!)!;
+    expect(await fs.realpath(session.cwd)).toBe(project);
+    expect(session.config.useWorktree).toBe(false);
+    expect(session.worktreeBranch).toBeUndefined();
+  });
+
+  it('still creates a remembered-default worktree inside an enrolled repository root', async () => {
+    const { manager, deps, dir } = await fixture();
+    const { repo } = await repository(dir);
+    const operation = await createIn(repo, deps, manager);
+    expect(operation.state).toBe('succeeded');
+    const session = manager.get(operation.sessionId!)!;
+    expect(path.relative(path.join(repo, '.vocs-code', 'worktrees'), await fs.realpath(session.cwd))).not.toMatch(/^\.\./);
+    expect(session.worktreeBranch).toMatch(/^vocscode\//);
   });
 });
