@@ -956,6 +956,49 @@ describe('SecretStore', () => {
     }
   });
 
+  it('keeps session-only identity secrets off disk without OS encryption, and removes an earlier obfuscated copy', async () => {
+    const dir = path.join(tmpRoot, 'session-only');
+    const identity = JSON.stringify({ deviceId: 'd1', refresh: 'refresh-credential-value' });
+    // An earlier version wrote the identity obfuscated next to an ordinary API key.
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'secrets.json'), JSON.stringify({
+      'remote-host': 'b64:' + Buffer.from(identity).toString('base64'),
+      openai: 'b64:' + Buffer.from('sk-ordinary').toString('base64'),
+    }));
+    safeStorageMock.encryptionAvailable = false;
+    try {
+      const log = vi.fn();
+      const store = new SecretStore(dir, log, { sessionOnly: ['remote-host', 'remote-enroll'] });
+      await store.load();
+      const onDisk = async () => JSON.parse(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8')) as Record<string, string>;
+      // Loading moves it to memory and rewrites the file without it; ordinary keys keep the fallback.
+      expect(Object.keys(await onDisk())).toEqual(['openai']);
+      expect(await store.get('remote-host')).toBe(identity);
+      expect(await store.get('openai')).toBe('sk-ordinary');
+      await store.set('remote-enroll', 'enrollment-secret');
+      await store.set('remote-host', identity.replace('d1', 'd2'));
+      await store.set('remote-host', identity.replace('d1', 'd3'));
+      const raw = await fs.readFile(path.join(dir, 'secrets.json'), 'utf8');
+      expect(raw).not.toContain(Buffer.from('enrollment-secret').toString('base64'));
+      expect(Object.keys(JSON.parse(raw))).toEqual(['openai']);
+      expect(await store.get('remote-host')).toContain('d3');
+      expect(store.has('remote-enroll')).toBe(true);
+      expect(log.mock.calls.filter(([, line]) => String(line).includes('remote-host kept for this session only'))).toHaveLength(1);
+      // A restart without OS encryption has nothing to read back: pairing starts over.
+      const restarted = new SecretStore(dir, () => undefined, { sessionOnly: ['remote-host', 'remote-enroll'] });
+      await restarted.load();
+      expect(await restarted.get('remote-host')).toBeUndefined();
+      expect(await restarted.get('remote-enroll')).toBeUndefined();
+      // With OS encryption the same ids are stored encrypted as before.
+      safeStorageMock.encryptionAvailable = true;
+      await restarted.set('remote-host', identity);
+      expect((await onDisk())['remote-host']!.startsWith('enc:')).toBe(true);
+      expect(await restarted.get('remote-host')).toBe(identity);
+    } finally {
+      safeStorageMock.encryptionAvailable = true;
+    }
+  });
+
   it('clears a key and treats an empty set as a clear', async () => {
     const dir = path.join(tmpRoot, 'clear');
     const store = new SecretStore(dir);
