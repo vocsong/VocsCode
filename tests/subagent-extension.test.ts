@@ -283,6 +283,25 @@ describe('foreground runs', () => {
     expect((h.loaderOptions[0]!.systemPromptOverride as () => string)()).toContain('PARENT PROMPT');
   });
 
+  it('tells an append-mode child that the lead\'s delegation rules are not addressed to it', async () => {
+    const h = harness();
+    // The parent prompt carries the user's app instructions, which address the lead.
+    h.parentCtx.getSystemPrompt = () => 'PARENT PROMPT\n\nYou are the lead. Prefer delegation for any non-trivial request.';
+    await createVocsCodeSubagents(h.pi as never, h.deps);
+    await h.tools.get('subagent')!.execute('call_1', { ...subagentCall, type: 'general-purpose' }, undefined, undefined, h.parentCtx);
+    const prompt = (h.loaderOptions[0]!.systemPromptOverride as () => string)();
+    const lead = prompt.indexOf('You are the lead.');
+    const notice = prompt.indexOf('# You are a subagent');
+    const role = prompt.indexOf('# Your role');
+    // The notice follows everything inherited and precedes the role, so it is the later word.
+    expect(lead).toBeGreaterThanOrEqual(0);
+    expect(notice).toBeGreaterThan(lead);
+    expect(role).toBeGreaterThan(notice);
+    expect(prompt).toMatch(/cannot delegate/);
+    // The child still has no way to delegate.
+    expect(h.sessionOptions[0]!.excludeTools).toEqual(expect.arrayContaining(['subagent', 'subagent_result', 'subagent_steer']));
+  });
+
   it('rejects an unknown agent type with the available names', async () => {
     const h = harness();
     await createVocsCodeSubagents(h.pi as never, h.deps);
