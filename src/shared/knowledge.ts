@@ -210,9 +210,9 @@ export interface KnowledgeProposalInput {
   claim: string;
   body: string;
   kind?: KnowledgeKind;
-  /** Where the accepted page lands; defaults by scope (see KnowledgeService.defaultScope). */
+  /** Where the page lands; inherits an existing page's scope, otherwise defaults to repo. */
   scope?: KnowledgePageScope;
-  /** Updates this existing page when accepted; a new slug is minted when absent. */
+  /** Explicitly updates this id, even for a changed claim; implicit slug collisions are refused. */
   pageId?: string;
   keywords?: string[];
   labels?: string[];

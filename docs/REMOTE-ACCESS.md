@@ -388,7 +388,12 @@ Web (browser)                Relay                      Desktop (host)
    the enrollment secret; once registered it connects (and resumes after a restart) with its own
    credential, and the field is hidden. The relay is not a setting: desktops always use
    `https://code.vocs.io` (`VOCS_CODE_RELAY_URL` points a development build or a test at another
-   relay). Desktop generates its device keypair, stores the private half in the secrets store,
+   relay). Both this override and the browser's `?relay=` override require HTTPS/WSS outside
+   literal loopback (`localhost`, IPv4 `127.0.0.0/8`, IPv6 `::1`); private LAN HTTP/WS has no
+   insecure override. Restored desktop/browser credentials are subject to the same policy at
+   request/socket dispatch, not just when choosing a relay. Credential-bearing HTTP calls never
+   follow redirects: configure the final HTTPS relay URL directly. Desktop generates its device
+   keypair, stores the private half in the secrets store,
    connects outbound WSS to the relay and, while no browser is paired, requests a pairing code
    straight away so the QR code is on screen without another click.
 2. **Code.** Relay returns a single-use 8-character code (e.g. `MVBTK7Q2`, ~2^40 space, no

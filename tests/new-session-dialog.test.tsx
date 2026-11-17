@@ -66,6 +66,32 @@ afterEach(() => {
 });
 
 describe('NewSessionDialog', () => {
+  it.each(['codex', 'codex-exec', 'cursor', 'acp'] as const)('labels %s additions as first-message session instructions and submits them', async (harness) => {
+    useStore.setState({ settings: { ...settings, defaultHarness: harness } });
+    render(<NewSessionDialog />);
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
+    const editor = screen.getByRole('textbox', { name: /^Session instructions/ });
+    expect(screen.queryByText('Append to system prompt')).toBeNull();
+    expect(screen.getByText("Sent with the first message; does not replace the harness's own system prompt.")).toBeTruthy();
+    fireEvent.change(editor, { target: { value: '  Session guidance.  ' } });
+    const start = screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+    fireEvent.click(start);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({
+      config: expect.objectContaining({ harness, appendSystemPrompt: 'Session guidance.' })
+    })));
+    expect(invoke.mock.calls.filter(([channel]) => channel === 'sessions:create')).toHaveLength(1);
+  });
+
+  it.each(['pi', 'claude', 'native'] as const)('keeps the supported system-prompt label for %s', async (harness) => {
+    useStore.setState({ settings: { ...settings, defaultHarness: harness } });
+    render(<NewSessionDialog />);
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
+    expect(screen.getByRole('textbox', { name: 'Append to system prompt' })).toBeTruthy();
+    expect(screen.queryByText("Sent with the first message; does not replace the harness's own system prompt.")).toBeNull();
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+  });
+
   it('starts from the first prompt on Enter and keeps Shift+Enter for newlines', async () => {
     render(<NewSessionDialog />);
     // Starting waits for the model list and the folder's git probe; Enter is inert until then.

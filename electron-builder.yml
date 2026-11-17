@@ -29,11 +29,11 @@ asarUnpack:
   - node_modules/@lydell/**
 # Every native dependency ships prebuilt (@lydell/node-pty); nothing needs a compiler at install time.
 npmRebuild: false
-# Publish to the published release the tag points at (default 'draft' skips when the
-# release already exists). Also emits latest.yml for a future electron-updater.
+# Keep updater configuration/metadata even with --publish never in CI. Only the
+# single release publisher exposes the complete set; local builder defaults stay draft.
 publish:
   provider: github
-  releaseType: release
+  releaseType: draft
 win:
   icon: resources/icons/vocs-code.ico
   target:
