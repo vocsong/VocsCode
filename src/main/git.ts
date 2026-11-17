@@ -1105,8 +1105,9 @@ export async function createWorktree(projectRoot: string, slug: string, opts: { 
   const r = await git(root, ['worktree', 'add', '-b', branch, wtPath, ...(startPoint ? [startPoint] : [])], 60_000);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
   if (confineTo && !within(root, await fs.realpath(wtPath))) {
-    await git(root, ['worktree', 'remove', '--force', wtPath]);
-    await git(root, ['branch', '-D', branch]);
+    const removed = await git(root, ['worktree', 'remove', '--force', wtPath]);
+    const deleted = await git(root, ['branch', '-D', branch]);
+    if (removed.code !== 0 || deleted.code !== 0) gitLog('warn', `Could not fully remove an unconfined worktree ${wtPath} (${branch}): ${failure(removed.code !== 0 ? removed : deleted)}`);
     throw new Error('The worktree was created outside this project and has been removed.');
   }
   return { path: wtPath, branch };

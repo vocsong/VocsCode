@@ -214,7 +214,7 @@ export class ControlService {
         const transcript = await this.deps.sessions.transcript(checked.session.id);
         // Reads do not reserve the runtime: desktop moves/configuration edits can finish meanwhile.
         await this.session(principal, request.method, projectId!, checked.session.id);
-        // Against the identity the read began with (a move away and back also fails), in the same
+        // Against the identity the read began with (a move away and back is not detected), in the same
         // synchronous block that builds the response. Revocation during the read also wins.
         this.fresh(checked);
         this.authorize(principal, request.method, projectId);

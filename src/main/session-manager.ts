@@ -131,6 +131,9 @@ export interface ControlledTurnResult {
   outputIds: string[];
 }
 
+/** A controlled turn's authorization was withdrawn before its runtime started: not a harness fault. */
+class ControlledStartRefused extends Error {}
+
 interface ControlledTurn {
   operationId: string;
   inputId: string;
@@ -1283,7 +1286,9 @@ export class SessionManager {
       if (!live()) throw new Error('Session stopped before its runtime could start.');
       // A controlled turn's grant can be revoked or narrowed while the runtime is being prepared.
       const turn = this.controlled.get(id);
-      if (turn?.runtime === active) turn.startAllowed();
+      if (turn?.runtime === active) {
+        try { turn.startAllowed(); } catch (error) { throw new ControlledStartRefused(errorMessage(error)); }
+      }
       await adapter.start();
     };
     active.starting = (this.admits(meta) ? this.deps.withWorkspaceDispatch!(meta, start) : start())
@@ -1312,6 +1317,14 @@ export class SessionManager {
       .catch((e) => {
         active.starting = null;
         if (this.active.get(id) !== active) throw e;
+        if (e instanceof ControlledStartRefused) {
+          // Nothing started and nothing is wrong with the session or its harness: release the
+          // unstarted runtime and leave the session as the owner had it. The controller's receipt
+          // records the refusal.
+          this.deps.log('info', `[${id}] controlled start refused: ${e.message}`);
+          this.disposeRuntime(id, active, 'idle').catch((de) => this.deps.log('warn', `[${id}] dispose after refused start: ${errorMessage(de)}`));
+          throw e;
+        }
         // The transcript card below is what the user sees; this line is what a bug report needs.
         this.deps.log('error', `[${id}] ${meta.config.harness} failed to start after ${Date.now() - t0}ms: ${e instanceof Error ? e.stack ?? e.message : errorMessage(e)}`);
         // Start failed after spawn: dispose the adapter so no harness child process is orphaned
@@ -1383,13 +1396,14 @@ export class SessionManager {
     // also catches any other path, so the authorization below stays about what actually starts.
     const authorized = (m: SessionMeta | undefined) => m && JSON.stringify([m.cwd, m.config.projectRoot, m.config.harness, m.config.permissionMode]);
     const reserved = authorized(meta);
+    // True only between start authorization and runtime construction: the window startAllowed guards.
     let startAuthorized = false;
     const assertCurrent = () => {
       if (lease.canceled || this.controlled.get(id) !== lease) throw new Error('Controlled turn was canceled before dispatch');
       if (lease.uncertain) throw new Error('Controlled runtime activity is unproven');
       if (lease.runtime && (this.active.get(id) !== lease.runtime || lease.runtime.tearingDown || lease.runtime.uncertain)) throw new Error('Controlled runtime is no longer current');
       if (authorized(this.get(id)) !== reserved) throw new Error('Controlled session configuration changed');
-      if (startAuthorized && !lease.runtime) lease.startAllowed();
+      if (startAuthorized) lease.startAllowed();
     };
     try {
       if (previous?.compactionInFlight) await previous.compactionInFlight;
@@ -1408,7 +1422,7 @@ export class SessionManager {
       await control.beforeStart();
       startAuthorized = true;
       assertCurrent();
-      const active = await this.ensureActive(id);
+      const active = await this.ensureActive(id).finally(() => { startAuthorized = false; });
       assertCurrent();
       if (active.compactionInFlight) await active.compactionInFlight;
       assertCurrent();

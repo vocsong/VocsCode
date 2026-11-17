@@ -551,10 +551,16 @@ describe('controller authorization before privileged effects', () => {
     expect(runtimes[0]!.adapter.start).not.toHaveBeenCalled();
     expect(runtimes[0]!.adapter.send).not.toHaveBeenCalled();
     expect(c.journal.snapshot().operations.map((op) => op.state)).toEqual(['failed']);
-    expect((await manager.transcript('session')).filter((item) => item.kind === 'user')).toEqual([]);
+    // A withdrawn grant is not a harness failure: the owner's session is left as it was.
+    await vi.waitFor(() => expect(runtimes[0]!.adapter.dispose).toHaveBeenCalledTimes(1));
+    expect(manager.get('session')).toMatchObject({ status: 'idle' });
+    expect(manager.get('session')!.lastError).toBeUndefined();
+    expect((await manager.transcript('session')).filter((item) => item.kind === 'user' || item.kind === 'info')).toEqual([]);
+    await manager.send('session', { text: 'An ordinary desktop turn' });
+    await vi.waitFor(() => expect(runtimes.at(-1)!.adapter.send).toHaveBeenCalledTimes(1));
   });
 
-  const git = (cwd: string, args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', ...args],
+  const git =(cwd: string, args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', ...args],
     { encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' } }).trim();
   async function repository(dir: string) {
     const repo = path.join(dir, 'repo'), outside = path.join(dir, 'outside');
