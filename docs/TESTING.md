@@ -275,7 +275,8 @@ HARNESS_E2E_EXE="$PWD/dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mj
 
 This checks startup under the packaged layout, not installer UX, code signing or notarization,
 every bundled SDK/resource, or an actual updater install. Tag-triggered `release.yml` publication
-is a separate workflow; this gate does not make it depend on a successful CI run.
+is a separate workflow, but its `verify-tag` job refuses to build unless this CI run passed on the
+tagged master commit (see [RELEASING.md](RELEASING.md#release-tag-gate)).
 At minimum, also verify the affected feature; terminal-only coverage does not prove every unpacked
 SDK or copied resource loads.
 

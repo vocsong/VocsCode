@@ -2,6 +2,9 @@
 # production always speaks the protocol of the released desktop. Verifies the exact checkout
 # before publishing. Credentials live in GitHub's protected `relay-production` environment, which
 # admits release tags only and waits for approval. Every release redeploys (tags skip path filters).
+# The verify-tag gate runs first, for tag pushes and manual redeploys alike: nothing deploys (and
+# no approval is requested) unless the tag's commit is on master and CI passed on that exact commit.
+# See docs/RELEASING.md.
 name: Deploy relay
 
 on:
@@ -18,13 +21,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify-tag:
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/verify-release-tag.yml
+    with:
+      tag: ${{ github.ref_name }}
+
   deploy:
+    needs: verify-tag
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: relay-production
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # The verified commit, not the tag name: a tag moved after the gate cannot change the deploy.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.verify-tag.outputs.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm

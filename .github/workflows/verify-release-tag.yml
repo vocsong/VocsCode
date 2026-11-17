@@ -1,0 +1,163 @@
+# Release gate shared by release.yml and deploy-relay.yml: a version tag may only produce installers
+# or a relay deployment when (a) the commit it points to is on master and (b) the CI workflow passed
+# on that exact commit, from a push to master or a manual dispatch. Callers `needs:` this job and
+# check out the verified SHA it outputs, never the tag name, so a tag moved after the check cannot
+# swap the code that gets built. Waits a bounded time for a CI run that is still going.
+# See docs/RELEASING.md#release-tag-gate.
+name: Verify release tag
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag to verify (vX.Y.Z)'
+        required: true
+        type: string
+    outputs:
+      sha:
+        description: 'Commit SHA the tag points to, verified on master and green in CI'
+        value: ${{ jobs.verify.outputs.sha }}
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  verify:
+    name: tag is on master and passed CI
+    runs-on: ubuntu-latest
+    # CI_WAIT_MINUTES of polling plus headroom for the API calls around it.
+    timeout-minutes: 85
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.tag.outputs.sha }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+      EVENT_REF: ${{ github.ref }}
+      EVENT_REF_TYPE: ${{ github.ref_type }}
+      EVENT_SHA: ${{ github.sha }}
+      # Master CI (four jobs, the Windows recovery suite the longest) takes about 45 minutes and
+      # normally starts before the tag is pushed.
+      CI_WAIT_MINUTES: '75'
+      # A CI run is created within seconds of the push it belongs to; this only covers that gap.
+      CI_APPEAR_MINUTES: '10'
+    steps:
+      - name: Resolve the tag to a commit
+        id: tag
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::The tag to release is not a version tag of the form vX.Y.Z."
+            exit 1
+          fi
+          if ! ref=$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha'); then
+            echo "::error::Tag $TAG does not exist in $REPO."
+            exit 1
+          fi
+          type=${ref%% *}
+          sha=${ref##* }
+          tag_object=$sha
+          # An annotated tag points at a tag object; peel it (and any nested tag) down to the commit.
+          for _ in 1 2 3 4 5; do
+            [ "$type" = tag ] || break
+            ref=$(gh api "repos/$REPO/git/tags/$sha" --jq '.object.type + " " + .object.sha')
+            type=${ref%% *}
+            sha=${ref##* }
+          done
+          if [ "$type" != commit ] || ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Tag $TAG does not resolve to a commit (got $type $sha)."
+            exit 1
+          fi
+          # Started by the tag itself (tag push, or a dispatch with --ref vX.Y.Z): the tag must still
+          # point where it pointed when this run started.
+          if [ "$EVENT_REF_TYPE" = tag ]; then
+            if [ "$EVENT_REF" != "refs/tags/$TAG" ]; then
+              echo "::error::This run was started from $EVENT_REF but asked to verify $TAG."
+              exit 1
+            fi
+            if [ "$EVENT_SHA" != "$sha" ] && [ "$EVENT_SHA" != "$tag_object" ]; then
+              echo "::error::Tag $TAG moved since this run started ($EVENT_SHA, now $sha). Re-run from the current tag."
+              exit 1
+            fi
+          fi
+          echo "Tag $TAG is commit $sha."
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Require the commit on master
+        env:
+          SHA: ${{ steps.tag.outputs.sha }}
+        run: |
+          # Commit history only (no trees or blobs): enough for an ancestry check, and unlike the
+          # compare API it does not depend on GitHub rendering a diff between the two.
+          git init -q "$RUNNER_TEMP/gate"
+          cd "$RUNNER_TEMP/gate"
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          if ! git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch -q --no-tags --filter=tree:0 \
+              "$GITHUB_SERVER_URL/$REPO.git" '+refs/heads/master:refs/remotes/origin/master' "$SHA" ||
+            ! git cat-file -e "$SHA^{commit}"; then
+            echo "::error::Could not fetch master and $SHA from $REPO."
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$SHA" refs/remotes/origin/master; then
+            echo "$SHA is on master (master is $(git rev-parse refs/remotes/origin/master))."
+          else
+            echo "::error::Tag $TAG ($SHA) is not on master. Releases are built only from commits on master; tag the release commit on origin/master."
+            exit 1
+          fi
+
+      - name: Require a successful CI run on the exact commit
+        env:
+          SHA: ${{ steps.tag.outputs.sha }}
+        run: |
+          now() { date +%s; }
+          started=$(now)
+          deadline=$(( started + CI_WAIT_MINUTES * 60 ))
+          appear_deadline=$(( started + CI_APPEAR_MINUTES * 60 ))
+          rerun_hint="re-run this workflow's failed jobs: gh run rerun $GITHUB_RUN_ID --failed"
+          while :; do
+            # Only a run that tested this commit as master counts: the push to master, or a manual
+            # dispatch (which runs the same full tier). Pull-request runs tested a different commit.
+            runs=$(gh api -X GET "repos/$REPO/actions/workflows/ci.yml/runs" -f head_sha="$SHA" -f per_page=100 \
+              --jq '[.workflow_runs[] | select((.event == "push" and .head_branch == "master") or .event == "workflow_dispatch")
+                    | {id, event, head_branch, status, conclusion, html_url}] | sort_by(-.id)')
+            # A green run passes only if every job in it succeeded: a skipped release-tier job is not a pass.
+            for id in $(jq -r '.[] | select(.status == "completed" and .conclusion == "success") | .id' <<<"$runs"); do
+              jobs=$(gh api -X GET "repos/$REPO/actions/runs/$id/jobs" -f filter=latest -f per_page=100 \
+                --jq '[.jobs[] | {name, conclusion}]')
+              total=$(jq 'length' <<<"$jobs")
+              failed=$(jq -r '[.[] | select(.conclusion != "success") | "\(.name): \(.conclusion)"] | join(", ")' <<<"$jobs")
+              if [ "$total" -gt 0 ] && [ -z "$failed" ]; then
+                url=$(jq -r --argjson id "$id" '.[] | select(.id == $id) | .html_url' <<<"$runs")
+                echo "CI passed on $SHA: $url ($total jobs, all successful)."
+                exit 0
+              fi
+              echo "CI run $id concluded success but not every job did ($failed); not accepted."
+            done
+            count=$(jq 'length' <<<"$runs")
+            pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")
+            if [ "$pending" -gt 0 ]; then
+              if [ "$(now)" -ge "$deadline" ]; then
+                echo "::error::CI on $SHA is still running after $CI_WAIT_MINUTES minutes. Wait for it to pass, then $rerun_hint"
+                exit 1
+              fi
+              echo "CI on $SHA is still running ($pending run(s)); checking again in 60s."
+            elif [ "$count" -eq 0 ]; then
+              if [ "$(now)" -ge "$appear_deadline" ]; then
+                echo "::error::No CI run from a push to master or a manual dispatch exists for $SHA. Start one with: gh workflow run ci.yml --ref $TAG — wait for it to pass, then $rerun_hint"
+                exit 1
+              fi
+              echo "No CI run for $SHA yet; checking again in 60s."
+            else
+              summary=$(jq -r '[.[] | "\(.html_url) (\(.event), \(.conclusion))"] | join("; ")' <<<"$runs")
+              echo "::error::CI did not pass on $SHA: $summary. Fix it on develop and ship again, or re-run CI if the failure was transient (gh run rerun <run id> --failed, or gh workflow run ci.yml --ref $TAG); once it is green, $rerun_hint"
+              exit 1
+            fi
+            sleep 60
+          done
