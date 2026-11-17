@@ -127,7 +127,10 @@ the model rows above; it creates a new definition there for a name no built-in a
 claims, and never touches the global set.
 
 Frontmatter: `name`, `description`, `tools`, optional `model`, `prompt_mode` (`append` | `replace`),
-`mcp: false`. **Model defaults to the session model**; a pinned model is respected, which is why the
+`mcp: false`. An `append` agent inherits the parent's whole system prompt, app instructions and
+`AGENTS.md` included, so a "You are a subagent" notice sits between that prompt and the agent's
+role: the lead's delegation rules are not addressed to a child that has no subagent tools.
+**Model defaults to the session model**; a pinned model is respected, which is why the
 shipped templates pin nothing — a committed pin would oblige every teammate to have that provider.
 
 **Git practice.** Definitions are project knowledge but also personal workflow, so Vocs Code's rule
