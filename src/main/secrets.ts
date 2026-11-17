@@ -6,7 +6,9 @@ import { readJson, writeJson } from './util/fs';
 
 /**
  * API keys encrypted at rest with Electron's safeStorage (DPAPI on Windows, Keychain on macOS,
- * libsecret on Linux). Falls back to obfuscated storage when OS encryption is unavailable.
+ * libsecret on Linux). Falls back to obfuscated storage when OS encryption is unavailable, except
+ * for the ids named in `sessionOnly`: long-lived identity material (remote access) is then kept in
+ * memory for this run only and never written, so a copied or backed-up file cannot carry it.
  *
  * Log lines here name the provider id only — never a key, encrypted or not.
  */
@@ -15,10 +17,20 @@ export class SecretStore {
   private readonly file: string;
   private readonly log: Logger;
   private warnedDecrypt = new Set<string>();
+  /** Session-only values, held while OS encryption is unavailable. */
+  private memory = new Map<string, string>();
+  private warnedSession = new Set<string>();
+  private readonly sessionOnly: ReadonlySet<string>;
 
-  constructor(userData: string, log: Logger = () => undefined) {
+  constructor(userData: string, log: Logger = () => undefined, opts: { sessionOnly?: readonly string[] } = {}) {
     this.file = path.join(userData, 'secrets.json');
     this.log = log;
+    this.sessionOnly = new Set(opts.sessionOnly ?? []);
+  }
+
+  /** Whether `id` must stay out of the file right now. */
+  private keepInMemory(id: string): boolean {
+    return this.sessionOnly.has(id) && !this.encryptionAvailable;
   }
 
   async load(): Promise<void> {
@@ -27,6 +39,17 @@ export class SecretStore {
       this.log('warn', `${this.file} is not a key table; ignoring it`);
       this.data = {};
     } else this.data = loaded;
+    // An earlier version wrote these obfuscated. Without OS encryption they move to memory for this
+    // run and leave the file, which is rewritten before anything else can copy it again.
+    const moved = Object.keys(this.data).filter((id) => this.keepInMemory(id) && this.data[id]?.startsWith('b64:'));
+    if (moved.length) {
+      for (const id of moved) {
+        this.memory.set(id, Buffer.from(this.data[id]!.slice(4), 'base64').toString('utf8'));
+        delete this.data[id];
+      }
+      await this.persist();
+      this.log('warn', `OS encryption unavailable: ${moved.join(', ')} removed from disk and kept for this session only`);
+    }
     const ids = Object.keys(this.data);
     const fallback = this.fallbackProviderIds;
     this.log('info', `secrets loaded for ${ids.length} provider(s)${fallback.length ? `; ${fallback.length} stored without OS encryption (${fallback.join(', ')})` : ''}; OS encryption ${this.encryptionAvailable ? 'available' : 'unavailable'}`);
@@ -41,6 +64,8 @@ export class SecretStore {
   }
 
   async get(id: string): Promise<string | undefined> {
+    const held = this.memory.get(id);
+    if (held !== undefined) return held;
     const v = this.data[id];
     if (!v) return undefined;
     if (v.startsWith('enc:')) {
@@ -61,7 +86,7 @@ export class SecretStore {
   }
 
   has(id: string): boolean {
-    return !!this.data[id];
+    return this.memory.has(id) || !!this.data[id];
   }
 
   get fallbackProviderIds(): string[] {
@@ -89,6 +114,18 @@ export class SecretStore {
   async set(id: string, value: string): Promise<void> {
     const trimmed = value.trim();
     if (!trimmed) return this.clear(id);
+    if (this.keepInMemory(id)) {
+      const wasStored = id in this.data;
+      this.memory.set(id, trimmed);
+      delete this.data[id];
+      if (wasStored) await this.persist();
+      if (!this.warnedSession.has(id)) {
+        this.warnedSession.add(id);
+        this.log('warn', `${id} kept for this session only: OS encryption is unavailable, so it is not written to disk`);
+      }
+      return;
+    }
+    this.memory.delete(id);
     const encrypted = this.encryptionAvailable;
     this.data[id] = encrypted ? 'enc:' + safeStorage.encryptString(trimmed).toString('base64') : 'b64:' + Buffer.from(trimmed, 'utf8').toString('base64');
     this.warnedDecrypt.delete(id);
@@ -98,6 +135,7 @@ export class SecretStore {
   }
 
   async clear(id: string): Promise<void> {
+    this.memory.delete(id);
     const had = id in this.data;
     delete this.data[id];
     await this.persist();

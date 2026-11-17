@@ -136,7 +136,8 @@ async function main(): Promise<void> {
   installAppProcessHandlers();
   const settings = new SettingsStore(userData, logTo);
   await settings.load();
-  const secrets = new SecretStore(userData, logTo);
+  // Remote-access identity and enrollment secrets never fall back to obfuscated storage on disk.
+  const secrets = new SecretStore(userData, logTo, { sessionOnly: ['remote-host', 'remote-enroll'] });
   await secrets.load();
   const store = new SessionStore(userData, logTo);
   await store.load();
