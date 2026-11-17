@@ -133,7 +133,9 @@ describe('file mentions open the Files panel', () => {
     expect(invokeMock).toHaveBeenCalledWith('fs:resolve', { sessionId: session.id, path: 'tools.ts' });
     expect(invokeMock).toHaveBeenCalledWith('fs:read', { sessionId: session.id, path: 'src/app/api/mcp/tools.ts', maxBytes: 200_000 });
     expect(invokeMock).not.toHaveBeenCalledWith('fs:read', expect.objectContaining({ path: 'tools.ts' }));
-    expect(invokeMock).toHaveBeenCalledWith('fs:list', { sessionId: session.id, relPath: 'src/app/api/mcp' });
+    // The folder listing comes from a passive effect that React may run in a later Scheduler task
+    // than the commit that showed the preview, so it can still be pending when the preview appears.
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('fs:list', { sessionId: session.id, relPath: 'src/app/api/mcp' }));
     await waitFor(() => expect((container.querySelector('.file-preview pre') as HTMLPreElement).scrollTop).toBeGreaterThan(0));
   });
 
