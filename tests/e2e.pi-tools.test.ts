@@ -110,7 +110,7 @@ describe.runIf(enabled)('electron e2e: Pi tool compatibility', () => {
       };
       let win = await launch();
       const resourceDir = packaged ? await app!.evaluate(() => process.resourcesPath) : path.join(root, 'resources');
-      for (const name of ['vocs-code-tools.ts', 'tool-arguments.ts', 'search-tools.ts', 'question-tool.ts', 'vocs-code-approvals.ts', 'vocs-code-subagents.ts', 'subagent-gate.ts', 'subagent-agents.ts', 'subagent-runs.ts', path.join('agents', 'general-purpose.md'), path.join('agents', 'Explore.md'), path.join('agents', 'Plan.md')]) {
+      for (const name of ['vocs-code-tools.ts', 'tool-arguments.ts', 'search-tools.ts', 'question-tool.ts', 'vocs-code-approvals.ts', 'vocs-code-subagents.ts', 'subagent-gate.ts', 'subagent-agents.ts', 'subagent-runs.ts', 'vocs-code-mcp.ts', 'mcp-client.ts', path.join('agents', 'general-purpose.md'), path.join('agents', 'Explore.md'), path.join('agents', 'Plan.md')]) {
         expect(await fs.readFile(path.join(resourceDir, 'pi', name), 'utf8')).toBe(await fs.readFile(path.join(root, 'resources', 'pi', name), 'utf8'));
       }
       const session = await invoke(win, 'sessions:create', {
@@ -179,6 +179,82 @@ describe.runIf(enabled)('electron e2e: Pi tool compatibility', () => {
       await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   }, 240_000);
+
+  it('interrupts an ordinary running task from Composer Steer and completes the new directive without a late write', async () => {
+    expect(process.env.VOCS_CODE_E2E_UI).toBe('1');
+    const { cli } = piIntegrationPaths();
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-pi-steer-app-'));
+    const userData = path.join(tmp, 'userData'), agentDir = path.join(tmp, 'agent'), project = path.join(tmp, 'project');
+    const artifacts = path.join(root, 'tests', 'artifacts');
+    let app: ElectronApplication | undefined;
+    try {
+      await Promise.all([userData, agentDir, project, artifacts].map((dir) => fs.mkdir(dir, { recursive: true })));
+      const shim = path.join(tmp, process.platform === 'win32' ? 'pi.cmd' : 'pi');
+      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      await fs.writeFile(shim, process.platform === 'win32' ? `@echo off\r\n"${process.execPath}" "${cli}" %*\r\n` : `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(cli)} "$@"\n`);
+      if (process.platform !== 'win32') await fs.chmod(shim, 0o755);
+      await fs.writeFile(path.join(userData, 'settings.json'), JSON.stringify({
+        ...JSON.parse(seedSettings(project)), binaries: { pi: shim },
+        pi: { extraArgs: ['--offline', '--no-extensions', '--no-skills', '--no-context-files', '--no-prompt-templates', '--no-themes', '--no-approve',
+          '-e', path.join(root, 'tests', 'fixtures', 'pi-scripted-provider.mjs'), '--provider', 'vocs-offline', '--model', 'scripted', '--thinking', 'off'] },
+      }));
+      const env: Record<string, string> = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (value !== undefined && !/API_?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(key)
+          && !/^(ELECTRON_RUN_AS_NODE|ANTHROPIC_BASE_URL|CLAUDECODE|PI_CODING_AGENT_DIR)$/.test(key)
+          && !key.startsWith('CLAUDE_CODE_') && !key.startsWith('VOCS_CODE_PI_')) env[key] = value;
+      }
+      Object.assign(env, { VOCS_CODE_USER_DATA: userData, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_TELEMETRY: '0' });
+      const packaged = process.env.HARNESS_E2E_EXE;
+      app = await electron.launch({ executablePath: packaged || (require('electron') as string),
+        args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`], env, timeout: 60_000 });
+      const win = await app.firstWindow();
+      await win.waitForSelector('.brand', { timeout: 60_000 });
+      const session = await invoke(win, 'sessions:create', { config: { harness: 'pi', projectRoot: project, useWorktree: false, permissionMode: 'full-auto' }, title: 'Pi Composer interrupt' });
+      const id = session.id;
+      await win.getByTestId('session-row').filter({ hasText: 'Pi Composer interrupt' }).click();
+      const composer = win.locator('.composer');
+      const draft = composer.locator('textarea');
+      const original = JSON.stringify({ calls: [{ id: 'sleeping-shell', name: 'bash', arguments: { command: 'printf STARTED > steer-started.txt; sleep 20; printf bad > late-write.txt' } }] });
+      await draft.fill(original);
+      await composer.getByRole('button', { name: 'Send', exact: true }).click();
+      await expect.poll(() => fs.readFile(path.join(project, 'steer-started.txt'), 'utf8').catch(() => ''), { timeout: 30_000, interval: 100 }).toBe('STARTED');
+      const startedAt = Date.now();
+      expect((await invoke(win, 'sessions:get', { id }))?.status).toBe('running');
+      expect(tool(await invoke(win, 'sessions:transcript', { id }), 'sleeping-shell').status).toBe('running');
+      const directive = JSON.stringify({ calls: [{ id: 'steered-write', name: 'write', arguments: { path: 'redirected.txt', content: 'COMPOSER_STEER_OK' } }] });
+      await draft.fill(directive);
+      await composer.screenshot({ path: path.join(artifacts, 'pi-steer-running.png') });
+      await composer.getByRole('button', { name: 'Steer', exact: true }).click();
+      // A queued steer would wait for the 20-second shell; the button must cancel it instead.
+      await expect.poll(async () => {
+        const meta = await invoke(win, 'sessions:get', { id });
+        if (meta?.status === 'error' || meta?.lastError) throw new Error(meta.lastError ?? 'Pi steering failed');
+        const items = await invoke(win, 'sessions:transcript', { id });
+        return { status: meta?.status, turns: items.filter((item) => item.kind === 'turn').map((item) => item.status) };
+      }, { timeout: 10_000, interval: 100 }).toEqual({ status: 'idle', turns: ['interrupted', 'completed'] });
+      expect(await fs.readFile(path.join(project, 'redirected.txt'), 'utf8')).toBe('COMPOSER_STEER_OK');
+      expect(await draft.inputValue()).toBe('');
+      await composer.getByRole('button', { name: 'Send', exact: true }).waitFor({ state: 'visible' });
+      await win.screenshot({ path: path.join(artifacts, 'pi-steer-completed.png') });
+      // Observe past the abandoned shell's deadline, not just the replacement turn's completion.
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, startedAt + 21_000 - Date.now())));
+      await expect(fs.stat(path.join(project, 'late-write.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+      const items = await invoke(win, 'sessions:transcript', { id });
+      expect((await invoke(win, 'sessions:get', { id }))!).toMatchObject({ status: 'idle', queued: 0 });
+      expect(items.filter((item) => item.kind === 'turn').map((item) => item.status)).toEqual(['interrupted', 'completed']);
+      expect(items.filter((item) => item.kind === 'user').map((item) => item.text)).toEqual([original, directive]);
+      expect(items.filter((item) => item.kind === 'tool').map((item) => [item.id, item.status])).toEqual([['sleeping-shell', 'error'], ['steered-write', 'done']]);
+      expect(items.filter((item) => item.kind === 'assistant' && item.text === 'COMPAT_OK' && !item.streaming)).toHaveLength(1);
+      expect(items.filter((item) => item.kind === 'info' && item.level === 'error')).toEqual([]);
+      expect(items.filter((item) => item.kind === 'approval')).toHaveLength(0);
+      expect(new Set(items.map((item) => item.id)).size).toBe(items.length);
+      await fs.writeFile(path.join(artifacts, 'pi-steer-transcript.json'), JSON.stringify(items, null, 2));
+    } finally {
+      await app?.close();
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  }, 180_000);
 
   it('delivers selected, typed and skipped answers with context from real question cards to Pi and retains them after restart', async () => {
     expect(process.env.VOCS_CODE_E2E_UI).toBe('1');

@@ -29,7 +29,7 @@ interface PiToolDefinition {
   /** Bullets for pi's "Guidelines" list; pi dedupes identical text across tools. */
   promptGuidelines?: string[];
   parameters: object;
-  execute(id: string, params: Record<string, unknown>): Promise<PiToolResult>;
+  execute(id: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<PiToolResult>;
 }
 
 interface PiLike {
@@ -324,10 +324,12 @@ async function connectBridge(): Promise<McpBridgeTool[]> {
         parameters: tool.inputSchema && typeof tool.inputSchema === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
         readOnly: builtin === MEMORY_SERVER && tool.readOnly === true,
         ...(mission ? { missionCoordination: true } : {}),
-        async execute(_id, params) {
+        async execute(_id, params, signal) {
           let result;
-          try { result = await connection.callTool(tool.name, params ?? {}); }
+          try { result = await connection.callTool(tool.name, params ?? {}, signal); }
           catch (error) {
+            // Cancellation is not a failed/revoked Mission connection, and must stay an AbortError.
+            if (error instanceof Error && error.name === 'AbortError') throw error;
             if (mission) {
               // mcp-client only uses this exact prefix for a JSON-RPC error reply to this call.
               // It currently drops the numeric code; transport/timeouts have different messages.
