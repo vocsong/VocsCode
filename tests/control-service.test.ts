@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { CONTROL_RETRY_GRACE_MS, ControlJournal } from '../src/main/control/journal';
-import { ControlService } from '../src/main/control/service';
+import { CONTROL_OPERATIONS_PER_CONTROLLER, CONTROL_WINDOWS_PER_CONTROLLER, ControlService } from '../src/main/control/service';
 import { defaultSettings } from '../src/main/settings';
 import { emptyUsage } from '../src/main/models/static-models';
 import { writeJson } from '../src/main/util/fs';
@@ -28,8 +28,9 @@ async function fixture(persist = writeJson) {
   const journal = new ControlJournal(root, persist, () => now);
   await journal.load();
   const dispatch = vi.fn();
-  const runControlled = vi.fn(async (_id: string, _input: unknown, context: { inputId: string; beforeDispatch(): Promise<void> }) => {
-    await context.beforeDispatch(); dispatch();
+  const start = vi.fn();
+  const runControlled = vi.fn(async (_id: string, _input: unknown, context: { inputId: string; beforeStart(): Promise<void>; beforeDispatch(): Promise<void> }) => {
+    await context.beforeStart(); start(); await context.beforeDispatch(); dispatch();
     return { outcome: 'succeeded' as const, inputId: context.inputId, runtimeId: 'runtime', turnId: 'turn', outputIds: ['answer'] };
   });
   const createControlled = vi.fn(async () => meta);
@@ -48,7 +49,7 @@ async function fixture(persist = writeJson) {
   await service.setEnabled(true);
   const window = await service.handle(principal, { method: 'windows.create', params: { instanceId: state.instanceId } }) as { admissionWindowId: string };
   const params = { instanceId: state.instanceId, projectId, sessionId: meta.id, admissionWindowId: window.admissionWindowId, idempotencyKey: 'same-intent', text: 'unique-prompt-content' };
-  return { root, project, settings, meta, principal, journal, dispatch, runControlled, createControlled, interruptControlled, transcript, sessions, guard, service, state, projectId, grant, params,
+  return { root, project, settings, meta, principal, journal, dispatch, start, runControlled, createControlled, interruptControlled, transcript, sessions, guard, service, state, projectId, grant, params,
     advance(ms: number) { now += ms; principal.validUntil = now + 30_000; } };
 }
 
@@ -382,4 +383,69 @@ it('marks nonterminal restart work unknown, keeps completed receipts immutable, 
   expect(restored.snapshot().operations[0]).toEqual(complete);
   await expect(restored.transaction((s) => { s.operations[0]!.state = 'dispatched'; })).rejects.toMatchObject({ code: 'conflict' });
   expect(f.dispatch).toHaveBeenCalledTimes(1);
+});
+
+it.each(['move', 'archive', 'replacement'] as const)('publishes no transcript when a %s lands during its final resource guard', async (change) => {
+  const f = await fixture();
+  const outside = path.join(f.root, 'outside');
+  await fs.mkdir(outside);
+  let sessionGuards = 0;
+  f.guard.mockImplementation(async (resource?: { sessionId?: string }) => {
+    if (!resource?.sessionId || ++sessionGuards !== 2) return;
+    if (change === 'move') f.meta.cwd = outside; // moveTo keeps config.projectRoot.
+    else if (change === 'archive') f.meta.archived = true;
+    else f.meta.createdAt = 2; // A different session now answers to the same ID.
+  });
+  await expect(f.service.handle(f.principal, { method: 'sessions.transcript', params: { instanceId: f.state.instanceId, projectId: f.projectId, sessionId: f.meta.id } })).rejects.toMatchObject({ code: 'denied' });
+  expect(sessionGuards).toBe(2);
+  expect(f.transcript).toHaveBeenCalledTimes(1);
+});
+
+it('keeps admission capacity for other controllers and reclaims a revoked controller\'s empty windows', async () => {
+  const f = await fixture(async () => undefined); // Real transitions; skip one fsync per window.
+  const call = (principal: ControllerPrincipal) => f.service.handle(principal, { method: 'windows.create', params: { instanceId: f.state.instanceId } });
+  const other: ControllerPrincipal = { ...f.principal, controllerId: randomUUID() };
+  await f.service.grant({ ...f.grant, controllerId: other.controllerId });
+  const receipt = await f.service.handle(f.principal, { method: 'sessions.send', params: f.params }) as ControlOperation;
+  await f.service.settle();
+  // The fixture's window holds a receipt; fill the rest of this controller's share.
+  for (let i = 1; i < CONTROL_WINDOWS_PER_CONTROLLER; i++) await call(f.principal);
+  await expect(call(f.principal)).rejects.toMatchObject({ code: 'busy' });
+  await expect(call(other)).resolves.toMatchObject({ admissionWindowId: expect.any(String) });
+  const own = () => f.journal.snapshot().windows.filter((w) => w.controllerId === f.principal.controllerId);
+  expect(own()).toHaveLength(CONTROL_WINDOWS_PER_CONTROLLER);
+  await f.service.revoke(f.journal.snapshot().grants.find((g) => g.controllerId === f.principal.controllerId && !g.revokedAt)!.id);
+  await call(other);
+  // Only the window holding retry evidence survives; the other principal's windows are untouched.
+  expect(own().map((w) => w.id)).toEqual([f.params.admissionWindowId]);
+  expect(f.journal.snapshot().operations).toEqual([expect.objectContaining({ id: receipt.id, state: 'succeeded' })]);
+  expect(f.journal.snapshot().windows.filter((w) => w.controllerId === other.controllerId)).toHaveLength(2);
+});
+
+it('reclaims an expired empty window at once instead of holding it through the retry grace', async () => {
+  const f = await fixture();
+  await f.service.handle(f.principal, { method: 'windows.create', params: { instanceId: f.state.instanceId } });
+  expect(f.journal.snapshot().windows).toHaveLength(2);
+  f.advance(3_600_001);
+  await f.service.setEnabled(true);
+  expect(f.journal.snapshot().windows).toEqual([]);
+  await expect(f.service.handle(f.principal, { method: 'sessions.send', params: f.params })).rejects.toMatchObject({ code: 'expired' });
+  expect(f.runControlled).not.toHaveBeenCalled();
+});
+
+it('caps one controller\'s retained receipts without consuming another controller\'s share', async () => {
+  const f = await fixture(async () => undefined);
+  const other: ControllerPrincipal = { ...f.principal, controllerId: randomUUID() };
+  await f.service.grant({ ...f.grant, controllerId: other.controllerId });
+  const first = await f.service.handle(f.principal, { method: 'sessions.send', params: f.params }) as ControlOperation;
+  await f.service.settle();
+  // Retained terminal receipts, as earlier admissions in the same window would have left them.
+  await f.journal.transaction((s) => {
+    for (let i = 1; i < CONTROL_OPERATIONS_PER_CONTROLLER; i++) s.operations.push({ ...s.operations[0]!, id: randomUUID(), idempotencyKey: `k${i}` });
+  });
+  expect(f.journal.snapshot().operations.filter((op) => op.controllerId === f.principal.controllerId && op.id !== first.id)).toHaveLength(CONTROL_OPERATIONS_PER_CONTROLLER - 1);
+  await expect(f.service.handle(f.principal, { method: 'sessions.send', params: { ...f.params, idempotencyKey: 'over' } })).rejects.toMatchObject({ code: 'busy' });
+  const window = await f.service.handle(other, { method: 'windows.create', params: { instanceId: f.state.instanceId } }) as { admissionWindowId: string };
+  await expect(f.service.handle(other, { method: 'sessions.send', params: { ...f.params, admissionWindowId: window.admissionWindowId } })).resolves.toMatchObject({ state: 'accepted' });
+  await f.service.settle();
 });

@@ -66,7 +66,10 @@ all subsequent desktop calls require it. Request objects reject extra fields.
 | `operations_interrupt` | Interrupt only that controller's exact active operation/runtime |
 
 Creation uses remembered project/app defaults and refuses unapproved harness/mode choices. There
-are no caller-controlled configuration overrides or silent model/harness fallback. Follow-up chat
+are no caller-controlled configuration overrides or silent model/harness fallback. A remembered
+worktree default is honored only when the enrolled project is its repository's root and the
+`.vocs-code/worktrees` destination contains no link out of it; otherwise creation is refused before
+Git or the filesystem is touched. Follow-up chat
 uses another `sessions_send` on the same session, with a **new intent key**. A retry of that same
 send must retain its original key, admission window, target and text. Never manufacture a new key
 merely because an acknowledgment was lost.
@@ -84,12 +87,16 @@ queue, steer, attachment or slash-command tools.
 - Same key/payload returns the same receipt; a different payload conflicts. Windows admit new work
   for at most one hour. Expired windows can return existing receipts through a 24-hour retry grace,
   but cannot admit new work. Terminal receipts may be pruned after that grace. Unknown window IDs
-  always fail closed. Limits are 1,024 retained windows and 5,000 receipts; new admission returns
-  `busy` at capacity. Local lifecycle diagnostics retain the latest 10,000 entries and are not a
+  always fail closed. Limits are 1,024 retained windows and 5,000 receipts, and each controller may
+  hold at most 32 windows and 512 receipts of them; new admission returns `busy` at either limit.
+  An empty window is reclaimed as soon as it expires or its controller holds no live grant. Local lifecycle diagnostics retain the latest 10,000 entries and are not a
   resumable public event stream.
 - A controlled send reserves the shared session boundary synchronously and uses a fresh runtime
   generation to fence late events. Desktop sends/configuration changes cannot join it. Busy,
   managed, active-goal, queued or unproven work is refused. Human Stop/Interrupt remains available.
+  The reserved session configuration is reauthorized against the grant before any runtime is
+  constructed or started, and again at dispatch. Session reads recheck the approved workspace, mode
+  and identity synchronously after their last awaited guard.
 - `succeeded` requires a correlated terminal event, proven quiescence, and a failure-propagating
   atomic/fsynced transcript and metadata barrier. It does not mean assertions in assistant prose
   or tests mentioned there were independently verified. Unsupported child/writer evidence produces

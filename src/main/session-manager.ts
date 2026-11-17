@@ -1350,7 +1350,7 @@ export class SessionManager {
   /** Internal desktop boundary, not a generic IPC method. Each admission gets a fresh runtime:
    * the normalized protocol has a running transition and terminal turn item, not a provider turn
    * ID on every delta. Reusing an earlier runtime would misattribute its late terminal events. */
-  async runControlled(id: string, input: { text: string }, control: { operationId: string; inputId: string; beforeDispatch: () => Promise<void> }): Promise<ControlledTurnResult> {
+  async runControlled(id: string, input: { text: string }, control: { operationId: string; inputId: string; beforeStart: () => Promise<void>; beforeDispatch: () => Promise<void> }): Promise<ControlledTurnResult> {
     this.assertUnmanaged(id);
     this.assertNotControlled(id);
     const meta = this.get(id);
@@ -1372,12 +1372,21 @@ export class SessionManager {
     };
     // This reservation precedes the very first await; ordinary send/steer/queue cannot slip in.
     this.controlled.set(id, lease);
+    // The configuration a runtime would start with. The reservation refuses desktop edits; this
+    // also catches any other path, so the authorization below stays about what actually starts.
+    const authorized = (m: SessionMeta | undefined) => m && JSON.stringify([m.cwd, m.config.projectRoot, m.config.harness, m.config.permissionMode]);
+    const reserved = authorized(meta);
     const assertCurrent = () => {
       if (lease.canceled || this.controlled.get(id) !== lease) throw new Error('Controlled turn was canceled before dispatch');
       if (lease.uncertain) throw new Error('Controlled runtime activity is unproven');
       if (lease.runtime && (this.active.get(id) !== lease.runtime || lease.runtime.tearingDown || lease.runtime.uncertain)) throw new Error('Controlled runtime is no longer current');
+      if (authorized(this.get(id)) !== reserved) throw new Error('Controlled session configuration changed');
     };
     try {
+      // Authorize the reserved configuration before any runtime is constructed or started. The
+      // dispatch check below stays: it is the grant/intent commit, not a startup gate.
+      await control.beforeStart();
+      assertCurrent();
       if (previous?.compactionInFlight) await previous.compactionInFlight;
       assertCurrent();
       if (previous) {

@@ -48,8 +48,15 @@ export class ControlJournal {
   /** Only expired windows plus retry grace may lose terminal receipts. Unknown/expired window IDs
    * are never admitted again, so pruning cannot turn a late retry into another execution. */
   private prune(state: ControlJournalState): void {
+    const now = this.now();
     const activeWindows = new Set(state.operations.filter((op) => !terminal.has(op.state)).map((op) => op.admissionWindowId));
-    const expired = new Set(state.windows.filter((w) => w.expiresAt + CONTROL_RETRY_GRACE_MS <= this.now() && !activeWindows.has(w.id)).map((w) => w.id));
+    const used = new Set(state.operations.map((op) => op.admissionWindowId));
+    const granted = (w: ControlJournalState['windows'][number]) => state.grants.some((g) => g.accountId === w.accountId && g.controllerId === w.controllerId && !g.revokedAt && g.expiresAt > now);
+    // An empty window holds no receipt to replay: once it can no longer admit (expired, or its
+    // controller holds no live grant) it is only capacity. A late retry naming it is refused as
+    // expired either way. Windows holding receipts keep them through the retry grace below.
+    const reclaimable = (w: ControlJournalState['windows'][number]) => !used.has(w.id) && (w.expiresAt <= now || !granted(w));
+    const expired = new Set(state.windows.filter((w) => reclaimable(w) || w.expiresAt + CONTROL_RETRY_GRACE_MS <= now && !activeWindows.has(w.id)).map((w) => w.id));
     state.windows = state.windows.filter((w) => !expired.has(w.id));
     state.operations = state.operations.filter((op) => !expired.has(op.admissionWindowId));
     const retained = new Set(state.operations.map((op) => op.id));
