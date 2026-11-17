@@ -131,6 +131,9 @@ export interface ControlledTurnResult {
   outputIds: string[];
 }
 
+/** A controlled turn's authorization was withdrawn before its runtime started: not a harness fault. */
+class ControlledStartRefused extends Error {}
+
 interface ControlledTurn {
   operationId: string;
   inputId: string;
@@ -146,6 +149,8 @@ interface ControlledTurn {
   ended: Deferred<void>;
   writes: Set<Promise<void>>;
   writeFailed: boolean;
+  /** Synchronous grant check, run again immediately before the runtime's adapter starts. */
+  startAllowed: () => void;
 }
 
 export interface SessionActivity {
@@ -623,8 +628,9 @@ export class SessionManager {
   }
 
   /** Host-only identity, allocated before worktree effects. The journal owns crash reconciliation;
-   * an absent session after a crash is not permission to replay an uncertain creation. */
-  async createControlled(req: CreateSessionRequest, operationId: string): Promise<SessionMeta> {
+   * an absent session after a crash is not permission to replay an uncertain creation. A worktree is
+   * created only with every write confined to `confineTo`, the enrolled project. */
+  async createControlled(req: CreateSessionRequest, operationId: string, confineTo: string): Promise<SessionMeta> {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(operationId)) throw new Error('Invalid control operation ID');
     if (req.initialPrompt !== undefined || req.initialImages !== undefined || req.initialFiles !== undefined || req.goal !== undefined) throw new Error('Controlled creation cannot dispatch initial input or goals');
     operationId = operationId.toLowerCase();
@@ -642,13 +648,13 @@ export class SessionManager {
       return existing;
     }
     if (pending) return pending.promise;
-    const promise = Promise.resolve().then(() => this.createWithId(request, id, { operationId, requestHash }));
+    const promise = Promise.resolve().then(() => this.createWithId(request, id, { operationId, requestHash }, confineTo));
     // Keep a failed attempt too: it may have created a worktree before the session write failed.
     this.controlledCreations.set(id, { hash: requestHash, promise });
     return promise;
   }
 
-  private async createWithId(req: CreateSessionRequest, id: string, controlCreation?: SessionMeta['controlCreation']): Promise<SessionMeta> {
+  private async createWithId(req: CreateSessionRequest, id: string, controlCreation?: SessionMeta['controlCreation'], confineTo?: string): Promise<SessionMeta> {
     if (req.config.fastMode !== undefined && typeof req.config.fastMode !== 'boolean') throw new Error('Fast mode must be a boolean');
     const settings = this.settings();
     let cfg = { ...req.config, fastMode: req.config.fastMode === true };
@@ -659,6 +665,7 @@ export class SessionManager {
     let cwd = cfg.projectRoot;
     let worktreeBranch: string | undefined;
     if (req.checkoutBranch) {
+      if (confineTo) throw new Error('Controlled creation cannot check out a branch');
       // Reuse an existing worktree on the branch; otherwise create one for it.
       if (!/^[\w][\w./-]*$/.test(req.checkoutBranch)) throw new Error('Invalid branch name');
       const wts = await gitWorktrees(cfg.projectRoot);
@@ -689,7 +696,7 @@ export class SessionManager {
         const typed = req.worktreeName?.trim() || req.title?.trim();
         const prompt = req.initialPrompt?.trim();
         const name = typed ? branchSlug(typed) : prompt ? branchNameFromText(prompt) : slugify(id);
-        const wt = await createWorktree(cfg.projectRoot, name, { branchPrefix, startPoint: req.worktreeBase });
+        const wt = await createWorktree(cfg.projectRoot, name, { branchPrefix, startPoint: req.worktreeBase, confineTo });
         cwd = wt.path;
         worktreeBranch = wt.branch;
       } else {
@@ -1277,6 +1284,11 @@ export class SessionManager {
       active.startupDispatched = true;
       if (meta.config.permissionMode !== 'plan') await this.claimWorkspaceWriter(meta, active);
       if (!live()) throw new Error('Session stopped before its runtime could start.');
+      // A controlled turn's grant can be revoked or narrowed while the runtime is being prepared.
+      const turn = this.controlled.get(id);
+      if (turn?.runtime === active) {
+        try { turn.startAllowed(); } catch (error) { throw new ControlledStartRefused(errorMessage(error)); }
+      }
       await adapter.start();
     };
     active.starting = (this.admits(meta) ? this.deps.withWorkspaceDispatch!(meta, start) : start())
@@ -1305,6 +1317,14 @@ export class SessionManager {
       .catch((e) => {
         active.starting = null;
         if (this.active.get(id) !== active) throw e;
+        if (e instanceof ControlledStartRefused) {
+          // Nothing started and nothing is wrong with the session or its harness: release the
+          // unstarted runtime and leave the session as the owner had it. The controller's receipt
+          // records the refusal.
+          this.deps.log('info', `[${id}] controlled start refused: ${e.message}`);
+          this.disposeRuntime(id, active, 'idle').catch((de) => this.deps.log('warn', `[${id}] dispose after refused start: ${errorMessage(de)}`));
+          throw e;
+        }
         // The transcript card below is what the user sees; this line is what a bug report needs.
         this.deps.log('error', `[${id}] ${meta.config.harness} failed to start after ${Date.now() - t0}ms: ${e instanceof Error ? e.stack ?? e.message : errorMessage(e)}`);
         // Start failed after spawn: dispose the adapter so no harness child process is orphaned
@@ -1350,7 +1370,7 @@ export class SessionManager {
   /** Internal desktop boundary, not a generic IPC method. Each admission gets a fresh runtime:
    * the normalized protocol has a running transition and terminal turn item, not a provider turn
    * ID on every delta. Reusing an earlier runtime would misattribute its late terminal events. */
-  async runControlled(id: string, input: { text: string }, control: { operationId: string; inputId: string; beforeDispatch: () => Promise<void> }): Promise<ControlledTurnResult> {
+  async runControlled(id: string, input: { text: string }, control: { operationId: string; inputId: string; beforeStart: () => Promise<void>; startAllowed: () => void; beforeDispatch: () => Promise<void> }): Promise<ControlledTurnResult> {
     this.assertUnmanaged(id);
     this.assertNotControlled(id);
     const meta = this.get(id);
@@ -1368,14 +1388,22 @@ export class SessionManager {
     const lease: ControlledTurn = {
       operationId: control.operationId, inputId: control.inputId, runtimeId: shortId('runtime_'),
       dispatched: false, started: false, canceled: false, uncertain: false, outputIds: new Set(),
-      ended: deferred<void>(), writes: new Set(), writeFailed: false,
+      ended: deferred<void>(), writes: new Set(), writeFailed: false, startAllowed: control.startAllowed,
     };
     // This reservation precedes the very first await; ordinary send/steer/queue cannot slip in.
     this.controlled.set(id, lease);
+    // The configuration a runtime would start with. The reservation refuses desktop edits; this
+    // also catches any other path, so the authorization below stays about what actually starts.
+    const authorized = (m: SessionMeta | undefined) => m && JSON.stringify([m.cwd, m.config.projectRoot, m.config.harness, m.config.permissionMode]);
+    const reserved = authorized(meta);
+    // True only between start authorization and runtime construction: the window startAllowed guards.
+    let startAuthorized = false;
     const assertCurrent = () => {
       if (lease.canceled || this.controlled.get(id) !== lease) throw new Error('Controlled turn was canceled before dispatch');
       if (lease.uncertain) throw new Error('Controlled runtime activity is unproven');
       if (lease.runtime && (this.active.get(id) !== lease.runtime || lease.runtime.tearingDown || lease.runtime.uncertain)) throw new Error('Controlled runtime is no longer current');
+      if (authorized(this.get(id)) !== reserved) throw new Error('Controlled session configuration changed');
+      if (startAuthorized) lease.startAllowed();
     };
     try {
       if (previous?.compactionInFlight) await previous.compactionInFlight;
@@ -1388,8 +1416,13 @@ export class SessionManager {
       assertCurrent();
       const existingItems = await this.deps.store.readTranscript(id);
       if (existingItems.some((item) => item.id === control.inputId)) throw new Error('Controlled input identity is already present');
+      // Authorize the reserved configuration last before a runtime is constructed. Starting one can
+      // spawn CLI and MCP processes, so the dispatch check below cannot be the first gate; the
+      // synchronous check repeats immediately before the adapter starts (see ensureActive).
+      await control.beforeStart();
+      startAuthorized = true;
       assertCurrent();
-      const active = await this.ensureActive(id);
+      const active = await this.ensureActive(id).finally(() => { startAuthorized = false; });
       assertCurrent();
       if (active.compactionInFlight) await active.compactionInFlight;
       assertCurrent();
