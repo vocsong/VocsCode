@@ -384,7 +384,7 @@ Gotchas:
 | `ENROLL_TOKEN` | relay Worker secret; the landing holds a copy as `RELAY_ENROLL_TOKEN` | legacy `vocs-v1` manual enrollment and signed owner routes; new accounts use Connect with Vocs | [runbook](../relay/README.md#enrollment-secret); paired desktops keep working |
 | `ACCOUNT_ASSERTION_SECRET` | identical secret on landing `vocs-code` and relay `vocs-relay` | signed account assertions | rotate both Workers together; a mismatch fails closed |
 | `DEVICE_ROUTE_SECRET` | relay `vocs-relay` only; keep stable | MACed tenant routing hints in new device ids | do not rotate without a versioned device-id migration; it is not an account credential |
-| Device refresh credentials | desktop secret store (`secrets.ts`, safeStorage); account-partitioned browser IndexedDB | buying access tokens, with a device-key signature | revoke the device; re-pair |
+| Device refresh credentials | desktop secret store (`secrets.ts`, safeStorage; memory only for that run when OS encryption is unavailable); account-partitioned browser IndexedDB | buying access tokens, with a device-key signature | revoke the device; re-pair |
 | `SESSION_SECRET` | landing `vocs-code` Worker secret | session and OAuth state signing (§2.1) | invalidates all sessions |
 | `VOCS_ACCOUNTS` | landing Worker secret | who may sign in (§2.1): `<vocs subject>=<relay account id>`; the owner maps to `vocs-v1` | add/remove an entry (removal ends that account's sessions); never remap an account id without a data migration; revoke devices for removed users separately |
 | `vocs-code-web` SSO client | Vocs Login `vocs_sso_client` row | the landing's sign-in handoff (§2.1) | disable the row to stop new sign-ins |
