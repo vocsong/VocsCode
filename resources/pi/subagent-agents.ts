@@ -139,10 +139,22 @@ export function findAgent(agents: readonly AgentType[], name: string | undefined
   return agents.find((agent) => agent.name.toLowerCase() === wanted);
 }
 
+/**
+ * Placed between an inherited parent prompt and the agent's role. The parent prompt carries the lead's
+ * instructions — app instructions, AGENTS.md, a knowledge digest — and some of them address the lead
+ * alone ("you are the lead, prefer delegation"). A child has no subagent tools (depth stays 1), so
+ * those must read as not addressed to it rather than as orders it cannot carry out.
+ */
+export const SUBAGENT_CHILD_NOTICE = [
+  '# You are a subagent',
+  'The instructions above were written for the agent that delegated this task to you. You are the child it started, and your final message is returned to that agent.',
+  'You have no subagent tools and cannot delegate: wherever the text above tells you to lead, delegate, spawn, steer or manage subagents, it is addressed to that agent, not to you — do the work yourself. Everything else above still applies.',
+].join('\n');
+
 /** The child system prompt: a replace-mode agent owns it, an append-mode agent extends the parent's. */
 export function buildSystemPrompt(agent: AgentType, parentSystemPrompt: string): string {
   if (agent.promptMode === 'append' && parentSystemPrompt.trim()) {
-    return `${parentSystemPrompt.trim()}\n\n# Your role\n${agent.prompt}`;
+    return `${parentSystemPrompt.trim()}\n\n${SUBAGENT_CHILD_NOTICE}\n\n# Your role\n${agent.prompt}`;
   }
   return agent.prompt;
 }

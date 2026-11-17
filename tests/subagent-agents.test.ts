@@ -18,6 +18,7 @@ import {
   parseFrontmatter,
   readSubagentLimits,
   resolveAgentDir,
+  SUBAGENT_CHILD_NOTICE,
   toolNamesFor
 } from '../resources/pi/subagent-agents';
 
@@ -186,7 +187,7 @@ describe('system prompt assembly', () => {
 
   it('extends the parent prompt for append-mode agents', () => {
     const agent = { ...BUILTIN_AGENTS[0]!, promptMode: 'append' as const, prompt: 'ROLE' };
-    expect(buildSystemPrompt(agent, 'PARENT')).toBe('PARENT\n\n# Your role\nROLE');
+    expect(buildSystemPrompt(agent, 'PARENT')).toBe(`PARENT\n\n${SUBAGENT_CHILD_NOTICE}\n\n# Your role\nROLE`);
     expect(buildSystemPrompt(agent, '  ')).toBe('ROLE');
   });
 });
