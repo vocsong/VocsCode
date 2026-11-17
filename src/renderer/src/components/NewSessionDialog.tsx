@@ -574,7 +574,10 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
               <Field label="Session title">
                 <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Auto from first prompt" />
               </Field>
-              <Field label="Append to system prompt">
+              <Field
+                label={descriptor.capabilities.systemPrompt ? 'Append to system prompt' : 'Session instructions'}
+                hint={descriptor.capabilities.systemPrompt ? undefined : "Sent with the first message; does not replace the harness's own system prompt."}
+              >
                 <textarea rows={2} value={appendSystemPrompt} onChange={(e) => setAppendSystemPrompt(e.target.value)} />
               </Field>
               <Field label="Budget cap (USD)" hint="Enforced by the Claude harness; shown as a warning elsewhere.">

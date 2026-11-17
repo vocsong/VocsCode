@@ -4,6 +4,7 @@ import type { AcpAgentPreset, AppSettings, CuaSettings, FolderSessionDefaults, F
 import { MCP_BUILTIN_IDS, isCuaPermissionMode } from '../shared/types';
 import type { KnowledgeSettings } from '../shared/knowledge';
 import { normalizeBranchPrefix, normalizeCustomBranchPrefixes } from '../shared/branch-prefix';
+import { assertEndpointUrl } from '../shared/endpoint-policy';
 import { isAutoCompactionThreshold } from '../shared/compaction';
 import { DEFAULT_DICTATION, DICTATION_IDLE_MINUTES, localModel, type DictationSettings } from '../shared/dictation';
 import { HARNESSES, PERMISSION_MODE_LABELS, isEffortLevel } from '../shared/harness-meta';
@@ -609,6 +610,14 @@ export class SettingsStore {
       if (Object.hasOwn(input, 'mcpServers')) {
         const refused = mcpServersSaveError(input.mcpServers, this.settings.mcpServers ?? []);
         if (refused) throw new Error(refused);
+      }
+      // Legacy unsafe URLs remain loadable and do not block unrelated saves. New or changed
+      // endpoint configuration must be safe before any write, publication or listener callback.
+      if (Array.isArray(input.providers)) {
+        for (const provider of input.providers) {
+          const previous = this.settings.providers.find((p) => p.id === provider.id);
+          if (provider.baseUrl !== undefined && provider.baseUrl !== '' && (!previous || previous.baseUrl !== provider.baseUrl)) assertEndpointUrl(provider.baseUrl);
+        }
       }
       const next = normalizeSettings({ ...this.settings, ...input });
       if (missionChanged) {

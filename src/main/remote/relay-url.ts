@@ -1,10 +1,13 @@
 import { DEFAULT_REMOTE_ORIGIN } from '../../shared/pairing';
+import { assertEndpointUrl, credentialFetch } from '../../shared/endpoint-policy';
 
 /** The relay this desktop connects to: code.vocs.io, which serves the web client, the API and the
  *  sockets on one origin, so there is no setting for it. VOCS_CODE_RELAY_URL points a development
  *  build or a test at another relay (a local `wrangler dev`, the test relay). */
 export function relayUrl(env: NodeJS.ProcessEnv = process.env): string {
-  return env.VOCS_CODE_RELAY_URL?.trim().replace(/\/+$/, '') || DEFAULT_REMOTE_ORIGIN;
+  const relay = env.VOCS_CODE_RELAY_URL?.trim().replace(/\/+$/, '') || DEFAULT_REMOTE_ORIGIN;
+  assertEndpointUrl(relay);
+  return relay;
 }
 
 const PROBE_TTL_MS = 60_000;
@@ -16,10 +19,11 @@ const probes = new Map<string, { at: number; value: boolean; pending?: Promise<v
  *  last answer (false until the first probe lands) and refreshes it in the background at most
  *  once a minute, since the Settings panel asks every few seconds. */
 export function signInAvailable(relay: string, fetchImpl: typeof fetch = fetch): boolean {
+  try { assertEndpointUrl(relay); } catch { return false; }
   const entry = probes.get(relay);
   if (!entry?.pending && (!entry || Date.now() - entry.at > PROBE_TTL_MS)) {
     const next = { at: entry?.at ?? 0, value: entry?.value ?? false } as { at: number; value: boolean; pending?: Promise<void> };
-    next.pending = fetchImpl(`${relay}/v1/me`, { redirect: 'manual', signal: AbortSignal.timeout(5000) })
+    next.pending = credentialFetch(fetchImpl)(`${relay}/v1/me`, { signal: AbortSignal.timeout(5000) })
       .then((res) => res.status === 401, () => false)
       .then((value) => {
         probes.set(relay, { at: Date.now(), value });

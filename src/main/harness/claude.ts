@@ -21,6 +21,7 @@ import {
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
 import { fastModeSupport } from '../../shared/fast-mode';
+import { assertEndpointUrl } from '../../shared/endpoint-policy';
 import { z } from 'zod';
 import { PiMcpConnection } from '../../../resources/pi/mcp-client';
 import { isMissionCoordinationTool, MISSION_SERVER_ID, missionToolDenial, missionCommandDenial, missionToolSubset } from '../../../resources/pi/vocs-code-mission';
@@ -396,7 +397,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     let auth = 'login';
     if (Object.keys(overlay).length) {
       options.env = { ...(options.env ?? {}), ...overlay };
-      auth = overlay.ANTHROPIC_BASE_URL ? `endpoint=${overlay.ANTHROPIC_BASE_URL}` : 'stored-key';
+      auth = overlay.ANTHROPIC_BASE_URL ? 'configured-endpoint' : 'stored-key';
     }
     if (!mission) options.env = { ...(options.env ?? {}), ...(await this.subagentModelEnv(options.model)) };
     this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${provider ? ` auth=${auth} provider=${provider.id}` : ''}`);
@@ -1276,6 +1277,7 @@ export function claudeProviderFor(settings: AppSettings, model: ModelRef | undef
 export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, apiKey: string | undefined): Record<string, string | undefined> {
   if (!provider) return {};
   const baseUrl = anthropicBaseUrlFor(provider);
+  if (baseUrl) assertEndpointUrl(baseUrl);
   if (baseUrl && baseUrl !== ANTHROPIC_DEFAULT_BASE_URL) {
     // Zen's Anthropic route reads x-api-key and answers a bearer token with "Missing API key".
     if (anthropicAuthFor(provider) === 'api-key') {
@@ -1295,6 +1297,11 @@ export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfi
  * credentials here, so the probe starts with the endpoint and key of the session it lists models for.
  */
 export async function resolveClaudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, getApiKey: (id: string) => Promise<string | undefined>): Promise<Record<string, string | undefined>> {
+  const baseUrl = provider && anthropicBaseUrlFor(provider);
+  if (baseUrl) assertEndpointUrl(baseUrl);
+  // The default route does not overlay the child's base URL. Before injecting an app key,
+  // validate the inherited endpoint too; external CLI-owned config remains the CLI's responsibility.
+  if (provider && settings.claude.useProviderKey && baseUrl === ANTHROPIC_DEFAULT_BASE_URL && process.env.ANTHROPIC_BASE_URL) assertEndpointUrl(process.env.ANTHROPIC_BASE_URL);
   const key = provider ? await resolveProviderApiKey(provider, getApiKey) : undefined;
   return claudeProviderEnv(settings, provider, key);
 }

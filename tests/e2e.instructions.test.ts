@@ -14,7 +14,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 import { APP_INSTRUCTION_MAX_CHARS } from '../src/shared/app-instructions';
-import { isolatedEnv, seedSettings } from './e2e-ui';
+import { isolatedEnv, openNewSession, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -28,6 +28,82 @@ afterAll(async () => {
 });
 
 describe.runIf(enabled)('instructions UI', () => {
+  it('labels Codex session instructions honestly, retains the draft across harness switches, and persists it after restart', async () => {
+    await app?.close();
+    app = null;
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-session-instructions-ui-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    const home = path.join(tmp, 'home');
+    const codexHome = path.join(home, '.codex');
+    const appData = path.join(home, 'AppData', 'Roaming');
+    const localAppData = path.join(home, 'AppData', 'Local');
+    const claudeHome = path.join(home, '.claude');
+    const piHome = path.join(home, '.pi', 'agent');
+    for (const dir of [userData, project, codexHome, appData, localAppData, claudeHome, piHome]) await fs.mkdir(dir, { recursive: true });
+    const codexInstructions = 'Keep Codex global instructions untouched.\n';
+    await fs.writeFile(path.join(codexHome, 'AGENTS.md'), codexInstructions);
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+      defaultHarness: 'native', agent: { enabled: false },
+      providers: [{ id: 'openai', enabled: true, hasApiKey: false, models: [{ id: 'gpt-5.4', provider: 'openai' }] }]
+    }));
+    const env = isolatedEnv(userData, {
+      HOME: home, USERPROFILE: home, APPDATA: appData, LOCALAPPDATA: localAppData,
+      CODEX_HOME: codexHome, CLAUDE_CONFIG_DIR: claudeHome, PI_CODING_AGENT_DIR: piHome,
+      ANTHROPIC_AUTH_TOKEN: '', CODEX_API_KEY: '', CURSOR_API_KEY: '', GOOGLE_API_KEY: ''
+    });
+    const launch = async () => {
+      app = await electron.launch({ ...launchOptions, args: [...launchOptions.args, `--user-data-dir=${userData}`], env, timeout: 60_000 });
+      const win = await app.firstWindow();
+      await win.waitForSelector('.brand', { timeout: 60_000 });
+      return win;
+    };
+    let win = await launch();
+    await openNewSession(win);
+    await win.getByRole('button', { name: 'Advanced', exact: true }).click();
+    const supported = win.getByRole('textbox', { name: 'Append to system prompt', exact: true });
+    await supported.fill('  Use concise session-specific answers.  ');
+    const pickHarness = async (name: string) => {
+      await win.locator('.harness-card').filter({ has: win.locator('.harness-card-name', { hasText: new RegExp(`^${name}$`) }) }).click();
+    };
+    // Both Codex engines use a first-message preamble, not a replacement system prompt.
+    for (const name of ['Codex \\(app-server\\)', 'Codex \\(exec SDK\\)']) {
+      await pickHarness(name);
+      const instructions = win.getByRole('textbox', { name: /^Session instructions/ });
+      expect(await instructions.inputValue()).toBe('  Use concise session-specific answers.  ');
+      expect(await win.getByText("Sent with the first message; does not replace the harness's own system prompt.", { exact: true }).isVisible()).toBe(true);
+      expect(await win.getByText('Append to system prompt', { exact: true }).count()).toBe(0);
+    }
+    await pickHarness('Native loop');
+    expect(await supported.inputValue()).toBe('  Use concise session-specific answers.  ');
+    await pickHarness('Codex \\(app-server\\)');
+    // No first prompt: creating the session exercises config persistence without a paid turn.
+    const start = win.getByRole('button', { name: /Start session/ });
+    await expect.poll(() => start.isEnabled(), { timeout: 60_000 }).toBe(true);
+    await start.click();
+    await win.locator('.modal').waitFor({ state: 'hidden' });
+    const readSessions = async (): Promise<SessionMeta[]> => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8'));
+    await expect.poll(async () => (await readSessions()).length).toBe(1);
+    const [created] = await readSessions();
+    expect(created.config.harness).toBe('codex');
+    expect(created.config.appendSystemPrompt).toBe('Use concise session-specific answers.');
+    expect(created.pendingAppInstructions).toBe(true);
+    expect(created.usage.turns).toBe(0);
+    expect(created.harnessRef).toEqual({});
+    await app!.close();
+    app = null;
+    win = await launch();
+    await expect.poll(async () => (await readSessions())[0]?.config.appendSystemPrompt).toBe('Use concise session-specific answers.');
+    const restored = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
+    expect(restored).toHaveLength(1);
+    expect(restored[0].config.appendSystemPrompt).toBe('Use concise session-specific answers.');
+    expect(restored[0].pendingAppInstructions).toBe(true);
+    expect(restored[0].usage.turns).toBe(0);
+    expect(await fs.readFile(path.join(codexHome, 'AGENTS.md'), 'utf8')).toBe(codexInstructions);
+    await app!.close();
+    app = null;
+  }, 180_000);
+
   it('writes the shared and harness-specific files, and removes one when cleared', async () => {
     const tmp = path.join(os.tmpdir(), `vocs-code-instructions-${Date.now()}`);
     const userData = path.join(tmp, 'userData');

@@ -5,6 +5,7 @@
  */
 import type { ProviderConfig } from '../../shared/types';
 import { cloudSttFor } from '../../shared/dictation';
+import { assertEndpointUrl, credentialFetch } from '../../shared/endpoint-policy';
 
 /** A dictation clip is seconds long; a provider that has not answered in a minute is not going to. */
 const CLOUD_TIMEOUT_MS = 60_000;
@@ -22,6 +23,7 @@ export interface CloudTranscribeRequest {
 function baseUrlOf(provider: ProviderConfig): string {
   const base = (provider.baseUrl ?? '').trim().replace(/\/+$/, '');
   if (!base) throw new Error(`${provider.name} has no base URL. Set one under Settings → Providers & keys.`);
+  assertEndpointUrl(base);
   return base;
 }
 
@@ -62,7 +64,7 @@ export async function transcribeCloud(req: CloudTranscribeRequest): Promise<stri
   if (!req.model) throw new Error(`Choose a transcription model for ${provider.name} under Settings → Voice.`);
   const url = `${baseUrlOf(provider)}/audio/transcriptions`;
   const headers = headersFor(provider, req.apiKey);
-  const fetchImpl = req.fetchImpl ?? fetch;
+  const fetchImpl = credentialFetch(req.fetchImpl);
   let res: Response;
   try {
     if (kind.protocol === 'openrouter') {
@@ -94,7 +96,7 @@ export async function listCloudModels(provider: ProviderConfig, apiKey: string |
   const kind = cloudSttFor(provider.kind);
   if (!kind) return [];
   if (kind.protocol !== 'openrouter') return [...kind.models];
-  const res = await fetchImpl(`${baseUrlOf(provider)}/models?output_modalities=transcription`, { headers: headersFor(provider, apiKey), signal: AbortSignal.timeout(15_000) });
+  const res = await credentialFetch(fetchImpl)(`${baseUrlOf(provider)}/models?output_modalities=transcription`, { headers: headersFor(provider, apiKey), signal: AbortSignal.timeout(15_000) });
   if (!res.ok) throw await failure(res, provider.name);
   const json = (await res.json()) as { data?: { id?: unknown; name?: unknown }[] };
   const live = (json.data ?? [])

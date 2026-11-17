@@ -499,6 +499,34 @@ describe('handler registry', () => {
     expect(pushes.some(([c, p]) => c === PUSH_CHANNELS.settingsChanged && (p as typeof before).notifications === false)).toBe(true);
   });
 
+  it('refuses unsafe provider settings through both registered save boundaries without writes or pushes', async () => {
+    const { registry, deps, pushes, logs } = stubDeps();
+    await deps.settings.update({ notifications: false });
+    const before = deps.settings.get();
+    const provider = { id: 'unsafe', kind: 'openai', name: 'Unsafe', enabled: true, hasApiKey: false, models: [], baseUrl: 'http://user:password@192.168.1.2/v1?token=hidden' };
+    const write = vi.spyOn(deps.settings, 'update');
+    const changed = vi.fn(); deps.settings.onChange(changed);
+    await expect(registry.invoke('providers:save', provider)).rejects.toThrow(/HTTPS/);
+    expect(write).not.toHaveBeenCalled();
+    await expect(registry.invoke('settings:update', { providers: [provider] })).rejects.toThrow(/HTTPS/);
+    expect(deps.settings.get()).toBe(before); expect(changed).not.toHaveBeenCalled(); expect(pushes).toEqual([]);
+    expect(logs.map(([, message]) => message).join('\n')).not.toMatch(/password|hidden|192\.168/);
+  });
+
+  it('refuses legacy unsafe provider use before reading keys or dispatching a request', async () => {
+    const { registry, deps } = stubDeps();
+    const provider = { ...deps.settings.get().providers.find((p) => p.id === 'openai')!, baseUrl: 'http://192.168.1.2/v1' };
+    // Simulate a legacy settings file, which remains loadable rather than preventing startup.
+    deps.settings.get().providers.push({ ...provider, id: 'legacy' });
+    const secret = vi.spyOn(deps.secrets, 'get');
+    const network = vi.spyOn(globalThis, 'fetch');
+    try {
+      await expect(registry.invoke('providers:test', { id: 'legacy' })).resolves.toMatchObject({ ok: false, detail: expect.stringContaining('HTTPS') });
+      await expect(registry.invoke('providers:refreshModels', { id: 'legacy' })).resolves.toMatchObject({ error: expect.stringContaining('HTTPS') });
+      expect(secret).not.toHaveBeenCalled(); expect(network).not.toHaveBeenCalled();
+    } finally { secret.mockRestore(); network.mockRestore(); }
+  });
+
   it('flips hasApiKey through secrets:set and pushes the new settings', async () => {
     const { registry, deps, pushes } = stubDeps();
     await deps.settings.load();
@@ -945,6 +973,16 @@ describe('remote handlers', () => {
     } as unknown as SecretStore;
     return { enabled, saved, ...stubDeps({ remote, secrets }) };
   }
+
+  it('refuses an insecure relay override before settings, secret writes, or host dispatch', async () => {
+    vi.stubEnv('VOCS_CODE_RELAY_URL', 'http://user:password@192.168.1.2/?token=hidden');
+    const { registry, deps, enabled, saved, pushes } = remoteRig();
+    const update = vi.spyOn(deps.settings, 'update');
+    for (const [channel, input] of [['remote:enable', { enrollToken: 'private' }], ['remote:signIn', undefined]] as const) {
+      await expect(registry.invoke(channel, input)).rejects.toThrow(/HTTPS/);
+    }
+    expect(update).not.toHaveBeenCalled(); expect(enabled).toEqual([]); expect(saved.size).toBe(0); expect(pushes).toEqual([]);
+  });
 
   it('connects to code.vocs.io with only the enrollment secret, dropping a relay URL an older build stored', async () => {
     vi.stubEnv('VOCS_CODE_RELAY_URL', undefined);

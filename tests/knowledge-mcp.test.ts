@@ -10,11 +10,12 @@ import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
 import { KnowledgeStore } from '../src/main/knowledge/store';
+import { KnowledgeService } from '../src/main/knowledge/service';
 import { SearchIndex } from '../src/main/search';
 import { SessionStore } from '../src/main/store';
 import { claimKey, serializeKnowledgeDocument } from '../src/shared/knowledge';
 import type { KnowledgePageMeta, KnowledgeScope } from '../src/shared/knowledge';
-import type { SessionMeta } from '../src/shared/types';
+import type { AppSettings, SessionMeta } from '../src/shared/types';
 
 const script = path.join(process.cwd(), 'resources', 'mcp', 'vocs-memory.mjs');
 const dirs: string[] = [];
@@ -40,8 +41,8 @@ interface Rpc {
   error?: { code: number; message: string };
 }
 
-function start(root: string, extraEnv: Record<string, string> = {}): { child: ChildProcessWithoutNullStreams; request: (message: Record<string, unknown>) => Promise<Rpc> } {
-  const child = spawn(process.execPath, [script], { env: { ...process.env, VOCS_MEMORY_ROOT: root, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'] });
+function start(root: string, extraEnv: Record<string, string> = {}, nodeArgs: string[] = []): { child: ChildProcessWithoutNullStreams; request: (message: Record<string, unknown>) => Promise<Rpc> } {
+  const child = spawn(process.execPath, [...nodeArgs, script], { env: { ...process.env, VOCS_MEMORY_ROOT: root, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'] });
   children.push(child);
   const pending = new Map<number, (msg: Rpc) => void>();
   let buffer = '';
@@ -101,6 +102,213 @@ function pageMeta(over: Partial<KnowledgePageMeta> = {}): KnowledgePageMeta {
 }
 
 describe('vocs-memory MCP server', () => {
+  it.each([
+    ['C++ is required.', 'C# is required.'],
+    ['The key is Foo.', 'The key is foo.'],
+    ['缓存必须持久化。', '缓存不可持久化。']
+  ])('preserves exact claim identity, including punctuation, case and Unicode (%s)', async (claim, different) => {
+    const projectRoot = tmpDir('vocs-mem-exact-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const { request } = start(wiki);
+    const propose = (text: string) => request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title: 'Exact identity', claim: text, body: 'complete body' } } });
+    const first = await propose(claim);
+    const id = JSON.parse(toolText(first)).id as string;
+    expect((await propose(claim)).result).not.toMatchObject({ isError: true });
+    const file = path.join(wiki, `${id}.md`);
+    const before = await fs.readFile(file, 'utf8');
+    expect((await propose(different)).result).toMatchObject({ isError: true });
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    expect((await new KnowledgeStore().load({ projectRoot, cwd: projectRoot })).map((p) => p.meta.claim)).toEqual([claim]);
+  });
+
+  it.each([
+    ['Same title', 'Same title'],
+    ['A & B', 'A / B'],
+    [`${'a'.repeat(60)} first`, `${'a'.repeat(60)} second`]
+  ])('refuses implicit generated id collisions without changing the wiki (%s)', async (firstTitle, secondTitle) => {
+    const projectRoot = tmpDir('vocs-mem-collision-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    await fs.mkdir(wiki, { recursive: true });
+    const { request } = start(wiki);
+    const first = await request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title: firstTitle, claim: 'The original claim.', body: 'original body' } } });
+    const id = JSON.parse(toolText(first)).id as string;
+    const before = await fs.readFile(path.join(wiki, `${id}.md`), 'utf8');
+    const collision = await request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title: secondTitle, claim: 'An unrelated claim.', body: 'replacement' } } });
+    expect((collision.result as { isError?: boolean }).isError).toBe(true);
+    expect(toolText(collision)).toMatch(/different title.*pageId.*page_id/i);
+    expect(await fs.readFile(path.join(wiki, `${id}.md`), 'utf8')).toBe(before);
+    expect(await new KnowledgeStore().load({ projectRoot, cwd: projectRoot })).toHaveLength(1);
+  });
+
+  it('uses actual normalized claims rather than a 32-bit hash or a truncated prefix', async () => {
+    const projectRoot = tmpDir('vocs-mem-identity-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const { request } = start(wiki);
+    const propose = (title: string, claim: string) => request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title, claim, body: 'complete body' } } });
+    const claims = ['claim ep3txk14adwdaeyh1085rcn12yo1a63otbxug55a', 'claim puezp2ukksp1y031bb819jg1c3pufk171h1clm19oq'];
+    expect(claimKey(claims[0])).toBe(claimKey(claims[1]));
+    expect(JSON.parse(toolText(await propose('First hash', claims[0]))).saved).toBe(true);
+    expect(JSON.parse(toolText(await propose('Second hash', claims[1]))).saved).toBe(true);
+    expect(await new KnowledgeStore().load({ projectRoot, cwd: projectRoot })).toHaveLength(2);
+    const longClaim = 'a'.repeat(310);
+    await propose('Long claim', longClaim);
+    const collision = await propose('Long claim', `${longClaim} different`);
+    expect((collision.result as { isError?: boolean }).isError).toBe(true);
+    expect(toolText(collision)).toContain('different claim');
+  });
+
+  it('serializes real MCP processes competing for an implicit generated id', async () => {
+    const projectRoot = tmpDir('vocs-mem-race-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const clients = Array.from({ length: 4 }, () => start(wiki));
+    const results = await Promise.all(clients.map(({ request }, index) => request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title: index % 2 ? 'Race & title' : 'Race / title', claim: `Unrelated claim ${index}`, body: `Complete body ${index}`, labels: [`winner-${index}`] } } })));
+    const successes = results.map((rpc) => !(rpc.result as { isError?: boolean }).isError);
+    expect(successes.filter(Boolean)).toHaveLength(1);
+    for (const [index, rpc] of results.entries()) if (!successes[index]) expect(toolText(rpc)).toContain('different claim');
+    const winner = successes.indexOf(true);
+    const pages = await new KnowledgeStore().load({ projectRoot, cwd: projectRoot });
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toMatchObject({ body: `Complete body ${winner}`, meta: { claim: `Unrelated claim ${winner}`, labels: [`winner-${winner}`], evidenceCount: 1 } });
+    expect(await fs.readdir(path.join(wiki, 'concept'))).toEqual(['race-title.md']);
+    await expect(fs.stat(path.join(wiki, '_write.lock'))).rejects.toThrow();
+  });
+
+  it('merges same-claim evidence from competing MCP processes without duplicating a page', async () => {
+    const projectRoot = tmpDir('vocs-mem-repeat-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const clients = Array.from({ length: 4 }, () => start(wiki));
+    const results = await Promise.all(clients.map(({ request }, index) => request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title: `Title ${index}`, claim: index % 2 ? 'The main  process  owns state.' : 'The main process owns state.', body: `Complete ${index}`, labels: [`label-${index}`] } } })));
+    const ids = results.map((rpc) => JSON.parse(toolText(rpc)).id);
+    expect(new Set(ids).size).toBe(1);
+    const pages = await new KnowledgeStore().load({ projectRoot, cwd: projectRoot });
+    expect(pages).toHaveLength(1);
+    expect(pages[0].meta.evidenceCount).toBe(4);
+    expect(pages[0].meta.labels.slice().sort()).toEqual(['label-0', 'label-1', 'label-2', 'label-3']);
+  });
+
+  it('shares the collision boundary between app instances and real MCP processes', async () => {
+    const projectRoot = tmpDir('vocs-mem-mixed-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const svc = new KnowledgeService({ log: () => undefined, settings: () => ({}) as AppSettings });
+    const { request } = start(wiki);
+    const [app, mcp] = await Promise.all([
+      svc.propose(scope, { title: 'Mixed race', claim: 'App claim.', body: 'Complete app body' }, 'agent', 's-app').then(() => true, (error: Error) => { expect(error.message).toContain('different claim'); return false; }),
+      request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title: 'Mixed race', claim: 'MCP claim.', body: 'Complete MCP body' } } })
+    ]);
+    const mcpWon = !(mcp.result as { isError?: boolean }).isError;
+    expect(Number(app) + Number(mcpWon)).toBe(1);
+    if (!mcpWon) expect(toolText(mcp)).toContain('different claim');
+    const pages = await new KnowledgeStore().load(scope);
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toMatchObject({ body: app ? 'Complete app body' : 'Complete MCP body', meta: { claim: app ? 'App claim.' : 'MCP claim.', evidenceCount: 1 } });
+    expect(await fs.readdir(path.join(wiki, 'concept'))).toEqual(['mixed-race.md']);
+  });
+
+  it.each(['app', 'mcp'])('preserves a %s winner against the other writer and still permits explicit updates', async (winner) => {
+    const projectRoot = tmpDir('vocs-mem-winner-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const svc = new KnowledgeService({ log: () => undefined, settings: () => ({}) as AppSettings });
+    const { request } = start(wiki);
+    const app = (claim: string, pageId?: string) => svc.propose(scope, { title: 'Shared name', claim, body: `${claim} body`, pageId, labels: ['app'] }, 'agent');
+    const mcp = (claim: string, page_id?: string) => request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title: 'Shared name', claim, body: `${claim} body`, page_id, labels: ['mcp'] } } });
+    const id = 'concept/shared-name';
+    if (winner === 'app') await app('App claim.');
+    else expect(JSON.parse(toolText(await mcp('MCP claim.'))).saved).toBe(true);
+    const file = path.join(wiki, `${id}.md`);
+    const before = await fs.readFile(file, 'utf8');
+    if (winner === 'app') expect((await mcp('MCP claim.')).result).toMatchObject({ isError: true });
+    else await expect(app('App claim.')).rejects.toThrow(/different claim/);
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    if (winner === 'app') expect(JSON.parse(toolText(await mcp('MCP claim.', id))).saved).toBe(true);
+    else expect((await app('App claim.', id)).promoted).toBe(true);
+    const page = await new KnowledgeStore().read(scope, id);
+    expect(page?.meta.labels.slice().sort()).toEqual(['app', 'mcp']);
+    expect(page?.meta.evidenceCount).toBe(2);
+    expect(page?.body).toBe(winner === 'app' ? 'MCP claim. body' : 'App claim. body');
+  });
+
+  it('merges concurrent explicit app/MCP updates using fresh provenance and complete pages', async () => {
+    const projectRoot = tmpDir('vocs-mem-explicit-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const id = 'concept/custom';
+    const store = new KnowledgeStore();
+    await store.write(scope, pageMeta({ id, labels: ['original'], createdAt: '2020-01-01T00:00:00.000Z', evidenceCount: 5, confidence: 'high', review: { state: 'reviewed', by: 'human', note: 'Preserve me.' }, related: ['concept/other'] }), 'original');
+    const svc = new KnowledgeService({ log: () => undefined, settings: () => ({}) as AppSettings, store });
+    const clients = Array.from({ length: 3 }, () => start(wiki));
+    const results = await Promise.all([
+      svc.propose(scope, { pageId: id, title: 'Custom', claim: 'App replacement.', body: 'App replacement. body', labels: ['app'], sources: [{ type: 'file', ref: 'app.ts' }] }, 'agent'),
+      ...clients.map(({ request }, index) => request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { page_id: id, title: 'Custom', claim: `MCP replacement ${index}.`, body: `MCP replacement ${index}. body`, labels: [`mcp-${index}`], sources: [{ type: 'file', ref: `mcp-${index}.ts` }] } } }).then((rpc) => { expect(JSON.parse(toolText(rpc)).saved).toBe(true); return rpc; }))
+    ]);
+    expect(results).toHaveLength(4);
+    const page = await new KnowledgeStore().read(scope, id);
+    expect(page?.meta).toMatchObject({ createdAt: '2020-01-01T00:00:00.000Z', evidenceCount: 9, confidence: 'high', review: { state: 'reviewed', by: 'human', note: 'Preserve me.' }, related: ['concept/other'] });
+    expect(page?.meta.labels.slice().sort()).toEqual(['app', 'mcp-0', 'mcp-1', 'mcp-2', 'original']);
+    expect(page?.meta.sources.map((s) => s.ref).sort()).toEqual(['app.ts', 'mcp-0.ts', 'mcp-1.ts', 'mcp-2.ts', 'src/main/session-manager.ts']);
+    expect(page?.body).toBe(`${page?.meta.claim} body`);
+    expect(await fs.readdir(path.join(wiki, 'concept'))).toEqual(['custom.md']);
+  });
+
+  it('preserves the complete old page on a real-process rename failure and can retry', async () => {
+    const projectRoot = tmpDir('vocs-mem-failure-');
+    const scope = { projectRoot, cwd: projectRoot };
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const id = 'concept/failure';
+    await new KnowledgeStore().write(scope, pageMeta({ id, createdAt: '2020-01-01T00:00:00.000Z' }), 'complete original body');
+    const file = path.join(wiki, `${id}.md`);
+    const before = await fs.readFile(file, 'utf8');
+    // Inject at the real child's filesystem boundary, without a test hook in production code.
+    const preload = `import { promises as fs } from 'node:fs'; const rename = fs.rename; let failed = false; fs.rename = async (from, to) => { if (!failed && String(to) === ${JSON.stringify(file)}) { failed = true; throw Object.assign(new Error('injected MCP rename failure'), { code: 'EACCES' }); } return rename(from, to); };`;
+    const { request } = start(wiki, {}, ['--import', `data:text/javascript,${encodeURIComponent(preload)}`]);
+    const propose = () => request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title: 'Failure', claim: 'Replacement claim.', body: 'complete replacement body', page_id: id, labels: ['replacement'] } } });
+    const failure = await propose();
+    expect(failure.result).toMatchObject({ isError: true });
+    expect(toolText(failure)).toContain('injected MCP rename failure');
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    expect(await fs.readdir(path.dirname(file))).toEqual(['failure.md']);
+    await expect(fs.stat(path.join(wiki, '_write.lock'))).rejects.toThrow();
+    expect(JSON.parse(toolText(await propose())).saved).toBe(true);
+    const page = await new KnowledgeStore().read(scope, id);
+    expect(page?.body).toBe('complete replacement body');
+    expect(page?.meta.createdAt).toBe('2020-01-01T00:00:00.000Z');
+    expect(page?.meta.evidenceCount).toBe(1);
+  });
+
+  it('fails closed on an abandoned cross-process lock and recovers after offline removal', async () => {
+    const projectRoot = tmpDir('vocs-mem-lock-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const lock = path.join(wiki, '_write.lock');
+    await fs.mkdir(lock, { recursive: true });
+    await fs.utimes(lock, new Date(0), new Date(0));
+    const { request } = start(wiki);
+    const propose = () => request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title: 'Recovery', claim: 'Recovered claim.', body: 'complete body' } } });
+    const result = await propose();
+    expect(result.result).toMatchObject({ isError: true });
+    expect(toolText(result)).toContain('stop all app/MCP writers');
+    expect(await fs.readdir(wiki)).toEqual(['_write.lock']);
+    await fs.rmdir(lock);
+    expect(JSON.parse(toolText(await propose())).saved).toBe(true);
+    expect((await new KnowledgeStore().load({ projectRoot, cwd: projectRoot }))[0].body).toBe('complete body');
+  });
+
+  it('refuses a damaged destination without writing and recovers when it is repaired offline', async () => {
+    const projectRoot = tmpDir('vocs-mem-damaged-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const file = path.join(wiki, 'concept', 'damaged.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'hand-written content without frontmatter');
+    const { request } = start(wiki);
+    const propose = () => request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: { title: 'Damaged', claim: 'A claim.', body: 'complete body' } } });
+    expect((await propose()).result).toMatchObject({ isError: true });
+    expect(await fs.readFile(file, 'utf8')).toBe('hand-written content without frontmatter');
+    expect(await fs.readdir(path.dirname(file))).toEqual(['damaged.md']);
+    await fs.rm(file);
+    expect(JSON.parse(toolText(await propose())).saved).toBe(true);
+    expect((await new KnowledgeStore().read({ projectRoot, cwd: projectRoot }, 'concept/damaged'))?.body).toBe('complete body');
+  });
+
   it('lists its six tools and searches pages the app wrote', async () => {
     const projectRoot = tmpDir('vocs-mem-');
     const store = new KnowledgeStore();
@@ -239,7 +447,7 @@ describe('vocs-memory MCP server', () => {
     await expect(fs.access(path.join(wiki, 'conventions', 'branch-only.md'))).rejects.toThrow();
   });
 
-  it('refuses a tombstoned claim and writes nothing', async () => {
+  it.each(['Only the main process may create or kill a PTY.', 'ONLY THE MAIN process may create or kill a PTY!'])('refuses a tombstoned claim and writes nothing (%s)', async (refiled) => {
     const projectRoot = tmpDir('vocs-mem-');
     const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
     await fs.mkdir(wiki, { recursive: true });
@@ -248,7 +456,7 @@ describe('vocs-memory MCP server', () => {
     const { request } = start(wiki);
     const propose = await request({
       method: 'tools/call',
-      params: { name: 'knowledge_propose', arguments: { title: 'Renderer never owns a PTY', claim, kind: 'convention', body: 'body' } }
+      params: { name: 'knowledge_propose', arguments: { title: 'Renderer never owns a PTY', claim: refiled, kind: 'convention', body: 'body' } }
     });
     const result = JSON.parse(toolText(propose)) as { rejected?: boolean; saved?: boolean };
     expect(result.rejected).toBe(true);

@@ -17,6 +17,7 @@
  * covered by tests/knowledge-mcp.test.ts, which writes with one side and reads with the other.
  */
 import { pathToFileURL } from 'node:url';
+import { knowledgeCollision, sameKnowledgeClaim, sameRejectedKnowledgeClaim, withKnowledgeWriteLock, writeKnowledgeFileAtomic } from './knowledge-write.mjs';
 
 const MAX_PAGES = 800;
 const MAX_BODY_CHARS = 20000;
@@ -195,7 +196,7 @@ function anchorsOf(raw) {
 
 /* ───────────────────────────── wiki access ─────────────────────────────── */
 
-function toPage(text, abs) {
+function toPage(text, abs, complete = false) {
   const parsed = parseFrontmatter(text);
   if (!parsed) return null;
   const raw = parsed.raw;
@@ -213,20 +214,23 @@ function toPage(text, abs) {
     branch: typeof raw.branch === 'string' ? raw.branch : undefined,
     claim: typeof raw.claim === 'string' ? raw.claim : undefined,
     confidence: typeof raw.confidence === 'string' ? raw.confidence : undefined,
-    keywords: list(raw.keywords),
+    keywords: list(raw.keywords, complete ? Infinity : 12),
     labels: normalizeLabels(list(raw.labels, 24)),
     sources: sourcesOf(raw),
     anchors: anchorsOf(raw),
-    related: list(raw.related),
-    supersedes: list(raw.supersedes),
-    contradicts: list(raw.contradicts),
+    related: list(raw.related, complete ? Infinity : 12),
+    supersedes: list(raw.supersedes, complete ? Infinity : 12),
+    contradicts: list(raw.contradicts, complete ? Infinity : 12),
     supersededBy: typeof raw.superseded_by === 'string' ? raw.superseded_by : undefined,
     createdAt: typeof raw.created_at === 'string' ? raw.created_at : undefined,
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : undefined,
     updatedBy: typeof raw.updated_by === 'string' ? raw.updated_by : undefined,
     reviewState: typeof raw.review_state === 'string' ? raw.review_state : undefined,
+    reviewedBy: typeof raw.reviewed_by === 'string' ? raw.reviewed_by : undefined,
+    reviewedAt: typeof raw.reviewed_at === 'string' ? raw.reviewed_at : undefined,
+    reviewNote: typeof raw.review_note === 'string' ? raw.review_note : undefined,
     evidenceCount: evidence,
-    body: parsed.body.slice(0, MAX_BODY_CHARS),
+    body: complete ? parsed.body : parsed.body.slice(0, MAX_BODY_CHARS),
     abs
   };
 }
@@ -588,6 +592,12 @@ export function serializePage(meta, body) {
   if (meta.related?.length) lines.push(`related: [${meta.related.map((v) => quoteValue(v)).join(', ')}]`);
   if (meta.supersedes?.length) lines.push(`supersedes: [${meta.supersedes.map((v) => quoteValue(v)).join(', ')}]`);
   if (meta.contradicts?.length) lines.push(`contradicts: [${meta.contradicts.map((v) => quoteValue(v)).join(', ')}]`);
+  if (meta.supersededBy) lines.push(yamlLine('superseded_by', meta.supersededBy));
+  if (meta.reviewState) lines.push(yamlLine('review_state', meta.reviewState));
+  if (meta.reviewedBy) lines.push(yamlLine('reviewed_by', meta.reviewedBy));
+  if (meta.reviewedAt) lines.push(yamlLine('reviewed_at', meta.reviewedAt));
+  if (meta.reviewNote) lines.push(yamlLine('review_note', meta.reviewNote));
+  if (meta.evidenceCount !== undefined) lines.push(`evidence_count: ${meta.evidenceCount}`);
   lines.push(`created_at: ${meta.createdAt}`, `updated_at: ${meta.updatedAt}`, `updated_by: ${quoteValue(meta.updatedBy)}`, '---', '');
   return `${lines.join('\n')}${String(body).replace(/\s+$/, '')}\n`;
 }
@@ -623,7 +633,7 @@ const TOOLS = [
   {
     name: 'knowledge_propose',
     description:
-      'Record durable project knowledge discovered while working (a convention, gotcha, decision or invariant) in the project wiki. This writes immediately: nothing is queued for human review, so record only claims that stay true beyond the current task and are evidenced by files, a command output or a commit. A claim tombstoned in _rejected.json is refused.',
+      'Record durable project knowledge discovered while working (a convention, gotcha, decision or invariant) in the project wiki. This writes immediately: nothing is queued for human review, so record only claims that stay true beyond the current task and are evidenced by files, a command output or a commit. A claim tombstoned in _rejected.json is refused. If a generated id already contains a different claim, choose a different title for a new page or pass page_id for an intentional update.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -708,7 +718,7 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
   };
 
   return async function call(name, args) {
-    const pages = await loadPages({ root, branchRoot });
+    const pages = name === 'knowledge_propose' ? [] : await loadPages({ root, branchRoot });
     if (name === 'knowledge_search') {
       const query = typeof args.query === 'string' ? args.query : '';
       if (!query.trim()) return errorResult('knowledge_search needs a query.');
@@ -771,63 +781,88 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
       const body = typeof args.body === 'string' ? args.body.trim() : '';
       if (!title || !claim || !body) return errorResult('knowledge_propose needs a title, a claim and a body.');
       const requestedId = typeof args.page_id === 'string' && args.page_id.trim() ? args.page_id.trim() : '';
-      const claimHash = claimKey(claim);
-      // A rejected claim is tombstoned in the wiki root; refiling it changes nothing.
-      let rejected = null;
+      if (requestedId && !isValidPageId(requestedId)) return errorResult(`"${requestedId}" is not a usable page id.`);
       try {
-        const parsed = JSON.parse(await fs.readFile(path.join(root, '_rejected.json'), 'utf8'));
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) rejected = parsed;
-      } catch {
-        rejected = null;
+        return await withKnowledgeWriteLock(root, async () => {
+          // Read only after acquiring the app/MCP mutex: a call-start snapshot is not a guard.
+          const pages = await loadPages({ root, branchRoot });
+          let rejected = null;
+          try {
+            rejected = JSON.parse(await fs.readFile(path.join(root, '_rejected.json'), 'utf8'));
+          } catch {
+            rejected = null;
+          }
+          if (sameRejectedKnowledgeClaim(rejected?.[claimKey(claim)]?.claim, claim)) {
+            return textResult({ id: '', targetPageId: '', status: 'rejected', saved: false, rejected: true, note: 'This claim was rejected before and is tombstoned in _rejected.json; nothing was written.' });
+          }
+          const readForWrite = async (id) => {
+            for (const dir of [branchRoot, root].filter(Boolean)) {
+              const file = path.join(dir, `${id}.md`);
+              try {
+                const page = toPage(await fs.readFile(file, 'utf8'), file, true);
+                if (!page || page.id !== id) throw new Error(`Cannot update invalid knowledge page "${id}".`);
+                return page;
+              } catch (error) {
+                if (error.code !== 'ENOENT') throw error;
+              }
+            }
+            return null;
+          };
+          let existing = requestedId ? await readForWrite(requestedId) : pages.find((p) => sameKnowledgeClaim(p.claim, claim));
+          const kind = KINDS.includes(args.kind) ? args.kind : existing?.kind ?? 'concept';
+          const targetPageId = requestedId || existing?.id || `${kind}/${slugify(title)}`;
+          if (!isValidPageId(targetPageId)) throw new Error(`"${targetPageId}" is not a usable page id.`);
+          existing = await readForWrite(targetPageId);
+          if (!requestedId && existing && !sameKnowledgeClaim(existing.claim, claim)) throw knowledgeCollision(targetPageId);
+          // New knowledge is repo-scoped; an existing branch page stays in its own slice.
+          const scope = existing?.scope ?? 'repo';
+          const pageBranch = scope === 'branch' ? existing?.branch ?? branch ?? undefined : undefined;
+          const targetRoot = scope === 'branch' && branchRoot ? branchRoot : root;
+          const file = path.join(targetRoot, `${targetPageId}.md`);
+          // Also protect files omitted by the bounded retrieval scan, and fail closed on damage.
+          try {
+            const current = toPage(await fs.readFile(file, 'utf8'), file, true);
+            if (!current || current.id !== targetPageId) throw new Error(`Cannot update invalid knowledge page "${targetPageId}".`);
+            if (!requestedId && !sameKnowledgeClaim(current.claim, claim)) throw knowledgeCollision(targetPageId);
+            existing = current;
+          } catch (error) {
+            if (error.code !== 'ENOENT') throw error;
+          }
+          const now = new Date().toISOString();
+          const meta = {
+            ...existing,
+            id: targetPageId,
+            title,
+            kind,
+            scope,
+            ...(pageBranch ? { branch: pageBranch } : {}),
+            claim,
+            keywords: [...new Set([...(existing?.keywords ?? []), ...list(args.keywords, 12)])].slice(0, 24),
+            labels: normalizeLabels([...(existing?.labels ?? []), ...list(args.labels, 24)]),
+            sources: mergeSources(existing?.sources ?? [], sourcesOf({ sources: Array.isArray(args.sources) ? args.sources : [] })),
+            anchors: mergeAnchors(existing?.anchors ?? [], anchorsOf({ anchors: Array.isArray(args.anchors) ? args.anchors : [] })),
+            related: existing?.related ?? [],
+            supersedes: existing?.supersedes ?? [],
+            contradicts: existing?.contradicts ?? [],
+            createdAt: existing?.createdAt ?? now,
+            updatedAt: now,
+            updatedBy: 'agent:mcp',
+            evidenceCount: (existing?.evidenceCount ?? 0) + 1
+          };
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await writeKnowledgeFileAtomic(file, serializePage(meta, body));
+          return textResult({
+            id: targetPageId,
+            targetPageId,
+            status: 'current',
+            saved: true,
+            scope,
+            note: scope === 'branch' ? `Recorded in the project wiki, on branch ${pageBranch}.` : 'Recorded in the project wiki automatically.'
+          });
+        });
+      } catch (error) {
+        return errorResult(error.message ?? String(error));
       }
-      if (rejected && rejected[claimHash]) {
-        return textResult({ id: '', targetPageId: '', status: 'rejected', saved: false, rejected: true, note: 'This claim was rejected before and is tombstoned in _rejected.json; nothing was written.' });
-      }
-      const byId = requestedId ? pages.find((p) => p.id === requestedId) : undefined;
-      // Updating the page the claim already lives on avoids a second file for the same statement.
-      const existing = byId ?? pages.find((p) => p.claim && claimKey(p.claim) === claimHash);
-      const kind = KINDS.includes(args.kind) ? args.kind : existing ? existing.kind : 'concept';
-      const targetPageId = requestedId && isValidPageId(requestedId) ? requestedId : existing ? existing.id : `${kind}/${slugify(title)}`;
-      if (!isValidPageId(targetPageId)) return errorResult(`"${targetPageId}" is not a usable page id.`);
-      // Knowledge belongs to the project, not to the checkout it was discovered in. A worktree
-      // session is the app's default, and a page filed into its branch slice would be invisible to
-      // every other session of the project — so branch scope is only ever inherited from a page that
-      // already declared it, never inferred from the presence of a branch root.
-      const scope = existing ? existing.scope : 'repo';
-      const pageBranch = scope === 'branch' ? existing?.branch ?? branch ?? undefined : undefined;
-      // An inherited branch page must be rewritten in its own slice, or the update would leave the
-      // old copy behind and drop a repo-scope twin of it.
-      const targetRoot = pageBranch && branchRoot ? branchRoot : root;
-      const now = new Date().toISOString();
-      const meta = {
-        id: targetPageId,
-        title,
-        kind,
-        scope,
-        ...(pageBranch ? { branch: pageBranch } : {}),
-        claim,
-        keywords: list(args.keywords, 12),
-        labels: normalizeLabels([...(existing?.labels ?? []), ...list(args.labels, 24)]),
-        sources: mergeSources(existing?.sources ?? [], sourcesOf({ sources: Array.isArray(args.sources) ? args.sources : [] })),
-        anchors: mergeAnchors(existing?.anchors ?? [], anchorsOf({ anchors: Array.isArray(args.anchors) ? args.anchors : [] })),
-        related: existing?.related ?? [],
-        supersedes: existing?.supersedes ?? [],
-        contradicts: existing?.contradicts ?? [],
-        createdAt: existing?.createdAt ?? now,
-        updatedAt: now,
-        updatedBy: 'agent:mcp'
-      };
-      const file = path.join(targetRoot, `${targetPageId}.md`);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, serializePage(meta, body), 'utf8');
-      return textResult({
-        id: targetPageId,
-        targetPageId,
-        status: 'current',
-        saved: true,
-        scope,
-        note: scope === 'branch' ? `Recorded in the project wiki, on branch ${pageBranch}.` : 'Recorded in the project wiki automatically.'
-      });
     }
     if (name === 'knowledge_status') {
       const fs = await import('node:fs/promises');

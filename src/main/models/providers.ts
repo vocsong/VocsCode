@@ -2,12 +2,26 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { ModelInfo, ProviderConfig } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
+import { assertEndpointUrl, credentialFetch } from '../../shared/endpoint-policy';
 import { errorMessage } from '../util/async';
 import { cursorModelToInfo } from './static-models';
 import { STATIC_MODELS_BY_PROVIDER, findPricing } from './static-models';
 
-/** Stored key first, then the provider's env var. */
+/** Validate configured endpoints and the SDK's environment fallback before resolving secrets. */
+export function assertProviderEndpoint(provider: Pick<ProviderConfig, 'kind' | 'baseUrl'>): void {
+  if (provider.kind === 'cursor') return; // Cursor owns its endpoint, not an app-configured route.
+  const base = provider.baseUrl ?? (provider.kind === 'anthropic' ? process.env.ANTHROPIC_BASE_URL : process.env.OPENAI_BASE_URL);
+  if (base !== undefined) assertEndpointUrl(base);
+}
+
+/** Stored key first, then the provider's env var. Unsafe legacy routes get no secret; callers
+ * still refuse at dispatch. Returning undefined preserves background callers' no-throw contract. */
 export async function resolveProviderApiKey(provider: ProviderConfig, getSecret: (id: string) => Promise<string | undefined>): Promise<string | undefined> {
+  try {
+    assertProviderEndpoint(provider);
+  } catch {
+    return undefined;
+  }
   const stored = await getSecret(provider.id);
   if (stored) return stored;
   if (provider.envKey && process.env[provider.envKey]) return process.env[provider.envKey];
@@ -33,6 +47,7 @@ export function fallbackModels(provider: ProviderConfig): ModelInfo[] {
 }
 
 export async function fetchProviderModels(provider: ProviderConfig, apiKey: string | undefined): Promise<ModelInfo[]> {
+  assertProviderEndpoint(provider);
   if (provider.kind === 'cursor') {
     // Not an API endpoint: models live in the Cursor harness picker, and the key is checked there.
     if (!apiKey) throw new Error('No Cursor API key stored. Add one under this provider or set CURSOR_API_KEY.');
@@ -51,7 +66,7 @@ export async function fetchProviderModels(provider: ProviderConfig, apiKey: stri
           'For a newer model, add its id under Models.'
       );
     }
-    const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, defaultHeaders: provider.headers });
+    const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, defaultHeaders: provider.headers, fetch: credentialFetch() });
     const out: ModelInfo[] = [];
     for await (const m of client.models.list({ limit: 100 })) {
       const mm = m as { id: string; display_name?: string; max_input_tokens?: number; max_tokens?: number };
@@ -70,7 +85,7 @@ export async function fetchProviderModels(provider: ProviderConfig, apiKey: stri
     return mergeWithStatic(out, provider);
   }
   if (provider.kind === 'openrouter') {
-    const res = await fetch(`${(provider.baseUrl ?? 'https://openrouter.ai/api/v1').replace(/\/$/, '')}/models`, {
+    const res = await credentialFetch()(`${(provider.baseUrl ?? 'https://openrouter.ai/api/v1').replace(/\/$/, '')}/models`, {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
     });
     if (!res.ok) throw new Error(`OpenRouter /models failed: ${res.status}`);
@@ -107,7 +122,7 @@ export async function fetchProviderModels(provider: ProviderConfig, apiKey: stri
       .sort((a, b) => a.id.localeCompare(b.id));
   }
   // Generic OpenAI-compatible /models
-  const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, defaultHeaders: provider.headers, maxRetries: 1 });
+  const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, defaultHeaders: provider.headers, maxRetries: 1, fetch: credentialFetch() });
   const out: ModelInfo[] = [];
   const page = await client.models.list();
   for await (const m of page) {

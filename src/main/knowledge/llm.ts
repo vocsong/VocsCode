@@ -7,7 +7,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { AppSettings } from '../../shared/types';
 import { backgroundHeaders, selectBackgroundModel } from '../agents/model';
-import { resolveProviderApiKey } from '../models/providers';
+import { assertProviderEndpoint, resolveProviderApiKey } from '../models/providers';
+import { credentialFetch } from '../../shared/endpoint-policy';
 import { isAnthropicProvider } from '../harness/native/drivers';
 import { errorMessage } from '../util/async';
 import { parseLeadingJson } from '../util/json';
@@ -60,7 +61,14 @@ export function createKnowledgeCompleter(deps: {
         return null;
       }
       const { provider, model } = choice;
-      const apiKey = await resolveProviderApiKey(provider, deps.getSecret);
+      let apiKey: string | undefined;
+      try {
+        assertProviderEndpoint(provider);
+        apiKey = await resolveProviderApiKey(provider, deps.getSecret);
+      } catch (e) {
+        deps.log('warn', `knowledge: background completion failed: ${errorMessage(e)}`);
+        return null;
+      }
       const timeout = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
       // One id for the whole completion, including the retry; unrelated jobs get distinct ids.
       const headers = backgroundHeaders(provider);
@@ -112,7 +120,7 @@ async function attemptOnce(opts: {
   const { provider, model, apiKey, system, prompt, budget, timeout, headers } = opts;
   try {
     if (isAnthropicProvider(provider)) {
-      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers });
+      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers, fetch: credentialFetch() });
       const msg = await client.messages.create(
         { model, max_tokens: budget, system, messages: [{ role: 'user', content: prompt }] },
         { signal: AbortSignal.timeout(timeout) }
@@ -124,7 +132,7 @@ async function attemptOnce(opts: {
       const thinking = msg.content.filter((b) => b.type !== 'text').length;
       return { text, finishReason: msg.stop_reason ?? undefined, ...(text.trim() ? {} : { note: thinking ? `${thinking} non-text block(s) only` : 'empty content' }) };
     }
-    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers });
+    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers, fetch: credentialFetch() });
     const body: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = isReasoningModel(model)
       ? { model, max_completion_tokens: budget, reasoning_effort: 'low', messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }
       : { model, max_tokens: budget, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] };

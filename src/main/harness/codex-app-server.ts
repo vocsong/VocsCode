@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
 import { fastModeSupport } from '../../shared/fast-mode';
+import { assertEndpointUrl } from '../../shared/endpoint-policy';
 import { isCodexBuiltinProvider, isOpenAiWireProvider } from '../../shared/providers';
 import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -145,12 +146,13 @@ export class CodexAppServerAdapter implements HarnessAdapter {
 
   async start(): Promise<void> {
     const meta = this.ctx.session();
+    const provider = this.resolveCodexProvider();
+    if (provider) assertEndpointUrl(provider.baseUrl);
     const bin = this.ctx.runtime.resolve('codex');
     if (!bin) throw new Error('Codex CLI not found. Install it with `npm install -g @openai/codex` or set the path in Settings.');
     const env: NodeJS.ProcessEnv = { ...process.env };
     const key = await this.ctx.getApiKey('openai');
     if (key && !env.OPENAI_API_KEY && !env.CODEX_API_KEY) env.OPENAI_API_KEY = key;
-    const provider = this.resolveCodexProvider();
     if (provider?.envKey) {
       const custom = await this.ctx.getApiKey(provider.id);
       if (custom) env[provider.envKey] = custom;
