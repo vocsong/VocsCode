@@ -292,6 +292,25 @@ it('separates transcript permission and withholds secret/approval groups entirel
   await expect(f.service.handle(f.principal, { method: 'approval.resolve', params: {} })).rejects.toBeDefined();
 });
 
+it('withholds the tool call that carried an owner-only question and its answer, on any page', async () => {
+  const f = await fixture();
+  const answer = 'owner-typed-answer';
+  f.transcript.mockImplementation(async () => [
+    { kind: 'tool', id: 'question-call', ts: 1, name: 'ask_user', input: { question: 'Which account?' }, output: answer, status: 'done' },
+    { kind: 'tool', id: 'ordinary-call', ts: 2, name: 'bash', input: { command: 'npm test' }, output: 'tests passed', status: 'done' },
+    { kind: 'approval', id: 'bash-card', ts: 3, request: { kind: 'command', toolItemId: 'ordinary-call', options: [] }, decision: { optionId: 'allow' } },
+    { kind: 'approval', id: 'question-card', ts: 4, request: { kind: 'question', toolItemId: 'question-call', questions: [{ id: 'q', question: 'Which account?' }] }, decision: { optionId: 'allow', answers: { q: answer } } },
+  ] as never);
+  const params = { instanceId: f.state.instanceId, projectId: f.projectId, sessionId: f.meta.id };
+  // The tool call is on the first page; the card that makes it owner-only is on the next.
+  const first = await f.service.handle(f.principal, { method: 'sessions.transcript', params: { ...params, limit: 2 } }) as { items: Array<{ id: string; kind: string; output?: string }> };
+  const second = await f.service.handle(f.principal, { method: 'sessions.transcript', params: { ...params, offset: 2, limit: 2 } });
+  expect(JSON.stringify([first, second])).not.toContain(answer);
+  expect(first.items[0]).toMatchObject({ id: 'question-call', kind: 'info' });
+  // An ordinary approved tool call stays readable; only its approval card is replaced.
+  expect(first.items[1]).toMatchObject({ id: 'ordinary-call', kind: 'tool', output: 'tests passed' });
+});
+
 it.each(['workspace', 'permission mode'] as const)('rechecks the session %s after reading its transcript', async (change) => {
   const f = await fixture();
   const outside = path.join(f.root, 'other');

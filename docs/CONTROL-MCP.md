@@ -77,7 +77,8 @@ send must retain its original key, admission window, target and text. Never manu
 merely because an acknowledgment was lost.
 
 Transcript access is independent from send permission. Approval/question cards are replaced with
-owner-action notices. **All questions and security approvals remain owner-only**, including ordinary
+owner-action notices, and so is the tool call a question card belongs to, since it carries the question
+and the owner's answer. **All questions and security approvals remain owner-only**, including ordinary
 questions in this first slice. There are no generic invoke, filesystem, terminal, secret, Mission,
 queue, steer, attachment or slash-command tools.
 

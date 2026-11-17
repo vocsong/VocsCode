@@ -218,10 +218,14 @@ export class ControlService {
         // synchronous block that builds the response. Revocation during the read also wins.
         this.fresh(checked);
         this.authorize(principal, request.method, projectId);
+        // A question card and the tool call it belongs to are one group: the call's input and output
+        // carry the question and the owner's answer, so both are withheld, whichever page they are on.
+        const answered = new Set(transcript.flatMap((item) => item.kind === 'approval' && item.request.questions?.length && item.request.toolItemId ? [item.request.toolItemId] : []));
         const items: unknown[] = [];
         let bytes = 0;
         for (const item of transcript.slice(offset, offset + limit)) {
-          let safe: unknown = item.kind === 'approval' ? { id: item.id, kind: 'info', ts: item.ts, level: 'info', text: 'Owner action required on this computer.' } : item;
+          let safe: unknown = item.kind === 'approval' ? { id: item.id, kind: 'info', ts: item.ts, level: 'info', text: 'Owner action required on this computer.' }
+            : answered.has(item.id) ? { id: item.id, kind: 'info', ts: item.ts, level: 'info', text: 'Owner-only question; read it on this computer.' } : item;
           let size = Buffer.byteLength(JSON.stringify(safe));
           if (size > 180_000) { safe = { id: item.id, kind: 'info', ts: item.ts, level: 'info', text: 'Item exceeds remote size limit; read it locally.' }; size = 200; }
           if (bytes + size > 200_000) break;
