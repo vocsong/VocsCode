@@ -310,6 +310,34 @@ describe('PiSection', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith(channel, { [key]: null }));
   });
 
+  it('clears a numeric value set moments earlier, before the first save has replied', async () => {
+    let current = setup();
+    const replies: Array<ReturnType<typeof deferred<PiSetup>>> = [];
+    invoke.mockImplementation(async (name: string, req: Record<string, unknown>) => {
+      if (name !== 'pi:subagents') return current;
+      const subagents: Record<string, unknown> = { ...current.subagents, ...req };
+      for (const key of Object.keys(req)) if (req[key] === null) delete subagents[key];
+      current = setup({ subagents: subagents as PiSetup['subagents'] });
+      const reply = deferred<PiSetup>();
+      replies.push(reply);
+      return reply.promise;
+    });
+    render(<PiSection />);
+    await selectCategory('Subagents');
+    const input = screen.getByRole('spinbutton', { name: /Max concurrent agents/ }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '5' } });
+    fireEvent.blur(input);
+    expect(invoke).toHaveBeenLastCalledWith('pi:subagents', { maxConcurrent: 5 });
+    expect(input.value).toBe('5'); // Not the stale, unset value while the save is in flight.
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.blur(input);
+    expect(invoke).toHaveBeenLastCalledWith('pi:subagents', { maxConcurrent: null });
+    const snapshot = current;
+    await act(async () => { for (const reply of replies) reply.resolve(snapshot); });
+    expect(current.subagents).toEqual({ reportUsage: true });
+    await waitFor(() => expect(input.value).toBe(''));
+  });
+
   it('refreshes numeric values without discarding a newer unsubmitted edit', async () => {
     let current = setup({ preferences: { compactionReserveTokens: 8192, retryMaxRetries: 3 } });
     const pending = deferred<PiSetup>();
