@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { CONTROL_RETRY_GRACE_MS, ControlJournal } from '../src/main/control/journal';
-import { CONTROL_OPERATIONS_PER_CONTROLLER, CONTROL_WINDOWS_PER_CONTROLLER, ControlService } from '../src/main/control/service';
+import { CONTROL_OPEN_WINDOWS_PER_CONTROLLER, CONTROL_OPERATIONS_PER_CONTROLLER, ControlService } from '../src/main/control/service';
 import { defaultSettings } from '../src/main/settings';
 import { emptyUsage } from '../src/main/models/static-models';
 import { writeJson } from '../src/main/util/fs';
@@ -350,7 +350,7 @@ it('inherits project defaults and rejects unapproved creation modes rather than 
   const { sessionId: _id, text: _text, ...params } = f.params;
   await f.service.handle(f.principal, { method: 'sessions.create', params }); await f.service.settle();
   expect(f.createControlled).toHaveBeenCalledTimes(1);
-  expect(f.createControlled.mock.calls[0]).toEqual([{ config: expect.objectContaining({ harness: 'native', permissionMode: 'ask', useWorktree: false, model: { provider: 'p', model: 'm' } }) }, expect.any(String)]);
+  expect(f.createControlled.mock.calls[0]).toEqual([{ config: expect.objectContaining({ harness: 'native', permissionMode: 'ask', useWorktree: false, model: { provider: 'p', model: 'm' } }) }, expect.any(String), await fs.realpath(f.project)]);
   f.settings.folderSessionDefaults[f.project]!.permissionMode = 'full-auto';
   await f.service.handle(f.principal, { method: 'sessions.create', params: { ...params, idempotencyKey: 'other' } }); await f.service.settle();
   expect(f.createControlled).toHaveBeenCalledTimes(1);
@@ -409,17 +409,35 @@ it('keeps admission capacity for other controllers and reclaims a revoked contro
   const receipt = await f.service.handle(f.principal, { method: 'sessions.send', params: f.params }) as ControlOperation;
   await f.service.settle();
   // The fixture's window holds a receipt; fill the rest of this controller's share.
-  for (let i = 1; i < CONTROL_WINDOWS_PER_CONTROLLER; i++) await call(f.principal);
+  for (let i = 1; i < CONTROL_OPEN_WINDOWS_PER_CONTROLLER; i++) await call(f.principal);
   await expect(call(f.principal)).rejects.toMatchObject({ code: 'busy' });
   await expect(call(other)).resolves.toMatchObject({ admissionWindowId: expect.any(String) });
   const own = () => f.journal.snapshot().windows.filter((w) => w.controllerId === f.principal.controllerId);
-  expect(own()).toHaveLength(CONTROL_WINDOWS_PER_CONTROLLER);
+  expect(own()).toHaveLength(CONTROL_OPEN_WINDOWS_PER_CONTROLLER);
   await f.service.revoke(f.journal.snapshot().grants.find((g) => g.controllerId === f.principal.controllerId && !g.revokedAt)!.id);
   await call(other);
   // Only the window holding retry evidence survives; the other principal's windows are untouched.
   expect(own().map((w) => w.id)).toEqual([f.params.admissionWindowId]);
   expect(f.journal.snapshot().operations).toEqual([expect.objectContaining({ id: receipt.id, state: 'succeeded' })]);
   expect(f.journal.snapshot().windows.filter((w) => w.controllerId === other.controllerId)).toHaveLength(2);
+});
+
+it('does not count windows kept only as retry evidence toward the open-window share', async () => {
+  const f = await fixture(async () => undefined);
+  await f.service.handle(f.principal, { method: 'sessions.send', params: f.params });
+  await f.service.settle();
+  // A day of used, expired windows, each still holding a receipt through the retry grace.
+  await f.journal.transaction((s) => {
+    const receipt = s.operations[0]!;
+    const expired = s.windows[0]!.expiresAt - 3_600_001;
+    for (let i = 0; i < CONTROL_OPEN_WINDOWS_PER_CONTROLLER; i++) {
+      const id = randomUUID();
+      s.windows.push({ id, accountId: receipt.accountId, controllerId: receipt.controllerId, expiresAt: expired });
+      s.operations.push({ ...receipt, id: randomUUID(), admissionWindowId: id });
+    }
+  });
+  await expect(f.service.handle(f.principal, { method: 'windows.create', params: { instanceId: f.state.instanceId } })).resolves.toMatchObject({ admissionWindowId: expect.any(String) });
+  expect(f.journal.snapshot().windows).toHaveLength(CONTROL_OPEN_WINDOWS_PER_CONTROLLER + 2);
 });
 
 it('reclaims an expired empty window at once instead of holding it through the retry grace', async () => {

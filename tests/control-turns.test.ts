@@ -104,7 +104,7 @@ async function fixture() {
   return { manager, store, meta, deps, dir, restart };
 }
 
-const control = (operationId = 'operation', beforeDispatch: () => Promise<void> = async () => undefined, beforeStart: () => Promise<void> = async () => undefined) => ({ operationId, inputId: `input_${operationId}`, beforeStart, beforeDispatch });
+const control = (operationId = 'operation', beforeDispatch: () => Promise<void> = async () => undefined, beforeStart: () => Promise<void> = async () => undefined, startAllowed: () => void = () => undefined) => ({ operationId, inputId: `input_${operationId}`, beforeStart, startAllowed, beforeDispatch });
 const run = (manager: SessionManager, operationId = 'operation', beforeDispatch?: () => Promise<void>) => manager.runControlled('session', { text: 'Do the task' }, control(operationId, beforeDispatch));
 const pendingTurn = () => { script = async (runtime) => { runtime.begin(); }; };
 const dispatched = async () => { await vi.waitFor(() => expect(runtimes.at(-1)?.adapter.send).toHaveBeenCalledTimes(1)); return runtimes.at(-1)!; };
@@ -442,15 +442,15 @@ describe('correlated controller creation', () => {
   it('creates exactly one session concurrently and returns that same durable identity after restart', async () => {
     const { manager, store, dir, restart } = await fixture();
     const req: CreateSessionRequest = { title: 'Created by controller', config: { projectRoot: dir, harness: 'native', permissionMode: 'ask' } };
-    const [first, duplicate] = await Promise.all([manager.createControlled(req, operationId), manager.createControlled(req, operationId)]);
+    const [first, duplicate] = await Promise.all([manager.createControlled(req, operationId, dir), manager.createControlled(req, operationId, dir)]);
     expect(first).toBe(duplicate);
     expect(first.id).toBe('s_control_11111111222243338444555555555555');
     expect(store.list().filter((meta) => meta.controlCreation?.operationId === operationId)).toHaveLength(1);
     const restored = await restart();
-    expect((await restored.manager.createControlled(req, operationId)).id).toBe(first.id);
+    expect((await restored.manager.createControlled(req, operationId, dir)).id).toBe(first.id);
     expect(restored.store.list().filter((meta) => meta.controlCreation?.operationId === operationId)).toHaveLength(1);
     expect(createAdapter).not.toHaveBeenCalled();
-    await expect(restored.manager.createControlled({ ...req, title: 'different payload' }, operationId)).rejects.toThrow('conflicts');
+    await expect(restored.manager.createControlled({ ...req, title: 'different payload' }, operationId, dir)).rejects.toThrow('conflicts');
   });
 
   it('recovers an already-created session after ancillary settings persistence failed without another create effect', async () => {
@@ -459,13 +459,13 @@ describe('correlated controller creation', () => {
     const digest = vi.fn(async () => 'Project guidance');
     deps.knowledgeDigest = digest;
     vi.mocked(deps.settings.update).mockRejectedValueOnce(new Error('settings unavailable'));
-    await expect(manager.createControlled(req, operationId)).rejects.toThrow('settings unavailable');
-    const recovered = await manager.createControlled(req, operationId);
+    await expect(manager.createControlled(req, operationId, dir)).rejects.toThrow('settings unavailable');
+    const recovered = await manager.createControlled(req, operationId, dir);
     expect(recovered.controlCreation?.operationId).toBe(operationId);
     expect(digest).toHaveBeenCalledTimes(1);
     expect(store.list().filter((meta) => meta.controlCreation)).toHaveLength(1);
     const restored = await restart();
-    expect((await restored.manager.createControlled(req, operationId)).id).toBe(recovered.id);
+    expect((await restored.manager.createControlled(req, operationId, dir)).id).toBe(recovered.id);
     expect(digest).toHaveBeenCalledTimes(1);
   });
 
@@ -475,8 +475,8 @@ describe('correlated controller creation', () => {
     const digest = vi.fn(async () => 'Project guidance');
     deps.knowledgeDigest = digest;
     vi.spyOn(store, 'upsert').mockRejectedValueOnce(new Error('index write failed'));
-    await expect(manager.createControlled(req, operationId)).rejects.toThrow('index write failed');
-    await expect(manager.createControlled(req, operationId)).rejects.toThrow('index write failed');
+    await expect(manager.createControlled(req, operationId, dir)).rejects.toThrow('index write failed');
+    await expect(manager.createControlled(req, operationId, dir)).rejects.toThrow('index write failed');
     expect(digest).toHaveBeenCalledTimes(1);
     expect(store.list()).toHaveLength(1);
   });
@@ -484,9 +484,9 @@ describe('correlated controller creation', () => {
   it('refuses invalid identities, implicit dispatch and forged ordinary provenance before effects', async () => {
     const { manager, store, dir } = await fixture();
     const req: CreateSessionRequest = { config: { projectRoot: dir, harness: 'native', permissionMode: 'ask' } };
-    await expect(manager.createControlled(req, '../invalid')).rejects.toThrow('ID');
-    await expect(manager.createControlled({ ...req, initialPrompt: 'run' }, operationId)).rejects.toThrow('initial input');
-    await expect(manager.createControlled({ ...req, goal: 'autonomous' }, operationId)).rejects.toThrow('initial input');
+    await expect(manager.createControlled(req, '../invalid', dir)).rejects.toThrow('ID');
+    await expect(manager.createControlled({ ...req, initialPrompt: 'run' }, operationId, dir)).rejects.toThrow('initial input');
+    await expect(manager.createControlled({ ...req, goal: 'autonomous' }, operationId, dir)).rejects.toThrow('initial input');
     await expect(manager.patch('session', { controlCreation: { operationId, requestHash: 'forged' } })).rejects.toThrow('host-owned');
     expect(store.list()).toHaveLength(1);
   });
@@ -533,6 +533,27 @@ describe('controller authorization before privileged effects', () => {
     expect((await manager.transcript('session')).filter((item) => item.kind === 'user')).toEqual([]);
   });
 
+  it('starts no runtime when the grant is revoked while that runtime is being prepared', async () => {
+    const { manager, deps, dir } = await fixture();
+    const c = await controlled(dir, deps, manager);
+    let entered!: () => void, release!: () => void;
+    const preparing = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    // The last await before the adapter starts: the workspace writer claim.
+    vi.spyOn(manager as unknown as { claimWorkspaceWriter(): Promise<void> }, 'claimWorkspaceWriter').mockImplementationOnce(async () => { entered(); await gate; });
+    await c.service.handle(c.principal, { method: 'sessions.send', params: { ...c.intent, sessionId: 'session', idempotencyKey: 'revoked-while-starting', text: 'Do the task' } });
+    try {
+      await preparing;
+      await c.service.revoke(c.journal.snapshot().grants[0]!.id);
+    } finally { release(); }
+    await c.service.settle();
+    expect(createAdapter).toHaveBeenCalledTimes(1);
+    expect(runtimes[0]!.adapter.start).not.toHaveBeenCalled();
+    expect(runtimes[0]!.adapter.send).not.toHaveBeenCalled();
+    expect(c.journal.snapshot().operations.map((op) => op.state)).toEqual(['failed']);
+    expect((await manager.transcript('session')).filter((item) => item.kind === 'user')).toEqual([]);
+  });
+
   const git = (cwd: string, args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', ...args],
     { encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' } }).trim();
   async function repository(dir: string) {
@@ -550,20 +571,42 @@ describe('controller authorization before privileged effects', () => {
     return c.journal.snapshot().operations[0]!;
   }
 
-  it.each(['nested project', 'linked .vocs-code'] as const)('refuses a worktree destination outside the enrolled project (%s) before any write', async (kind) => {
+  const link = (target: string, at: string) => fs.symlink(target, at, process.platform === 'win32' ? 'junction' : 'dir');
+  it.each(['nested project', 'linked .vocs-code', 'linked .vocs-code/worktrees', 'linked worktree as project'] as const)('refuses a worktree whose writes would leave the enrolled project (%s) before any write', async (kind) => {
     const { manager, deps, dir } = await fixture();
     const { repo, outside } = await repository(dir);
     let project = repo;
+    const branches = ['main'];
     if (kind === 'nested project') { project = path.join(repo, 'approved'); await fs.mkdir(project); }
-    else await fs.symlink(outside, path.join(repo, '.vocs-code'), process.platform === 'win32' ? 'junction' : 'dir');
+    else if (kind === 'linked .vocs-code') await link(outside, path.join(repo, '.vocs-code'));
+    else if (kind === 'linked .vocs-code/worktrees') { await fs.mkdir(path.join(repo, '.vocs-code')); await link(outside, path.join(repo, '.vocs-code', 'worktrees')); }
+    else {
+      // Its branch refs and worktree bookkeeping live in the main repository's git directory.
+      git(repo, ['worktree', 'add', '-q', '-b', 'side', path.join(dir, 'linked')]);
+      project = await fs.realpath(path.join(dir, 'linked'));
+      branches.push('side');
+    }
+    const worktrees = git(repo, ['worktree', 'list', '--porcelain']).match(/^worktree /gm)!.length;
     const operation = await createIn(project, deps, manager);
     expect(operation.state).toBe('failed');
     expect(operation.sessionId).toBeUndefined();
-    expect(git(repo, ['branch', '--format=%(refname:short)'])).toBe('main');
-    expect(git(repo, ['worktree', 'list', '--porcelain']).match(/^worktree /gm)).toHaveLength(1);
+    expect(git(repo, ['branch', '--format=%(refname:short)']).split(/\r?\n/).sort()).toEqual(branches);
+    expect(git(repo, ['worktree', 'list', '--porcelain']).match(/^worktree /gm)).toHaveLength(worktrees);
     expect(await fs.readdir(outside)).toEqual([]);
     if (kind === 'nested project') await expect(fs.stat(path.join(repo, '.vocs-code'))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(manager.list().filter((meta) => meta.controlCreation)).toEqual([]);
+  });
+
+  it('creates a plain session in the project when the remembered worktree default has no repository to use', async () => {
+    const { manager, deps, dir } = await fixture();
+    await fs.mkdir(path.join(dir, 'plain'));
+    const project = await fs.realpath(path.join(dir, 'plain'));
+    const operation = await createIn(project, deps, manager);
+    expect(operation.state).toBe('succeeded');
+    const session = manager.get(operation.sessionId!)!;
+    expect(await fs.realpath(session.cwd)).toBe(project);
+    expect(session.config.useWorktree).toBe(false);
+    expect(session.worktreeBranch).toBeUndefined();
   });
 
   it('still creates a remembered-default worktree inside an enrolled repository root', async () => {

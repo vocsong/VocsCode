@@ -1050,18 +1050,50 @@ export async function excludeVocsCodeDir(root: string): Promise<void> {
   }
 }
 
+const pathKey = (value: string): string => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+const within = (root: string, target: string): boolean => {
+  const relative = path.relative(pathKey(root), pathKey(target));
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+};
+
+/**
+ * The repository root a worktree for `projectRoot` is created under, or null when there is no
+ * repository. Throws unless that root IS `confine` and every write `git worktree add` makes stays
+ * inside it: the worktree folder (no existing `.vocs-code` link out), the new branch and Git's
+ * worktree bookkeeping (no git directory elsewhere, as in a linked worktree or submodule).
+ */
+export async function confinedWorktreeRoot(projectRoot: string, confine: string): Promise<string | null> {
+  const root = await gitRoot(projectRoot);
+  if (!root) return null;
+  const real = await fs.realpath(root);
+  if (pathKey(real) !== pathKey(await fs.realpath(confine))) throw new Error('The worktree would be created outside this project.');
+  const dirs = await git(real, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir']);
+  const gitDirs = dirs.code === 0 && !dirs.truncated ? dirs.stdout.split(/\r?\n/).filter(Boolean) : [];
+  if (gitDirs.length !== 2) throw new Error('Could not resolve the repository git directory.');
+  for (const dir of gitDirs) if (!within(real, await fs.realpath(dir))) throw new Error('The repository keeps its git directory outside this project.');
+  for (const dir of [path.join(real, '.vocs-code'), path.join(real, '.vocs-code', 'worktrees')]) {
+    const stat = await fs.lstat(dir).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (!stat) break;
+    if (!stat.isDirectory() || stat.isSymbolicLink() || pathKey(await fs.realpath(dir)) !== pathKey(dir)) throw new Error('The worktree folder links outside this project.');
+  }
+  return real;
+}
+
 /**
  * Creates an isolated worktree under <root>/.vocs-code/worktrees/<slug> on a new branch
- * `<branchPrefix>/<slug>` (`vocscode/` by default), at `startPoint` when given.
+ * `<branchPrefix>/<slug>` (`vocscode/` by default), at `startPoint` when given. With `confineTo`,
+ * every write stays inside that folder (see confinedWorktreeRoot), checked again after creating
+ * the parent folders; a worktree that resolves elsewhere anyway is removed with its branch.
  */
-export async function createWorktree(projectRoot: string, slug: string, opts: { startPoint?: string; branchPrefix?: string } = {}): Promise<{ path: string; branch: string }> {
-  const { startPoint } = opts;
+export async function createWorktree(projectRoot: string, slug: string, opts: { startPoint?: string; branchPrefix?: string; confineTo?: string } = {}): Promise<{ path: string; branch: string }> {
+  const { startPoint, confineTo } = opts;
   const prefix = opts.branchPrefix ?? DEFAULT_BRANCH_PREFIX;
   if (normalizeBranchPrefix(prefix) !== prefix) throw new Error(`Invalid branch prefix: ${prefix}`);
-  const root = await gitRoot(projectRoot);
+  const root = confineTo ? await confinedWorktreeRoot(projectRoot, confineTo) : await gitRoot(projectRoot);
   if (!root) throw new Error('Worktrees require a git repository.');
   const base = path.join(root, '.vocs-code', 'worktrees');
   await fs.mkdir(base, { recursive: true });
+  if (confineTo && await confinedWorktreeRoot(root, confineTo) !== root) throw new Error('The worktree would be created outside this project.');
   await excludeVocsCodeDir(root);
   // Pick a name whose directory AND branch are both free (a removed worktree leaves its branch behind).
   const branchExists = async (b: string) => (await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${b}`])).code === 0;
@@ -1072,6 +1104,11 @@ export async function createWorktree(projectRoot: string, slug: string, opts: { 
   const branch = `${prefix}/${name}`;
   const r = await git(root, ['worktree', 'add', '-b', branch, wtPath, ...(startPoint ? [startPoint] : [])], 60_000);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
+  if (confineTo && !within(root, await fs.realpath(wtPath))) {
+    await git(root, ['worktree', 'remove', '--force', wtPath]);
+    await git(root, ['branch', '-D', branch]);
+    throw new Error('The worktree was created outside this project and has been removed.');
+  }
   return { path: wtPath, branch };
 }
 
