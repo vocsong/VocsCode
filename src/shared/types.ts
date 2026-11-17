@@ -1127,12 +1127,8 @@ export interface SessionEventEnvelope {
   seq?: number;
 }
 
-/** Subagent spend attributed to the model that produced it. */
-export interface SubagentCost {
-  provider: string;
-  model: string;
-  costUsd: number;
-}
+/** Subagent spend to move off the parent model; a null pair explicitly means unknown identity. */
+export type SubagentCost = { costUsd: number } & (ModelRef | { provider: null; model: null });
 
 /** A finished pi-subagents run, reported to the app so its work is counted and attributed. */
 export interface SubagentCompletion {
@@ -1140,8 +1136,8 @@ export interface SubagentCompletion {
   description?: string;
   /** Terminal pi-subagents status: completed, error, stopped, aborted. */
   status: string;
-  /** The model the run actually used, when it could be resolved. */
-  model?: ModelRef;
+  /** The model the run actually used; null explicitly means unknown, never the parent's model. */
+  model?: ModelRef | null;
   /** Internal tool calls the run made; these never enter the parent transcript. */
   toolUses: number;
   costUsd?: number;

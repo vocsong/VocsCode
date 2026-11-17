@@ -3,7 +3,8 @@ import OpenAI from 'openai';
 import type { ModelRef, ProviderConfig } from '../shared/types';
 import { backgroundHeaders, selectBackgroundModel } from './agents/model';
 import { STATIC_MODELS_BY_PROVIDER } from './models/static-models';
-import { resolveProviderApiKey } from './models/providers';
+import { assertProviderEndpoint, resolveProviderApiKey } from './models/providers';
+import { credentialFetch } from '../shared/endpoint-policy';
 import { isAnthropicProvider } from './harness/native/drivers';
 import { errorMessage } from './util/async';
 import { sanitizeBranchNameReply } from '../shared/branch-prefix';
@@ -120,13 +121,14 @@ async function askBackgroundModel(
   }
   const { provider, model } = picked;
   log?.('debug', `${label}: asking ${provider.id}/${model}`);
-  const apiKey = await resolveProviderApiKey(provider, getSecret);
   const sample = prompt.trim().slice(0, PROMPT_SAMPLE_CHARS);
   const headers = backgroundHeaders(provider, sessionId);
   try {
+    assertProviderEndpoint(provider);
+    const apiKey = await resolveProviderApiKey(provider, getSecret);
     const thinks = thinksBeforeAnswering(provider, model);
     if (isAnthropicProvider(provider)) {
-      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers });
+      const client = new Anthropic({ apiKey, baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers, fetch: credentialFetch() });
       const msg = await client.messages.create(
         { model, max_tokens: thinks ? TITLE_REASONING_MAX_TOKENS : TITLE_MAX_TOKENS, system, messages: [{ role: 'user', content: sample }] },
         { signal: AbortSignal.timeout(timeoutMs) }
@@ -137,7 +139,7 @@ async function askBackgroundModel(
       }
       return { text: msg.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join(' ') };
     }
-    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers });
+    const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: headers, fetch: credentialFetch() });
     // Reasoning models (o-series, gpt-5) reject max_tokens and spend the budget on thinking
     // before any text arrives, so they need max_completion_tokens and low effort. Other thinking
     // models (DeepSeek and friends) take max_tokens but need the same room.

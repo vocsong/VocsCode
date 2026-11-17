@@ -11,6 +11,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import type { ModelRef, SubagentCompletion, TranscriptItem } from '../shared/types';
+import { UNKNOWN_MODEL_KEY } from '../shared/model-names';
 import { classifyExecution, deriveOutcome, type ExecutionFacts } from '../shared/analytics/classify';
 import { addedLinesOf } from '../shared/analytics/lines';
 import { EXECUTION_RETENTION, modelKeyOf, usageTokens, type ExecutionRecord, type IngestKind, type TurnRecord, type TurnUsageFacts } from '../shared/analytics/records';
@@ -255,8 +256,8 @@ export class ExecutionLog {
       endTs: ctx.now,
       harness: ctx.harness,
       harnessVersion: ctx.harnessVersion,
-      model: modelKeyOf(completion.model) ?? modelKeyOf(ctx.activeModel),
-      parentModel: completion.model && modelKeyOf(completion.model) !== modelKeyOf(ctx.activeModel) ? modelKeyOf(ctx.activeModel) : undefined,
+      model: completion.model === null ? UNKNOWN_MODEL_KEY : modelKeyOf(completion.model) ?? modelKeyOf(ctx.activeModel),
+      parentModel: completion.model === null || completion.model && modelKeyOf(completion.model) !== modelKeyOf(ctx.activeModel) ? modelKeyOf(ctx.activeModel) : undefined,
       role: 'subagent',
       projectRoot: ctx.projectRoot,
       os: this.osKey,

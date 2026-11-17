@@ -208,6 +208,9 @@ describe('ExecutionLog', () => {
     expect(run).toMatchObject({ weight: 12, role: 'subagent', model: 'p/sub', parentModel: 'p/m', derived: { category: 'subagent_failed' } });
     expect(a.recordSubagent('s1', { agentId: 'ag1', status: 'error', toolUses: 12 }, ctx())).toBeNull();
     expect(a.recordSubagent('s1', { agentId: 'ag2', status: 'aborted', toolUses: 2 }, ctx())!.derived).toMatchObject({ outcome: 'control', category: 'cancelled' });
+    // Explicit unknown identity is not the legacy absence that inherited the active model.
+    expect(a.recordSubagent('s1', { agentId: 'ag3', status: 'completed', model: null, toolUses: 3 }, ctx())).toMatchObject({ model: '/(unknown)', parentModel: 'p/m', weight: 3 });
+    expect(a.recordSubagent('s1', { agentId: 'ag4', status: 'completed', toolUses: 1 }, ctx())).toMatchObject({ model: 'p/m' });
   });
 
   it('keeps unwritten lines after a failed append and writes them on the next flush', async () => {

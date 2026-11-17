@@ -15,6 +15,7 @@
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { knowledgeCollision, sameKnowledgeClaim, sameRejectedKnowledgeClaim, withKnowledgeWriteLock, writeKnowledgeFileAtomic } from '../../../resources/mcp/knowledge-write.mjs';
 import {
   KNOWLEDGE_BRANCHES_DIR,
   KNOWLEDGE_DIR,
@@ -36,6 +37,7 @@ import {
   type KnowledgePage,
   type KnowledgePageMeta,
   type KnowledgePageScope,
+  type KnowledgeProposalInput,
   type KnowledgeScope,
   type KnowledgeSource,
   type KnowledgeStatus
@@ -80,10 +82,6 @@ function isInside(parent: string, child: string): boolean {
 export class KnowledgeStore {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly ignored = new Set<string>();
-  private evidence: Record<string, EvidenceEntry> | null = null;
-  private rejected: Record<string, RejectedEntry> | null = null;
-  private evidenceFile: string | null = null;
-  private rejectedFile: string | null = null;
 
   /** The project's shared wiki; every session of the project writes and reads here. */
   repoDir(scope: KnowledgeScope): string {
@@ -160,15 +158,72 @@ export class KnowledgeStore {
     return all.find((p) => p.meta.id === id) ?? null;
   }
 
+  /** Serialize app instances and standalone MCP writers, then discard every cached page. */
+  private withWriteLock<T>(scope: KnowledgeScope, action: () => Promise<T>): Promise<T> {
+    return withKnowledgeWriteLock(this.repoDir(scope), async () => {
+      this.cache.clear();
+      return action();
+    });
+  }
+
+  /** Resolve identity and merge fresh metadata inside the same cross-process write boundary. */
+  async ingest(scope: KnowledgeScope, input: KnowledgeProposalInput, origin: string, sessionId?: string): Promise<{ page: StoredPage | null; evidenceCount: number }> {
+    if (input.pageId !== undefined && !isKnowledgeId(input.pageId)) throw new Error('Invalid knowledge page id');
+    return this.withWriteLock(scope, async () => {
+      if (await this.isRejected(scope, input.claim)) return { page: null, evidenceCount: 0 };
+      const pages = await this.load(scope);
+      const existing = input.pageId
+        ? pages.find((p) => p.meta.id === input.pageId)
+        : pages.find((p) => sameKnowledgeClaim(p.meta.claim, input.claim));
+      const id = input.pageId ?? existing?.meta.id ?? pathForProposal(input.kind ?? 'concept', input.title).replace(/\.md$/, '');
+      const previous = await this.readForWrite(scope, id);
+      if (!input.pageId && previous && !sameKnowledgeClaim(previous.meta.claim, input.claim)) throw knowledgeCollision(id);
+      const pageScope = input.scope ?? previous?.meta.scope ?? 'repo';
+      const meta = proposalMeta({ ...input, id, scope: pageScope, branch: pageScope === 'branch' ? scope.branch : undefined, base: previous?.meta });
+      delete meta.targetPageId;
+      const page = await this.writeUnlocked(scope, { ...meta, status: 'current', updatedBy: origin }, input.body, input.pageId ? undefined : input.claim);
+      const evidenceCount = await this.recordEvidenceUnlocked(scope, input.claim, sessionId);
+      return { page, evidenceCount };
+    });
+  }
+
   /** Writes a page into the scope it names, preserving `createdAt` on an update. */
   async write(scope: KnowledgeScope, meta: KnowledgePageMeta, body: string): Promise<StoredPage> {
+    return this.withWriteLock(scope, () => this.writeUnlocked(scope, meta, body));
+  }
+
+  /** Exact, uncached reads for write decisions; bounded retrieval scans are not identity checks. */
+  private async readForWrite(scope: KnowledgeScope, id: string): Promise<StoredPage | null> {
+    for (const dir of [this.branchDir(scope), this.repoDir(scope)]) {
+      if (!dir) continue;
+      const file = path.join(dir, `${id}.md`);
+      try {
+        const parsed = parseKnowledgeDocument(await fs.readFile(file, 'utf8'), `${id}.md`);
+        if (!parsed || parsed.meta.id !== id) throw new Error(`Cannot update invalid knowledge page "${id}".`);
+        return { ...parsed, abs: file, scopeDir: dir, mtimeMs: Date.now() };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    return null;
+  }
+
+  private async writeUnlocked(scope: KnowledgeScope, meta: KnowledgePageMeta, body: string, implicitClaim?: string): Promise<StoredPage> {
     if (!isKnowledgeId(meta.id)) throw new Error('Invalid knowledge page id');
     const dir = meta.scope === 'branch' ? this.branchDir(scope) : this.repoDir(scope);
     if (!dir) throw new Error('Branch-scope pages need a branch name (only worktree sessions carry one)');
     await this.ensureIgnored(scope);
     const file = path.join(dir, `${meta.id}.md`);
     if (!isInside(dir, file)) throw new Error('Knowledge page path escapes the wiki');
-    const previous = await this.read(scope, meta.id);
+    // An unreadable or malformed destination is not an absent page and must never be replaced.
+    let previous: KnowledgePage | null = null;
+    try {
+      previous = parseKnowledgeDocument(await fs.readFile(file, 'utf8'), `${meta.id}.md`);
+      if (!previous || previous.meta.id !== meta.id) throw new Error(`Cannot update invalid knowledge page "${meta.id}".`);
+      if (implicitClaim !== undefined && !sameKnowledgeClaim(previous.meta.claim, implicitClaim)) throw knowledgeCollision(meta.id);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
     const now = new Date().toISOString();
     const next: KnowledgePageMeta = {
       ...meta,
@@ -184,9 +239,11 @@ export class KnowledgeStore {
 
   /** Applies a patch to an existing page and writes it back; null when the page is gone. */
   async patch(scope: KnowledgeScope, id: string, patch: Partial<KnowledgePageMeta>): Promise<StoredPage | null> {
-    const page = await this.read(scope, id);
-    if (!page) return null;
-    return this.write(scope, { ...page.meta, ...patch, id: page.meta.id }, page.body);
+    return this.withWriteLock(scope, async () => {
+      const page = await this.read(scope, id);
+      if (!page) return null;
+      return this.writeUnlocked(scope, { ...page.meta, ...patch, id: page.meta.id }, page.body);
+    });
   }
 
   /**
@@ -196,6 +253,10 @@ export class KnowledgeStore {
    * would survive on disk while the caller reported success.
    */
   async deletePage(scope: KnowledgeScope, id: string): Promise<boolean> {
+    return this.withWriteLock(scope, () => this.deletePageUnlocked(scope, id));
+  }
+
+  private async deletePageUnlocked(scope: KnowledgeScope, id: string): Promise<boolean> {
     if (!isKnowledgeId(id)) return false;
     for (const dir of [this.branchDir(scope), this.repoDir(scope)]) {
       if (!dir) continue;
@@ -248,52 +309,49 @@ export class KnowledgeStore {
     return { evidence: path.join(dir, '_evidence.json'), rejected: path.join(dir, '_rejected.json') };
   }
 
-  private async loadLedgers(scope: KnowledgeScope): Promise<void> {
-    const { evidence, rejected } = await this.ledgerFiles(scope);
-    if (this.evidenceFile !== evidence) {
-      this.evidence = await readJson<Record<string, EvidenceEntry>>(evidence, {});
-      this.evidenceFile = evidence;
-    }
-    if (this.rejectedFile !== rejected) {
-      this.rejected = await readJson<Record<string, RejectedEntry>>(rejected, {});
-      this.rejectedFile = rejected;
-    }
-  }
-
   /** Records one sighting of a claim; returns the number of distinct sessions that have seen it. */
   async recordEvidence(scope: KnowledgeScope, claim: string, sessionId?: string): Promise<number> {
-    await this.loadLedgers(scope);
+    return this.withWriteLock(scope, () => this.recordEvidenceUnlocked(scope, claim, sessionId));
+  }
+
+  private async recordEvidenceUnlocked(scope: KnowledgeScope, claim: string, sessionId?: string): Promise<number> {
+    const { evidence: file } = await this.ledgerFiles(scope);
+    // Local fresh snapshots cannot be replaced by concurrent readers on this store instance.
+    const evidence = await readJson<Record<string, EvidenceEntry>>(file, {});
     const key = claimKey(claim);
     const now = new Date().toISOString();
-    const entry = this.evidence?.[key] ?? { count: 0, sessions: [], firstAt: now, lastAt: now };
+    const entry = evidence[key] ?? { count: 0, sessions: [], firstAt: now, lastAt: now };
     const sessions = sessionId && !entry.sessions.includes(sessionId) ? [...entry.sessions, sessionId] : entry.sessions;
     const next: EvidenceEntry = { count: sessions.length, sessions, firstAt: entry.firstAt, lastAt: now };
-    this.evidence = { ...(this.evidence ?? {}), [key]: next };
-    await ensureDir(this.repoDir(scope));
-    await writeFileAtomic(this.evidenceFile!, JSON.stringify(this.evidence, null, 2));
+    await writeFileAtomic(file, JSON.stringify({ ...evidence, [key]: next }, null, 2));
     return next.count;
   }
 
   async evidenceFor(scope: KnowledgeScope, claim: string): Promise<number> {
-    await this.loadLedgers(scope);
-    return this.evidence?.[claimKey(claim)]?.count ?? 0;
+    const { evidence: file } = await this.ledgerFiles(scope);
+    const evidence = await readJson<Record<string, EvidenceEntry>>(file, {});
+    return evidence[claimKey(claim)]?.count ?? 0;
   }
 
   async reject(scope: KnowledgeScope, claim: string, by?: string): Promise<void> {
-    await this.loadLedgers(scope);
-    this.rejected = { ...(this.rejected ?? {}), [claimKey(claim)]: { claim, at: new Date().toISOString(), ...(by ? { by } : {}) } };
-    await ensureDir(this.repoDir(scope));
-    await writeFileAtomic(this.rejectedFile!, JSON.stringify(this.rejected, null, 2));
+    await this.withWriteLock(scope, async () => {
+      const { rejected: file } = await this.ledgerFiles(scope);
+      const rejected = await readJson<Record<string, RejectedEntry>>(file, {});
+      const next = { ...rejected, [claimKey(claim)]: { claim, at: new Date().toISOString(), ...(by ? { by } : {}) } };
+      await writeFileAtomic(file, JSON.stringify(next, null, 2));
+    });
   }
 
   async rejectedClaims(scope: KnowledgeScope): Promise<string[]> {
-    await this.loadLedgers(scope);
-    return Object.values(this.rejected ?? {}).map((r) => r.claim);
+    const { rejected: file } = await this.ledgerFiles(scope);
+    const rejected = await readJson<Record<string, RejectedEntry>>(file, {});
+    return Object.values(rejected).map((r) => r.claim);
   }
 
   async isRejected(scope: KnowledgeScope, claim: string): Promise<boolean> {
-    await this.loadLedgers(scope);
-    return !!this.rejected?.[claimKey(claim)];
+    const { rejected: file } = await this.ledgerFiles(scope);
+    const rejected = await readJson<Record<string, RejectedEntry>>(file, {});
+    return sameRejectedKnowledgeClaim(rejected[claimKey(claim)]?.claim, claim);
   }
 
   /* ------------------------------------------------------------------ */
@@ -442,9 +500,7 @@ function newestFirst(episodes: KnowledgeEpisode[]): KnowledgeEpisode[] {
 
 /** Serializes only the pages the caller asked for, from a summary list; shared with publish. */
 export async function writeFileAtomic(file: string, content: string): Promise<void> {
-  const tmp = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(tmp, content, 'utf8');
-  await fs.rename(tmp, file);
+  await writeKnowledgeFileAtomic(file, content);
 }
 
 /** Builds a proposal record's meta from an input, on top of the page it may edit. */
@@ -475,6 +531,7 @@ export function proposalMeta(input: {
     kind: input.kind ?? existing?.kind ?? 'concept',
     status: input.status ?? existing?.status ?? 'proposed',
     scope: input.scope,
+    ...(existing?.review ? { review: existing.review } : {}),
     keywords: [...new Set([...(input.keywords ?? []), ...(existing?.keywords ?? [])])].slice(0, 24),
     labels: normalizeLabels([...(input.labels ?? []), ...(existing?.labels ?? [])]),
     sources: dedupeSources([...(input.sources ?? []), ...(existing?.sources ?? [])]),

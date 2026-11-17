@@ -24,7 +24,7 @@ import type {
   UsageSpeed,
   UsageTotals
 } from '../shared/types';
-import { modelKeyLabel } from '../shared/model-names';
+import { modelKeyLabel, UNKNOWN_MODEL_KEY } from '../shared/model-names';
 import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, emptySlice, harnessModelKey, harnessModelToolUsageRows, harnessToolUsageRows, modelToolUsageRows, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
 import { codeOutputReport, type CodeOutputReport } from '../shared/analytics/code-output';
 import type { ExecutionRecord } from '../shared/analytics/records';
@@ -982,13 +982,11 @@ export class AnalyticsStore {
       };
       addDay(day, delta);
       attribute(day, { id: meta.id, harness: meta.config.harness, projectRoot: meta.config.projectRoot }, delta);
-      const provider = completion.model?.provider;
-      const model = completion.model?.model;
-      if (model) {
+      const modelKey = completion.model === null ? UNKNOWN_MODEL_KEY : completion.model?.model ? `${completion.model.provider}/${completion.model.model}` : undefined;
+      if (modelKey) {
         const by = (day.by ??= emptyDimensions());
-        const modelKey = `${provider ?? ''}/${model}`;
-        addSlice(by.model, modelKey, model, delta, meta.id);
-        addSlice(by.harnessModel, harnessModelKey(meta.config.harness, modelKey), model, delta, meta.id);
+        addSlice(by.model, modelKey, modelKeyLabel(modelKey), delta, meta.id);
+        addSlice(by.harnessModel, harnessModelKey(meta.config.harness, modelKey), modelKeyLabel(modelKey), delta, meta.id);
       }
     }
     this.scheduleWrite();
@@ -1002,9 +1000,11 @@ export class AnalyticsStore {
   private queueSubagentCost(sessionId: string, costs: SubagentCost[]): void {
     const pending = this.pendingSubagentCost.get(sessionId) ?? new Map<string, SubagentCost>();
     for (const c of costs) {
-      if (!c.provider || !c.model || !(c.costUsd > 0)) continue;
-      const key = `${c.provider}/${c.model}`;
-      const cur = pending.get(key) ?? { provider: c.provider, model: c.model, costUsd: 0 };
+      if (!(c.costUsd > 0) || !Number.isFinite(c.costUsd)) continue;
+      const unknown = c.provider === null && c.model === null;
+      if (!unknown && (!c.provider || !c.model)) continue;
+      const key = unknown ? UNKNOWN_MODEL_KEY : `${c.provider}/${c.model}`;
+      const cur = pending.get(key) ?? { ...c, costUsd: 0 };
       cur.costUsd += c.costUsd;
       pending.set(key, cur);
     }
@@ -1012,7 +1012,8 @@ export class AnalyticsStore {
   }
 
   /**
-   * Moves queued subagent cost off the session's active model and onto the model each run used.
+   * Moves queued subagent cost off the session's active model and onto the model each run used
+   * (or the explicit unknown slice when a legacy name could not identify a single model).
    * Bounded by the active model's own slice so a day can never go negative, and whatever cannot be
    * moved stays queued for a later delta — so the cumulative split converges even when the spend
    * and the completion land in different turns. The harness × model slice carries the same cost,

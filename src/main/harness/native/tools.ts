@@ -284,13 +284,15 @@ async function* walk(root: string, rel = '', signal?: AbortSignal, skipped?: { c
   }
 }
 
-export function detectShell(): { file: string; args: (cmd: string) => string[]; name: string } {
+export function detectShell(): { file: string; args: (cmd: string) => string[]; name: string; windowsVerbatimArguments?: boolean } {
   if (process.platform === 'win32') {
     const bash = which('bash');
     if (bash && !/System32/i.test(bash)) return { file: bash, args: (cmd) => ['-lc', cmd], name: 'bash (Git Bash)' };
     const pwsh = which('pwsh') ?? which('powershell');
     if (pwsh) return { file: pwsh, args: (cmd) => ['-NoProfile', '-NonInteractive', '-Command', cmd], name: 'PowerShell' };
-    return { file: process.env.ComSpec || 'cmd.exe', args: (cmd) => ['/d', '/s', '/c', cmd], name: 'cmd.exe' };
+    // cmd parses its own command line, not spawn's default Windows CRT escaping.
+    // /s strips this outer quote pair, preserving the command's own quotes and operators.
+    return { file: process.env.ComSpec || 'cmd.exe', args: (cmd) => ['/d', '/s', '/c', `"${cmd}"`], name: 'cmd.exe', windowsVerbatimArguments: true };
   }
   return { file: process.env.SHELL || '/bin/sh', args: (cmd) => ['-lc', cmd], name: process.env.SHELL || 'sh' };
 }
@@ -334,7 +336,7 @@ export async function runBash(cwd: string, command: string, timeoutMs: number, s
     let reason = '';
     let done = false;
     let termination: Promise<void> | undefined;
-    const child = spawn(sh.file, sh.args(command), { cwd, env: process.env, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(sh.file, sh.args(command), { cwd, env: process.env, windowsHide: true, windowsVerbatimArguments: sh.windowsVerbatimArguments, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     const stop = (why: string) => {
       if (done || termination) return;
       reason = why;
