@@ -9,6 +9,7 @@ import {
 } from '../../shared/control';
 import { resolveNewSessionDefaults } from '../../shared/session-defaults';
 import type { AppSettings, CreateSessionRequest, SessionMeta } from '../../shared/types';
+import { confinedWorktreeRoot } from '../git';
 import type { SessionManager } from '../session-manager';
 import { ControlJournal, type ControlJournalState } from './journal';
 
@@ -16,6 +17,21 @@ const key = (value: string): string => process.platform === 'win32' ? path.resol
 const terminal = new Set(['succeeded', 'failed', 'interrupted', 'unknown']);
 const WINDOW_MS = 60 * 60 * 1000;
 const MAX_GRANT_MS = 90 * 24 * 60 * 60 * 1000;
+/** Per-controller shares of the journal's global bounds (1024 windows, 5000 receipts), so one
+ * controller cannot exhaust admission for every other controller the owner has granted. Open
+ * windows (still able to admit) are capped tightly; windows kept only as retry evidence count
+ * toward a larger retained cap, since each holds at least one receipt and receipts are capped. */
+export const CONTROL_OPEN_WINDOWS_PER_CONTROLLER = 32;
+export const CONTROL_WINDOWS_PER_CONTROLLER = 128;
+export const CONTROL_OPERATIONS_PER_CONTROLLER = 1000;
+const inside = (root: string, target: string): boolean => {
+  const relative = path.relative(key(root), key(target));
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+};
+/** Everything a session authorization decision read. A desktop move, archive, configuration edit
+ * or replacement changes it, so a decision cannot outlive the state it was made against. */
+const sessionIdentity = (session: SessionMeta): string => JSON.stringify([session.id, session.createdAt, session.cwd, session.config.projectRoot,
+  session.config.permissionMode, session.config.harness, !!session.mission, !!session.archived]);
 
 /** App-owned control domain. The authenticated transport supplies identity, not a tool argument. */
 export class ControlService {
@@ -125,11 +141,12 @@ export class ControlService {
     return project;
   }
 
-  private async session(principal: ControllerPrincipal, method: ControlMethod, projectId: string, sessionId: string): Promise<SessionMeta> {
+  private async session(principal: ControllerPrincipal, method: ControlMethod, projectId: string, sessionId: string): Promise<{ session: SessionMeta; identity: string }> {
     this.authorize(principal, method, projectId);
     const project = await this.project(projectId);
     const session = this.deps.sessions.get(sessionId);
     if (!session || session.mission || session.archived) throw new ControlError('denied');
+    const checked = sessionIdentity(session);
     try {
       if (key(await fs.realpath(session.config.projectRoot)) !== key(project.canonicalRoot)) throw new Error('wrong project');
       // A substituted worktree symlink must not make an existing session point elsewhere.
@@ -137,13 +154,23 @@ export class ControlService {
       if (cwd !== key(session.cwd)) throw new Error('changed workspace');
       // Desktop moveTo keeps projectRoot. It must not carry a controller grant to another folder.
       // This slice supports the project and its descendants, including app-managed worktrees.
-      const relative = path.relative(key(project.canonicalRoot), cwd);
-      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('outside project');
+      if (!inside(project.canonicalRoot, cwd)) throw new Error('outside project');
       await this.deps.guard({ sessionId });
     } catch { throw new ControlError('denied'); }
+    // Synchronously after the last await: the workspace, mode and harness approved above are
+    // still the session's. Callers publish through fresh(), which repeats this in their own
+    // synchronous block, because resuming after this method returns is another turn of the loop.
+    const current = this.fresh({ session, identity: checked });
     const grant = this.authorize(principal, method, projectId);
-    if (!grant.permissionModes.includes(session.config.permissionMode) || !grant.harnesses.includes(session.config.harness)) throw new ControlError('denied');
-    return session;
+    if (!grant.permissionModes.includes(current.config.permissionMode) || !grant.harnesses.includes(current.config.harness)) throw new ControlError('denied');
+    return { session: current, identity: checked };
+  }
+
+  /** The session exactly as it was authorized, or denied. Synchronous by design. */
+  private fresh(checked: { session: SessionMeta; identity: string }): SessionMeta {
+    const current = this.deps.sessions.get(checked.session.id);
+    if (!current || sessionIdentity(current) !== checked.identity) throw new ControlError('denied');
+    return current;
   }
 
   private summary(session: SessionMeta): unknown {
@@ -177,21 +204,28 @@ export class ControlService {
         await this.project(projectId!);
         const visible: unknown[] = [];
         for (const session of this.deps.sessions.list()) {
-          try { visible.push(this.summary(await this.session(principal, 'sessions.list', projectId!, session.id))); } catch { /* Filter unapproved sessions. */ }
+          try { visible.push(this.summary(this.fresh(await this.session(principal, 'sessions.list', projectId!, session.id)))); } catch { /* Filter unapproved sessions. */ }
         }
         return { items: visible.slice(offset, offset + limit), nextOffset: offset + limit < visible.length ? offset + limit : null };
       }
-      case 'sessions.get': return this.summary(await this.session(principal, request.method, projectId!, String(params.sessionId)));
+      case 'sessions.get': return this.summary(this.fresh(await this.session(principal, request.method, projectId!, String(params.sessionId))));
       case 'sessions.transcript': {
-        const session = await this.session(principal, request.method, projectId!, String(params.sessionId));
-        const transcript = await this.deps.sessions.transcript(session.id);
+        const checked = await this.session(principal, request.method, projectId!, String(params.sessionId));
+        const transcript = await this.deps.sessions.transcript(checked.session.id);
         // Reads do not reserve the runtime: desktop moves/configuration edits can finish meanwhile.
-        await this.session(principal, request.method, projectId!, session.id);
-        this.authorize(principal, request.method, projectId); // Revocation during the read also wins.
+        await this.session(principal, request.method, projectId!, checked.session.id);
+        // Against the identity the read began with (a move away and back is not detected), in the same
+        // synchronous block that builds the response. Revocation during the read also wins.
+        this.fresh(checked);
+        this.authorize(principal, request.method, projectId);
+        // A question card and the tool call it belongs to are one group: the call's input and output
+        // carry the question and the owner's answer, so both are withheld, whichever page they are on.
+        const answered = new Set(transcript.flatMap((item) => item.kind === 'approval' && item.request.questions?.length && item.request.toolItemId ? [item.request.toolItemId] : []));
         const items: unknown[] = [];
         let bytes = 0;
         for (const item of transcript.slice(offset, offset + limit)) {
-          let safe: unknown = item.kind === 'approval' ? { id: item.id, kind: 'info', ts: item.ts, level: 'info', text: 'Owner action required on this computer.' } : item;
+          let safe: unknown = item.kind === 'approval' ? { id: item.id, kind: 'info', ts: item.ts, level: 'info', text: 'Owner action required on this computer.' }
+            : answered.has(item.id) ? { id: item.id, kind: 'info', ts: item.ts, level: 'info', text: 'Owner-only question; read it on this computer.' } : item;
           let size = Buffer.byteLength(JSON.stringify(safe));
           if (size > 180_000) { safe = { id: item.id, kind: 'info', ts: item.ts, level: 'info', text: 'Item exceeds remote size limit; read it locally.' }; size = 200; }
           if (bytes + size > 200_000) break;
@@ -202,7 +236,8 @@ export class ControlService {
       }
       case 'windows.create': return this.deps.journal.transaction((s) => {
         const grant = this.authorize(principal, request.method, undefined, s);
-        if (s.windows.length >= 1024) throw new ControlError('busy');
+        const own = s.windows.filter((w) => w.accountId === principal.accountId && w.controllerId === principal.controllerId);
+        if (own.filter((w) => w.expiresAt > this.now()).length >= CONTROL_OPEN_WINDOWS_PER_CONTROLLER || own.length >= CONTROL_WINDOWS_PER_CONTROLLER || s.windows.length >= 1024) throw new ControlError('busy');
         const window = { id: randomUUID(), accountId: principal.accountId, controllerId: principal.controllerId, expiresAt: Math.min(this.now() + WINDOW_MS, grant.expiresAt) };
         s.windows.push(window);
         return { admissionWindowId: window.id, expiresAt: window.expiresAt, instanceId: s.instanceId };
@@ -240,7 +275,8 @@ export class ControlService {
         return { operation: existing, fresh: false };
       }
       if (window.expiresAt <= this.now()) throw new ControlError('expired');
-      if (state.operations.length >= 5000) throw new ControlError('busy');
+      const own = state.operations.filter((op) => op.accountId === principal.accountId && op.controllerId === principal.controllerId).length;
+      if (own >= CONTROL_OPERATIONS_PER_CONTROLLER || state.operations.length >= 5000) throw new ControlError('busy');
       const id = randomUUID();
       const operation: ControlOperation = { id, accountId: principal.accountId, controllerId: principal.controllerId, instanceId: state.instanceId, projectId,
         sessionId: method === 'sessions.send' ? String(params.sessionId) : undefined, inputId: method === 'sessions.send' ? `u_${id.replaceAll('-', '')}` : undefined,
@@ -280,15 +316,43 @@ export class ControlService {
         this.authorize(principal, operation.method, project.id);
       };
       if (operation.method === 'sessions.send') {
-        const result = await this.deps.sessions.runControlled(operation.sessionId!, { text: String(params.text) }, { operationId: operation.id, inputId: operation.inputId!, beforeDispatch });
+        // The manager has reserved the session (configuration edits are refused) when it calls this,
+        // and calls it before constructing or starting a runtime: starting one can spawn CLI and MCP
+        // processes, so a configuration the grant excludes must not get that far.
+        let checked: { session: SessionMeta; identity: string } | undefined;
+        const beforeStart = async (): Promise<void> => {
+          await this.project(project.id);
+          checked = await this.session(principal, operation.method, project.id, operation.sessionId!);
+          startAllowed();
+        };
+        // Synchronous, so the manager can run it immediately before the adapter starts: a grant
+        // revoked or narrowed while the runtime was prepared stops it there.
+        const startAllowed = (): void => {
+          try {
+            const state = this.snapshot();
+            const grant = this.authorize(principal, operation.method, project.id, state);
+            if (state.operations.find((op) => op.id === operation.id)?.state !== 'accepted' || !checked) throw new ControlError('conflict');
+            const session = this.fresh(checked);
+            if (!grant.permissionModes.includes(session.config.permissionMode) || !grant.harnesses.includes(session.config.harness)) throw new ControlError('denied');
+          } catch { throw new Error('Remote control permission for this request was withdrawn before the session started.'); }
+        };
+        const result = await this.deps.sessions.runControlled(operation.sessionId!, { text: String(params.text) }, { operationId: operation.id, inputId: operation.inputId!, beforeStart, startAllowed, beforeDispatch });
         await this.update(operation.id, { state: result.outcome, runtimeId: result.runtimeId, turnId: result.turnId, outputIds: result.outputIds });
       } else {
         const defaults = resolveNewSessionDefaults(this.deps.settings(), project.root);
         const grant = this.authorize(principal, operation.method, project.id);
         if (!grant.permissionModes.includes(defaults.permissionMode) || !grant.harnesses.includes(defaults.harness)) throw new ControlError('denied');
         const config: CreateSessionRequest['config'] = { ...defaults, effort: defaults.effort || undefined, projectRoot: project.root };
+        if (config.useWorktree) {
+          // Decided once, before any effect: no repository means no worktree, even if a later Git
+          // call would find one. Creation repeats the confinement at the point it writes.
+          const root = await confinedWorktreeRoot(project.root, project.canonicalRoot).catch(() => { throw new ControlError('denied'); });
+          if (!root) config.useWorktree = false;
+        }
         await beforeDispatch();
-        const session = await this.deps.sessions.createControlled({ config, title: params.title as string | undefined }, operation.id);
+        const session = await this.deps.sessions.createControlled({ config, title: params.title as string | undefined }, operation.id, project.canonicalRoot);
+        // Defense in depth only; the destination was authorized before any effect above.
+        if (!inside(project.canonicalRoot, await fs.realpath(session.cwd))) throw new ControlError('denied');
         await this.update(operation.id, { state: 'succeeded', sessionId: session.id });
       }
     } catch {
