@@ -15,7 +15,9 @@ limited to this account) and `CLOUDFLARE_ACCOUNT_ID`, admits release tags only, 
 owner's approval. The workflow checks the relay types and tests — including the full pairing flow
 against this checkout's Worker in local workerd — verifies the generated web bundle and dry-run,
 and fails loudly when credentials are absent. Redeploy a release with
-`gh workflow run deploy-relay.yml --ref vX.Y.Z`. It does **not** create or rotate `ENROLL_TOKEN`.
+`gh workflow run deploy-relay.yml --ref vX.Y.Z`. Tag pushes and redeploys alike first pass the
+[release tag gate](../docs/RELEASING.md#release-tag-gate): the tag's commit must be on `master` with
+a green CI run. It does **not** create or rotate `ENROLL_TOKEN`.
 
 For a manual deploy or recovery (run from a release tag's checkout, not an unmerged branch):
 

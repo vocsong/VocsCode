@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { fullRunReason } from '../scripts/test-changed-scope.mjs';
@@ -43,6 +43,118 @@ describe('CI tier boundaries', () => {
     expect(job('gate')).toContain('npm test --');
     expect(job('e2e')).toContain('npm run test:e2e:ci');
     expect(job('windows-offline')).toContain('tests/mission-receipt-recovery.test.ts');
+  });
+});
+
+const workflowDir = path.join(root, '.github/workflows');
+const readWorkflow = (file: string) => readFileSync(path.join(workflowDir, file), 'utf8').replace(/\r\n/g, '\n');
+
+/** Top-level jobs of a workflow, keyed by id, each mapped to its indented body. */
+function jobsOf(file: string): Map<string, string> {
+  const text = readWorkflow(file);
+  const start = text.indexOf('\njobs:\n');
+  expect(start, `${file} has a jobs: block`).toBeGreaterThanOrEqual(0);
+  const jobs = new Map<string, string>();
+  const parts = text.slice(start + '\njobs:\n'.length).split(/^ {2}([\w-]+):\n/m);
+  for (let i = 1; i < parts.length; i += 2) jobs.set(parts[i], parts[i + 1]);
+  return jobs;
+}
+
+function needsOf(body: string): string[] {
+  const match = /^ {4}needs: *(\[[^\]]*\]|[\w-]+)/m.exec(body);
+  if (!match) return [];
+  return match[1].replace(/[[\]]/g, '').split(',').map((name) => name.trim()).filter(Boolean);
+}
+
+describe('release tag gate', () => {
+  const gate = readWorkflow('verify-release-tag.yml');
+
+  it.each([
+    ['release.yml', ['build']],
+    ['deploy-relay.yml', ['deploy']]
+  ])('%s runs verify-tag first and every build/deploy job needs it and builds its verified SHA', (file, expected) => {
+    const jobs = jobsOf(file);
+    const verify = jobs.get('verify-tag');
+    expect(verify, `${file} has a verify-tag job`).toBeDefined();
+    expect(verify).toContain('uses: ./.github/workflows/verify-release-tag.yml');
+    expect(verify).toMatch(/permissions:\n {6}actions: read\n {6}contents: read\n/);
+    const others = [...jobs.keys()].filter((name) => name !== 'verify-tag');
+    expect(others).toEqual(expected);
+    for (const name of others) {
+      const body = jobs.get(name)!;
+      expect(needsOf(body), `${file} job ${name} needs verify-tag`).toContain('verify-tag');
+      // Every checkout builds the verified commit, never whatever the tag points at by then.
+      const checkouts = body.match(/uses: actions\/checkout@.*(\n {8,}.*)*/g) ?? [];
+      expect(checkouts.length).toBeGreaterThan(0);
+      for (const step of checkouts) expect(step).toContain('ref: ${{ needs.verify-tag.outputs.sha }}');
+    }
+  });
+
+  it('gates manual runs the same way: release.yml verifies the dispatched tag input', () => {
+    const verify = jobsOf('release.yml').get('verify-tag')!;
+    expect(verify).toContain('tag: ${{ inputs.tag || github.ref_name }}');
+    expect(verify).not.toMatch(/^ {4}if:/m);
+    expect(readWorkflow('release.yml')).toContain('workflow_dispatch:');
+  });
+
+  it('keeps the relay deploy behind its protected environment and on tags only', () => {
+    const jobs = jobsOf('deploy-relay.yml');
+    expect(jobs.get('deploy')).toContain('environment: relay-production');
+    expect(jobs.get('deploy')).toContain("if: startsWith(github.ref, 'refs/tags/v')");
+    expect(jobs.get('verify-tag')).toContain('tag: ${{ github.ref_name }}');
+    expect(readWorkflow('deploy-relay.yml')).toContain('workflow_dispatch:');
+  });
+
+  it('is callable only, with least-privilege token scopes', () => {
+    expect(gate).toMatch(/^on:\n {2}workflow_call:\n/m);
+    expect(gate).not.toMatch(/^ {2}(push|pull_request|workflow_dispatch|schedule):/m);
+    expect(gate).not.toMatch(/: write$/m);
+    expect(gate).toContain('value: ${{ jobs.verify.outputs.sha }}');
+  });
+
+  it('peels annotated tags and rejects a tag that moved after the run started', () => {
+    expect(gate).toContain('repos/$REPO/git/ref/tags/$TAG');
+    expect(gate).toContain('repos/$REPO/git/tags/$sha');
+    expect(gate).toContain('[ "$type" != commit ]');
+    expect(gate).toContain('Tag $TAG moved since this run started');
+    // Workflow input reaches the script only through env, never interpolated into it.
+    expect(gate).toContain('TAG: ${{ inputs.tag }}');
+    expect(gate).not.toMatch(/run: \|[^]*\$\{\{ inputs\./);
+  });
+
+  it('requires the commit on master', () => {
+    expect(gate).toContain("'+refs/heads/master:refs/remotes/origin/master' \"$SHA\"");
+    expect(gate).toContain('git merge-base --is-ancestor "$SHA" refs/remotes/origin/master');
+  });
+
+  it('requires a successful CI run on the exact commit from a master push or a manual dispatch, waiting a bounded time', () => {
+    expect(gate).toContain('repos/$REPO/actions/workflows/ci.yml/runs');
+    expect(gate).toContain('-f head_sha="$SHA"');
+    expect(gate).toContain('select((.event == "push" and .head_branch == "master") or .event == "workflow_dispatch")');
+    expect(gate).toContain('select(.status == "completed" and .conclusion == "success")');
+    // A successful run with a skipped job (a release-tier job guarded out) does not count.
+    expect(gate).toContain('select(.conclusion != "success")');
+    expect(gate).toMatch(/CI_WAIT_MINUTES: '\d+'/);
+    expect(gate).toMatch(/timeout-minutes: \d+/);
+    expect(readWorkflow('ci.yml')).toMatch(/^name: CI$/m);
+  });
+});
+
+describe('workflow action pins', () => {
+  const files = readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(file));
+
+  const usesOf = (file: string) => [...readWorkflow(file).matchAll(/^\s*(?:- )?uses: *(.+)$/gm)].map((match) => match[1].trim());
+
+  it('covers every workflow', () => {
+    expect(files).toEqual(expect.arrayContaining(['ci.yml', 'release.yml', 'deploy-relay.yml', 'release-please.yml', 'verify-release-tag.yml']));
+    expect(files.flatMap(usesOf).filter((use) => !use.startsWith('./')).length).toBeGreaterThanOrEqual(10);
+  });
+
+  it.each(files)('%s pins every action to a full commit SHA with its version noted', (file) => {
+    for (const use of usesOf(file)) {
+      if (use.startsWith('./')) continue; // same-commit reusable workflow
+      expect(use, `${file}: ${use}`).toMatch(/^[\w.-]+\/[\w./-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/);
+    }
   });
 });
 
