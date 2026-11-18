@@ -420,9 +420,44 @@ export function Sidebar() {
         <button type="button" className={`sidebar-link ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
           <Icon name="settings" size={14} /> Settings
         </button>
+        <UpdatePill />
       </div>
       <Resizer target="sidebar" />
     </aside>
+  );
+}
+
+function UpdatePill() {
+  const { status, version, progress, deferred } = useStore((s) => s.updateState);
+  let label: string;
+  let title: string;
+  let action: 'update:download' | 'update:install' | undefined;
+
+  switch (status) {
+    case 'available':
+      label = 'Update';
+      title = `Download Vocs Code ${version}`;
+      action = 'update:download';
+      break;
+    case 'downloading':
+      label = `Updating… ${Math.round(progress?.percent ?? 0)}%`;
+      title = `Downloading Vocs Code ${version}`;
+      break;
+    case 'restart-pending':
+      label = deferred ? 'Update ready' : 'Install update';
+      title = deferred
+        ? `Vocs Code ${version} is ready. Restart now or wait for sessions to finish.`
+        : `Restart to install Vocs Code ${version}`;
+      action = 'update:install';
+      break;
+    default:
+      return null;
+  }
+
+  return (
+    <button type="button" className="update-pill" title={title} disabled={!action} onClick={action ? () => void invoke(action, undefined) : undefined}>
+      {label}
+    </button>
   );
 }
 

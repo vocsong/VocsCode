@@ -1,6 +1,4 @@
-// In-app auto-update UI (issue #198): the title-bar pill and the Settings → About updates panel.
-// The pill appears only when there is something to act on, and its click drives the update along;
-// the About panel offers the manual check and the restart-to-update action.
+// The sidebar update button handles download progress and restart. The About panel offers a manual check.
 /** @vitest-environment jsdom */
 const invokeMock = vi.fn().mockResolvedValue({});
 (window as unknown as { harness: unknown }).harness = {
@@ -11,6 +9,7 @@ const invokeMock = vi.fn().mockResolvedValue({});
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { Sidebar } from '../src/renderer/src/components/Sidebar';
 import { TitleBar } from '../src/renderer/src/components/TitleBar';
 import { SettingsView } from '../src/renderer/src/components/SettingsView';
 import { useStore } from '../src/renderer/src/store';
@@ -50,45 +49,48 @@ function setUpdateState(updateState: UpdateState, isPackaged = true): void {
   });
 }
 
-describe('update pill (title bar)', () => {
+describe('update button beside Settings', () => {
   it('stays hidden while idle, checking, up-to-date or errored', () => {
     for (const status of ['idle', 'checking', 'up-to-date', 'error'] as const) {
       setUpdateState({ status });
-      const { container } = render(<TitleBar />);
+      const { container } = render(<Sidebar />);
+      expect(screen.getByRole('button', { name: 'Settings' })).toBeTruthy();
       expect(container.querySelector('.update-pill')).toBeNull();
       cleanup();
     }
   });
 
-  it('offers the download for an available update and invokes update:download on click', () => {
+  it('offers one Update button directly beside Settings and starts the download on click', () => {
     setUpdateState({ status: 'available', version: '0.3.0' });
-    const { container } = render(<TitleBar />);
-    const pill = container.querySelector('.update-pill') as HTMLButtonElement;
-    expect(pill.textContent).toContain('0.3.0');
-    fireEvent.click(pill);
+    const { container } = render(<><TitleBar /><Sidebar /></>);
+    const settings = screen.getByRole('button', { name: 'Settings' });
+    const update = screen.getByRole('button', { name: /^Update\b/ });
+    expect(settings.nextElementSibling).toBe(update);
+    expect(update.textContent).toBe('Update');
+    expect(update.title).toContain('0.3.0');
+    expect(container.querySelectorAll('.update-pill')).toHaveLength(1);
+    fireEvent.click(update);
     expect(invokeMock).toHaveBeenCalledWith('update:download', undefined);
   });
 
   it('shows download progress and the deferred restart prompt', () => {
     setUpdateState({ status: 'downloading', version: '0.3.0', progress: { percent: 42.4, bytesPerSecond: 0, transferred: 0, total: 0 } });
-    const { container } = render(<TitleBar />);
-    expect((container.querySelector('.update-pill') as HTMLButtonElement).textContent).toContain('42%');
+    render(<Sidebar />);
+    const progress = screen.getByRole<HTMLButtonElement>('button', { name: 'Updating… 42%' });
+    expect(progress.disabled).toBe(true);
     cleanup();
 
     setUpdateState({ status: 'restart-pending', version: '0.3.0', deferred: true });
-    const second = render(<TitleBar />);
-    expect((second.container.querySelector('.update-pill') as HTMLButtonElement).textContent).toContain('0.3.0');
+    render(<Sidebar />);
     // A deferred prompt still installs on an explicit click.
-    fireEvent.click(second.container.querySelector('.update-pill') as HTMLButtonElement);
+    fireEvent.click(screen.getByRole('button', { name: 'Update ready' }));
     expect(invokeMock).toHaveBeenCalledWith('update:install', undefined);
   });
 
   it('offers restart-to-install once the app is quiet again', () => {
     setUpdateState({ status: 'restart-pending', version: '0.3.0' });
-    const { container } = render(<TitleBar />);
-    const pill = container.querySelector('.update-pill') as HTMLButtonElement;
-    expect(pill.textContent).toBe('Restart to update');
-    fireEvent.click(pill);
+    render(<Sidebar />);
+    fireEvent.click(screen.getByRole('button', { name: 'Install update' }));
     expect(invokeMock).toHaveBeenCalledWith('update:install', undefined);
   });
 });
