@@ -165,6 +165,16 @@ describe('single draft-first release publisher', () => {
     expect(github.calls.some((call) => call.path.startsWith('/repos/example/disposable/releases?per_page=100&page=2'))).toBe(true);
   });
 
+  it('diagnoses a matching release title with an unassigned tag and leaves the draft untouched', async () => {
+    const { github, publish } = await setup();
+    const placeholder = 'untagged-0123456789abcdef';
+    github.release.tag_name = placeholder;
+    github.release.name = identity.tag;
+    await expect(publish()).rejects.toThrow(`Attach the existing tag ${identity.tag} to draft ${placeholder}`);
+    expect(github.release).toMatchObject({ draft: true, tag_name: placeholder, body: 'Human release notes' });
+    expect(github.mutations).toEqual([]);
+  });
+
   it('refuses to choose when two releases name the tag', async () => {
     const { github, publish } = await setup();
     github.otherReleases = [{ ...github.release, id: 11 }];

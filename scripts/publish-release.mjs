@@ -155,13 +155,21 @@ export function createGitHubClient({ repository, token, fetchImpl = fetch }) {
      *  one release naming the tag is refused rather than guessed. */
     async getRelease(tag) {
       const found = [];
+      const untagged = [];
       for (let page = 1; page <= 10; page++) {
         const batch = await request(`${base}/releases?per_page=100&page=${page}`);
         if (!Array.isArray(batch)) throw new Error('Invalid GitHub release listing.');
-        found.push(...batch.filter((release) => release?.tag_name === tag));
+        for (const release of batch) {
+          if (release?.tag_name === tag) found.push(release);
+          else if (release?.draft === true && release.name === tag && /^untagged-[a-f0-9]+$/i.test(release.tag_name)) untagged.push(release.tag_name);
+        }
         if (batch.length < 100) break;
       }
       if (found.length > 1) throw new Error('More than one release names this tag; refusing to choose.');
+      // A title can help diagnose a missing tag, but only tag_name identifies a release to update.
+      if (found.length === 0 && untagged.length === 1) {
+        throw new Error(`Attach the existing tag ${tag} to draft ${untagged[0]}, then re-run the failed publish job.`);
+      }
       return found[0] ?? null;
     },
     async listAssets(releaseId) {
