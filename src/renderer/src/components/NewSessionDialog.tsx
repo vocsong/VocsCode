@@ -391,6 +391,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
               <span className="field-label">Model</span>
               <Button size="sm" variant="ghost" icon="refresh" disabled={modelsLoading} onClick={() => { setModelRefresh((v) => v + 1); void refreshAvailability(); }}>Recheck models and sign-in</Button>
             </div>
+            {modelsError && <p className="muted small ns-model-notice">Any listed suggestions may be fallbacks, not verified account access. Use Set up / sign in to repair the connection.</p>}
             <ModelPicker
               models={models}
               loading={modelsLoading}
@@ -400,7 +401,6 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
               // No onSelectCustom here: a new session starts on a listed model only; an unlisted id is switched in the header afterwards.
               onSelect={(m) => setModel(m ? { provider: m.provider, model: m.id } : undefined)}
             />
-            {modelsError && <p className="muted small">Any listed suggestions may be fallbacks, not verified account access. Use Set up / sign in to repair the connection.</p>}
           </section>
 
           <section className="ns-span2 ns-run-options">
@@ -435,6 +435,39 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
             {!descriptor.capabilities.approvals && mode !== 'plan' && <div className="ns-span2 callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
           </section>
         </div>
+
+        <section className="ns-span2">
+          <div className="field">
+            <label className="field-label" htmlFor={promptId}>First prompt (optional)</label>
+            {images.length > 0 && (
+              <div className="attachments ns-attachments">
+                {images.map((im, i) => (
+                  <div key={i} className="attachment">
+                    <img src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'image'} />
+                    <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove">
+                      <Icon name="x" size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
+            <div className="ns-prompt-box">
+              <textarea id={promptId} ref={promptRef} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
+              <label className="icon-btn ns-attach" title="Attach files">
+                <Icon name="file" size={14} />
+                <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
+              </label>
+            </div>
+            <span className="field-hint">Paste or attach files and images — they are sent with the first message.</span>
+          </div>
+          <Field
+            label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>}
+            hint="A persistent objective. The session keeps continuing until the agent proves it is done or the iteration guard trips. On a harness that has its own /goal command, the objective is handed to that harness instead and the guard does not apply."
+          >
+            <textarea rows={2} value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="e.g. Make the test suite pass and open a PR" />
+          </Field>
+        </section>
 
         <section className="ns-span2 ns-workspace">
           <Toggle
@@ -517,37 +550,6 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
         </section>
 
         <section className="ns-span2">
-          <div className="field">
-            <label className="field-label" htmlFor={promptId}>First prompt (optional)</label>
-            {images.length > 0 && (
-              <div className="attachments ns-attachments">
-                {images.map((im, i) => (
-                  <div key={i} className="attachment">
-                    <img src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'image'} />
-                    <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove">
-                      <Icon name="x" size={12} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
-            <div className="ns-prompt-box">
-              <textarea id={promptId} ref={promptRef} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
-              <label className="icon-btn ns-attach" title="Attach files">
-                <Icon name="file" size={14} />
-                <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
-              </label>
-            </div>
-            <span className="field-hint">Paste or attach files and images — they are sent with the first message.</span>
-          </div>
-          <Field
-            label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>}
-            hint="A persistent objective. The session keeps continuing until the agent proves it is done or the iteration guard trips. On a harness that has its own /goal command, the objective is handed to that harness instead and the guard does not apply."
-          >
-            <textarea rows={2} value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="e.g. Make the test suite pass and open a PR" />
-          </Field>
-
           <button type="button" className="link-btn" onClick={() => setAdvanced((v) => !v)}>
             <Icon name={advanced ? 'chevron' : 'chevronRight'} size={12} /> Advanced
           </button>
