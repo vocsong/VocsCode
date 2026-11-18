@@ -241,7 +241,9 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await fs.mkdir(project, { recursive: true });
     const existing = session('s_refresh', 'pi', project);
     existing.config.model = { provider: 'openai', model: 'gpt-5.4' };
-    const baseline: ModelInfo = { provider: 'openai', id: 'gpt-5.4', displayName: 'Catalog baseline', contextWindow: 256_000 };
+    existing.config.effort = 'high';
+    existing.activeEffort = 'low';
+    const baseline: ModelInfo = { provider: 'openai', id: 'gpt-5.4', displayName: 'Catalog baseline', contextWindow: 256_000, supportedEfforts: ['low', 'high'] };
     // Synthetic availability, not a claim that this runtime/account has access to GPT 6.2.
     const discovered: ModelInfo = { provider: 'openai', id: 'gpt-6.2', displayName: 'GPT 6.2 fixture', contextWindow: 512_000 };
     await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([existing]), 'utf8');
@@ -251,9 +253,15 @@ describe.runIf(enabled)('model picker before the first message', () => {
     const errors: string[] = [];
     win.on('pageerror', (error) => errors.push(error.message));
     await win.locator('.composer').waitFor({ timeout: 60_000 });
-    await win.click('.composer .pill[title="Model"]');
-    await win.getByRole('menuitem', { name: /^More models/ }).click();
-    const picker = win.locator('.composer .model-picker');
+    const modelPill = win.locator('.composer').getByRole('button', { name: /^Model:/ });
+    const menu = win.locator('.composer .run-controls').getByRole('menu');
+    const more = menu.getByRole('menuitem', { name: 'More models', exact: true });
+    await modelPill.click();
+    // The checked tier follows the effective effort, not the differing saved preference.
+    await menu.getByRole('group', { name: 'Reasoning Effort', exact: true })
+      .getByRole('menuitemradio', { name: 'low', exact: true, checked: true }).waitFor({ timeout: 20_000 });
+    await more.click();
+    const picker = menu.locator('.model-picker');
     const refs = () => picker.locator('.mp-name').evaluateAll((els) => els.map((el) => el.getAttribute('title')).sort());
     await expect.poll(refs, { timeout: 20_000 }).toEqual(['openai/gpt-5.4']);
 
@@ -294,15 +302,17 @@ describe.runIf(enabled)('model picker before the first message', () => {
     }
     expect(await app.evaluate(() => (globalThis as FixtureGlobal).__vocsModelRefreshFixture.discoveries.length)).toBe(beforeDiscovery + 1);
     expect(await win.locator('.composer textarea').inputValue()).toBe(draft);
-    await win.click('.composer .pill[title="Model"]');
-    await win.getByRole('menuitem', { name: /^More models/ }).click();
+    await modelPill.click();
+    await more.click();
     await expect.poll(refs, { timeout: 20_000 }).toEqual(['openai/gpt-5.4', 'openai/gpt-6.2']);
     const reported = picker.locator('.mp-row:has(.mp-name[title="openai/gpt-5.4"])');
     expect(await reported.innerText()).toContain('Session-reported baseline');
     expect(await reported.innerText()).toContain('Context 128k');
     expect(await picker.locator('.mp-name[title="openai/gpt-6.2"]').count()).toBe(1);
-    await picker.locator('.mp-row:has(.mp-name[title="openai/gpt-6.2"]) .mp-select').click();
-    await expect.poll(() => win.locator('.composer .pill[title="Model"] .pill-text').getAttribute('title'), { timeout: 10_000 }).toBe('openai/gpt-6.2');
+    await menu.getByRole('button', { name: 'Back', exact: true }).click();
+    await menu.getByRole('group', { name: 'Favourite', exact: true })
+      .getByRole('menuitem', { name: /^openai\/gpt-6\.2\b/ }).click();
+    await expect.poll(() => modelPill.locator('.pill-text').getAttribute('title'), { timeout: 10_000 }).toBe('openai/gpt-6.2');
     expect(await win.locator('.composer textarea').inputValue()).toBe(draft);
     const persisted = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
     expect(persisted).toHaveLength(1);
@@ -324,17 +334,23 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await fs.mkdir(userData, { recursive: true });
     await fs.mkdir(project, { recursive: true });
     // Explicit catalog and no key: this covers controls and persistence, never a paid turn.
+    const viewport = { width: 960, height: 720 };
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+      windowBounds: viewport,
       defaultHarness: 'native',
       defaultEffort: 'high',
       defaultModelByHarness: { native: { provider: 'openai', model: 'gpt-5.4' } },
+      favoriteModels: [{ provider: 'openai', model: 'gpt-4.1' }],
+      agent: { enabled: false },
       providers: [{ id: 'openai', enabled: true, hasApiKey: false, models: [
-        { provider: 'openai', id: 'gpt-5.4', displayName: 'GPT 5.4' },
-        { provider: 'openai', id: 'gpt-4.1', displayName: 'GPT 4.1' }
+        { provider: 'openai', id: 'gpt-5.4', displayName: 'GPT 5.4', supportedEfforts: ['low', 'high'] },
+        { provider: 'openai', id: 'gpt-4.1', displayName: 'GPT 4.1' },
+        { provider: 'openai', id: 'gpt-5.4-mini', displayName: 'GPT 5.4 mini' }
       ] }]
     }), 'utf8');
 
     const win = await launch(userData);
+    await win.setViewportSize(viewport);
     await openNewSession(win);
     await pickModel(win, 'openai/gpt-5.4');
     const creationToggle = win.getByRole('checkbox', { name: 'Fast mode', exact: true });
@@ -351,41 +367,86 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await creationToggle.isChecked()).toBe(true);
     await win.getByRole('button', { name: /Start session/ }).click();
 
-    // Fast mode lives in the model menu, beside the model it depends on.
-    await win.click('.composer .run-controls .pill[title="Model"]');
-    const toggle = win.getByRole('switch', { name: 'Request Fast mode' });
-    await toggle.waitFor({ timeout: 60_000 });
-    expect(await toggle.getAttribute('aria-checked')).toBe('true');
-    expect(await toggle.innerText()).toContain('requested');
+    // All three groups are visible together; the shortlist includes the unstarred current model.
+    const controls = win.locator('.composer .run-controls');
+    const modelPill = controls.getByRole('button', { name: /^Model:/ });
+    const menu = controls.getByRole('menu');
+    const favourite = menu.getByRole('group', { name: 'Favourite', exact: true });
+    const starred = favourite.getByRole('menuitem', { name: /^openai\/gpt-4\.1(?:\s|$)/ });
+    const more = menu.getByRole('menuitem', { name: 'More models', exact: true });
+    const effort = menu.getByRole('group', { name: 'Reasoning Effort', exact: true });
+    const low = effort.getByRole('menuitemradio', { name: 'low', exact: true });
+    const high = effort.getByRole('menuitemradio', { name: 'high', exact: true });
+    const fast = menu.getByRole('group', { name: 'Fast Mode', exact: true });
+    const on = fast.getByRole('menuitemradio', { name: 'On', exact: true });
+    const off = fast.getByRole('menuitemradio', { name: 'Off', exact: true });
+    const requested = fast.getByText('Requested', { exact: true });
+    const confirm = win.getByRole('button', { name: 'Enable Fast mode', exact: true });
     const saved = async () => JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
+
+    await modelPill.click({ timeout: 60_000 });
+    await starred.waitFor({ timeout: 20_000 });
+    expect(await favourite.getByRole('menuitem', { name: /^openai\/gpt-5\.4(?:\s|$)/ }).isVisible()).toBe(true);
+    expect(await favourite.getByRole('menuitem', { name: /^[^/]+\// }).count()).toBe(2);
+    expect(await effort.getByRole('menuitemradio').count()).toBe(2);
+    expect(await low.getAttribute('aria-checked')).toBe('false');
+    expect(await high.getAttribute('aria-checked')).toBe('true');
+    expect(await fast.getByRole('menuitemradio').count()).toBe(2);
+    expect(await on.getAttribute('aria-checked')).toBe('true');
+    expect(await off.getAttribute('aria-checked')).toBe('false');
+    expect(await requested.isVisible()).toBe(true);
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
     expect((await saved())[0].config.effort).toBe('high');
-    // The pill reads provider/model with the effort beside it; Fast stays in its accessible name and menu.
-    const modelPill = win.locator('.composer .pill[title="Model"]');
+    // The pill still exposes the qualified model and effort.
     expect(await modelPill.locator('.pill-text').innerText()).toBe('openai/GPT 5.4');
     expect(await modelPill.locator('.pill-effort').innerText()).toBe('high');
     expect(await modelPill.locator('.pill-text').getAttribute('title')).toBe('openai/gpt-5.4');
     expect(await modelPill.getAttribute('aria-label')).toContain('Model: openai/gpt-5.4');
     expect(await modelPill.getAttribute('aria-label')).toContain('high');
-    expect(await win.locator('.composer .model-menu').getByRole('menuitem', { name: /^Effort/ }).locator('.menu-item-hint').innerText()).toBe('high');
 
-    await toggle.click();
-    await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('false');
-    expect(await toggle.innerText()).toContain('off');
+    // More models follows the shortlist; the arrow keys reach both sets of inline radio items.
+    await starred.press('ArrowDown');
+    expect(await more.evaluate((el) => el === document.activeElement)).toBe(true);
+    await win.keyboard.press('ArrowDown');
+    expect(await low.evaluate((el) => el === document.activeElement)).toBe(true);
+    await high.press('ArrowDown');
+    expect(await on.evaluate((el) => el === document.activeElement)).toBe(true);
+    await win.keyboard.press('ArrowDown');
+    expect(await off.evaluate((el) => el === document.activeElement)).toBe(true);
+    await win.keyboard.press('Enter');
+    await expect.poll(() => off.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('true');
+    expect(await on.getAttribute('aria-checked')).toBe('false');
+    expect(await requested.isVisible()).toBe(false);
+    expect(await confirm.count()).toBe(0);
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(false);
-    await toggle.click();
-    const confirm = win.getByRole('button', { name: 'Enable Fast mode', exact: true });
+    expect(await high.getAttribute('aria-checked')).toBe('true');
+    expect(await menu.evaluate((el) => el.scrollHeight <= el.clientHeight + 1), 'all groups fit in the review screenshot').toBe(true);
+    await fs.mkdir(shots, { recursive: true });
+    await menu.screenshot({ path: path.join(shots, 'models-07-inline-model-menu.png'), animations: 'disabled' });
+
+    await low.click();
+    await menu.waitFor({ state: 'hidden' });
+    await expect.poll(() => modelPill.locator('.pill-effort').innerText(), { timeout: 10_000 }).toBe('low');
+    await modelPill.click();
+    expect(await low.getAttribute('aria-checked')).toBe('true');
+    expect(await high.getAttribute('aria-checked')).toBe('false');
+
+    await on.click();
     await confirm.waitFor();
     expect(await win.getByText(FAST_MODE_COST_WARNING, { exact: true }).isVisible()).toBe(true);
-    expect(await toggle.getAttribute('aria-checked')).toBe('false');
+    expect(await on.getAttribute('aria-checked')).toBe('false');
+    expect((await saved())[0].config.fastMode).toBe(false);
     await confirm.click();
-    await win.click('.composer .run-controls .pill[title="Model"]');
-    await expect.poll(() => toggle.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('true');
-    expect(await toggle.innerText()).toContain('requested');
+    await menu.waitFor({ state: 'hidden' });
+    await modelPill.click();
+    await expect.poll(() => on.getAttribute('aria-checked'), { timeout: 10_000 }).toBe('true');
+    expect(await off.getAttribute('aria-checked')).toBe('false');
+    await requested.waitFor();
+    expect(await low.getAttribute('aria-checked')).toBe('true');
     await expect.poll(async () => (await saved())[0]?.config.fastMode, { timeout: 10_000 }).toBe(true);
     const stored = await saved();
     expect(stored).toHaveLength(1);
-    expect(stored[0].config.effort).toBe('high');
+    expect(stored[0].config.effort).toBe('low');
     expect(stored[0].status).toBe('idle');
     expect(stored[0].usage.turns).toBe(0);
     expect(await win.locator('.transcript .item').count()).toBe(0);
@@ -409,11 +470,17 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(await win.locator('.transcript .item').count()).toBe(0);
 
     // The pill opens a short list first; the full catalog is one step in, under More models.
-    await win.click('.composer .run-controls .pill[title="Model"]');
-    await win.locator('.composer .model-menu-models .menu-item').first().waitFor({ timeout: 20_000 });
-    expect(await win.locator('.composer .model-menu').getByRole('menuitem', { name: /^Effort/ }).count()).toBe(1);
+    const controls = win.locator('.composer .run-controls');
+    const modelPill = controls.getByRole('button', { name: /^Model:/ });
+    const menu = controls.getByRole('menu');
+    const more = menu.getByRole('menuitem', { name: 'More models', exact: true });
+    await modelPill.click();
+    const shortlist = menu.getByRole('group', { name: 'Favourite', exact: true })
+      .getByRole('menuitem', { name: /^[^/]+\// });
+    await shortlist.first().waitFor({ timeout: 20_000 });
+    expect(await menu.getByRole('group', { name: 'Reasoning Effort', exact: true }).isVisible()).toBe(true);
     await win.screenshot({ path: path.join(shots, 'models-00-model-menu.png') });
-    await win.getByRole('menuitem', { name: /^More models/ }).click();
+    await more.click();
     const picker = win.locator('.model-picker');
     await picker.waitFor({ timeout: 10_000 });
     await picker.locator('.mp-row').first().waitFor({ timeout: 20_000 });
@@ -431,18 +498,18 @@ describe.runIf(enabled)('model picker before the first message', () => {
     const picked = (await first.locator('.mp-name').getAttribute('title')) ?? '';
     expect(picked).toContain('/');
     await first.click();
-    await expect.poll(() => win.locator('.composer .pill[title="Model"] .pill-text').getAttribute('title'), { timeout: 10_000 }).toBe(picked);
+    await expect.poll(() => modelPill.locator('.pill-text').getAttribute('title'), { timeout: 10_000 }).toBe(picked);
 
     // A gateway id that no catalog lists can still be typed and sticks: a bare id is adopted under
     // the provider already in use, and the pill's tooltip retains that qualified name.
-    await win.click('.composer .run-controls .pill[title="Model"]');
-    await win.getByRole('menuitem', { name: /^More models/ }).click();
+    await modelPill.click();
+    await more.click();
     const picker2 = win.locator('.model-picker');
     await picker2.waitFor({ timeout: 10_000 });
     await picker2.locator('.mp-search input').fill('acme-custom-1');
     await picker2.getByRole('button', { name: 'Use “acme-custom-1”' }).click();
-    await expect.poll(() => win.locator('.composer .pill[title="Model"] .pill-text').getAttribute('title'), { timeout: 10_000 }).toBe(`${picked.split('/')[0]}/acme-custom-1`);
-    expect(await win.locator('.composer .pill[title="Model"] .pill-text').innerText()).toBe(`${picked.split('/')[0]}/acme-custom-1`);
+    await expect.poll(() => modelPill.locator('.pill-text').getAttribute('title'), { timeout: 10_000 }).toBe(`${picked.split('/')[0]}/acme-custom-1`);
+    expect(await modelPill.locator('.pill-text').innerText()).toBe(`${picked.split('/')[0]}/acme-custom-1`);
   }, 180_000);
 
   it.each([
@@ -624,13 +691,14 @@ describe.runIf(enabled)('model picker before the first message', () => {
 
     // Started without a prompt, so no harness process exists; the composer's run controls read the same catalog.
     await win.getByRole('button', { name: /Start session/ }).click();
-    await win.click('.composer .run-controls .pill[title="Model"]');
-    const note = win.locator('.composer .run-more-note');
-    await expect.poll(() => note.innerText(), { timeout: 60_000 }).toContain('does not support reasoning effort');
-    expect(await win.getByRole('menuitem', { name: 'high', exact: true }).count()).toBe(0);
-    expect(await win.locator('.composer .model-menu').getByRole('menuitem', { name: /^Effort/ }).isDisabled()).toBe(true);
-    expect(await win.locator('.composer .model-menu').getByRole('menuitem', { name: /^Effort/ }).locator('.menu-item-hint').innerText()).toBe('Not supported');
-    expect(await win.locator('.composer .pill[title="Model"]').getAttribute('aria-label')).not.toContain('high');
+    const controls = win.locator('.composer .run-controls');
+    const modelPill = controls.getByRole('button', { name: /^Model:/ });
+    await modelPill.click();
+    const effortGroup = controls.getByRole('menu').getByRole('group', { name: 'Reasoning Effort', exact: true });
+    await effortGroup.getByText(/does not support reasoning effort/).waitFor({ timeout: 60_000 });
+    expect(await effortGroup.getByRole('menuitemradio').count()).toBe(0);
+    expect(await effortGroup.getByRole('menuitem').count()).toBe(0);
+    expect(await modelPill.getAttribute('aria-label')).not.toContain('Effort:');
     const sessions = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
     expect(sessions).toHaveLength(1);
     expect(sessions[0].config.effort).toBeNull();

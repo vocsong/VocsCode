@@ -139,7 +139,7 @@ export function Badge({ children, tone = 'neutral', title }: { children: React.R
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-const MENU_ITEM_SELECTOR = '[role="menuitem"]:not([disabled])';
+const MENU_ITEM_SELECTOR = ':is([role="menuitem"], [role="menuitemradio"]):not([disabled])';
 
 /** True only inside a Dropdown menu, so MenuItem labels itself without touching the title-bar menus. */
 const MenuContext = React.createContext(false);
@@ -169,12 +169,14 @@ export function Dropdown({
       if (!ref.current?.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.key === 'Escape') {
         restoreTrigger();
         return;
       }
       const menu = menuRef.current;
-      if (!menu) return;
+      // A dialog opened by a menu item (e.g. Fast mode confirmation) owns its own keys.
+      if (!menu?.contains(document.activeElement)) return;
       const items = Array.from(menu.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR));
       if (items.length === 0) return;
       const current = items.indexOf(document.activeElement as HTMLElement);
@@ -226,13 +228,24 @@ export function Dropdown({
   );
 }
 
-export function MenuItem({ children, onClick, active, danger, hint, disabled, trailing }: { children: React.ReactNode; onClick?: () => void; active?: boolean; danger?: boolean; hint?: string; disabled?: boolean; trailing?: React.ReactNode }) {
+export function MenuItem({ children, onClick, active, checked, danger, hint, disabled, trailing }: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  active?: boolean;
+  /** Supplying a checked state makes this a menu radio item inside a Dropdown. */
+  checked?: boolean;
+  danger?: boolean;
+  hint?: string;
+  disabled?: boolean;
+  trailing?: React.ReactNode;
+}) {
   const inMenu = React.useContext(MenuContext);
+  const selected = checked ?? active;
   return (
-    <button type="button" role={inMenu ? 'menuitem' : undefined} className={`menu-item ${active ? 'active' : ''} ${danger ? 'danger' : ''}`} onClick={onClick} disabled={disabled}>
+    <button type="button" role={inMenu ? (checked === undefined ? 'menuitem' : 'menuitemradio') : undefined} aria-checked={inMenu ? checked : undefined} className={`menu-item ${selected ? 'active' : ''} ${danger ? 'danger' : ''}`} onClick={onClick} disabled={disabled}>
       <span className="menu-item-label">{children}</span>
       {hint && <span className="menu-item-hint">{hint}</span>}
-      {active && <Icon name="check" size={14} />}
+      {selected && <Icon name="check" size={14} />}
       {trailing}
     </button>
   );

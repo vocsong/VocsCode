@@ -12,7 +12,7 @@ const invokeMock = vi.fn().mockResolvedValue({});
   on: vi.fn().mockReturnValue(() => undefined),
 };
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Header } from '../src/renderer/src/components/Header';
 import { SessionControls } from '../src/renderer/src/components/SessionControls';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
@@ -181,7 +181,8 @@ describe('composer run controls', () => {
     expect(pill.getAttribute('aria-label')).toContain('deepseek/deepseek-v4-flash');
 
     fireEvent.click(pill);
-    expect(screen.getByText('deepseek/deepseek-v4-flash', { selector: '.model-menu-current' })).toBeTruthy();
+    const favourites = within(screen.getByRole('group', { name: 'Favourite' }));
+    expect(favourites.getByRole('menuitem', { name: 'deepseek/deepseek-v4-flash' }).querySelector('[data-icon="check"]')).toBeTruthy();
     fireEvent.click(screen.getByRole('menuitem', { name: /^More models/ }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'openrouter/deepseek/deepseek-flash' } });
     fireEvent.click(screen.getByRole('button', { name: 'Use “openrouter/deepseek/deepseek-flash”' }));
@@ -201,7 +202,8 @@ describe('composer run controls', () => {
     const pill = container.querySelector('[title="Model"]') as HTMLElement;
     expect(pill.querySelector('.pill-effort')?.textContent).toBe('high');
     fireEvent.click(pill);
-    expect(screen.getByRole('menuitem', { name: /^Effort/ }).textContent).toContain('high');
+    const reasoning = within(screen.getByRole('group', { name: 'Reasoning Effort' }));
+    expect(reasoning.getByRole('menuitemradio', { name: 'high', checked: true })).toBeTruthy();
     fireEvent.mouseDown(document.body);
     expect(screen.queryByRole('button', { name: 'More session controls' })).toBeNull();
 
@@ -214,7 +216,9 @@ describe('composer run controls', () => {
   it('reads default in the model menu while no effort was chosen', () => {
     setupControls();
     fireEvent.click(screen.getByTitle('Model'));
-    expect(screen.getByRole('menuitem', { name: /^Effort/ }).textContent).toContain('default');
+    const reasoning = within(screen.getByRole('group', { name: 'Reasoning Effort' }));
+    expect(reasoning.getByText('Default', { exact: true })).toBeTruthy();
+    expect(reasoning.queryByRole('menuitemradio', { checked: true })).toBeNull();
   });
 
   it('names the model provider-first in the pill, with the effort beside it as its own lighter label', () => {
@@ -236,19 +240,16 @@ describe('composer run controls', () => {
     expect(container.querySelector('[title="Model"] .pill-effort')).toBeNull();
 
     fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
-    expect((screen.getByRole('menuitem', { name: /^Effort/ }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText('Haiku 4.5 does not support reasoning effort')).toBeTruthy();
-    expect(screen.queryByRole('menuitem', { name: 'high' })).toBeNull();
+    const reasoning = within(screen.getByRole('group', { name: 'Reasoning Effort' }));
+    expect(reasoning.getByText('Haiku 4.5 does not support reasoning effort')).toBeTruthy();
+    expect(reasoning.queryAllByRole('menuitemradio')).toHaveLength(0);
   });
 
-  it('offers Claude its own effort levels under Effort while the model does not say which it takes', () => {
-    const { container } = setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
-    fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
-    fireEvent.click(screen.getByRole('menuitem', { name: /^Effort/ }));
-    expect(screen.getAllByRole('menuitem').map((item) => item.textContent?.trim())).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
-    // Back returns to the model list without closing the menu.
-    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
-    expect(screen.getByRole('menuitem', { name: /^Effort/ })).toBeTruthy();
+  it('offers all of Claude’s effort levels inline when the model does not say which it takes', () => {
+    setupControls({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    fireEvent.click(screen.getByTitle('Model'));
+    const reasoning = within(screen.getByRole('group', { name: 'Reasoning Effort' }));
+    expect(reasoning.getAllByRole('menuitemradio').map((item) => item.textContent?.trim())).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
   });
 
   it('lists starred catalog models plus the current one, and switches with one click', async () => {
@@ -280,8 +281,13 @@ describe('composer run controls', () => {
     fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
     expect([...document.querySelectorAll('.model-menu-models .menu-item-label')].map((row) => row.textContent)).toEqual(['p/a', 'p/b', 'p/c', 'p/d', 'p/f']);
     fireEvent.click(screen.getByRole('menuitem', { name: /^More models/ }));
-    fireEvent.change(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'p/e' } });
+    const search = screen.getByRole('textbox', { name: 'Search models' });
+    expect(document.activeElement).toBe(search);
+    fireEvent.change(search, { target: { value: 'p/e' } });
     expect(screen.getByRole('button', { name: /p\/e/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: /^p\/a/ }));
+    expect(screen.getByRole('group', { name: 'Reasoning Effort' })).toBeTruthy();
   });
 
   it('remembers a successful reasoning effort switch for the next session', async () => {
@@ -294,8 +300,7 @@ describe('composer run controls', () => {
     });
 
     fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
-    fireEvent.click(screen.getByRole('menuitem', { name: /^Effort/ }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'high' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'high' }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('sessions:setEffort', { id: 's_h', effort: 'high' }));
     expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
@@ -309,8 +314,7 @@ describe('composer run controls', () => {
     invokeMock.mockImplementation((channel: string) => channel === 'sessions:setEffort' ? Promise.reject(new Error('unsupported')) : Promise.resolve({}));
 
     fireEvent.click(container.querySelector('[title="Model"]') as HTMLElement);
-    fireEvent.click(screen.getByRole('menuitem', { name: /^Effort/ }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'high' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'high' }));
 
     await waitFor(() => expect(useStore.getState().toasts.some((toast) => toast.text.includes('unsupported'))).toBe(true));
     expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
