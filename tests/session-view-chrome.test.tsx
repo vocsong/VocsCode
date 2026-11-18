@@ -1,6 +1,6 @@
 // The session view's ways in: the title bar names where you are and opens the command palette,
 // Vesta minimizes into the title bar, the sidebar leads with New session and the app's other
-// views (Settings alone at the foot), and the welcome screen is a clean start.
+// views with Settings at the foot, and the welcome screen is a clean start.
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -88,7 +88,7 @@ describe('sidebar navigation', () => {
     expect(useStore.getState().quickSessionOpen).toBe(true);
   });
 
-  it('keeps the views at the top, the Archived toggle on the Sessions heading and Settings alone at the foot', () => {
+  it('keeps the views at the top, the Archived toggle on the Sessions heading and Settings at the foot', () => {
     const { container } = render(<Sidebar />);
     const labels = (selector: string) => [...container.querySelectorAll(selector)].map((el) => el.textContent?.trim());
     expect(labels('.sidebar-views .sidebar-link')).toEqual(['Analytics', 'Skills', 'MCP']);

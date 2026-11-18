@@ -314,8 +314,9 @@ open. The feed uses `latest.yml`, `latest-mac.yml` and `latest-linux.yml`, gener
 and exposed together by the complete-set publisher. NSIS differential updates use `.blockmap` files.
 The `zip` targets in `electron-builder.yml` supply the macOS updater, and users install from the DMG.
 New versions download automatically. Users can check immediately from
-**Settings → About & doctor → Check for updates**. The title bar offers **Restart to update** once
-the download is ready and sessions are idle. Updates install on a clean quit for Windows NSIS and Linux AppImage.
+**Settings → About & doctor → Check for updates**. Download progress appears beside **Settings** in the
+sidebar. Once the download is ready and sessions are idle, **Install update** restarts Vocs Code.
+Updates also install on a clean quit for Windows NSIS and Linux AppImage.
 macOS installation from the updater is best-effort with the current ad-hoc signature. Reliable macOS
 updates require Developer ID signing.
 
