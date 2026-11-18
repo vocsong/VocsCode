@@ -2214,6 +2214,10 @@ h4 {
   top: auto;
   bottom: calc(100% + 6px);
 }
+/* The expanded quick choices use more of the viewport, but still scroll for long lists. */
+.run-controls .dropdown-menu:has(.model-menu:not(.model-menu-wide)) {
+  max-height: 76vh;
+}
 .run-more-label {
   padding: 8px 8px 4px;
   font-size: 11px;
@@ -2228,15 +2232,6 @@ h4 {
 .run-more-section {
   border-top: 1px solid var(--border);
   margin-top: 4px;
-}
-.run-more-footer {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  border-top: 1px solid var(--border);
-  margin-top: 4px;
-  padding: 6px 4px 2px;
 }
 .run-controls .pill {
   gap: 5px;
@@ -2267,15 +2262,11 @@ h4 {
   color: var(--fg-muted);
   font-weight: 400;
 }
-.model-menu-current {
-  padding: 8px;
-  color: var(--fg-muted);
-  font-size: 11px;
-  overflow-wrap: anywhere;
-  border-bottom: 1px solid var(--border);
-}
 .model-menu {
   width: 320px;
+}
+.model-menu:not(.model-menu-wide) .menu-item {
+  padding-block: 5px;
 }
 /* A short-list row keeps the model name whole; the catalog's label truncates instead. */
 .model-menu-models .menu-item-label {
@@ -2316,10 +2307,6 @@ h4 {
 .run-controls .pill.mode-auto {
   color: var(--blue);
   background: var(--blue-soft);
-}
-.run-controls .pill[role='switch'][aria-checked='true'] {
-  color: var(--amber);
-  background: var(--amber-soft);
 }
 /* Context use and spend, next to the send button. */
 .session-meter {

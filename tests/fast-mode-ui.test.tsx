@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { AppSettings, ModelInfo, SessionMeta } from '../src/shared/types';
 import { FAST_MODE_COST_WARNING } from '../src/shared/fast-mode';
 
@@ -114,6 +114,10 @@ describe('new-session Fast mode request', () => {
   });
 });
 
+function fastOption(name: 'On' | 'Off') {
+  return within(screen.getByRole('group', { name: 'Fast Mode' })).getByRole<HTMLButtonElement>('menuitemradio', { name });
+}
+
 describe('composer Fast mode request', () => {
   it('keeps Steer primary, queues through its menu, and puts cost in composer options', async () => {
     const busy = session({ status: 'running', usage: { ...session().usage, costUsd: 6.11 } });
@@ -182,19 +186,28 @@ describe('composer Fast mode request', () => {
     invoke.mockImplementation((channel: string) => channel === 'sessions:setFastMode' ? new Promise((r) => { resolve = r; }) : Promise.resolve({}));
     render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
-    const toggle = screen.getByRole('switch', { name: 'Request Fast mode' }) as HTMLButtonElement;
-    fireEvent.click(toggle);
+    const on = fastOption('On');
+    const off = fastOption('Off');
+    fireEvent.click(off);
+    expect(off.getAttribute('aria-checked')).toBe('true');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent.click(on);
     expect(await screen.findByText(FAST_MODE_COST_WARNING)).toBeTruthy();
     expect(invoke).not.toHaveBeenCalledWith('sessions:setFastMode', expect.anything());
-    fireEvent.click(screen.getByRole('button', { name: 'Enable Fast mode' }));
+    const confirm = screen.getByRole('button', { name: 'Enable Fast mode' });
+    expect(document.activeElement).toBe(confirm);
+    fireEvent.keyDown(confirm, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(confirm); // The menu cannot steal focus from the warning.
+    fireEvent.click(confirm);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:setFastMode', { id: 's_fast', enabled: true }));
-    expect(toggle.disabled).toBe(true);
-    expect(toggle.getAttribute('aria-checked')).toBe('false');
-    expect(toggle.textContent).toContain('off');
+    expect(on.disabled && off.disabled).toBe(true);
+    expect(on.getAttribute('aria-checked')).toBe('false');
+    expect(off.getAttribute('aria-checked')).toBe('true');
     await act(async () => resolve(session({ config: { ...session().config, fastMode: true }, fastModeStatus: { state: 'requested' } })));
-    expect(toggle.getAttribute('aria-checked')).toBe('true');
-    expect(toggle.textContent).toContain('requested');
-    expect(toggle.disabled).toBe(false);
+    expect(on.getAttribute('aria-checked')).toBe('true');
+    expect(off.getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByRole('status').textContent).toBe('Requested');
+    expect(on.disabled || off.disabled).toBe(false);
     expect(useStore.getState().sessions[0].config.effort).toBe('high');
     expect(invoke).not.toHaveBeenCalledWith('sessions:setEffort', expect.anything());
   });
@@ -203,60 +216,61 @@ describe('composer Fast mode request', () => {
     invoke.mockRejectedValue(new Error('account refused'));
     render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
-    const toggle = screen.getByRole('switch', { name: 'Request Fast mode' }) as HTMLButtonElement;
-    fireEvent.click(toggle);
+    const on = fastOption('On');
+    fireEvent.click(on);
     fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
-    await waitFor(() => expect(toggle.disabled).toBe(false));
+    await waitFor(() => expect(on.disabled).toBe(false));
     expect(invoke).not.toHaveBeenCalledWith('sessions:setFastMode', expect.anything());
-    fireEvent.click(toggle);
+    fireEvent.click(on);
     fireEvent.click(await screen.findByRole('button', { name: 'Enable Fast mode' }));
     expect((await screen.findByRole('alert')).textContent).toContain('account refused');
     expect(useStore.getState().toasts.map((t) => t.text)).toContain('Fast mode change failed: account refused');
-    expect(toggle.getAttribute('aria-checked')).toBe('false');
-    expect(toggle.textContent).toContain('off');
-    expect(toggle.disabled).toBe(false);
+    expect(on.getAttribute('aria-checked')).toBe('false');
+    expect(fastOption('Off').getAttribute('aria-checked')).toBe('true');
+    expect(on.disabled).toBe(false);
   });
 
   it('reports a failed request even after the model menu closes for confirmation', async () => {
     invoke.mockImplementation((channel: string) => channel === 'sessions:setFastMode' ? Promise.reject(new Error('request failed')) : Promise.resolve({}));
     render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
-    fireEvent.click(screen.getByRole('switch', { name: 'Request Fast mode' }));
+    fireEvent.click(fastOption('On'));
     fireEvent.click(screen.getByRole('button', { name: 'Enable Fast mode' }));
     fireEvent.mouseDown(document.body);
     await waitFor(() => expect(useStore.getState().toasts.map((t) => t.text)).toContain('Fast mode change failed: request failed'));
-    expect(screen.queryByRole('switch', { name: 'Request Fast mode' })).toBeNull();
+    expect(screen.queryByRole('group', { name: 'Fast Mode' })).toBeNull();
   });
 
-  it.each(['requested', 'on', 'unavailable', 'cooldown'] as const)('shows effective %s status, including runtime detail', (state) => {
+  it.each([['requested', 'Requested'], ['on', 'Active'], ['unavailable', 'Unavailable'], ['cooldown', 'Cooldown']] as const)('shows effective %s status, including runtime detail', (state, label) => {
     seed(session({ config: { ...session().config, fastMode: true }, fastModeStatus: { state, detail: 'runtime detail' } }));
     render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
-    const toggle = screen.getByRole('switch', { name: 'Request Fast mode' });
-    expect(toggle.textContent).toContain(state);
-    expect(toggle.getAttribute('title')).toContain('runtime detail');
+    const status = within(screen.getByRole('group', { name: 'Fast Mode' })).getByRole('status');
+    expect(status.textContent).toBe(label);
+    expect(status.getAttribute('title')).toBe('runtime detail');
+    expect(fastOption('On').getAttribute('aria-checked')).toBe('true');
   });
 
   it.each(['running', 'starting', 'awaiting'] as const)('disables changes while %s', (status) => {
     seed(session({ status }));
     render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
-    const toggle = screen.getByRole('switch', { name: 'Request Fast mode' }) as HTMLButtonElement;
-    expect(toggle.disabled).toBe(true);
-    expect(toggle.title).toContain('Stop the session');
+    expect(fastOption('On').disabled && fastOption('Off').disabled).toBe(true);
+    expect(screen.getByText('Stop the session before changing Fast mode.')).toBeTruthy();
   });
 
   it('uses a custom active ref and provider endpoint instead of the saved model', () => {
     seed(session({ activeModel: { provider: 'openai', model: 'gpt-4.1-custom' } }));
     const view = render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
-    expect((screen.getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
+    expect(fastOption('On').disabled).toBe(true);
     view.unmount();
     seed();
     useStore.setState({ settings: { ...settings, providers: [{ id: 'openai', baseUrl: 'https://gateway.example/v1', enabled: true } as never] } });
     render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
-    expect((screen.getByRole('switch') as HTMLButtonElement).title).toContain('custom endpoints');
+    expect(fastOption('On').disabled).toBe(true);
+    expect(screen.getByText(/custom endpoints/)).toBeTruthy();
   });
 
   it('allows an unsupported saved request to be turned off without confirmation', async () => {
@@ -264,26 +278,28 @@ describe('composer Fast mode request', () => {
     seed(session({ config: { ...meta.config, harness: 'cursor', fastMode: true }, fastModeStatus: { state: 'unavailable' } }));
     render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
-    const toggle = screen.getByRole('switch') as HTMLButtonElement;
-    expect(toggle.disabled).toBe(false);
-    fireEvent.click(toggle);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:setFastMode', { id: 's_fast', enabled: false }));
+    expect(fastOption('On').disabled).toBe(true);
+    const off = fastOption('Off');
+    expect(off.disabled).toBe(false);
+    fireEvent.click(off);
+    await waitFor(() => expect(off.getAttribute('aria-checked')).toBe('true'));
+    expect(invoke).toHaveBeenCalledWith('sessions:setFastMode', { id: 's_fast', enabled: false });
     expect(screen.queryByText('Enable Fast mode?')).toBeNull();
   });
 
-  it('honors connection capability and hides the toggle for Missions', () => {
+  it('honors connection capability and hides Fast Mode for Missions', () => {
     gate.allowed = false;
     const view = render(<LiveControls />);
     fireEvent.click(screen.getByTitle('Model'));
-    expect((screen.getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
+    expect(fastOption('On').disabled && fastOption('Off').disabled).toBe(true);
     view.unmount();
     // The composer carries the run controls for an ordinary session, and none for a Mission lead.
     const ordinary = render(<Composer session={session()} />);
     fireEvent.click(screen.getByTitle('Model'));
-    expect(screen.getByRole('switch', { name: 'Request Fast mode' })).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Fast Mode' })).toBeTruthy();
     ordinary.unmount();
     render(<Composer session={session({ mission: { missionId: 'm1', role: 'lead' } as SessionMeta['mission'] })} />);
     expect(screen.getByPlaceholderText(/Message the principal engineer/)).toBeTruthy();
-    expect(screen.queryByRole('switch', { name: 'Request Fast mode' })).toBeNull();
+    expect(screen.queryByRole('group', { name: 'Fast Mode' })).toBeNull();
   });
 });

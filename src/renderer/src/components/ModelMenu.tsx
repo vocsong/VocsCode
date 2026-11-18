@@ -1,9 +1,5 @@
-/**
- * The composer's model menu: a short list of models, Effort › and More models › drilling in place
- * (a side flyout would clip at the window edge), and the Fast mode request. Unmounts on close, so it
- * always reopens on the short list.
- */
-import React, { useEffect, useRef, useState } from 'react';
+/** The composer's quick model, reasoning and speed choices. Only the full catalog drills in. */
+import React, { useEffect, useId, useRef, useState } from 'react';
 import type { EffortLevel, ModelInfo, ModelRef, SessionMeta } from '../../../shared/types';
 import { modelName } from '../../../shared/model-names';
 import type { SessionControlOption } from '../session-controls';
@@ -11,7 +7,7 @@ import { quickModels } from '../session-controls';
 import { useStore } from '../store';
 import { Icon, MenuItem, Spinner } from './ui';
 import { ModelPicker } from './ModelPicker';
-import { FastModePill } from './FastModePill';
+import { FastModeOptions } from './FastModeOptions';
 
 const NO_FAVORITES: ModelRef[] = [];
 
@@ -37,7 +33,7 @@ export function ModelMenu({
   error?: string;
   current?: ModelRef;
   emptyText: string;
-  /** The harness takes reasoning effort at all; without it the Effort row is not offered. */
+  /** Omit the whole effort section for harnesses that don't take reasoning effort. */
   effortSupported: boolean;
   effortLevels: SessionControlOption<EffortLevel>[];
   effort?: EffortLevel;
@@ -48,24 +44,21 @@ export function ModelMenu({
   close: () => void;
 }) {
   const favorites = useStore((s) => s.settings?.favoriteModels ?? NO_FAVORITES);
-  const [view, setView] = useState<'main' | 'effort' | 'models'>('main');
+  const [showAll, setShowAll] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  // A drilled-in view keeps keyboard focus on its rows; the full picker focuses its own search.
+  const favouriteId = useId();
+  const effortId = useId();
+  // Restore row focus when returning from the full picker, which focuses its own search.
   useEffect(() => {
-    if (view !== 'models') ref.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')?.focus();
-  }, [view]);
+    if (!showAll) ref.current?.querySelector<HTMLButtonElement>('button:not([disabled])')?.focus();
+  }, [showAll]);
 
-  const isCurrent = (m: ModelInfo) => !!current && m.provider === current.provider && m.id === current.model;
-  const back = (label: string) => (
-    <button type="button" className="menu-item model-menu-back" aria-label="Back" onClick={() => setView('main')}>
-      <Icon name="arrowLeft" size={13} /> <span className="menu-item-label">{label}</span>
-    </button>
-  );
-
-  if (view === 'models') {
+  if (showAll) {
     return (
-      <div ref={ref} className="model-menu model-menu-wide">
-        {back('All models')}
+      <div className="model-menu model-menu-wide">
+        <button type="button" className="menu-item model-menu-back" aria-label="Back" onClick={() => setShowAll(false)}>
+          <Icon name="arrowLeft" size={13} /> <span className="menu-item-label">All models</span>
+        </button>
         <ModelPicker
           models={models}
           loading={loading}
@@ -85,48 +78,43 @@ export function ModelMenu({
     );
   }
 
-  if (view === 'effort') {
-    return (
-      <div ref={ref} className="model-menu">
-        {back('Reasoning effort')}
-        {effortLevels.map((option) => (
-          <MenuItem key={option.value} active={effort === option.value} onClick={() => { close(); onEffort(option.value); }}>
-            {option.label}
-          </MenuItem>
-        ))}
-      </div>
-    );
-  }
-
   const short = quickModels(models, favorites, current);
   return (
     <div ref={ref} className="model-menu">
-      {current && <div className="model-menu-current">{modelName(current.provider, current.model)}</div>}
-      <div className="model-menu-models">
-        {short.map((m) => (
-          <MenuItem key={`${m.provider}::${m.id}`} active={isCurrent(m)} hint={m.displayName && m.displayName !== m.id ? m.displayName : undefined} onClick={() => { close(); if (!isCurrent(m)) onSelect(m); }}>
-            {modelName(m.provider, m.id)}
-          </MenuItem>
-        ))}
-      </div>
-      {loading && !short.length && <div className="run-more-note row gap6"><Spinner size={11} /> Loading models…</div>}
-      {!loading && !short.length && <div className="run-more-note">{error ?? emptyText}</div>}
-      {effortSupported && (
-        <div className="run-more-section">
-          <MenuItem disabled={!effortLevels.length} hint={effortLevels.length ? effort ?? 'default' : 'Not supported'} trailing={<Icon name="chevronRight" size={13} />} onClick={() => setView('effort')}>
-            Effort
-          </MenuItem>
-          {!effortLevels.length && <div className="run-more-note">{noEffortNote}</div>}
+      <div role="group" aria-labelledby={favouriteId}>
+        <div className="run-more-label" id={favouriteId}>Favourite</div>
+        <div className="model-menu-models">
+          {short.map((m) => {
+            const selected = m.provider === current?.provider && m.id === current.model;
+            return (
+              <MenuItem key={`${m.provider}::${m.id}`} active={selected} hint={m.displayName && m.displayName !== m.id ? m.displayName : undefined} onClick={() => { close(); if (!selected) onSelect(m); }}>
+                {modelName(m.provider, m.id)}
+              </MenuItem>
+            );
+          })}
         </div>
-      )}
-      <div className="run-more-section">
-        <MenuItem trailing={<Icon name="chevronRight" size={13} />} onClick={() => setView('models')}>
+        {loading && !short.length && <div className="run-more-note row gap6"><Spinner size={11} /> Loading models…</div>}
+        {!loading && !short.length && <div className="run-more-note">{error ?? emptyText}</div>}
+        <MenuItem trailing={<Icon name="chevronRight" size={13} />} onClick={() => setShowAll(true)}>
           More models
         </MenuItem>
       </div>
-      <div className="run-more-footer">
-        <FastModePill key={session.id} session={session} />
-      </div>
+      {effortSupported && (
+        <div className="run-more-section" role="group" aria-labelledby={effortId}>
+          <div className="run-more-label row gap6">
+            <span id={effortId}>Reasoning Effort</span>
+            <span className="spacer" />
+            {!effort && effortLevels.length > 0 && <span className="menu-item-hint">Default</span>}
+          </div>
+          {effortLevels.map((option) => (
+            <MenuItem key={option.value} checked={effort === option.value} onClick={() => { close(); onEffort(option.value); }}>
+              {option.label}
+            </MenuItem>
+          ))}
+          {!effortLevels.length && <div className="run-more-note">{noEffortNote}</div>}
+        </div>
+      )}
+      <FastModeOptions key={session.id} session={session} />
     </div>
   );
 }

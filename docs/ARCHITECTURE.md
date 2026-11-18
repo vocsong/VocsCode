@@ -133,7 +133,8 @@ option with no level the app models stays unknown too.
 
 The desktop composer footer stays on one row, including narrow split panes. Its model pill uses
 catalog display text (or the model id), with the full `provider/model` identity in its accessible
-label, tooltip and menu. Effort and Fast settings live in that menu; permissions remain visible.
+label, tooltip and menu. The menu shows Favourite models, the available Reasoning Effort levels,
+and Fast Mode On/Off together; More models opens the searchable catalog. Permissions remain visible.
 Steer is primary while running, with Queue in its adjacent menu; queue-only harnesses get one Queue
 button. Composer options holds dictation's Cloud/Local selector, attachments, cost/context details
 and queued-message counts. Container queries move the inline attachment/context/count controls into
