@@ -75,6 +75,7 @@ function host(models = catalog) {
       cost = totalCost;
       feed({ type: 'agent_start' });
       feed({ type: 'agent_end', messages: [] });
+      feed({ type: 'agent_settled' });
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
   };
@@ -209,6 +210,7 @@ describe('Pi adapter → AnalyticsStore subagent cost boundary', () => {
     h.feed({ type: 'message_update', usage: { input: 100, output: 10, cost: { total: 0.3 } }, assistantMessageEvent: { type: 'text_delta', delta: 'partial' } });
     expect(usages(h.events).at(-1)!.totals.costUsd).toBeCloseTo(0.3);
     h.feed({ type: 'agent_end', messages: [] });
+    h.feed({ type: 'agent_settled' });
     h.notification({ id: 'child', modelName: 'Claude Opus 5', status: 'completed', totalCost: 0.2, toolUses: 2 });
     // A later poll for the same run must not settle it again or change the initial attribution.
     h.result({ agentId: 'child', modelName: 'anthropic/claude-opus-5', status: 'completed', cost: 0.2, toolUses: 2 });
