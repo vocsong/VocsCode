@@ -155,6 +155,9 @@ speed field, and Pi's bundled fast-mode extension modifies provider payloads and
 headers. `SessionMeta.fastModeStatus` is observational: `requested` is not `on`. Only provider/runtime
 evidence may report `on`, `cooldown` or `unavailable`; restart and fork reset stale observations.
 No adapter changes reasoning effort or silently retries a failed premium request at another tier.
+Pi estimates completed Fast requests using published rates where possible. Where those rates are
+unavailable, analytics uses 2x Pi's standard cost estimate for that request and shows a warning.
+Neither estimate confirms the provider's actual charges.
 
 Both Codex harnesses discover their pre-session models through a short-lived app-server probe,
 following every `model/list` page rather than treating the bundled catalog as authoritative. The
