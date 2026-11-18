@@ -150,7 +150,20 @@ export function createGitHubClient({ repository, token, fetchImpl = fetch }) {
       if (object.type !== 'commit' || !/^[0-9a-f]{40}$/.test(object.sha)) throw new Error('Tag does not resolve to a commit.');
       return object.sha;
     },
-    getRelease: (tag) => request(`${base}/releases/tags/${encodeURIComponent(tag)}`),
+    /** The release for this exact tag, draft or published. `GET /releases/tags/{tag}` never
+     *  returns drafts (HTTP 404), so a draft is found in the authenticated release list; more than
+     *  one release naming the tag is refused rather than guessed. */
+    async getRelease(tag) {
+      const found = [];
+      for (let page = 1; page <= 10; page++) {
+        const batch = await request(`${base}/releases?per_page=100&page=${page}`);
+        if (!Array.isArray(batch)) throw new Error('Invalid GitHub release listing.');
+        found.push(...batch.filter((release) => release?.tag_name === tag));
+        if (batch.length < 100) break;
+      }
+      if (found.length > 1) throw new Error('More than one release names this tag; refusing to choose.');
+      return found[0] ?? null;
+    },
     async listAssets(releaseId) {
       const assets = [];
       for (let page = 1; ; page++) {
