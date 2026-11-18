@@ -9,6 +9,16 @@ sign-in from API keys, detects selected-runtime prerequisites, and checks models
 a coding prompt. See [First-time setup and recovery](ONBOARDING.md) for billing caveats, explicit
 save/dismissal behavior and repair paths.
 
+**Providers & keys → Harness logins → Refresh models** re-probes Pi, Codex or Claude without
+installing a runtime or sending a prompt. The Codex action refreshes both Codex adapters. Results
+are shared with existing session pickers and New Session; new models are appended to a running
+session’s startup list without replacing its model metadata. Pi, Claude and Codex sessions remain
+limited to their reported providers, and ACP keeps its session-advertised list. A failed refresh
+shows the error and retains the last usable catalog for the current provider/runtime configuration.
+Newly added credentials or runtime-only model changes may require restarting an existing harness
+process; discovery does not guarantee that process or account can use every listed model. **Refresh logins** checks runtime
+availability/sign-in only; **Check for updates** checks CLI versions.
+
 ## Find the right page
 
 | Group | Pages |

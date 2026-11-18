@@ -16,7 +16,8 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import type { ProviderConfig, SessionMeta } from '../src/shared/types';
+import type { ModelInfo, ProviderConfig, SessionMeta } from '../src/shared/types';
+import { PUSH_CHANNELS } from '../src/shared/ipc';
 import { FAST_MODE_COST_WARNING } from '../src/shared/fast-mode';
 import { openNewSession, pickModel, seedSettings } from './e2e-ui';
 
@@ -50,8 +51,15 @@ async function pickHarness(win: Page, name: RegExp): Promise<void> {
   await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: name }) }).click();
 }
 
+interface ModelRefreshFixture {
+  models: ModelInfo[];
+  discoveries: string[];
+  forbidden: string[];
+}
+type FixtureGlobal = typeof globalThis & { __vocsModelRefreshFixture: ModelRefreshFixture };
+
 /** Launches the built app against a fresh userData with every provider key stripped. */
-async function launch(userData: string): Promise<Page> {
+async function launch(userData: string, catalog?: ModelInfo[]): Promise<Page> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v === undefined) continue;
@@ -80,6 +88,31 @@ async function launch(userData: string): Promise<Page> {
   const app = await electron.launch({ executablePath: packaged || (require('electron') as string), args, env, timeout: 60_000 });
   apps.push(app);
   const win: Page = await app.firstWindow();
+  await win.waitForSelector('.brand', { timeout: 60_000 });
+  if (catalog) {
+    // Isolate catalog changes from whichever Pi runtime is installed. Only the main discovery
+    // response is scripted: the preload, store, Settings, dialog and composer are production UI.
+    await app.evaluate(({ ipcMain }, models) => {
+      const fixture: ModelRefreshFixture = { models, discoveries: [], forbidden: [] };
+      (globalThis as FixtureGlobal).__vocsModelRefreshFixture = fixture;
+      ipcMain.removeHandler('harness:models');
+      ipcMain.handle('harness:models', (_event, request: { harness: string }) => {
+        fixture.discoveries.push(request.harness);
+        return request.harness === 'pi' ? { models: fixture.models } : { models: [], error: 'Only Pi is configured in this fixture' };
+      });
+      // Fail closed if a catalog-only UI action accidentally becomes an install, login or turn.
+      for (const channel of ['harness:install', 'harness:login', 'sessions:create', 'sessions:send']) {
+        ipcMain.removeHandler(channel);
+        ipcMain.handle(channel, () => {
+          fixture.forbidden.push(channel);
+          throw new Error(`${channel} is forbidden in the model-refresh fixture`);
+        });
+      }
+    }, catalog);
+  }
+  // A renderer may already have booted before Electron's main evaluation; discard that state so
+  // these two fixture cases always begin with the controlled catalog, not an installed runtime.
+  if (catalog) await win.reload();
   await win.waitForSelector('.brand', { timeout: 60_000 });
   return win;
 }
@@ -171,6 +204,89 @@ describe.runIf(enabled)('model picker before the first message', () => {
     const prompt = dialog.getByRole('textbox', { name: 'First prompt (optional)', exact: true });
     expect(await prompt.evaluate((el) => el === document.activeElement)).toBe(true);
     expect((await geometry()).body.scrollTop).toBeGreaterThan(0);
+  }, 180_000);
+
+  it.each(['Settings Providers refresh', 'cancelled New Session discovery'] as const)('updates an existing Pi composer after %s without losing its draft or starting a turn', async (entry) => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-model-refresh-'));
+    const userData = path.join(tmp, 'userData'), project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    const existing = session('s_refresh', 'pi', project);
+    existing.config.model = { provider: 'openai', model: 'gpt-5.4' };
+    const baseline: ModelInfo = { provider: 'openai', id: 'gpt-5.4', displayName: 'Catalog baseline', contextWindow: 256_000 };
+    // Synthetic availability, not a claim that this runtime/account has access to GPT 6.2.
+    const discovered: ModelInfo = { provider: 'openai', id: 'gpt-6.2', displayName: 'GPT 6.2 fixture', contextWindow: 512_000 };
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([existing]), 'utf8');
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { defaultHarness: 'pi', agent: { enabled: false }, providers: [] }), 'utf8');
+    const win = await launch(userData, [baseline]);
+    const app = apps[apps.length - 1]!;
+    const errors: string[] = [];
+    win.on('pageerror', (error) => errors.push(error.message));
+    await win.locator('.composer').waitFor({ timeout: 60_000 });
+    await win.click('.composer .pill[title="Model"]');
+    await win.getByRole('menuitem', { name: /^More models/ }).click();
+    const picker = win.locator('.composer .model-picker');
+    const refs = () => picker.locator('.mp-name').evaluateAll((els) => els.map((el) => el.getAttribute('title')).sort());
+    await expect.poll(refs, { timeout: 20_000 }).toEqual(['openai/gpt-5.4']);
+
+    // Reproduce a stale session-owned list without starting Pi or sending a paid prompt. The
+    // reported duplicate has authoritative metadata; refreshing may append, never overwrite it.
+    await app.evaluate(({ BrowserWindow }, { channel, sessionId, model }) => {
+      BrowserWindow.getAllWindows()[0]!.webContents.send(channel, {
+        sessionId, event: { type: 'models', models: [model] }, ts: Date.now(), seq: 1
+      });
+    }, { channel: PUSH_CHANNELS.sessionEvent, sessionId: existing.id, model: { ...baseline, displayName: 'Session-reported baseline', contextWindow: 128_000 } });
+    await expect.poll(() => picker.locator('.mp-row').innerText(), { timeout: 10_000 }).toContain('Session-reported baseline');
+    const draft = 'Keep this unsent draft while refreshing models';
+    await picker.locator('.mp-search input').press('Escape');
+    await picker.waitFor({ state: 'hidden' });
+    await win.locator('.composer textarea').fill(draft);
+
+    if (entry === 'Settings Providers refresh') {
+      await win.getByRole('button', { name: 'Settings', exact: true }).click();
+      await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Providers & keys', exact: true }).click();
+      for (const name of ['Refresh Claude Agent SDK models', 'Refresh Codex (app-server) models', 'Refresh Pi models']) {
+        expect(await win.getByRole('button', { name, exact: true }).isVisible()).toBe(true);
+      }
+    }
+    await app.evaluate((_electron, models) => {
+      (globalThis as FixtureGlobal).__vocsModelRefreshFixture.models = models;
+    }, [baseline, discovered]);
+    const beforeDiscovery = await app.evaluate(() => (globalThis as FixtureGlobal).__vocsModelRefreshFixture.discoveries.length);
+    if (entry === 'Settings Providers refresh') {
+      await win.getByRole('button', { name: 'Refresh Pi models', exact: true }).click();
+      await win.locator('#providers-logins').getByRole('status').filter({ hasText: 'Pi: 2 models' }).waitFor({ timeout: 20_000 });
+      await win.getByRole('button', { name: 'Back to workspace', exact: true }).click();
+    } else {
+      await openNewSession(win);
+      const dialogPicker = win.locator('.ns-col-model .model-picker');
+      await expect.poll(() => dialogPicker.locator('.mp-name').evaluateAll((els) => els.map((el) => el.getAttribute('title')).sort()), { timeout: 20_000 }).toEqual(['openai/gpt-5.4', 'openai/gpt-6.2']);
+      await win.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await win.locator('.modal').waitFor({ state: 'hidden' });
+    }
+    expect(await app.evaluate(() => (globalThis as FixtureGlobal).__vocsModelRefreshFixture.discoveries.length)).toBe(beforeDiscovery + 1);
+    expect(await win.locator('.composer textarea').inputValue()).toBe(draft);
+    await win.click('.composer .pill[title="Model"]');
+    await win.getByRole('menuitem', { name: /^More models/ }).click();
+    await expect.poll(refs, { timeout: 20_000 }).toEqual(['openai/gpt-5.4', 'openai/gpt-6.2']);
+    const reported = picker.locator('.mp-row:has(.mp-name[title="openai/gpt-5.4"])');
+    expect(await reported.innerText()).toContain('Session-reported baseline');
+    expect(await reported.innerText()).toContain('Context 128k');
+    expect(await picker.locator('.mp-name[title="openai/gpt-6.2"]').count()).toBe(1);
+    await picker.locator('.mp-row:has(.mp-name[title="openai/gpt-6.2"]) .mp-select').click();
+    await expect.poll(() => win.locator('.composer .pill[title="Model"] .pill-text').getAttribute('title'), { timeout: 10_000 }).toBe('openai/gpt-6.2');
+    expect(await win.locator('.composer textarea').inputValue()).toBe(draft);
+    const persisted = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].id).toBe(existing.id);
+    expect(persisted[0].status).toBe('idle');
+    expect(persisted[0].usage.turns).toBe(0);
+    expect(persisted[0].harnessRef).toEqual({});
+    expect(persisted[0].config.model).toEqual({ provider: 'openai', model: 'gpt-6.2' });
+    expect(await win.locator('.transcript .item').count()).toBe(0);
+    expect(await app.evaluate(() => (globalThis as FixtureGlobal).__vocsModelRefreshFixture.forbidden)).toEqual([]);
+    expect(errors).toEqual([]);
+    await app.close();
   }, 180_000);
 
   it('creates a Fast request and changes it under the composer without claiming an effective fast tier', async () => {

@@ -789,8 +789,8 @@ type LoginHarness = (typeof LOGIN_HARNESSES)[number];
 
 /**
  * Login state for harnesses that bring their own credentials, shown next to the key vault. The same
- * card checks those CLIs against what their npm package publishes and updates them in place; both
- * are explicit actions, so opening Settings never reaches the network on its own.
+ * card explicitly refreshes model catalogs, checks CLI updates and updates runtimes in place.
+ * Opening Settings never reaches the network on its own.
  */
 function HarnessLogins() {
   const availability = useStore((s) => s.availability);
@@ -800,6 +800,9 @@ function HarnessLogins() {
   const [checking, setChecking] = useState(false);
   const [updates, setUpdates] = useState<Partial<Record<HarnessId, HarnessUpdate>> | null>(null);
   const [updating, setUpdating] = useState<LoginHarness | null>(null);
+  const refreshModels = useStore((s) => s.refreshModelCatalog);
+  const modelRefreshPending = useRef(new Set<LoginHarness>());
+  const [modelRefreshes, setModelRefreshes] = useState<Partial<Record<LoginHarness, { pending: boolean; text?: string; error?: boolean }>>>({});
   const credHome: Partial<Record<HarnessId, string>> = { claude: '~/.claude', codex: '~/.codex', pi: '~/.pi/agent' };
 
   const checkUpdates = async () => {
@@ -832,6 +835,32 @@ function HarnessLogins() {
     } finally { setUpdating(null); }
   };
 
+  const refreshRowModels = async (id: LoginHarness) => {
+    // Ref guard covers a second click before React has committed the disabled button.
+    if (modelRefreshPending.current.has(id)) return;
+    modelRefreshPending.current.add(id);
+    setModelRefreshes((s) => ({ ...s, [id]: { pending: true } }));
+    const nameOf = (harness: HarnessId) => HARNESSES.find((h) => h.id === harness)!.name;
+    try {
+      // Both Codex adapters use the same runtime but have separate renderer catalog caches.
+      const ids: HarnessId[] = id === 'codex' ? ['codex', 'codex-exec'] : [id];
+      const results = await Promise.all(ids.map(async (harness) => ({ harness, ...await refreshModels(harness) })));
+      const failures = results.filter((r) => r.error);
+      const error = failures.length > 0;
+      const text = error
+        ? `Could not refresh models: ${failures.map((r) => `${nameOf(r.harness)}: ${r.error}`).join('; ')}`
+        : results.map((r) => `${nameOf(r.harness)}: ${r.models.length} ${r.models.length === 1 ? 'model' : 'models'}`).join('; ');
+      setModelRefreshes((s) => ({ ...s, [id]: { pending: false, text, error } }));
+      toast(text, error ? 'error' : 'success');
+    } catch (e) {
+      const text = `Could not refresh ${nameOf(id)} models: ${e instanceof Error ? e.message : String(e)}`;
+      setModelRefreshes((s) => ({ ...s, [id]: { pending: false, text, error: true } }));
+      toast(text, 'error');
+    } finally {
+      modelRefreshPending.current.delete(id);
+    }
+  };
+
   const summary = updates ? updateSummary(updates) : null;
   return (
     <div className="provider-card">
@@ -841,8 +870,8 @@ function HarnessLogins() {
         <Button size="sm" variant="ghost" disabled={checking} onClick={() => void checkUpdates()}>
           {checking ? <Spinner /> : 'Check for updates'}
         </Button>
-        <Button size="sm" variant="ghost" icon="refresh" onClick={() => void refreshNow()}>
-          {refreshing ? <Spinner /> : 'Refresh'}
+        <Button size="sm" variant="ghost" icon="refresh" aria-label="Refresh logins" disabled={refreshing} onClick={() => void refreshNow()}>
+          {refreshing ? <Spinner /> : 'Refresh logins'}
         </Button>
       </div>
       <div className="provider-body">
@@ -850,11 +879,18 @@ function HarnessLogins() {
           const h = HARNESSES.find((x) => x.id === id)!;
           const av = availability[id];
           const upd = updates?.[id];
+          const modelRefresh = modelRefreshes[id];
           return (
-            <div key={id} className="row gap8" style={{ alignItems: 'center' }}>
+            <div key={id} className="row gap8" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
               <strong>{h.name}</strong>
               <Badge tone={harnessStatus(id, av).tone}>{harnessStatus(id, av).label}</Badge>
               <Button size="sm" variant="ghost" aria-label={`Sign in to ${h.name}`} onClick={() => useStore.getState().openOnboarding(id)}>Sign in / setup</Button>
+              <Button size="sm" variant="ghost" icon="refresh" aria-label={`Refresh ${h.name} models`} disabled={modelRefresh?.pending} onClick={() => void refreshRowModels(id)}>
+                {modelRefresh?.pending ? <Spinner size={11} /> : null} Refresh models
+              </Button>
+              {modelRefresh && <span role="status" className={`muted small${modelRefresh.error ? ' info-error' : ''}`}>
+                {modelRefresh.pending ? 'Refreshing models…' : modelRefresh.text}
+              </span>}
               <span className="muted small">
                 {av?.version ? `${av.version} · ` : ''}
                 uses its own credentials from {credHome[id]}
@@ -875,7 +911,7 @@ function HarnessLogins() {
           );
         })}
         {summary && <p className={`muted small${summary.error ? ' info-error' : ''}`}>{summary.text}</p>}
-        <p className="muted small">Sign in / setup opens the guide for the runtime Vocs Code actually selected, including bundled binaries. Complete the vendor login, then recheck. A detected login does not guarantee plan access to every model.</p>
+        <p className="muted small">Sign in / setup opens the guide for the runtime Vocs Code actually selected, including bundled binaries. Complete the vendor login, then recheck. Refresh models reloads the catalog without updating a runtime or starting a session. A detected login does not guarantee plan access to every model.</p>
       </div>
     </div>
   );
