@@ -63,7 +63,7 @@ export const SETTINGS_PAGES = [
   ] },
   { id: 'providers', label: 'Providers & keys', icon: 'key', group: 'Connections', description: 'Connect your models. Keep credentials in the OS keychain, not in configuration.', saveHint: 'Keys and new providers have explicit Save actions', topics: [
     { label: 'Providers & API keys', description: 'Enable providers, save or test keys and configure endpoints.', keywords: 'openai anthropic openrouter deepseek ollama lmstudio api key secrets base url custom', anchor: 'providers-catalog' },
-    { label: 'Harness logins', description: 'Check agent login status and available CLI updates.', keywords: 'login authentication credentials updates codex claude pi', anchor: 'providers-logins' },
+    { label: 'Harness logins', description: 'Refresh models, check agent login status and available CLI updates.', keywords: 'login authentication credentials updates codex claude pi catalog reload', anchor: 'providers-logins' },
     { label: 'Model capability overrides', description: 'Correct whether a model accepts image attachments.', keywords: 'vision images models override capability', anchor: 'providers-overrides' },
   ] },
   { id: 'harnesses', label: 'Harnesses', icon: 'cpu', group: 'Connections', description: 'Your agent runtimes, in one place. Check availability, install and configure.', saveHint: AUTO, topics: [

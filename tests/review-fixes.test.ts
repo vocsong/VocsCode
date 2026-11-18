@@ -303,7 +303,7 @@ describe('model list for a session whose harness has not started', () => {
   const session = (id: string, harness: HarnessId): SessionMeta =>
     ({ id, config: { harness } }) as SessionMeta;
 
-  it('falls back to the harness catalog, then prefers what the harness reports', () => {
+  it('falls back to the harness catalog, then supplements what the harness reports', () => {
     const catalogModel: ModelInfo = { id: 'gpt-5.6-luna', provider: 'openai', displayName: 'gpt-5.6-luna' };
     const reportedModel: ModelInfo = { id: 'gpt-5.6-pro', provider: 'openai', displayName: 'gpt-5.6-pro' };
     const catalog = { models: [catalogModel], loading: false };
@@ -313,8 +313,8 @@ describe('model list for a session whose harness has not started', () => {
     // Catalog only — the state a brand-new session is in before its first message.
     expect(pickSessionModels(undefined, catalog).models).toEqual([catalogModel]);
     expect(pickSessionModels([], catalog).models).toEqual([catalogModel]);
-    // Once the harness publishes its own list it wins, catalog or not.
-    expect(pickSessionModels([reportedModel], catalog)).toEqual({ models: [reportedModel], loading: false });
+    // A startup snapshot keeps its models and metadata, without hiding later catalog additions.
+    expect(pickSessionModels([reportedModel], catalog)).toEqual({ models: [reportedModel, catalogModel], loading: false });
     // An error is carried through so the picker can explain itself (e.g. ACP before session start).
     expect(pickSessionModels(undefined, { models: [], loading: false, error: 'nope' }).error).toBe('nope');
   });
