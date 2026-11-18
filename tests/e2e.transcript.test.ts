@@ -27,7 +27,7 @@ afterAll(async () => {
 const SID = 's_transcript_e2e';
 const T = Date.now() - 600_000;
 
-/** A finished turn with work, followed by a final-only turn with no work to collapse. */
+/** A finished turn with work, followed by a turn with a reply and a background follow-up. */
 function transcript(): TranscriptItem[] {
   return [
     { id: 'u1', kind: 'user', ts: T, text: 'Resolve the npm run update EBUSY failure.' },
@@ -82,8 +82,12 @@ function transcript(): TranscriptItem[] {
     },
     { id: 'turn1', kind: 'turn', ts: T + 8, status: 'completed', durationMs: 197_000, costUsd: 0.04, usage: { inputTokens: 4200, outputTokens: 900 } },
     { id: 'u2', kind: 'user', ts: T + 60_000, text: 'Can I retry the update now?' },
-    { id: 'f2', kind: 'assistant', ts: T + 60_001, text: 'Yes, the orphaned processes are gone. Retry npm run update.', phase: 'final' },
-    { id: 'turn2', kind: 'turn', ts: T + 60_002, status: 'completed' }
+    { id: 'f2', kind: 'assistant', ts: T + 60_001, text: 'Yes, the orphaned processes are gone. Retry npm run update.' },
+    // A hidden background completion resumes Pi inside the same visual turn, with no phase or
+    // intervening user row recorded on disk. The lookup must not hide the already-sent reply.
+    { id: 'lookup', kind: 'tool', ts: T + 60_002, name: 'subagent_result', hint: 'agent', status: 'done' },
+    { id: 'f3', kind: 'assistant', ts: T + 60_003, text: 'The background review also confirmed the update can be retried.' },
+    { id: 'turn2', kind: 'turn', ts: T + 60_004, status: 'completed' }
   ];
 }
 
@@ -102,7 +106,7 @@ async function completionTimes(win: Page) {
   const expected = await win.evaluate((timestamps) => timestamps.map((ts) => ({
     dateTime: new Date(ts).toISOString(),
     text: new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })
-  })), [T + 8, T + 60_002]);
+  })), [T + 8, T + 60_004]);
   expect(actual).toEqual(expected);
   return actual;
 }
@@ -145,18 +149,19 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     await fs.mkdir(shots, { recursive: true });
 
     // Collapsed: the answer and the worked header are on screen, the work itself is not.
-    await win.waitForSelector('.work-head', { timeout: 30_000 });
-    expect(await win.locator('.work-head').innerText()).toContain('Worked for 3m 17s');
-    expect(await win.locator('.msg-assistant .md').first().innerText()).toContain('Done');
-    expect(await win.locator('.msg-assistant .md').nth(1).innerText()).toContain('Retry npm run update');
-    expect(await win.locator('.work-head').count()).toBe(1);
+    const work = win.locator('.work-head');
+    await work.first().waitFor({ timeout: 30_000 });
+    expect(await work.first().innerText()).toContain('Worked for 3m 17s');
+    const replies = await win.locator('.msg-assistant .md').allInnerTexts();
+    expect(replies).toEqual([expect.stringContaining('Done'), expect.stringContaining('Retry npm run update'), expect.stringContaining('The background review also confirmed')]);
+    expect(await work.count()).toBe(2);
     const originalTimes = await completionTimes(win);
     expect(await win.locator('.tool-card').count()).toBe(0);
     expect(await win.locator('.thinking-toggle').count()).toBe(0);
     await win.screenshot({ path: path.join(shots, 'transcript-01-collapsed.png') });
 
     // Expanded by the user: commentary and command rows appear, thinking stays collapsed.
-    await win.locator('.work-head').click();
+    await work.first().click();
     expect(await win.locator('.msg-assistant').filter({ hasText: 'blanket kill' }).count()).toBe(1);
     expect(await win.locator('.tool-card').count()).toBe(2);
     await expect(win.locator('.tool-name').first().innerText()).resolves.toBe('Ran');
@@ -189,6 +194,8 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     await reopened.waitForSelector('.brand', { timeout: 60_000 });
     await expectQuietWindow(app);
     expect(await completionTimes(reopened)).toEqual(originalTimes);
+    expect(await reopened.getByText('Retry npm run update.', { exact: false }).isVisible()).toBe(true);
+    expect(await reopened.locator('.work-body').count()).toBe(0);
   }, 180_000);
 
   it('shows question details, keeps context separate from the answer, and renders saved decisions', async () => {
