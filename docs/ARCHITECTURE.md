@@ -60,6 +60,15 @@ resources/processes the read-only Windows process-table reader (Toolhelp snapsho
 tests             unit + format + review-fixes run offline; smoke and e2e are opt-in
 ```
 
+## Transcript collapse
+
+`Transcript.tsx` keeps replies outside **Worked** and collapses tool calls, progress commentary and
+thinking. Explicit assistant phases take precedence. When a harness has not labelled a message,
+the renderer infers commentary from a later tool call, but only up to the next user message,
+turn footer, or `subagent_result` lookup. Pi can look up a background result after replying and
+before emitting a turn footer; that lookup still collapses, but does not hide the earlier reply.
+The same rule applies when reopening a saved transcript.
+
 ## Transcript file references
 
 Chat file links open in Files within the session's `cwd` (the worktree checkout, not the
