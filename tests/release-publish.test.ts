@@ -44,6 +44,7 @@ class GitHub {
   digests = true;
   failAfter = 0;
   streamFailure = false;
+  otherReleases: any[] = [];
   after: ((call: Call) => void | Promise<void>) | undefined;
   client = createGitHubClient({ repository: 'example/disposable', token: 'test-token', fetchImpl: this.fetch.bind(this) as typeof fetch });
 
@@ -67,7 +68,12 @@ class GitHub {
     let status = 200;
     if (method === 'GET' && endpoint.startsWith('/git/ref/tags/')) result = { object: this.tag };
     else if (method === 'GET' && endpoint.startsWith('/git/tags/')) result = { object: this.tagObjects.get(endpoint.split('/').at(-1)!) };
-    else if (method === 'GET' && endpoint.startsWith('/releases/tags/')) { result = this.release; if (!result) status = 404; }
+    // Like GitHub: the by-tag lookup never returns drafts; the authenticated list does.
+    else if (method === 'GET' && endpoint.startsWith('/releases/tags/')) { result = this.release; if (!result || this.release.draft) status = 404; }
+    else if (method === 'GET' && endpoint === '/releases') {
+      const page = Number(url.searchParams.get('page'));
+      result = [...this.otherReleases, ...(this.release ? [this.release] : [])].slice((page - 1) * 100, page * 100);
+    }
     else if (method === 'GET' && endpoint === '/releases/10/assets') {
       const page = Number(url.searchParams.get('page'));
       result = this.assets.slice((page - 1) * 100, page * 100).map(({ bytes, ...asset }) => asset);
@@ -149,6 +155,21 @@ describe('single draft-first release publisher', () => {
     expect(github.mutations.filter((call) => call.method === 'POST')).toHaveLength(14);
     expect(github.mutations.filter((call) => call.method === 'PATCH' && call.body.body)).toHaveLength(1);
     expect(github.mutations.filter((call) => call.body?.draft === false)).toHaveLength(1);
+  });
+
+  it('finds the precreated draft among other releases, though GitHub hides drafts from the by-tag lookup', async () => {
+    const { github, publish } = await setup();
+    github.otherReleases = Array.from({ length: 120 }, (_, i) => ({ id: 1000 + i, tag_name: `v0.0.${i}`, draft: i % 2 === 0, prerelease: false }));
+    expect(github.release.draft).toBe(true);
+    expect(await publish()).toEqual({ status: 'published', assets: 14 });
+    expect(github.calls.some((call) => call.path.startsWith('/repos/example/disposable/releases?per_page=100&page=2'))).toBe(true);
+  });
+
+  it('refuses to choose when two releases name the tag', async () => {
+    const { github, publish } = await setup();
+    github.otherReleases = [{ ...github.release, id: 11 }];
+    await expect(publish()).rejects.toThrow(/More than one release names this tag/);
+    expect(github.mutations).toEqual([]);
   });
 
   it('an identical public rerun is read-only, including streamed digest fallback', async () => {

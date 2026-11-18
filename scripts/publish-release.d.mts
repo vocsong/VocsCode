@@ -3,7 +3,7 @@ export interface GitHubRelease { id: number; tag_name: string; draft: boolean; p
 export interface GitHubAsset { id: number; name: string; size: number; state: string; digest?: string | null }
 export interface ReleaseGitHub {
   resolveTag(tag: string): Promise<string>;
-  getRelease(tag: string): Promise<GitHubRelease>;
+  getRelease(tag: string): Promise<GitHubRelease | null>;
   listAssets(releaseId: number): Promise<GitHubAsset[]>;
   hashAsset(assetId: number): Promise<{ size: number; sha256: string }>;
   editRelease(releaseId: number, patch: { body?: string; draft?: boolean }): Promise<unknown>;
