@@ -117,7 +117,7 @@ npm run build && HARNESS_E2E=1 npm run test:e2e:terminal
 # Vesta on the real pi runtime, offline scripted model (installed Pi 0.85.1; HARNESS_E2E_EXE for the packaged app).
 npm run build && VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/e2e.vesta.test.ts
 # Windows in-app auto-update against a loopback feed. Use a disposable build in dist/win-unpacked.
-# Covers startup and manual checks, automatic download and the installer handoff on quit.
+# Covers startup and manual checks, the update button beside Settings and installer handoff on quit.
 npm run build && npm run dist:dir -- --publish never && HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mjs tests/e2e.update.test.ts
 VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts
 VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.subagents.test.ts
@@ -158,7 +158,7 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 | First-time onboarding and setup recovery (`harness-setup.ts`, `OnboardingWizard`, `HarnessSetup`, `OnboardingProvider`, Home/Settings/New Session entry points) | `tests/harness-readiness.test.ts`, `tests/runtime.test.ts`, `tests/harness-setup.test.ts`, `tests/harness-setup-ipc.test.ts`, `tests/onboarding-ui.test.tsx`, `tests/handler-registry.test.ts`, `tests/review-fixes.test.ts` + `e2e.models`, `e2e.vision`, `e2e.instructions`, `e2e.session-view`. Retain draft/save failure recovery, unknown sign-in, catalog fallback, stale-response, owner-main-frame dispatch and restart coverage. Use isolated, existing vendor homes and APPDATA directories; no live OAuth or paid prompts in these suites. See [Onboarding](ONBOARDING.md). |
 | Harness CLI update check (`runtime.ts` `checkUpdates`, Harness logins card) | `tests/harness-updates.test.ts`, `tests/harness-update-ui.test.tsx` + `e2e.vision` |
 | Vesta panel, `agents/` pi bridge, `resources/pi/vocs-code-vesta.ts` | `tests/vesta.test.ts` + `e2e.vesta` (opt-in, real pi) |
-| Updater, `main/updater*.ts`, update pill, About updates panel | `tests/updater.test.ts`, `tests/update-ui.test.tsx` + `e2e.update` (opt-in, packaged + mock feed) |
+| Updater, `main/updater*.ts`, sidebar update button, About updates panel | `tests/updater.test.ts`, `tests/update-ui.test.tsx` + `e2e.update` (opt-in, packaged + mock feed) |
 | pi harness (`harness/pi.ts`), `resources/pi/**` | `tests/pi-steering.test.ts`, `tests/pi-steering-session.test.ts`, `tests/pi-mcp-cancellation.test.ts` + `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-steering.integration.test.ts tests/pi-tool-compatibility.integration.test.ts tests/pi-subagents.integration.test.ts tests/pi-questions.integration.test.ts tests/e2e.pi-tools.test.ts` + live `HARNESS_SMOKE_ONLY=pi`. Steering coverage retains shell/foreground-child cancellation with no late write, successful exactly-once redirection, queued images/FIFO order, rapid steers, natural completion, late dialogs, disposal, and delayed stats. |
 | Pi global settings (`main/pi-config.ts`, Settings → Pi) | `tests/pi-config.test.ts`, `tests/pi-settings.test.tsx`, `tests/handler-registry.test.ts` + `e2e.pi-settings`; retain concurrent-write/reload, write-failure recovery, prompt-byte-budget, pending-draft and stale-response regressions. |
 | Subagents panel, right-panel split | `VOCS_CODE_E2E_UI=1 vitest run tests/e2e.subagents.test.ts` + `e2e.layout`, `e2e.files` |
