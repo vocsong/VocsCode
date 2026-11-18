@@ -11,6 +11,7 @@ import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/sta
 import { codexProviderModels } from '../models/codex-catalog';
 import { toCodex } from '../mcp/effective';
 import { JsonRpcStdioClient } from './jsonrpc';
+import { applyCodexMcpSuppression, getCodexMcpServers } from './codex-mcp-config';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY } from './permissions';
 import { questionAnswerWithNote } from './question-answers';
 import { spawnTool } from './spawn';
@@ -221,10 +222,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
         return [];
       });
-      // Codex loads its own ~/.codex/config.toml under whatever this hands over, so a server this
-      // app defines has to be claimed either way: the shared endpoint when the repo has an index,
-      // otherwise switched off, so that config cannot start a second copy in the session.
-      const mcpServers = toCodex(mcp, 'inline', { owned: this.ctx.ownedMcpIds() }).config;
+      const mcpServers = toCodex(mcp, 'inline').config;
+      await applyCodexMcpSuppression(mcpServers, this.ctx.ownedMcpIds(), () => getCodexMcpServers(this.rpc!, meta.cwd));
       if (Object.keys(mcpServers).length) config.mcp_servers = mcpServers;
       if (Object.keys(config).length) common.config = config;
       let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null; serviceTier?: string | null };

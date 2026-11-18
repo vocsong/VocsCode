@@ -244,12 +244,8 @@ export function codexHeaderVar(serverId: string, header: string): string {
  * table, because the exec SDK flattens it into `--config key=value` argv, which is visible in
  * the process list: stdio values are handed over through the Codex environment (`env_vars`) and
  * HTTP headers through `env_http_headers`.
- *
- * `opts.owned` names the servers this app defines itself (its built-ins). Codex reads its own
- * `config.toml` underneath everything handed over here, so a server this app is not injecting has
- * to be switched off by name.
  */
-export function toCodex(servers: ResolvedServer[], mode: 'inline' | 'env-ref' = 'inline', opts: { owned?: string[] } = {}): CodexMcpConfig {
+export function toCodex(servers: ResolvedServer[], mode: 'inline' | 'env-ref' = 'inline'): CodexMcpConfig {
   const config: Record<string, Record<string, CodexTomlValue>> = {};
   const env: Record<string, string> = {};
   for (const { def, secretEnvKeys, secretHeaderKeys } of servers) {
@@ -290,9 +286,6 @@ export function toCodex(servers: ResolvedServer[], mode: 'inline' | 'env-ref' = 
     if (def.timeoutMs) t.tool_timeout_sec = Math.max(1, Math.round(def.timeoutMs / 1000));
     config[def.id] = t;
   }
-  // Without this, a `[mcp_servers.gitnexus]` in the user's own config.toml would start a second,
-  // unscoped copy in every session beside the one shared server this app runs.
-  for (const id of opts.owned ?? []) if (!config[id]) config[id] = { enabled: false };
   return { config, env };
 }
 
