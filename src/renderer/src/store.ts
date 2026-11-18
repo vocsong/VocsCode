@@ -36,7 +36,7 @@ export interface FileReveal {
   line?: number;
 }
 
-/** A harness's model list fetched without a running session, so a not-yet-started session still has models. */
+/** A harness's shared model catalog, discovered independently of any session process. */
 export interface ModelCatalogEntry {
   models: ModelInfo[];
   loading: boolean;
@@ -74,7 +74,7 @@ interface State {
   /** First item index of each paged transcript; greater than zero means earlier items exist. */
   transcriptStarts: Record<string, number>;
   models: Record<string, ModelInfo[]>;
-  /** Per-harness catalog, keyed by harness id, used until that session's process reports its own list. */
+  /** Per-harness catalog shared by New Session, settings and existing session model pickers. */
   modelCatalog: Partial<Record<HarnessId, ModelCatalogEntry>>;
   availability: Partial<Record<HarnessId, HarnessAvailability>>;
   /** Set when the last availability check failed; setup surfaces a retry instead of an endless spinner. */
@@ -216,8 +216,10 @@ interface State {
   dismissToast(id: string): void;
   refreshAvailability(): Promise<void>;
   recordHarnessAvailability(harness: HarnessId, availability: HarnessAvailability): void;
-  /** Fetches one harness's model catalog, at most once per harness until the model overrides change. */
+  /** Fetches one harness's model catalog only when it has no cached or pending entry. */
   ensureModelCatalog(harness: HarnessId): Promise<void>;
+  /** Re-probes the selected runtime; preserves usable models on failure and fences stale responses. */
+  refreshModelCatalog(harness: HarnessId, context?: { acpAgent?: string; projectRoot?: string }): Promise<ModelCatalogEntry>;
   clearTranscriptLocal(id: string): void;
   /** Replaces a loaded transcript after a server-side rewrite (for example, editing a past prompt). */
   replaceTranscript(id: string, items: TranscriptItem[]): void;
@@ -840,8 +842,10 @@ export const useStore = create<State>((set, get) => ({
 
   setSettings(settings) {
     set((s) => {
-      // Overrides are baked in when the catalog is fetched, so a change to them invalidates it.
-      const stale = !!s.settings && JSON.stringify(s.settings.modelOverrides) !== JSON.stringify(settings.modelOverrides);
+      // Discovery and its last-good fallback belong to this configuration. Do not resurrect a
+      // removed endpoint or an old runtime's catalog after a settings change or in-flight probe.
+      const catalogInputs = (value: AppSettings) => [value.modelOverrides, value.providers, value.binaries, value.claude];
+      const stale = !!s.settings && JSON.stringify(catalogInputs(s.settings)) !== JSON.stringify(catalogInputs(settings));
       return stale ? { settings, modelCatalog: {} } : { settings };
     });
   },
@@ -1130,15 +1134,24 @@ export const useStore = create<State>((set, get) => ({
   async ensureModelCatalog(harness) {
     // Present means fetched, failed or in flight: one round trip per harness, not per session.
     if (get().modelCatalog[harness]) return;
+    await get().refreshModelCatalog(harness);
+  },
+  async refreshModelCatalog(harness, context) {
+    const previous = get().modelCatalog[harness];
     const put = (entry: ModelCatalogEntry) => set((s) => ({ modelCatalog: { ...s.modelCatalog, [harness]: entry } }));
-    const pending: ModelCatalogEntry = { models: [], loading: true };
+    const pending: ModelCatalogEntry = { models: previous?.models ?? [], loading: true };
     put(pending);
+    let result: ModelCatalogEntry;
     try {
-      const r = await invoke('harness:models', { harness });
-      if (get().modelCatalog[harness] === pending) put({ models: r.models, error: r.error, loading: false });
+      const r = await invoke('harness:models', { harness, ...context });
+      if (!Array.isArray(r?.models)) throw new Error('Harness model discovery returned an invalid catalog.');
+      result = { models: r.error && previous?.models.length ? previous.models : r.models, error: r.error, loading: false };
     } catch (e) {
-      if (get().modelCatalog[harness] === pending) put({ models: [], error: (e as Error).message, loading: false });
+      result = { models: previous?.models ?? [], error: e instanceof Error ? e.message : String(e), loading: false };
     }
+    // Settings invalidation or a newer refresh owns the catalog now; never resurrect an old request.
+    if (get().modelCatalog[harness] === pending) put(result);
+    return result;
   },
   clearTranscriptLocal(id) {
     set((s) => {
