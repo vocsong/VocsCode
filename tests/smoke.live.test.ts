@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
-import type { ApprovalDecision, HarnessId, HarnessRef, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
+import { MCP_BUILTIN_IDS, type ApprovalDecision, type HarnessId, type HarnessRef, type SessionEvent, type SessionMeta, type TranscriptItem } from '../src/shared/types';
 import type { ResolvedServer } from '../src/main/mcp/effective';
 import { createAdapter } from '../src/main/harness/registry';
 import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
@@ -71,7 +71,7 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
     effort: () => meta.config.effort ?? undefined,
     getApiKey: async () => undefined,
     mcpServers: async () => mcp,
-    ownedMcpIds: () => [],
+    ownedMcpIds: () => harness === 'codex' || harness === 'codex-exec' ? [...MCP_BUILTIN_IDS] : [],
     emit: (event) => {
       events.push(event);
       if (event.type === 'item.upsert') items.set(event.item.id, event.item);
