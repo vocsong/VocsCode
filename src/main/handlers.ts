@@ -57,6 +57,7 @@ import { DictationService } from './dictation/service';
 import { localModel } from '../shared/dictation';
 import { discoverChatImports } from './chat-import';
 import { representsChatImport } from './chat-import-identity';
+import { isReservedSecretId, providerSecrets } from './secret-ids';
 
 /** Structural dialog options (Electron shapes are cast in ipc.ts, keeping this file Electron-free). */
 export interface OpenDialogOptions {
@@ -258,13 +259,19 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   for (const [channel, action] of [
     ['vocsAccount:get', () => vocsAccount.get()],
-    ['vocsAccount:signIn', () => vocsAccount.signIn()],
     ['vocsAccount:cancel', () => vocsAccount.cancel()],
     ['vocsAccount:signOut', () => vocsAccount.signOut()],
     ['vocsAccount:refresh', () => vocsAccount.refresh()]
   ] as const) handle(channel, input => {
     if (input !== undefined) throw new Error('Account commands do not accept configuration.');
     return action();
+  });
+  // The one choice the renderer makes: keep this sign-in or not. Main picks client, issuer and label.
+  const signInRequest = z.strictObject({ persist: z.boolean() }).optional();
+  handle('vocsAccount:signIn', input => {
+    const parsed = signInRequest.safeParse(input);
+    if (!parsed.success) throw new Error('Account commands do not accept configuration.');
+    return vocsAccount.signIn(parsed.data);
   });
 
   if (deps.control) {
@@ -824,15 +831,19 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return { removedSessions };
   });
 
+  // Identity material shares the store with API keys; provider ids can never name it.
+  const assertProviderSecretId = (id: string) => { if (isReservedSecretId(id)) throw new Error('That id is reserved and cannot hold a provider key.'); };
   handle('secrets:set', async ({ providerId, apiKey }) => {
+    assertProviderSecretId(providerId);
     await secrets.set(providerId, apiKey);
     await syncProviderKeyFlags();
   });
   handle('secrets:clear', async ({ providerId }) => {
+    assertProviderSecretId(providerId);
     await secrets.clear(providerId);
     await syncProviderKeyFlags();
   });
-  handle('secrets:has', ({ providerId }) => secrets.has(providerId));
+  handle('secrets:has', ({ providerId }) => !isReservedSecretId(providerId) && secrets.has(providerId));
   handle('secrets:status', () => secrets.status);
 
   async function syncProviderKeyFlags(): Promise<AppSettings> {
@@ -851,6 +862,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     });
   });
   handle('providers:save', async (provider) => {
+    assertProviderSecretId(provider.id);
     if (provider.baseUrl !== undefined && provider.baseUrl !== '') assertEndpointUrl(provider.baseUrl);
     const s = settings.get();
     const idx = s.providers.findIndex((p) => p.id === provider.id);
@@ -862,6 +874,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return next.providers;
   });
   handle('providers:delete', async ({ id }) => {
+    assertProviderSecretId(id);
     const s = settings.get();
     const next = await settings.update({ providers: s.providers.filter((p) => p.id !== id || p.builtin) });
     await secrets.clear(id);
@@ -955,7 +968,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('harness:models', async ({ harness }) => {
     assertHarnessId(harness);
     const current = settings.get();
-    const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: (id) => secrets.get(id) });
+    const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: providerSecrets((id) => secrets.get(id)) });
     return { ...result, models: enrichModelsFromProviders(result.models, current.providers) };
   });
   handle('harness:install', async ({ id }) => {
@@ -1351,7 +1364,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     getSettings: () => settings.get(),
     listSessions: () => sessions.list(),
     getSession: (id) => sessions.get(id),
-    getSecret: (providerId) => secrets.get(providerId),
+    getSecret: providerSecrets((providerId) => secrets.get(providerId)),
     invoke: (channel, req) => invokeChannel(channel, req, 'agent'),
     push: (state) => deps.push(PUSH_CHANNELS.agentState, state),
     log: deps.log,
@@ -1774,8 +1787,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       else await assertOrdinaryWorkspace(target);
     },
     shutdown: async () => {
-      vocsAccount.dispose();
-      await Promise.all([vesta.dispose(), dictationService?.dispose()]);
+      await Promise.all([vocsAccount.dispose(), vesta.dispose(), dictationService?.dispose()]);
     }
   };
 }

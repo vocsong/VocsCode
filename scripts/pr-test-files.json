@@ -44,6 +44,7 @@
   "tests/mcp-oauth-transport-race.test.ts",
   "tests/vocs-account.test.ts",
   "tests/vocs-account-settings.test.tsx",
+  "tests/vocs-account-persistent.test.ts",
   "tests/session-event-seq.test.ts",
   "tests/session-resume.test.ts",
   "tests/session-create-goal.test.ts",
