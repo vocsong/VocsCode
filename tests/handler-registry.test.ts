@@ -14,6 +14,7 @@ import { isRemoteChannel, isRemotePushChannel } from '../src/shared/remote-chann
 import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
+import { providerSecrets } from '../src/main/secret-ids';
 import type { SessionManager } from '../src/main/session-manager';
 import type { RemoteConfig, HarnessId, SessionMeta, TranscriptItem, AppInstructionFile } from '../src/shared/types';
 import type { RemoteHost } from '../src/main/remote/host';
@@ -147,6 +148,11 @@ describe('handler registry', () => {
       expect(isRemoteChannel(channel)).toBe(false);
       expect(agentChannels().includes(channel as never)).toBe(false);
     }
+    // Sign-in takes exactly one renderer choice, whether to keep the sign-in; nothing else.
+    for (const input of [{ persist: 'yes' }, { persist: true, clientId: 'vocs-code-device' }, { persist: true, deviceName: 'evil' }]) await expect(registry.invoke('vocsAccount:signIn', input, 'desktop')).rejects.toThrow(/do not accept configuration/);
+    await expect(registry.invoke('vocsAccount:signIn', { persist: true }, 'desktop')).resolves.toEqual(snapshot);
+    expect(account.signIn).toHaveBeenLastCalledWith({ persist: true });
+    await expect(registry.invoke('vocsAccount:signIn', { persist: true }, 'agent')).rejects.toThrow(/desktop owner/);
     await registry.shutdown(); expect(account.dispose).toHaveBeenCalledTimes(1);
   });
 
@@ -535,6 +541,26 @@ describe('handler registry', () => {
     const list = (await registry.invoke('providers:list', undefined)) as { id: string; hasApiKey: boolean }[];
     expect(list.find((p) => p.id === 'testprov')?.hasApiKey).toBe(true);
     expect(pushes.filter(([c]) => c === PUSH_CHANNELS.settingsChanged).length).toBeGreaterThan(0);
+  });
+
+  it('never lets a provider id name identity material in the shared secret store', async () => {
+    const { registry, deps } = stubDeps();
+    await deps.settings.load();
+    const set = vi.spyOn(deps.secrets, 'set'), clear = vi.spyOn(deps.secrets, 'clear'), get = vi.spyOn(deps.secrets, 'get');
+    for (const id of ['vocs-account:production', 'vocs-account:staging', 'remote-host', 'remote-enroll']) {
+      await expect(registry.invoke('secrets:set', { providerId: id, apiKey: '{"v":1}' })).rejects.toThrow(/reserved/);
+      await expect(registry.invoke('secrets:clear', { providerId: id })).rejects.toThrow(/reserved/);
+      await expect(registry.invoke('providers:save', { id, kind: 'openai', name: 'Evil', baseUrl: 'https://evil.example/v1', hasApiKey: false, models: [] })).rejects.toThrow(/reserved/);
+      await expect(registry.invoke('secrets:has', { providerId: id })).resolves.toBe(false);
+      await expect(registry.invoke('providers:delete', { id })).rejects.toThrow(/reserved/);
+      await expect(providerSecrets(deps.secrets.get)(id)).resolves.toBeUndefined();
+    }
+    await expect(providerSecrets(async (id) => `key-for-${id}`)('openai')).resolves.toBe('key-for-openai');
+    expect(set).not.toHaveBeenCalled(); expect(clear).not.toHaveBeenCalled();
+    // A provider planted in settings under a reserved id never receives the vault record as its key.
+    const { resolveProviderApiKey } = await import('../src/main/models/providers');
+    await expect(resolveProviderApiKey({ id: 'vocs-account:production', kind: 'openai', name: 'Evil', baseUrl: 'https://evil.example/v1', hasApiKey: true, models: [] } as never, deps.secrets.get)).resolves.toBeUndefined();
+    expect(get).not.toHaveBeenCalledWith('vocs-account:production');
   });
 
   it('lists, searches and reads workspace files, refusing escapes', async () => {

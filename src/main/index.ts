@@ -4,7 +4,7 @@ import { existsSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { BrowserWindow, Menu, Notification, app, nativeTheme, screen, shell } from 'electron';
+import { BrowserWindow, Menu, Notification, app, nativeTheme, net, screen, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
@@ -25,6 +25,8 @@ import { SharedGitnexusServer } from './mcp/shared-server';
 import { RuntimeResolver, which } from './runtime';
 import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
+import { providerSecrets } from './secret-ids';
+import { createVocsAccount, VOCS_ACCOUNT_VAULT_IDS, vocsAccountRealm } from './vocs-account';
 import { SessionManager } from './session-manager';
 import { MissionRuntime } from './mission/runtime';
 import { ordinaryProcessOwnership as ordinaryOwnershipEnabled, ownedWindowsJobProbe } from './owned-windows-job';
@@ -136,8 +138,9 @@ async function main(): Promise<void> {
   installAppProcessHandlers();
   const settings = new SettingsStore(userData, logTo);
   await settings.load();
-  // Remote-access identity and enrollment secrets never fall back to obfuscated storage on disk.
-  const secrets = new SecretStore(userData, logTo, { sessionOnly: ['remote-host', 'remote-enroll'] });
+  // Remote-access identity and enrollment secrets, and a Vocs sign-in kept on this computer, never
+  // fall back to obfuscated storage on disk: without a real OS keychain they live for this run only.
+  const secrets = new SecretStore(userData, logTo, { sessionOnly: ['remote-host', 'remote-enroll'], keychainOnly: VOCS_ACCOUNT_VAULT_IDS });
   await secrets.load();
   const store = new SessionStore(userData, logTo);
   await store.load();
@@ -234,7 +237,7 @@ async function main(): Promise<void> {
       return lines;
     },
     synth: {
-      completer: createKnowledgeCompleter({ settings: () => settings.get(), getSecret: (id) => secrets.get(id), log })
+      completer: createKnowledgeCompleter({ settings: () => settings.get(), getSecret: providerSecrets((id) => secrets.get(id)), log })
     },
     anchors: createGitnexusAnchorResolver({
       // A cold shared server is started lazily; the panel must not wait on it forever.
@@ -263,7 +266,7 @@ async function main(): Promise<void> {
     settings,
     runtime,
     analytics,
-    getSecret: (id) => secrets.get(id),
+    getSecret: providerSecrets((id) => secrets.get(id)),
     // Read on turn end only, long after the tracker below exists.
     isViewing: (id): boolean => desktopFocus.isViewing(id),
     sharedGitnexus: () => sharedGitnexus.ensure(),
@@ -446,7 +449,10 @@ async function main(): Promise<void> {
     log
   });
 
+  // Built here, not in the registry, because it needs the OS vault; restored after the window opens.
+  const vocsAccount = createVocsAccount({ realm: vocsAccountRealm(), openExternal: (url) => shell.openExternal(url), vault: secrets, isOnline: () => net.isOnline() });
   const registry = registerIpc({
+    vocsAccount,
     settings,
     secrets,
     sessions,
@@ -521,6 +527,8 @@ async function main(): Promise<void> {
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
 
   createWindow(settings, appRoot, (focused) => desktopFocus.setWindowFocused(focused), (contents) => forgetVisibleOnRendererReset(contents, desktopFocus));
+  // A sign-in kept on this computer renews in the background; Settings shows "restoring" meanwhile.
+  void vocsAccount.restore().catch(() => undefined);
 
   log('info', `ready in ${Math.round(process.uptime() * 1000)}ms: ${store.list().length} session(s), ${terminals.list().length} terminal tab(s)`);
 

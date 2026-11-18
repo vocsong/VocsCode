@@ -47,7 +47,9 @@ vi.mock('../src/main/git', async (importOriginal) => ({
 // unavailable-encryption fallback path be exercised without re-declaring the mock.
 const safeStorageMock = vi.hoisted(() => ({
   encryptionAvailable: true,
+  backend: 'gnome_libsecret',
   isEncryptionAvailable: () => safeStorageMock.encryptionAvailable,
+  getSelectedStorageBackend: () => safeStorageMock.backend,
   encryptString: (s: string) => Buffer.concat([Buffer.from('enc|'), Buffer.from(s, 'utf8')]),
   decryptString: (b: Buffer) => {
     const raw = b.toString('utf8');
@@ -997,6 +999,108 @@ describe('SecretStore', () => {
     } finally {
       safeStorageMock.encryptionAvailable = true;
     }
+  });
+
+  it('keeps a Vocs sign-in record off disk without OS encryption, and never logs its token', async () => {
+    const ids = ['vocs-account:production', 'vocs-account:staging'];
+    const record = JSON.stringify({ v: 1, refreshToken: 'refresh-token-value-never-logged-000000000' });
+    const log = vi.fn();
+    safeStorageMock.encryptionAvailable = false;
+    try {
+      const dir = path.join(tmpRoot, 'vocs-account-memory');
+      const store = new SecretStore(dir, log, { keychainOnly: ids });
+      await store.load();
+      await store.set('vocs-account:staging', record);
+      expect(store.isMemoryOnly('vocs-account:staging')).toBe(true);
+      expect(await store.get('vocs-account:staging')).toBe(record);
+      expect(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8').catch(() => '{}')).not.toContain(Buffer.from(record).toString('base64'));
+      safeStorageMock.encryptionAvailable = true;
+      const encrypted = new SecretStore(path.join(tmpRoot, 'vocs-account-enc'), log, { keychainOnly: ids });
+      await encrypted.load();
+      expect(encrypted.isMemoryOnly('vocs-account:production')).toBe(false);
+      await encrypted.set('vocs-account:production', record);
+      const raw = await fs.readFile(path.join(tmpRoot, 'vocs-account-enc', 'secrets.json'), 'utf8');
+      expect(JSON.parse(raw)['vocs-account:production'].startsWith('enc:')).toBe(true);
+      expect(raw).not.toContain('refresh-token-value');
+      expect(JSON.stringify(log.mock.calls)).not.toContain('refresh-token-value');
+    } finally {
+      safeStorageMock.encryptionAvailable = true;
+    }
+  });
+
+  it('treats a Linux basic_text or unknown keychain backend as no OS encryption for keychain-only ids, leaving remote access as it was', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+    try {
+      for (const backend of ['basic_text', 'unknown']) {
+        const dir = path.join(tmpRoot, `linux-${backend}`);
+        // Written under the fixed basic_text key by an earlier run: moved off disk at load.
+        await fs.mkdir(dir, { recursive: true });
+        const remoteHost = 'enc:' + Buffer.from('enc|remote-identity').toString('base64');
+        await fs.writeFile(path.join(dir, 'secrets.json'), JSON.stringify({ 'vocs-account:production': 'enc:' + Buffer.from('enc|kept-record').toString('base64'), openai: 'enc:' + Buffer.from('enc|sk-ordinary').toString('base64'), 'remote-host': remoteHost }));
+        safeStorageMock.backend = backend;
+        const store = new SecretStore(dir, () => undefined, { sessionOnly: ['remote-host', 'remote-enroll'], keychainOnly: ['vocs-account:production'] });
+        await store.load();
+        expect(store.secureStorageAvailable).toBe(false);
+        expect(store.isMemoryOnly('vocs-account:production')).toBe(true);
+        expect(await store.get('vocs-account:production')).toBe('kept-record');
+        // Remote access is unchanged by this: still on disk, still persisted.
+        expect(store.isMemoryOnly('remote-host')).toBe(false);
+        expect(await store.get('remote-host')).toBe('remote-identity');
+        const onDisk = JSON.parse(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8')) as Record<string, string>;
+        expect(Object.keys(onDisk).sort()).toEqual(['openai', 'remote-host']);
+        expect(onDisk['remote-host']).toBe(remoteHost);
+        await store.set('remote-enroll', 'enrollment-secret');
+        expect(Object.keys(JSON.parse(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8')))).toContain('remote-enroll');
+      }
+      safeStorageMock.backend = 'gnome_libsecret';
+      const store = new SecretStore(path.join(tmpRoot, 'linux-libsecret'), () => undefined, { keychainOnly: ['vocs-account:production'] });
+      expect(store.secureStorageAvailable).toBe(true);
+      expect(store.isMemoryOnly('vocs-account:production')).toBe(false);
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+      safeStorageMock.backend = 'gnome_libsecret';
+    }
+  });
+
+  it('keeps a keychain-only enc: record on disk when the weak backend cannot decrypt it (keyring not up yet)', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+    try {
+      const dir = path.join(tmpRoot, 'linux-undecryptable');
+      // Sealed by the real keyring in an earlier run; this run came up on basic_text.
+      const sealed = 'enc:' + Buffer.from('sealed-by-the-real-keyring').toString('base64');
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'secrets.json'), JSON.stringify({ 'vocs-account:production': sealed }));
+      safeStorageMock.backend = 'basic_text';
+      const store = new SecretStore(dir, () => undefined, { keychainOnly: ['vocs-account:production'] });
+      await store.load();
+      expect(await store.get('vocs-account:production')).toBeUndefined();
+      expect(JSON.parse(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8'))['vocs-account:production']).toBe(sealed);
+      // Once the keyring is back, the record reads again.
+      safeStorageMock.backend = 'gnome_libsecret';
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+      safeStorageMock.backend = 'gnome_libsecret';
+    }
+  });
+
+  it('reads a keychain-only id back only as enc:, ignoring and removing a planted plain or b64 value', async () => {
+    const dir = path.join(tmpRoot, 'planted');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'secrets.json'), JSON.stringify({
+      'vocs-account:production': 'b64:' + Buffer.from('{"planted":true}').toString('base64'),
+      'vocs-account:staging': '{"planted":true}',
+      'remote-host': 'b64:' + Buffer.from('legacy-remote').toString('base64')
+    }));
+    const store = new SecretStore(dir, () => undefined, { sessionOnly: ['remote-host'], keychainOnly: ['vocs-account:production', 'vocs-account:staging'] });
+    await store.load();
+    expect(await store.get('vocs-account:production')).toBeUndefined();
+    expect(await store.get('vocs-account:staging')).toBeUndefined();
+    expect(await store.get('remote-host')).toBe('legacy-remote'); // unchanged for remote access
+    expect(Object.keys(JSON.parse(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8')))).toEqual(['remote-host']);
+    await store.set('vocs-account:production', '{"v":1}');
+    expect(await store.get('vocs-account:production')).toBe('{"v":1}');
   });
 
   it('clears a key and treats an empty set as a clear', async () => {

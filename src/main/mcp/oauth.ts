@@ -19,6 +19,38 @@ export interface NativeMcpOAuthOptions {
   maxTokenAgeSeconds?: number;
   timeoutMs?: number;
   fetch?: FetchLike;
+  /** Device enrollment (Vocs `vocs-code-device`): sent as `device_name` with the code exchange,
+   *  whose `refresh_token`/`device_id`/`device_expires_at` are then held for `takeDeviceGrant()`.
+   *  Main-selected, never renderer input. */
+  deviceName?: string;
+  /** A device grant that arrived but will not be handed over (cancelled or failed sign-in):
+   *  the caller revokes it, so it is never left live on the account. */
+  onAbandonedDeviceGrant?: (grant: NativeDeviceGrant) => void;
+}
+
+/** A device grant from the code exchange. Main-process only; the SDK never sees the refresh token. */
+export interface NativeDeviceGrant {
+  refreshToken: string;
+  deviceId: string;
+  deviceExpiresAt: number;
+}
+
+/** The token or authorization endpoint answered with an OAuth error. Codes only, never logged. */
+export class NativeOAuthError extends Error {
+  constructor(readonly code: string, readonly description?: string) { super('OAuth sign-in was refused'); }
+}
+
+/** Shapes shared with the account broker's own refresh grant. */
+export const DEVICE_REFRESH_TOKEN = /^[A-Za-z0-9_-]{32,512}$/;
+export const DEVICE_ID = /^[\x21-\x7e]{1,200}$/;
+/** The issuer caps a device at one year; allow a day of clock skew and nothing more. */
+export const DEVICE_MAX_LIFETIME_MS = 367 * 24 * 60 * 60 * 1000;
+export function parseDeviceGrant(value: Record<string, unknown>, now = Date.now()): NativeDeviceGrant | undefined {
+  const { refresh_token: refreshToken, device_id: deviceId, device_expires_at: deviceExpiresAt } = value;
+  if (typeof refreshToken !== 'string' || !DEVICE_REFRESH_TOKEN.test(refreshToken)) return undefined;
+  if (typeof deviceId !== 'string' || !DEVICE_ID.test(deviceId)) return undefined;
+  if (typeof deviceExpiresAt !== 'number' || !Number.isSafeInteger(deviceExpiresAt) || deviceExpiresAt <= now || deviceExpiresAt > now + DEVICE_MAX_LIFETIME_MS) return undefined;
+  return { refreshToken, deviceId, deviceExpiresAt };
 }
 
 /** Tokens stay memory-only in this first slice; no fallback to plaintext/obfuscated disk storage. */
@@ -32,6 +64,8 @@ export interface NativeMcpOAuth {
   /** Main-process snapshot with the original expiry deadline, never exposed over IPC. */
   credentialSnapshot(): { token: OAuthTokens; expiresAt: number } | undefined;
   authorize(signal?: AbortSignal): Promise<void>;
+  /** The device grant of the last completed `authorize()`, handed over once (then forgotten here). */
+  takeDeviceGrant(): NativeDeviceGrant | undefined;
   /** Local logout/cancel. Remote revocation is a separate issuer operation. */
   clear(): void;
 }
@@ -53,6 +87,26 @@ async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise
   finally { signal.removeEventListener('abort', abort); }
 }
 
+/** A token response is small; anything over 64 KB is refused rather than buffered. */
+async function boundedJson(response: Response, limit = 64 * 1024): Promise<unknown> {
+  if (!response.body) throw new Error('Missing token response');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) throw new Error('Token response too large');
+      chunks.push(value);
+    }
+  } finally { void reader.cancel().catch(() => undefined); }
+  const bytes = new Uint8Array(size); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+}
+
 function equalSecret(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
@@ -67,6 +121,7 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
   const scopes = [...new Set(options.scopes)];
   if (options.clientId && !/^[A-Za-z0-9._-]{1,128}$/.test(options.clientId)) throw new Error('Invalid public client ID');
   if (options.callbackPath && !/^\/[A-Za-z0-9/_-]{1,128}$/.test(options.callbackPath)) throw new Error('Invalid loopback callback path');
+  if (options.deviceName !== undefined && !/^[\x20-\x7e]{1,60}$/.test(options.deviceName)) throw new Error('Invalid device name');
   if (options.maxTokenAgeSeconds !== undefined && (!Number.isSafeInteger(options.maxTokenAgeSeconds) || options.maxTokenAgeSeconds <= 0)) throw new Error('Invalid token lifetime limit');
   let tokens: OAuthTokens | undefined;
   let client: OAuthClientInformationMixed | undefined;
@@ -78,15 +133,19 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
   let generation = 0;
   let expiresAt = 0;
   let lifetime = new AbortController();
+  let device: NativeDeviceGrant | undefined;
+  let endpointError: NativeOAuthError | undefined;
 
-  const guardedFetch: FetchLike = async (input, init) => {
+  /** `detached`: a device code exchange. Once sent, it is allowed to finish (bounded) even if the
+   *  sign-in is cancelled, so a grant it returns can be revoked instead of left live. */
+  const guardedFetch = async (input: string | URL, init?: RequestInit, detached?: { signal: AbortSignal }): Promise<Response> => {
     const url = secureUrl(input);
     if (!origins.has(url.origin)) throw new Error('MCP OAuth endpoint is outside the approved resource and issuer');
     if (new Headers(init?.headers).get('authorization')?.toLowerCase().startsWith('bearer ') && url.href !== resource) throw new Error('MCP bearer token cannot leave its exact resource');
     const signal = AbortSignal.any([lifetime.signal, ...(active ? [active.signal] : []), ...(init?.signal ? [init.signal] : [])]);
     signal.throwIfAborted();
-    const response = await (options.fetch ?? fetch)(input, { ...init, signal, redirect: 'manual' });
-    if (signal.aborted) { await response.body?.cancel(); signal.throwIfAborted(); }
+    const response = await (options.fetch ?? fetch)(input, { ...init, signal: detached ? detached.signal : signal, redirect: 'manual' });
+    if (signal.aborted && !detached) { await response.body?.cancel(); signal.throwIfAborted(); }
     if (response.status >= 300 && response.status < 400) {
       await response.body?.cancel();
       throw new Error('MCP OAuth redirects are not allowed');
@@ -163,6 +222,43 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
     verifier = undefined;
     state = undefined;
     expiresAt = 0;
+    // A device grant that arrived but was never handed over is revoked, not just forgotten.
+    if (device) abandon(device);
+    device = undefined;
+    endpointError = undefined;
+  }
+
+  /** The token response, minus everything the SDK must not hold: refresh and device fields are
+   *  kept here (device client only) and stripped from what the SDK parses, so its own refresh
+   *  logic can never see a refresh token. Error codes are noted for the caller's message. A read
+   *  that finishes after its attempt was cancelled changes nothing. */
+  async function inspectTokenResponse(response: Response, attempt: AbortSignal): Promise<Response> {
+    const headers = new Headers(response.headers);
+    headers.delete('content-length'); headers.delete('content-encoding');
+    const init = { status: response.status, statusText: response.statusText, headers };
+    let value: unknown;
+    // Read to the end even after a cancel (bounded): a device grant in a late body must still be revoked.
+    try { value = await boundedJson(response); }
+    catch { attempt.throwIfAborted(); return new Response(null, init); }
+    if (attempt.aborted) {
+      const late = response.ok && options.deviceName && value && typeof value === 'object' && !Array.isArray(value) ? parseDeviceGrant(value as Record<string, unknown>) : undefined;
+      if (late) abandon(late);
+      attempt.throwIfAborted();
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return new Response(JSON.stringify(value), init);
+    const record = value as Record<string, unknown>;
+    if (!response.ok) {
+      // The first refusal is the meaningful one; anything after it is fallout.
+      if (typeof record.error === 'string') endpointError ??= new NativeOAuthError(record.error.slice(0, 64), typeof record.error_description === 'string' ? record.error_description.slice(0, 128) : undefined);
+      return new Response(JSON.stringify(record), init);
+    }
+    const { refresh_token: _refresh, device_id: _id, device_expires_at: _expires, ...rest } = record;
+    if (options.deviceName) device = parseDeviceGrant(record);
+    return new Response(JSON.stringify(rest), init);
+  }
+
+  function abandon(grant: NativeDeviceGrant) {
+    try { options.onAbandonedDeviceGrant?.(grant); } catch { /* best effort */ }
   }
 
   function transport(): { authProvider: OAuthClientProvider; fetch: FetchLike } {
@@ -200,6 +296,7 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
   return {
     resource, provider, fetch: guardedFetch, clear, transport,
     credentialSnapshot: () => tokens && Date.now() < expiresAt ? { token: { ...tokens }, expiresAt } : undefined,
+    takeDeviceGrant() { const grant = device; device = undefined; return grant; },
     async authorize(signal) {
       if (active) throw new Error('MCP sign-in is already in progress');
       clear();
@@ -237,7 +334,8 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
         accepted = true;
         const code = url.searchParams.get('code');
         if (url.searchParams.has('error') || !code || code.length > 4096 || url.searchParams.getAll('code').length !== 1) {
-          res.writeHead(400).end('Sign-in was not completed.'); fail(new Error('MCP authorization denied or invalid callback')); return;
+          const refused = url.searchParams.get('error');
+          res.writeHead(400).end('Sign-in was not completed.'); fail(refused && /^[a-z_]{1,64}$/.test(refused) ? new NativeOAuthError(refused) : new Error('MCP authorization denied or invalid callback')); return;
         }
         res.writeHead(200).end('Sign-in received. Return to Vocs Code.');
         finish(code);
@@ -264,9 +362,29 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
             } : value;
           }
         });
+        // An authorization code is single-use. The SDK retries the exchange after an
+        // invalid_grant/invalid_client answer; that second POST could only replace the issuer's real
+        // answer (e.g. fresh_sign_in_required) with a generic one, so it is never sent.
+        let codeExchanged = false;
         const attemptFetch: FetchLike = async (input, init) => {
           controller.signal.throwIfAborted();
-          return guardedFetch(input, { ...init, signal: AbortSignal.any([controller.signal, ...(init?.signal ? [init.signal] : [])]) });
+          const tokenEndpoint = discovery?.authorizationServerMetadata?.token_endpoint;
+          const isToken = !!tokenEndpoint && init?.method === 'POST' && secureUrl(input).href === secureUrl(tokenEndpoint).href;
+          let body = init?.body;
+          const isCodeExchange = isToken && body instanceof URLSearchParams && body.get('grant_type') === 'authorization_code';
+          if (isCodeExchange) {
+            if (codeExchanged) throw new Error('Authorization code already exchanged');
+            codeExchanged = true;
+          }
+          if (isCodeExchange && options.deviceName && body instanceof URLSearchParams) {
+            body = new URLSearchParams(body);
+            body.set('device_name', options.deviceName);
+          }
+          const attemptInit = { ...init, body, signal: AbortSignal.any([controller.signal, ...(init?.signal ? [init.signal] : [])]) };
+          const response = isCodeExchange && options.deviceName
+            ? await guardedFetch(input, attemptInit, { signal: AbortSignal.timeout(30_000) })
+            : await guardedFetch(input, attemptInit);
+          return isToken ? inspectTokenResponse(response, controller.signal) : response;
         };
         const result = await abortable(auth(attemptProvider, { serverUrl: resource, scope: scopes.join(' '), fetchFn: attemptFetch }), controller.signal);
         if (result !== 'REDIRECT') throw new Error('Expected an interactive MCP sign-in');
@@ -276,8 +394,13 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
       } catch (error) {
         tokens = undefined;
         expiresAt = 0;
-        throw error;
+        if (device) abandon(device);
+        device = undefined;
+        // The SDK retries an invalid_client/invalid_grant exchange and then fails on something
+        // else; the endpoint's own answer is the one worth reporting.
+        throw endpointError ?? error;
       } finally {
+        endpointError = undefined;
         clearTimeout(timer);
         signal?.removeEventListener('abort', abort);
         controller.signal.removeEventListener('abort', onAbort);
