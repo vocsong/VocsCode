@@ -85,6 +85,94 @@ async function launch(userData: string): Promise<Page> {
 }
 
 describe.runIf(enabled)('model picker before the first message', () => {
+  it('keeps a roomy model list and compact harness cards in a short New Session dialog', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-new-session-layout-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    // Native reads these from settings without a provider request or a running harness.
+    const models = Array.from({ length: 24 }, (_, i) => ({
+      provider: 'openai', id: `layout-fixture-${i + 1}`, displayName: `Layout fixture ${i + 1}`
+    }));
+    const viewport = { width: 960, height: 600 };
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+      windowBounds: viewport,
+      defaultHarness: 'native',
+      defaultUseWorktree: false,
+      providers: [{ id: 'openai', enabled: true, hasApiKey: false, models }]
+    }), 'utf8');
+
+    const win = await launch(userData);
+    // Pin CSS pixels at BrowserWindow's minimum size even on a small CI display.
+    await win.setViewportSize(viewport);
+    await openNewSession(win);
+    const dialog = win.getByRole('dialog', { name: /^New session/i });
+    const list = dialog.locator('.ns-grid .ns-col-model .mp-list');
+    const cards = dialog.locator('.harness-card');
+    const search = dialog.getByRole('textbox', { name: 'Search models', exact: true });
+    const start = dialog.getByRole('button', { name: /^Start session/ });
+    await search.waitFor({ state: 'visible' });
+    await start.waitFor({ state: 'visible' });
+    await expect.poll(() => list.locator('.mp-name[title^="openai/layout-fixture-"]').count(), { timeout: 30_000 }).toBe(models.length);
+    // Measure the populated card layout, not the shorter loading spinners.
+    await cards.first().waitFor({ state: 'visible' });
+    await expect.poll(() => cards.locator('.badge').count(), { timeout: 75_000 }).toBe(await cards.count());
+    await win.evaluate(() => document.fonts.ready.then(() => undefined));
+
+    const geometry = () => dialog.evaluate((el) => {
+      const body = el.querySelector<HTMLElement>('.modal-body')!;
+      const column = el.querySelector('.ns-col-model')!;
+      const list = column.querySelector<HTMLElement>('.mp-list')!;
+      const rect = (node: Element) => {
+        const { x, width, height, top, bottom } = node.getBoundingClientRect();
+        return { x, width, height, top, bottom };
+      };
+      const bodyRect = rect(body);
+      // A grouping wrapper with display: contents does not clip its children.
+      const columnRect = column.getClientRects().length && getComputedStyle(column).overflowY !== 'visible' ? rect(column) : undefined;
+      return {
+        cards: rect(el.querySelector('.harness-cards')!),
+        list: rect(list),
+        search: rect(column.querySelector('.mp-search input')!),
+        footer: rect(el.querySelector('.modal-footer')!),
+        body: { scrollTop: body.scrollTop, bottom: bodyRect.bottom },
+        modelClipTop: Math.max(0, bodyRect.top, columnRect?.top ?? 0),
+        modelClipBottom: Math.min(innerHeight, bodyRect.bottom, columnRect?.bottom ?? innerHeight)
+      };
+    });
+    const before = await geometry();
+    // Leave slack around the target ~234 px list and for status badges to wrap on system fonts.
+    const exposedListHeight = Math.min(before.list.bottom, before.modelClipBottom) - Math.max(before.list.top, before.modelClipTop);
+    expect(exposedListHeight, 'model list height exposed on open (CSS px)').toBeGreaterThanOrEqual(200);
+    expect(before.cards.height, 'combined harness card height (CSS px)').toBeLessThanOrEqual(240);
+    expect(before.list.width, 'model list is wider than the harness grid').toBeGreaterThan(before.cards.width);
+    expect(before.list.x).toBeGreaterThanOrEqual(before.cards.x + before.cards.width);
+    expect(before.search.top, 'search is not clipped on open').toBeGreaterThanOrEqual(before.modelClipTop - 1);
+    expect(before.search.bottom).toBeLessThanOrEqual(before.list.top + 1);
+    expect(before.footer.top, 'footer is below the scrolling dialog body').toBeGreaterThanOrEqual(before.body.bottom - 1);
+    expect(before.footer.bottom, 'footer fits inside the viewport').toBeLessThanOrEqual(viewport.height + 1);
+    expect(before.body.scrollTop, 'opening the dialog does not scroll to the prompt').toBe(0);
+    expect(await search.evaluate((el) => el === document.activeElement)).toBe(true);
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'models-06-short-new-session.png') });
+
+    // Wheel inside the exposed list without Playwright auto-scrolling a row into view.
+    await win.mouse.move(before.list.x + before.list.width / 2, Math.max(before.list.top, before.modelClipTop) + exposedListHeight / 2);
+    await win.mouse.wheel(0, 160);
+    await expect.poll(() => list.evaluate((el) => el.scrollTop), { timeout: 5_000 }).toBeGreaterThan(48);
+    const after = await geometry();
+    expect(after.body.scrollTop, 'wheel scroll stays in the model list').toBe(before.body.scrollTop);
+    expect(Math.abs(after.search.top - before.search.top), 'search stays in place').toBeLessThanOrEqual(1);
+    expect(Math.abs(after.footer.top - before.footer.top), 'footer stays in place').toBeLessThanOrEqual(1);
+
+    // A keyboard user can skip the catalog rows and start typing without scrolling manually.
+    await dialog.getByRole('button', { name: 'Jump to first prompt', exact: true }).press('Enter');
+    const prompt = dialog.getByRole('textbox', { name: 'First prompt (optional)', exact: true });
+    expect(await prompt.evaluate((el) => el === document.activeElement)).toBe(true);
+    expect((await geometry()).body.scrollTop).toBeGreaterThan(0);
+  }, 180_000);
+
   it('creates a Fast request and changes it under the composer without claiming an effective fast tier', async () => {
     const tmp = path.join(os.tmpdir(), `vocs-code-fast-mode-${Date.now()}`);
     const userData = path.join(tmp, 'userData');

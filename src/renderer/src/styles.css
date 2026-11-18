@@ -5340,12 +5340,22 @@ body.resizing {
 }
 
 /* New session dialog */
+.ns-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.ns-toolbar > .mission-kind {
+  margin-bottom: 0;
+}
 .ns-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-  /* Harness and model columns stretch to the same height. */
-  align-items: stretch;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 12px 16px;
+  align-items: start;
 }
 .ns-span2 {
   grid-column: 1 / -1;
@@ -5393,28 +5403,44 @@ body.resizing {
 .ns-col {
   min-width: 0;
 }
-/* The model column matches the harness column's height (set in NewSessionDialog via ResizeObserver);
-   the model list is the flexible part and scrolls inside it. */
+/* Keep the picker and its options in source order, with the latter spanning both columns. */
 .ns-col-model {
+  display: contents;
+}
+.ns-model-heading {
   display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.ns-col-model > * {
-  flex-shrink: 0;
-}
-.ns-col-model .field:has(.model-picker) {
-  flex: 1 1 0;
-  min-height: 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-bottom: 4px;
 }
 .ns-col-model .model-picker {
-  flex: 1;
-  min-height: 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
 }
+.ns-col-model .mp-search {
+  position: static;
+}
+/* The catalog has its own viewport; changing harness details or model options cannot squeeze it. */
 .ns-col-model .mp-list {
-  flex: 1;
-  min-height: 48px;
-  max-height: none;
+  max-height: clamp(160px, 39vh, 400px);
+}
+.ns-col-model .menu-empty {
+  overflow-wrap: anywhere;
+}
+.ns-run-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.2fr);
+  gap: 8px 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.ns-run-options .field,
+.ns-fast-mode .toggle {
+  margin: 0;
 }
 /* Workspace row: worktree isolation spans both columns below a divider; turning it on opens the
    branch panel (prefix chip joined to the name, the base branch, and a preview of what is created). */
@@ -5501,6 +5527,12 @@ body.resizing {
 .ns-worktree-hint .row {
   flex-wrap: wrap;
 }
+.ns-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ns-summary code {
   color: var(--accent);
 }
@@ -5509,15 +5541,22 @@ body.resizing {
 .harness-cards {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  gap: 4px;
 }
 .harness-card {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  align-content: center;
+  gap: 2px 6px;
   min-width: 0;
+  min-height: 32px;
   text-align: left;
   border: 1px solid var(--border);
   background: var(--bg-elev);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  padding: 4px 8px;
   cursor: pointer;
 }
 .harness-card:hover {
@@ -5527,25 +5566,13 @@ body.resizing {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
-.harness-card-top {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: 4px 6px;
-}
-.harness-card-top .badge {
+.harness-card .badge {
   max-width: 100%;
   white-space: normal;
 }
 .harness-card-name {
   font-weight: 600;
   font-size: 12.5px;
-}
-.harness-card-tag {
-  color: var(--fg-muted);
-  font-size: 11.5px;
-  margin-top: 2px;
 }
 .advanced {
   border-left: 2px solid var(--border);
