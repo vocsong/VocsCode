@@ -157,6 +157,7 @@ describe('Pi adapter turn-state tracking', () => {
     feed(a, { type: 'agent_start' });
     feed(a, { type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: '429 rate limited', content: [] } });
     feed(a, { type: 'agent_end', messages: [] });
+    feed(a, { type: 'agent_settled' });
     await settle();
     const turn = turns(events).at(-1) as Extract<TranscriptItem, { kind: 'turn' }>;
     expect(turn.status).toBe('failed');
@@ -171,9 +172,10 @@ describe('Pi adapter turn-state tracking', () => {
     feed(a, { type: 'agent_end', messages: [], willRetry: true });
     await settle();
     expect(turns(events)).toHaveLength(0);
-    // The retry succeeds: final agent_end completes the turn normally.
+    // The retry succeeds: agent_settled completes the whole run normally.
     feed(a, { type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'done' }] } });
     feed(a, { type: 'agent_end', messages: [], willRetry: false });
+    feed(a, { type: 'agent_settled' });
     await settle();
     const turn = turns(events).at(-1) as Extract<TranscriptItem, { kind: 'turn' }>;
     expect(turn.status).toBe('completed');
@@ -185,6 +187,7 @@ describe('Pi adapter turn-state tracking', () => {
     feed(a, { type: 'agent_start' });
     feed(a, { type: 'message_end', message: { role: 'assistant', stopReason: 'aborted', content: [] } });
     feed(a, { type: 'agent_end', messages: [] });
+    feed(a, { type: 'agent_settled' });
     await settle();
     const turn = turns(events).at(-1) as Extract<TranscriptItem, { kind: 'turn' }>;
     expect(turn.status).toBe('interrupted');
@@ -199,10 +202,12 @@ describe('Pi adapter turn-state tracking', () => {
     await a.send({ text: 'one' });
     feed(a, { type: 'agent_start' });
     feed(a, { type: 'agent_end', messages: [] });
+    feed(a, { type: 'agent_settled' });
     await settle();
     await a.send({ text: 'two' });
     feed(a, { type: 'agent_start' });
     feed(a, { type: 'agent_end', messages: [] });
+    feed(a, { type: 'agent_settled' });
     await settle();
     const usages = events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage');
     expect(usages.at(-1)?.totals.turns).toBe(2);
@@ -232,6 +237,7 @@ describe('Pi adapter turn-state tracking', () => {
     });
     feed(a, { type: 'message_end', message: { role: 'assistant', content: [], usage: { input: 100, output: 8, cacheRead: 0, cacheWrite: 0, cost: { total: 0.015 } } } });
     feed(a, { type: 'agent_end', messages: [] });
+    feed(a, { type: 'agent_settled' });
     await settle();
     const final = events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage').at(-1);
     expect(final?.totals).toMatchObject({ inputTokens: 100, outputTokens: 40, costUsd: 0.02, turns: 1 });
@@ -253,6 +259,7 @@ describe('Pi adapter turn-state tracking', () => {
     });
     feed(a, { type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [] } });
     feed(a, { type: 'agent_end', messages: [] });
+    feed(a, { type: 'agent_settled' });
     await settle();
     const turn = turns(events).at(-1) as Extract<TranscriptItem, { kind: 'turn' }>;
     // Every counter the turn moved, not just input/output: cache reads and reasoning are part of what
@@ -276,6 +283,7 @@ describe('Pi adapter turn-state tracking', () => {
       type === 'get_session_stats' ? new Promise<unknown>((resolve) => { release = () => resolve({ tokens: { input: 10, output: 2 }, cost: 0.01 }); }) : {};
     feed(a, { type: 'agent_start' });
     feed(a, { type: 'agent_end', messages: [] });
+    feed(a, { type: 'agent_settled' });
     await settle();
     await new Promise((resolve) => setTimeout(resolve, 60));
     release();
@@ -288,8 +296,9 @@ describe('Pi adapter turn-state tracking', () => {
     const { ctx, events } = stubCtx();
     const a = new PiAdapter(ctx);
     prime(a);
-    // pi can emit agent_end on its own; without a start, duration must stay unknown, not Date.now().
+    // Without a recorded start, duration must stay unknown, not Date.now().
     feed(a, { type: 'agent_end', messages: [] });
+    feed(a, { type: 'agent_settled' });
     await settle();
     const turn = turns(events).at(-1) as Extract<TranscriptItem, { kind: 'turn' }>;
     expect(turn.durationMs).toBeUndefined();

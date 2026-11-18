@@ -1753,6 +1753,11 @@ export class SessionManager {
       assertCurrent();
       active.turnPending = true;
       try {
+        // Normal Pi steering aborts the old run; release its approval waits before handing off.
+        // Queue and Mission input retain their existing approval lifecycle.
+        if (!this.get(id)?.mission && active.adapter.id === 'pi' && active.adapter.busy && input.mode !== 'queue') {
+          this.cancelApprovals(id, active, 'Interrupted');
+        }
         await active.adapter.send(prepared);
       } catch (e) {
         if (hooks) active.uncertain = true; // A rejected transport request need not mean no work ran.
