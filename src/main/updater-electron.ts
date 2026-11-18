@@ -12,8 +12,8 @@ import type { Logger } from './log';
 const { autoUpdater } = electronUpdater;
 
 export function electronUpdaterFacade(log: Logger): UpdaterFacade {
-  // The user decides when to download; a downloaded update still installs automatically on a
-  // clean quit (electron-updater's default), which covers "updated next restart" for free.
+  // UpdateService starts the download so it can track progress and timeouts. Keep the
+  // library's install-on-quit behavior for downloaded updates.
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.logger = {
