@@ -6,6 +6,8 @@ import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, TranscriptItem, 
 import { errorMessage, shortId, truncate } from '../util/async';
 import { fastModeSupport } from '../../shared/fast-mode';
 import { toCodex } from '../mcp/effective';
+import { bundledCodexPath } from '../runtime';
+import { applyCodexMcpSuppression, readCodexMcpServers } from './codex-mcp-config';
 import { TurnUsageTracker } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { listCodexModels } from './codex-app-server';
@@ -73,9 +75,12 @@ export class CodexExecAdapter implements HarnessAdapter {
       this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
       return [];
     });
-    // `owned` keeps a same-named server in the user's own config.toml from starting a second copy
-    // inside the session beside the one shared server this app runs.
-    const { config: mcpServers, env: mcpEnv } = toCodex(mcp, 'env-ref', { owned: this.ctx.ownedMcpIds() });
+    const { config: mcpServers, env: mcpEnv } = toCodex(mcp, 'env-ref');
+    await applyCodexMcpSuppression(mcpServers, this.ctx.ownedMcpIds(), () => {
+      const executable = override ?? bundledCodexPath(this.ctx.runtime.runtimePaths.appRoot);
+      if (!executable) throw new Error('Codex SDK runtime not found. Select a native Codex executable in Settings.');
+      return readCodexMcpServers(executable, meta.cwd, env);
+    });
     Object.assign(env, mcpEnv);
     this.model = (meta.config.model ?? meta.activeModel)?.model;
     this.modelProvider = (meta.config.model ?? meta.activeModel)?.provider;

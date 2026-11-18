@@ -395,18 +395,25 @@ describe('codex custom provider wiring', () => {
     await adapter.dispose();
   });
 
-  it('switches this app\u2019s own server name off in the thread config when the session gets none', async () => {
+  it('disables inherited built-ins without introducing invalid entries for absent ones', async () => {
     const meta = makeMeta();
-    const { ctx } = makeCtx(meta, defaultSettings(), ['gitnexus']);
+    const { ctx } = makeCtx(meta, defaultSettings(), ['gitnexus', 'vocs-mission']);
     const child = makeFakeChild();
     mocks.spawnChildren.push(child);
-    const server = scriptServer(child);
+    const server = scriptServer(child).on('config/read', () => ({ config: {
+      mcp_servers: { gitnexus: { url: 'http://127.0.0.1:1/mcp' }, unrelated: { command: 'other' } }
+    } }));
 
     const adapter = new CodexAppServerAdapter(ctx);
-    await adapter.start();
-
-    const thread = server.requests.find((r) => r.method === 'thread/start');
-    expect(thread?.params.config?.mcp_servers).toEqual({ gitnexus: { enabled: false } });
-    await adapter.dispose();
+    try {
+      await adapter.start();
+      expect(server.requests.find((r) => r.method === 'config/read')?.params).toEqual({ cwd: meta.cwd });
+      const thread = server.requests.find((r) => r.method === 'thread/start');
+      expect(thread?.params.config?.mcp_servers).toEqual({
+        gitnexus: { enabled: false }, 'vocs-mission': { enabled: false, command: '' }
+      });
+    } finally {
+      await adapter.dispose();
+    }
   });
 });

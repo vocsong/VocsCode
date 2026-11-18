@@ -204,6 +204,12 @@ edits apply mid-session without a restart (P1).
 status request (`mcpServerStatus/list` or similar) to feed §7.2; if not, the tab shows
 "configured" only.
 
+Both Codex adapters suppress app-owned MCP names not injected into the session. Codex
+validates the transport even for a disabled entry and merges overrides with its native
+config. Read the merged native MCP config for the session cwd first; use `enabled = false`
+alone for inherited entries, and pair it with `command = ""` for absent names. The empty
+command is never run, and no native config files are written.
+
 **Codex exec** — `new Codex({ codexPathOverride, env, config: { mcp_servers } })`. The SDK
 flattens it to `--config` flags; secrets therefore go through `env_vars` and
 `env_http_headers`, never inline (§8). Verified live: Codex loads the servers, but this
@@ -515,9 +521,8 @@ Rules:
   unindexed project.
 - Codex loads its own `~/.codex/config.toml` underneath whatever a session is handed, so a
   `[mcp_servers.gitnexus]` left there would start a second, unscoped copy beside the shared one.
-  Both Codex adapters pass `ownedMcpIds()` to `toCodex`, which writes
-  `mcp_servers.gitnexus = { enabled: false }` for any owned name the session is not receiving:
-  the name is switched off, and a real entry of the same name is never replaced. Both Codex
+  Both Codex adapters apply a session-only disable override for owned names the session does not
+  receive, using the native transport when present (see §6). Injected entries are left alone. Both Codex
   harnesses belong to the set whose config the app writes, so the built-in row on the MCP tab
   says this (`claimed`); a harness whose config the app does not write is injected and left alone.
 - A worktree session shares the main checkout's switches (`projectRoot`), but its `cwd` also
