@@ -260,16 +260,38 @@ describe('Pi adapter nonce-bound Fast mode RPC bridge', () => {
     expect(h.events.filter((event) => event.type === 'usage').at(-1)).toMatchObject({ totals: { costUsd: expect.closeTo(expected + 0.01, 8), turns: 2 } });
     await h.adapter.dispose();
   });
-  it.each([{ ...openai, id: 'gpt-6' }, codex])('surfaces missing requested Fast pricing instead of implying the standard estimate is full spend: $provider/$id', async (model) => {
-    const h = await host({ enabled: true, model, stats: { cost: 0.01 } });
+  it.each([
+    { model: { ...openai, id: 'gpt-6' }, input: 1000, cacheWrite: 0 },
+    { model: codex, input: 1000, cacheWrite: 0 },
+    { model: openai, input: 273_000, cacheWrite: 0 },
+    { model: openai, input: 1000, cacheWrite: 1000 },
+  ])('uses a 2x estimate when Fast rates are missing: $model.provider/$model.id ($input input, $cacheWrite cache writes)', async ({ model, input, cacheWrite }) => {
+    // Stats include $0.005 not seen in the assistant stream. Only the Fast request is doubled.
+    const stats = { cost: 0.015 };
+    const h = await host({ enabled: true, model, stats });
     await h.adapter.start(); await h.adapter.send({ text: 'fast' });
     h.emit({ type: 'message_start', message: { role: 'assistant', provider: model.provider, model: model.id } });
-    h.emit({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', usage: { input: 1000, output: 1000, cost: { total: 0.01 } } } });
+    h.emit({ type: 'message_update', usage: { input, output: 500, cacheWrite, cost: { total: 0.005 } } });
+    h.emit({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', usage: { input, output: 1000, cacheWrite, cost: { total: 0.01 } } } });
     h.emit({ type: 'agent_end' });
     h.emit({ type: 'agent_settled' });
-    await vi.waitFor(() => expect(h.events.filter((event) => event.type === 'item.upsert' && event.item.kind === 'turn')).toHaveLength(1));
-    expect(h.meta.fastModeStatus?.detail).toContain('pricing is unavailable');
-    expect(h.events.some((event) => event.type === 'item.upsert' && event.item.kind === 'info' && event.item.level === 'warn' && event.item.text.includes('standard-rate estimate'))).toBe(true);
+    const turns = () => h.events.filter((event) => event.type === 'item.upsert' && event.item.kind === 'turn');
+    const latestUsage = () => h.events.filter((event) => event.type === 'usage').at(-1);
+    await vi.waitFor(() => expect(turns()).toHaveLength(1));
+    expect(turns()[0]).toMatchObject({ item: { status: 'completed', costUsd: expect.closeTo(0.025, 8), usage: { inputTokens: input, outputTokens: 1000, cacheWriteTokens: cacheWrite } } });
+    expect(latestUsage()).toMatchObject({ totals: { costUsd: expect.closeTo(0.025, 8), turns: 1 } });
+    expect(h.meta.fastModeStatus?.detail).toContain('2x');
+    expect(h.events.filter((event) => event.type === 'item.upsert' && event.item.kind === 'info' && event.item.level === 'warn')).toEqual([
+      expect.objectContaining({ item: expect.objectContaining({ text: expect.stringMatching(/analytics.*2x.*provider billing/i) }) }),
+    ]);
+    await h.adapter.setFastMode(false);
+    stats.cost = 0.02;
+    await h.adapter.send({ text: 'standard' });
+    // Stats-only usage must keep the earlier adjustment without doubling the new spend.
+    h.emit({ type: 'agent_settled' });
+    await vi.waitFor(() => expect(turns()).toHaveLength(2));
+    expect(turns()[1]).toMatchObject({ item: { costUsd: expect.closeTo(0.005, 8) } });
+    expect(latestUsage()).toMatchObject({ totals: { costUsd: expect.closeTo(0.03, 8), turns: 2 } });
     await h.adapter.dispose();
   });
   it('does not apply first-party premiums to an unsupported restored provider', async () => {

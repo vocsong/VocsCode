@@ -29,6 +29,8 @@ const PI_BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
 const PI_READY_MARKER = 'VCODE_PI_READY::';
 const PI_EXTENSION_ERROR_MARKER = 'VCODE_PI_ERROR::';
 const PI_TOOL_INPUT_MARKER = 'VCODE_PI_TOOL_INPUT::';
+const PI_FAST_FALLBACK_MULTIPLIER = 2;
+const PI_FAST_FALLBACK_ESTIMATE = `${PI_FAST_FALLBACK_MULTIPLIER}x Pi's standard cost estimate`;
 /** Vocs Code's own subagent extension reports run activity as these notifications. */
 const PI_SUBAGENT_MARKER = 'VCODE_SUBAGENT::';
 /** Tool names our subagent extension registers; their cards read as agent work, not shell work. */
@@ -1028,16 +1030,18 @@ export class PiAdapter implements HarnessAdapter {
       const pricing = model.provider === 'openai' || model.provider === 'anthropic'
         ? fastModePricing(model.model, current.input + current.cacheRead + current.cacheWrite) : undefined;
       // Pi does not expose cache TTL; Anthropic cache writes use the five-minute estimate.
-      if (pricing && (!current.cacheWrite || pricing.cacheWrite !== undefined)) {
-        const estimate = estimateCostUsd(pricing, { inputTokens: current.input, outputTokens: current.output, cacheReadTokens: current.cacheRead, cacheWriteTokens: current.cacheWrite });
-        const premium = Math.max(0, estimate - current.cost);
-        current.cost += premium;
-        this.fastModeCostAdjustment += premium;
-      } else {
+      const hasFastRates = pricing && (!current.cacheWrite || pricing.cacheWrite !== undefined);
+      const estimate = hasFastRates
+        ? estimateCostUsd(pricing, { inputTokens: current.input, outputTokens: current.output, cacheReadTokens: current.cacheRead, cacheWriteTokens: current.cacheWrite })
+        : current.cost * PI_FAST_FALLBACK_MULTIPLIER;
+      const premium = Math.max(0, estimate - current.cost);
+      current.cost += premium;
+      this.fastModeCostAdjustment += premium;
+      if (!hasFastRates) {
         const key = `${model.provider}/${model.model}`;
         if (!this.unknownFastCostReported.has(key)) {
           this.unknownFastCostReported.add(key);
-          this.info('Pi Fast pricing is unavailable for this model/context. Reported spend retains Pi\'s standard-rate estimate, excludes any unknown Fast premium, and is not the full bill. Check provider billing.', 'warn');
+          this.info(`Pi Fast pricing is unavailable for this model or context. Analytics estimates spend at ${PI_FAST_FALLBACK_ESTIMATE} when available. Check provider billing for actual charges.`, 'warn');
         }
       }
     }
@@ -1205,7 +1209,10 @@ export class PiAdapter implements HarnessAdapter {
         if (payload.enabled && this.fastModeEffectiveModel) {
           const model = this.fastModeEffectiveModel;
           const priced = (model.provider === 'openai' || model.provider === 'anthropic') && fastModePricing(model.model, 0);
-          detail = `${detail ?? ''} ${priced ? 'Completed-request costs estimate requested Fast rates, not confirmed billing; Anthropic cache writes assume five-minute TTL.' : 'Fast pricing is unavailable; Pi standard-rate estimates exclude any unknown premium. Check provider billing.'}`.trim();
+          const pricingDetail = priced
+            ? `Analytics uses published Fast rates where available, or ${PI_FAST_FALLBACK_ESTIMATE} otherwise. Anthropic cache writes assume a five-minute TTL.`
+            : `Fast pricing is unavailable; analytics estimates spend at ${PI_FAST_FALLBACK_ESTIMATE} when available.`;
+          detail = `${detail ?? ''} ${pricingDetail} Check provider billing for actual charges.`.trim();
         }
         this.ctx.updateMeta({ fastModeStatus: { state: payload.state as 'off' | 'requested' | 'unavailable' | 'cooldown', ...(detail ? { detail } : {}) } });
       } else if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents' || payload.capability === 'mission' || payload.capability === 'mcp' || payload.capability === 'fast-mode')) {
