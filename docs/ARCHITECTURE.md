@@ -351,14 +351,31 @@ production (`auth.vocs.io` issuer, `mcp.vocs.io` catalog) unless main is launche
 `VOCS_CODE_ACCOUNT_REALM=staging`; the renderer never chooses an issuer or catalog, and a
 catalog that names the other realm is rejected.
 It configures the native OAuth controller with a static public client and fixed loopback callback,
-keeps five-minute credentials only in main-process memory, and validates the exact Hub catalog
+keeps five-minute access tokens only in main-process memory, and validates the exact Hub catalog
 contract before returning descriptive state. Each cancellation/sign-out/expiry invalidates its
 generation and clears catalog data; refreshing never treats stale metadata as authorization.
-Local sign-out precedes bounded best-effort remote token revocation.
 
-The five `vocsAccount:*` requests accept no URLs, credentials or arbitrary configuration. Both
-the transport-agnostic registry and Electron owner-main-frame boundary reject remote/agent
-callers. Main owns expiry and request cancellation; renderer revisions/generations prevent stale
-UI results. Registry shutdown disposes the broker. This does not persist sessions, mutate MCP
-configuration, grant tool access or require login for local editing. Settings presents the
+**Kept sign-in.** "Keep me signed in on this computer" (on by default) signs in with the
+`vocs-code-device` client and a platform-only `device_name`; off keeps the temporary `vocs-code`
+flow. The device's rotating refresh token is the only thing kept, in `SecretStore` under
+`vocs-account:<realm>` as `{v:1,issuer,clientId,resource,deviceId,refreshToken,deviceExpiresAt}`.
+Both ids are `sessionOnly`, so without a real OS keychain (including Linux `basic_text`/`unknown`)
+the record lives in memory for this run. On load the record must match the pinned realm exactly;
+it never chooses where a token is sent, and anything else is removed unused. The OAuth controller
+strips refresh and device fields before the MCP SDK parses a token response, so the SDK's own
+refresh logic never sees a refresh token. Startup restore runs after the window opens; the refresh
+grant is single-flight and writes the rotated token to the vault before the new access token is
+used (a failed write keeps it in memory and says so). `invalid_grant`, or any unknown outcome
+after the request may have been sent, ends the sign-in and clears the vault (a replayed token
+revokes the device server-side). A failure before sending (offline, DNS, refused, TLS) or a
+`503 temporarily_unavailable` keeps the vault and shows `offline` with Retry. Sign-out clears the
+vault first, then revokes the refresh token; a rotation that answers after sign-out is revoked,
+never stored. Quitting keeps the vault.
+
+The five `vocsAccount:*` requests accept no URLs, credentials or arbitrary configuration; sign-in
+takes only `{ persist: boolean }`. Both the transport-agnostic registry and Electron
+owner-main-frame boundary reject remote/agent callers. Main owns expiry and request cancellation;
+renderer revisions/generations prevent stale UI results. Registry shutdown disposes the broker
+(memory only). This does not mutate MCP configuration, grant tool access or require login for
+local editing. Settings presents the
 catalog read-only; live desktop acceptance is documented in `ACCOUNT-STAGING-TEST.md`.

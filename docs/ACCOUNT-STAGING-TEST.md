@@ -1,13 +1,14 @@
 # Vocs account + Hub catalog: staging desktop acceptance
 
-This is an opt-in staging experiment, not a mandatory login gate or persistent account release. Local work remains available signed out. It does not install MCP servers, authorize tools, send coding prompts, run paid providers or change production.
+This is an opt-in staging experiment, not a mandatory login gate. Local work remains available signed out. It does not install MCP servers, authorize tools, send coding prompts, run paid providers or change production.
 
 ## Targets and boundaries
 
 - Issuer: `https://vocs-login-staging.vocs.workers.dev/api/auth`.
 - Catalog: `https://vocs-mcp-staging.vocs.workers.dev/api/connections`.
-- Public client: `vocs-code`; PKCE S256; `catalog:read`; callback `http://127.0.0.1:<ephemeral-port>/oauth/vocs`.
-- Access is memory-only and expires after at most five minutes. Closing the app clears it. No refresh token, desktop client secret, OS-vault persistence or provider key is part of this slice.
+- Public clients: `vocs-code-device` with **Keep me signed in on this computer** (the default), `vocs-code` without it; PKCE S256; `catalog:read`; callback `http://127.0.0.1:<ephemeral-port>/oauth/vocs`.
+- Access tokens are memory-only and last at most five minutes. A temporary (`vocs-code`) sign-in ends with them; closing the app clears it.
+- A kept (`vocs-code-device`) sign-in stores only its rotating refresh token, in the OS keychain (the `vocs-account:staging` entry of `secrets.json`, `enc:`), and renews at startup. Without a keychain it stays in memory and ends when the app closes. No desktop client secret or provider key is involved.
 - Catalog visibility is not a tool grant. Even a visible connection must not be installed, connected or invoked automatically.
 - No token, authorization code, verifier, cookie, credential or authorization URL should be copied into a screenshot, issue, log attachment or chat. Report safe status and timestamps only.
 
@@ -30,9 +31,14 @@ This is an opt-in staging experiment, not a mandatory login gate or persistent a
 | Sign out during sign-in or catalog loading | Local credentials/catalog clear immediately; late responses do not restore them. Remote revocation failure must not keep the desktop signed in. |
 | Refresh catalog | Fetches current account permissions. No tool grant or paid call happens. |
 | Account has no Hub permissions | Empty/denied catalog is explained; no automatic provisioning or permission escalation. |
-| Wait beyond five-minute expiry | App stops treating cached catalog as authorization and offers explicit sign-in. No silent refresh or persistent-login claim. |
+| Wait beyond five-minute expiry (temporary sign-in) | App stops treating cached catalog as authorization and offers explicit sign-in. No silent refresh. |
+| Kept sign-in: **Refresh connections** after five minutes | One refresh grant, then the catalog; still signed in, "Stays signed in on this computer until <date>". |
 | Disconnect network | Bounded error/retry state, not a spinning permanent wait; local work remains usable. No cached cloud authorization. |
-| Restart app | Signed out; previous credentials/catalog do not return from disk. |
+| Restart app (temporary sign-in) | Signed out; previous credentials/catalog do not return from disk. |
+| Restart app (kept sign-in) | "Restoring your sign-in…" while the window is already usable, then signed in with a fresh catalog. |
+| Restart offline (kept sign-in) | "Can't reach Vocs" with **Retry** and **Sign out**; the sign-in is still kept, and Retry signs in once online. |
+| Revoke the device under Account & security, then Refresh or restart | "Your sign-in ended. Sign in again."; the saved entry is gone from `secrets.json`. |
+| Sign out of a kept sign-in (also offline) | Signed out at once and the saved entry removed; the device leaves the account page once revocation reaches Vocs. |
 | Sign in as another already-authorized account | Old account data is cleared first. Only the new account's catalog appears. Do not create a second live account solely for this check. |
 | Light/dark and narrow window | Labels/buttons remain readable, focusable and non-overlapping; cancellation/status is visible. |
 
@@ -63,7 +69,7 @@ npm ci
 $env:NODE_OPTIONS = '--no-experimental-webstorage'
 npm run typecheck
 npm run build
-npx vitest run tests/vocs-account.test.ts tests/vocs-account-settings.test.tsx tests/mcp-oauth.test.ts tests/mcp-oauth-transport-race.test.ts tests/handler-registry.test.ts tests/harness-setup-ipc.test.ts
+npx vitest run tests/vocs-account.test.ts tests/vocs-account-persistent.test.ts tests/vocs-account-settings.test.tsx tests/mcp-oauth.test.ts tests/mcp-oauth-transport-race.test.ts tests/handler-registry.test.ts tests/harness-setup-ipc.test.ts
 $env:VOCS_CODE_E2E_UI = '1'
 npx vitest run tests/e2e.vocs-account.test.ts tests/e2e.layout.test.ts
 Remove-Item Env:VOCS_CODE_E2E_UI

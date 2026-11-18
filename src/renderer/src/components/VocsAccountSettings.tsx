@@ -7,6 +7,7 @@ import { SettingsGroup, SettingsNote } from './SettingsPrimitives';
 const statusUnavailable = 'Account status is unavailable. Retry to check this desktop connection.';
 const actionUnconfirmed = 'The account action could not be confirmed. Retry the status check.';
 const leftNotice = 'Sign-in was cancelled because you left this page. Start it again when you are ready.';
+const noKeychain = 'This computer has no secure keychain; you’ll be signed out when Vocs Code closes.';
 /** Survives the unmount that cancelled a pending sign-in, so the next visit can say why it stopped. */
 let leftDuringSignIn = false;
 const signedOut: VocsAccountState = { realm: 'production', status: 'signed_out', refreshing: false, revision: -1, connections: [] };
@@ -16,6 +17,8 @@ export function VocsAccountSettings() {
   const [busy, setBusy] = useState<'signIn' | 'cancel' | 'signOut' | 'refresh' | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // "Keep me signed in on this computer" is on by default (owner decision).
+  const [keep, setKeep] = useState(true);
   const mounted = useRef(false);
   const epoch = useRef(0);
   const pending = useRef<typeof busy>(null);
@@ -56,7 +59,7 @@ export function VocsAccountSettings() {
     if (kind === 'cancel' || kind === 'signOut') setState({ ...signedOut, revision: revision.current });
     if (kind === 'signIn') setState({ ...signedOut, status: 'signing_in', revision: revision.current });
     try {
-      const next = await invoke(`vocsAccount:${kind}`, undefined);
+      const next = kind === 'signIn' ? await invoke('vocsAccount:signIn', { persist: keep }) : await invoke(`vocsAccount:${kind}`, undefined);
       if (mounted.current && epoch.current === generation) apply(next);
     } catch {
       if (mounted.current && epoch.current === generation) {
@@ -75,9 +78,21 @@ export function VocsAccountSettings() {
     catch { if (mounted.current && generation === epoch.current) setError(statusUnavailable); }
     finally { if (mounted.current && generation === epoch.current) { pending.current = null; setBusy(null); } }
   }
+  const staging = state?.realm === 'staging';
   const signingIn = state?.status === 'signing_in';
   const connected = state?.status === 'signed_in';
-  const staging = state?.realm === 'staging';
+  const restoring = state?.status === 'restoring';
+  const offline = state?.status === 'offline';
+  /** A kept sign-in that is not usable right now: it can be retried or signed out, not signed in over. */
+  const kept = restoring || offline;
+  const statusText = signingIn ? 'Waiting for browser sign-in…'
+    : restoring ? 'Restoring your sign-in…'
+    : offline ? 'Can’t reach Vocs. Your sign-in is still kept on this computer.'
+    : connected ? (staging ? 'Connected to Vocs staging' : 'Connected to Vocs')
+    : state ? 'Signed out' : 'Checking account status…';
+  const session = !connected ? '' : state.persistent
+    ? (state.keychain === false ? 'Signed in until Vocs Code closes' : state.deviceExpiresAt ? `Stays signed in on this computer until ${new Date(state.deviceExpiresAt).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}` : 'Stays signed in on this computer')
+    : state.expiresAt ? `Expires at ${new Date(state.expiresAt).toLocaleTimeString()}` : 'Temporary session';
   const signInLabel = staging ? 'Sign in to staging' : 'Sign in with Vocs';
   return <section className="settings-section vocs-account-settings" data-testid="vocs-account-settings">
     <SettingsGroup id="vocs-account-login" title="Vocs account" icon="shield" description="One identity for Vocs cloud features. Local projects and existing tools remain available while signed out.">
@@ -86,24 +101,36 @@ export function VocsAccountSettings() {
         ? 'This connects only to the isolated Vocs staging environment, not your production account. Sign-in opens your system browser. No provider key or paid request is used.'
         : 'Sign-in opens your system browser at auth.vocs.io. This page only reads which Vocs Hub connections your account may use; no provider key or paid request is used.'}</SettingsNote>
       {isWeb ? <p role="status">Open Vocs Code on this computer to manage account sign-in. Remote browser access cannot authorize this desktop.</p> : <>
-        <p role="status" aria-live="polite" className="vocs-account-status">{signingIn ? 'Waiting for browser sign-in…' : connected ? (staging ? 'Connected to Vocs staging' : 'Connected to Vocs') : state ? 'Signed out' : 'Checking account status…'}</p>
+        <p role="status" aria-live="polite" className="vocs-account-status">{statusText}</p>
         {/* Retry re-reads status, so it is offered only when reading or confirming status failed;
             after a refused or expired sign-in the retry is the sign-in button. */}
         {(error || state?.error) && <div className="vocs-account-error" role="alert"><p>{error || state?.error}</p>{(error === statusUnavailable || error === actionUnconfirmed) && <Button disabled={!!busy} onClick={() => void retry()}>Retry status</Button>}</div>}
         {notice && <p className="muted vocs-account-notice">{notice}</p>}
-        {connected && <dl className="vocs-account-details"><div><dt>Account</dt><dd data-testid="vocs-account-id">{state.accountId}</dd></div><div><dt>Session</dt><dd>{state.expiresAt ? `Expires at ${new Date(state.expiresAt).toLocaleTimeString()}` : 'Temporary session'}</dd></div></dl>}
+        {state?.notice && <p className="vocs-account-notice" role="alert">{state.notice}</p>}
+        {connected && <dl className="vocs-account-details"><div><dt>Account</dt><dd data-testid="vocs-account-id">{state.accountId ?? 'Loading…'}</dd></div><div><dt>Session</dt><dd data-testid="vocs-account-session">{session}</dd></div></dl>}
         <div className="vocs-account-actions">
           {/* The sign-in button stays mounted, disabled, while waiting, and Cancel sits beside it:
               the second click of a double-click must land on it, never on Cancel. */}
           {connected ? <>
             <Button disabled={!!busy || state.refreshing} onClick={() => void action('refresh')}>{busy === 'refresh' || state.refreshing ? 'Refreshing…' : 'Refresh connections'}</Button>
             <Button disabled={busy === 'signOut'} onClick={() => void action('signOut')}>Sign out</Button>
+          </> : kept ? <>
+            {/* Retry renews the kept sign-in (main treats refresh from offline as a retry). */}
+            {offline && <Button variant="primary" disabled={!!busy} onClick={() => void action('refresh')}>{busy === 'refresh' ? 'Retrying…' : 'Retry'}</Button>}
+            <Button disabled={busy === 'signOut'} onClick={() => void action('signOut')}>Sign out</Button>
           </> : <>
             <Button key="start-sign-in" variant="primary" disabled={!state || !!busy || signingIn} onClick={() => void action('signIn')}>{signInLabel}</Button>
             {signingIn && <Button key="cancel-sign-in" onClick={() => void action('cancel')} disabled={busy === 'cancel'}>Cancel sign-in</Button>}
           </>}
         </div>
-        <p className="muted">This session lasts up to five minutes and is kept only in memory. Restarting or signing out clears it. Persistent sign-in is not enabled.</p>
+        {!connected && !kept && <div className="vocs-account-keep">
+          <label><input type="checkbox" checked={keep} disabled={!state || !!busy || signingIn} onChange={(event) => setKeep(event.target.checked)} /> Keep me signed in on this computer</label>
+          <p className="muted">{!keep ? 'This sign-in lasts up to five minutes and is kept only in memory. Restarting or signing out clears it.'
+            : state?.keychain === false ? noKeychain
+            : 'Stays signed in for up to a year (90 days unused) in this computer’s keychain. Sign out here, or revoke it under Account & security on Vocs Login.'}</p>
+        </div>}
+        {connected && !state.persistent && <p className="muted">This session lasts up to five minutes and is kept only in memory. Restarting or signing out clears it.</p>}
+        {connected && state.persistent && state.keychain === false && <p className="muted">{noKeychain}</p>}
       </>}
     </SettingsGroup>
     <SettingsGroup id="vocs-account-catalog" title="Hub connections" icon="globe" description="A catalog is not an execution grant. Connections are not added to any harness or workspace automatically.">

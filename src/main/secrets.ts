@@ -30,7 +30,28 @@ export class SecretStore {
 
   /** Whether `id` must stay out of the file right now. */
   private keepInMemory(id: string): boolean {
-    return this.sessionOnly.has(id) && !this.encryptionAvailable;
+    return this.sessionOnly.has(id) && !this.secureStorageAvailable;
+  }
+
+  /** True when `id` is held for this run only and will be gone after a restart. */
+  isMemoryOnly(id: string): boolean {
+    return this.keepInMemory(id);
+  }
+
+  /**
+   * OS encryption backed by a real keychain. On Linux, Chromium falls back to `basic_text` (a
+   * hard-coded key) when no secret service is running; that, or an `unknown` backend, protects
+   * nothing a copied file would not reveal, so session-only ids treat it as unavailable.
+   */
+  get secureStorageAvailable(): boolean {
+    if (!this.encryptionAvailable) return false;
+    if (process.platform !== 'linux') return true;
+    try {
+      const backend = (safeStorage as { getSelectedStorageBackend?: () => string }).getSelectedStorageBackend?.();
+      return backend !== 'basic_text' && backend !== 'unknown';
+    } catch {
+      return false;
+    }
   }
 
   async load(): Promise<void> {
@@ -39,12 +60,16 @@ export class SecretStore {
       this.log('warn', `${this.file} is not a key table; ignoring it`);
       this.data = {};
     } else this.data = loaded;
-    // An earlier version wrote these obfuscated. Without OS encryption they move to memory for this
-    // run and leave the file, which is rewritten before anything else can copy it again.
-    const moved = Object.keys(this.data).filter((id) => this.keepInMemory(id) && this.data[id]?.startsWith('b64:'));
+    // An earlier version wrote these obfuscated (or, on a Linux basic_text backend, under its fixed
+    // key). Without a real keychain they move to memory for this run and leave the file, which is
+    // rewritten before anything else can copy it again. An `enc:` value moves only when that weak
+    // backend can read it: one sealed by a keychain that is merely unavailable now stays put.
+    const weakKey = this.encryptionAvailable && !this.secureStorageAvailable;
+    const moved = Object.keys(this.data).filter((id) => this.keepInMemory(id) && (this.data[id]?.startsWith('b64:') || (weakKey && this.data[id]?.startsWith('enc:'))));
     if (moved.length) {
       for (const id of moved) {
-        this.memory.set(id, Buffer.from(this.data[id]!.slice(4), 'base64').toString('utf8'));
+        const value = await this.get(id);
+        if (value !== undefined) this.memory.set(id, value);
         delete this.data[id];
       }
       await this.persist();

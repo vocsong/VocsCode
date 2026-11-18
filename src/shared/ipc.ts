@@ -1,4 +1,4 @@
-import type { VocsAccountState } from './vocs-account';
+import type { VocsAccountSignInRequest, VocsAccountState } from './vocs-account';
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type { ControlGrantInput, ControlOwnerState } from './control';
 import type { HarnessSetupStatus, LoginHarnessId } from './harness-setup';
@@ -154,7 +154,7 @@ export interface IpcContract {
 
   /** Local desktop owner only; no tokens, URLs or client configuration accepted. */
   'vocsAccount:get': [void, VocsAccountState];
-  'vocsAccount:signIn': [void, VocsAccountState];
+  'vocsAccount:signIn': [VocsAccountSignInRequest | void, VocsAccountState];
   'vocsAccount:cancel': [void, VocsAccountState];
   'vocsAccount:signOut': [void, VocsAccountState];
   'vocsAccount:refresh': [void, VocsAccountState];

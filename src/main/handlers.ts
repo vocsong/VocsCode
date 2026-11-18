@@ -258,13 +258,19 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   for (const [channel, action] of [
     ['vocsAccount:get', () => vocsAccount.get()],
-    ['vocsAccount:signIn', () => vocsAccount.signIn()],
     ['vocsAccount:cancel', () => vocsAccount.cancel()],
     ['vocsAccount:signOut', () => vocsAccount.signOut()],
     ['vocsAccount:refresh', () => vocsAccount.refresh()]
   ] as const) handle(channel, input => {
     if (input !== undefined) throw new Error('Account commands do not accept configuration.');
     return action();
+  });
+  // The one choice the renderer makes: keep this sign-in or not. Main picks client, issuer and label.
+  const signInRequest = z.strictObject({ persist: z.boolean() }).optional();
+  handle('vocsAccount:signIn', input => {
+    const parsed = signInRequest.safeParse(input);
+    if (!parsed.success) throw new Error('Account commands do not accept configuration.');
+    return vocsAccount.signIn(parsed.data);
   });
 
   if (deps.control) {

@@ -147,6 +147,11 @@ describe('handler registry', () => {
       expect(isRemoteChannel(channel)).toBe(false);
       expect(agentChannels().includes(channel as never)).toBe(false);
     }
+    // Sign-in takes exactly one renderer choice, whether to keep the sign-in; nothing else.
+    for (const input of [{ persist: 'yes' }, { persist: true, clientId: 'vocs-code-device' }, { persist: true, deviceName: 'evil' }]) await expect(registry.invoke('vocsAccount:signIn', input, 'desktop')).rejects.toThrow(/do not accept configuration/);
+    await expect(registry.invoke('vocsAccount:signIn', { persist: true }, 'desktop')).resolves.toEqual(snapshot);
+    expect(account.signIn).toHaveBeenLastCalledWith({ persist: true });
+    await expect(registry.invoke('vocsAccount:signIn', { persist: true }, 'agent')).rejects.toThrow(/desktop owner/);
     await registry.shutdown(); expect(account.dispose).toHaveBeenCalledTimes(1);
   });
 
