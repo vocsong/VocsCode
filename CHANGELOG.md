@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.1](https://github.com/vocsong/VocsCode/compare/v0.10.0...v0.10.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **codex:** preserve transports when disabling built-in MCP servers ([#533](https://github.com/vocsong/VocsCode/issues/533)) ([7988540](https://github.com/vocsong/VocsCode/commit/7988540a292d7a29a677286be8215b20c567c78d))
+* **models:** refresh harness catalogs from provider settings ([#534](https://github.com/vocsong/VocsCode/issues/534)) ([e3e937f](https://github.com/vocsong/VocsCode/commit/e3e937f15edd81be2b56c4e3474b6f573046974a))
+* **release:** find the precreated draft by listing releases, since the tag lookup hides drafts ([#538](https://github.com/vocsong/VocsCode/issues/538)) ([b0ca8b3](https://github.com/vocsong/VocsCode/commit/b0ca8b3e7569da7340480463d71032994892d2b8))
+
 ## [0.10.0](https://github.com/vocsong/VocsCode/compare/v0.9.1...v0.10.0) (2026-11-18)
 
 
