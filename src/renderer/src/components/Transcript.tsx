@@ -639,31 +639,32 @@ export const isRunningEntry = (item: TranscriptItem): boolean =>
  * than something that must stay visible: the answer, warnings and user turns. Approvals are work
  * too, but the header stays open while one is undecided; plans are work that `WorkGroup` keeps on
  * screen as one card under its header, so a plan update no longer splits a turn's work in two.
- * `laterToolInTurn` says whether a tool call still follows within the same turn, which is what
- * makes an unlabelled assistant text commentary instead of the answer.
+ * `laterToolInSegment` says whether a tool call still follows before the next reply boundary,
+ * which is what makes unlabelled assistant text commentary instead of an answer.
  */
-export function isWorkItem(item: TranscriptItem, laterToolInTurn: boolean): boolean {
+export function isWorkItem(item: TranscriptItem, laterToolInSegment: boolean): boolean {
   if (item.kind === 'tool' || item.kind === 'approval' || item.kind === 'plan') return true;
   // Warnings and errors are signals, not work: they stay on screen when the group is collapsed.
   if (item.kind === 'info') return item.level === 'info';
   if (item.kind !== 'assistant') return false;
   if (item.phase === 'final' || item.phase === 'plan') return false;
   if (item.phase === 'commentary') return true;
-  return item.text.trim() === '' || laterToolInTurn;
+  return item.text.trim() === '' || laterToolInSegment;
 }
 
 /**
- * Collapses each turn's tool calls, commentary, thinking, plans and approvals into one `work` chunk
- * (Codex-style), keeping the answer, warnings and turn rows as standalone rows. The duration
- * shown by the header comes off the turn row that closes the work.
+ * Collapses runs of tool calls, commentary, thinking, plans and approvals into `work` chunks,
+ * keeping replies, warnings and turn rows standalone. The duration shown by the last work
+ * header comes off the turn row that closes it.
  */
 export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
-  // A phase-less assistant text narrates the work while a tool call still follows it in the turn.
   const laterTool = new Array<boolean>(items.length).fill(false);
   let seenTool = false;
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i]!;
-    if (item.kind === 'user' || item.kind === 'turn') {
+    // Pi can look up a background result after replying, without a phase or turn marker. Treat
+    // the lookup as a boundary for inferring commentary, but keep the lookup itself collapsible.
+    if (item.kind === 'user' || item.kind === 'turn' || (item.kind === 'tool' && item.name === 'subagent_result')) {
       seenTool = false;
       continue;
     }

@@ -83,6 +83,27 @@ describe('groupTranscript', () => {
     expect(chunks[1]).toMatchObject({ kind: 'single', item: { id: 'm2' } });
   });
 
+  it('keeps earlier replies visible when subagent follow-ups do more work before the turn closes', () => {
+    const progress: TranscriptItem = { ...text('p1', 'Fetching the result'), phase: 'commentary' } as TranscriptItem;
+    const report = text('report', 'The change is merged.');
+    const firstLookup = tool({ id: 'lookup1', name: 'subagent_result', hint: 'agent' });
+    const check = tool({ id: 'c2' });
+    const firstUpdate = text('update1', 'The review has no blockers.');
+    const secondLookup = tool({ id: 'lookup2', name: 'subagent_result', hint: 'agent' });
+    const secondUpdate = text('update2', 'The background tests passed.');
+    const footer: TranscriptItem = { id: 'turn1', kind: 'turn', ts: 0, status: 'completed' };
+    const before = tool({ id: 'c1' });
+    expect(groupTranscript([before, report, progress, firstLookup, check, firstUpdate, secondLookup, secondUpdate, footer])).toMatchObject([
+      { kind: 'work', entries: [before] },
+      { kind: 'single', item: report },
+      { kind: 'work', entries: [progress, firstLookup, check] },
+      { kind: 'single', item: firstUpdate },
+      { kind: 'work', entries: [secondLookup] },
+      { kind: 'single', item: secondUpdate },
+      { kind: 'single', item: footer }
+    ]);
+  });
+
   it('treats thinking-only items as work and keeps an explicit final outside', () => {
     const thinking = { id: 'th1', kind: 'assistant', ts: 0, text: '', thinking: 'hmm' } as TranscriptItem;
     const final: TranscriptItem = { id: 'f1', kind: 'assistant', ts: 0, text: 'answer', phase: 'final' };
