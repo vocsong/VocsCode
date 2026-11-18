@@ -66,8 +66,8 @@ The bot reads master's **first-parent history**: it represents each merge commit
 
    A commit that `master` already has by content is dropped by the rebase, so a `boundary` from an earlier release is harmless.
 3. release-please runs on that push and prepares the release commit (version bump + changelog) on `release-please--branches--master--components--vocs-code`. It cannot open the PR itself (see below), so open it by hand — title `chore(master): release X.Y.Z`, body the new `CHANGELOG.md` section, which the bot has already written to that branch — and rebase-merge it once **all four** required checks have passed, including the Windows ownership and recovery job (about 45 minutes); the ruleset blocks the merge until then.
-4. Push the tag and create an **empty draft** by hand. The tag must equal `v` plus the tagged
-   `package.json` version. The real tag push starts the installer build; `release.yml` alone
+4. Push the tag from `master`, then create an **empty draft** attached to that tag. The tag must
+   equal `v` plus the tagged `package.json` version. The real tag push starts the installer build; `release.yml` alone
    publishes the draft, after all three platform bundles and all 14 assets validate. Do not publish
    the draft in the GitHub UI. release-please deliberately uses `skip-github-release: true`: it
    prepares the release PR, not tags or public releases. Both tag workflows first run the
@@ -77,8 +77,10 @@ The bot reads master's **first-parent history**: it represents each merge commit
    ```bash
    git tag vX.Y.Z origin/master && git push origin vX.Y.Z
    gh release create vX.Y.Z --draft --verify-tag --title vX.Y.Z --notes-file <the new CHANGELOG section>
+   gh release view vX.Y.Z --json tagName,isDraft
    ```
 
+   Confirm `tagName` is `vX.Y.Z` and `isDraft` is `true` while the build runs.
    For a prerelease, use the matching version suffix and add `--prerelease` when creating the
    draft. Publication preserves that flag, the title, and the human-authored notes.
 
@@ -146,6 +148,9 @@ back the public set. No asset is uploaded directly from an unpacked build direct
   are resumable. If bundles expired, a new run must rebuild every platform; changed bytes are safe
   to reconcile only while the release remains a matching marked draft.
 - **Draft missing:** create the empty draft as above, then rerun the publisher's failed job.
+- **Draft has an `untagged-…` placeholder:** find its current `tagName` with
+  `gh release list --json name,tagName,isDraft` and confirm it is the intended empty draft. Attach the existing tag with
+  `gh release edit <draft-tag> --tag vX.Y.Z --verify-tag --draft`, then rerun the failed publish job.
 - **Tag moved / wrong provenance / invalid bundle:** stop. Do not remove or rewrite the marker,
   re-tag a public version, or bypass the exact-master-CI gate. Fix the source and cut a new version.
 - **Already public and identical:** a rerun succeeds read-only: **zero uploads, deletes, or release
@@ -304,15 +309,15 @@ CI builds mac and linux images that cannot be built on a Windows dev machine —
 
 ## In-app auto-update
 
-Packaged builds check GitHub Releases themselves through `electron-updater` (issue #198). The feed is
-the `latest.yml` / `latest-mac.yml` / `latest-linux.yml` manifests generated with `--publish never`
-and exposed together by the complete-set publisher; NSIS
-differential updates ride on the `.blockmap` files, and macOS needs the `zip` targets in
-`electron-builder.yml` (the DMG stays the user-facing download). Users can also check manually from
-**Settings → About**; the title-bar pill only appears when there is something to act on, and a
-restart-to-install prompt is held until every session is out of a live turn. Until a release has
-shipped with a signed mac build, mac auto-updates are best-effort (Gatekeeper blocks unsigned
-installers); Windows NSIS and Linux AppImage are the supported update paths.
+Packaged builds check GitHub Releases through `electron-updater` at startup and every hour while
+open. The feed uses `latest.yml`, `latest-mac.yml` and `latest-linux.yml`, generated with `--publish never`
+and exposed together by the complete-set publisher. NSIS differential updates use `.blockmap` files.
+The `zip` targets in `electron-builder.yml` supply the macOS updater, and users install from the DMG.
+New versions download automatically. Users can check immediately from
+**Settings → About & doctor → Check for updates**. The title bar offers **Restart to update** once
+the download is ready and sessions are idle. Updates install on a clean quit for Windows NSIS and Linux AppImage.
+macOS installation from the updater is best-effort with the current ad-hoc signature. Reliable macOS
+updates require Developer ID signing.
 
 ## Later
 

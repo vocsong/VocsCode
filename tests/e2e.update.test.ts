@@ -1,12 +1,11 @@
 /** Packaged in-app auto-update (issue #198) against a staged mock update feed.
  *
- *  Proves what the unit suites cannot: a packaged app reads `resources/app-update.yml`, its
- *  startup check hits the feed, the title-bar pill appears, the download runs to
- *  restart-pending, and the About panel describes it — while an unpackaged run of the same build
- *  never contacts the feed at all. "Restart to update" is not clicked here: the staged installer
- *  is a dummy file, so a real install can only be verified against a real Release.
+ *  A packaged app reads `resources/app-update.yml`, checks at startup, and downloads a newer
+ *  release after a manual check. The feed serves a dummy installer, so the test records the
+ *  install-on-quit handoff in place of launching it.
  *
- *  Run: npm run dist:dir && VOCS_CODE_E2E_UI=1 HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" npx vitest run tests/e2e.update.test.ts
+ *  Run after `npm run build` and `npm run dist:dir -- --publish never`:
+ *  HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" node scripts/e2e-guard.mjs tests/e2e.update.test.ts
  */
 import http from 'node:http';
 import crypto from 'node:crypto';
@@ -32,44 +31,57 @@ function invoke<K extends IpcChannel>(win: Page, channel: K, request: IpcRequest
   return win.evaluate(({ channel, request }) => window.harness.invoke(channel, request), { channel, request }) as Promise<IpcResponse<K>>;
 }
 
-/** A static feed serving latest.yml + a dummy installer; counts every request it receives. */
+/** Loopback feed with independently counted metadata and installer requests. */
 interface Feed {
   url: string;
-  requests: number;
+  manifestRequests: number;
+  installerRequests: number;
+  publish(version: string): void;
   stop(): Promise<void>;
 }
 
-async function startFeed(): Promise<Feed> {
+async function startFeed(initialVersion: string): Promise<Feed> {
   const installer = Buffer.alloc(64 * 1024, 7);
   const sha512 = crypto.createHash('sha512').update(installer).digest('base64');
-  const name = 'Vocs-Code-Setup-999.0.0.exe';
-  const latest = [
-    'version: 999.0.0',
-    "releaseDate: '2026-01-01T00:00:00.000Z'",
-    'path: ' + name,
-    'sha512: ' + sha512,
-    'files:',
-    `  - url: ${name}`,
-    '    sha512: ' + sha512,
-    `    size: ${installer.length}`
-  ].join('\n');
-  let requests = 0;
+  let version = initialVersion;
+  let manifestRequests = 0;
+  let installerRequests = 0;
   const server = http.createServer((req, res) => {
-    requests++;
-    if (req.url?.endsWith('.exe')) {
+    const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    const name = `Vocs-Code-Setup-${version}.exe`;
+    if (pathname === `/${name}`) {
+      installerRequests++;
       res.writeHead(200, { 'content-type': 'application/octet-stream' });
       res.end(installer);
       return;
     }
+    if (pathname !== '/latest.yml') {
+      res.writeHead(404).end();
+      return;
+    }
+    manifestRequests++;
     res.writeHead(200, { 'content-type': 'text/yaml' });
-    res.end(latest);
+    res.end([
+      `version: ${version}`,
+      "releaseDate: '2026-01-01T00:00:00.000Z'",
+      'files:',
+      `  - url: ${name}`,
+      `    sha512: ${sha512}`,
+      `    size: ${installer.length}`
+    ].join('\n'));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as { port: number }).port;
   return {
     url: `http://127.0.0.1:${port}/`,
-    get requests() {
-      return requests;
+    get manifestRequests() {
+      return manifestRequests;
+    },
+    get installerRequests() {
+      return installerRequests;
+    },
+    publish(nextVersion) {
+      version = nextVersion;
     },
     stop: () =>
       new Promise<void>((resolve) => {
@@ -78,7 +90,7 @@ async function startFeed(): Promise<Feed> {
   };
 }
 
-async function launch(userData: string, executablePath: string, args: string[], env: Record<string, string>): Promise<{ app: ElectronApplication; win: Page }> {
+async function launch(executablePath: string, args: string[], env: Record<string, string>): Promise<{ app: ElectronApplication; win: Page }> {
   const app = await electron.launch({ executablePath, args, env, timeout: 90_000 });
   const win = await app.firstWindow();
   await expect.poll(() => win.evaluate(() => typeof window.harness?.invoke), { timeout: 30_000 }).toBe('function');
@@ -109,60 +121,89 @@ describe.runIf(enabled)('electron e2e: in-app auto-update', () => {
 
   it('an unpackaged run never checks the feed', async () => {
     expect(process.env.VOCS_CODE_E2E_UI, 'Set VOCS_CODE_E2E_UI=1 to launch Electron').toBe('1');
-    feed = await startFeed();
+    feed = await startFeed('999.0.0');
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-update-dev-'));
     const userData = path.join(tmp, 'userData');
     await fs.mkdir(userData, { recursive: true });
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(userData));
-    const { app, win } = await launch(userData, require('electron') as string, [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`], isolatedEnv(userData, { VOCS_CODE_UPDATER_DISABLE: '' }));
+    const { app, win } = await launch(require('electron') as string, [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`], isolatedEnv(userData, { VOCS_CODE_UPDATER_DISABLE: '' }));
     try {
       // Past the deferred-check moment (5s after startup), the feed must still be untouched.
       const state = await waitForState(win, 'idle');
       expect(state.status).toBe('idle');
       await new Promise((r) => setTimeout(r, 8_000));
-      expect(feed.requests, 'the unpackaged app must never contact the update feed').toBe(0);
+      expect(await invoke(win, 'update:check', undefined)).toEqual({ status: 'idle' });
+      expect(feed.manifestRequests).toBe(0);
+      expect(feed.installerRequests).toBe(0);
     } finally {
       await app.close();
     }
   });
 
-  it.runIf(packaged)('the packaged app checks, shows the pill, downloads and reaches restart-pending', async () => {
-    feed = await startFeed();
+  it.runIf(packaged)('checks at startup, downloads from About and hands off the update on quit', async () => {
+    feed = await startFeed('0.0.0');
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-update-app-'));
     const userData = path.join(tmp, 'userData');
+    const installCalls = path.join(tmp, 'install-calls.jsonl');
     await fs.mkdir(userData, { recursive: true });
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(userData));
     // Stage the feed the way electron-builder would on a real install: resources/app-update.yml
     // in the unpacked app, pointed at the local mock (a real install points at GitHub Releases).
-    const resourcesDir = path.join(path.dirname(packaged!), 'resources');
-    await fs.writeFile(path.join(resourcesDir, 'app-update.yml'), `provider: generic\nurl: ${feed.url}\nupdaterCacheDirName: ${cacheDirName}\n`);
-    const { app, win } = await launch(userData, packaged!, [`--user-data-dir=${userData}`], isolatedEnv(userData, { VOCS_CODE_UPDATER_DISABLE: '' }));
+    const configPath = path.join(path.dirname(packaged!), 'resources', 'app-update.yml');
+    const originalConfig = await fs.readFile(configPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    await fs.writeFile(configPath, `provider: generic\nurl: ${feed.url}\nupdaterCacheDirName: ${cacheDirName}\n`);
+    let app: ElectronApplication | undefined;
     try {
-      // Startup check → update available (999.0.0 > 0.2.0), pill in the title bar.
-      const available = await waitForState(win, 'available');
-      expect(available.version).toBe('999.0.0');
-      const pill = win.locator('.update-pill');
-      await pill.waitFor({ timeout: 20_000 });
-      expect(await pill.textContent()).toContain('999.0.0');
+      const launchResult = await launch(packaged!, [`--user-data-dir=${userData}`], isolatedEnv(userData, { VOCS_CODE_UPDATER_DISABLE: '' }));
+      app = launchResult.app;
+      const { win } = launchResult;
+      // Exercise the real NSIS quit hook. Record its handoff instead of executing the dummy file.
+      await app.evaluate(({ app: electronApp }, recordPath) => {
+        const { createRequire } = process.getBuiltinModule('node:module')!;
+        const { appendFileSync } = process.getBuiltinModule('node:fs')!;
+        const requireFromApp = createRequire(`${electronApp.getAppPath()}/package.json`);
+        const { autoUpdater, NsisUpdater } = requireFromApp('electron-updater') as typeof import('electron-updater');
+        if (!(autoUpdater instanceof NsisUpdater)) throw new Error('Expected the packaged Windows NSIS updater');
+        Object.defineProperty(autoUpdater, 'doInstall', {
+          value: (options: unknown) => {
+            appendFileSync(recordPath, `${JSON.stringify(options)}\n`);
+            return true;
+          }
+        });
+      }, installCalls);
+      await waitForState(win, 'up-to-date');
+      expect(feed.manifestRequests).toBe(1);
+      expect(feed.installerRequests).toBe(0);
 
-      // Download via the pill (the way a user acts on it) → progress → restart-pending.
-      await pill.click();
-      const done = await waitForState(win, 'restart-pending');
-      expect(done.version).toBe('999.0.0');
-      expect(feed.requests).toBeGreaterThanOrEqual(2);
-
-      // The About panel describes the state and offers restart-to-update. The pill in the title
-      // bar carries the same name, so the lookup is scoped to the panel.
       await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
       await win.getByRole('button', { name: 'About & doctor' }).click();
       const panel = win.locator('.settings-updates');
-      await panel.waitFor({ timeout: 20_000 });
-      await expect
-        .poll(async () => (await panel.textContent()) ?? '', { timeout: 20_000 })
-        .toContain('is ready');
+      expect(await panel.textContent()).toContain('You are up to date.');
+      feed.publish('999.0.0');
+      await panel.getByRole('button', { name: 'Check for updates' }).click();
+
+      expect(await waitForState(win, 'restart-pending')).toEqual({ status: 'restart-pending', version: '999.0.0' });
+      expect(feed.manifestRequests).toBe(2);
+      expect(feed.installerRequests).toBe(1);
       await panel.getByRole('button', { name: 'Restart to update' }).waitFor({ timeout: 10_000 });
-    } finally {
+      expect(await panel.textContent()).toContain('Update 999.0.0 is ready.');
+      await win.locator('.update-pill').filter({ hasText: 'Restart to update' }).waitFor({ timeout: 10_000 });
+      await expect(fs.stat(installCalls)).rejects.toMatchObject({ code: 'ENOENT' });
+
       await app.close();
+      app = undefined;
+      const calls = (await fs.readFile(installCalls, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+      expect(calls).toEqual([expect.objectContaining({ isSilent: true, isForceRunAfter: false })]);
+    } finally {
+      try {
+        await app?.close();
+      } finally {
+        if (originalConfig) await fs.writeFile(configPath, originalConfig);
+        else await fs.rm(configPath, { force: true });
+      }
     }
   });
 });

@@ -374,10 +374,7 @@ async function main(): Promise<void> {
       log
     });
     sessionsChangedHooks.push(() => updater?.notifySessionsChanged());
-    const startupCheck = setTimeout(() => {
-      updater?.check();
-    }, 5_000);
-    startupCheck.unref?.();
+    updater.startChecking();
     log('info', 'in-app updates enabled (GitHub Releases)');
   } else {
     log('debug', 'in-app updates disabled: unpackaged build' + (process.env.VOCS_CODE_UPDATER_DISABLE ? ' or VOCS_CODE_UPDATER_DISABLE' : ''));
@@ -552,6 +549,7 @@ async function main(): Promise<void> {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
+    updater?.stopChecking();
     const t0 = Date.now();
     log('info', `quitting: ${sessions?.list().filter((s) => s.status === 'running' || s.status === 'awaiting' || s.status === 'starting').length ?? 0} live session(s), ${terminals?.list().length ?? 0} terminal tab(s)`);
     // Drain debounced session-meta persists after the sessions themselves are stopped. Restored

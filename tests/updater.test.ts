@@ -86,7 +86,7 @@ describe('update state machine (packaged)', () => {
     expect(Object.values(fake.handlers).every((list) => list.length === 0)).toBe(true);
   });
 
-  it('goes idle → checking → available → downloading → restart-pending', () => {
+  it('downloads a newly found update once without a download request from the user', () => {
     const fake = makeFacade();
     const { service, pushes } = makeService(fake);
     expect(service.get()).toEqual({ status: 'idle' });
@@ -98,9 +98,9 @@ describe('update state machine (packaged)', () => {
     expect(service.get()).toMatchObject({ status: 'checking' });
 
     fake.emit('available', '0.3.0');
-    expect(service.get()).toEqual({ status: 'available', version: '0.3.0' });
+    expect(service.get()).toEqual({ status: 'downloading', version: '0.3.0' });
+    expect(fake.downloadUpdate).toHaveBeenCalledTimes(1);
 
-    expect(service.download()).toMatchObject({ status: 'downloading' });
     fake.emit('progress', PROGRESS);
     expect(service.get()).toMatchObject({ status: 'downloading', progress: PROGRESS });
 
@@ -108,6 +108,71 @@ describe('update state machine (packaged)', () => {
     expect(service.get()).toEqual({ status: 'restart-pending', version: '0.3.0' });
     // Nothing was held back: no session was live.
     expect(pushes.at(-1)).not.toHaveProperty('deferred', true);
+  });
+
+  it('checks at startup and once an hour while open, then stops on shutdown', () => {
+    vi.useFakeTimers();
+    try {
+      const fake = makeFacade();
+      const { service } = makeService(fake);
+      fake.checkForUpdates.mockImplementation(async () => {
+        fake.emit('notAvailable');
+        return null;
+      });
+
+      service.startChecking();
+      service.startChecking();
+      vi.advanceTimersByTime(4_999);
+      expect(fake.checkForUpdates).toHaveBeenCalledTimes(0);
+      vi.advanceTimersByTime(1);
+      expect(service.get().status).toBe('up-to-date');
+      expect(fake.checkForUpdates).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(60 * 60_000);
+      expect(fake.checkForUpdates).toHaveBeenCalledTimes(2);
+
+      service.stopChecking();
+      vi.advanceTimersByTime(60 * 60_000);
+      expect(fake.checkForUpdates).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a downloaded update ready across later background and manual checks', () => {
+    vi.useFakeTimers();
+    try {
+      const fake = makeFacade();
+      const { service, pushes } = makeService(fake, { live: true });
+      service.startChecking();
+      vi.advanceTimersByTime(5_000);
+      fake.emit('available', '0.3.0');
+      fake.emit('downloaded', '0.3.0');
+      const ready = { status: 'restart-pending', version: '0.3.0', deferred: true };
+      expect(service.get()).toEqual(ready);
+      const lastPush = pushes.length;
+
+      vi.advanceTimersByTime(60 * 60_000);
+      expect(service.check()).toEqual(ready);
+      expect(fake.checkForUpdates).toHaveBeenCalledTimes(1);
+      expect(fake.downloadUpdate).toHaveBeenCalledTimes(1);
+      expect(pushes).toHaveLength(lastPush);
+      expect(fake.quitAndInstall).toHaveBeenCalledTimes(0);
+      service.stopChecking();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not start a download from a check that finishes during shutdown', () => {
+    const fake = makeFacade();
+    const { service } = makeService(fake);
+    service.check();
+    service.stopChecking();
+    fake.emit('available', '0.3.0');
+    service.check();
+
+    expect(fake.downloadUpdate).toHaveBeenCalledTimes(0);
+    expect(fake.checkForUpdates).toHaveBeenCalledTimes(1);
   });
 
   it('returns to up-to-date with a checkedAt when the feed has nothing newer', () => {
@@ -126,7 +191,6 @@ describe('update state machine (packaged)', () => {
     const { service, pushes, setLive } = makeService(fake, { live: true });
     service.check();
     fake.emit('available', '0.3.0');
-    service.download();
     fake.emit('downloaded', '0.3.0');
     expect(service.get()).toMatchObject({ status: 'restart-pending', deferred: true });
 
@@ -149,7 +213,7 @@ describe('update state machine (packaged)', () => {
     fake.emit('downloaded', '0.3.0');
     expect(service.get()).toMatchObject({ status: 'checking' });
     fake.emit('available', '0.3.0');
-    expect(service.get()).toEqual({ status: 'available', version: '0.3.0' });
+    expect(service.get()).toEqual({ status: 'downloading', version: '0.3.0' });
   });
 
   it('surfaces a facade error as the error status', () => {
@@ -191,7 +255,6 @@ describe('update state machine (packaged)', () => {
       const { service } = makeService(fake, { downloadTimeoutMs: 500 });
       service.check();
       fake.emit('available', '0.3.0');
-      service.download();
       vi.advanceTimersByTime(600);
       expect(service.get()).toEqual({ status: 'error', error: 'download stalled for over 1s' });
     } finally {
@@ -206,7 +269,6 @@ describe('update state machine (packaged)', () => {
       const { service } = makeService(fake, { downloadTimeoutMs: 500 });
       service.check();
       fake.emit('available', '0.3.0');
-      service.download();
       vi.advanceTimersByTime(400);
       fake.emit('progress', PROGRESS);
       vi.advanceTimersByTime(400);
@@ -221,10 +283,9 @@ describe('update state machine (packaged)', () => {
   it('surfaces a rejected download promise as the error status', async () => {
     const fake = makeFacade();
     const { service } = makeService(fake);
+    fake.downloadUpdate.mockImplementation(async () => { throw new Error('disk full'); });
     service.check();
     fake.emit('available', '0.3.0');
-    fake.downloadUpdate.mockReturnValue(Promise.reject(new Error('disk full')));
-    service.download();
     await vi.waitFor(() => expect(service.get()).toEqual({ status: 'error', error: 'disk full' }));
   });
 
@@ -232,11 +293,12 @@ describe('update state machine (packaged)', () => {
     const fake = makeFacade();
     const { service } = makeService(fake);
     fake.checkForUpdates.mockReturnValue(new Promise(() => undefined));
+    fake.downloadUpdate.mockReturnValue(new Promise(() => undefined));
     service.check();
     service.check();
     expect(fake.checkForUpdates).toHaveBeenCalledTimes(1);
     fake.emit('available', '0.3.0');
-    fake.downloadUpdate.mockReturnValue(new Promise(() => undefined));
+    fake.emit('available', '0.3.0');
     service.download();
     service.download();
     expect(fake.downloadUpdate).toHaveBeenCalledTimes(1);
@@ -262,7 +324,6 @@ describe('update state machine (packaged)', () => {
     fake.emit('available', '0.3.0');
     service.install();
     expect(fake.quitAndInstall).not.toHaveBeenCalled();
-    service.download();
     fake.emit('downloaded', '0.3.0');
     service.install();
     expect(fake.quitAndInstall).toHaveBeenCalledTimes(1);
