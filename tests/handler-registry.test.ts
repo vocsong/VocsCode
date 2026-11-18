@@ -542,6 +542,23 @@ describe('handler registry', () => {
     expect(pushes.filter(([c]) => c === PUSH_CHANNELS.settingsChanged).length).toBeGreaterThan(0);
   });
 
+  it('never lets a provider id name identity material in the shared secret store', async () => {
+    const { registry, deps } = stubDeps();
+    await deps.settings.load();
+    const set = vi.spyOn(deps.secrets, 'set'), clear = vi.spyOn(deps.secrets, 'clear'), get = vi.spyOn(deps.secrets, 'get');
+    for (const id of ['vocs-account:production', 'vocs-account:staging', 'remote-host', 'remote-enroll']) {
+      await expect(registry.invoke('secrets:set', { providerId: id, apiKey: '{"v":1}' })).rejects.toThrow(/reserved/);
+      await expect(registry.invoke('secrets:clear', { providerId: id })).rejects.toThrow(/reserved/);
+      await expect(registry.invoke('providers:save', { id, kind: 'openai', name: 'Evil', baseUrl: 'https://evil.example/v1', hasApiKey: false, models: [] })).rejects.toThrow(/reserved/);
+      await expect(registry.invoke('secrets:has', { providerId: id })).resolves.toBe(false);
+    }
+    expect(set).not.toHaveBeenCalled(); expect(clear).not.toHaveBeenCalled();
+    // A provider planted in settings under a reserved id never receives the vault record as its key.
+    const { resolveProviderApiKey } = await import('../src/main/models/providers');
+    await expect(resolveProviderApiKey({ id: 'vocs-account:production', kind: 'openai', name: 'Evil', baseUrl: 'https://evil.example/v1', hasApiKey: true, models: [] } as never, deps.secrets.get)).resolves.toBeUndefined();
+    expect(get).not.toHaveBeenCalledWith('vocs-account:production');
+  });
+
   it('lists, searches and reads workspace files, refusing escapes', async () => {
     const { registry } = stubDeps();
     const list = (await registry.invoke('fs:list', { sessionId: 's_test' })) as { name: string; path: string; isDir: boolean }[];

@@ -57,6 +57,7 @@ import { DictationService } from './dictation/service';
 import { localModel } from '../shared/dictation';
 import { discoverChatImports } from './chat-import';
 import { representsChatImport } from './chat-import-identity';
+import { isReservedSecretId } from './secret-ids';
 
 /** Structural dialog options (Electron shapes are cast in ipc.ts, keeping this file Electron-free). */
 export interface OpenDialogOptions {
@@ -830,15 +831,19 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return { removedSessions };
   });
 
+  // Identity material shares the store with API keys; provider ids can never name it.
+  const assertProviderSecretId = (id: string) => { if (isReservedSecretId(id)) throw new Error('That id is reserved and cannot hold a provider key.'); };
   handle('secrets:set', async ({ providerId, apiKey }) => {
+    assertProviderSecretId(providerId);
     await secrets.set(providerId, apiKey);
     await syncProviderKeyFlags();
   });
   handle('secrets:clear', async ({ providerId }) => {
+    assertProviderSecretId(providerId);
     await secrets.clear(providerId);
     await syncProviderKeyFlags();
   });
-  handle('secrets:has', ({ providerId }) => secrets.has(providerId));
+  handle('secrets:has', ({ providerId }) => !isReservedSecretId(providerId) && secrets.has(providerId));
   handle('secrets:status', () => secrets.status);
 
   async function syncProviderKeyFlags(): Promise<AppSettings> {
@@ -857,6 +862,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     });
   });
   handle('providers:save', async (provider) => {
+    assertProviderSecretId(provider.id);
     if (provider.baseUrl !== undefined && provider.baseUrl !== '') assertEndpointUrl(provider.baseUrl);
     const s = settings.get();
     const idx = s.providers.findIndex((p) => p.id === provider.id);
@@ -1780,8 +1786,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       else await assertOrdinaryWorkspace(target);
     },
     shutdown: async () => {
-      vocsAccount.dispose();
-      await Promise.all([vesta.dispose(), dictationService?.dispose()]);
+      await Promise.all([vocsAccount.dispose(), vesta.dispose(), dictationService?.dispose()]);
     }
   };
 }

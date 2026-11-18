@@ -196,16 +196,28 @@ describe('device enrollment ("Keep me signed in")', () => {
     expect(stored(f)).toBeUndefined(); expect(f.vault.set).not.toHaveBeenCalled();
   });
 
+  it('production offers no kept sign-in yet: it signs in with vocs-code and never enrolls a device', async () => {
+    const f = issuer('production'); const b = broker(f);
+    expect(b.get()).toMatchObject({ realm: 'production', deviceSignIn: false });
+    expect(VOCS_REALMS.production.deviceClientId).toBeUndefined();
+    const state = await b.signIn({ persist: true }); // a stale or forged request cannot force it
+    expect(state).toMatchObject({ status: 'signed_in', realm: 'production' }); expect(state.persistent).toBeUndefined();
+    expect(f.lastBrowserUrl()!.searchParams.get('client_id')).toBe('vocs-code');
+    expect(f.enrollment).not.toHaveBeenCalled(); expect(f.temporaryExchange).toHaveBeenCalledTimes(1);
+    expect(f.vault.set).not.toHaveBeenCalled();
+    expect(broker(issuer('staging')).get().deviceSignIn).toBe(true);
+  });
+
   it('falls back to a clear message when the issuer does not offer the device client yet', async () => {
-    const f = issuer('production'); f.enrollment.mockImplementation(async () => Response.json({ error: 'invalid_client', error_description: 'PRIVATE_DETAIL' }, { status: 401 }));
+    const f = issuer(); f.enrollment.mockImplementation(async () => Response.json({ error: 'invalid_client', error_description: 'PRIVATE_DETAIL' }, { status: 401 }));
     const state = await broker(f).signIn({ persist: true });
-    expect(state).toMatchObject({ status: 'signed_out', realm: 'production' });
+    expect(state).toMatchObject({ status: 'signed_out', realm: 'staging' });
     expect(state.error).toMatch(/not available for this Vocs account yet.*Keep me signed in on this computer/);
     expect(state.error).not.toContain('PRIVATE_DETAIL'); expect(f.vault.set).not.toHaveBeenCalled(); expect(f.catalog).not.toHaveBeenCalled();
   });
 
   it('says so when the authorization redirect refuses the device client', async () => {
-    const f = issuer('production');
+    const f = issuer();
     f.browser.mockImplementation(async (url: string) => {
       const browserUrl = new URL(url); const callback = new URL(browserUrl.searchParams.get('redirect_uri')!);
       callback.searchParams.set('error', 'unauthorized_client'); callback.searchParams.set('state', browserUrl.searchParams.get('state')!);
@@ -215,10 +227,27 @@ describe('device enrollment ("Keep me signed in")', () => {
     expect(state.status).toBe('signed_out'); expect(state.error).toMatch(/not available for this Vocs account yet/);
   });
 
-  it('asks for a fresh browser sign-in when enrollment needs one', async () => {
-    const f = issuer(); f.enrollment.mockImplementation(async () => Response.json({ error: 'invalid_grant', error_description: 'fresh_sign_in_required' }, { status: 400 }));
+  it('asks for a fresh browser sign-in when enrollment needs one, and never re-sends the consumed code', async () => {
+    // Like the issuer: the first exchange consumes the code; a second one gets a plain invalid_grant.
+    const f = issuer();
+    f.enrollment
+      .mockImplementationOnce(async () => Response.json({ error: 'invalid_grant', error_description: 'fresh_sign_in_required' }, { status: 400 }))
+      .mockImplementation(async () => Response.json({ error: 'invalid_grant' }, { status: 400 }));
     const state = await broker(f).signIn({ persist: true });
     expect(state.status).toBe('signed_out'); expect(state.error).toMatch(/fresh sign-in/); expect(f.vault.set).not.toHaveBeenCalled();
+    expect(f.enrollment).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancel while the device exchange is answering revokes the grant it returns', async () => {
+    const f = issuer(); const gate = deferred<void>(); const sent = deferred<void>();
+    const original = f.enrollment.getMockImplementation()!;
+    f.enrollment.mockImplementation(async (params) => { const answer = await original(params); sent.resolve(); await gate.promise; return answer; });
+    const b = broker(f); const pending = b.signIn({ persist: true });
+    await sent.promise;
+    b.cancel(); gate.resolve();
+    expect((await pending).status).toBe('signed_out');
+    await vi.waitFor(() => expect(f.revoked).toEqual([token('e1')]));
+    expect(f.live.size).toBe(0); expect(f.vault.set).not.toHaveBeenCalled(); expect(f.catalog).not.toHaveBeenCalled();
   });
 
   it('a failed catalog after enrollment ends the new device instead of leaving it behind', async () => {
@@ -252,11 +281,46 @@ describe('device enrollment ("Keep me signed in")', () => {
     expect(b.get().notice).toMatch(/could not save/);
   });
 
-  it('without an OS keychain the state says so and the sign-in lasts this run', async () => {
+  it('a device whose vault write failed is revoked when the app quits', async () => {
+    const f = issuer(); f.vault.failSet = true; const b = broker(f);
+    expect((await b.signIn({ persist: true })).status).toBe('signed_in');
+    expect(f.revoked).toEqual([]);
+    await b.dispose();
+    expect(f.revoked).toEqual([token('e1')]); expect(f.live.size).toBe(0);
+  });
+
+  it('a rotation whose vault write failed is revoked at quit too, with the newest token', async () => {
+    const f = issuer(); seed(f); const b = broker(f);
+    f.vault.failSet = true;
+    expect((await b.restore()).status).toBe('signed_in');
+    expect(b.get().notice).toMatch(/could not save/);
+    await b.dispose();
+    expect(f.revoked).toEqual([token(1)]); expect(f.live.size).toBe(0);
+  });
+
+  it('quitting does not wait long for a revocation that never answers', async () => {
+    const f = issuer(); f.vault.failSet = true; const b = broker(f);
+    await b.signIn({ persist: true });
+    f.revoke.mockImplementation(() => new Promise<Response>(() => undefined));
+    const started = Date.now(); await b.dispose(200);
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  it('without an OS keychain no device is enrolled: the sign-in is the temporary one', async () => {
     const f = issuer(); f.vault.memoryOnly = true; const b = broker(f);
-    expect(b.get().keychain).toBe(false);
+    expect(b.get()).toMatchObject({ keychain: false, deviceSignIn: true });
     const state = await b.signIn({ persist: true });
-    expect(state).toMatchObject({ status: 'signed_in', persistent: true, keychain: false });
+    expect(state).toMatchObject({ status: 'signed_in', keychain: false }); expect(state.persistent).toBeUndefined();
+    expect(f.lastBrowserUrl()!.searchParams.get('client_id')).toBe('vocs-code');
+    expect(f.enrollment).not.toHaveBeenCalled(); expect(f.vault.set).not.toHaveBeenCalled();
+  });
+
+  it('a record that can no longer be kept (keychain gone) is revoked at startup, not used', async () => {
+    const f = issuer(); const record = seed(f); f.vault.memoryOnly = true;
+    const state = await broker(f).restore();
+    expect(state.status).toBe('signed_out'); expect(f.refresh).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(f.revoked).toEqual([record.refreshToken]));
+    expect(stored(f)).toBeUndefined();
   });
 });
 
@@ -279,23 +343,50 @@ describe('restore and refresh', () => {
     expect(state.status).toBe('signed_out'); expect(f.network).not.toHaveBeenCalled();
   });
 
-  it('single-flights the refresh grant across concurrent callers', async () => {
+  it('Refresh during a restore joins it: one refresh grant, and both callers get the outcome', async () => {
     const f = issuer(); seed(f); const held = deferred<void>();
     const original = f.refresh.getMockImplementation()!;
     f.refresh.mockImplementation(async (params) => { await held.promise; return original(params); });
     const b = broker(f);
-    const calls = [b.restore(), b.restore(), b.refresh(), b.refresh()];
+    const calls = [b.restore(), b.refresh(), b.refresh()];
     await vi.waitFor(() => expect(f.refresh).toHaveBeenCalledTimes(1));
     held.resolve();
     const states = await Promise.all(calls);
     expect(f.refresh).toHaveBeenCalledTimes(1);
-    expect(states.at(-1)!.status === 'signed_in' || b.get().status === 'signed_in').toBe(true);
-    await vi.waitFor(() => expect(b.get().status).toBe('signed_in'));
-    // An expired access token renews once even when Refresh is pressed twice.
-    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.now() + 301_000);
+    expect(states.map(state => state.status)).toEqual(['signed_in', 'signed_in', 'signed_in']);
+  });
+
+  it('Retry clicked twice from offline sends one refresh grant and both clicks see the result', async () => {
+    const f = issuer(); seed(f); let online = false; const held = deferred<void>();
+    const b = broker(f, { isOnline: () => online });
+    expect((await b.restore()).status).toBe('offline');
+    online = true;
+    const original = f.refresh.getMockImplementation()!;
     f.refresh.mockImplementation(async (params) => { await held.promise; return original(params); });
-    await Promise.all([b.refresh(), b.refresh()]);
-    expect(f.refresh).toHaveBeenCalledTimes(2);
+    const retries = [b.refresh(), b.refresh()];
+    await vi.waitFor(() => expect(f.refresh).toHaveBeenCalledTimes(1));
+    held.resolve();
+    expect((await Promise.all(retries)).map(state => state.status)).toEqual(['signed_in', 'signed_in']);
+    expect(f.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('Refresh pressed twice after expiry renews once', async () => {
+    const f = issuer(); const b = broker(f); await b.signIn({ persist: true });
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.now() + 301_000);
+    const states = await Promise.all([b.refresh(), b.refresh()]);
+    expect(f.refresh).toHaveBeenCalledTimes(1);
+    expect(states.map(state => state.status)).toEqual(['signed_in', 'signed_in']);
+  });
+
+  it('a Hub 401 for a kept sign-in renews once before showing it connected', async () => {
+    const f = issuer(); seed(f); f.catalog.mockResolvedValueOnce(new Response(null, { status: 401 }));
+    const b = broker(f); const pending = b.restore();
+    const seen: string[] = [];
+    const poll = setInterval(() => seen.push(b.get().status), 1);
+    const state = await pending; clearInterval(poll);
+    expect(state).toMatchObject({ status: 'signed_in', persistent: true, connections: [{ id: 'openrouter' }] }); expect(state.error).toBeUndefined();
+    expect(f.refresh).toHaveBeenCalledTimes(2); expect(f.catalog).toHaveBeenCalledTimes(2);
+    expect(seen.every(status => status === 'restoring')).toBe(true); // never "connected" before the catalog
   });
 
   it('a refresh after expiry rotates first, then reads the catalog with the new access token', async () => {
@@ -332,16 +423,18 @@ describe('restore and refresh', () => {
     online = true; expect((await b.refresh()).status).toBe('signed_in');
   });
 
-  it('503 temporarily_unavailable keeps the vault and offers Retry', async () => {
-    const f = issuer(); const record = seed(f); f.refresh.mockResolvedValueOnce(Response.json({ error: 'temporarily_unavailable' }, { status: 503 }));
-    const state = await broker(f).restore();
+  it.each([503, 429])('%s temporarily_unavailable keeps the vault and offers Retry, revoking nothing', async (status) => {
+    const f = issuer(); const record = seed(f); f.refresh.mockResolvedValueOnce(Response.json({ error: 'temporarily_unavailable' }, { status }));
+    const b = broker(f); const state = await b.restore();
     expect(state.status).toBe('offline'); expect(state.error).toMatch(/temporarily unavailable/);
-    expect(stored(f)!.refreshToken).toBe(record.refreshToken);
+    expect(stored(f)!.refreshToken).toBe(record.refreshToken); expect(f.revoke).not.toHaveBeenCalled();
+    expect((await b.refresh()).status).toBe('signed_in');
   });
 
   it.each([
     ['a reset after sending', async () => { throw netError('ECONNRESET'); }],
     ['an unexplained 500', async () => new Response('oops', { status: 500 })],
+    ['invalid_request (device grants switched off again)', async () => Response.json({ error: 'invalid_request' }, { status: 400 })],
     ['a malformed 200', async () => Response.json({ access_token: 'x' })]
   ])('an unknown outcome (%s) is treated as ended', async (_name, failure) => {
     const f = issuer(); const record = seed(f); const original = f.network.getMockImplementation()!;
@@ -484,18 +577,22 @@ describe('a new sign-in during a restore', () => {
 });
 
 describe('realm separation', () => {
-  it('keeps staging and production records independent', async () => {
+  it('keeps staging and production slots independent', async () => {
     const vault = memoryVault();
     const staging = issuer('staging', vault); const production = issuer('production', vault);
-    const prodRecord = seed(production, 'production');
-    await broker(staging).signIn({ persist: true });
+    const prodRaw = JSON.stringify({ planted: 'production slot' });
+    vault.data.set(vocsAccountVaultId('production'), prodRaw);
+    const stagingBroker = broker(staging);
+    await stagingBroker.signIn({ persist: true });
     expect(stored(staging, 'staging')).toMatchObject({ issuer: VOCS_REALMS.staging.issuer });
-    expect(stored(production, 'production')).toEqual(prodRecord);
-    await brokers.at(-1)!.signOut();
-    expect(stored(production, 'production')).toEqual(prodRecord);
+    await stagingBroker.signOut();
+    expect(vault.data.get(vocsAccountVaultId('production'))).toBe(prodRaw);
     expect(production.network).not.toHaveBeenCalled();
-    const restored = await broker(production).restore();
-    expect(restored).toMatchObject({ realm: 'production', status: 'signed_in' });
+    // A production broker never reads, uses or clears the staging slot.
+    await broker(staging).signIn({ persist: true });
+    const stagingRaw = vault.data.get(vocsAccountVaultId('staging'));
+    expect((await broker(production).restore()).status).toBe('signed_out');
+    expect(vault.data.get(vocsAccountVaultId('staging'))).toBe(stagingRaw);
     expect(production.urls.every(url => !url.includes('staging'))).toBe(true);
   });
 });

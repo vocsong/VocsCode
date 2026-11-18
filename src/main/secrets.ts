@@ -21,16 +21,24 @@ export class SecretStore {
   private memory = new Map<string, string>();
   private warnedSession = new Set<string>();
   private readonly sessionOnly: ReadonlySet<string>;
+  private readonly keychainOnly: ReadonlySet<string>;
 
-  constructor(userData: string, log: Logger = () => undefined, opts: { sessionOnly?: readonly string[] } = {}) {
+  /**
+   * `keychainOnly` ids are `sessionOnly` ids that additionally need a real keychain: a Linux
+   * `basic_text`/`unknown` backend counts as no encryption for them, and on disk they are only ever
+   * read back as `enc:` (an obfuscated or plain value there was not written by this store).
+   */
+  constructor(userData: string, log: Logger = () => undefined, opts: { sessionOnly?: readonly string[]; keychainOnly?: readonly string[] } = {}) {
     this.file = path.join(userData, 'secrets.json');
     this.log = log;
-    this.sessionOnly = new Set(opts.sessionOnly ?? []);
+    this.keychainOnly = new Set(opts.keychainOnly ?? []);
+    this.sessionOnly = new Set([...(opts.sessionOnly ?? []), ...this.keychainOnly]);
   }
 
   /** Whether `id` must stay out of the file right now. */
   private keepInMemory(id: string): boolean {
-    return this.sessionOnly.has(id) && !this.secureStorageAvailable;
+    if (!this.sessionOnly.has(id)) return false;
+    return this.keychainOnly.has(id) ? !this.secureStorageAvailable : !this.encryptionAvailable;
   }
 
   /** True when `id` is held for this run only and will be gone after a restart. */
@@ -65,7 +73,14 @@ export class SecretStore {
     // rewritten before anything else can copy it again. An `enc:` value moves only when that weak
     // backend can read it: one sealed by a keychain that is merely unavailable now stays put.
     const weakKey = this.encryptionAvailable && !this.secureStorageAvailable;
-    const moved = Object.keys(this.data).filter((id) => this.keepInMemory(id) && (this.data[id]?.startsWith('b64:') || (weakKey && this.data[id]?.startsWith('enc:'))));
+    // A keychain-only value that is not `enc:` while the keychain works was planted, not written here.
+    const planted = Object.keys(this.data).filter((id) => this.keychainOnly.has(id) && !this.keepInMemory(id) && !this.data[id]?.startsWith('enc:'));
+    if (planted.length) {
+      for (const id of planted) delete this.data[id];
+      await this.persist();
+      this.log('warn', `ignored and removed ${planted.join(', ')}: not stored by the OS keychain`);
+    }
+    const moved = Object.keys(this.data).filter((id) => this.keepInMemory(id) && (this.data[id]?.startsWith('b64:') || (weakKey && this.keychainOnly.has(id) && this.data[id]?.startsWith('enc:'))));
     if (moved.length) {
       for (const id of moved) {
         const value = await this.get(id);
@@ -93,6 +108,7 @@ export class SecretStore {
     if (held !== undefined) return held;
     const v = this.data[id];
     if (!v) return undefined;
+    if (this.keychainOnly.has(id) && !v.startsWith('enc:')) return undefined;
     if (v.startsWith('enc:')) {
       try {
         return safeStorage.decryptString(Buffer.from(v.slice(4), 'base64'));

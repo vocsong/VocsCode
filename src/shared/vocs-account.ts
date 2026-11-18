@@ -30,6 +30,8 @@ export interface VocsAccountState {
   deviceExpiresAt?: number;
   /** False when this computer has no OS keychain, so a kept sign-in lasts until the app closes. */
   keychain?: boolean;
+  /** This realm offers "Keep me signed in" (its issuer has device grants on). Absent/false: hidden. */
+  deviceSignIn?: boolean;
   connections: VocsAccountConnection[];
   error?: string;
   /** A non-fatal problem worth saying, e.g. the sign-in could not be saved on this computer. */

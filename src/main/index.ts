@@ -139,7 +139,7 @@ async function main(): Promise<void> {
   await settings.load();
   // Remote-access identity and enrollment secrets, and a Vocs sign-in kept on this computer, never
   // fall back to obfuscated storage on disk: without a real OS keychain they live for this run only.
-  const secrets = new SecretStore(userData, logTo, { sessionOnly: ['remote-host', 'remote-enroll', ...VOCS_ACCOUNT_VAULT_IDS] });
+  const secrets = new SecretStore(userData, logTo, { sessionOnly: ['remote-host', 'remote-enroll'], keychainOnly: VOCS_ACCOUNT_VAULT_IDS });
   await secrets.load();
   const store = new SessionStore(userData, logTo);
   await store.load();

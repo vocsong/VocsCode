@@ -8,6 +8,7 @@ const statusUnavailable = 'Account status is unavailable. Retry to check this de
 const actionUnconfirmed = 'The account action could not be confirmed. Retry the status check.';
 const leftNotice = 'Sign-in was cancelled because you left this page. Start it again when you are ready.';
 const noKeychain = 'This computer has no secure keychain; you’ll be signed out when Vocs Code closes.';
+const temporaryNote = 'This sign-in lasts up to five minutes and is kept only in memory. Restarting or signing out clears it.';
 /** Survives the unmount that cancelled a pending sign-in, so the next visit can say why it stopped. */
 let leftDuringSignIn = false;
 const signedOut: VocsAccountState = { realm: 'production', status: 'signed_out', refreshing: false, revision: -1, connections: [] };
@@ -59,7 +60,7 @@ export function VocsAccountSettings() {
     if (kind === 'cancel' || kind === 'signOut') setState({ ...signedOut, revision: revision.current });
     if (kind === 'signIn') setState({ ...signedOut, status: 'signing_in', revision: revision.current });
     try {
-      const next = kind === 'signIn' ? await invoke('vocsAccount:signIn', { persist: keep }) : await invoke(`vocsAccount:${kind}`, undefined);
+      const next = kind === 'signIn' ? await invoke('vocsAccount:signIn', { persist }) : await invoke(`vocsAccount:${kind}`, undefined);
       if (mounted.current && epoch.current === generation) apply(next);
     } catch {
       if (mounted.current && epoch.current === generation) {
@@ -79,6 +80,10 @@ export function VocsAccountSettings() {
     finally { if (mounted.current && generation === epoch.current) { pending.current = null; setBusy(null); } }
   }
   const staging = state?.realm === 'staging';
+  /** The realm offers kept sign-ins, and this computer has a keychain to keep one in. */
+  const offersKeep = state?.deviceSignIn === true;
+  const canKeep = offersKeep && state?.keychain !== false;
+  const persist = keep && canKeep;
   const signingIn = state?.status === 'signing_in';
   const connected = state?.status === 'signed_in';
   const restoring = state?.status === 'restoring';
@@ -123,12 +128,12 @@ export function VocsAccountSettings() {
             {signingIn && <Button key="cancel-sign-in" onClick={() => void action('cancel')} disabled={busy === 'cancel'}>Cancel sign-in</Button>}
           </>}
         </div>
-        {!connected && !kept && <div className="vocs-account-keep">
-          <label><input type="checkbox" checked={keep} disabled={!state || !!busy || signingIn} onChange={(event) => setKeep(event.target.checked)} /> Keep me signed in on this computer</label>
-          <p className="muted">{!keep ? 'This sign-in lasts up to five minutes and is kept only in memory. Restarting or signing out clears it.'
-            : state?.keychain === false ? noKeychain
+        {!connected && !kept && (offersKeep ? <div className="vocs-account-keep">
+          <label><input type="checkbox" checked={persist} disabled={!canKeep || !state || !!busy || signingIn} onChange={(event) => setKeep(event.target.checked)} /> Keep me signed in on this computer</label>
+          <p className="muted">{!canKeep ? noKeychain
+            : !keep ? temporaryNote
             : 'Stays signed in for up to a year (90 days unused) in this computer’s keychain. Sign out here, or revoke it under Account & security on Vocs Login.'}</p>
-        </div>}
+        </div> : state && <p className="muted">{temporaryNote}</p>)}
         {connected && !state.persistent && <p className="muted">This session lasts up to five minutes and is kept only in memory. Restarting or signing out clears it.</p>}
         {connected && state.persistent && state.keychain === false && <p className="muted">{noKeychain}</p>}
       </>}

@@ -5,7 +5,7 @@ import type { VocsAccountState } from '../src/shared/vocs-account';
 const api = vi.hoisted(() => ({ invoke: vi.fn(), isWeb: false }));
 vi.mock('../src/renderer/src/api', () => api);
 import { VocsAccountSettings } from '../src/renderer/src/components/VocsAccountSettings';
-const out = (revision = 1): VocsAccountState => ({ realm: 'staging', status: 'signed_out', revision, refreshing: false, connections: [] });
+const out = (revision = 1): VocsAccountState => ({ realm: 'staging', status: 'signed_out', revision, refreshing: false, connections: [], deviceSignIn: true, keychain: true });
 const connected = (revision = 3): VocsAccountState => ({ ...out(revision), status: 'signed_in', accountId: 'opaque-account-a', expiresAt: Date.now() + 300000, connections: [{ id: 'openrouter', name: 'OpenRouter', transport: 'streamable-http', resource: 'https://vocs-mcp-staging.vocs.workers.dev/openrouter', authorizationServer: 'https://vocs-mcp-staging.vocs.workers.dev', accountScopes: ['models:read'], authorization: 'oauth_required', executionReadiness: 'not_checked' }] });
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((r, j) => { resolve = r; reject = j; }); return { promise, resolve, reject }; }
 beforeEach(() => { api.isWeb = false; api.invoke.mockReset().mockResolvedValue(out()); });
@@ -20,7 +20,7 @@ describe('staging Vocs account settings', () => {
     expect(api.invoke.mock.calls).toEqual([['vocsAccount:get', undefined]]);
   });
   it('labels production without staging wording and keeps staging labels behind the staging realm', async () => {
-    api.invoke.mockResolvedValue({ ...out(), realm: 'production' });
+    api.invoke.mockResolvedValue({ ...out(), realm: 'production', deviceSignIn: false });
     render(<VocsAccountSettings />); await screen.findByText('Signed out');
     expect(screen.queryByText('Staging only')).toBeNull();
     expect(screen.getByText(/Sign-in opens your system browser at auth.vocs.io/)).toBeTruthy();
@@ -197,11 +197,26 @@ describe('staging Vocs account settings', () => {
     expect(screen.getByRole('alert').textContent).toContain('Your sign-in ended. Sign in again.');
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Sign in to staging' }).disabled).toBe(false);
   });
-  it('explains a missing keychain and a sign-in that could not be saved', async () => {
-    api.invoke.mockResolvedValue({ ...out(), keychain: false });
+  it('hides "Keep me signed in" where the realm does not offer it, and signs in temporarily', async () => {
+    api.invoke.mockImplementation((c) => Promise.resolve(c === 'vocsAccount:signIn' ? { ...connected(4), realm: 'production' } : { ...out(), realm: 'production', deviceSignIn: false }));
+    render(<VocsAccountSettings />); await screen.findByText('Signed out');
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.getByText(/lasts up to five minutes and is kept only in memory/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with Vocs' }));
+    await screen.findByText('opaque-account-a');
+    expect(api.invoke.mock.calls.filter(([c]) => c === 'vocsAccount:signIn')).toEqual([['vocsAccount:signIn', { persist: false }]]);
+  });
+  it('without a keychain the box is off and disabled, says why, and sign-in is temporary', async () => {
+    api.invoke.mockImplementation((c) => Promise.resolve(c === 'vocsAccount:signIn' ? connected(4) : { ...out(), keychain: false }));
     await ready();
+    const box = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Keep me signed in on this computer' });
+    expect(box.checked).toBe(false); expect(box.disabled).toBe(true);
     expect(screen.getByText('This computer has no secure keychain; you’ll be signed out when Vocs Code closes.')).toBeTruthy();
-    cleanup();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in to staging' }));
+    await screen.findByText('opaque-account-a');
+    expect(api.invoke.mock.calls.filter(([c]) => c === 'vocsAccount:signIn')).toEqual([['vocsAccount:signIn', { persist: false }]]);
+  });
+  it('explains a sign-in that could not be saved', async () => {
     api.invoke.mockResolvedValue({ ...connected(), persistent: true, expiresAt: undefined, deviceExpiresAt: Date.now() + 1e10, keychain: false, notice: 'Vocs Code could not save your sign-in on this computer. You stay signed in until Vocs Code closes.' });
     render(<VocsAccountSettings />); await screen.findByText('opaque-account-a');
     expect(screen.getByTestId('vocs-account-session').textContent).toBe('Signed in until Vocs Code closes');

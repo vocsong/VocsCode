@@ -5,15 +5,28 @@
  */
 import { z } from 'zod';
 import type { VocsAccountRealm, VocsAccountSignInRequest, VocsAccountState } from '../shared/vocs-account';
-import { createNativeMcpOAuth, DEVICE_ID, DEVICE_MAX_LIFETIME_MS, DEVICE_REFRESH_TOKEN, NativeOAuthError, parseDeviceGrant, type NativeMcpOAuth, type NativeMcpOAuthOptions } from './mcp/oauth';
-export const VOCS_REALMS = Object.freeze({
+import { createNativeMcpOAuth, DEVICE_ID, DEVICE_MAX_LIFETIME_MS, DEVICE_REFRESH_TOKEN, NativeOAuthError, parseDeviceGrant, type NativeDeviceGrant, type NativeMcpOAuth, type NativeMcpOAuthOptions } from './mcp/oauth';
+/** The public client that enrolls a kept ("Keep me signed in") device. */
+export const VOCS_DEVICE_CLIENT_ID = 'vocs-code-device';
+interface RealmConfig {
+  issuer: string;
+  identityIssuer: string;
+  hub: string;
+  resource: string;
+  clientId: string;
+  /** Set only where the issuer offers device grants (`NATIVE_DEVICE_GRANTS_ENABLED`). Without it the
+   *  realm offers no "Keep me signed in" and always uses the temporary `clientId` flow. */
+  deviceClientId?: typeof VOCS_DEVICE_CLIENT_ID;
+}
+export const VOCS_REALMS: Readonly<Record<VocsAccountRealm, Readonly<RealmConfig>>> = Object.freeze({
   production: Object.freeze({
     issuer: 'https://auth.vocs.io/api/auth',
     identityIssuer: 'https://auth.vocs.io',
     hub: 'https://mcp.vocs.io',
     resource: 'https://mcp.vocs.io/api/connections',
-    clientId: 'vocs-code',
-    deviceClientId: 'vocs-code-device'
+    clientId: 'vocs-code'
+    // No deviceClientId yet: production has device grants off. Set it to VOCS_DEVICE_CLIENT_ID only
+    // once the owner turns NATIVE_DEVICE_GRANTS_ENABLED on in production (docs/ARCHITECTURE.md).
   }),
   staging: Object.freeze({
     issuer: 'https://vocs-login-staging.vocs.workers.dev/api/auth',
@@ -21,7 +34,7 @@ export const VOCS_REALMS = Object.freeze({
     hub: 'https://vocs-mcp-staging.vocs.workers.dev',
     resource: 'https://vocs-mcp-staging.vocs.workers.dev/api/connections',
     clientId: 'vocs-code',
-    deviceClientId: 'vocs-code-device'
+    deviceClientId: VOCS_DEVICE_CLIENT_ID
   })
 });
 export const VOCS_STAGING = VOCS_REALMS.staging;
@@ -48,7 +61,7 @@ export interface VocsAccountVault {
   /** True when the value is held for this run only (no OS keychain). */
   isMemoryOnly?(id: string): boolean;
 }
-function catalogSchema(target: (typeof VOCS_REALMS)[VocsAccountRealm]) {
+function catalogSchema(target: RealmConfig) {
   return z.strictObject({
     version: z.literal(1),
     account: z.strictObject({ id: z.string().regex(/^[a-f0-9]{64}$/), identityIssuer: z.literal(target.identityIssuer) }),
@@ -68,6 +81,7 @@ const recordSchema = z.strictObject({
 type VaultRecord = z.infer<typeof recordSchema>;
 const accessTokenSchema = z.object({ access_token: z.string().min(1).max(16384), token_type: z.string().regex(/^bearer$/i), expires_in: z.number().int().positive().max(300), scope: z.literal('catalog:read') });
 class CatalogAccessDenied extends Error {}
+class CatalogUnauthorized extends Error {}
 class AccountChanged extends Error {}
 const ENDED = 'Your sign-in ended. Sign in again.';
 const NOT_SAVED = 'Vocs Code could not save your sign-in on this computer. You stay signed in until Vocs Code closes.';
@@ -142,8 +156,11 @@ interface Session {
   record?: VaultRecord;
   /** Ended on purpose (sign-out, ended, replaced): a late answer revokes whatever it carries. */
   ended: boolean;
-  /** Single-flight refresh grant. */
-  flight?: Promise<Renewal>;
+  /** The newest refresh token is not in the vault (its write failed): revoked when the app quits,
+   *  so a device that cannot come back is not left live on the account. */
+  unsaved?: boolean;
+  /** Single flight for everything that may renew this session (restore, Retry, Refresh). */
+  op?: Promise<VocsAccountState>;
 }
 type Renewal = { kind: 'ok' } | { kind: 'offline' } | { kind: 'unavailable' } | { kind: 'ended'; revoke?: string } | { kind: 'stale' };
 export function createVocsAccount(options: Options) {
@@ -156,7 +173,9 @@ export function createVocsAccount(options: Options) {
     ? 'This account has no staging Hub catalog access. Ask the staging administrator to enable it, then sign in again.'
     : 'This Vocs account has no Hub catalog access yet. Ask the Vocs administrator to enable it, then sign in again.';
   const keychain = () => { try { return !!options.vault && !options.vault.isMemoryOnly?.(vaultId); } catch { return false; } };
-  const base = (): Omit<VocsAccountState, 'revision'> => ({ realm, status: 'signed_out', refreshing: false, connections: [], keychain: keychain() });
+  /** A device is enrolled only where it can be kept: the realm offers it and the OS keychain works. */
+  const canKeep = () => !!target.deviceClientId && keychain();
+  const base = (): Omit<VocsAccountState, 'revision'> => ({ realm, status: 'signed_out', refreshing: false, connections: [], keychain: keychain(), deviceSignIn: !!target.deviceClientId });
   let state: VocsAccountState = { ...base(), revision: 0 };
   let oauth: NativeMcpOAuth | undefined;
   let session: Session | undefined;
@@ -208,7 +227,7 @@ export function createVocsAccount(options: Options) {
       const response = await bounded(send(`${target.issuer}/oauth2/revoke`, {
         method: 'POST', redirect: 'manual', signal: controller.signal,
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ client_id: target.deviceClientId, token: refreshToken, token_type_hint: 'refresh_token' })
+        body: new URLSearchParams({ client_id: VOCS_DEVICE_CLIENT_ID, token: refreshToken, token_type_hint: 'refresh_token' })
       }), controller.signal);
       void response.body?.cancel().catch(() => undefined);
       return response.status === 200 && !response.redirected;
@@ -264,6 +283,7 @@ export function createVocsAccount(options: Options) {
       if (s.ended) { void revokeDevice(next.refreshToken); void forget(next.deviceId); return { kind: 'stale' }; }
       // Cancelled or quitting: the rotated token is saved for the next start, but not used now.
       if (s !== session) return { kind: 'stale' };
+      s.unsaved = !saved;
       if (!saved) update({ notice: NOT_SAVED });
       s.accessToken = access.data.access_token;
       s.accessExpiresAt = Date.now() + access.data.expires_in * 1000;
@@ -271,15 +291,21 @@ export function createVocsAccount(options: Options) {
     }
     if (s.ended) return { kind: 'stale' };
     if (status === 400 && fields?.error === 'invalid_grant') return { kind: 'ended' };
-    // The issuer's storage failed inside its atomic batch: nothing rotated, the token is still good.
-    if (status === 503 && fields?.error === 'temporarily_unavailable') return { kind: 'unavailable' };
+    // Rate limited (429) or the issuer's storage failed inside its atomic batch (503): nothing was
+    // consumed, the token is still good. Any status: the error code is what says so.
+    if (fields?.error === 'temporarily_unavailable') return { kind: 'unavailable' };
+    // Anything else (including invalid_request once device grants are switched off again) ends it.
     return { kind: 'ended', revoke: record.refreshToken };
   }
   function renew(s: Session): Promise<Renewal> {
-    if (s.flight) return s.flight;
-    const flight = renewOnce(s).catch((): Renewal => ({ kind: 'ended', revoke: s.record?.refreshToken })).finally(() => { if (s.flight === flight) s.flight = undefined; });
-    s.flight = flight;
-    return flight;
+    return renewOnce(s).catch((): Renewal => ({ kind: 'ended', revoke: s.record?.refreshToken }));
+  }
+  /** Runs `work` unless this session already has one running, in which case the caller joins it. */
+  function single(s: Session, work: () => Promise<VocsAccountState>): Promise<VocsAccountState> {
+    if (s.op) return s.op;
+    const op = work().finally(() => { if (s.op === op) s.op = undefined; });
+    s.op = op;
+    return op;
   }
   /** Applies a renewal to the current session; true when a fresh access token is ready. */
   function settle(s: Session, outcome: Renewal, epoch: number): boolean {
@@ -296,38 +322,57 @@ export function createVocsAccount(options: Options) {
     const token = s.accessToken;
     if (!token || s.accessExpiresAt <= Date.now()) throw new Error('Account token expired');
     const response = await bounded(send(target.resource, { method: 'GET', redirect: 'manual', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, signal: controller.signal }), controller.signal);
-    if (response.status !== 200 || response.redirected) { void response.body?.cancel().catch(() => undefined); if (response.status === 403) throw new CatalogAccessDenied(); throw new Error('Account catalog denied'); }
+    if (response.status !== 200 || response.redirected) { void response.body?.cancel().catch(() => undefined); if (response.status === 403) throw new CatalogAccessDenied(); if (response.status === 401 && !response.redirected) throw new CatalogUnauthorized(); throw new Error('Account catalog denied'); }
     const value = schema.parse(await json(response, controller.signal));
     if (epoch !== generation || controller.signal.aborted) throw new Error('Account operation interrupted');
     if (state.accountId && state.accountId !== value.account.id) throw new AccountChanged();
     update({ accountId: value.account.id, connections: value.connections });
   }
-  /** Catalog read for a kept sign-in: a failure is reported, but does not end the device. */
-  async function keptCatalog(s: Session, epoch: number) {
+  /** Catalog read for a kept sign-in: a failure is reported, but does not end the device. A Hub
+   *  401 renews the access token once and reads again. False when the session did not survive. */
+  async function keptCatalog(s: Session, epoch: number): Promise<boolean> {
     const controller = new AbortController(); active = controller;
     update({ refreshing: true, connections: [], error: undefined });
-    const timeout = setTimeout(() => controller.abort(), 10_000);
-    try { await catalog(s, controller, epoch); }
-    catch (error) {
-      if (epoch !== generation) return;
-      if (error instanceof AccountChanged) { end(ENDED, s.record?.refreshToken); return; }
+    let timeout = setTimeout(() => controller.abort(), 10_000);
+    try {
+      try { await catalog(s, controller, epoch); }
+      catch (error) {
+        if (!(error instanceof CatalogUnauthorized) || epoch !== generation) throw error;
+        clearTimeout(timeout);
+        if (!settle(s, await renew(s), epoch)) return false;
+        timeout = setTimeout(() => controller.abort(), 10_000);
+        await catalog(s, controller, epoch);
+      }
+      return true;
+    } catch (error) {
+      if (epoch !== generation) return false;
+      if (error instanceof AccountChanged) { end(ENDED, s.record?.refreshToken); return false; }
       update({ connections: [], error: error instanceof CatalogAccessDenied ? missingAccess : CATALOG_UNVERIFIED });
+      return true;
     } finally {
       clearTimeout(timeout);
       if (epoch === generation) { active = undefined; update({ refreshing: false }); }
     }
   }
-  /** Renews a kept sign-in (startup or Retry) and reads the catalog. */
+  /** Renews a kept sign-in (startup or Retry) and reads the catalog before showing it connected. */
   async function resume(s: Session, epoch: number): Promise<VocsAccountState> {
     update({ status: 'restoring', refreshing: false, connections: [], error: undefined });
     if (!settle(s, await renew(s), epoch)) return get();
+    if (!(await keptCatalog(s, epoch)) || epoch !== generation || s !== session) return get();
     update({ status: 'signed_in', persistent: true, deviceExpiresAt: s.record!.deviceExpiresAt });
-    await keptCatalog(s, epoch);
     return get();
   }
-  /** Startup: picks up a sign-in kept on this computer. Never blocks; the window shows `restoring`. */
-  async function restore(): Promise<VocsAccountState> {
-    if (state.status !== 'signed_out' || session) return get();
+  /** Startup: picks up a sign-in kept on this computer. Never blocks; the window shows `restoring`.
+   *  A Refresh/Retry or second restore while it runs joins it. */
+  let restoring: Promise<VocsAccountState> | undefined;
+  function restore(): Promise<VocsAccountState> {
+    if (restoring) return restoring;
+    if (state.status !== 'signed_out' || session) return Promise.resolve(get());
+    const run = restoreOnce().finally(() => { if (restoring === run) restoring = undefined; });
+    restoring = run;
+    return run;
+  }
+  async function restoreOnce(): Promise<VocsAccountState> {
     const epoch = generation;
     update({ status: 'restoring', error: undefined });
     const { raw, record } = await readVault();
@@ -338,9 +383,16 @@ export function createVocsAccount(options: Options) {
       update({ status: 'signed_out' });
       return get();
     }
+    if (!keychain()) {
+      // Held in memory only (no keychain any more): it cannot survive this run, so it ends now
+      // rather than living on as a device nobody can sign out.
+      void eraseVault(); void revokeDevice(record.refreshToken);
+      update({ status: 'signed_out' });
+      return get();
+    }
     const s: Session = { persistent: true, record, accessExpiresAt: 0, ended: false };
     session = s;
-    return resume(s, epoch);
+    return single(s, () => resume(s, epoch));
   }
   function signInFailure(error: unknown, persist: boolean): string {
     if (error instanceof CatalogAccessDenied) return missingAccess;
@@ -353,7 +405,9 @@ export function createVocsAccount(options: Options) {
   }
   async function signIn(request?: VocsAccountSignInRequest): Promise<VocsAccountState> {
     if (state.status === 'signing_in') return get();
-    const persist = request?.persist === true;
+    // Only where a device can be kept; otherwise this is the temporary sign-in, as the UI shows.
+    const persist = request?.persist === true && canKeep();
+    const deviceClientId = target.deviceClientId;
     // Kept sign-ins this one replaces (in memory: offline, restoring, or one whose vault write
     // failed; in the vault: read below). Revoked once the new sign-in has succeeded. One still
     // renewing is ended now, so its late rotation is revoked instead of overwriting the vault.
@@ -366,8 +420,9 @@ export function createVocsAccount(options: Options) {
     let enrolled: Session | undefined;
     try {
       const client = (options.createOAuth ?? createNativeMcpOAuth)({
-        resource: target.resource, issuer: target.issuer, scopes: ['catalog:read'], clientId: persist ? target.deviceClientId : target.clientId, callbackPath: '/oauth/vocs', maxTokenAgeSeconds: 300,
-        openExternal: options.openExternal, fetch: options.fetch, timeoutMs: options.timeoutMs, ...(persist ? { deviceName: vocsDeviceName(options.platform) } : {})
+        resource: target.resource, issuer: target.issuer, scopes: ['catalog:read'], clientId: persist && deviceClientId ? deviceClientId : target.clientId, callbackPath: '/oauth/vocs', maxTokenAgeSeconds: 300,
+        openExternal: options.openExternal, fetch: options.fetch, timeoutMs: options.timeoutMs,
+        ...(persist ? { deviceName: vocsDeviceName(options.platform), onAbandonedDeviceGrant: (abandoned: NativeDeviceGrant) => void revokeDevice(abandoned.refreshToken) } : {})
       });
       oauth = client;
       await bounded(client.authorize(controller.signal), controller.signal);
@@ -382,10 +437,11 @@ export function createVocsAccount(options: Options) {
         if (!grant) throw new Error('Invalid device grant');
         const before = await readVault();
         if (before.record) superseded.set(before.record.deviceId, before.record.refreshToken);
-        s.record = { v: 1, issuer: target.issuer, clientId: target.deviceClientId, resource: target.resource, ...grant };
+        s.record = { v: 1, issuer: target.issuer, clientId: VOCS_DEVICE_CLIENT_ID, resource: target.resource, ...grant };
         // Kept before the access token is used: a crash after this point still restores.
         const saved = await writeVault(s.record);
         if (epoch !== generation || controller.signal.aborted) throw new Error('Account operation interrupted');
+        s.unsaved = !saved;
         if (!saved) update({ notice: NOT_SAVED });
       }
       // The SDK provider forgets its copy; from here the token lives only in this session.
@@ -420,21 +476,28 @@ export function createVocsAccount(options: Options) {
     return get();
   }
   async function refresh(): Promise<VocsAccountState> {
+    if (restoring) return restoring;
     get();
     const s = session;
-    // Retry from offline: renew the kept sign-in again.
-    if (state.status === 'offline' && s?.persistent) return resume(s, generation);
+    if (s?.persistent) {
+      // Restore, Retry and Refresh share one flight: a second click joins the first and gets its result.
+      if (s.op) return s.op;
+      const epoch = generation;
+      // Retry from offline: renew the kept sign-in again.
+      if (state.status === 'offline') return single(s, () => resume(s, epoch));
+      if (state.status !== 'signed_in') return get();
+      return single(s, async () => {
+        if (!s.accessToken || s.accessExpiresAt - Date.now() < 30_000) {
+          update({ refreshing: true, connections: [], error: undefined });
+          if (!settle(s, await renew(s), epoch)) return get();
+          update({ deviceExpiresAt: s.record!.deviceExpiresAt });
+        }
+        await keptCatalog(s, epoch);
+        return get();
+      });
+    }
     if (state.status !== 'signed_in' || !s || state.refreshing) return get();
     const epoch = generation;
-    if (s.persistent) {
-      if (!s.accessToken || s.accessExpiresAt - Date.now() < 30_000) {
-        update({ refreshing: true, connections: [], error: undefined });
-        if (!settle(s, await renew(s), epoch)) return get();
-        update({ deviceExpiresAt: s.record!.deviceExpiresAt });
-      }
-      await keptCatalog(s, epoch);
-      return get();
-    }
     const controller = new AbortController(); active = controller;
     // Clear stale permissions while offline/refreshing. Cached entries never authorize use.
     update({ refreshing: true, connections: [], error: undefined });
@@ -475,6 +538,19 @@ export function createVocsAccount(options: Options) {
     if (error && epoch === generation) update({ error });
     return get();
   }
-  return { get, restore, signIn, refresh, signOut, cancel: () => { clear(); return get(); }, dispose: () => clear() };
+  /** App quit: memory goes, the vault stays. A device whose token never reached the vault cannot
+   *  come back, so it is revoked (bounded; the quit does not wait on the network for long). */
+  async function dispose(timeoutMs = 2000): Promise<void> {
+    const s = session;
+    clear();
+    if (!s?.record || !s.unsaved || s.ended) return;
+    s.ended = true;
+    const record = s.record;
+    await Promise.race([
+      Promise.all([eraseVault(), revokeDevice(record.refreshToken)]),
+      new Promise<void>(resolve => { const timer = setTimeout(resolve, timeoutMs); timer.unref?.(); })
+    ]);
+  }
+  return { get, restore, signIn, refresh, signOut, cancel: () => { clear(); return get(); }, dispose };
 }
 export type VocsAccountBroker = ReturnType<typeof createVocsAccount>;
