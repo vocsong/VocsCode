@@ -8,7 +8,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import { invoke, isMac, isWeb, modKey } from '../api';
 import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
-import type { UpdateState } from '../../../shared/types';
 import { Icon, MenuItem } from './ui';
 import { ForkIntoItems } from './ForkInto';
 import { openSettings } from './SettingsView';
@@ -42,7 +41,6 @@ export function TitleBar() {
         <TitleBarButton icon="arrowLeft" label="Back" hint={isMac ? '⌘[' : 'Alt+←'} disabled={!canBack} onClick={() => void navBack()} />
         <TitleBarButton icon="arrowRight" label="Forward" hint={isMac ? '⌘]' : 'Alt+→'} disabled={!canForward} onClick={() => void navForward()} />
         <MenuBar />
-        <UpdatePill />
       </div>
       {/* The middle of the bar names where you are and doubles as the way to go anywhere else. */}
       <div className="titlebar-title">
@@ -58,34 +56,6 @@ export function TitleBar() {
       <div className="titlebar-tail">{isWeb && <span className="web-badge">web</span>}</div>
     </div>
   );
-}
-
-/** Unobtrusive auto-update indicator (issue #198): appears only when there is something to act on.
- *  Clicking moves the update along — download, or restart-to-install. While a session is live the
- *  restart prompt is held (deferred); an explicit click installs anyway. */
-function UpdatePill() {
-  const updateState = useStore((s) => s.updateState);
-  if (!pillFor(updateState)) return null;
-  const s = updateState;
-  const label = s.status === 'available' ? `Update ${s.version} available` : s.status === 'downloading' ? `Updating… ${Math.round(s.progress?.percent ?? 0)}%` : s.deferred ? `Update ${s.version} ready` : 'Restart to update';
-  const title = s.status === 'restart-pending' ? (s.deferred ? `Vocs Code ${s.version} is downloaded. It will be offered again once every session is idle; click to update now.` : `Restart to install Vocs Code ${s.version}.`) : s.status === 'downloading' ? 'Downloading the update' : `Download Vocs Code ${s.version}`;
-  return (
-    <button
-      type="button"
-      className={`update-pill ${s.status === 'restart-pending' ? 'update-pill-ready' : ''}`}
-      title={title}
-      onClick={() => {
-        if (s.status === 'available') void invoke('update:download', undefined);
-        else if (s.status === 'restart-pending') void invoke('update:install', undefined);
-      }}
-    >
-      {label}
-    </button>
-  );
-}
-
-function pillFor(s: UpdateState): boolean {
-  return s.status === 'available' || s.status === 'downloading' || s.status === 'restart-pending';
 }
 
 function TitleBarButton({ icon, label, hint, onClick, disabled }: { icon: string; label: string; hint?: string; onClick: () => void; disabled?: boolean }) {

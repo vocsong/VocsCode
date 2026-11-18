@@ -617,33 +617,6 @@ h4 {
   flex: 0 0 calc(100vw - env(titlebar-area-width, 100vw) - env(titlebar-area-x, 0px));
 }
 
-/* In-app auto-update pill (issue #198): appears in the lead strip only when there is something
-   to act on, styled like the web badge but clickable (the lead is app-region: no-drag). */
-.update-pill {
-  margin-left: 8px;
-  padding: 1px 8px;
-  font-size: 11px;
-  line-height: 1.6;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: none;
-  color: var(--fg-muted);
-  cursor: pointer;
-  white-space: nowrap;
-  -webkit-app-region: no-drag;
-}
-.update-pill:hover {
-  color: var(--fg);
-  border-color: var(--fg-muted);
-}
-.update-pill-ready {
-  color: var(--fg);
-  border-color: var(--fg);
-}
-.update-pill-ready:hover {
-  color: var(--fg);
-}
-
 /* Menu bar */
 .menubar {
   display: flex;
@@ -1994,12 +1967,36 @@ h4 {
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
-  gap: 2px;
+  align-items: center;
+  gap: 4px;
 }
 .sidebar-bottom .sidebar-link {
   flex: 0 1 auto;
   justify-content: flex-start;
   padding: 6px 8px;
+}
+.sidebar-bottom .update-pill {
+  max-width: 100%;
+  padding: 3px 6px;
+  font-size: 11px;
+  line-height: 1.6;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-bottom .update-pill:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.sidebar-bottom .update-pill:disabled {
+  border-color: var(--border);
+  background: none;
+  color: var(--fg-muted);
+  cursor: default;
 }
 .sidebar-link {
   display: flex;
