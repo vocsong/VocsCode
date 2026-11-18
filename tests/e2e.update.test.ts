@@ -140,13 +140,13 @@ describe.runIf(enabled)('electron e2e: in-app auto-update', () => {
     }
   });
 
-  it.runIf(packaged)('checks at startup, shows the update beside Settings and hands it off on quit', async () => {
+  it.runIf(packaged)('checks at startup, downloads from About and hands off the update on quit', async () => {
     feed = await startFeed('0.0.0');
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-update-app-'));
     const userData = path.join(tmp, 'userData');
     const installCalls = path.join(tmp, 'install-calls.jsonl');
     await fs.mkdir(userData, { recursive: true });
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(userData, { sidebarWidth: 200 }));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(userData));
     // Stage the feed the way electron-builder would on a real install: resources/app-update.yml
     // in the unpacked app, pointed at the local mock (a real install points at GitHub Releases).
     const configPath = path.join(path.dirname(packaged!), 'resources', 'app-update.yml');
@@ -178,10 +178,7 @@ describe.runIf(enabled)('electron e2e: in-app auto-update', () => {
       expect(feed.manifestRequests).toBe(1);
       expect(feed.installerRequests).toBe(0);
 
-      const footer = win.locator('.sidebar-bottom');
-      const settings = footer.getByRole('button', { name: 'Settings', exact: true });
-      expect(await footer.locator('.update-pill').count()).toBe(0);
-      await settings.click();
+      await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
       await win.getByRole('button', { name: 'About & doctor' }).click();
       const panel = win.locator('.settings-updates');
       expect(await panel.textContent()).toContain('You are up to date.');
@@ -193,14 +190,7 @@ describe.runIf(enabled)('electron e2e: in-app auto-update', () => {
       expect(feed.installerRequests).toBe(1);
       await panel.getByRole('button', { name: 'Restart to update' }).waitFor({ timeout: 10_000 });
       expect(await panel.textContent()).toContain('Update 999.0.0 is ready.');
-      const install = footer.getByRole('button', { name: 'Install update' });
-      await install.waitFor({ timeout: 10_000 });
-      const [settingsBounds, installBounds] = await Promise.all([settings.boundingBox(), install.boundingBox()]);
-      if (!settingsBounds || !installBounds) throw new Error('Expected visible Settings and update buttons');
-      const settingsCenter = settingsBounds.y + settingsBounds.height / 2;
-      const installCenter = installBounds.y + installBounds.height / 2;
-      expect(installBounds.x).toBeGreaterThan(settingsBounds.x + settingsBounds.width);
-      expect(Math.abs(installCenter - settingsCenter)).toBeLessThan(1);
+      await win.locator('.update-pill').filter({ hasText: 'Restart to update' }).waitFor({ timeout: 10_000 });
       await expect(fs.stat(installCalls)).rejects.toMatchObject({ code: 'ENOENT' });
 
       await app.close();

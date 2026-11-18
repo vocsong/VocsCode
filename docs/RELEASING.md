@@ -65,8 +65,6 @@ The bot reads master's **first-parent history**: it represents each merge commit
    ```
 
    A commit that `master` already has by content is dropped by the rebase, so a `boundary` from an earlier release is harmless.
-   A feature can land on `develop` before the version sync and still be queued for the next release.
-   If the tree comparison shows a missing change, include its commit on the ship branch and compare again.
 3. release-please runs on that push and prepares the release commit (version bump + changelog) on `release-please--branches--master--components--vocs-code`. It cannot open the PR itself (see below), so open it by hand — title `chore(master): release X.Y.Z`, body the new `CHANGELOG.md` section, which the bot has already written to that branch — and rebase-merge it once **all four** required checks have passed, including the Windows ownership and recovery job (about 45 minutes); the ruleset blocks the merge until then.
 4. Push the tag from `master`, then create an **empty draft** attached to that tag. The tag must
    equal `v` plus the tagged `package.json` version. The real tag push starts the installer build; `release.yml` alone
@@ -140,7 +138,6 @@ draft must be empty; preexisting assets without provenance are refused.
 
 The publisher can reconcile changed, missing, duplicate or stale assets **only on that marked
 draft**. It rechecks tag/SHA, draft identity, provenance and prerelease status before every write.
-Both metadata edits include the verified `tag_name` to preserve the draft's tag association.
 It compares remote state, size and GitHub's SHA-256 digest; if no digest exists it streams and hashes
 the authenticated asset download. After all uploads it freshly lists and verifies the **entire**
 remote set before the final `draft: false` PATCH. That is the only public transition. It then reads
@@ -317,9 +314,8 @@ open. The feed uses `latest.yml`, `latest-mac.yml` and `latest-linux.yml`, gener
 and exposed together by the complete-set publisher. NSIS differential updates use `.blockmap` files.
 The `zip` targets in `electron-builder.yml` supply the macOS updater, and users install from the DMG.
 New versions download automatically. Users can check immediately from
-**Settings → About & doctor → Check for updates**. Download progress appears beside **Settings** in the
-sidebar. Once the download is ready and sessions are idle, **Install update** restarts Vocs Code.
-Updates also install on a clean quit for Windows NSIS and Linux AppImage.
+**Settings → About & doctor → Check for updates**. The title bar offers **Restart to update** once
+the download is ready and sessions are idle. Updates install on a clean quit for Windows NSIS and Linux AppImage.
 macOS installation from the updater is best-effort with the current ad-hoc signature. Reliable macOS
 updates require Developer ID signing.
 
