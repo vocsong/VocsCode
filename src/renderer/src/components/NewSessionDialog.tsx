@@ -144,7 +144,9 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
     setModelsLoading(!!projectRoot);
     setModel(rememberedModel(settings, projectRoot, harness));
     if (!projectRoot) return;
-    invoke('harness:models', { harness, acpAgent, projectRoot })
+    // Publish the same discovery to existing sessions; opening this dialog must not leave their
+    // composer pickers on an older, private snapshot.
+    useStore.getState().refreshModelCatalog(harness, { acpAgent, projectRoot })
       .then((r) => {
         if (cancelled) return;
         setModels(r.models);
