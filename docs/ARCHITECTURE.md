@@ -351,14 +351,46 @@ production (`auth.vocs.io` issuer, `mcp.vocs.io` catalog) unless main is launche
 `VOCS_CODE_ACCOUNT_REALM=staging`; the renderer never chooses an issuer or catalog, and a
 catalog that names the other realm is rejected.
 It configures the native OAuth controller with a static public client and fixed loopback callback,
-keeps five-minute credentials only in main-process memory, and validates the exact Hub catalog
+keeps five-minute access tokens only in main-process memory, and validates the exact Hub catalog
 contract before returning descriptive state. Each cancellation/sign-out/expiry invalidates its
 generation and clears catalog data; refreshing never treats stale metadata as authorization.
-Local sign-out precedes bounded best-effort remote token revocation.
 
-The five `vocsAccount:*` requests accept no URLs, credentials or arbitrary configuration. Both
-the transport-agnostic registry and Electron owner-main-frame boundary reject remote/agent
-callers. Main owns expiry and request cancellation; renderer revisions/generations prevent stale
-UI results. Registry shutdown disposes the broker. This does not persist sessions, mutate MCP
-configuration, grant tool access or require login for local editing. Settings presents the
+**Kept sign-in.** A realm offers "Keep me signed in on this computer" only when its config has a
+`deviceClientId`: staging does; production does not until the owner turns
+`NATIVE_DEVICE_GRANTS_ENABLED` on there, and enabling it then means setting `deviceClientId` for
+production in `VOCS_REALMS` (`main/vocs-account.ts`). Where it is offered the box is on by
+default and signs in with `vocs-code-device` and a platform-only `device_name`; off or unoffered
+it is the temporary `vocs-code` flow. Without a real keychain (including Linux
+`basic_text`/`unknown`) the device is still enrolled (owner decision 10), its refresh token stays in
+memory and rotates there for this run, and the device is revoked when the app quits; the UI says
+the sign-in ends when Vocs Code closes. An `enc:` record the weak backend cannot decrypt (keyring
+not up yet) is left on disk untouched. The device's rotating refresh token is the
+only thing kept, in `SecretStore` under `vocs-account:<realm>` as
+`{v:1,issuer,clientId,resource,deviceId,refreshToken,deviceExpiresAt}`. Those ids are
+`keychainOnly`: read back only as `enc:` (a planted plain or `b64:` value is removed at load) and
+never reachable as a provider id (`secrets:*`, `providers:save`/`providers:delete`, and every
+provider-keyed secret getter, refuse `vocs-account:*`, `remote-host`, `remote-enroll`). On load the record must match the pinned realm
+exactly; it never chooses where a token is sent, and anything else is removed unused. The OAuth
+controller strips refresh and device fields before the MCP SDK parses a token response, so the
+SDK's own refresh logic never sees a refresh token, and it never re-sends a consumed authorization
+code, so the issuer's first answer (e.g. `fresh_sign_in_required`) is the one shown. A device
+exchange cancelled while it answers (or after it answered, before the grant was handed over) still
+has its grant revoked; its body is read bounded to 64 KB. Startup restore runs after the
+window opens; restore, Retry and Refresh share one flight per session, so concurrent clicks send
+one refresh grant. The rotated token is written to the vault before the new access token is used;
+a failed write keeps it in memory, says so, and revokes the device when the app quits (bounded,
+2 s), as for a machine without a keychain. A Hub 401 renews once before the sign-in is shown connected. `invalid_grant`, or any unknown
+outcome after the request may have been sent, ends the sign-in and clears the vault (a replayed
+token revokes the device server-side). Rolling the server flag back makes refresh answer
+`invalid_request`, which likewise ends the device on the desktop. A failure before sending
+(offline, DNS, refused, TLS) or `temporarily_unavailable` (429 rate limit, 503 storage) keeps the
+vault and shows `offline` with Retry. Sign-out clears the vault first, then revokes the refresh
+token; a rotation that answers after sign-out is revoked, never stored. Quitting keeps the vault.
+
+The five `vocsAccount:*` requests accept no URLs, credentials or arbitrary configuration; sign-in
+takes only `{ persist: boolean }`. Both the transport-agnostic registry and Electron
+owner-main-frame boundary reject remote/agent callers. Main owns expiry and request cancellation;
+renderer revisions/generations prevent stale UI results. Registry shutdown disposes the broker
+(memory only, plus the bounded revoke above). This does not mutate MCP configuration, grant tool access or require login for
+local editing. Settings presents the
 catalog read-only; live desktop acceptance is documented in `ACCOUNT-STAGING-TEST.md`.

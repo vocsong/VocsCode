@@ -227,9 +227,9 @@ describe('native MCP OAuth main-process boundary', () => {
       const response = await original(input, init);
       if (stage !== 'token-body' || String(input) !== `${issuer}token`) return response;
       const staleTokens = { ...await response.json(), access_token: 'stale-token' };
-      const delayed = Response.json(staleTokens);
-      delayed.json = async () => { requested(); await gate; return staleTokens; };
-      return delayed;
+      // An uncooperative body: its bytes arrive only after the gate opens.
+      const bytes = new TextEncoder().encode(JSON.stringify(staleTokens));
+      return new Response(new ReadableStream({ async pull(controller) { requested(); await gate; controller.enqueue(bytes); controller.close(); } }, { highWaterMark: 0 }), { status: 200, headers: { 'content-type': 'application/json' } });
     });
     const controller = new AbortController();
     const outcome = f.oauth.authorize(controller.signal).then(

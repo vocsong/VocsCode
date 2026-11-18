@@ -6,6 +6,7 @@ import { assertEndpointUrl, credentialFetch } from '../../shared/endpoint-policy
 import { errorMessage } from '../util/async';
 import { cursorModelToInfo } from './static-models';
 import { STATIC_MODELS_BY_PROVIDER, findPricing } from './static-models';
+import { isReservedSecretId } from '../secret-ids';
 
 /** Validate configured endpoints and the SDK's environment fallback before resolving secrets. */
 export function assertProviderEndpoint(provider: Pick<ProviderConfig, 'kind' | 'baseUrl'>): void {
@@ -22,7 +23,8 @@ export async function resolveProviderApiKey(provider: ProviderConfig, getSecret:
   } catch {
     return undefined;
   }
-  const stored = await getSecret(provider.id);
+  // A provider id never names identity material (remote pairing, a kept Vocs sign-in).
+  const stored = isReservedSecretId(provider.id) ? undefined : await getSecret(provider.id);
   if (stored) return stored;
   if (provider.envKey && process.env[provider.envKey]) return process.env[provider.envKey];
   return undefined;

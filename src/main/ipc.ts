@@ -14,8 +14,11 @@ import type { DesktopFocusTracker } from './desktop-focus';
 import type { UpdateService } from './updater';
 import type { GitnexusIndexer } from './mcp';
 import type { AppInstructions } from './app-instructions';
+import type { VocsAccountBroker } from './vocs-account';
 
 export interface IpcDeps {
+  /** Vocs account broker built by index.ts with the OS vault; the registry builds a memory-only one otherwise. */
+  vocsAccount?: VocsAccountBroker;
   settings: SettingsStore;
   secrets: SecretStore;
   sessions: SessionManager;
@@ -116,6 +119,7 @@ function desktopBridge(deps: IpcDeps): DesktopBridge {
 
 export function registerIpc(deps: IpcDeps): HandlerRegistry {
   const registry = createHandlerRegistry({
+    vocsAccount: deps.vocsAccount,
     settings: deps.settings,
     secrets: deps.secrets,
     sessions: deps.sessions,
