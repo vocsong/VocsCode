@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.10.0](https://github.com/vocsong/VocsCode/compare/v0.9.1...v0.10.0) (2026-11-18)
+
+
+### Features
+
+* **ui:** show provider/model with the effort beside it in the model pill ([#516](https://github.com/vocsong/VocsCode/issues/516)) ([8f5dea2](https://github.com/vocsong/VocsCode/commit/8f5dea244a0413cab8051522119a0402d1ed08a2))
+
+
+### Bug Fixes
+
+* **control:** authorize remote-controller effects before they happen ([#520](https://github.com/vocsong/VocsCode/issues/520)) ([8a0aed5](https://github.com/vocsong/VocsCode/commit/8a0aed51db74b7f816ab45415d1f509cf7c3f7fe))
+* **deps:** take patched MCP SDK, Zod, DOMPurify, Cursor SDK and server packages ([#522](https://github.com/vocsong/VocsCode/issues/522)) ([d80e4ac](https://github.com/vocsong/VocsCode/commit/d80e4ac456d6c055c3a8fa84f83bd3e9e0804239))
+* give the New Session model picker more room ([#530](https://github.com/vocsong/VocsCode/issues/530)) ([ac2c68d](https://github.com/vocsong/VocsCode/commit/ac2c68d508dce3e9d4c2cf2f099f4e8aa903d1f3))
+* keep transcript replies visible after subagent follow-ups ([#531](https://github.com/vocsong/VocsCode/issues/531)) ([ff28b8b](https://github.com/vocsong/VocsCode/commit/ff28b8b1393b824c6ea8b3f11405ed96cb97bfb6))
+* **pi-settings:** keep a quick numeric clear from being dropped while a save is in flight ([#521](https://github.com/vocsong/VocsCode/issues/521)) ([9b673ae](https://github.com/vocsong/VocsCode/commit/9b673ae9258c236b0a85a78d77c35d22bc03941c))
+* **pi:** interrupt active work when steering ([00841f8](https://github.com/vocsong/VocsCode/commit/00841f83e3c7aff4256a4797ec1d1e50ba804f63))
+* **pi:** tell append-mode subagents the lead's delegation rules are not theirs ([#525](https://github.com/vocsong/VocsCode/issues/525)) ([8118ae1](https://github.com/vocsong/VocsCode/commit/8118ae1e08ab0f4ba3926b83bbe0c8aee65cb4ec))
+* resolve triaged defects and harden release publication ([#524](https://github.com/vocsong/VocsCode/issues/524)) ([cf1c3c9](https://github.com/vocsong/VocsCode/commit/cf1c3c97537f2a1b87efcc82a822d0dd0304ee0d))
+* **secrets:** keep remote-access identity in memory only when the OS cannot encrypt it ([#526](https://github.com/vocsong/VocsCode/issues/526)) ([0f01f9d](https://github.com/vocsong/VocsCode/commit/0f01f9d2e77aa2503e87d1804efbdf19fb6aeac7))
+
 ## [0.9.1](https://github.com/vocsong/VocsCode/compare/v0.9.0...v0.9.1) (2026-11-16)
 
 
