@@ -22,6 +22,7 @@ import { InstructionsSection } from './InstructionsSection';
 import { MissionSettings } from './mission/MissionSettings';
 import { VoiceSection } from './VoiceSettings';
 import { ControlSettings } from './ControlSettings';
+import { LocalControlSettings } from './LocalControlSettings';
 import { VocsAccountSettings } from './VocsAccountSettings';
 import { ChatImport } from './ChatImport';
 
@@ -163,7 +164,11 @@ export function SettingsView() {
               {section === 'instructions' && <InstructionsSection />}
               {section === 'pi' && <PiSection />}
               {section === 'acp' && <AcpAgents settings={settings} update={update} />}
-              {section === 'remote' && <><SettingsGroup id="remote-browser" title="Browser access" icon="globe"><RemoteSection settings={settings} update={update} /></SettingsGroup><SettingsGroup id="remote-controllers" title="External MCP control" description="Experimental · Connect a controller with explicit desktop grants." icon="shield"><ControlSettings /></SettingsGroup></>}
+              {section === 'remote' && <>
+                <SettingsGroup id="remote-browser" title="Browser access" icon="globe"><RemoteSection settings={settings} update={update} /></SettingsGroup>
+                <SettingsGroup id="remote-controllers" title="External MCP control" description="Experimental · Connect a controller with explicit desktop grants." icon="shield"><ControlSettings /></SettingsGroup>
+                <LocalControlSettings />
+              </>}
               {section === 'about' && <About />}
             </div>
           </div>

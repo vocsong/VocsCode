@@ -379,7 +379,13 @@ describe('Mission coordinator', () => {
     const worker = runtimes.get(first.sessionId)!;
     worker.usage({ inputTokens: 100, costUsd: 1 });
     await report(r, first.attemptId, { status: 'failed' }); worker.finish();
-    await wait(() => expect(service.get(r.id)?.attempts[0].status).toBe('terminal'));
+    // Turn settlement commits the terminal attempt and its notice separately. Wait for both
+    // before reading the revision for Pause; this test is about usage recovery, not stale actions.
+    await wait(() => {
+      const current = service.get(r.id);
+      expect(current?.attempts[0].status).toBe('terminal');
+      expect(current?.mailbox.some((item) => item.sessionId === first.sessionId && item.text.startsWith(`Attempt ${first.attemptId} ended:`))).toBe(true);
+    });
     await service.control({ missionId: r.id, expectedRevision: service.get(r.id)!.revision, idempotencyKey: 'pause-under-budget', control: { action: 'pause' } });
     await crashRestart();
     expect(service.get(r.id)?.status).toBe('paused'); expect(scheduler.snapshot().active).toEqual([]);

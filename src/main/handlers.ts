@@ -121,6 +121,7 @@ export interface HandlerDeps {
   remote?: RemoteHost;
   /** Local owner configuration, never exposed through browser/agent invocation origins. */
   control?: import('./control/service').ControlService;
+  localControl?: Pick<import('./control/local').LocalControl, 'ownerState' | 'enable' | 'disable'>;
   /** Which session the desktop window is on, mirrored to paired browsers; absent in tests. */
   desktopFocus?: DesktopFocusTracker;
   /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
@@ -280,6 +281,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     handle('control:enable', (input) => control.setEnabled(z.strictObject({ enabled: z.boolean() }).parse(input).enabled));
     handle('control:grant', (input) => control.grant(controlGrantInputSchema.parse(input)));
     handle('control:revoke', (input) => control.revoke(z.strictObject({ grantId: z.string().uuid() }).parse(input).grantId));
+  }
+  if (deps.localControl) {
+    const local = deps.localControl;
+    handle('control:local:get', () => local.ownerState());
+    handle('control:local:enable', (input) => local.enable(input));
+    handle('control:local:disable', () => local.disable());
   }
 
   async function invokeChannel(channel: string, req: unknown, actor: 'user' | 'agent' | 'desktop' = 'user'): Promise<unknown> {
