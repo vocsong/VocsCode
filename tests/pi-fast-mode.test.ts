@@ -226,6 +226,7 @@ describe('Pi adapter nonce-bound Fast mode RPC bridge', () => {
     expect(h.payloads).toEqual([{ model: opus.id, messages: [], reasoning: { effort: 'high' }, speed: 'fast', betas: ['fast-mode-2026-02-01'] }]);
     h.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }], stopReason: 'stop' } });
     h.emit({ type: 'agent_end' });
+    h.emit({ type: 'agent_settled' });
     await vi.waitFor(() => expect(h.events.filter((event) => event.type === 'item.upsert' && event.item.kind === 'turn' && event.item.status === 'completed')).toHaveLength(1));
     expect(h.meta.fastModeStatus?.state).toBe('requested');
     await h.adapter.dispose();
@@ -241,6 +242,7 @@ describe('Pi adapter nonce-bound Fast mode RPC bridge', () => {
     h.emit({ type: 'message_update', usage: { input: 500, output: 500, cacheRead: 500, cacheWrite: cacheWrite / 2, cost: { total: 0.01 } } });
     h.emit({ type: 'message_end', message: { role: 'assistant', provider: model.provider, model: model.id, stopReason: 'stop', usage: { input: 1000, output: 1000, cacheRead: 1000, cacheWrite, cost: { total: 0.02 } } } });
     h.emit({ type: 'agent_end' });
+    h.emit({ type: 'agent_settled' });
     const turns = () => h.events.filter((event) => event.type === 'item.upsert' && event.item.kind === 'turn').map((event) => (event as Extract<SessionEvent, { type: 'item.upsert' }>).item);
     await vi.waitFor(() => expect(turns()).toHaveLength(1));
     expect(turns()[0]).toMatchObject({ status: 'completed', costUsd: expect.closeTo(expected, 8) });
@@ -252,6 +254,7 @@ describe('Pi adapter nonce-bound Fast mode RPC bridge', () => {
     h.emit({ type: 'message_start', message: { role: 'assistant', provider: model.provider, model: model.id } });
     h.emit({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', usage: { input: 1000, output: 1000, cost: { total: 0.01 } } } });
     h.emit({ type: 'agent_end' });
+    h.emit({ type: 'agent_settled' });
     await vi.waitFor(() => expect(turns()).toHaveLength(2));
     expect(turns()[1]).toMatchObject({ costUsd: expect.closeTo(0.01, 8) });
     expect(h.events.filter((event) => event.type === 'usage').at(-1)).toMatchObject({ totals: { costUsd: expect.closeTo(expected + 0.01, 8), turns: 2 } });
@@ -263,6 +266,7 @@ describe('Pi adapter nonce-bound Fast mode RPC bridge', () => {
     h.emit({ type: 'message_start', message: { role: 'assistant', provider: model.provider, model: model.id } });
     h.emit({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', usage: { input: 1000, output: 1000, cost: { total: 0.01 } } } });
     h.emit({ type: 'agent_end' });
+    h.emit({ type: 'agent_settled' });
     await vi.waitFor(() => expect(h.events.filter((event) => event.type === 'item.upsert' && event.item.kind === 'turn')).toHaveLength(1));
     expect(h.meta.fastModeStatus?.detail).toContain('pricing is unavailable');
     expect(h.events.some((event) => event.type === 'item.upsert' && event.item.kind === 'info' && event.item.level === 'warn' && event.item.text.includes('standard-rate estimate'))).toBe(true);
@@ -274,6 +278,7 @@ describe('Pi adapter nonce-bound Fast mode RPC bridge', () => {
     h.emit({ type: 'message_start', message: { role: 'assistant', provider: 'openrouter', model: openai.id } });
     h.emit({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', usage: { input: 1000, output: 1000, cost: { total: 0.01 } } } });
     h.emit({ type: 'agent_end' });
+    h.emit({ type: 'agent_settled' });
     await vi.waitFor(() => expect(h.events.filter((event) => event.type === 'item.upsert' && event.item.kind === 'turn')).toHaveLength(1));
     expect(h.events.filter((event) => event.type === 'usage').at(-1)).toMatchObject({ totals: { costUsd: 0.01 } });
     await h.adapter.dispose();

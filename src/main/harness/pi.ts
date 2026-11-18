@@ -223,6 +223,18 @@ export class PiAdapter implements HarnessAdapter {
   private missionTools: string[] = [];
   private missionSettling = false;
   private missionInterrupted = false;
+  private turnFinishing: Promise<void> | null = null;
+  private statsOverlapped = false;
+  private readonly deferredLines: string[] = [];
+  /** Keep user input outside Pi's queues: 0.85.1 can consume queued input under an aborted signal. */
+  private readonly followUps: UserInput[] = [];
+  private inputDispatch: Promise<void> = Promise.resolve();
+  private pendingInputs = 0;
+  private pendingSteers = 0;
+  private inputRevision = 0;
+  private runtimeQueued = 0;
+  private steeringInterrupt = false;
+  private idleReported = true;
   /** Survives root exit and failed stop attempts until the Job's positive teardown receipt. */
   private missionProcess: OwnedWindowsJob<ChildProcess> | null = null;
   private missionIntent: ManagedPiOwnershipIntent | null = null;
@@ -246,7 +258,7 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   get busy(): boolean {
-    return this._busy;
+    return this._busy || this.pendingInputs > 0;
   }
 
   workspaceWriterState(): 'active' | 'unknown' | 'quiescent' | undefined {
@@ -595,27 +607,40 @@ export class PiAdapter implements HarnessAdapter {
       return;
     }
     if (this.ctx.session().mission ? this.missionStopping : this.ordinaryStopping) return;
+    // A new extension-started run can arrive while the old run's stats are in flight. Do not
+    // mix its usage/stop reason into the old turn or let old bookkeeping publish a stale idle.
+    const customMessage = (type === 'message_start' || type === 'message_end') && (ev.message as { role?: string } | undefined)?.role === 'custom';
+    // Out-of-band child completions still belong to the pending accounting report.
+    if (this.turnFinishing && type !== 'extension_ui_request' && type !== 'queue_update' && !customMessage) {
+      if (type === 'agent_start' || type === 'message_start' || type === 'message_update') this.statsOverlapped = true;
+      this.deferredLines.push(line);
+      return;
+    }
     switch (type) {
       case 'agent_start':
+        this.missionSettling = false;
+        this.idleReported = false;
         this._busy = true;
         if (!this.turnStartedAt) this.usage.beginTurn();
         this.turnStartedAt = this.turnStartedAt || Date.now();
         this.ctx.emit({ type: 'status', status: 'running' });
         return;
-      case 'agent_end': {
-        // A retry (or compaction) follows this run; wait for the final agent_end so the
-        // turn item reflects the whole prompt, not the failed attempt.
-        if (this.ctx.session().mission || (ev as { willRetry?: boolean }).willRetry) return;
-        void this.finishTurn();
+      case 'agent_end':
+        // This is only a low-level run boundary. Retry, compaction or extension work may follow.
+        return;
+      case 'agent_settled': {
+        if (this.missionSettling || this.ctx.session().mission && !this.turnStartedAt) return;
+        this.missionSettling = true;
+        const finishing = this.finishTurn();
+        this.turnFinishing = finishing;
+        void finishing.finally(() => {
+          if (this.turnFinishing !== finishing) return;
+          this.turnFinishing = null;
+          for (const deferredLine of this.deferredLines.splice(0)) this.handleLine(deferredLine);
+          this.advanceInputs();
+        }).catch((error) => this.ctx.log('warn', `Pi turn finalization failed: ${errorMessage(error)}`));
         return;
       }
-      case 'agent_settled':
-        // Mission must not release its attempt on agent_end: Pi may still have scheduler,
-        // retry, compaction or queued follow-up work. The installed RPC drain boundary is settled.
-        if (!this.ctx.session().mission || !this.turnStartedAt || this.missionSettling) return;
-        this.missionSettling = true;
-        void this.finishTurn();
-        return;
       case 'turn_start':
       case 'turn_end':
         return;
@@ -727,7 +752,8 @@ export class PiAdapter implements HarnessAdapter {
         return;
       case 'queue_update': {
         const e = ev as { steering?: unknown[]; followUp?: unknown[] };
-        this.ctx.updateMeta({ queued: (e.steering?.length ?? 0) + (e.followUp?.length ?? 0) });
+        this.runtimeQueued = (e.steering?.length ?? 0) + (e.followUp?.length ?? 0);
+        this.updateQueued();
         return;
       }
       case 'compaction_start':
@@ -1030,6 +1056,11 @@ export class PiAdapter implements HarnessAdapter {
         /* process gone */
       }
     };
+    // A dialog emitted by the retiring run must not wedge cancellation or acquire a new grant.
+    if ((this.steeringInterrupt || this.pendingSteers > 0) && ['select', 'confirm', 'input', 'editor'].includes(req.method)) {
+      respond({ cancelled: true });
+      return;
+    }
     // Mission questions go through the broker to the lead. Keep only the shipped permission
     // gate's cards; a worker extension must never create another user conversation channel.
     if (this.ctx.session().mission && ['select', 'confirm', 'input', 'editor'].includes(req.method) &&
@@ -1214,8 +1245,8 @@ export class PiAdapter implements HarnessAdapter {
 
   private async finishTurn(): Promise<void> {
     const child = this.child;
+    this.statsOverlapped = false;
     this.declinedTools.clear();
-    if (!this.ctx.session().mission) this._busy = false;
     // The turn ends now, but the stats round-trip below is app bookkeeping rather than model work:
     // measuring the wall time after it would fold a stalled request (up to the 10s timeout) into the
     // turn's duration and depress the speed the panel derives from it. A turn that ends after
@@ -1235,7 +1266,9 @@ export class PiAdapter implements HarnessAdapter {
       );
       if (stats.sessionFile) this.ctx.updateRef({ piSessionFile: stats.sessionFile });
       const t = stats.tokens ?? {};
-      this.usage.setCumulative({
+      // A snapshot that overlaps a newer run already includes its deferred samples. Keep this
+      // turn's streamed usage; the next non-overlapping cumulative snapshot reconciles both.
+      if (!this.statsOverlapped) this.usage.setCumulative({
         inputTokens: t.input,
         outputTokens: t.output,
         cacheReadTokens: t.cacheRead,
@@ -1267,13 +1300,13 @@ export class PiAdapter implements HarnessAdapter {
     // has no measured usage at all, so the row stays unknown instead of claiming a measured zero.
     const turnUsage = completed.usage && Object.values(completed.usage).some((value) => (value ?? 0) > 0) ? completed.usage : undefined;
     // pi ends a failed turn with an assistant message (stopReason 'error'), not an error event.
-    const stopReason = this.ctx.session().mission && this.missionInterrupted ? 'aborted' : this.lastStopReason;
+    const stopReason = this.steeringInterrupt || this.ctx.session().mission && this.missionInterrupted ? 'aborted' : this.lastStopReason;
     const errorMsg = this.lastErrorMessage;
     this.lastStopReason = null;
     this.lastErrorMessage = null;
     const failed = stopReason === 'error' && errorMsg;
     if (failed) this.info(`Turn failed: ${errorMsg}`, 'error');
-    if (this.ctx.session().mission) this._busy = false;
+    this._busy = false;
     this.ctx.emit({
       type: 'item.upsert',
       item: {
@@ -1288,7 +1321,23 @@ export class PiAdapter implements HarnessAdapter {
       }
     });
     this.turnStartedAt = 0;
-    this.ctx.emit({ type: 'status', status: 'idle' });
+    if (this.ctx.session().mission) this.ctx.emit({ type: 'status', status: 'idle' });
+  }
+
+  private updateQueued(): void {
+    this.ctx.updateMeta({ queued: this.runtimeQueued + this.followUps.length + this.pendingInputs });
+  }
+
+  private advanceInputs(): void {
+    if (this.ctx.session().mission || this._busy || this.pendingInputs || this.turnFinishing || this.ordinaryStopping || this.exited) return;
+    const next = this.followUps.shift();
+    this.updateQueued();
+    if (next) {
+      void this.send({ ...next, mode: 'queue' }).catch((error) => this.ctx.emit({ type: 'error', message: `Pi queued input failed: ${errorMessage(error)}`, fatal: false }));
+    } else if (!this.idleReported) {
+      this.idleReported = true;
+      this.ctx.emit({ type: 'status', status: 'idle' });
+    }
   }
 
   private info(text: string, level: 'info' | 'warn' | 'error' = 'info'): void {
@@ -1304,12 +1353,69 @@ export class PiAdapter implements HarnessAdapter {
       if (!readiness.ready) throw new Error(readiness.reason ?? 'Managed Mission runtime is unverified.');
     }
     if (!this.ctx.session().mission && this.ctx.permissionMode() !== 'plan') this.ordinaryWritersUnproven = true;
-    const images = (input.images ?? []).map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }));
-    if (this._busy) {
-      const type = input.mode === 'queue' ? 'follow_up' : 'steer';
-      await this.request(type, { message: input.text, images });
+    if (this.ctx.session().mission) {
+      if (this._busy) {
+        await this.request(input.mode === 'queue' ? 'follow_up' : 'steer', { message: input.text, images: this.images(input) });
+      } else await this.promptInput(input);
       return;
     }
+    if (input.mode === 'queue' && this.busy) {
+      this.followUps.push(input);
+      this.updateQueued();
+      return;
+    }
+    const child = this.child;
+    const revision = this.inputRevision;
+    const assertCurrent = () => {
+      if (this.child !== child || this.exited || this.ordinaryStopping || revision !== this.inputRevision) throw new Error('Pi stopped before the message could be sent.');
+    };
+    let steeringPending = this.busy;
+    if (steeringPending) this.pendingSteers++;
+    this.pendingInputs++;
+    this.updateQueued();
+    // Serialize only cancellation/admission, never a whole model response. Rapid steers each
+    // enter once, in order, and queued follow-ups cannot overtake an urgent directive.
+    const dispatch = this.inputDispatch.then(async () => {
+      assertCurrent();
+      await this.turnFinishing;
+      if (this._busy && input.mode === 'queue') {
+        // An extension can start work between selecting a follow-up and admitting it.
+        // Queue must still wait, preserving its place ahead of later follow-ups.
+        this.followUps.unshift(input);
+        return;
+      }
+      if (this._busy) {
+        this.steeringInterrupt = true;
+        try {
+          await withTimeout(this.request('abort'), 15_000, 'Pi steering cancellation');
+          await this.turnFinishing;
+          assertCurrent();
+          if (this._busy) throw new Error('Pi did not settle after cancellation; stop the session before retrying.');
+        } finally {
+          this.steeringInterrupt = false;
+        }
+      }
+      assertCurrent();
+      if (steeringPending) { this.pendingSteers--; steeringPending = false; }
+      await this.promptInput(input);
+    });
+    const completed = dispatch.finally(() => {
+      if (steeringPending) this.pendingSteers--;
+      this.pendingInputs--;
+      this.updateQueued();
+      this.advanceInputs();
+    });
+    this.inputDispatch = completed.catch(() => undefined);
+    await completed;
+  }
+
+  private images(input: UserInput): { type: string; data: string; mimeType: string }[] {
+    return (input.images ?? []).map((image) => ({ type: 'image', data: image.data, mimeType: image.mimeType }));
+  }
+
+  private async promptInput(input: UserInput): Promise<void> {
+    const child = this.child;
+    this.idleReported = false;
     this._busy = true;
     this.missionSettling = false;
     this.missionInterrupted = false;
@@ -1319,10 +1425,12 @@ export class PiAdapter implements HarnessAdapter {
     this.usage.beginTurn();
     this.ctx.emit({ type: 'status', status: 'running' });
     try {
-      await this.request('prompt', { message: input.text, images });
+      await this.request('prompt', { message: input.text, images: this.images(input) });
     } catch (e) {
-      this._busy = false;
-      this.ctx.emit({ type: 'status', status: 'idle' });
+      if (this.child === child && !this.exited && !this.ordinaryStopping && !this.missionStopping) {
+        this._busy = false;
+        if (this.ctx.session().mission) this.ctx.emit({ type: 'status', status: 'idle' });
+      }
       throw e;
     }
   }
@@ -1428,6 +1536,11 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   async dispose(): Promise<void> {
+    this.inputRevision++;
+    this.followUps.length = 0;
+    this.deferredLines.length = 0;
+    this.runtimeQueued = 0;
+    this.updateQueued();
     this.usageReporter.close();
     this.extensionCapabilities.clear();
     this.missionTools = [];

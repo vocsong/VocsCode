@@ -88,6 +88,19 @@ Transports without `fs:resolve` retain exact-path opening.
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
 
+Ordinary **Pi Steer interrupts the active run**, waits for cancellation and turn bookkeeping to
+settle, then admits the directive as a fresh prompt. Queue remains non-interrupting and FIFO;
+`PiAdapter` retains full follow-up payloads (including images) outside Pi until dispatch. This is
+intentional: Pi's native steering waits for a whole tool batch, and Pi 0.85.1 can consume queued
+input under an already-aborted signal. Admission is serialized, not model responses, so rapid
+steers are each submitted once without dropping earlier directives. Pending old-run approvals are
+denied; late old-run dialogs cannot acquire a new grant. Cancellation failure refuses the new
+prompt rather than running it beside unproven old work. Normalized turn completion uses
+`agent_settled`, not intermediate `agent_end`; delayed stats cannot overwrite a newer run. Managed
+Mission input retains its broker-owned continuation policy. The Pi MCP bridge propagates per-call
+cancellation without closing shared connections; remote cancellation is advisory, not proof that a
+remote mutation or its side effects stopped.
+
 Claude catalogs map every SDK row to the canonical wire id it resolves to, the recommended `default`
 included: that row leads as `<model> (recommended)` and is the New Session preselection, so a saved
 Claude selection is always a concrete version, never the moving alias. A `default` the runtime does
