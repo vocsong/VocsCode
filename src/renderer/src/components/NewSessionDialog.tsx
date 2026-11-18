@@ -1,5 +1,5 @@
 /** New session dialog: project directory, harness, model, permission mode and worktree isolation (with its branch prefix). */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import type { AppSettings, EffortLevel, FileAttachment, HarnessId, ImageAttachment, ModelInfo, ModelRef, PermissionMode, SessionConfig } from '../../../shared/types';
 import { branchNameFromText, branchPrefixOptions, branchSlug, normalizeBranchPrefix } from '../../../shared/branch-prefix';
 import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../shared/harness-meta';
@@ -84,28 +84,9 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const [appendSystemPrompt, setAppendSystemPrompt] = useState('');
   const [maxBudget, setMaxBudget] = useState('');
   const [creating, setCreating] = useState(false);
-
-  // Focus the first-prompt textarea so typing can start immediately.
   const promptRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => {
-    promptRef.current?.focus();
-  }, []);
-
-  // The model column keeps the harness column's height; the model list scrolls inside it.
-  const harnessColRef = useRef<HTMLElement>(null);
-  const modelColRef = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const left = harnessColRef.current;
-    const right = modelColRef.current;
-    if (!left || !right) return;
-    const apply = () => {
-      right.style.height = `${left.offsetHeight}px`;
-    };
-    apply();
-    const ro = new ResizeObserver(apply);
-    ro.observe(left);
-    return () => ro.disconnect();
-  }, [harness, acpAgent]);
+  const promptId = useId();
+  const permissionsHintId = useId();
 
   // `git worktree add` needs a repository; without one the toggle would only produce a failed
   // session creation, so the folder is probed before the toggle is offered.
@@ -353,30 +334,23 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
         </>
       }
     >
-      {choices}
+      <div className="ns-toolbar">
+        {choices}
+        <Button size="sm" variant="ghost" onClick={() => promptRef.current?.focus()}>Jump to first prompt</Button>
+      </div>
       <div className="ns-grid">
-        <section className="ns-col" ref={harnessColRef}>
-          <Field label="Harness">
+        <section className="ns-col">
+          <div className="field">
+            <span className="field-label">Harness</span>
+            {availabilityError && <div className="field-hint">Could not check harnesses. <button type="button" className="link-btn" onClick={() => void refreshAvailability()}>Retry</button></div>}
             <div className="harness-cards">
               {HARNESSES.map((h) => {
                 const av = availability[h.id];
+                const status = harnessStatus(h.id, av);
                 return (
-                  <button key={h.id} type="button" className={`harness-card ${harness === h.id ? 'active' : ''}`} onClick={() => setHarness(h.id)}>
-                    <div className="harness-card-top">
-                      <span className="harness-card-name">{h.name}</span>
-                      {av ? <Badge tone={harnessStatus(h.id, av).tone}>{harnessStatus(h.id, av).label}</Badge> : availabilityError ? (
-                        <span
-                          className="link-btn"
-                          role="button"
-                          tabIndex={0}
-                          onClick={(e) => { e.stopPropagation(); void refreshAvailability(); }}
-                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); void refreshAvailability(); } }}
-                        >
-                          could not check — retry
-                        </span>
-                      ) : <Spinner size={10} />}
-                    </div>
-                    <div className="harness-card-tag">{h.tagline}</div>
+                  <button key={h.id} type="button" className={`harness-card ${harness === h.id ? 'active' : ''}`} aria-pressed={harness === h.id} title={h.tagline} onClick={() => setHarness(h.id)}>
+                    <span className="harness-card-name">{h.name}</span>
+                    {av ? <Badge tone={status.tone}>{status.label}</Badge> : !availabilityError && <Spinner size={10} />}
                   </button>
                 );
               })}
@@ -387,7 +361,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
                 {availability[harness]!.detail} {availability[harness]!.installHint && <code>{availability[harness]!.installHint}</code>}
               </div>
             )}
-          </Field>
+          </div>
 
           {harnessNeedsSetup(harness, availability[harness], { loading: modelsLoading, count: models.length, error: modelsError }) && (
             <>
@@ -409,8 +383,12 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
           )}
         </section>
 
-        <section className="ns-col ns-col-model" ref={modelColRef}>
-          <Field label={<span className="row gap6">Model {modelsLoading && <Spinner size={11} />}</span>} hint={modelsError}>
+        <div className="ns-col-model">
+          <section className="ns-col">
+            <div className="ns-model-heading">
+              <span className="field-label">Model</span>
+              <Button size="sm" variant="ghost" icon="refresh" disabled={modelsLoading} onClick={() => { setModelRefresh((v) => v + 1); void refreshAvailability(); }}>Recheck models and sign-in</Button>
+            </div>
             <ModelPicker
               models={models}
               loading={modelsLoading}
@@ -420,10 +398,10 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
               // No onSelectCustom here: a new session starts on a listed model only; an unlisted id is switched in the header afterwards.
               onSelect={(m) => setModel(m ? { provider: m.provider, model: m.id } : undefined)}
             />
-          </Field>
-          <Button size="sm" variant="ghost" icon="refresh" disabled={modelsLoading} onClick={() => { setModelRefresh((v) => v + 1); void refreshAvailability(); }}>Recheck models and sign-in</Button>
-          {modelsError && <p className="muted small">Any listed suggestions may be fallbacks, not verified account access. Use Set up / sign in to repair the connection.</p>}
-          <div className="row gap12">
+            {modelsError && <p className="muted small">Any listed suggestions may be fallbacks, not verified account access. Use Set up / sign in to repair the connection.</p>}
+          </section>
+
+          <section className="ns-span2 ns-run-options">
             <Field label="Reasoning effort">
               <select value={selectedEffort} onChange={(e) => setEffort(e.target.value as EffortLevel | '')} disabled={!descriptor.capabilities.effort || noEffort} title={noEffort ? `${selectedModel?.displayName ?? 'This model'} does not support reasoning effort` : undefined}>
                 <option value="">{noEffort ? 'Not supported' : 'Default'}</option>
@@ -434,25 +412,27 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
                 ))}
               </select>
             </Field>
-            <Field label="Permissions">
-              <select value={mode} onChange={(e) => setMode(e.target.value as PermissionMode)}>
-                {modes.map((m) => (
-                  <option key={m} value={m}>
-                    {PERMISSION_MODE_LABELS[m].label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
-          <div className="field-hint">{PERMISSION_MODE_LABELS[mode].description}</div>
-          <div className="field">
-            <Toggle checked={fastSupport.supported && fastMode} onChange={setFastMode} disabled={creating || modelsLoading || !fastSupport.supported} label="Fast mode" />
-            <span className="field-hint">{FAST_MODE_COST_WARNING}</span>
-            {!fastSupport.supported && <span className="field-hint">{fastSupport.reason ?? 'Fast mode is not supported on this route.'}</span>}
-          </div>
-          {!descriptor.capabilities.approvals && mode !== 'plan' && <div className="callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
-
-        </section>
+            <div className="field">
+              <label className="field">
+                <span className="field-label">Permissions</span>
+                <select aria-describedby={permissionsHintId} value={mode} onChange={(e) => setMode(e.target.value as PermissionMode)}>
+                  {modes.map((m) => (
+                    <option key={m} value={m}>
+                      {PERMISSION_MODE_LABELS[m].label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <span id={permissionsHintId} className="field-hint">{PERMISSION_MODE_LABELS[mode].description}</span>
+            </div>
+            <div className="field ns-fast-mode">
+              <Toggle checked={fastSupport.supported && fastMode} onChange={setFastMode} disabled={creating || modelsLoading || !fastSupport.supported} label="Fast mode" />
+              <span className="field-hint">{FAST_MODE_COST_WARNING}</span>
+              {!fastSupport.supported && <span className="field-hint">{fastSupport.reason ?? 'Fast mode is not supported on this route.'}</span>}
+            </div>
+            {!descriptor.capabilities.approvals && mode !== 'plan' && <div className="ns-span2 callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
+          </section>
+        </div>
 
         <section className="ns-span2 ns-workspace">
           <Toggle
@@ -536,7 +516,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
 
         <section className="ns-span2">
           <div className="field">
-            <span className="field-label">First prompt (optional)</span>
+            <label className="field-label" htmlFor={promptId}>First prompt (optional)</label>
             {images.length > 0 && (
               <div className="attachments ns-attachments">
                 {images.map((im, i) => (
@@ -551,7 +531,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
             )}
             <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
             <div className="ns-prompt-box">
-              <textarea ref={promptRef} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
+              <textarea id={promptId} ref={promptRef} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
               <label className="icon-btn ns-attach" title="Attach files">
                 <Icon name="file" size={14} />
                 <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />
