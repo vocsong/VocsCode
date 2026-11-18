@@ -6,3 +6,9 @@
 export function isReservedSecretId(id: string): boolean {
   return id === 'remote-host' || id === 'remote-enroll' || id.startsWith('vocs-account:');
 }
+
+/** A secret getter for anything keyed by provider (or other user-chosen) ids: reserved ids read as
+ *  absent, so a provider named `vocs-account:staging` can never receive the vault record. */
+export function providerSecrets(get: (id: string) => Promise<string | undefined>): (id: string) => Promise<string | undefined> {
+  return async (id) => (isReservedSecretId(id) ? undefined : get(id));
+}

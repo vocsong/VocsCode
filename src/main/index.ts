@@ -25,6 +25,7 @@ import { SharedGitnexusServer } from './mcp/shared-server';
 import { RuntimeResolver, which } from './runtime';
 import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
+import { providerSecrets } from './secret-ids';
 import { createVocsAccount, VOCS_ACCOUNT_VAULT_IDS, vocsAccountRealm } from './vocs-account';
 import { SessionManager } from './session-manager';
 import { MissionRuntime } from './mission/runtime';
@@ -236,7 +237,7 @@ async function main(): Promise<void> {
       return lines;
     },
     synth: {
-      completer: createKnowledgeCompleter({ settings: () => settings.get(), getSecret: (id) => secrets.get(id), log })
+      completer: createKnowledgeCompleter({ settings: () => settings.get(), getSecret: providerSecrets((id) => secrets.get(id)), log })
     },
     anchors: createGitnexusAnchorResolver({
       // A cold shared server is started lazily; the panel must not wait on it forever.
@@ -265,7 +266,7 @@ async function main(): Promise<void> {
     settings,
     runtime,
     analytics,
-    getSecret: (id) => secrets.get(id),
+    getSecret: providerSecrets((id) => secrets.get(id)),
     // Read on turn end only, long after the tracker below exists.
     isViewing: (id): boolean => desktopFocus.isViewing(id),
     sharedGitnexus: () => sharedGitnexus.ensure(),

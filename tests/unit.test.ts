@@ -1063,6 +1063,28 @@ describe('SecretStore', () => {
     }
   });
 
+  it('keeps a keychain-only enc: record on disk when the weak backend cannot decrypt it (keyring not up yet)', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+    try {
+      const dir = path.join(tmpRoot, 'linux-undecryptable');
+      // Sealed by the real keyring in an earlier run; this run came up on basic_text.
+      const sealed = 'enc:' + Buffer.from('sealed-by-the-real-keyring').toString('base64');
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'secrets.json'), JSON.stringify({ 'vocs-account:production': sealed }));
+      safeStorageMock.backend = 'basic_text';
+      const store = new SecretStore(dir, () => undefined, { keychainOnly: ['vocs-account:production'] });
+      await store.load();
+      expect(await store.get('vocs-account:production')).toBeUndefined();
+      expect(JSON.parse(await fs.readFile(path.join(dir, 'secrets.json'), 'utf8'))['vocs-account:production']).toBe(sealed);
+      // Once the keyring is back, the record reads again.
+      safeStorageMock.backend = 'gnome_libsecret';
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+      safeStorageMock.backend = 'gnome_libsecret';
+    }
+  });
+
   it('reads a keychain-only id back only as enc:, ignoring and removing a planted plain or b64 value', async () => {
     const dir = path.join(tmpRoot, 'planted');
     await fs.mkdir(dir, { recursive: true });

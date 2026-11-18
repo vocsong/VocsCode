@@ -57,7 +57,7 @@ import { DictationService } from './dictation/service';
 import { localModel } from '../shared/dictation';
 import { discoverChatImports } from './chat-import';
 import { representsChatImport } from './chat-import-identity';
-import { isReservedSecretId } from './secret-ids';
+import { isReservedSecretId, providerSecrets } from './secret-ids';
 
 /** Structural dialog options (Electron shapes are cast in ipc.ts, keeping this file Electron-free). */
 export interface OpenDialogOptions {
@@ -874,6 +874,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return next.providers;
   });
   handle('providers:delete', async ({ id }) => {
+    assertProviderSecretId(id);
     const s = settings.get();
     const next = await settings.update({ providers: s.providers.filter((p) => p.id !== id || p.builtin) });
     await secrets.clear(id);
@@ -967,7 +968,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('harness:models', async ({ harness }) => {
     assertHarnessId(harness);
     const current = settings.get();
-    const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: (id) => secrets.get(id) });
+    const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: providerSecrets((id) => secrets.get(id)) });
     return { ...result, models: enrichModelsFromProviders(result.models, current.providers) };
   });
   handle('harness:install', async ({ id }) => {
@@ -1363,7 +1364,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     getSettings: () => settings.get(),
     listSessions: () => sessions.list(),
     getSession: (id) => sessions.get(id),
-    getSecret: (providerId) => secrets.get(providerId),
+    getSecret: providerSecrets((providerId) => secrets.get(providerId)),
     invoke: (channel, req) => invokeChannel(channel, req, 'agent'),
     push: (state) => deps.push(PUSH_CHANNELS.agentState, state),
     log: deps.log,

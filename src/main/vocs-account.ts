@@ -173,8 +173,9 @@ export function createVocsAccount(options: Options) {
     ? 'This account has no staging Hub catalog access. Ask the staging administrator to enable it, then sign in again.'
     : 'This Vocs account has no Hub catalog access yet. Ask the Vocs administrator to enable it, then sign in again.';
   const keychain = () => { try { return !!options.vault && !options.vault.isMemoryOnly?.(vaultId); } catch { return false; } };
-  /** A device is enrolled only where it can be kept: the realm offers it and the OS keychain works. */
-  const canKeep = () => !!target.deviceClientId && keychain();
+  /** The realm offers device grants. Without a keychain a device is still enrolled (owner decision
+   *  10): its token stays in memory for this run and the device is revoked when the app quits. */
+  const canKeep = () => !!target.deviceClientId;
   const base = (): Omit<VocsAccountState, 'revision'> => ({ realm, status: 'signed_out', refreshing: false, connections: [], keychain: keychain(), deviceSignIn: !!target.deviceClientId });
   let state: VocsAccountState = { ...base(), revision: 0 };
   let oauth: NativeMcpOAuth | undefined;
@@ -283,7 +284,7 @@ export function createVocsAccount(options: Options) {
       if (s.ended) { void revokeDevice(next.refreshToken); void forget(next.deviceId); return { kind: 'stale' }; }
       // Cancelled or quitting: the rotated token is saved for the next start, but not used now.
       if (s !== session) return { kind: 'stale' };
-      s.unsaved = !saved;
+      s.unsaved = !saved || !keychain();
       if (!saved) update({ notice: NOT_SAVED });
       s.accessToken = access.data.access_token;
       s.accessExpiresAt = Date.now() + access.data.expires_in * 1000;
@@ -383,14 +384,8 @@ export function createVocsAccount(options: Options) {
       update({ status: 'signed_out' });
       return get();
     }
-    if (!keychain()) {
-      // Held in memory only (no keychain any more): it cannot survive this run, so it ends now
-      // rather than living on as a device nobody can sign out.
-      void eraseVault(); void revokeDevice(record.refreshToken);
-      update({ status: 'signed_out' });
-      return get();
-    }
-    const s: Session = { persistent: true, record, accessExpiresAt: 0, ended: false };
+    // Held in memory only (no keychain): usable for this run, revoked when the app quits.
+    const s: Session = { persistent: true, record, accessExpiresAt: 0, ended: false, unsaved: !keychain() };
     session = s;
     return single(s, () => resume(s, epoch));
   }
@@ -441,7 +436,7 @@ export function createVocsAccount(options: Options) {
         // Kept before the access token is used: a crash after this point still restores.
         const saved = await writeVault(s.record);
         if (epoch !== generation || controller.signal.aborted) throw new Error('Account operation interrupted');
-        s.unsaved = !saved;
+        s.unsaved = !saved || !keychain();
         if (!saved) update({ notice: NOT_SAVED });
       }
       // The SDK provider forgets its copy; from here the token lives only in this session.
@@ -538,8 +533,8 @@ export function createVocsAccount(options: Options) {
     if (error && epoch === generation) update({ error });
     return get();
   }
-  /** App quit: memory goes, the vault stays. A device whose token never reached the vault cannot
-   *  come back, so it is revoked (bounded; the quit does not wait on the network for long). */
+  /** App quit: memory goes, the vault stays. A device whose token never reached a lasting vault
+   *  (failed write, or no OS keychain) cannot come back, so it is revoked (bounded). */
   async function dispose(timeoutMs = 2000): Promise<void> {
     const s = session;
     clear();

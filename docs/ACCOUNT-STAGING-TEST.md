@@ -8,7 +8,7 @@ This is an opt-in staging experiment, not a mandatory login gate. Local work rem
 - Catalog: `https://vocs-mcp-staging.vocs.workers.dev/api/connections`.
 - Public clients: `vocs-code-device` with **Keep me signed in on this computer** (the default), `vocs-code` without it; PKCE S256; `catalog:read`; callback `http://127.0.0.1:<ephemeral-port>/oauth/vocs`.
 - Access tokens are memory-only and last at most five minutes. A temporary (`vocs-code`) sign-in ends with them; closing the app clears it.
-- A kept (`vocs-code-device`) sign-in stores only its rotating refresh token, in the OS keychain (the `vocs-account:staging` entry of `secrets.json`, `enc:`), and renews at startup. Without a real keychain no device is enrolled: the box is off and disabled, and the sign-in is the temporary one. Production offers no kept sign-in until device grants are enabled there. No desktop client secret or provider key is involved.
+- A kept (`vocs-code-device`) sign-in stores only its rotating refresh token, in the OS keychain (the `vocs-account:staging` entry of `secrets.json`, `enc:`), and renews at startup. Without a real keychain the device is still enrolled, its token stays in memory for this run, and the device is revoked when the app quits ("This computer has no secure keychain, so you'll be signed out when Vocs Code closes."). Production offers no kept sign-in until device grants are enabled there. No desktop client secret or provider key is involved.
 - Catalog visibility is not a tool grant. Even a visible connection must not be installed, connected or invoked automatically.
 - No token, authorization code, verifier, cookie, credential or authorization URL should be copied into a screenshot, issue, log attachment or chat. Report safe status and timestamps only.
 

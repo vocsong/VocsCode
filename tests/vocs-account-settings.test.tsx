@@ -206,21 +206,21 @@ describe('staging Vocs account settings', () => {
     await screen.findByText('opaque-account-a');
     expect(api.invoke.mock.calls.filter(([c]) => c === 'vocsAccount:signIn')).toEqual([['vocsAccount:signIn', { persist: false }]]);
   });
-  it('without a keychain the box is off and disabled, says why, and sign-in is temporary', async () => {
+  it('without a keychain the box stays on and enabled, says the sign-in ends at close, and keeps the choice', async () => {
     api.invoke.mockImplementation((c) => Promise.resolve(c === 'vocsAccount:signIn' ? connected(4) : { ...out(), keychain: false }));
     await ready();
     const box = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Keep me signed in on this computer' });
-    expect(box.checked).toBe(false); expect(box.disabled).toBe(true);
-    expect(screen.getByText('This computer has no secure keychain; you’ll be signed out when Vocs Code closes.')).toBeTruthy();
+    expect(box.checked).toBe(true); expect(box.disabled).toBe(false);
+    expect(screen.getByText('This computer has no secure keychain, so you’ll be signed out when Vocs Code closes.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Sign in to staging' }));
     await screen.findByText('opaque-account-a');
-    expect(api.invoke.mock.calls.filter(([c]) => c === 'vocsAccount:signIn')).toEqual([['vocsAccount:signIn', { persist: false }]]);
+    expect(api.invoke.mock.calls.filter(([c]) => c === 'vocsAccount:signIn')).toEqual([['vocsAccount:signIn', { persist: true }]]);
   });
   it('explains a sign-in that could not be saved', async () => {
     api.invoke.mockResolvedValue({ ...connected(), persistent: true, expiresAt: undefined, deviceExpiresAt: Date.now() + 1e10, keychain: false, notice: 'Vocs Code could not save your sign-in on this computer. You stay signed in until Vocs Code closes.' });
     render(<VocsAccountSettings />); await screen.findByText('opaque-account-a');
     expect(screen.getByTestId('vocs-account-session').textContent).toBe('Signed in until Vocs Code closes');
-    expect(screen.getByText('This computer has no secure keychain; you’ll be signed out when Vocs Code closes.')).toBeTruthy();
+    expect(screen.getByText('This computer has no secure keychain, so you’ll be signed out when Vocs Code closes.')).toBeTruthy();
     expect(screen.getByRole('alert').textContent).toMatch(/could not save your sign-in/);
   });
   it('keeps account management out of remote browser sessions', () => {

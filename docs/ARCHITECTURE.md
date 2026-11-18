@@ -358,24 +358,28 @@ generation and clears catalog data; refreshing never treats stale metadata as au
 **Kept sign-in.** A realm offers "Keep me signed in on this computer" only when its config has a
 `deviceClientId`: staging does; production does not until the owner turns
 `NATIVE_DEVICE_GRANTS_ENABLED` on there, and enabling it then means setting `deviceClientId` for
-production in `VOCS_REALMS` (`main/vocs-account.ts`). Where it is offered and the OS keychain works,
-the box is on by default and signs in with `vocs-code-device` and a platform-only `device_name`;
-off, unoffered, or without a real keychain (including Linux `basic_text`/`unknown`) it is the
-temporary `vocs-code` flow and no device is enrolled. The device's rotating refresh token is the
+production in `VOCS_REALMS` (`main/vocs-account.ts`). Where it is offered the box is on by
+default and signs in with `vocs-code-device` and a platform-only `device_name`; off or unoffered
+it is the temporary `vocs-code` flow. Without a real keychain (including Linux
+`basic_text`/`unknown`) the device is still enrolled (owner decision 10), its refresh token stays in
+memory and rotates there for this run, and the device is revoked when the app quits; the UI says
+the sign-in ends when Vocs Code closes. An `enc:` record the weak backend cannot decrypt (keyring
+not up yet) is left on disk untouched. The device's rotating refresh token is the
 only thing kept, in `SecretStore` under `vocs-account:<realm>` as
 `{v:1,issuer,clientId,resource,deviceId,refreshToken,deviceExpiresAt}`. Those ids are
 `keychainOnly`: read back only as `enc:` (a planted plain or `b64:` value is removed at load) and
-never reachable as a provider id (`secrets:*`, `providers:save` and provider key lookup refuse
-`vocs-account:*`, `remote-host`, `remote-enroll`). On load the record must match the pinned realm
+never reachable as a provider id (`secrets:*`, `providers:save`/`providers:delete`, and every
+provider-keyed secret getter, refuse `vocs-account:*`, `remote-host`, `remote-enroll`). On load the record must match the pinned realm
 exactly; it never chooses where a token is sent, and anything else is removed unused. The OAuth
 controller strips refresh and device fields before the MCP SDK parses a token response, so the
 SDK's own refresh logic never sees a refresh token, and it never re-sends a consumed authorization
 code, so the issuer's first answer (e.g. `fresh_sign_in_required`) is the one shown. A device
-exchange cancelled while it answers still has its grant revoked. Startup restore runs after the
+exchange cancelled while it answers (or after it answered, before the grant was handed over) still
+has its grant revoked; its body is read bounded to 64 KB. Startup restore runs after the
 window opens; restore, Retry and Refresh share one flight per session, so concurrent clicks send
 one refresh grant. The rotated token is written to the vault before the new access token is used;
 a failed write keeps it in memory, says so, and revokes the device when the app quits (bounded,
-2 s). A Hub 401 renews once before the sign-in is shown connected. `invalid_grant`, or any unknown
+2 s), as for a machine without a keychain. A Hub 401 renews once before the sign-in is shown connected. `invalid_grant`, or any unknown
 outcome after the request may have been sent, ends the sign-in and clears the vault (a replayed
 token revokes the device server-side). Rolling the server flag back makes refresh answer
 `invalid_request`, which likewise ends the device on the desktop. A failure before sending

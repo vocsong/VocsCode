@@ -87,6 +87,26 @@ async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise
   finally { signal.removeEventListener('abort', abort); }
 }
 
+/** A token response is small; anything over 64 KB is refused rather than buffered. */
+async function boundedJson(response: Response, limit = 64 * 1024): Promise<unknown> {
+  if (!response.body) throw new Error('Missing token response');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) throw new Error('Token response too large');
+      chunks.push(value);
+    }
+  } finally { void reader.cancel().catch(() => undefined); }
+  const bytes = new Uint8Array(size); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+}
+
 function equalSecret(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
@@ -202,6 +222,8 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
     verifier = undefined;
     state = undefined;
     expiresAt = 0;
+    // A device grant that arrived but was never handed over is revoked, not just forgotten.
+    if (device) abandon(device);
     device = undefined;
     endpointError = undefined;
   }
@@ -215,8 +237,8 @@ export function createNativeMcpOAuth(options: NativeMcpOAuthOptions): NativeMcpO
     headers.delete('content-length'); headers.delete('content-encoding');
     const init = { status: response.status, statusText: response.statusText, headers };
     let value: unknown;
-    // Read to the end even after a cancel: a device grant in a late body must still be revoked.
-    try { value = await response.json(); }
+    // Read to the end even after a cancel (bounded): a device grant in a late body must still be revoked.
+    try { value = await boundedJson(response); }
     catch { attempt.throwIfAborted(); return new Response(null, init); }
     if (attempt.aborted) {
       const late = response.ok && options.deviceName && value && typeof value === 'object' && !Array.isArray(value) ? parseDeviceGrant(value as Record<string, unknown>) : undefined;

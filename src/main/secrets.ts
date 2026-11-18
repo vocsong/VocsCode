@@ -84,6 +84,9 @@ export class SecretStore {
     if (moved.length) {
       for (const id of moved) {
         const value = await this.get(id);
+        // An `enc:` value the weak backend cannot read (e.g. the keyring was not up yet) stays on
+        // disk untouched: deleting it would sign the user out and orphan a live device.
+        if (value === undefined && this.data[id]?.startsWith('enc:')) continue;
         if (value !== undefined) this.memory.set(id, value);
         delete this.data[id];
       }

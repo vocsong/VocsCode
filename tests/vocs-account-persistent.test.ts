@@ -22,19 +22,21 @@ const catalogBody = (realm: VocsAccountRealm, id = 'a'.repeat(64)) => {
 };
 function netError(code: string) { return Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(code), { code }) }); }
 
-/** In-memory stand-in for SecretStore with an ordered event log. */
+/** In-memory stand-in for SecretStore with an ordered event log. `data` is what is on disk; with
+ *  `memoryOnly` (no OS keychain) values go to `memory`, as SecretStore's session-only ids do. */
 function memoryVault(initial: Record<string, string> = {}) {
   const data = new Map(Object.entries(initial));
+  const memory = new Map<string, string>();
   const events: string[] = [];
   const vault = {
-    data, events, memoryOnly: false, failSet: false,
-    get: vi.fn(async (id: string) => data.get(id)),
+    data, memory, events, memoryOnly: false, failSet: false,
+    get: vi.fn(async (id: string) => memory.get(id) ?? data.get(id)),
     set: vi.fn(async (id: string, value: string) => {
       if (vault.failSet) { events.push(`vault:set-failed:${id}`); throw new Error('disk full'); }
       events.push(`vault:set:${id}:${(JSON.parse(value) as { refreshToken: string }).refreshToken}`);
-      data.set(id, value);
+      if (vault.memoryOnly) { memory.set(id, value); data.delete(id); } else data.set(id, value);
     }),
-    clear: vi.fn(async (id: string) => { events.push(`vault:clear:${id}`); data.delete(id); }),
+    clear: vi.fn(async (id: string) => { events.push(`vault:clear:${id}`); data.delete(id); memory.delete(id); }),
     isMemoryOnly: (id: string) => { void id; return vault.memoryOnly; }
   };
   return vault;
@@ -306,21 +308,51 @@ describe('device enrollment ("Keep me signed in")', () => {
     expect(Date.now() - started).toBeLessThan(1500);
   });
 
-  it('without an OS keychain no device is enrolled: the sign-in is the temporary one', async () => {
+  it('without an OS keychain the device still enrolls, lives in memory, refreshes there and is revoked at quit', async () => {
     const f = issuer(); f.vault.memoryOnly = true; const b = broker(f);
     expect(b.get()).toMatchObject({ keychain: false, deviceSignIn: true });
     const state = await b.signIn({ persist: true });
-    expect(state).toMatchObject({ status: 'signed_in', keychain: false }); expect(state.persistent).toBeUndefined();
-    expect(f.lastBrowserUrl()!.searchParams.get('client_id')).toBe('vocs-code');
-    expect(f.enrollment).not.toHaveBeenCalled(); expect(f.vault.set).not.toHaveBeenCalled();
+    expect(state).toMatchObject({ status: 'signed_in', persistent: true, keychain: false });
+    expect(f.lastBrowserUrl()!.searchParams.get('client_id')).toBe('vocs-code-device');
+    expect(f.enrollment).toHaveBeenCalledTimes(1);
+    expect(f.vault.data.size).toBe(0); // nothing on disk
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.now() + 301_000);
+    expect((await b.refresh()).status).toBe('signed_in');
+    expect(f.refresh).toHaveBeenCalledTimes(1); expect(f.vault.data.size).toBe(0);
+    vi.useRealTimers();
+    expect(f.revoked).toEqual([]);
+    await b.dispose();
+    expect(f.revoked).toEqual([token(2)]); expect(f.live.size).toBe(0); // the rotated, in-memory token
   });
 
-  it('a record that can no longer be kept (keychain gone) is revoked at startup, not used', async () => {
-    const f = issuer(); const record = seed(f); f.vault.memoryOnly = true;
-    const state = await broker(f).restore();
-    expect(state.status).toBe('signed_out'); expect(f.refresh).not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(f.revoked).toEqual([record.refreshToken]));
-    expect(stored(f)).toBeUndefined();
+  it('a record held in memory only (keychain gone) is used for this run and revoked at quit', async () => {
+    const f = issuer(); seed(f); f.vault.memoryOnly = true;
+    f.vault.memory.set(vocsAccountVaultId('staging'), f.vault.data.get(vocsAccountVaultId('staging'))!); f.vault.data.clear();
+    const b = broker(f);
+    expect((await b.restore()).status).toBe('signed_in');
+    await b.dispose();
+    expect(f.revoked).toEqual([token(1)]); expect(f.live.size).toBe(0);
+  });
+
+  it('cancel after the device exchange answered (while the SDK saves the tokens) revokes the grant', async () => {
+    const f = issuer(); let b!: ReturnType<typeof createVocsAccount>;
+    const createOAuth = (options: Parameters<typeof createNativeMcpOAuth>[0]) => {
+      const client = createNativeMcpOAuth(options);
+      const save = client.provider.saveTokens.bind(client.provider);
+      client.provider.saveTokens = (tokens) => { b.cancel(); return save(tokens); };
+      return client;
+    };
+    b = broker(f, { createOAuth });
+    expect((await b.signIn({ persist: true })).status).toBe('signed_out');
+    await vi.waitFor(() => expect(f.revoked).toEqual([token('e1')]));
+    expect(f.live.size).toBe(0); expect(f.vault.set).not.toHaveBeenCalled();
+  });
+
+  it('refuses an oversized device exchange answer instead of buffering it', async () => {
+    const f = issuer(); const original = f.enrollment.getMockImplementation()!;
+    f.enrollment.mockImplementation(async (params) => Response.json({ ...await (await original(params)).json(), padding: 'x'.repeat(70 * 1024) }));
+    const state = await broker(f).signIn({ persist: true });
+    expect(state.status).toBe('signed_out'); expect(f.vault.set).not.toHaveBeenCalled(); expect(f.catalog).not.toHaveBeenCalled();
   });
 });
 

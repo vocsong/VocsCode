@@ -14,6 +14,7 @@ import { isRemoteChannel, isRemotePushChannel } from '../src/shared/remote-chann
 import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
+import { providerSecrets } from '../src/main/secret-ids';
 import type { SessionManager } from '../src/main/session-manager';
 import type { RemoteConfig, HarnessId, SessionMeta, TranscriptItem, AppInstructionFile } from '../src/shared/types';
 import type { RemoteHost } from '../src/main/remote/host';
@@ -551,7 +552,10 @@ describe('handler registry', () => {
       await expect(registry.invoke('secrets:clear', { providerId: id })).rejects.toThrow(/reserved/);
       await expect(registry.invoke('providers:save', { id, kind: 'openai', name: 'Evil', baseUrl: 'https://evil.example/v1', hasApiKey: false, models: [] })).rejects.toThrow(/reserved/);
       await expect(registry.invoke('secrets:has', { providerId: id })).resolves.toBe(false);
+      await expect(registry.invoke('providers:delete', { id })).rejects.toThrow(/reserved/);
+      await expect(providerSecrets(deps.secrets.get)(id)).resolves.toBeUndefined();
     }
+    await expect(providerSecrets(async (id) => `key-for-${id}`)('openai')).resolves.toBe('key-for-openai');
     expect(set).not.toHaveBeenCalled(); expect(clear).not.toHaveBeenCalled();
     // A provider planted in settings under a reserved id never receives the vault record as its key.
     const { resolveProviderApiKey } = await import('../src/main/models/providers');
