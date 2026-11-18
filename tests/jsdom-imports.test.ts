@@ -14,7 +14,9 @@ const builtins = new Set(builtinModules.flatMap((m) => [m, `node:${m}`]));
 /** Runtime import specifiers; type-only imports are erased and never load. */
 function runtimeImports(source: string): string[] {
   const specs: string[] = [];
-  const re = /^\s*(import|export)\s+(type\s+)?([^'";]*?)\s*(?:from\s+)?['"]([^'"]+)['"]/gm;
+  // A clause never contains parentheses: `export function f(x: 'http')` is a declaration whose
+  // string literal must not be read as a module specifier.
+  const re = /^\s*(import|export)\s+(type\s+)?([^'";()]*?)\s*(?:from\s+)?['"]([^'"]+)['"]/gm;
   for (const [, , typeOnly, clause, spec] of source.matchAll(re)) {
     if (typeOnly) continue;
     const named = clause.match(/^\{([^}]*)\}$/);
