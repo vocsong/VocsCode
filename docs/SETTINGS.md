@@ -31,7 +31,7 @@ availability/sign-in only; **Check for updates** checks CLI versions.
 General is the starting point for daily preferences and common destinations. Appearance owns the
 interface mode (Standard, or the minimalist Zen and Mono layouts), the live theme preview and the
 theme catalogue; the interface and the color theme are independent, and every theme works in every
-mode. Session defaults owns new-session defaults, compaction,
+mode. See [Interface modes](INTERFACE-MODES.md). Session defaults owns new-session defaults, compaction,
 goals and worktree branch prefixes. Remembered per-project choices still take precedence for
 new-session harness, permission and effort defaults. Compaction is app-wide and can affect existing
 sessions at an idle boundary; the harness-native `/goal` preference updates existing sessions too.
