@@ -49,7 +49,7 @@
   text-align: left;
 }
 :root[data-ui='mono'] .titlebar-search-text::before {
-  content: '~ ';
+  content: '~ ' / '';
   color: var(--accent);
 }
 :root[data-ui='mono'] .titlebar-search > .icon {
@@ -265,7 +265,7 @@
   font-weight: 500;
 }
 :root[data-ui='mono'] .project-title::after {
-  content: '/';
+  content: '/' / '';
   color: var(--fg-faint);
 }
 :root[data-ui='mono'] .project-count {
@@ -295,7 +295,8 @@
 :root[data-ui='mono'] .session-row.in-pane {
   box-shadow: inset 0 -2px 0 var(--border-strong);
 }
-/* Each tab leads with a glyph for its state: ○ idle, ● open, ◆ running, ! waiting on you. */
+/* Each tab leads with a glyph for its state: ○ idle, ● open, ◆ running, ! waiting on you. Mono hides
+   the status pill, so the glyphs that carry news say it to a screen reader too. */
 :root[data-ui='mono'] .session-pin {
   width: auto;
   align-self: center;
@@ -305,36 +306,36 @@
   display: none;
 }
 :root[data-ui='mono'] .session-pin::before {
-  content: '○';
+  content: '○' / '';
   color: var(--fg-faint);
   font-size: 11px;
   line-height: 1;
 }
 :root[data-ui='mono'] .session-row.active .session-pin::before {
-  content: '●';
+  content: '●' / '';
   color: var(--accent);
 }
 :root[data-ui='mono'] .session-row.unseen .session-pin::before {
-  content: '●';
+  content: '●' / 'finished';
   color: var(--green);
 }
 :root[data-ui='mono'] .session-row:is([data-status='running'], [data-status='starting']) .session-pin::before {
-  content: '◆';
+  content: '◆' / 'running';
   color: var(--blue);
   animation: mono-blink 1.1s steps(2, jump-none) infinite;
 }
 :root[data-ui='mono'] .session-row[data-status='awaiting'] .session-pin::before {
-  content: '!';
+  content: '!' / 'waiting on you';
   color: var(--red);
   font-weight: 700;
   animation: mono-blink 0.7s steps(2, jump-none) infinite;
 }
 :root[data-ui='mono'] .session-row[data-status='error'] .session-pin::before {
-  content: '×';
+  content: '×' / 'error';
   color: var(--red);
 }
 :root[data-ui='mono'] .session-row[data-status='archiving'] .session-pin::before {
-  content: '…';
+  content: '…' / 'archiving';
   color: var(--amber);
 }
 @keyframes mono-blink {
@@ -403,11 +404,11 @@
   letter-spacing: 0;
 }
 :root[data-ui='mono'] .header-title > .badge::before {
-  content: '[';
+  content: '[' / '';
   color: var(--fg-faint);
 }
 :root[data-ui='mono'] .header-title > .badge::after {
-  content: ']';
+  content: ']' / '';
   color: var(--fg-faint);
 }
 :root[data-ui='mono'] .header-crumbs {
@@ -423,7 +424,7 @@
   display: none;
 }
 :root[data-ui='mono'] .header-path:first-child > span::before {
-  content: '~/';
+  content: '~/' / '';
   color: var(--fg-faint);
 }
 :root[data-ui='mono'] .header-changes {
@@ -487,7 +488,7 @@
   line-height: 1.65;
 }
 :root[data-ui='mono'] .msg-user .msg-bubble::before {
-  content: '❯';
+  content: '❯' / '';
   position: absolute;
   left: 0;
   color: var(--accent);
@@ -523,12 +524,12 @@
   font-size: 11.5px;
 }
 :root[data-ui='mono'] .work-head::before {
-  content: '▸';
+  content: '▸' / '';
   margin-right: 7px;
   color: var(--fg-faint);
 }
 :root[data-ui='mono'] .work-open > .work-head::before {
-  content: '▾';
+  content: '▾' / '';
 }
 :root[data-ui='mono'] .work-head > .icon {
   display: none;
@@ -544,7 +545,7 @@
 }
 :root[data-ui='mono'] .work-label::after,
 :root[data-ui='mono'] .work-stat::after {
-  content: attr(data-short);
+  content: attr(data-short) / '';
 }
 :root[data-ui='mono'] .work-stat::before {
   margin: 0 1ch;
@@ -616,7 +617,7 @@
   box-shadow: inset 2px 0 0 var(--accent);
 }
 :root[data-ui='mono'] .pane .composer-box::before {
-  content: '❯';
+  content: '❯' / '';
   position: absolute;
   left: 14px;
   top: 10px;
@@ -738,7 +739,7 @@
   letter-spacing: 0;
 }
 :root[data-ui='mono'] .welcome-title::before {
-  content: '❯ ';
+  content: '❯ ' / '';
   color: var(--accent);
 }
 :root[data-ui='mono'] .welcome-sub {
@@ -789,7 +790,7 @@
     text-transform: lowercase;
   }
   :root[data-ui='mono'] .settings-nav-label::before {
-    content: '# ';
+    content: '# ' / '';
   }
   :root[data-ui='mono'] .settings-link {
     gap: 0;
@@ -804,7 +805,7 @@
     display: none;
   }
   :root[data-ui='mono'] .settings-link::before {
-    content: '  ';
+    content: '  ' / '';
     white-space: pre;
   }
   :root[data-ui='mono'] .settings-link.active {
@@ -813,7 +814,7 @@
     box-shadow: inset 2px 0 0 var(--accent);
   }
   :root[data-ui='mono'] .settings-link.active::before {
-    content: '› ';
+    content: '› ' / '';
   }
 }
 :root[data-ui='mono'] .settings-nav-footer {
@@ -828,7 +829,7 @@
   letter-spacing: 0;
 }
 :root[data-ui='mono'] .settings-page-header h1::before {
-  content: '## ';
+  content: '## ' / '';
   color: var(--fg-faint);
 }
 :root[data-ui='mono'] .settings-breadcrumb,

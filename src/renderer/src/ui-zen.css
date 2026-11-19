@@ -520,7 +520,7 @@
 }
 :root[data-ui='zen'] .work-label::after,
 :root[data-ui='zen'] .work-stat::after {
-  content: attr(data-short);
+  content: attr(data-short) / '';
 }
 :root[data-ui='zen'] .work-head:hover .work-label {
   color: var(--fg-muted);

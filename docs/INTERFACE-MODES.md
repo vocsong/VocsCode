@@ -54,7 +54,6 @@ by icon. Labels the layout drops become tooltips, so no destination disappears.
   the one-button menu, tooltips for labels the layout hides, the composer placeholder and Mono's
   sideways wheel scrolling. The CSS also reads a few data hooks:
   - `data-status`, `data-tone` and `data-pinned` on session rows;
-  - `data-tab` on panel tabs;
   - `data-short` on the work chip (its facts without words);
   - the `turn-*` span classes on turn footers.
 - Tokens are overridden on `:root[data-ui=…][data-theme]` so they outrank the injected theme blocks.
