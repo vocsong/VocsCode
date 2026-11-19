@@ -91,7 +91,8 @@ export async function publishRelease({ bundlesDir, tag, sha, version, github }) 
     // Recheck emptiness before claiming an initial draft; target_commitish is deliberately ignored.
     if ((await github.listAssets(release.id)).length) throw new Error('Draft changed before provenance was recorded.');
     const body = `${release.body ?? ''}${release.body ? '\n\n' : ''}${provenanceMarker(identity)}`;
-    await github.editRelease(release.id, { body });
+    // Keep the verified tag attached when GitHub updates the draft metadata.
+    await github.editRelease(release.id, { tag_name: tag, body });
   }
   for (const asset of remove) {
     await draftGuard();
@@ -108,7 +109,7 @@ export async function publishRelease({ bundlesDir, tag, sha, version, github }) 
   if (!await exactRemote(github, release, assets)) throw new Error('Final draft asset validation failed; leaving the release draft.');
   // The last write is the sole public transition. Preserve title, notes and prerelease classification.
   await draftGuard();
-  await github.editRelease(releaseId, { draft: false });
+  await github.editRelease(releaseId, { tag_name: tag, draft: false });
   release = await current();
   checkMarker(release, identity);
   if (release.id !== releaseId || release.draft || release.prerelease !== prerelease || !await exactRemote(github, release, assets)) throw new Error('Published release readback failed. Do not repair public assets with this workflow.');
