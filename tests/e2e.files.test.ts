@@ -1,7 +1,8 @@
 /**
- * End-to-end flow for file mentions: a file path in a reply is a link, and clicking it opens the
- * file in the right panel's Files tab. The session and transcript are seeded on disk so no harness
- * and no provider key are involved. Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
+ * End-to-end flow for file mentions: a file path in a reply is a link, and clicking it previews the
+ * file in the split view, in a pane beside the session. The Files tab browses and opens files into
+ * the same pane. The session and transcript are seeded on disk so no harness and no provider key are
+ * involved. Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -23,7 +24,7 @@ afterEach(async () => {
   app = null;
 });
 
-describe.runIf(enabled)('file mentions open in the Files panel', () => {
+describe.runIf(enabled)('file mentions preview in the split view', () => {
   it('decodes and previews inline Markdown screenshots from the session checkout without activating enclosing links', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-inline-images-'));
     const userData = path.join(tmp, 'profile');
@@ -162,6 +163,8 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
       queued: 0
     } as SessionMeta;
+    const checkoutUrlPath = checkout.replace(/\\/g, '/');
+    const absoluteLink = `${/^[A-Za-z]:/.test(checkoutUrlPath) ? '/' : ''}${checkoutUrlPath}/src/hello.ts:12`;
     const history: TranscriptItem[] = Array.from({ length: 400 }, (_, i) => ({
       id: `history${i}`, kind: 'assistant', ts: Date.now() - 1000 + i,
       text: i === 200 ? 'PerformanceNeedle: inspect `src/hello.ts:300`.' : `Historical reply ${i}`
@@ -172,7 +175,9 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
       { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'It lives in `src/hello.ts:300`, right at the top.' },
       // The missing name exists only in config.projectRoot, never in the session checkout.
       { id: 'a2', kind: 'assistant', ts: Date.now(), text: 'Import `SideGuard-Q-2026-10.zip`; the local copy is `src/bundle.zip`.' },
-      { id: 'a3', kind: 'assistant', ts: Date.now(), text: 'Inspect `tools.ts`, `api/mcp/tools.ts`, `exact.ts`, and `duplicate.ts`.' }
+      { id: 'a3', kind: 'assistant', ts: Date.now(), text: 'Inspect `tools.ts`, `api/mcp/tools.ts`, `exact.ts`, and `duplicate.ts`.' },
+      // Codex writes absolute links as URL paths (`/G:/…:12` on Windows); a mailto: link cannot open here.
+      { id: 'a4', kind: 'assistant', ts: Date.now(), text: `See [the greeting](<${absoluteLink}>), or [write to support](mailto:help@example.com).` }
     ];
     await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
     await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
@@ -191,20 +196,29 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     const packaged = process.env.HARNESS_E2E_EXE;
     app = await electron.launch({ executablePath: packaged || (require('electron') as string), args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js')], env, timeout: 60_000 });
     const win: Page = await app.firstWindow();
+    // Sidebar, conversation, preview and right panel side by side: a CI runner's small display would
+    // otherwise fold the split down to one pane.
+    await win.setViewportSize({ width: 1600, height: 1000 });
     await win.waitForSelector('.brand', { timeout: 60_000 });
+    const activeTab = await win.locator('.panel-tab.active').first().innerText();
 
     const ref = win.locator('.transcript .file-ref', { hasText: 'src/hello.ts' });
     await ref.waitFor({ timeout: 30_000 });
     expect(await ref.innerText()).toBe('src/hello.ts:300');
     await ref.click();
 
-    // The panel switched to Files and previewed the exact file, not just its folder.
-    await win.waitForSelector('.panel-tab.active:has-text("Files")', { timeout: 10_000 });
+    // The file previews in a pane beside the conversation, which stays the active pane; the right
+    // panel is left where it was.
+    const filePane = win.getByTestId('file-pane');
+    await filePane.waitFor({ state: 'visible', timeout: 10_000 });
     await win.waitForSelector('.file-preview-head .mono:has-text("src/hello.ts")', { timeout: 10_000 });
     await win.waitForSelector('.file-preview pre:has-text("line300 =")', { timeout: 10_000 });
-    // The mention carried a line number, so the panel scrolled it into view instead of staying at the top.
-    // The panel is split in two, so name the half the Files tab lives in rather than any panel body.
-    const scrollTop = await win.locator('.panel-section.panel-top .panel-body').evaluate((el) => el.scrollTop);
+    expect(await win.locator('[data-testid="session-panes"] > .pane').evaluateAll((els) => els.map((el) => el.getAttribute('data-testid')))).toEqual(['session-pane', 'file-pane']);
+    expect(await win.locator('[data-testid="session-pane"].active').count()).toBe(1);
+    expect(await win.getByTestId('session-pane').isVisible()).toBe(true);
+    expect(await win.locator('.panel-tab.active').first().innerText()).toBe(activeTab);
+    // The mention carried a line number, so the preview scrolled it into view instead of staying at the top.
+    const scrollTop = await filePane.locator('.file-preview pre').evaluate((el) => el.scrollTop);
     expect(scrollTop).toBeGreaterThan(0);
 
     await fs.mkdir(shots, { recursive: true });
@@ -244,7 +258,17 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     // An existing literal path wins even when a nested file has the same basename.
     await shortRefs.getByRole('link', { name: 'exact.ts', exact: true }).click();
     await expectFile('exact.ts', exactBody);
+
+    // A Codex-style absolute link inside the checkout opens as a workspace path; the link nothing here
+    // can open is plain text, not a coloured link that does nothing.
+    const links = win.locator('[data-item-id="a4"]');
+    await links.getByRole('link', { name: 'the greeting', exact: true }).click();
+    await expectFile('src/hello.ts', body);
+    expect(await links.getByRole('link').count()).toBe(1);
+    expect(await links.locator('.md-link-text').innerText()).toBe('write to support');
+    expect(await links.locator('a:not([href]):not([data-file])').count()).toBe(0);
     await win.locator('.file-preview-head button[title="Close preview"]').click();
+    await filePane.waitFor({ state: 'detached', timeout: 10_000 });
 
     // An ambiguous basename must not silently preview either file before a choice.
     const chooser = win.getByRole('region', { name: 'Choose a file', exact: true });
@@ -264,7 +288,8 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     await chooser.waitFor({ state: 'hidden', timeout: 10_000 });
     expect(await win.locator('.file-preview').count()).toBe(0);
     expect(await win.locator('.file-match-list .file-row').count()).toBe(0);
-    await win.locator('.file-list').waitFor({ state: 'visible', timeout: 10_000 });
+    // Cancelling with nothing previewed closes the pane: the conversation has the room back.
+    await filePane.waitFor({ state: 'detached', timeout: 10_000 });
 
     await shortRefs.getByRole('link', { name: 'duplicate.ts', exact: true }).click();
     await expectChoices();
@@ -282,14 +307,22 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     await match.getByRole('link', { name: 'src/hello.ts:300' }).click();
     expect(await win.locator('.file-preview pre').innerText()).toBe(body);
 
-    // Back to the folder listing, then open the PNG: it renders as a decoded picture.
+    // The Files tab browses; opening the PNG from it previews in the same pane, as a decoded picture.
     await win.locator('.file-preview-head button[title="Close preview"]').click();
-    await win.locator('.file-list .file-row', { hasText: 'pixel.png' }).click();
+    await filePane.waitFor({ state: 'detached', timeout: 10_000 });
+    await win.locator('.panel .panel-tab', { hasText: 'Files' }).click();
+    await win.locator('.files .file-list .file-row', { hasText: /^\s*src\s*$/ }).click();
+    const pixelRow = win.locator('.files .file-list .file-row', { hasText: 'pixel.png' });
+    await pixelRow.click();
+    await filePane.waitFor({ state: 'visible', timeout: 10_000 });
     await win.waitForSelector('.file-preview-head .mono:has-text("src/pixel.png")', { timeout: 10_000 });
-    const img = win.locator('.file-preview .file-image img');
+    const img = filePane.locator('.file-preview .file-image img');
     await img.waitFor({ timeout: 10_000 });
     await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth), { timeout: 10_000 }).toBe(1);
     expect(await win.locator('.file-preview pre').count()).toBe(0);
+    // The panel stays a browser: the preview is not in it, and its row shows what is open.
+    expect(await win.locator('.panel .file-preview').count()).toBe(0);
+    await expect.poll(() => pixelRow.getAttribute('class')).toContain('active');
     await win.screenshot({ path: path.join(shots, 'files-02-image.png') });
   }, 180_000);
 });

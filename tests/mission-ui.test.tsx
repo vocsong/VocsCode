@@ -15,6 +15,8 @@ import { SettingsView } from '../src/renderer/src/components/SettingsView';
 import { MissionPanel, MissionHeaderControls, MissionUsage } from '../src/renderer/src/components/mission/MissionPanel';
 import { MissionSettings } from '../src/renderer/src/components/mission/MissionSettings';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
+import { FilePreviewPane } from '../src/renderer/src/components/FilePreviewPane';
+import { filePane, singlePaneLayout } from '../src/renderer/src/panes';
 import { Sidebar, sidebarNavModel } from '../src/renderer/src/components/Sidebar';
 import { CommandPalette } from '../src/renderer/src/components/CommandPalette';
 import { Transcript } from '../src/renderer/src/components/Transcript';
@@ -742,10 +744,14 @@ describe('Mission navigation, inspection and workspace safety', () => {
       if (channel === 'fs:read') return { content: 'lead workspace preview', truncated: false };
       return original(channel, input);
     });
-    useStore.setState({ missions: { mission: record }, panelTab: 'files' });
+    useStore.setState({ missions: { mission: record }, panelTab: 'files', layout: singlePaneLayout('lead') });
     render(<RightPanel session={owned('lead')} />);
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('fs:list', { sessionId: 'lead', relPath: undefined, missionWorkspaceId: undefined }));
     act(() => useStore.getState().revealFile('lead', 'tools.ts'));
+    // The file previews in the split view beside the lead, scoped to the lead's own workspace.
+    const pane = filePane(useStore.getState().layout)!;
+    expect(pane.file).toMatchObject({ sessionId: 'lead', path: 'tools.ts', missionWorkspaceId: 'lead-workspace' });
+    render(<FilePreviewPane pane={pane} size={0.5} split />);
     await screen.findByText('lead workspace preview');
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'fs:resolve')).toEqual([
       ['fs:resolve', { sessionId: 'lead', path: 'tools.ts', missionWorkspaceId: 'lead-workspace' }]

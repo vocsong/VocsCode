@@ -72,7 +72,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
   const onImageExpand = useCallback((images: LightboxImage[], index: number) => {
     setLightbox({ images, index });
   }, []);
-  /** Inline file references (`\`src/store.ts\``) open in the Files tab of the right panel. */
+  /** Inline file references (`\`src/store.ts\``) preview in the split view beside this session. */
   const openFile = useCallback(
     (path: string, line?: number) => useStore.getState().revealFile(session.id, path, line),
     [session.id]
@@ -325,7 +325,7 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
 
   return (
     <div className="transcript-wrap">
-      <div className={`transcript ${virtual ? 'virtual' : ''}`} ref={ref} onScroll={onScroll} onContextMenu={caps.contextMenu ? onContextMenu : undefined}>
+      <div className={`transcript ${virtual ? 'virtual' : ''} ${caps.openFile ? '' : 'no-file-links'}`} ref={ref} onScroll={onScroll} onContextMenu={caps.contextMenu ? onContextMenu : undefined}>
         {!loaded && !transcriptError && <div className="transcript-loading"><Spinner /> Loading…</div>}
         {!loaded && transcriptError && (
           <div className="transcript-error callout warn" role="alert">

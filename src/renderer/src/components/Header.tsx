@@ -10,7 +10,7 @@ import { Badge, Button, Icon, StatusDot } from './ui';
 import { ForkIntoDropdown } from './ForkInto';
 import { MissionHeaderControls, useMission } from './mission/MissionPanel';
 import { openMission } from '../missions';
-import { canSplit } from '../panes';
+import { canClosePane, canSplit } from '../panes';
 
 /**
  * One row: who the session is (status, title, harness, folder, branch) on the left, what it changed
@@ -30,7 +30,8 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
   const toggleThinking = useStore((s) => s.toggleThinking);
   const changesVersion = useStore((s) => s.changesVersion);
   const splittable = useStore((s) => canSplit(s.layout));
-  const split = useStore((s) => s.layout.panes.length > 1);
+  // A file preview beside a lone session does not make that session's pane closable.
+  const split = useStore((s) => !!paneId && canClosePane(s.layout, paneId));
   const { data: summary } = useGitSummary(session.id, changesVersion);
   const branch = summary?.branch;
   const h = HARNESS_BY_ID[session.config.harness];
