@@ -504,9 +504,13 @@ describe.runIf(enabled)('electron e2e: Mission session flow (no live provider)',
     expect(await win.getByTestId('panel-bottom-subagents').count()).toBe(0);
     await win.getByLabel('Mission workspace', { exact: true }).selectOption(work.worker.id);
     await win.getByTestId('mission-changes').getByText(/specialist unaccepted edit/).waitFor();
+    // A transcript file previews beside the lead, read from the lead's own workspace whatever the
+    // panel's workspace picker is showing.
     await win.locator('.transcript .file-ref').click();
-    await expect.poll(() => win.getByLabel('Mission workspace', { exact: true }).inputValue()).toBe(work.lead.id);
-    await expect.poll(() => win.locator('.file-preview pre').innerText()).toBe('lead unaccepted edit\n');
+    await expect.poll(() => win.getByTestId('file-pane').locator('.file-preview pre').innerText()).toBe('lead unaccepted edit\n');
+    expect(await win.getByLabel('Mission workspace', { exact: true }).inputValue()).toBe(work.worker.id);
+    await win.getByTestId('file-pane').getByRole('button', { name: 'Close preview', exact: true }).click();
+    await win.getByTestId('file-pane').waitFor({ state: 'detached' });
     await win.getByRole('button', { name: 'Mission result', exact: true }).click();
     expect(await win.getByLabel('Mission workspace', { exact: true }).inputValue()).toBe('');
     await win.getByRole('button', { name: 'Source discussion: Original discussion', exact: true }).click();

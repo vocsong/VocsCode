@@ -9,10 +9,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { harnessShort } from '../format';
 import { isTopLevelSession } from '../missions';
-import { MIN_PANE_PX, SESSION_DRAG_TYPE, dropZoneAt, visiblePaneSessions, type DropZone, type PaneLayout, type SessionPane } from '../panes';
+import { SESSION_DRAG_TYPE, dropZoneAt, filePane, paneMinPx, visiblePaneSessions, type DropZone, type PaneLayout, type SessionPane } from '../panes';
 import { sortSessionRows } from '../sessionOrder';
 import { toastError, useStore } from '../store';
 import { Composer } from './Composer';
+import { FilePreviewPane } from './FilePreviewPane';
 import { Header } from './Header';
 import { Transcript } from './Transcript';
 import { Button, StatusDot } from './ui';
@@ -25,9 +26,12 @@ export function SessionPanes({ empty }: { empty: React.ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
   const split = layout.panes.length > 1;
+  const hasFile = !!filePane(layout);
+  const minTotal = layout.panes.reduce((sum, p) => sum + paneMinPx(p, layout.orientation), 0);
 
-  // Too little room for every pane at its minimum: show only the active one rather than squeezing
-  // two unreadable chats. The others stay mounted, so nothing is lost when the window grows again.
+  // Too little room for every pane at its minimum: show only the active one (or the file just
+  // opened) rather than squeezing two unreadable views. The others stay mounted, so nothing is lost
+  // when the window grows again.
   useEffect(() => {
     const el = ref.current;
     if (!el || !split || typeof ResizeObserver === 'undefined') {
@@ -36,13 +40,13 @@ export function SessionPanes({ empty }: { empty: React.ReactNode }) {
     }
     const check = () => {
       const size = layout.orientation === 'horizontal' ? el.clientWidth : el.clientHeight;
-      setNarrow(size > 0 && size < layout.panes.length * MIN_PANE_PX[layout.orientation]);
+      setNarrow(size > 0 && size < minTotal);
     };
     check();
     const ro = new ResizeObserver(check);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [split, layout.orientation, layout.panes.length]);
+  }, [split, layout.orientation, minTotal]);
 
   // What is on screen decides whether a finished turn was seen (useSessionViewing). Another view
   // replacing the panes unmounts them, so nothing counts as visible then.
@@ -53,11 +57,15 @@ export function SessionPanes({ empty }: { empty: React.ReactNode }) {
   useEffect(() => () => useStore.setState({ visibleSessionIds: [] }), []);
 
   return (
-    <div ref={ref} className={`panes panes-${layout.orientation}${split ? ' split' : ''}${narrow ? ' narrow' : ''}`} data-testid="session-panes">
+    <div ref={ref} className={`panes panes-${layout.orientation}${split ? ' split' : ''}${narrow ? ' narrow' : ''}${hasFile ? ' has-file' : ''}`} data-testid="session-panes">
       {layout.panes.map((pane, i) => (
         <React.Fragment key={pane.id}>
           {i > 0 && <PaneDivider layout={layout} index={i} container={ref} />}
-          <PaneView pane={pane} active={pane.id === layout.activePaneId} split={split} size={layout.sizes[i] ?? 1} empty={empty} />
+          {pane.file ? (
+            <FilePreviewPane pane={pane} split={split} size={layout.sizes[i] ?? 1} />
+          ) : (
+            <PaneView pane={pane} active={pane.id === layout.activePaneId} split={split} size={layout.sizes[i] ?? 1} empty={empty} />
+          )}
         </React.Fragment>
       ))}
     </div>
@@ -210,8 +218,8 @@ function PaneDivider({ layout, index, container }: { layout: PaneLayout; index: 
   const pairAt = (fraction: number, totalPx: number): number[] => {
     const before = sizes.slice(0, index - 1).reduce((a, b) => a + b, 0);
     const pair = sizes[index - 1]! + sizes[index]!;
-    const min = Math.min(pair / 2, MIN_PANE_PX[layout.orientation] / Math.max(1, totalPx));
-    const a = Math.min(pair - min, Math.max(min, fraction - before));
+    const min = (pane: SessionPane | undefined) => Math.min(pair / 2, paneMinPx(pane, layout.orientation) / Math.max(1, totalPx));
+    const a = Math.min(pair - min(layout.panes[index]), Math.max(min(layout.panes[index - 1]), fraction - before));
     const next = [...sizes];
     next[index - 1] = a;
     next[index] = pair - a;

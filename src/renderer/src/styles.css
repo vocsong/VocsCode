@@ -325,6 +325,52 @@ h4 {
 .panes.narrow > .pane-divider {
   display: none;
 }
+/* …unless a file was just opened: then the preview is what the user asked to see. */
+.panes.narrow.has-file > .pane.active {
+  display: none;
+}
+.panes.narrow.has-file > .pane.file-pane {
+  display: flex;
+}
+/* A file previewed beside its session: a lighter surface than a conversation, and narrower allowed. */
+.panes-horizontal.split > .pane.file-pane {
+  min-width: 280px;
+}
+.panes-vertical.split > .pane.file-pane {
+  min-height: 160px;
+}
+.pane.file-pane {
+  background: var(--bg-sunken);
+}
+.pane.file-pane > .file-preview {
+  flex: 1;
+  min-height: 0;
+}
+.file-pane .file-preview-head {
+  min-height: 40px;
+  min-width: 0;
+}
+.file-pane .file-preview-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-pane .file-preview-session {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-pane .file-preview pre {
+  background: var(--bg);
+}
+.file-pane .file-match-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
 .panes.narrow > .pane {
   min-width: 0;
   min-height: 0;
@@ -2727,20 +2773,39 @@ h4 {
   border-radius: 5px;
   font-size: 12.5px;
 }
-/* A file mentioned in a reply: clicking opens it in the Files panel. */
-.md code.file-ref,
-.md a.file-ref {
+/* A file mentioned in a reply: clicking previews it in the split view. */
+:is(.md, .markdown) code.file-ref,
+:is(.md, .markdown) a.file-ref {
   cursor: pointer;
   text-decoration: none;
   border-bottom: 1px dotted var(--border-strong);
 }
-.md code.file-ref:hover,
-.md code.file-ref:focus-visible,
-.md a.file-ref:hover,
-.md a.file-ref:focus-visible {
+:is(.md, .markdown) code.file-ref:hover,
+:is(.md, .markdown) code.file-ref:focus-visible,
+:is(.md, .markdown) a.file-ref:hover,
+:is(.md, .markdown) a.file-ref:focus-visible {
   color: var(--accent);
   border-bottom-color: currentColor;
   outline: none;
+}
+/* Only what opens looks like a link. A target nothing here can open renders as plain text
+   (markdown.ts), and an anchor whose href sanitising removed reads as text too. */
+.md-link-text,
+:is(.md, .markdown) a:not([href]):not([data-file]) {
+  color: inherit;
+  cursor: text;
+  text-decoration: none;
+}
+/* A host that cannot open files (the paired browser) shows file names as plain code. */
+.transcript.no-file-links .file-ref {
+  cursor: text;
+  border-bottom: none;
+}
+.transcript.no-file-links a.file-ref {
+  color: inherit;
+}
+.transcript.no-file-links .file-ref:hover {
+  color: inherit;
 }
 .md pre code {
   background: none;
