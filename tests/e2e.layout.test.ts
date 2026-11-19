@@ -294,7 +294,7 @@ describe.runIf(enabled)('shell layout', () => {
         anchoredTopics++;
       }
     }
-    expect(anchoredTopics).toBe(28);
+    expect(anchoredTopics).toBe(29);
 
     // A Mission budget result skips the tier cards and focuses the actual limits heading.
     await search.fill('mission budget');
