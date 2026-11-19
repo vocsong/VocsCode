@@ -53,7 +53,29 @@ The [remote HTTPS MCP](CONTROL-MCP.md) rollout is separate.
   expose the stdio process through a remote bridge. PowerShell policy can refuse the native helper;
   the preview fails closed and does not override that policy.
 
-For the offline developer gate, build first and run
-`node scripts/e2e-guard.mjs tests/e2e.remote.test.ts` on Windows. The local case uses a disposable
-Electron profile, native pipe and real SDK stdio client. It does not exercise a separate Windows
-account, SMB or other computers, installed CLI distribution, or the remote OAuth service.
+## Verification
+
+On Windows, from the repository:
+
+```powershell
+npx vitest run tests/local-control-windows.test.ts
+npm run build
+node scripts/e2e-guard.mjs tests/e2e.remote.test.ts
+```
+
+The native suite uses synthetic data on a fresh local pipe: it reads back the protected one-user
+ACL, requires Windows to deny a restricted token at open while allowing the ordinary owner token
+on that same pipe, checks PID and creation-time mismatches and exact frame limits, and checks
+cleanup after abrupt loss of the watched owner process. No accounts or privileges are added.
+The Electron case verifies the full CLI and SDK stdio path with disposable profile data.
+
+A restricted token is **not a second Windows account**. For separate-account qualification in an
+authorized lab, use two existing standard accounts with distinct user SIDs (`whoami /user`) and a
+synthetic project. Confirm each account can run the preview against its own desktop. Keep the
+first desktop running while the second runs `status --json` with the first desktop's descriptor:
+require a nonzero exit and empty stdout. Repeat the same call as the first account and require
+success. A closed desktop, an unreadable checkout, or a blocked PowerShell helper is not a valid
+negative result. Revoke both test grants when done.
+
+Separate-account and SMB denial, installed CLI distribution, and remote OAuth are not covered by
+the offline suites. Do not change SMB, firewall, or PowerShell policy to run them.
