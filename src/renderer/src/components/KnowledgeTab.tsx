@@ -8,7 +8,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isPendingStatus, type KnowledgeGraph, type KnowledgeJobState, type KnowledgePageDetail, type KnowledgePageSummary, type KnowledgeView } from '../../../shared/knowledge';
 import type { SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
-import { renderMarkdown } from '../markdown';
+import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
 import { Badge, Button, EmptyState, Icon, Spinner, Toggle } from './ui';
 
@@ -65,6 +65,13 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
   const liveId = useRef(session.id);
+  // A page body names files and links out; without handlers those would be coloured but dead.
+  const body = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = body.current;
+    if (!el) return;
+    return installMarkdownHandlers(el, (url) => void invoke('app:openExternal', { url }), (p, line) => useStore.getState().revealFile(session.id, p, line));
+  }, [detail, session.id]);
 
   const load = useCallback(async () => {
     const sid = session.id;
@@ -336,7 +343,7 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
               <Icon name="alert" size={12} /> Possibly out of date: {detail.staleReasons.join('; ')}
             </div>
           )}
-          <div className="knowledge-body markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.page.body, { fileLinks: true }) }} />
+          <div ref={body} className="knowledge-body markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.page.body, { fileLinks: true }) }} />
           {detail.page.meta.sources.length > 0 && (
             <div className="knowledge-meta">
               <h4>Sources</h4>

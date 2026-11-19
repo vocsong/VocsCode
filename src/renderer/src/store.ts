@@ -10,7 +10,9 @@ import { resolveNewSessionDefaults } from '../../shared/session-defaults';
 import { invoke, on, canInvoke } from './api';
 import { recencyAt, sortSessionRows } from './sessionOrder';
 import * as panes from './panes';
-import type { DropZone, PaneLayout, PaneOrientation, PaneSide } from './panes';
+import type { DropZone, FilePreviewTarget, PaneLayout, PaneOrientation, PaneSide } from './panes';
+import { workspaceRelativePath } from './file-refs';
+import { fileScope, showOutsideFile } from './file-open';
 
 export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
 /** The Git panel's inner view: the repo, its worktrees, or the two GitHub lists. */
@@ -28,12 +30,11 @@ export interface NavEntry {
   sessionId: string | null;
 }
 
-/** A path a transcript file link wants the Files tab to show; the Files tab clears it once opened. */
+/** A folder a transcript link wants the Files tab to show; the Files tab clears it once opened. Files
+ *  open in the split view instead (`panes.openFilePane`). */
 export interface FileReveal {
   sessionId: string;
   path: string;
-  /** Line to scroll to when the mention carried one. */
-  line?: number;
 }
 
 /** A harness's shared model catalog, discovered independently of any session process. */
@@ -114,7 +115,7 @@ interface State {
    * and a local state would drop the user back on Branches every time.
    */
   gitPanelView: GitPanelView;
-  /** One-shot request to show a file in the Files tab, set by transcript file links. */
+  /** One-shot request to show a folder in the Files tab, set by transcript folder links. */
   fileReveal: FileReveal | null;
   /** One-shot request to open one subagent run, set by a subagent tool card. */
   subagentReveal: { sessionId: string; runId: string } | null;
@@ -191,8 +192,13 @@ interface State {
   setPanelTab(t: PanelTab | 'mcp'): void;
   setGitPanelView(v: GitPanelView): void;
   setPanelBottomTab(t: PanelBottomTab): void;
-  /** Opens the Files tab on a path (workspace-relative or absolute inside the session cwd). */
-  revealFile(sessionId: string, path: string, line?: number): void;
+  /**
+   * Opens a path a session names (workspace-relative, shortened, or absolute inside its folder). A
+   * file previews in the split view beside its session; a folder opens in the Files tab; a path
+   * outside the folder is only shown in the system file manager. `exact` skips the shortened-name
+   * lookup; `workspace` picks a Mission workspace ('' is the integration result, absent is the lead's).
+   */
+  revealFile(sessionId: string, path: string, line?: number, opts?: { exact?: boolean; workspace?: string; missionLoaded?: boolean }): void;
   consumeFileReveal(): void;
   /** Opens the Subagents tab on one run, used by a transcript tool card. */
   revealSubagentRun(sessionId: string, runId: string): void;
@@ -369,6 +375,8 @@ function markPanelBottomOpened(list: PanelBottomTab[], tab: PanelBottomTab): Pan
 
 /** Off until the desktop boot has restored the last split, so the initial empty layout never overwrites it. */
 let persistLayout = false;
+/** Numbers each file preview request, so opening the same file again still reloads it. */
+let fileNonce = 0;
 
 /** Installs a restored split: every pane's transcript loads, the active one becomes the context. */
 async function applyLayout(set: Setter, get: Getter, layout: PaneLayout): Promise<void> {
@@ -1010,8 +1018,41 @@ export const useStore = create<State>((set, get) => ({
   setPanelBottomTab(panelBottomTab) {
     set((s) => ({ panelBottomTab, panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, panelBottomTab), panelOpen: true }));
   },
-  revealFile(sessionId, path, line) {
-    set({ fileReveal: line ? { sessionId, path, line } : { sessionId, path }, panelTab: 'files', panelOpen: true });
+  revealFile(sessionId, path, line, opts = {}) {
+    const st = get();
+    const session = st.sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    const mission = session.mission ? st.missions[session.mission.missionId] : undefined;
+    if (session.mission && !mission && !opts.missionLoaded) {
+      // A Mission lead reads its files from a workspace on the Mission record: load it, then open.
+      void get().loadMission(session.mission.missionId)
+        .then(() => get().revealFile(sessionId, path, line, { ...opts, missionLoaded: true }))
+        .catch(toastError);
+      return;
+    }
+    const scope = fileScope(session, mission, opts.workspace);
+    const target = path.trim();
+    const rel = workspaceRelativePath(scope.root, target);
+    if (rel === null) {
+      void showOutsideFile(sessionId, scope.root, target, (text, kind) => get().toast(text, kind));
+      return;
+    }
+    const clean = rel.replace(/\/+$/, '');
+    if (/[\\/]$/.test(target) || clean === '') {
+      // A folder is something to browse: the Files tab opens on it.
+      set({ fileReveal: { sessionId, path: target }, panelTab: 'files', panelOpen: true });
+      return;
+    }
+    const file: FilePreviewTarget = {
+      sessionId,
+      path: clean,
+      nonce: ++fileNonce,
+      ...(line && line > 0 ? { line } : {}),
+      ...(opts.exact ? { exact: true } : {}),
+      ...(session.mission ? { missionWorkspaceId: scope.missionWorkspaceId } : {})
+    };
+    const layout = panes.openFilePane(st.layout, file);
+    if (layout !== st.layout) set({ layout, view: 'chat' });
   },
   consumeFileReveal() {
     set((s) => (s.fileReveal ? { fileReveal: null } : {}));
