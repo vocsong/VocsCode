@@ -125,6 +125,8 @@ describe('single draft-first release publisher', () => {
     const { github, publish, assets } = await setup();
     github.release.prerelease = prerelease;
     github.after = (call) => {
+      // GitHub can lose the draft's tag association when a metadata edit omits the tag.
+      if (call.method === 'PATCH' && !Object.hasOwn(call.body, 'tag_name')) github.release.tag_name = 'untagged-0123456789abcdef';
       if (call.method === 'POST' && github.assets.length === 5) github.release.body += '\nHuman mid-upload addition';
       if (call.method === 'PATCH' && call.body.draft === false) {
         expect(github.assets).toHaveLength(14);
@@ -133,10 +135,10 @@ describe('single draft-first release publisher', () => {
     };
     expect(await publish()).toEqual({ status: 'published', assets: 14 });
     expect(writes(github)).toEqual([
-      { body: `Human release notes\n\n${provenanceMarker(identity)}` },
-      ...assets.map((asset) => `POST ${asset.name}`), { draft: false }
+      { tag_name: identity.tag, body: `Human release notes\n\n${provenanceMarker(identity)}` },
+      ...assets.map((asset) => `POST ${asset.name}`), { tag_name: identity.tag, draft: false }
     ]);
-    expect(github.release).toMatchObject({ draft: false, prerelease, name: 'Human title', body: `Human release notes\n\n${provenanceMarker(identity)}\nHuman mid-upload addition` });
+    expect(github.release).toMatchObject({ tag_name: identity.tag, draft: false, prerelease, name: 'Human title', body: `Human release notes\n\n${provenanceMarker(identity)}\nHuman mid-upload addition` });
     expect(github.assets.map((asset) => asset.name)).toEqual(expectedAssets(identity.version));
   });
 
@@ -243,7 +245,7 @@ describe('single draft-first release publisher', () => {
       `DELETE /repos/example/disposable/releases/assets/${changed.id}`,
       `DELETE /repos/example/disposable/releases/assets/${duplicateOriginal.id}`,
       `DELETE /repos/example/disposable/releases/assets/${duplicate.id}`,
-      `POST ${assets[0].name}`, `POST ${assets[1].name}`, { draft: false }
+      `POST ${assets[0].name}`, `POST ${assets[1].name}`, { tag_name: identity.tag, draft: false }
     ]);
     expect(github.assets).toHaveLength(14);
   });
@@ -375,6 +377,6 @@ describe('single draft-first release publisher', () => {
     github.release.prerelease = true;
     expect(await publish()).toEqual({ status: 'published', assets: 14 });
     expect(github.release.prerelease).toBe(true);
-    expect(github.mutations.at(-1)?.body).toEqual({ draft: false });
+    expect(github.mutations.at(-1)?.body).toEqual({ tag_name: id.tag, draft: false });
   });
 });
