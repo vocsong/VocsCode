@@ -1,0 +1,901 @@
+/*
+ * Zen interface (Settings → Appearance → Interface; shared/ui-modes.ts).
+ *
+ * One calm column. Sessions are a rail of dots: the rail is the left edge of the full session
+ * list, clipped, so hovering it slides the list open over the conversation without reflowing
+ * anything. The conversation sits in a centered column, the composer floats as a pill, and the side
+ * panel is a drawer that floats beside the column. Chrome stays quiet until it is reached for.
+ *
+ * Everything here is scoped to `:root[data-ui='zen']` and only restyles the standard component
+ * tree, so switching modes never remounts a session, a draft, a terminal or a panel. Colors still
+ * come from the active theme.
+ */
+
+/* Tokens. `[data-theme]` lifts these above the data-driven theme blocks (html:root[data-theme]). */
+:root[data-ui='zen'][data-theme] {
+  --border: color-mix(in srgb, var(--fg) 7%, transparent);
+  --border-strong: color-mix(in srgb, var(--fg) 13%, transparent);
+  --radius: 14px;
+  --radius-sm: 9px;
+  --radius-lg: 20px;
+  --reading: 700px;
+  --shadow-sm: none;
+  --shadow-card: 0 0 0 1px var(--border), 0 16px 44px -24px rgb(0 0 0 / 0.5);
+  --shadow: 0 0 0 1px var(--border), 0 24px 60px -22px rgb(0 0 0 / 0.55);
+  --zen-rail: 52px;
+  --zen-glyph: 26px;
+}
+
+/* ---------- Title bar: only the menu, the place you are and Vesta ---------- */
+:root[data-ui='zen'] .titlebar {
+  background: var(--bg);
+  box-shadow: none;
+}
+:root[data-ui='zen'] .titlebar-lead .menubar-compact {
+  order: -1;
+  margin-left: 0;
+}
+/* Back and forward wait at the end of the lead until the bar is pointed at. */
+:root[data-ui='zen'] .titlebar-lead > .titlebar-btn:not(:first-child) {
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+:root[data-ui='zen'] .titlebar:hover .titlebar-lead > .titlebar-btn:not(:first-child),
+:root[data-ui='zen'] .titlebar-lead > .titlebar-btn:focus-visible {
+  opacity: 1;
+}
+:root[data-ui='zen'] .titlebar-search {
+  width: auto;
+  max-width: min(460px, 100%);
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-faint);
+  padding: 0 12px;
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .titlebar-search:hover {
+  border-color: transparent;
+  background: var(--bg-hover);
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .titlebar-search > .icon,
+:root[data-ui='zen'] .titlebar-search .kbd {
+  display: none;
+}
+:root[data-ui='zen'] .titlebar-vesta {
+  font-size: 0;
+  gap: 0;
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+  border-color: transparent;
+  background: transparent;
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .titlebar-vesta.open {
+  background: var(--accent-soft);
+}
+
+/* The one-button menu: icon tabs over the chosen menu. */
+:root[data-ui='zen'] .menubar-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px 2px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+:root[data-ui='zen'] .menubar-tab {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+:root[data-ui='zen'] .menubar-tab:hover,
+:root[data-ui='zen'] .menubar-tab.active {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+:root[data-ui='zen'] .menubar-tab.active {
+  color: var(--accent);
+}
+
+/* ---------- Layout: rail, column, floating drawer ---------- */
+:root[data-ui='zen'] .app {
+  grid-template-columns: var(--zen-rail) minmax(0, 1fr);
+}
+:root[data-ui='zen'] .app.no-sidebar {
+  grid-template-columns: minmax(0, 1fr);
+}
+:root[data-ui='zen'] .sidebar-backdrop {
+  display: none;
+}
+:root[data-ui='zen'] .main {
+  transition: padding-right 0.22s ease;
+}
+/* The drawer floats, but the column still moves out of its way rather than hiding under it. */
+:root[data-ui='zen'] .app:not(.no-panel) > .main {
+  padding-right: calc(var(--panel) + 20px);
+}
+
+/* ---------- Sidebar: a rail of dots that opens on hover ---------- */
+:root[data-ui='zen'] .sidebar {
+  /* Out of the drawer it is at narrow widths in the standard layout: the rail fits anywhere. */
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: auto;
+  width: var(--zen-rail);
+  /* Over the conversation when open, under the title bar so its menus drop over the rail. */
+  z-index: 29;
+  overflow: hidden;
+  background: var(--bg);
+  border-right: none;
+  box-shadow: none;
+  transition: width 0.2s ease 0.08s, box-shadow 0.2s ease 0.08s, background-color 0.2s ease 0.08s;
+}
+:root[data-ui='zen'] .sidebar:hover,
+:root[data-ui='zen'] .sidebar:has(:focus-visible),
+:root[data-ui='zen'] body.resizing .sidebar {
+  width: var(--sidebar);
+  background: var(--bg-elev);
+  border-radius: 0 18px 18px 0;
+  box-shadow: 0 0 0 1px var(--border), 24px 0 60px -30px rgb(0 0 0 / 0.6);
+  transition-delay: 0.14s;
+}
+/* Every row keeps its full-width layout; the rail is just its left edge, so opening never reflows. */
+:root[data-ui='zen'] .sidebar > :not(.resizer),
+:root[data-ui='zen'] .sidebar-nav > *,
+:root[data-ui='zen'] .sidebar-section > .sidebar-archived {
+  flex-shrink: 0;
+  width: var(--sidebar);
+}
+:root[data-ui='zen'] .sidebar-nav,
+:root[data-ui='zen'] .sidebar-section {
+  display: contents;
+}
+:root[data-ui='zen'] .sidebar-section-label {
+  display: none;
+}
+:root[data-ui='zen'] .sidebar-top {
+  order: 0;
+  padding: 10px 10px 10px 0;
+}
+:root[data-ui='zen'] .brand {
+  gap: 0;
+  font-weight: 600;
+  font-size: 14px;
+}
+:root[data-ui='zen'] .brand > .icon {
+  width: var(--zen-rail);
+  height: 20px;
+}
+:root[data-ui='zen'] .sidebar-new,
+:root[data-ui='zen'] .sidebar-views .sidebar-link,
+:root[data-ui='zen'] .sidebar-archived,
+:root[data-ui='zen'] .sidebar-bottom .sidebar-link {
+  justify-content: flex-start;
+  gap: 0;
+  width: var(--sidebar);
+  padding: 8px 12px 8px 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--fg-muted);
+  font-size: 13px;
+  font-weight: 450;
+}
+:root[data-ui='zen'] .sidebar-new > .icon,
+:root[data-ui='zen'] .sidebar-views .sidebar-link > .icon,
+:root[data-ui='zen'] .sidebar-archived > .icon,
+:root[data-ui='zen'] .sidebar-bottom .sidebar-link > .icon {
+  width: var(--zen-rail);
+  height: 16px;
+  color: inherit;
+}
+:root[data-ui='zen'] .sidebar-new:hover,
+:root[data-ui='zen'] .sidebar-views .sidebar-link:hover,
+:root[data-ui='zen'] .sidebar-archived:hover,
+:root[data-ui='zen'] .sidebar-bottom .sidebar-link:hover,
+:root[data-ui='zen'] .sidebar-link.active {
+  background: var(--bg-hover);
+  color: var(--fg);
+  box-shadow: none;
+}
+:root[data-ui='zen'] .sidebar-new {
+  order: 1;
+  color: var(--accent);
+}
+:root[data-ui='zen'] .sidebar-new > span {
+  color: var(--fg);
+}
+:root[data-ui='zen'] .sidebar-new .kbd {
+  display: none;
+}
+:root[data-ui='zen'] .sidebar-list {
+  order: 2;
+  flex: 1 1 auto;
+  padding: 8px 0;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+:root[data-ui='zen'] .sidebar-views {
+  order: 3;
+  flex-direction: column;
+  gap: 0;
+}
+:root[data-ui='zen'] .sidebar-archived {
+  order: 3;
+}
+:root[data-ui='zen'] .sidebar-bottom {
+  order: 4;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 0 0 10px;
+  border-top: none;
+}
+:root[data-ui='zen'] .sidebar-bottom .update-pill {
+  margin: 4px 12px 0 14px;
+}
+:root[data-ui='zen'] .sidebar:not(:hover):not(:has(:focus-visible)) .update-pill {
+  /* Collapsed, a pending update is a dot under the gear rather than a cut-off pill. */
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  margin: 2px 0 0 21px;
+  font-size: 0;
+  border-radius: 50%;
+}
+:root[data-ui='zen'] .sidebar-empty {
+  padding: 20px 12px 20px var(--zen-rail);
+  text-align: left;
+}
+/* A folder is a short rule in the rail and its name beside it. */
+:root[data-ui='zen'] .project-group {
+  margin-bottom: 10px;
+}
+:root[data-ui='zen'] .project-header {
+  position: relative;
+  padding: 8px 10px 4px var(--zen-rail);
+  font-weight: 500;
+  color: var(--fg-faint);
+}
+:root[data-ui='zen'] .project-header::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--zen-glyph) - 7px);
+  top: 50%;
+  width: 14px;
+  height: 1px;
+  margin-top: 2px;
+  background: var(--border-strong);
+}
+:root[data-ui='zen'] .project-fold-btn {
+  display: none;
+}
+/* A session is a dot in the rail: its harness's hue, ringed when open, pulsing while it works. */
+:root[data-ui='zen'] .session-row {
+  gap: 0;
+  margin-right: 10px;
+  padding: 5px 8px 5px 0;
+  border-radius: 0 10px 10px 0;
+  --zen-dot: var(--fg-faint);
+}
+:root[data-ui='zen'] .session-row[data-tone='amber'] { --zen-dot: var(--amber); }
+:root[data-ui='zen'] .session-row[data-tone='green'] { --zen-dot: var(--green); }
+:root[data-ui='zen'] .session-row[data-tone='blue'] { --zen-dot: var(--blue); }
+:root[data-ui='zen'] .session-row[data-tone='purple'] { --zen-dot: var(--purple); }
+:root[data-ui='zen'] .session-row[data-tone='red'] { --zen-dot: var(--red); }
+:root[data-ui='zen'] .session-row.active {
+  background: var(--bg-hover);
+  box-shadow: none;
+}
+:root[data-ui='zen'] .session-row.in-pane {
+  box-shadow: none;
+}
+:root[data-ui='zen'] .session-pin {
+  align-self: center;
+  justify-content: center;
+  width: var(--zen-rail);
+  margin: 0;
+}
+:root[data-ui='zen'] .session-pin .row-act-btn {
+  display: none;
+}
+:root[data-ui='zen'] .session-pin::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--zen-dot);
+  opacity: 0.5;
+  transition: opacity 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+:root[data-ui='zen'] .session-row:hover .session-pin::before {
+  opacity: 0.9;
+}
+:root[data-ui='zen'] .session-row[data-pinned] .session-pin::before {
+  border-radius: 2px;
+}
+:root[data-ui='zen'] .session-row.in-pane .session-pin::before {
+  opacity: 0.85;
+}
+:root[data-ui='zen'] .session-row.active .session-pin::before {
+  opacity: 1;
+  transform: scale(1.3);
+  box-shadow: 0 0 0 3px var(--bg), 0 0 0 4.5px var(--zen-dot);
+}
+:root[data-ui='zen'] .session-row.unseen .session-pin::before {
+  opacity: 1;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+:root[data-ui='zen'] .session-row:is([data-status='running'], [data-status='starting']) .session-pin::before {
+  opacity: 1;
+  background: var(--blue);
+  animation: zen-breathe 1.6s ease-in-out infinite;
+}
+:root[data-ui='zen'] .session-row[data-status='awaiting'] .session-pin::before {
+  opacity: 1;
+  background: var(--red);
+  animation: zen-breathe 0.9s ease-in-out infinite;
+}
+:root[data-ui='zen'] .session-row:is([data-status='error'], [data-status='archiving']) .session-pin::before {
+  opacity: 1;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--red);
+}
+:root[data-ui='zen'] .session-row[data-status='archiving'] .session-pin::before {
+  box-shadow: inset 0 0 0 1.5px var(--amber);
+}
+@keyframes zen-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.5);
+  }
+}
+/* One line per session: the title, and a status pill only when there is something to say. */
+:root[data-ui='zen'] .session-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+:root[data-ui='zen'] .session-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 450;
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .session-row.active .session-title,
+:root[data-ui='zen'] .session-row.unseen .session-title {
+  font-weight: 550;
+  color: var(--fg);
+}
+:root[data-ui='zen'] .session-unseen-dot {
+  display: none;
+}
+:root[data-ui='zen'] .session-meta {
+  flex: 0 0 auto;
+  margin: 0;
+  min-height: 0;
+}
+:root[data-ui='zen'] .session-meta > :not(.session-side) {
+  display: none;
+}
+:root[data-ui='zen'] .sidebar > .resizer {
+  display: none;
+}
+:root[data-ui='zen'] .sidebar:hover > .resizer,
+:root[data-ui='zen'] body.resizing .sidebar > .resizer {
+  display: block;
+}
+
+/* ---------- Session pane ---------- */
+:root[data-ui='zen'] .header {
+  border-bottom: none;
+  background: transparent;
+  padding: 0 14px 0 20px;
+}
+:root[data-ui='zen'] .header-title {
+  min-height: 42px;
+}
+/* The title bar already names a lone session; a split names each pane. */
+:root[data-ui='zen'] .panes:not(.split) .header-name {
+  visibility: hidden;
+}
+:root[data-ui='zen'] .header-name {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .header-title > .badge,
+:root[data-ui='zen'] .header-crumbs,
+:root[data-ui='zen'] .header-divider,
+:root[data-ui='zen'] .header-status {
+  display: none;
+}
+:root[data-ui='zen'] .header-changes {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-ui='zen'] .header-changes > span:not(.add):not(.del) {
+  display: none;
+}
+:root[data-ui='zen'] .header .btn {
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .header-actions,
+:root[data-ui='zen'] .header-title > .btn {
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+:root[data-ui='zen'] .header:hover .header-actions,
+:root[data-ui='zen'] .header:hover .header-title > .btn,
+:root[data-ui='zen'] .header:focus-within .header-actions,
+:root[data-ui='zen'] .header:focus-within .header-title > .btn,
+:root[data-ui='zen'] .header-title > .btn.btn-subtle {
+  opacity: 1;
+}
+:root[data-ui='zen'] .header-title > .btn:last-child {
+  opacity: 0.6;
+}
+:root[data-ui='zen'] .panes.split > .pane.active > .header {
+  box-shadow: inset 0 2px 0 var(--accent-soft);
+}
+:root[data-ui='zen'] .pane-divider {
+  background: var(--border);
+}
+:root[data-ui='zen'] .pane-divider:hover {
+  background: var(--border);
+}
+
+/* ---------- Transcript: one quiet reading column ---------- */
+:root[data-ui='zen'] .transcript {
+  padding: 36px 32px 48px;
+  gap: 20px;
+}
+:root[data-ui='zen'] .transcript.virtual > .transcript-row {
+  padding-bottom: 20px;
+}
+:root[data-ui='zen'] .md {
+  font-size: 15px;
+  line-height: 1.75;
+}
+/* Your words read as the line the answer follows, not as a bubble. */
+:root[data-ui='zen'] .msg-user {
+  align-items: flex-start;
+  padding-top: 10px;
+}
+:root[data-ui='zen'] .msg-user .msg-bubble {
+  max-width: 100%;
+  padding: 0 0 0 16px;
+  border-radius: 0;
+  background: none;
+  box-shadow: inset 2px 0 0 var(--accent);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.6;
+  color: var(--fg);
+}
+:root[data-ui='zen'] .msg-user-meta {
+  padding-left: 14px;
+}
+:root[data-ui='zen'] .msg-plan {
+  border-left-width: 2px;
+}
+/* A turn's work is a whisper: its time, steps and files as bare numbers. */
+:root[data-ui='zen'] .work-head {
+  gap: 6px;
+  padding: 3px 10px 3px 8px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--fg-faint);
+}
+:root[data-ui='zen'] .work-head:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+:root[data-ui='zen'] .work-label,
+:root[data-ui='zen'] .work-stat {
+  font-size: 0;
+  font-weight: 450;
+  color: var(--fg-faint);
+}
+:root[data-ui='zen'] .work-label::after,
+:root[data-ui='zen'] .work-stat::after,
+:root[data-ui='zen'] .work-stat::before {
+  font-size: 12px;
+}
+:root[data-ui='zen'] .work-label::after,
+:root[data-ui='zen'] .work-stat::after {
+  content: attr(data-short);
+}
+:root[data-ui='zen'] .work-head:hover .work-label {
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .work-body {
+  border-left-width: 1px;
+}
+:root[data-ui='zen'] .plan-card {
+  border-color: transparent;
+  background: var(--bg-sunken);
+  border-radius: 16px;
+}
+:root[data-ui='zen'] .codeblock {
+  border: none;
+  border-radius: 14px;
+}
+:root[data-ui='zen'] .md code {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+:root[data-ui='zen'] .md pre code {
+  background: none;
+}
+/* The end of a turn says nothing unless it went wrong; pointing at it brings the numbers back. */
+:root[data-ui='zen'] .turn-footer {
+  padding: 0 0 18px;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+:root[data-ui='zen'] .turn-footer:hover,
+:root[data-ui='zen'] .turn-footer:is(.turn-failed, .turn-interrupted) {
+  opacity: 1;
+}
+:root[data-ui='zen'] .turn-footer.turn-completed > .turn-label {
+  display: none;
+}
+:root[data-ui='zen'] .turn-footer.turn-completed > .turn-time {
+  margin-left: 2px;
+}
+:root[data-ui='zen'] .approval {
+  border-radius: 18px;
+}
+:root[data-ui='zen'] .jump-bottom {
+  border-color: transparent;
+}
+
+/* ---------- Composer: a floating pill whose controls wait for you ---------- */
+:root[data-ui='zen'] .pane > .composer {
+  padding: 4px 32px 24px;
+  background: var(--bg);
+}
+:root[data-ui='zen'] .pane .composer-box {
+  max-width: calc(var(--reading) - 20px);
+  border: none;
+  border-radius: 26px;
+  background: var(--bg-elev);
+  box-shadow: 0 0 0 1px var(--border), 0 18px 48px -22px rgb(0 0 0 / 0.55);
+}
+:root[data-ui='zen'] .pane .composer-box:focus-within {
+  border: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent), 0 0 0 5px var(--accent-soft), 0 18px 48px -22px rgb(0 0 0 / 0.55);
+}
+:root[data-ui='zen'] .pane .composer-box textarea {
+  padding: 15px 22px 4px;
+  font-size: 15px;
+  min-height: 48px;
+}
+:root[data-ui='zen'] .pane .composer-actions {
+  padding: 0 10px 9px 12px;
+}
+:root[data-ui='zen'] .composer-actions {
+  --zen-reveal: 0;
+}
+/* Typing is not reaching for them: only pointing at the pill, tabbing into its controls, an open
+   menu or a live recording brings them back. */
+:root[data-ui='zen'] .composer-box:hover .composer-actions,
+:root[data-ui='zen'] .composer-actions:focus-within,
+:root[data-ui='zen'] .composer-actions:has(.open),
+:root[data-ui='zen'] .composer-actions:has(.is-recording) {
+  --zen-reveal: 1;
+}
+/* .run-controls is display: contents (it has no box to fade), so its children fade instead. */
+:root[data-ui='zen'] .composer-actions > :not(.run-controls),
+:root[data-ui='zen'] .composer-actions > .run-controls > * {
+  opacity: var(--zen-reveal);
+  transition: opacity 0.18s ease;
+}
+/* Send, steer, stop and the queue count never hide. */
+:root[data-ui='zen'] .composer-actions > :is(.composer-send-group, .btn, .queued-hint) {
+  opacity: 1;
+}
+:root[data-ui='zen'] .composer-actions .pill {
+  border-color: transparent;
+  background: transparent;
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .composer-actions .pill:hover,
+:root[data-ui='zen'] .composer-actions .pill.open {
+  background: var(--bg-hover);
+}
+:root[data-ui='zen'] .btn.send-btn {
+  width: 34px;
+  height: 34px;
+}
+:root[data-ui='zen'] .composer-send-group:has(.dropdown) > .btn,
+:root[data-ui='zen'] .composer-send-group .composer-send-options {
+  border-radius: 999px;
+}
+
+/* ---------- Side panel: a drawer floating beside the column ---------- */
+:root[data-ui='zen'] .panel {
+  position: fixed;
+  top: calc(var(--titlebar) + 10px);
+  right: 12px;
+  bottom: 12px;
+  z-index: 34;
+  width: var(--panel);
+  padding-bottom: 8px;
+  border: none;
+  border-radius: 20px;
+  background: var(--bg-elev);
+  box-shadow: 0 0 0 1px var(--border), 0 30px 70px -30px rgb(0 0 0 / 0.65);
+}
+:root[data-ui='zen'] .panel-tabs {
+  gap: 2px;
+  min-height: 46px;
+  padding: 0 10px;
+  border-bottom: none;
+}
+:root[data-ui='zen'] .panel-bottom > .panel-tabs {
+  background: transparent;
+}
+:root[data-ui='zen'] .panel-section.panel-bottom {
+  border-top: 1px solid var(--border);
+}
+:root[data-ui='zen'] .panel-tab {
+  align-self: center;
+  justify-content: center;
+  gap: 0;
+  min-width: 32px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 0;
+  color: var(--fg-faint);
+}
+:root[data-ui='zen'] .panel-tab > .icon {
+  width: 15px;
+  height: 15px;
+}
+:root[data-ui='zen'] .panel-tab:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+:root[data-ui='zen'] .panel-tab.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+:root[data-ui='zen'] .panel-tab.active::after {
+  display: none;
+}
+:root[data-ui='zen'] .panel-tab.active > .icon {
+  color: inherit;
+}
+:root[data-ui='zen'] .panel-tab .panel-tab-count {
+  font-size: 10px;
+  margin-left: 4px;
+}
+:root[data-ui='zen'] .panel-tabs .btn {
+  border-radius: 999px;
+}
+
+/* ---------- Welcome ---------- */
+:root[data-ui='zen'] .welcome {
+  gap: 18px;
+}
+:root[data-ui='zen'] .welcome-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--accent);
+  box-shadow: 0 0 0 1px var(--border);
+}
+:root[data-ui='zen'] .welcome-title {
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+:root[data-ui='zen'] .welcome-sub,
+:root[data-ui='zen'] .welcome-keys {
+  display: none;
+}
+:root[data-ui='zen'] .welcome-actions .btn {
+  border-radius: 999px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-muted);
+}
+:root[data-ui='zen'] .welcome-actions .btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+:root[data-ui='zen'] .welcome-actions .btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* ---------- Settings: an icon rail beside one centered column ---------- */
+/* A narrow window keeps Settings' own compact layout (a section select over the page). */
+@container settings (min-width: 651px) {
+  :root[data-ui='zen'] .settings-shell {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+  :root[data-ui='zen'] .settings-nav {
+    padding-left: 0;
+    padding-right: 0;
+    align-items: center;
+    border-right: none;
+    background: var(--bg);
+    overflow: visible;
+  }
+  :root[data-ui='zen'] .settings-title {
+    justify-content: center;
+  }
+  :root[data-ui='zen'] .settings-title > span,
+  :root[data-ui='zen'] .settings-nav-label,
+  :root[data-ui='zen'] .settings-nav-footer,
+  :root[data-ui='zen'] .settings-link > span {
+    display: none;
+  }
+  :root[data-ui='zen'] .settings-title .btn {
+    border-radius: 999px;
+  }
+  /* The search is an icon until it is used; focused, it opens over the page. */
+  :root[data-ui='zen'] .settings-search {
+    position: relative;
+    z-index: 20;
+    width: 40px;
+    min-height: 36px;
+    padding: 0 12px;
+    border-color: transparent;
+    border-radius: 999px;
+    background: transparent;
+    overflow: hidden;
+    transition: width 0.18s ease, box-shadow 0.18s ease;
+  }
+  :root[data-ui='zen'] .settings-search input {
+    position: absolute;
+    inset: 0;
+    padding-left: 36px;
+    opacity: 0;
+    cursor: pointer;
+  }
+  :root[data-ui='zen'] .settings-search:focus-within,
+  :root[data-ui='zen'] .settings-search:has(input:not(:placeholder-shown)) {
+    width: 280px;
+    background: var(--bg-elev);
+    box-shadow: var(--shadow);
+  }
+  :root[data-ui='zen'] .settings-search:focus-within input,
+  :root[data-ui='zen'] .settings-search:has(input:not(:placeholder-shown)) input {
+    opacity: 1;
+    cursor: text;
+  }
+  :root[data-ui='zen'] .settings-nav-groups {
+    width: 100%;
+    padding-top: 10px;
+    scrollbar-width: none;
+  }
+  :root[data-ui='zen'] .settings-nav-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    margin-bottom: 14px;
+  }
+  :root[data-ui='zen'] .settings-link {
+    justify-content: center;
+    width: 40px;
+    height: 36px;
+    padding: 0;
+    border-radius: 999px;
+    color: var(--fg-faint);
+  }
+  :root[data-ui='zen'] .settings-link.active {
+    color: var(--accent);
+    background: var(--accent-soft);
+    box-shadow: none;
+  }
+  :root[data-ui='zen'] .settings-link.active::before {
+    display: none;
+  }
+}
+:root[data-ui='zen'] .settings-page-header {
+  border-bottom: none;
+  padding-top: 34px;
+  padding-bottom: 6px;
+}
+:root[data-ui='zen'] .settings-page-header,
+:root[data-ui='zen'] .settings-body {
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+}
+:root[data-ui='zen'] .settings-breadcrumb,
+:root[data-ui='zen'] .settings-save-hint,
+:root[data-ui='zen'] .settings-theme-preview,
+:root[data-ui='zen'] .settings-overview {
+  display: none;
+}
+:root[data-ui='zen'] .settings-page-header h1 {
+  font-weight: 450;
+}
+:root[data-ui='zen'] .settings-group {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  border-top: 1px solid var(--border);
+}
+:root[data-ui='zen'] .settings-group-heading {
+  border-bottom: none;
+  padding-left: 0;
+  padding-right: 0;
+}
+:root[data-ui='zen'] .settings-group-icon {
+  display: none;
+}
+:root[data-ui='zen'] .settings-group-content {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* ---------- Overlays: soft, round, blurred ---------- */
+:root[data-ui='zen'] .modal-backdrop {
+  background: rgb(0 0 0 / 0.28);
+  backdrop-filter: blur(6px);
+}
+:root[data-ui='zen'] .modal,
+:root[data-ui='zen'] .palette {
+  border: none;
+  border-radius: 22px;
+}
+:root[data-ui='zen'] .dropdown-menu,
+:root[data-ui='zen'] .activity-tray {
+  border: none;
+}
+:root[data-ui='zen'] .btn {
+  border-radius: 999px;
+}
+:root[data-ui='zen'] .badge {
+  background: transparent;
+  padding: 0 2px;
+}
+:root[data-ui='zen'] .toasts {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  align-items: center;
+}
+:root[data-ui='zen'] .toast {
+  border: none;
+  border-radius: 999px;
+  padding: 9px 16px;
+}
+:root[data-ui='zen'] .toast-error {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 40%, transparent), var(--shadow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-ui='zen'] .sidebar,
+  :root[data-ui='zen'] .main,
+  :root[data-ui='zen'] .settings-search {
+    transition: none;
+  }
+  :root[data-ui='zen'] .session-pin::before {
+    animation: none;
+  }
+}

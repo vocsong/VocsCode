@@ -1,0 +1,873 @@
+/*
+ * Mono interface (Settings → Appearance → Interface; shared/ui-modes.ts).
+ *
+ * A terminal-like grid. Monospace type, square corners and hairline rules. Sessions are tabs across
+ * the top of the window, the session header is a one-line status bar, the transcript is a log with a
+ * prompt glyph on your lines, and the composer is a full-width prompt line along the foot. Glyphs
+ * stand in for labels.
+ *
+ * Everything here is scoped to `:root[data-ui='mono']` and only restyles the standard component
+ * tree, so switching modes never remounts a session, a draft, a terminal or a panel. Colors still
+ * come from the active theme.
+ */
+
+/* Tokens. `[data-theme]` lifts these above the data-driven theme blocks (html:root[data-theme]). */
+:root[data-ui='mono'][data-theme] {
+  --font: var(--mono);
+  --radius: 0px;
+  --radius-sm: 0px;
+  --radius-lg: 0px;
+  --reading: 112ch;
+  --shadow-sm: none;
+  --shadow-card: none;
+  --shadow: 0 0 0 1px var(--border-strong), 0 14px 30px -18px rgb(0 0 0 / 0.55);
+  --mono-strip: 34px;
+}
+:root[data-ui='mono'] body {
+  font-size: 12.5px;
+  font-variant-ligatures: none;
+}
+:root[data-ui='mono'] :is(.btn, .pill, .badge, .kbd, .dropdown-menu, .modal, .palette, .toast, .callout, input, select, textarea, .codeblock, .plan-card, .approval, .activity-tray, .titlebar-search, .titlebar-vesta, .header-changes, .row-act-btn, .titlebar-btn, .menubar-btn, .icon-btn, .work-head, .tool-card, .shell-card, .find-bar, .jump-bottom) {
+  border-radius: 0;
+}
+
+/* ---------- Title bar ---------- */
+:root[data-ui='mono'] .titlebar {
+  background: var(--bg-sunken);
+  box-shadow: 0 1px 0 var(--border-strong);
+}
+:root[data-ui='mono'] .titlebar-search {
+  height: 22px;
+  border-color: transparent;
+  background: transparent;
+  font-size: 11.5px;
+}
+:root[data-ui='mono'] .titlebar-search:hover {
+  border-color: var(--border);
+}
+:root[data-ui='mono'] .titlebar-search-text {
+  text-align: left;
+}
+:root[data-ui='mono'] .titlebar-search-text::before {
+  content: '~ ';
+  color: var(--accent);
+}
+:root[data-ui='mono'] .titlebar-search > .icon {
+  display: none;
+}
+:root[data-ui='mono'] .titlebar-search .kbd {
+  border: none;
+  background: none;
+}
+:root[data-ui='mono'] .titlebar-vesta {
+  height: 22px;
+  border-color: var(--border);
+  background: transparent;
+  font-size: 0;
+  gap: 0;
+  padding: 0 6px;
+}
+:root[data-ui='mono'] .menubar-tabs {
+  display: flex;
+  margin: -4px -4px 4px;
+  border-bottom: 1px solid var(--border-strong);
+}
+:root[data-ui='mono'] .menubar-tab {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  border: none;
+  border-right: 1px solid var(--border);
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+:root[data-ui='mono'] .menubar-tab:last-child {
+  border-right: none;
+}
+:root[data-ui='mono'] .menubar-tab:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+:root[data-ui='mono'] .menubar-tab.active {
+  color: var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* ---------- Layout: tab strip over the workspace ---------- */
+:root[data-ui='mono'] .app {
+  grid-template-columns: minmax(0, 1fr) var(--panel);
+}
+:root[data-ui='mono'] .app.no-panel {
+  grid-template-columns: minmax(0, 1fr);
+}
+:root[data-ui='mono'] .app:not(.no-sidebar) {
+  grid-template-rows: var(--mono-strip) minmax(0, 1fr);
+}
+:root[data-ui='mono'] .app:not(.no-sidebar) > .main,
+:root[data-ui='mono'] .app:not(.no-sidebar) > .panel {
+  grid-row: 2;
+}
+:root[data-ui='mono'] .sidebar-backdrop {
+  display: none;
+}
+
+/* ---------- Sidebar → the tab strip ---------- */
+:root[data-ui='mono'] .sidebar {
+  /* Out of the drawer it is at narrow widths in the standard layout: the strip fits anywhere. */
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: auto;
+  width: auto;
+  /* Over the workspace (the activity tray hangs from it), under the title bar's menus. */
+  z-index: 29;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  flex-direction: row;
+  align-items: stretch;
+  height: var(--mono-strip);
+  border-right: none;
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--bg-sunken);
+  box-shadow: none;
+}
+:root[data-ui='mono'] .sidebar > .resizer {
+  display: none;
+}
+:root[data-ui='mono'] .sidebar-nav,
+:root[data-ui='mono'] .sidebar-section {
+  display: contents;
+}
+:root[data-ui='mono'] .sidebar-section-label {
+  display: none;
+}
+:root[data-ui='mono'] .sidebar-top {
+  order: 0;
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 0 6px 0 10px;
+  border-right: 1px solid var(--border);
+}
+:root[data-ui='mono'] .brand {
+  gap: 0;
+}
+:root[data-ui='mono'] .brand > span {
+  display: none;
+}
+:root[data-ui='mono'] .brand > .icon {
+  width: 16px;
+  height: 16px;
+}
+:root[data-ui='mono'] .sidebar-status .badge {
+  padding: 0 5px;
+  font-size: 10.5px;
+  font-weight: 500;
+}
+/* Icon-only buttons at both ends of the strip. */
+:root[data-ui='mono'] .sidebar-new,
+:root[data-ui='mono'] .sidebar-views .sidebar-link,
+:root[data-ui='mono'] .sidebar-archived,
+:root[data-ui='mono'] .sidebar-bottom .sidebar-link {
+  flex: 0 0 auto;
+  justify-content: center;
+  gap: 0;
+  width: 34px;
+  height: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  font-size: 0;
+  color: var(--fg-muted);
+}
+:root[data-ui='mono'] .sidebar-new > span,
+:root[data-ui='mono'] .sidebar-new .kbd {
+  display: none;
+}
+:root[data-ui='mono'] .sidebar-new {
+  order: 1;
+  border-right: 1px solid var(--border);
+  color: var(--accent);
+}
+:root[data-ui='mono'] .sidebar-new:hover,
+:root[data-ui='mono'] .sidebar-views .sidebar-link:hover,
+:root[data-ui='mono'] .sidebar-archived:hover,
+:root[data-ui='mono'] .sidebar-bottom .sidebar-link:hover,
+:root[data-ui='mono'] .sidebar .sidebar-link.active {
+  background: var(--bg-hover);
+  color: var(--fg);
+  box-shadow: none;
+}
+:root[data-ui='mono'] .sidebar .sidebar-link.active {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+:root[data-ui='mono'] .sidebar-views {
+  order: 3;
+  gap: 0;
+  border-left: 1px solid var(--border);
+}
+:root[data-ui='mono'] .sidebar-archived {
+  order: 3;
+}
+:root[data-ui='mono'] .sidebar-bottom {
+  order: 4;
+  flex-wrap: nowrap;
+  gap: 0;
+  padding: 0 4px 0 0;
+  border-top: none;
+}
+:root[data-ui='mono'] .sidebar-bottom .update-pill {
+  align-self: center;
+  margin-left: 4px;
+  border-radius: 0;
+}
+/* The tabs: folders as `name/` prefixes, sessions as cells, the open one lifted and underlined. */
+:root[data-ui='mono'] .sidebar-list {
+  order: 2;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* A wheel scrolls the strip sideways (Sidebar.tsx); a scrollbar would only eat the tabs' height. */
+  scrollbar-width: none;
+}
+:root[data-ui='mono'] .sidebar-empty {
+  align-self: center;
+  padding: 0 12px;
+  font-size: 11.5px;
+}
+:root[data-ui='mono'] .project-group {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  margin: 0;
+  border-right: 1px solid var(--border-strong);
+}
+:root[data-ui='mono'] .project-header {
+  gap: 2px;
+  padding: 0 4px 0 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--fg-faint);
+}
+:root[data-ui='mono'] .project-fold-btn,
+:root[data-ui='mono'] .project-header .project-icon-btn,
+:root[data-ui='mono'] .project-header .project-branch {
+  display: none;
+}
+:root[data-ui='mono'] .project-title {
+  font-weight: 500;
+}
+:root[data-ui='mono'] .project-title::after {
+  content: '/';
+  color: var(--fg-faint);
+}
+:root[data-ui='mono'] .project-count {
+  font-size: 10.5px;
+}
+:root[data-ui='mono'] .project-new-btn {
+  margin-left: 2px;
+  border-radius: 0;
+}
+:root[data-ui='mono'] .session-row {
+  flex: 0 0 auto;
+  gap: 7px;
+  max-width: 24ch;
+  padding: 0 12px 0 10px;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  font-size: 12px;
+}
+:root[data-ui='mono'] .session-row:hover {
+  background: var(--bg-hover);
+}
+:root[data-ui='mono'] .session-row.active {
+  max-width: 40ch;
+  background: var(--bg);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+:root[data-ui='mono'] .session-row.in-pane {
+  box-shadow: inset 0 -2px 0 var(--border-strong);
+}
+/* Each tab leads with a glyph for its state: ○ idle, ● open, ◆ running, ! waiting on you. */
+:root[data-ui='mono'] .session-pin {
+  width: auto;
+  align-self: center;
+  margin: 0;
+}
+:root[data-ui='mono'] .session-pin .row-act-btn {
+  display: none;
+}
+:root[data-ui='mono'] .session-pin::before {
+  content: '○';
+  color: var(--fg-faint);
+  font-size: 11px;
+  line-height: 1;
+}
+:root[data-ui='mono'] .session-row.active .session-pin::before {
+  content: '●';
+  color: var(--accent);
+}
+:root[data-ui='mono'] .session-row.unseen .session-pin::before {
+  content: '●';
+  color: var(--green);
+}
+:root[data-ui='mono'] .session-row:is([data-status='running'], [data-status='starting']) .session-pin::before {
+  content: '◆';
+  color: var(--blue);
+  animation: mono-blink 1.1s steps(2, jump-none) infinite;
+}
+:root[data-ui='mono'] .session-row[data-status='awaiting'] .session-pin::before {
+  content: '!';
+  color: var(--red);
+  font-weight: 700;
+  animation: mono-blink 0.7s steps(2, jump-none) infinite;
+}
+:root[data-ui='mono'] .session-row[data-status='error'] .session-pin::before {
+  content: '×';
+  color: var(--red);
+}
+:root[data-ui='mono'] .session-row[data-status='archiving'] .session-pin::before {
+  content: '…';
+  color: var(--amber);
+}
+@keyframes mono-blink {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.25;
+  }
+}
+:root[data-ui='mono'] .session-main {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+:root[data-ui='mono'] .session-title {
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+/* The tab is the click target: selecting it, not renaming it (double-click or the menu renames). */
+:root[data-ui='mono'] .session-title span {
+  pointer-events: none;
+}
+:root[data-ui='mono'] .session-row:hover .session-title span {
+  text-decoration: none;
+}
+:root[data-ui='mono'] .session-row.active .session-title,
+:root[data-ui='mono'] .session-row.unseen .session-title {
+  font-weight: 600;
+  color: var(--fg);
+}
+:root[data-ui='mono'] .session-unseen-dot,
+:root[data-ui='mono'] .session-meta,
+:root[data-ui='mono'] .session-row .row-actions {
+  display: none;
+}
+:root[data-ui='mono'] .session-rename {
+  width: 22ch;
+  padding: 1px 4px;
+}
+:root[data-ui='mono'] .activity-tray {
+  left: 0;
+  top: 100%;
+  width: 360px;
+}
+
+/* ---------- Session header → a status line ---------- */
+:root[data-ui='mono'] .header {
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+:root[data-ui='mono'] .header-title {
+  min-height: 30px;
+  gap: 12px;
+  font-size: 11.5px;
+}
+:root[data-ui='mono'] .header-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+:root[data-ui='mono'] .header-title > .badge {
+  padding: 0;
+  background: none;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+:root[data-ui='mono'] .header-title > .badge::before {
+  content: '[';
+  color: var(--fg-faint);
+}
+:root[data-ui='mono'] .header-title > .badge::after {
+  content: ']';
+  color: var(--fg-faint);
+}
+:root[data-ui='mono'] .header-crumbs {
+  gap: 10px;
+  padding-left: 0;
+  border-left: none;
+}
+:root[data-ui='mono'] .header-path {
+  padding: 0;
+  border-radius: 0;
+}
+:root[data-ui='mono'] .header-path:first-child > .icon {
+  display: none;
+}
+:root[data-ui='mono'] .header-path:first-child > span::before {
+  content: '~/';
+  color: var(--fg-faint);
+}
+:root[data-ui='mono'] .header-changes {
+  height: 22px;
+  border-color: var(--border);
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-ui='mono'] .header-changes > span:not(.add):not(.del) {
+  display: none;
+}
+:root[data-ui='mono'] .header-divider {
+  display: none;
+}
+:root[data-ui='mono'] .header .btn {
+  padding: 3px 5px;
+}
+:root[data-ui='mono'] .panes.split > .pane.active > .header {
+  box-shadow: inset 0 -1px 0 var(--accent);
+}
+:root[data-ui='mono'] .pane-divider {
+  background: var(--border-strong);
+}
+
+/* ---------- Transcript → a log ---------- */
+:root[data-ui='mono'] .transcript {
+  padding: 16px 22px 26px;
+  gap: 12px;
+}
+:root[data-ui='mono'] .transcript > * {
+  margin: 0;
+}
+:root[data-ui='mono'] .transcript.virtual > .transcript-row {
+  padding-bottom: 12px;
+}
+:root[data-ui='mono'] .md {
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+:root[data-ui='mono'] .msg-assistant,
+:root[data-ui='mono'] .work-group,
+:root[data-ui='mono'] .turn-footer,
+:root[data-ui='mono'] .tool-group,
+:root[data-ui='mono'] .info-line,
+:root[data-ui='mono'] .approval {
+  margin-left: 2ch;
+}
+/* Your lines carry the prompt glyph; the replies indent under them. */
+:root[data-ui='mono'] .msg-user {
+  align-items: stretch;
+}
+:root[data-ui='mono'] .msg-user .msg-bubble {
+  position: relative;
+  max-width: 100%;
+  padding: 0 0 0 2ch;
+  border-radius: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.65;
+}
+:root[data-ui='mono'] .msg-user .msg-bubble::before {
+  content: '❯';
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+}
+:root[data-ui='mono'] .msg-user-meta {
+  padding-left: 2ch;
+  justify-content: flex-start;
+}
+:root[data-ui='mono'] .md code {
+  padding: 0;
+  background: none;
+  color: var(--cyan);
+  font-size: inherit;
+}
+:root[data-ui='mono'] .md pre code {
+  color: inherit;
+}
+:root[data-ui='mono'] .codeblock {
+  border: none;
+  border-left: 2px solid var(--border-strong);
+  background: var(--bg-sunken);
+}
+:root[data-ui='mono'] .md blockquote {
+  border-left-width: 1px;
+}
+/* Work: `▸ 2m 34s · 4 · ±2`, opening into a dashed rail. */
+:root[data-ui='mono'] .work-head {
+  gap: 0;
+  padding: 1px 8px 1px 6px;
+  border-color: var(--border);
+  background: transparent;
+  box-shadow: none;
+  font-size: 11.5px;
+}
+:root[data-ui='mono'] .work-head::before {
+  content: '▸';
+  margin-right: 7px;
+  color: var(--fg-faint);
+}
+:root[data-ui='mono'] .work-open > .work-head::before {
+  content: '▾';
+}
+:root[data-ui='mono'] .work-head > .icon {
+  display: none;
+}
+:root[data-ui='mono'] .work-label,
+:root[data-ui='mono'] .work-stat {
+  font-size: 0;
+}
+:root[data-ui='mono'] .work-label::after,
+:root[data-ui='mono'] .work-stat::after,
+:root[data-ui='mono'] .work-stat::before {
+  font-size: 11.5px;
+}
+:root[data-ui='mono'] .work-label::after,
+:root[data-ui='mono'] .work-stat::after {
+  content: attr(data-short);
+}
+:root[data-ui='mono'] .work-stat::before {
+  margin: 0 1ch;
+}
+:root[data-ui='mono'] .work-label {
+  font-weight: 600;
+}
+:root[data-ui='mono'] .work-body {
+  margin-left: 4px;
+  border-left: 1px dashed var(--border-strong);
+}
+:root[data-ui='mono'] .plan-card {
+  border-color: var(--border);
+  background: transparent;
+}
+:root[data-ui='mono'] .tool-icon {
+  border-radius: 0;
+}
+/* The end of a turn is a rule with its numbers: ── 2:03:40 · 2m 34s · $0.61 */
+:root[data-ui='mono'] .turn-footer {
+  gap: 1ch;
+  padding: 0 0 16px;
+  font-size: 11px;
+}
+:root[data-ui='mono'] .turn-footer::before {
+  content: '';
+  flex: 0 0 4ch;
+  border-top: 1px solid var(--border-strong);
+}
+:root[data-ui='mono'] .turn-footer {
+  flex-wrap: wrap;
+}
+:root[data-ui='mono'] .turn-footer > span {
+  white-space: nowrap;
+}
+:root[data-ui='mono'] .turn-footer.turn-completed > .icon,
+:root[data-ui='mono'] .turn-footer.turn-completed > .turn-label {
+  display: none;
+}
+:root[data-ui='mono'] .turn-footer.turn-completed > .turn-time {
+  font-size: 0;
+}
+:root[data-ui='mono'] .turn-footer.turn-completed > .turn-time > time {
+  font-size: 11px;
+}
+:root[data-ui='mono'] .approval {
+  border-width: 1px;
+}
+
+/* ---------- Composer → a prompt line along the foot ---------- */
+:root[data-ui='mono'] .pane > .composer {
+  padding: 0;
+  border-top: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+}
+:root[data-ui='mono'] .pane > .composer::before {
+  display: none;
+}
+:root[data-ui='mono'] .pane .composer-box {
+  position: relative;
+  max-width: none;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-ui='mono'] .pane .composer-box:focus-within {
+  border: none;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+:root[data-ui='mono'] .pane .composer-box::before {
+  content: '❯';
+  position: absolute;
+  left: 14px;
+  top: 10px;
+  color: var(--accent);
+  font-weight: 700;
+  line-height: 1.5;
+}
+:root[data-ui='mono'] .pane .composer-box textarea {
+  min-height: 40px;
+  padding: 10px 16px 2px calc(14px + 3ch);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+:root[data-ui='mono'] .pane .composer-actions {
+  gap: 0;
+  padding: 0 8px 4px calc(8px + 2ch);
+  font-size: 11px;
+}
+:root[data-ui='mono'] .composer-actions .pill {
+  height: 22px;
+  padding: 0 7px;
+  border-color: transparent;
+  background: transparent;
+  font-size: 11px;
+}
+:root[data-ui='mono'] .composer-actions .pill:hover,
+:root[data-ui='mono'] .composer-actions .pill.open {
+  border-color: var(--border);
+}
+:root[data-ui='mono'] .composer-actions .run-controls .pill-model > .icon:first-child {
+  display: none;
+}
+:root[data-ui='mono'] .composer-actions > .icon-btn {
+  padding: 4px;
+}
+:root[data-ui='mono'] .btn.send-btn {
+  width: 30px;
+  height: 24px;
+}
+:root[data-ui='mono'] .composer-send-group:has(.dropdown) > .btn,
+:root[data-ui='mono'] .composer-send-group .composer-send-options {
+  border-radius: 0;
+}
+:root[data-ui='mono'] .pane .composer-hint,
+:root[data-ui='mono'] .pane .attachments,
+:root[data-ui='mono'] .pane .composer-warn {
+  max-width: none;
+  margin-left: calc(14px + 3ch);
+}
+
+/* ---------- Side panel: flat, icon tabs in cells ---------- */
+:root[data-ui='mono'] .panel {
+  border-left: 1px solid var(--border-strong);
+  background: var(--bg);
+}
+:root[data-ui='mono'] .panel-tabs {
+  min-height: 30px;
+  padding: 0;
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--bg-sunken);
+}
+:root[data-ui='mono'] .panel-bottom > .panel-tabs {
+  border-top: none;
+}
+:root[data-ui='mono'] .panel-section.panel-bottom {
+  border-top: 1px solid var(--border-strong);
+}
+:root[data-ui='mono'] .panel-tab {
+  justify-content: center;
+  gap: 0;
+  min-width: 34px;
+  padding: 0 9px;
+  border-right: 1px solid var(--border);
+  font-size: 0;
+  color: var(--fg-faint);
+}
+:root[data-ui='mono'] .panel-tab:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+:root[data-ui='mono'] .panel-tab.active {
+  background: var(--bg);
+  color: var(--accent);
+}
+:root[data-ui='mono'] .panel-tab.active::after {
+  left: 0;
+  right: 0;
+  bottom: auto;
+  top: 0;
+  border-radius: 0;
+}
+:root[data-ui='mono'] .panel-tab .panel-tab-count {
+  font-size: 10px;
+  margin-left: 4px;
+}
+:root[data-ui='mono'] .panel-tabs > .btn {
+  align-self: stretch;
+  height: auto;
+}
+
+/* ---------- Welcome ---------- */
+:root[data-ui='mono'] .welcome {
+  align-items: flex-start;
+  width: min(64ch, 100%);
+  text-align: left;
+  gap: 10px;
+}
+:root[data-ui='mono'] .welcome-mark {
+  width: auto;
+  height: auto;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--accent);
+}
+:root[data-ui='mono'] .welcome-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+:root[data-ui='mono'] .welcome-title::before {
+  content: '❯ ';
+  color: var(--accent);
+}
+:root[data-ui='mono'] .welcome-sub {
+  display: none;
+}
+:root[data-ui='mono'] .welcome-actions {
+  justify-content: flex-start;
+}
+/* The keys as a two-column table: the chord, then what it does. */
+:root[data-ui='mono'] .welcome-keys {
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 2ch;
+  width: 100%;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+:root[data-ui='mono'] .welcome-key {
+  display: contents;
+}
+:root[data-ui='mono'] .welcome-key .kbd {
+  justify-self: start;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+}
+
+/* ---------- Settings: a plain menu beside the page ---------- */
+@container settings (min-width: 651px) {
+  :root[data-ui='mono'] .settings-shell {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+  :root[data-ui='mono'] .settings-nav {
+    padding: 14px 0 10px;
+    border-right: 1px solid var(--border-strong);
+  }
+  :root[data-ui='mono'] .settings-title {
+    padding: 0 10px 14px;
+    font-size: 13px;
+    letter-spacing: 0;
+  }
+  :root[data-ui='mono'] .settings-search {
+    margin: 0 10px;
+  }
+  :root[data-ui='mono'] .settings-nav-label {
+    padding: 0 14px 4px;
+    letter-spacing: 0;
+    text-transform: lowercase;
+  }
+  :root[data-ui='mono'] .settings-nav-label::before {
+    content: '# ';
+  }
+  :root[data-ui='mono'] .settings-link {
+    gap: 0;
+    min-height: 26px;
+    margin: 0;
+    padding: 3px 14px;
+    border-radius: 0;
+    font-size: 12px;
+    text-transform: lowercase;
+  }
+  :root[data-ui='mono'] .settings-link > .icon {
+    display: none;
+  }
+  :root[data-ui='mono'] .settings-link::before {
+    content: '  ';
+    white-space: pre;
+  }
+  :root[data-ui='mono'] .settings-link.active {
+    background: var(--bg-hover);
+    color: var(--accent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  :root[data-ui='mono'] .settings-link.active::before {
+    content: '› ';
+  }
+}
+:root[data-ui='mono'] .settings-nav-footer {
+  display: none;
+}
+:root[data-ui='mono'] .settings-page-header {
+  padding-top: 18px;
+  padding-bottom: 14px;
+}
+:root[data-ui='mono'] .settings-page-header h1 {
+  font-size: 16px;
+  letter-spacing: 0;
+}
+:root[data-ui='mono'] .settings-page-header h1::before {
+  content: '## ';
+  color: var(--fg-faint);
+}
+:root[data-ui='mono'] .settings-breadcrumb,
+:root[data-ui='mono'] .settings-theme-preview,
+:root[data-ui='mono'] .settings-overview {
+  display: none;
+}
+:root[data-ui='mono'] .settings-group {
+  border-color: var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+:root[data-ui='mono'] .settings-group-heading {
+  padding-top: 12px;
+  padding-bottom: 10px;
+  background: var(--bg-sunken);
+}
+:root[data-ui='mono'] .settings-group-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 0;
+  background: none;
+}
+:root[data-ui='mono'] :is(.settings-quick-link, .settings-search-result, .settings-note, .settings-search-empty, .theme-card, .ui-mode-card) {
+  border-radius: 0;
+}
+
+/* ---------- Overlays: flat and ruled ---------- */
+:root[data-ui='mono'] .modal-backdrop {
+  background: rgb(0 0 0 / 0.5);
+}
+:root[data-ui='mono'] .modal,
+:root[data-ui='mono'] .palette {
+  border: 1px solid var(--border-strong);
+}
+:root[data-ui='mono'] .dropdown-menu,
+:root[data-ui='mono'] .activity-tray {
+  border-color: var(--border-strong);
+}
+:root[data-ui='mono'] .toast {
+  border-left-width: 2px;
+}

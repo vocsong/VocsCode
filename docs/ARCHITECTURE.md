@@ -5,7 +5,7 @@ Technical reference moved out of the README. For the friendly overview, read the
 ## Source layout
 
 ```
-src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette (no runtime deps);
+src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette, interface modes (no runtime deps);
                   mission*.ts hold the Mission record, preset/config and command contracts
 src/main
   harness/        one adapter per harness → normalized SessionEvent stream
@@ -44,6 +44,8 @@ src/renderer      React 19 + zustand UI
     mission/      Mission settings, launch dialog, panel, workspace inspector and completion report
   terminal/       xterm.js instances kept alive outside React (host.ts)
   theme.ts        injects the data-driven palettes and applies the active theme to <html>
+  ui-mode.ts      the interface mode (Standard, Zen, Mono) as React reads it; theme.ts applies it as <html data-ui>
+  ui-zen.css      the Zen layout and ui-mono.css the Mono one: CSS over the standard component tree, so a switch never remounts anything
   store.ts        session state; api.ts wraps the preload bridge
   panes.ts        the split view's pane model (which session each pane shows, plus a file preview pane); components/SessionPanes.tsx renders it
   file-open.ts    where a session's files are read from (Mission workspaces) and how outside paths are only revealed; components/FilePreviewPane.tsx previews

@@ -7,6 +7,8 @@ import { isTopLevelSession, MISSION_MANAGED_REASON, pauseMissionSession } from '
 import { createTerminal } from '../terminal/host';
 import { canSplit, sessionPanes } from '../panes';
 import { Icon } from './ui';
+import { setUiMode } from '../ui-mode';
+import { UI_MODES } from '../../../shared/ui-modes';
 
 
 interface Cmd {
@@ -42,7 +44,9 @@ export function CommandPalette() {
       { id: 'changes', label: 'Show changes', icon: 'diff', run: () => st.setPanelTab('changes') },
       { id: 'goal', label: active?.mission ? 'Show Mission' : 'Show goal', icon: 'target', run: () => st.setPanelTab('goal') },
       { id: 'terminal', label: 'Show terminal', hint: 'Ctrl+`', icon: 'terminal', run: () => { st.setPanelTab('terminal'); st.focusTerminal(); } },
-      { id: 'thinking', label: 'Toggle thinking visibility', icon: 'brain', run: () => st.toggleThinking() }
+      { id: 'thinking', label: 'Toggle thinking visibility', icon: 'brain', run: () => st.toggleThinking() },
+      // The interface mode is one keystroke away from anywhere, so trying Zen or Mono costs nothing.
+      ...UI_MODES.filter((m) => m.id !== (st.settings?.uiMode ?? 'standard')).map((m) => ({ id: `ui:${m.id}`, label: `Switch to the ${m.name} interface`, hint: m.tagline, icon: 'layout', run: () => setUiMode(m.id) }))
     ];
     if (activeId) {
       base.push(

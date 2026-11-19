@@ -18,6 +18,7 @@ import { commandMission, MISSION_MANAGED_REASON, pauseMissionSession, sendMissio
 import { insertTranscript } from '../../../shared/dictation';
 import { DictationControl, type DictationHandle } from './DictationControl';
 import { SessionControls, SessionMeter } from './SessionControls';
+import { useUiMode } from '../ui-mode';
 
 /** With one pane the composer is the only one; in a split, only the active pane's takes focus and inserts. */
 function ownsComposerFocus(sessionId: string): boolean {
@@ -27,6 +28,13 @@ function ownsComposerFocus(sessionId: string): boolean {
 
 /** Where the pane hands files dropped anywhere on it; set only while a writable composer is mounted. */
 export type AttachFilesRef = React.MutableRefObject<((files: File[]) => void) | null>;
+
+/** The idle prompt's hint, shorter in the minimalist modes (Mono draws its own prompt glyph). */
+const IDLE_PLACEHOLDER = {
+  standard: 'Message the agent… @ files · / commands · ! shell',
+  zen: 'Ask anything…',
+  mono: 'message · @file · /command · !shell'
+} as const;
 
 export function Composer({ session, attachRef }: { session: SessionMeta; attachRef?: AttachFilesRef }) {
   const archived = useStore((s) => session.mission && s.missions[session.mission.missionId]?.archived);
@@ -67,6 +75,7 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
   const shellDraft = text.trimStart().startsWith('!');
   const harness = HARNESS_BY_ID[session.config.harness];
   const caps = harness.capabilities;
+  const uiMode = useUiMode();
   const { models } = useSessionModels(session);
   const currentModel = session.activeModel ?? session.config.model;
   const currentInfo = models.find((m) => currentModel && m.id === currentModel.model && m.provider === currentModel.provider);
@@ -623,7 +632,7 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
           onChange={onChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste attachments)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now; send menu to queue)' : 'Queue a follow-up… (sent after this turn)') : 'Message the agent… @ files · / commands · ! shell'}
+          placeholder={completed ? 'Ask about the completed Mission… (read-only answer)' : session.mission ? 'Message the principal engineer… (/mission controls, @ files, paste attachments)' : busy ? (caps.steer ? 'Steer the agent… (Enter sends now; send menu to queue)' : 'Queue a follow-up… (sent after this turn)') : IDLE_PLACEHOLDER[uiMode]}
           rows={1}
           spellCheck
         />

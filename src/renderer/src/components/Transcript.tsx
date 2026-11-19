@@ -463,10 +463,10 @@ function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, s
       return (
         <div className={`turn-footer turn-${item.status}`}>
           <Icon name={item.status === 'completed' ? 'check' : 'alert'} size={12} />
-          <span>{item.status === 'completed' ? 'Turn complete' : item.status === 'interrupted' ? 'Interrupted' : `Failed${item.error ? `: ${item.error}` : ''}`}</span>
-          <span>· <time dateTime={new Date(item.ts).toISOString()} title={new Date(item.ts).toLocaleString()}>{new Date(item.ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</time></span>
-          {item.durationMs ? <span>· {fmtDuration(item.durationMs)}</span> : null}
-          {item.costUsd ? <span>· {fmtCost(item.costUsd)}</span> : null}
+          <span className="turn-label">{item.status === 'completed' ? 'Turn complete' : item.status === 'interrupted' ? 'Interrupted' : `Failed${item.error ? `: ${item.error}` : ''}`}</span>
+          <span className="turn-time">· <time dateTime={new Date(item.ts).toISOString()} title={new Date(item.ts).toLocaleString()}>{new Date(item.ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</time></span>
+          {item.durationMs ? <span className="turn-duration">· {fmtDuration(item.durationMs)}</span> : null}
+          {item.costUsd ? <span className="turn-cost">· {fmtCost(item.costUsd)}</span> : null}
           {/* Token detail is for the curious: it shows when the row is hovered. */}
           {item.usage && (item.usage.inputTokens || item.usage.outputTokens) ? <span className="turn-detail">· {fmtTokens(item.usage.inputTokens)} in / {fmtTokens(item.usage.outputTokens)} out</span> : null}
           {item.status === 'completed' && fmtRate(item.usage?.outputTokens, item.durationMs) ? (
@@ -762,9 +762,10 @@ export function WorkGroup({ chunk, sessionId, canEdit = false, showThinking, onI
     <div className={`work-group ${running ? 'work-running' : ''} ${expanded ? 'work-open' : ''}`}>
       <button type="button" className="work-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
         <Icon name={running ? 'activity' : 'layers'} size={13} className="work-icon" />
-        <span className="work-label">{running ? 'Working…' : durationMs ? `Worked for ${fmtDuration(durationMs)}` : 'Worked'}</span>
-        {tools.length > 0 && <span className="work-stat">{tools.length} step{tools.length === 1 ? '' : 's'}</span>}
-        {files.size > 0 && <span className="work-stat">{files.size} file{files.size === 1 ? '' : 's'} changed</span>}
+        {/* data-short carries the same facts without the words, for the Zen and Mono interfaces. */}
+        <span className="work-label" data-short={running ? '…' : durationMs ? fmtDuration(durationMs) : '✓'}>{running ? 'Working…' : durationMs ? `Worked for ${fmtDuration(durationMs)}` : 'Worked'}</span>
+        {tools.length > 0 && <span className="work-stat work-steps" data-short={String(tools.length)}>{tools.length} step{tools.length === 1 ? '' : 's'}</span>}
+        {files.size > 0 && <span className="work-stat work-files" data-short={`±${files.size}`}>{files.size} file{files.size === 1 ? '' : 's'} changed</span>}
         {running ? <Spinner size={12} /> : null}
         {failed ? <Badge tone="red">{failed} failed</Badge> : null}
         <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} className="work-chevron" />

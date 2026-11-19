@@ -212,3 +212,41 @@
 .settings .vocs-account-keep label { display: flex; align-items: center; gap: 8px; }
 .settings .vocs-account-keep p { margin: 6px 0 0 24px; }
 .settings .vocs-account-notice[role="alert"] { border-left: 2px solid var(--accent); padding-left: 12px; }
+
+/* Interface picker (Appearance): one card per layout, each with a wireframe of the window it gives. */
+.ui-mode-picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); gap: 12px; margin-top: 4px; }
+.ui-mode-card { display: flex; flex-direction: column; gap: 5px; min-width: 0; padding: 8px 8px 11px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); color: var(--fg); cursor: pointer; text-align: left; transition: border-color 0.12s, box-shadow 0.12s; }
+.ui-mode-card:hover { border-color: var(--border-strong); }
+.ui-mode-card.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.ui-mode-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ui-mode-name { display: flex; align-items: center; gap: 6px; margin: 4px 4px 0; font-weight: 600; }
+.ui-mode-name .icon { color: var(--accent); }
+.ui-mode-tagline { margin: 0 4px; color: var(--fg-muted); font-size: 11.5px; }
+.ui-mini { position: relative; display: flex; height: 98px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.ui-mini b { display: block; height: 5px; margin: 0 0 6px; border-radius: 3px; background: color-mix(in srgb, var(--fg) 16%, transparent); }
+.ui-mini b.user { margin-left: auto; background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.ui-mini .w40 { width: 40%; } .ui-mini .w50 { width: 50%; } .ui-mini .w60 { width: 60%; } .ui-mini .w70 { width: 70%; } .ui-mini .w75 { width: 75%; } .ui-mini .w80 { width: 80%; } .ui-mini .w85 { width: 85%; } .ui-mini .w90 { width: 90%; }
+/* Standard: labelled sidebar, header, transcript, boxed composer, side panel. */
+.ui-mini-side { flex: 0 0 26%; padding: 10px 6px; background: var(--bg-sunken); border-right: 1px solid var(--border); }
+.ui-mini-main { display: flex; flex-direction: column; flex: 1; min-width: 0; padding: 0 8px; }
+.ui-mini-head { flex: 0 0 12px; margin: 0 -8px 8px; border-bottom: 1px solid var(--border); }
+.ui-mini-box { margin-top: auto; margin-bottom: 7px; height: 15px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg-elev); }
+.ui-mini-panel { flex: 0 0 24%; padding: 20px 6px; background: var(--bg-elev); border-left: 1px solid var(--border); }
+/* Zen: a rail of dots, one centered column, a floating pill. */
+.ui-mini-rail { display: flex; flex: 0 0 15px; flex-direction: column; align-items: center; gap: 6px; padding-top: 12px; }
+.ui-mini-rail i { width: 5px; height: 5px; border-radius: 50%; background: color-mix(in srgb, var(--fg) 28%, transparent); }
+.ui-mini-rail i.on { background: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.ui-mini-column { flex: 0 0 54%; margin: 0 auto; padding-top: 14px; }
+.ui-mini-column b { height: 4px; margin-bottom: 7px; }
+.ui-mini-pill { position: absolute; left: 50%; bottom: 9px; width: 50%; height: 13px; transform: translateX(-50%); border-radius: 999px; background: var(--bg-elev); box-shadow: 0 0 0 1px var(--border), 0 4px 12px -4px rgb(0 0 0 / 0.4); }
+/* Mono: tabs across the top, a status line, a log, a prompt line along the foot. */
+.ui-mini-mono { flex-direction: column; border-radius: 3px; }
+.ui-mini-tabs { display: flex; flex: 0 0 13px; align-items: stretch; border-bottom: 1px solid var(--border-strong); }
+.ui-mini-tabs i { flex: 0 0 20%; border-right: 1px solid var(--border); }
+.ui-mini-tabs i.on { background: var(--bg-elev); box-shadow: inset 0 -2px 0 var(--accent); }
+.ui-mini-status { flex: 0 0 8px; background: var(--bg-sunken); border-bottom: 1px solid var(--border); }
+.ui-mini-log { flex: 1; padding: 7px 8px 0; }
+.ui-mini-log b { border-radius: 0; height: 4px; }
+.ui-mini-log b.user { margin-left: 0; }
+.ui-mini-prompt { position: relative; flex: 0 0 14px; border-top: 1px solid var(--border-strong); background: var(--bg-elev); }
+.ui-mini-prompt::before { content: ''; position: absolute; left: 8px; top: 4px; width: 5px; height: 5px; border-top: 1.5px solid var(--accent); border-right: 1.5px solid var(--accent); transform: rotate(45deg); }

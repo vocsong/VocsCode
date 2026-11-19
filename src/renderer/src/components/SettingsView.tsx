@@ -14,6 +14,8 @@ import { invoke, isMac, on, platform } from '../api';
 import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { systemPrefersDark } from '../theme';
+import { UI_MODES, type UiModeId } from '../../../shared/ui-modes';
+import { useMinimalUi } from '../ui-mode';
 import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
 import { PairingQr } from './PairingQr';
@@ -87,6 +89,8 @@ export function SettingsView() {
   const update = (patch: Partial<AppSettings>) => void invoke('settings:update', patch).catch((error: unknown) => {
     toast(`Could not save settings: ${error instanceof Error ? error.message : String(error)}`, 'error');
   });
+  // Zen and Mono show the section nav as icons, so each one carries its name as a tooltip.
+  const minimal = useMinimalUi();
   return (
     <div className="settings" onKeyDown={(e) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
@@ -120,7 +124,7 @@ export function SettingsView() {
               <div className="settings-nav-group" key={group}>
                 <div className="settings-nav-label">{group}</div>
                 {SETTINGS_PAGES.filter((p) => p.group === group).map((p) => (
-                  <button key={p.id} type="button" className={`settings-link ${section === p.id && !searching ? 'active' : ''}`} aria-current={section === p.id && !searching ? 'page' : undefined} onClick={() => navigate(p.id)}>
+                  <button key={p.id} type="button" className={`settings-link ${section === p.id && !searching ? 'active' : ''}`} aria-current={section === p.id && !searching ? 'page' : undefined} title={minimal ? p.label : undefined} onClick={() => navigate(p.id)}>
                     <Icon name={p.icon} size={16} /><span>{p.label}</span>
                   </button>
                 ))}
@@ -219,7 +223,7 @@ function ThemePicker({ value, onChange }: { value: ThemeId; onChange: (id: Theme
 function General({ settings, update, navigate }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void; navigate: (section: Section) => void }) {
   const theme = THEMES.find((t) => t.id === settings.theme);
   const links: { section: Section; detail: string }[] = [
-    { section: 'appearance', detail: theme?.name ?? 'System' },
+    { section: 'appearance', detail: `${UI_MODES.find((m) => m.id === (settings.uiMode ?? 'standard'))?.name ?? 'Standard'} · ${theme?.name ?? 'System'}` },
     { section: 'sessions', detail: HARNESSES.find((h) => h.id === settings.defaultHarness)?.name ?? 'Choose your defaults' },
     { section: 'providers', detail: `${settings.providers.filter((p) => p.enabled).length} enabled providers` },
     { section: 'shortcuts', detail: 'Make it second nature' },
@@ -256,10 +260,70 @@ function Appearance({ settings, update }: { settings: AppSettings; update: (p: P
       <div className="settings-preview-workspace"><div className="settings-eyebrow">YOUR NEXT GREAT IDEA</div><strong>A calmer place to build.</strong><p>One workspace. Every coding agent.</p><div className="settings-preview-message"><Icon name="sparkles" size={16} /> Ready when you are.</div></div>
       <div className="settings-preview-caption"><Icon name={theme?.id === 'system' ? 'sun' : 'palette'} size={15} />{theme?.name ?? 'System'}<span>Live preview</span></div>
     </div>
+    <SettingsGroup id="appearance-interface" title="Interface" description="How the window is laid out. Separate from the color theme: every theme works with every layout, and switching keeps your sessions, drafts and panels as they are." icon="layout">
+      <UiModePicker value={settings.uiMode ?? 'standard'} onChange={(next) => update({ uiMode: next })} />
+    </SettingsGroup>
     <SettingsGroup id="appearance-theme" title="Color theme" description="Choose a palette below. System follows your computer’s light or dark preference." icon="palette">
       <ThemePicker value={settings.theme} onChange={(next) => update({ theme: next })} />
     </SettingsGroup>
   </div>;
+}
+
+/** One card per interface mode, each with a wireframe of the layout it gives the window. */
+function UiModePicker({ value, onChange }: { value: UiModeId; onChange: (id: UiModeId) => void }) {
+  return (
+    <div className="ui-mode-picker" role="group" aria-label="Interface">
+      {UI_MODES.map((m) => (
+        <button
+          key={m.id}
+          type="button"
+          className={`ui-mode-card${value === m.id ? ' active' : ''}`}
+          data-testid={`ui-mode-${m.id}`}
+          title={m.description}
+          aria-label={`${m.name} interface`}
+          aria-pressed={value === m.id}
+          onClick={() => onChange(m.id)}
+        >
+          <UiModeMiniature id={m.id} />
+          <span className="ui-mode-name">
+            {m.name}
+            {value === m.id && <Icon name="check" size={13} />}
+          </span>
+          <span className="ui-mode-tagline">{m.tagline}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A schematic of each layout, drawn in the current theme's colors. */
+function UiModeMiniature({ id }: { id: UiModeId }) {
+  if (id === 'zen') {
+    return (
+      <span className="ui-mini ui-mini-zen" aria-hidden="true">
+        <span className="ui-mini-rail"><i className="on" /><i /><i /><i /></span>
+        <span className="ui-mini-column"><b className="w60" /><b className="w90" /><b className="w75" /><b className="w40 user" /><b className="w85" /></span>
+        <span className="ui-mini-pill" />
+      </span>
+    );
+  }
+  if (id === 'mono') {
+    return (
+      <span className="ui-mini ui-mini-mono" aria-hidden="true">
+        <span className="ui-mini-tabs"><i className="on" /><i /><i /><i /></span>
+        <span className="ui-mini-status" />
+        <span className="ui-mini-log"><b className="w50 user" /><b className="w90" /><b className="w70" /><b className="w80" /></span>
+        <span className="ui-mini-prompt" />
+      </span>
+    );
+  }
+  return (
+    <span className="ui-mini ui-mini-standard" aria-hidden="true">
+      <span className="ui-mini-side"><b className="w80" /><b className="w60" /><b className="w70" /><b className="w50" /></span>
+      <span className="ui-mini-main"><span className="ui-mini-head" /><b className="w70" /><b className="w90" /><b className="w50 user" /><span className="ui-mini-box" /></span>
+      <span className="ui-mini-panel"><b className="w70" /><b className="w50" /></span>
+    </span>
+  );
 }
 
 function SessionDefaults({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
