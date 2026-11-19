@@ -43,16 +43,24 @@ export interface FileRef {
   line?: number;
 }
 
-/** `foo.ts:12`, `foo.ts:12:9` and `foo.ts#L12` all point at a line inside the file. */
-const LINE_SUFFIX = /^(.*?)(?::(\d+)(?::\d+)?|#L(\d+))$/;
+/**
+ * `foo.ts:12`, `foo.ts:12:9`, `foo.ts:12-20`, `foo.ts#L12`, `foo.ts#L12C4` and `foo.ts#L12-L20` all
+ * point at a line inside the file; a range opens at its first line.
+ */
+const LINE_SUFFIX = /^(.*?)(?::(\d+)(?::\d+)?(?:-\d+(?::\d+)?)?|#L(\d+)(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/;
 
 /**
- * Parses a single token (an inline code span or a relative link target) as a workspace path.
+ * Parses a single token (an inline code span or a link target) as a workspace path.
  * Returns null for anything that is not confidently a file or directory reference.
+ *
+ * `link` relaxes the prose filter for markdown link targets: the author already marked the text as
+ * a link, so a name with spaces or brackets (`Screenshot (2).png`) is a file, not a sentence.
  */
-export function parseFileRef(raw: string): FileRef | null {
+export function parseFileRef(raw: string, { link = false }: { link?: boolean } = {}): FileRef | null {
   let text = raw.trim();
   if (!text || text.length > 240) return null;
+  // `/G:/repo/a.ts` is how Codex writes a Windows path as a URL path; it is the drive path.
+  if (/^\/[A-Za-z]:[\\/]/.test(text)) text = text.slice(1);
 
   let line: number | undefined;
   const suffix = LINE_SUFFIX.exec(text);
@@ -62,9 +70,10 @@ export function parseFileRef(raw: string): FileRef | null {
     if (Number.isInteger(n) && n > 0) line = n;
   }
 
-  // Whitespace, markdown markup, globs and shell syntax all mean this is prose, not a path.
-  if (/[\s`"'<>|*?{}()[\]!$&=;,^~]/.test(text)) return null;
-  if (text.includes('://') || text.startsWith('//') || text.startsWith('-')) return null;
+  // Whitespace, markdown markup, globs and shell syntax all mean this is prose, not a path. A link
+  // target only rules out what no file name on any platform can contain.
+  if ((link ? /[\x00-\x1f"<>|*?]/ : /[\s`"'<>|*?{}()[\]!$&=;,^~]/).test(text)) return null;
+  if (text.includes('://') || text.startsWith('//') || text.startsWith('-') || text.startsWith('~')) return null;
   // A leading `@` is an npm scope (`@scope/pkg/index.ts`), not a workspace path.
   if (text.startsWith('@')) return null;
   // After a line suffix, a colon can only belong to a Windows drive letter.
@@ -79,6 +88,53 @@ export function parseFileRef(raw: string): FileRef | null {
   const base = segments[segments.length - 1]!;
   if (!looksLikeFileName(base)) return null;
   return line ? { path: normalized, line } : { path: normalized };
+}
+
+/**
+ * Parses a markdown link target as a workspace path. Link targets are often URL-shaped: `file://`
+ * URIs, percent-encoded names (`my%20file.ts`, `G:%5Crepo%5Ca.ts`), Codex's `/G:/…` drive paths and
+ * `#section` fragments. A remote `file://host/…` share never counts.
+ */
+export function parseFileLink(href: string): FileRef | null {
+  let target = href.trim();
+  const uri = /^file:(\/\/[^/]*)?(\/.*)$/i.exec(target);
+  if (uri) {
+    if (uri[1] && uri[1] !== '//' && uri[1].toLowerCase() !== '//localhost') return null;
+    target = uri[2]!;
+  } else if (/^[A-Za-z][A-Za-z0-9+.-]+:/.test(target) && !/^[A-Za-z]:[\\/]/.test(target)) {
+    // Any other scheme (http, mailto, vscode…) is not a workspace file.
+    return null;
+  }
+  // A `#section` or `?query` names a place in a page, not part of the file name; `#L12` is a line.
+  const fragment = target.search(/[?#]/);
+  if (fragment >= 0 && !/^#L\d/.test(target.slice(fragment))) target = target.slice(0, fragment);
+  if (/%[0-9A-Fa-f]{2}/.test(target)) {
+    try {
+      target = decodeURIComponent(target);
+    } catch {
+      return null;
+    }
+  }
+  return parseFileRef(target, { link: true });
+}
+
+/**
+ * Joins a link target written inside a markdown file to that file's folder, so `../src/a.ts` in
+ * `docs/guide.md` means `src/a.ts`. Absolute targets pass through; one that climbs above the
+ * workspace root resolves to null.
+ */
+export function joinRelative(baseDir: string, target: string): string | null {
+  const raw = target.replace(/\\/g, '/');
+  if (/^(?:[A-Za-z]:\/|\/)/.test(raw)) return raw;
+  const out = baseDir.replace(/\\/g, '/').split('/').filter(Boolean);
+  for (const seg of raw.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (!out.length) return null;
+      out.pop();
+    } else out.push(seg);
+  }
+  return out.join('/') + (raw.endsWith('/') && out.length ? '/' : '');
 }
 
 function looksLikeFileName(base: string): boolean {

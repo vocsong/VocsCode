@@ -151,6 +151,60 @@ describe('split view, empty pane holding focus', () => {
   });
 });
 
+describe('file previews in the split view', () => {
+  const filePanes = () => [...document.querySelectorAll<HTMLElement>('[data-testid="file-pane"]')];
+  const reply = (id: string, text: string): TranscriptItem => ({ id, kind: 'assistant', ts: 2, text });
+
+  beforeEach(() => {
+    useStore.setState({ transcripts: { s_a: [user('u_a', 'alpha question'), reply('r_a', 'The layout lives in `src/arch.ts:3`.')], s_b: [user('u_b', 'beta question')] } } as never);
+    invoke.mockImplementation(async (channel: string, request: { path?: string }) => {
+      if (channel === 'harness:models') return { models: [] };
+      if (channel === 'git:summary') return null;
+      if (channel === 'fs:resolve') return { status: 'resolved', path: request.path };
+      if (channel === 'fs:read') return { content: 'export const arch = 1;\nexport const layout = 2;\nexport const third = 3;\n', truncated: false };
+      return {};
+    });
+  });
+
+  it('a clicked file mention opens beside its session, which keeps focus, the composer and the panels', async () => {
+    render(<App />);
+    fireEvent.click(await waitFor(() => panes()[0]!.querySelector<HTMLElement>('.file-ref')!));
+
+    await waitFor(() => expect(filePanes()).toHaveLength(1));
+    const preview = filePanes()[0]!;
+    await waitFor(() => expect(preview.querySelector('pre')?.textContent).toContain('export const third = 3;'));
+    expect(preview.querySelector('.file-preview-path')?.textContent).toBe('src/arch.ts');
+    // Order on screen: the conversation, then its preview.
+    const row = [...document.querySelector('[data-testid="session-panes"]')!.children].filter((el) => el.matches('.pane')).map((el) => el.getAttribute('data-testid'));
+    expect(row).toEqual(['session-pane', 'file-pane']);
+    expect(panes()[0]!.classList.contains('active')).toBe(true);
+    expect(useStore.getState().activeId).toBe('s_a');
+    expect(useStore.getState().panelOpen).toBe(false);
+
+    // Clicking into the preview does not take the active pane away from the conversation.
+    fireEvent.pointerDown(preview);
+    expect(useStore.getState().activeId).toBe('s_a');
+    expect(panes()[0]!.classList.contains('active')).toBe(true);
+    // A preview beside a lone session neither makes the session closable nor blocks a split.
+    expect(panes()[0]!.querySelector('[aria-label="Close pane"]')).toBeNull();
+    expect(panes()[0]!.querySelector('[aria-label="Split right"]')).not.toBeNull();
+
+    fireEvent.click(preview.querySelector('[aria-label="Close preview"]')!);
+    await waitFor(() => expect(filePanes()).toHaveLength(0));
+    expect(panes()).toHaveLength(1);
+  });
+
+  it('closes the preview when its session leaves the pane', async () => {
+    render(<App />);
+    fireEvent.click(await waitFor(() => panes()[0]!.querySelector<HTMLElement>('.file-ref')!));
+    await waitFor(() => expect(filePanes()).toHaveLength(1));
+    fireEvent.click(sidebarRow('s_b'));
+    await waitFor(() => expect(paneText(0)).toContain('beta question'));
+    expect(filePanes()).toHaveLength(0);
+    expect(panes()).toHaveLength(1);
+  });
+});
+
 describe('Escape with the activity tray open', () => {
   it('closes a hover-opened tray without interrupting the running turn', async () => {
     useStore.setState({ sessions: [{ ...A, status: 'running' }, B] } as never);
