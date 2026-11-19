@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.11.0](https://github.com/vocsong/VocsCode/compare/v0.10.1...v0.11.0) (2026-11-19)
+
+
+### Features
+
+* **account:** stay signed in to Vocs on this computer ([#536](https://github.com/vocsong/VocsCode/issues/536)) ([f498d6a](https://github.com/vocsong/VocsCode/commit/f498d6a784a9b1f81a7568102fe9202f7ee8d846))
+* download desktop updates automatically ([#543](https://github.com/vocsong/VocsCode/issues/543)) ([7698b98](https://github.com/vocsong/VocsCode/commit/7698b988b80f64aff19b912c93f8c0bf9b74afd8))
+
+
+### Bug Fixes
+
+* align the New Session model picker with the harness ([#542](https://github.com/vocsong/VocsCode/issues/542)) ([a216b94](https://github.com/vocsong/VocsCode/commit/a216b9461e5e91bd834bd34e5c52e727aa6b81e1))
+* estimate missing Pi Fast pricing at 2x ([7e3d0d5](https://github.com/vocsong/VocsCode/commit/7e3d0d50a40d39a63fe53064b664f2d8f8717c68))
+* **release:** keep the verified tag on draft updates ([#550](https://github.com/vocsong/VocsCode/issues/550)) ([b5b7d74](https://github.com/vocsong/VocsCode/commit/b5b7d74c22272a8cea41603ef3faac78186db9cc))
+* **ui:** put the update button beside Settings ([#546](https://github.com/vocsong/VocsCode/issues/546)) ([09993f3](https://github.com/vocsong/VocsCode/commit/09993f36f7b2100d76299750d74e27659d677b9c))
+* **ui:** Show reasoning and Fast Mode in the model menu ([#544](https://github.com/vocsong/VocsCode/issues/544)) ([59d2560](https://github.com/vocsong/VocsCode/commit/59d256014dd053dbd4e210a5f267ea70949bfb3b))
+
 ## [0.10.1](https://github.com/vocsong/VocsCode/compare/v0.10.0...v0.10.1) (2026-11-18)
 
 
