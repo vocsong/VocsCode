@@ -27,7 +27,7 @@
   font-size: 12.5px;
   font-variant-ligatures: none;
 }
-:root[data-ui='mono'] :is(.btn, .pill, .badge, .kbd, .dropdown-menu, .modal, .palette, .toast, .callout, input, select, textarea, .codeblock, .plan-card, .approval, .activity-tray, .titlebar-search, .titlebar-vesta, .header-changes, .row-act-btn, .titlebar-btn, .menubar-btn, .icon-btn, .work-head, .tool-card, .shell-card, .find-bar, .jump-bottom) {
+:root[data-ui='mono'] :is(.toggle-track, .toggle-thumb, .btn, .pill, .badge, .kbd, .dropdown-menu, .modal, .palette, .toast, .callout, input, select, textarea, .codeblock, .plan-card, .approval, .activity-tray, .titlebar-search, .titlebar-vesta, .header-changes, .row-act-btn, .titlebar-btn, .menubar-btn, .icon-btn, .work-head, .tool-card, .shell-card, .find-bar, .jump-bottom) {
   border-radius: 0;
 }
 
