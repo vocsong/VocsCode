@@ -1,9 +1,9 @@
 /**
- * Electron end-to-end for the transcript's layers of collapse: a turn's tool calls, commentary and
- * thinking sit behind one "Worked for …" header, the answer stays visible, commands render as
- * compact rows that expand into a shell panel. The session and transcript are seeded on disk, so
- * no harness and no provider key are involved. Requires `npm run build` first; gated by
- * VOCS_CODE_E2E_UI=1.
+ * Electron end-to-end for the transcript's layers of collapse: every assistant message stays on
+ * screen, the steps between two messages sit behind a "Worked …" header, thinking stays behind its
+ * own toggle, and commands render as compact rows that expand into a shell panel. The session and
+ * transcript are seeded on disk, so no harness and no provider key are involved. Requires
+ * `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -27,7 +27,7 @@ afterAll(async () => {
 const SID = 's_transcript_e2e';
 const T = Date.now() - 600_000;
 
-/** A finished turn with work, followed by a turn with a reply and a background follow-up. */
+/** A finished turn that worked in two stretches around a message, then a turn with a reply and a background follow-up. */
 function transcript(): TranscriptItem[] {
   return [
     { id: 'u1', kind: 'user', ts: T, text: 'Resolve the npm run update EBUSY failure.' },
@@ -87,7 +87,7 @@ function transcript(): TranscriptItem[] {
     // intervening user row recorded on disk. The lookup must not hide the already-sent reply.
     { id: 'lookup', kind: 'tool', ts: T + 60_002, name: 'subagent_result', hint: 'agent', status: 'done' },
     { id: 'f3', kind: 'assistant', ts: T + 60_003, text: 'The background review also confirmed the update can be retried.' },
-    { id: 'turn2', kind: 'turn', ts: T + 60_004, status: 'completed' }
+    { id: 'turn2', kind: 'turn', ts: T + 60_004, status: 'completed', durationMs: 42_000 }
   ];
 }
 
@@ -112,7 +112,7 @@ async function completionTimes(win: Page) {
 }
 
 describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
-  it('keeps answers visible, expands work and commands, and preserves completion times after restart', async () => {
+  it('keeps every message visible, expands work and commands, and preserves completion times after restart', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-transcript-'));
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
@@ -148,25 +148,39 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     await expectQuietWindow(app);
     await fs.mkdir(shots, { recursive: true });
 
-    // Collapsed: the answer and the worked header are on screen, the work itself is not.
+    // Collapsed: every message and the worked headers are on screen, the steps themselves are not.
     const work = win.locator('.work-head');
     await work.first().waitFor({ timeout: 30_000 });
-    expect(await work.first().innerText()).toContain('Worked for 3m 17s');
     const replies = await win.locator('.msg-assistant .md').allInnerTexts();
-    expect(replies).toEqual([expect.stringContaining('Done'), expect.stringContaining('Retry npm run update'), expect.stringContaining('The background review also confirmed')]);
-    expect(await work.count()).toBe(2);
+    expect(replies).toEqual([
+      expect.stringContaining('find the exact processes first'),
+      expect.stringContaining('A blanket kill would be unsafe'),
+      expect.stringContaining('Done'),
+      expect.stringContaining('Retry npm run update'),
+      expect.stringContaining('The background review also confirmed')
+    ]);
+    // One header per stretch of steps. A turn that worked in two stretches leaves its duration on
+    // the turn row; a turn with one stretch shows it on that header.
+    expect(await work.count()).toBe(3);
+    expect(await work.nth(0).innerText()).toMatch(/^Worked\s*1 step$/);
+    expect(await work.nth(1).innerText()).toMatch(/^Worked\s*3 steps$/);
+    expect(await work.nth(2).innerText()).toContain('Worked for 42.0s');
+    expect(await win.locator('.turn-footer').first().innerText()).toContain('3m 17s');
     const originalTimes = await completionTimes(win);
     expect(await win.locator('.tool-card').count()).toBe(0);
-    expect(await win.locator('.thinking-toggle').count()).toBe(0);
+    // The first message's thinking is one closed toggle on the message, not text on screen.
+    expect(await win.locator('.thinking-toggle').count()).toBe(1);
+    expect(await win.locator('.thinking-body').count()).toBe(0);
     await win.screenshot({ path: path.join(shots, 'transcript-01-collapsed.png') });
 
-    // Expanded by the user: commentary and command rows appear, thinking stays collapsed.
-    await work.first().click();
-    expect(await win.locator('.msg-assistant').filter({ hasText: 'blanket kill' }).count()).toBe(1);
+    // Expanded by the user: each stretch shows its own command rows, and nothing else moves.
+    await work.nth(0).click();
+    expect(await win.locator('.tool-card').count()).toBe(1);
+    await expect(win.locator('.tool-card .tool-name').first().innerText()).resolves.toBe('Ran');
+    await work.nth(1).click();
     expect(await win.locator('.tool-card').count()).toBe(2);
-    await expect(win.locator('.tool-name').first().innerText()).resolves.toBe('Ran');
     expect(await win.locator('.tool-group-head').innerText()).toContain('Ran 2 commands');
-    expect(await win.locator('.thinking-toggle').count()).toBe(1);
+    expect(await win.locator('.msg-assistant').filter({ hasText: 'blanket kill' }).evaluate((element) => !!element.closest('.work-group'))).toBe(false);
     expect(await win.locator('.thinking-body').count()).toBe(0);
     await win.screenshot({ path: path.join(shots, 'transcript-02-expanded.png') });
 
@@ -182,7 +196,7 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     expect(await shell.locator('.shell-foot').innerText()).toContain('done');
     await win.screenshot({ path: path.join(shots, 'transcript-03-shell.png') });
 
-    // Thinking opens on its own click, not with the work group.
+    // Thinking opens on its own click, not with the work around it.
     await win.locator('.thinking-toggle').click();
     expect(await win.locator('.thinking-body').innerText()).toContain('Enumerate electron processes');
 
@@ -195,6 +209,8 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     await expectQuietWindow(app);
     expect(await completionTimes(reopened)).toEqual(originalTimes);
     expect(await reopened.getByText('Retry npm run update.', { exact: false }).isVisible()).toBe(true);
+    expect(await reopened.getByText('A blanket kill would be unsafe', { exact: false }).isVisible()).toBe(true);
+    expect(await reopened.locator('.work-head').count()).toBe(3);
     expect(await reopened.locator('.work-body').count()).toBe(0);
   }, 180_000);
 

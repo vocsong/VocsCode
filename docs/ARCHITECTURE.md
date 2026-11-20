@@ -65,12 +65,30 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 
 ## Transcript collapse
 
-`Transcript.tsx` keeps replies outside **Worked** and collapses tool calls, progress commentary and
-thinking. Explicit assistant phases take precedence. When a harness has not labelled a message,
-the renderer infers commentary from a later tool call, but only up to the next user message,
-turn footer, or `subagent_result` lookup. Pi can look up a background result after replying and
-before emitting a turn footer; that lookup still collapses, but does not hide the earlier reply.
-The same rule applies when reopening a saved transcript.
+`Transcript.tsx` (`groupTranscript`) keeps everything written for the reader on screen and collapses
+only machinery. Every assistant row that carries prose is a message and is never collapsed,
+whatever `phase` its harness gave it and whether or not a tool call follows. The steps between two
+messages — tool calls, approvals, plans, with the thinking and info-level notices among them —
+collapse into one **Worked** header per stretch, so a turn reads message, work, message, work,
+answer. User rows, turn footers and warnings/errors always stay visible.
+
+The adapters differ in what they emit, and the renderer is where that is evened out, so a turn
+looks the same on every harness and when a saved transcript is reopened:
+
+- **Phase.** Codex app-server labels prose `commentary` or `final`, Codex exec labels all of it
+  `final`, the other adapters label nothing. Phase does not decide visibility; only `plan` is
+  styled.
+- **Thinking.** Claude, Cursor, Pi, ACP and native put reasoning on the row of the prose it
+  precedes; the Codex adapters emit it as a row of its own. Either way it is one collapsed
+  "Thinking" toggle, open only while it streams: reasoning that leads into a message sits directly
+  above that message, reasoning among steps collapses with them.
+- **Empty rows.** A row with no prose and no visible thinking (Pi leaves one for a tool-only
+  message; any row with thinking hidden) makes no row.
+
+A header needs a step behind it: thinking or a notice with no step beside it stays a row of its
+own, never a "Worked" over nothing. Work in flight stays open until the next message starts. The
+turn's duration is shown on a header only when the turn worked in a single stretch; otherwise it
+stays on the turn footer.
 
 ## Transcript file references
 

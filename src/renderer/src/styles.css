@@ -2719,9 +2719,6 @@ h4 {
 .msg-assistant {
   padding: 2px 0;
 }
-.msg-commentary .md {
-  color: var(--fg-muted);
-}
 .msg-plan {
   border-left: 3px solid var(--purple);
   padding-left: 12px;
@@ -3038,7 +3035,7 @@ h4 {
   animation: pulse 1.2s ease-in-out infinite;
 }
 
-/* A turn's work: tool calls, commentary and thinking behind one "Worked for …" header */
+/* A stretch of work between two messages: tool calls, thinking and notices behind a "Worked …" header */
 /* The head is a compact chip: duration, step count, files touched. Opened, the steps hang off a rail. */
 .work-group {
   display: flex;

@@ -47,7 +47,6 @@ afterEach(() => {
 const session = { id: 's1', title: 't', cwd: '/w', status: 'idle', config: { harness: 'native' }, harnessRef: {}, usage: {} } as unknown as SessionMeta;
 
 function messages(count: number): TranscriptItem[] {
-  // Each answer closes its own turn; without a phase they would read as commentary for a later tool.
   return Array.from({ length: count }, (_, i) => ({ id: `a${i}`, kind: 'assistant', ts: i, text: `message ${i}`, phase: 'final' }) as TranscriptItem);
 }
 
