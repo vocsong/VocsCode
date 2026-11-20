@@ -227,6 +227,10 @@ names a model wins instead, which is why `_FORCE` is withheld the moment one doe
 tab's **Models** view lists every type with the model it will run on, edits that one field, and
 writes the definition that overrides a built-in the user chooses to replace.
 
+Codex app-server can stream subagent threads on the same connection as their parent. The adapter
+uses the owning thread ID for turn status, transcript items, and token usage. Activity about a
+subagent belongs in the parent transcript when Codex emits the item on the parent thread.
+
 Context reduction differs the same way. Most engines take an app-requested `compact()` at an idle
 boundary between turns. Claude's CLI instead reduces context from inside the turn that needs it, so
 its adapter exposes `setAutoCompactionWindow(tokens)`: the app hands over the token window that the

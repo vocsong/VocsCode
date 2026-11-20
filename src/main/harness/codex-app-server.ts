@@ -228,9 +228,12 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       if (Object.keys(config).length) common.config = config;
       let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null; serviceTier?: string | null };
       if (meta.harnessRef.codexThreadId) {
+        // Restored usage can arrive in the same stdout chunk as the resume response.
+        this.threadId = meta.harnessRef.codexThreadId;
         try {
-          res = await withTimeout(this.rpc.request('thread/resume', { threadId: meta.harnessRef.codexThreadId, ...common }), 30_000, 'thread/resume');
+          res = await withTimeout(this.rpc.request('thread/resume', { threadId: this.threadId, ...common }), 30_000, 'thread/resume');
         } catch (e) {
+          this.threadId = null;
           this.info(`Could not resume Codex thread (${errorMessage(e)}); starting a new one.`, 'warn');
           res = await withTimeout(this.rpc.request('thread/start', { ...common, sessionStartSource: null }), 30_000, 'thread/start');
         }
@@ -262,15 +265,23 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   private wireNotifications(rpc: JsonRpcStdioClient): void {
+    // Codex also streams spawned threads on this connection. Only this session's thread
+    // owns its turn, transcript and usage. Parent-thread subagent activity still arrives here.
+    const onThreadNotification = (method: string, handle: (params: unknown) => void): void => {
+      rpc.onNotification(method, (params) => {
+        if (this.threadId && (params as { threadId?: string } | undefined)?.threadId === this.threadId) handle(params);
+      });
+    };
     // Settings acknowledge the configured tier, not the tier actually served by the API.
-    rpc.onNotification('thread/settings/updated', (p) => {
-      const n = p as { threadId?: string; threadSettings?: { serviceTier?: string | null } };
-      if (n.threadId === this.threadId && n.threadSettings?.serviceTier !== undefined) this.serviceTier = n.threadSettings.serviceTier ?? 'default';
-      if (n.threadId === this.threadId && this.fastMode && n.threadSettings?.serviceTier !== undefined && n.threadSettings.serviceTier !== 'fast' && n.threadSettings.serviceTier !== 'priority') {
-        this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: `Codex selected service tier: ${n.threadSettings.serviceTier ?? 'default'}` } });
+    onThreadNotification('thread/settings/updated', (p) => {
+      const tier = (p as { threadSettings?: { serviceTier?: string | null } }).threadSettings?.serviceTier;
+      if (tier === undefined) return;
+      this.serviceTier = tier ?? 'default';
+      if (this.fastMode && tier !== 'fast' && tier !== 'priority') {
+        this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: `Codex selected service tier: ${this.serviceTier}` } });
       }
     });
-    rpc.onNotification('turn/started', (p) => {
+    onThreadNotification('turn/started', (p) => {
       const n = p as { turn: { id: string } };
       this.turnId = n.turn.id;
       this._busy = true;
@@ -278,9 +289,14 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.turnStartedAt = this.turnStartedAt || Date.now();
       this.ctx.emit({ type: 'status', status: 'running' });
     });
-    rpc.onNotification('item/started', (p) => this.upsertItem((p as { item: ThreadItem }).item, false));
-    rpc.onNotification('item/completed', (p) => this.upsertItem((p as { item: ThreadItem }).item, true));
-    rpc.onNotification('item/agentMessage/delta', (p) => {
+    rpc.onNotification('item/started', (p) => {
+      const { threadId, item } = p as { threadId: string; item: ThreadItem };
+      if (threadId === this.threadId) this.upsertItem(item, false);
+      // Child approvals can still reach this client. The approval request refers to this item's patch.
+      else if (item.type === 'fileChange') this.rememberFileChanges(item as Extract<ThreadItem, { type: 'fileChange' }>);
+    });
+    onThreadNotification('item/completed', (p) => this.upsertItem((p as { item: ThreadItem }).item, true));
+    onThreadNotification('item/agentMessage/delta', (p) => {
       const n = p as { itemId: string; delta: string };
       const item = this.items.get(n.itemId);
       if (item && item.kind === 'assistant') {
@@ -288,7 +304,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, textDelta: n.delta });
       }
     });
-    rpc.onNotification('item/plan/delta', (p) => {
+    onThreadNotification('item/plan/delta', (p) => {
       const n = p as { itemId: string; delta: string };
       const item = this.items.get(n.itemId);
       if (item && item.kind === 'assistant') {
@@ -308,9 +324,9 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, thinkingDelta: n.delta });
       }
     };
-    rpc.onNotification('item/reasoning/summaryTextDelta', reasoningDelta);
-    rpc.onNotification('item/reasoning/textDelta', reasoningDelta);
-    rpc.onNotification('item/reasoning/summaryPartAdded', (p) => {
+    onThreadNotification('item/reasoning/summaryTextDelta', reasoningDelta);
+    onThreadNotification('item/reasoning/textDelta', reasoningDelta);
+    onThreadNotification('item/reasoning/summaryPartAdded', (p) => {
       const n = p as { itemId: string };
       const item = this.items.get(n.itemId);
       if (item && item.kind === 'assistant' && item.thinking) {
@@ -318,7 +334,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, thinkingDelta: '\n\n' });
       }
     });
-    rpc.onNotification('item/commandExecution/outputDelta', (p) => {
+    onThreadNotification('item/commandExecution/outputDelta', (p) => {
       const n = p as { itemId: string; delta: string };
       const item = this.items.get(n.itemId);
       if (item && item.kind === 'tool') {
@@ -326,7 +342,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, outputDelta: n.delta });
       }
     });
-    rpc.onNotification('item/fileChange/outputDelta', (p) => {
+    onThreadNotification('item/fileChange/outputDelta', (p) => {
       const n = p as { itemId: string; delta: string };
       const item = this.items.get(n.itemId);
       if (item && item.kind === 'tool') {
@@ -334,7 +350,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.emit({ type: 'item.delta', id: n.itemId, outputDelta: n.delta });
       }
     });
-    rpc.onNotification('turn/completed', (p) => {
+    onThreadNotification('turn/completed', (p) => {
       const n = p as { turn: { id: string; status: 'completed' | 'interrupted' | 'failed' | 'inProgress'; error: { message: string } | null; durationMs: number | null } };
       this._busy = false;
       this.turnId = null;
@@ -355,7 +371,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.ctx.updateMeta({ queued: this.queue.length });
       if (next) void this.send({ ...next, mode: 'now' }).catch((e) => this.info(errorMessage(e), 'error'));
     });
-    rpc.onNotification('thread/tokenUsage/updated', (p) => {
+    onThreadNotification('thread/tokenUsage/updated', (p) => {
       const n = p as { tokenUsage: { total: { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number; reasoningOutputTokens: number; totalTokens: number }; last: { totalTokens: number }; modelContextWindow: number | null } };
       const t = n.tokenUsage.total;
       const before = this.usage.snapshot();
@@ -395,22 +411,22 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       this.usage.addUsage({ costUsd: estimateCostUsd(pricing, added) });
       this.ctx.emit({ type: 'usage', totals: this.usage.snapshot() });
     });
-    rpc.onNotification('error', (p) => {
+    onThreadNotification('error', (p) => {
       const n = p as { error: { message: string }; willRetry: boolean };
       if (this.fastMode && !n.willRetry) this.ctx.updateMeta({ fastModeStatus: { state: 'unavailable', detail: n.error.message } });
       this.info(`${n.error.message}${n.willRetry ? ' (retrying)' : ''}`, n.willRetry ? 'warn' : 'error');
     });
     rpc.onNotification('warning', (p) => this.ctx.log('warn', `[codex] ${JSON.stringify(p)}`));
     rpc.onNotification('configWarning', (p) => this.ctx.log('warn', `[codex config] ${JSON.stringify(p)}`));
-    rpc.onNotification('thread/name/updated', (p) => {
+    onThreadNotification('thread/name/updated', (p) => {
       const n = p as { name?: string | null };
       if (n.name && /^New session|^Untitled/i.test(this.ctx.session().title)) this.ctx.updateMeta({ title: n.name });
     });
-    rpc.onNotification('thread/compacted', () => {
+    onThreadNotification('thread/compacted', () => {
       this.info('Codex compacted the conversation context.');
       this.compactionWaiter?.resolve();
     });
-    rpc.onNotification('model/rerouted', (p) => this.info(`Model rerouted: ${JSON.stringify(p)}`, 'warn'));
+    onThreadNotification('model/rerouted', (p) => this.info(`Model rerouted: ${JSON.stringify(p)}`, 'warn'));
     rpc.onNotification('account/rateLimits/updated', (p) => this.ctx.log('debug', `[codex rate limits] ${JSON.stringify(p)}`));
   }
 
@@ -571,13 +587,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       }
       case 'fileChange': {
         const it = item as Extract<ThreadItem, { type: 'fileChange' }>;
-        const changes: FileChange[] = it.changes.map((c) => ({
-          path: c.path,
-          kind: c.kind.type === 'update' && c.kind.move_path ? 'rename' : c.kind.type,
-          diff: c.diff,
-          oldPath: c.kind.type === 'update' ? c.kind.move_path ?? undefined : undefined
-        }));
-        this.fileChangeItems.set(it.id, changes);
+        const changes = this.rememberFileChanges(it);
         out = {
           id: it.id,
           kind: 'tool',
@@ -649,6 +659,17 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         out = { id: item.id, kind: 'info', ts, level: 'info', text: `${item.type}: ${truncate(JSON.stringify(item), 500, '…')}` };
     }
     if (out) this.upsert(out);
+  }
+
+  private rememberFileChanges(item: Extract<ThreadItem, { type: 'fileChange' }>): FileChange[] {
+    const changes: FileChange[] = item.changes.map((c) => ({
+      path: c.path,
+      kind: c.kind.type === 'update' && c.kind.move_path ? 'rename' : c.kind.type,
+      diff: c.diff,
+      oldPath: c.kind.type === 'update' ? c.kind.move_path ?? undefined : undefined
+    }));
+    this.fileChangeItems.set(item.id, changes);
+    return changes;
   }
 
   /**

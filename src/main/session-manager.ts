@@ -446,21 +446,22 @@ export class SessionManager {
     // The check can take seconds over the network; the session may have moved on.
     if (!this.gitStateCheckable(meta.status)) return;
     const next: SessionStatus = state.merged ? 'merged' : state.pr ? 'pr' : 'idle';
-    if (meta.status === next || meta.status === 'merged' || meta.status === 'error') return;
     // A stopped harness stays stopped unless the branch is actually pr/merged: git evidence
     // may upgrade the status, never downgrade it back to idle.
     if (meta.status === 'stopped' && next === 'idle') return;
-    meta.status = next;
-    meta.statusDetail = undefined;
-    this.schedulePersist(meta);
-    this.pushSessions();
-    // Parked on 'pr': keep polling so the label flips to 'merged' once it lands.
+    if (meta.status !== next) {
+      meta.status = next;
+      meta.statusDetail = undefined;
+      this.schedulePersist(meta);
+      this.pushSessions();
+    }
+    // An open PR needs another check even when this poll left the label unchanged.
     if (next === 'pr' && recheck) this.scheduleGitStateCheck(id, SessionManager.GIT_STATE_RECHECK_MS);
   }
 
   /** Only idle/pr/stopped sessions take a label update; live or already-final statuses are left alone. */
   private gitStateCheckable(status: SessionStatus): boolean {
-    return status === 'idle' || status === 'pr' || status === 'merged' || status === 'stopped';
+    return status === 'idle' || status === 'pr' || status === 'stopped';
   }
 
   /**
@@ -2453,9 +2454,8 @@ export class SessionManager {
     }
     const meta = this.get(sessionId);
     if (meta && active.approvals.size === 0 && meta.status === 'awaiting') {
-      meta.status = 'running';
-      meta.statusDetail = undefined;
-      this.pushSessions();
+      const status = active.adapter.busy || active.turnPending ? 'running' : 'idle';
+      this.emit(sessionId, { type: 'status', status });
     }
     this.emit(sessionId, { type: 'approval.resolved', requestId, decision });
   }
