@@ -6,6 +6,8 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { startDiagnostics } from './diag';
 import { installThemeStyles } from './theme';
 import './styles.css';
+// The minimalist Zen interface, keyed on <html data-ui>; after styles.css so it wins ties.
+import './ui-zen.css';
 
 // Before the first render, so a non-default theme never paints with the fallback palette.
 installThemeStyles();

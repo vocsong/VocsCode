@@ -5,6 +5,7 @@
  * every other theme is data in `src/shared/themes.ts` and injected here as one stylesheet.
  */
 import { isThemeId, themeCss, type ThemeId } from '../../shared/themes';
+import { DEFAULT_UI_MODE, isUiModeId, type UiModeId } from '../../shared/ui-modes';
 
 const STYLE_ID = 'vocs-theme-palettes';
 
@@ -29,4 +30,18 @@ export function activeTheme(): ThemeId {
 
 export function systemPrefersDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+/**
+ * Applies an interface mode (shared/ui-modes.ts). Only an attribute changes: the minimalist layouts
+ * are CSS over the same component tree, so nothing remounts and no state is lost on a switch.
+ */
+export function applyUiMode(id: UiModeId | undefined): void {
+  document.documentElement.setAttribute('data-ui', isUiModeId(id) ? id : DEFAULT_UI_MODE);
+}
+
+/** The interface mode currently on `<html>`. */
+export function activeUiMode(): UiModeId {
+  const id = document.documentElement.getAttribute('data-ui');
+  return isUiModeId(id) ? id : DEFAULT_UI_MODE;
 }

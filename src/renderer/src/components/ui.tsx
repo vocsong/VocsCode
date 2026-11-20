@@ -3,6 +3,7 @@ import React, { useEffect, useId, useRef, useState } from 'react';
 
 const ICONS: Record<string, string> = {
   logo: 'M6.4 7.2L12 17L17.6 7.2M9.2 19h5.6',
+  menu: 'M4 7h16M4 12h16M4 17h10',
   plus: 'M12 5v14M5 12h14',
   minus: 'M5 12h14',
   // A speech bubble with a plus: "start a new session" rather than the generic "add".

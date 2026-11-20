@@ -12,6 +12,8 @@ import { Icon, MenuItem } from './ui';
 import { ForkIntoItems } from './ForkInto';
 import { openSettings } from './SettingsView';
 import { VestaLauncher } from './Vesta';
+import { setUiMode, useMinimalUi, useUiMode } from '../ui-mode';
+import { UI_MODES } from '../../../shared/ui-modes';
 
 const REPO = 'https://github.com/vocsong/VocsCode';
 
@@ -66,11 +68,16 @@ function TitleBarButton({ icon, label, hint, onClick, disabled }: { icon: string
   );
 }
 
-/** Click to open, then hover to walk across the menus — the way a native menu bar behaves. */
+/**
+ * Click to open, then hover to walk across the menus — the way a native menu bar behaves. The
+ * minimalist Zen interface folds the four words into one button whose panel switches between the
+ * same menus by icon, so every item stays reachable without the labels on the bar.
+ */
 function MenuBar() {
   const [open, setOpen] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const close = () => setOpen(null);
+  const compact = useMinimalUi();
 
   useEffect(() => {
     if (!open) return;
@@ -88,12 +95,54 @@ function MenuBar() {
     };
   }, [open]);
 
-  const menus: { label: string; width: number; render: (close: () => void) => React.ReactNode }[] = [
-    { label: 'File', width: 280, render: (c) => <FileMenu close={c} /> },
-    { label: 'Edit', width: 240, render: (c) => <EditMenu close={c} /> },
-    { label: 'View', width: 260, render: (c) => <ViewMenu close={c} /> },
-    { label: 'Help', width: 240, render: (c) => <HelpMenu close={c} /> }
+  const menus: { label: string; icon: string; width: number; render: (close: () => void) => React.ReactNode }[] = [
+    { label: 'File', icon: 'file', width: 280, render: (c) => <FileMenu close={c} /> },
+    { label: 'Edit', icon: 'edit', width: 240, render: (c) => <EditMenu close={c} /> },
+    { label: 'View', icon: 'eye', width: 260, render: (c) => <ViewMenu close={c} /> },
+    { label: 'Help', icon: 'info', width: 240, render: (c) => <HelpMenu close={c} /> }
   ];
+
+  if (compact) {
+    const current = menus.find((m) => m.label === open);
+    return (
+      <nav className="menubar menubar-compact" ref={ref}>
+        <div className="menubar-item">
+          <button
+            type="button"
+            className={`menubar-btn titlebar-btn ${open ? 'open' : ''}`}
+            aria-label="Menu"
+            aria-expanded={!!open}
+            title="Menu"
+            onClick={() => setOpen(open ? null : 'File')}
+          >
+            <Icon name="menu" size={15} />
+          </button>
+          {current && (
+            <div className="dropdown-menu dropdown-left menubar-panel" style={{ width: 280 }}>
+              <div className="menubar-tabs" role="tablist" aria-label="Menus">
+                {menus.map((m) => (
+                  <button
+                    key={m.label}
+                    type="button"
+                    role="tab"
+                    className={`menubar-tab ${m.label === open ? 'active' : ''}`}
+                    aria-selected={m.label === open}
+                    aria-label={m.label}
+                    title={m.label}
+                    onClick={() => setOpen(m.label)}
+                    onMouseEnter={() => setOpen(m.label)}
+                  >
+                    <Icon name={m.icon} size={14} />
+                  </button>
+                ))}
+              </div>
+              {current.render(close)}
+            </div>
+          )}
+        </div>
+      </nav>
+    );
+  }
 
   return (
     <nav className="menubar" ref={ref}>
@@ -208,6 +257,7 @@ function ViewMenu({ close }: { close: () => void }) {
   const panelOpen = useStore((s) => s.panelOpen);
   const panelTab = useStore((s) => s.panelTab);
   const showThinking = useStore((s) => s.showThinking);
+  const uiMode = useUiMode();
   const st = useStore.getState();
   const run = (fn: () => void) => () => {
     close();
@@ -239,6 +289,11 @@ function ViewMenu({ close }: { close: () => void }) {
         Thinking
       </MenuItem>
       <Sep />
+      {UI_MODES.map((m) => (
+        <MenuItem key={m.id} active={uiMode === m.id} onClick={run(() => setUiMode(m.id))}>
+          {m.name} interface
+        </MenuItem>
+      ))}
       <MenuItem onClick={run(() => openSettings('appearance'))}>Theme</MenuItem>
     </>
   );
