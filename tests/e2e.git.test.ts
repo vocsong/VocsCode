@@ -4,6 +4,7 @@
  * markdown body and metadata; the issue dialog keeps working, comment counts included. Both previews
  * pull the conversation's comments on open and render them below the description. The PR
  * table keeps the number in its own column at the default panel width and when the panel is wide.
+ * A transcript link opens the Git panel in Standard and Zen and shows a merged PR outside the recent list.
  * The row's New session action confirms first in a dialog carrying the review template, editable
  * before the session starts on the repo; the issue row does the same with the fix template. That
  * turn is not asserted, since no provider key is configured.
@@ -48,9 +49,24 @@ const PR_VIEW_JSON =
 const ISSUE_VIEW_JSON =
   '{"comments":[{"author":{"login":"octocat"},"body":"Me **too**.","createdAt":"2024-02-03T04:05:06Z",' +
   '"url":"https://example.com/acme/repo/issues/12#issuecomment-1"}]}';
+const LINKED_PR_URL = 'https://github.com/acme/repo/pull/560';
+const LINKED_ISSUE_URL = 'https://github.com/acme/repo/issues/12';
+const LINKED_PR_VIEW_JSON = JSON.stringify({
+  number: 560,
+  title: 'Ship the usage toggle',
+  state: 'MERGED',
+  url: LINKED_PR_URL,
+  headRefName: 'feature/usage-toggle',
+  baseRefName: 'develop',
+  body: 'Adds the **usage toggle**.',
+  comments: [{ author: { login: 'reviewer' }, body: 'Verified in Electron.' }]
+});
 
 const GH_SH = [
   '#!/bin/sh',
+  'case "$1 $2 $3" in',
+  `  'pr view ${LINKED_PR_URL}'|'pr view 560') echo '${LINKED_PR_VIEW_JSON}'; exit 0 ;;`,
+  'esac',
   'case "$1 $2" in',
   `  'pr list') echo '${PR_JSON}' ;;`,
   `  'pr view') echo '${PR_VIEW_JSON}' ;;`,
@@ -63,11 +79,16 @@ const GH_SH = [
 
 const GH_CMD = [
   '@echo off',
+  `if /i "%~1 %~2 %~3"=="pr view ${LINKED_PR_URL}" goto linked_pr`,
+  'if /i "%~1 %~2 %~3"=="pr view 560" goto linked_pr',
   `if /i "%~1"=="pr" if /i "%~2"=="list" echo ${PR_JSON}`,
   `if /i "%~1"=="pr" if /i "%~2"=="view" echo ${PR_VIEW_JSON}`,
   `if /i "%~1"=="issue" if /i "%~2"=="list" echo ${ISSUE_JSON}`,
   `if /i "%~1"=="issue" if /i "%~2"=="view" echo ${ISSUE_VIEW_JSON}`,
   'if /i "%~1"=="auth" if /i "%~2"=="status" echo Logged in to github.com account octocat (keyring)',
+  'exit /b 0',
+  ':linked_pr',
+  `echo ${LINKED_PR_VIEW_JSON}`,
   'exit /b 0'
 ].join('\r\n');
 
@@ -76,9 +97,10 @@ const GH_CMD = [
  * `seedRepo` runs after the initial commit so a test can add remotes, branches, and sessions.
  */
 async function seedAndLaunch(
-  { tag, panelWidth, uiMode, seedRepo }: {
+  { tag, panelWidth, assistantText = 'Hi', uiMode, seedRepo }: {
     tag: string;
     panelWidth: number;
+    assistantText?: string;
     uiMode?: UiModeId;
     seedRepo?: (project: string, git: (...args: string[]) => void) => Pick<SessionMeta, 'title' | 'cwd' | 'worktreeBranch'>[] | void;
   }
@@ -119,7 +141,7 @@ async function seedAndLaunch(
   } as SessionMeta;
   const items: TranscriptItem[] = [
     { id: 'u1', kind: 'user', ts: Date.now(), text: 'Hello' },
-    { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'Hi' }
+    { id: 'a1', kind: 'assistant', ts: Date.now(), text: assistantText }
   ];
   const sessions = [session, ...additionalSessions.map((meta, i) => ({
     ...session, ...meta, id: `${sid}-${i}`, updatedAt: session.updatedAt - i - 1
@@ -135,7 +157,8 @@ async function seedAndLaunch(
     if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|OPENCODE|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
     env[k] = v;
   }
-  env.PATH = `${bin}${path.delimiter}${env.PATH ?? ''}`;
+  const pathKey = isWin ? Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'PATH' : 'PATH';
+  env[pathKey] = `${bin}${path.delimiter}${env[pathKey] ?? ''}`;
   env.VOCS_CODE_USER_DATA = userData;
 
   const packaged = process.env.HARNESS_E2E_EXE;
@@ -189,6 +212,43 @@ async function launchBranchesPanel(): Promise<{ app: ElectronApplication; win: P
 }
 
 describe.runIf(enabled)('git panel PR details', () => {
+  it.each(['standard', 'zen'] as const)('opens the linked pull request from a transcript with the Git panel closed in %s mode', async (uiMode) => {
+    const { app, win } = await seedAndLaunch({
+      tag: `pr-link-${uiMode}`,
+      panelWidth: 420,
+      uiMode,
+      assistantText: `Merged [#560](${LINKED_PR_URL}) into develop. See [issue #12](${LINKED_ISSUE_URL}).`,
+      seedRepo: (_project, git) => git('remote', 'add', 'origin', 'https://github.com/acme/repo.git')
+    });
+    await app.evaluate(({ shell }) => {
+      const opened: string[] = [];
+      (globalThis as unknown as { __openedGitLinks: string[] }).__openedGitLinks = opened;
+      shell.openExternal = async (url: string) => void opened.push(url);
+    });
+    const opened = () => app.evaluate(() => (globalThis as unknown as { __openedGitLinks: string[] }).__openedGitLinks);
+
+    expect(await win.locator('html').getAttribute('data-ui')).toBe(uiMode);
+    const closePanel = win.getByRole('button', { name: 'Close panel' });
+    await closePanel.click();
+    await closePanel.waitFor({ state: 'hidden' });
+    await win.getByRole('link', { name: 'issue #12', exact: true }).click();
+    await expect.poll(opened, { timeout: 10_000 }).toEqual([LINKED_ISSUE_URL]);
+
+    await win.getByRole('link', { name: '#560', exact: true }).click();
+    const dialog = win.getByRole('dialog', { name: '#560 Ship the usage toggle', exact: true });
+    await dialog.waitFor({ timeout: 10_000 });
+    expect(await dialog.getByText('Merged', { exact: true }).isVisible()).toBe(true);
+    expect(await dialog.locator('.pr-dialog-body strong').innerText()).toBe('usage toggle');
+    await dialog.getByText('Verified in Electron.').waitFor({ timeout: 10_000 });
+    expect(await opened()).toEqual([LINKED_ISSUE_URL]);
+
+    await dialog.getByRole('button', { name: 'Open on GitHub' }).click();
+    await expect.poll(opened, { timeout: 10_000 }).toEqual([LINKED_ISSUE_URL, LINKED_PR_URL]);
+    await dialog.waitFor({ state: 'hidden', timeout: 10_000 });
+    await win.getByRole('button', { name: 'Read pull request #7: Ship the widget' }).waitFor({ timeout: 10_000 });
+    await app.close();
+  }, 180_000);
+
   it('opens a pull request dialog from its row and keeps the issue dialog working', async () => {
     const { app, win } = await launchGitPanel(420);
 

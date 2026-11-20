@@ -55,6 +55,29 @@ function underPath(dir: string, cwd: string): boolean {
 }
 
 export function BranchesTab({ session, cache }: { session: SessionMeta; cache: GitPanelCache }) {
+  const preview = useStore((s) => s.gitPullRequestPreview?.sessionId === session.id ? s.gitPullRequestPreview : null);
+  const closePreview = useStore((s) => s.closePullRequestPreview);
+  return (
+    <>
+      <RepositoryGitTab session={session} cache={cache} />
+      {preview && (
+        <PrDialog
+          number={preview.number}
+          pr={preview.detail?.pr}
+          comments={preview.detail?.comments ?? null}
+          loadError={preview.detail?.error}
+          onClose={closePreview}
+          onViewExternal={() => {
+            closePreview();
+            void invoke('app:openExternal', { url: preview.url });
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function RepositoryGitTab({ session, cache }: { session: SessionMeta; cache: GitPanelCache }) {
   const toast = useStore((s) => s.toast);
   const sessions = useStore((s) => s.sessions);
   const setActive = useStore((s) => s.setActive);
@@ -600,7 +623,7 @@ export function BranchesTab({ session, cache }: { session: SessionMeta; cache: G
         />
       )}
       {isCurrentVisit && selectedPr && (
-        <PrDialog
+        <ListedPrDialog
           pr={selectedPr}
           sessionId={session.id}
           onClose={() => setSelectedPr(null)}
@@ -1263,22 +1286,73 @@ function IssueDialog({
   );
 }
 
-function PrDialog({
-  pr,
-  sessionId,
-  onClose,
-  onViewExternal,
-  onMerge
-}: {
+function ListedPrDialog({ pr, sessionId, onClose, onViewExternal, onMerge }: {
   pr: GitPullRequest;
   sessionId: string;
   onClose: () => void;
   onViewExternal: () => void;
   onMerge: () => void;
 }) {
+  const { comments, error } = useGitComments('git:prComments', sessionId, pr.number);
+  return <PrDialog number={pr.number} pr={pr} comments={comments} commentsError={error} onClose={onClose} onViewExternal={onViewExternal} onMerge={onMerge} />;
+}
+
+function PrDialog({
+  number,
+  pr,
+  comments,
+  commentsError,
+  loadError,
+  onClose,
+  onViewExternal,
+  onMerge
+}: {
+  number: number;
+  pr?: GitPullRequest;
+  comments: GitComment[] | null;
+  commentsError?: string;
+  loadError?: string;
+  onClose: () => void;
+  onViewExternal: () => void;
+  onMerge?: () => void;
+}) {
+  const mergeable = pr?.state === 'OPEN' && !pr.isDraft && !!pr.headRefName;
+  return (
+    <Modal
+      title={<><span className="mono muted">#{number}</span> {pr?.title}</>}
+      onClose={onClose}
+      width={760}
+      footer={
+        <>
+          <Button variant="ghost" icon="external" onClick={onViewExternal}>
+            Open on GitHub
+          </Button>
+          {pr && onMerge && (
+            <Button
+              variant="primary"
+              icon="check"
+              disabled={!mergeable}
+              title={mergeable ? `Merge ${pr.headRefName} into ${pr.baseRefName ?? 'its target branch'}` : pr.isDraft ? 'Draft pull requests cannot be merged' : 'Only open pull requests can be merged'}
+              onClick={onMerge}
+            >
+              Merge PR
+            </Button>
+          )}
+        </>
+      }
+    >
+      {pr ? <PrDetails pr={pr} comments={comments} error={commentsError} /> : loadError ? (
+        <div className="callout warn" role="status">{loadError}</div>
+      ) : (
+        <div className="muted" role="status"><Spinner /> Loading pull request…</div>
+      )}
+    </Modal>
+  );
+}
+
+function PrDetails({ pr, comments, error }: { pr: GitPullRequest; comments: GitComment[] | null; error?: string }) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const bodyHtml = useMemo(() => renderMarkdown(pr.body ?? ''), [pr.body]);
-  const { comments, error } = useGitComments('git:prComments', sessionId, pr.number);
   useEffect(() => {
     if (!bodyRef.current || !bodyHtml) return;
     return installMarkdownHandlers(bodyRef.current, (url) => void invoke('app:openExternal', { url }));
@@ -1287,30 +1361,8 @@ function PrDialog({
   const stateTone = pr.state === 'MERGED' ? 'purple' : pr.state === 'CLOSED' ? 'neutral' : pr.isDraft ? 'neutral' : 'green';
   const review = pr.reviewDecision === 'APPROVED' ? 'Approved' : pr.reviewDecision === 'CHANGES_REQUESTED' ? 'Changes requested' : undefined;
   const diffStat = pr.additions !== undefined || pr.deletions !== undefined ? `+${pr.additions ?? 0} −${pr.deletions ?? 0}` : undefined;
-  const mergeable = pr.state === 'OPEN' && !pr.isDraft && !!pr.headRefName;
-
   return (
-    <Modal
-      title={<><span className="mono muted">#{pr.number}</span> {pr.title}</>}
-      onClose={onClose}
-      width={760}
-      footer={
-        <>
-          <Button variant="ghost" icon="external" onClick={onViewExternal}>
-            Open on GitHub
-          </Button>
-          <Button
-            variant="primary"
-            icon="check"
-            disabled={!mergeable}
-            title={mergeable ? `Merge ${pr.headRefName} into ${pr.baseRefName ?? 'its target branch'}` : pr.isDraft ? 'Draft pull requests cannot be merged' : 'Only open pull requests can be merged'}
-            onClick={onMerge}
-          >
-            Merge PR
-          </Button>
-        </>
-      }
-    >
+    <>
       <div className="pr-dialog-meta">
         <Badge tone={stateTone}>{stateLabel}</Badge>
         {review && <Badge tone={pr.reviewDecision === 'APPROVED' ? 'green' : 'red'} title={`Review: ${review}`}>{review}</Badge>}
@@ -1329,7 +1381,7 @@ function PrDialog({
       </div>
       {bodyHtml ? <div ref={bodyRef} className="md pr-dialog-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} /> : <p className="muted pr-dialog-empty">No description provided.</p>}
       <CommentsSection comments={comments} error={error} loading={comments === null} />
-    </Modal>
+    </>
   );
 }
 
