@@ -238,6 +238,7 @@ describe('split view', () => {
     await waitFor(() => expect(panes()).toHaveLength(2));
     // The new pane waits for a choice; the first pane is the same mounted transcript as before.
     expect(panes()[1]!.textContent).toContain('Open a session in this pane');
+    expect(panes()[1]!.textContent).toContain('repo | Tests');
     expect(panes()[0]!.querySelector('.transcript')).toBe(original);
     expect(useStore.getState().activeId).toBeNull();
 
