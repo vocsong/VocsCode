@@ -353,15 +353,17 @@
     transform: scale(1.5);
   }
 }
-/* One line per session: the title, and a status pill only when there is something to say. */
+/* One line per session: title and hover actions, with the status pill at the end. */
 :root[data-ui='zen'] .session-main {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-:root[data-ui='zen'] .session-title {
-  flex: 1 1 auto;
+:root[data-ui='zen'] .session-heading {
+  flex: 1;
   min-width: 0;
+}
+:root[data-ui='zen'] .session-title {
   font-weight: 450;
   color: var(--fg-muted);
 }
@@ -374,12 +376,23 @@
   display: none;
 }
 :root[data-ui='zen'] .session-meta {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  max-width: 40%;
   margin: 0;
   min-height: 0;
 }
 :root[data-ui='zen'] .session-meta > :not(.session-side) {
   display: none;
+}
+:root[data-ui='zen'] .session-side,
+:root[data-ui='zen'] .session-side > .dropdown {
+  flex-shrink: 1;
+  min-width: 0;
+}
+:root[data-ui='zen'] .session-status {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 :root[data-ui='zen'] .sidebar > .resizer {
   display: none;

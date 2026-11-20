@@ -606,31 +606,52 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
         </button>
       </div>
       <div className="session-main">
-        {renaming ? (
-          <input
-            className="session-rename"
-            autoFocus
-            onFocus={(e) => e.currentTarget.select()}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onBlur={(e) => {
-              e.stopPropagation();
-              void commit();
-            }}
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === 'Enter') void commit();
-              if (e.key === 'Escape') cancelRename();
-            }}
-            onClick={(e) => e.stopPropagation()}
-            onDoubleClick={(e) => e.stopPropagation()}
-          />
-        ) : (
-          <div className="session-title">
-            {s.unseenAt !== undefined && <span className="session-unseen-dot" data-testid="session-unseen-dot" title="Finished since you last looked" />}
-            <span title="Click to rename" onClick={(e) => { e.stopPropagation(); startRename(); }}>{s.title}</span>
+        <div className="session-heading">
+          {renaming ? (
+            <input
+              className="session-rename"
+              autoFocus
+              onFocus={(e) => e.currentTarget.select()}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onBlur={(e) => {
+                e.stopPropagation();
+                void commit();
+              }}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') void commit();
+                if (e.key === 'Escape') cancelRename();
+              }}
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <div className="session-title">
+              {s.unseenAt !== undefined && <span className="session-unseen-dot" data-testid="session-unseen-dot" title="Finished since you last looked" />}
+              <span title="Click to rename" onClick={(e) => { e.stopPropagation(); startRename(); }}>{s.title}</span>
+            </div>
+          )}
+          <div className="row-actions" onClick={(e) => e.stopPropagation()}>
+            {s.archived ? (
+              <>
+                <button type="button" className="row-act-btn" title="Restore session" aria-label="Restore session" onClick={() => void invoke('sessions:archive', { id: s.id, archived: false })}>
+                  <Icon name="restore" size={15} />
+                </button>
+                <button type="button" className="row-act-btn danger" disabled={!!s.mission} title={s.mission ? 'Mission deletion unavailable; archive retains artifacts' : 'Delete session'} aria-label="Delete session" onClick={() => void deleteRow()}>
+                  <Icon name="trash" size={15} />
+                </button>
+              </>
+            ) : (
+              <>
+                <ForkIntoDropdown session={s} />
+                <button type="button" className="row-act-btn" title={s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={() => void archiveSession(s, toast)}>
+                  <Icon name="archive" size={15} />
+                </button>
+              </>
+            )}
           </div>
-        )}
+        </div>
         <div className="session-meta">
           {s.mission && <Badge tone="purple">Mission</Badge>}
           <span className={`session-harness tone-${harnessTone(s.config.harness)}`} title={h?.name}>
@@ -659,25 +680,6 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
           </span>
           <span className="session-time">{relTime(s.updatedAt)}</span>
         </div>
-      </div>
-      <div className="row-actions" onClick={(e) => e.stopPropagation()}>
-        {s.archived ? (
-          <>
-            <button type="button" className="row-act-btn" title="Restore session" aria-label="Restore session" onClick={() => void invoke('sessions:archive', { id: s.id, archived: false })}>
-              <Icon name="restore" size={15} />
-            </button>
-            <button type="button" className="row-act-btn danger" disabled={!!s.mission} title={s.mission ? 'Mission deletion unavailable; archive retains artifacts' : 'Delete session'} aria-label="Delete session" onClick={() => void deleteRow()}>
-              <Icon name="trash" size={15} />
-            </button>
-          </>
-        ) : (
-          <>
-            <ForkIntoDropdown session={s} />
-            <button type="button" className="row-act-btn" title={s.mission ? 'Archive Mission (retain worktrees)' : s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={() => void archiveSession(s, toast)}>
-              <Icon name="archive" size={15} />
-            </button>
-          </>
-        )}
       </div>
     </div>
   );
