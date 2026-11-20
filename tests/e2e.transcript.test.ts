@@ -151,7 +151,8 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     // Collapsed: every message and the worked headers are on screen, the steps themselves are not.
     const work = win.locator('.work-head');
     await work.first().waitFor({ timeout: 30_000 });
-    const replies = await win.locator('.msg-assistant .md').allInnerTexts();
+    const messages = win.locator('.msg-assistant .md');
+    const replies = await messages.allInnerTexts();
     expect(replies).toEqual([
       expect.stringContaining('find the exact processes first'),
       expect.stringContaining('A blanket kill would be unsafe'),
@@ -172,6 +173,19 @@ describe.runIf(enabled)('electron e2e: transcript collapse layers', () => {
     expect(await win.locator('.thinking-toggle').count()).toBe(1);
     expect(await win.locator('.thinking-body').count()).toBe(0);
     await win.screenshot({ path: path.join(shots, 'transcript-01-collapsed.png') });
+
+    const [replyBottom, summary, followUpTop] = await Promise.all([
+      messages.filter({ hasText: 'Retry npm run update' }).evaluate((el) => el.getBoundingClientRect().bottom),
+      work.nth(2).evaluate((el) => {
+        const { top, bottom } = el.getBoundingClientRect();
+        return { top, bottom };
+      }),
+      messages.filter({ hasText: 'The background review also confirmed' }).evaluate((el) => el.getBoundingClientRect().top)
+    ]);
+    for (const gap of [summary.top - replyBottom, followUpTop - summary.bottom]) {
+      expect(gap).toBeGreaterThanOrEqual(0);
+      expect(gap).toBeLessThanOrEqual(12);
+    }
 
     // Expanded by the user: each stretch shows its own command rows, and nothing else moves.
     await work.nth(0).click();
