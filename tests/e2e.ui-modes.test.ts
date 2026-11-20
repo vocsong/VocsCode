@@ -193,8 +193,18 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await expect.poll(() => modelPill.evaluate((el) => getComputedStyle(el.closest('.dropdown')!).opacity)).toBe('0');
     expect(await style(win, '.pane.active .composer .send-btn', 'opacity')).toBe('1');
     await shot(win, 'zen-session');
-    await win.locator('.pane.active .composer-box').hover();
+    const composerBox = win.locator('.pane.active .composer-box');
+    await composerBox.hover();
     await expect.poll(() => modelPill.evaluate((el) => getComputedStyle(el.closest('.dropdown')!).opacity)).toBe('1');
+    const menu = composerBox.getByRole('menu');
+    for (const pill of [modelPill, composerBox.getByRole('button', { name: 'Permission mode: Edits' })]) {
+      await pill.click();
+      await menu.waitFor();
+      const [popup, trigger] = await Promise.all([menu.boundingBox(), pill.boundingBox()]);
+      expect(Math.abs(popup!.x - trigger!.x), 'run menu sits over its own Zen button').toBeLessThanOrEqual(1);
+      await win.keyboard.press('Escape');
+      await menu.waitFor({ state: 'hidden' });
+    }
     // Hovering the rail opens it to the user's sidebar width, over the transcript: the pane does not move.
     const paneBefore = await rect(win, '.pane.active');
     await win.mouse.move(26, 420);

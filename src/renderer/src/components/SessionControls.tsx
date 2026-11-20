@@ -1,7 +1,7 @@
 /**
  * The model pill reads provider/model with the reasoning effort beside it in a lighter weight, and
  * opens the full model identity, Effort and Fast controls.
- * Permissions stay visible; the context ring opens Usage. Secondary details live in menus.
+ * Permissions stay visible; the context ring toggles Usage. Secondary details live in menus.
  */
 import React from 'react';
 import type { ModelInfo, SessionMeta } from '../../../shared/types';
@@ -82,7 +82,6 @@ export function SessionControls({ session }: { session: SessionMeta }) {
       {modeLabel && (
         <Dropdown
           align="left"
-          width={300}
           trigger={(open) => (
             <button type="button" className={`pill run-permission mode-${mode} ${open ? 'open' : ''}`} title="Permission mode" aria-label={`Permission mode: ${modeLabel.short}`}>
               <Icon name="shield" size={13} /> <span className="pill-text">{modeLabel.short}</span> <Icon name="chevron" size={12} />
@@ -107,6 +106,7 @@ export function SessionControls({ session }: { session: SessionMeta }) {
 
 /** Context stays glanceable; spend and token details are in the options menu / Usage panel. */
 export function SessionMeter({ session }: { session: SessionMeta }) {
+  const usageOpen = useStore((s) => s.panelOpen && s.panelTab === 'usage');
   const ctxPct = session.usage.contextWindow && session.usage.contextTokens ? Math.min(100, Math.round((session.usage.contextTokens / session.usage.contextWindow) * 100)) : null;
   const r = 6;
   const c = 2 * Math.PI * r;
@@ -114,9 +114,14 @@ export function SessionMeter({ session }: { session: SessionMeta }) {
     <button
       type="button"
       className={`session-meter ${ctxPct !== null && ctxPct >= 80 ? 'session-meter-high' : ''}`}
-      title={`${fmtCost(session.usage.costUsd)} · Input ${fmtTokens(session.usage.inputTokens)} · Output ${fmtTokens(session.usage.outputTokens)} · Cache read ${fmtTokens(session.usage.cacheReadTokens)}${ctxPct !== null ? ` · Context ${ctxPct}%` : ''} — open Usage`}
+      title={`${fmtCost(session.usage.costUsd)} · Input ${fmtTokens(session.usage.inputTokens)} · Output ${fmtTokens(session.usage.outputTokens)} · Cache read ${fmtTokens(session.usage.cacheReadTokens)}${ctxPct !== null ? ` · Context ${ctxPct}%` : ''} — ${usageOpen ? 'close' : 'open'} Usage`}
       aria-label="Session usage"
-      onClick={() => useStore.getState().setPanelTab('usage')}
+      aria-expanded={usageOpen}
+      onClick={() => {
+        const { panelOpen, panelTab, setPanelTab, togglePanel } = useStore.getState();
+        if (panelOpen && panelTab === 'usage') togglePanel(false);
+        else setPanelTab('usage');
+      }}
     >
       {ctxPct !== null && (
         <span className="session-meter-ring" aria-hidden>
