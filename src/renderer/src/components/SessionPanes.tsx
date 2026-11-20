@@ -7,7 +7,7 @@
  * follow state, and a pane re-renders only when its own session's transcript or metadata changes.
  */
 import React, { useEffect, useRef, useState } from 'react';
-import { harnessShort } from '../format';
+import { formatSessionLabel, harnessShort } from '../format';
 import { isTopLevelSession } from '../missions';
 import { SESSION_DRAG_TYPE, dropZoneAt, filePane, paneMinPx, visiblePaneSessions, type DropZone, type PaneLayout, type SessionPane } from '../panes';
 import { sortSessionRows } from '../sessionOrder';
@@ -185,13 +185,16 @@ function PanePicker({ pane }: { pane: SessionPane }) {
       <p className="muted small">Pick one below, click one in the sidebar, or drag it here. Each pane keeps its own session running.</p>
       {choices.length > 0 ? (
         <div className="pane-picker-list" role="list">
-          {choices.map((s) => (
-            <button key={s.id} type="button" role="listitem" className="pane-picker-item" onClick={() => open(s.id)}>
-              <StatusDot status={s.status} />
-              <span className="pane-picker-name">{s.title}</span>
-              <span className="muted small">{harnessShort(s.config.harness)}{s.worktreeBranch ? ` · ${s.worktreeBranch}` : ''}</span>
-            </button>
-          ))}
+          {choices.map((session) => {
+            const label = formatSessionLabel(session);
+            return (
+              <button key={session.id} type="button" role="listitem" className="pane-picker-item" onClick={() => open(session.id)}>
+                <StatusDot status={session.status} />
+                <span className="pane-picker-name" title={label}>{label}</span>
+                <span className="muted small">{harnessShort(session.config.harness)}{session.worktreeBranch ? ` · ${session.worktreeBranch}` : ''}</span>
+              </button>
+            );
+          })}
         </div>
       ) : (
         <p className="muted small">Every other session is already on screen.</p>
