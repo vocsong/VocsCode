@@ -1478,6 +1478,12 @@ h4 {
   text-transform: uppercase;
   color: var(--fg-faint);
 }
+.sidebar-section .sidebar-recent {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 3px 7px;
+  font-size: 11.5px;
+}
 .sidebar-section .sidebar-archived {
   flex: 0 0 auto;
   padding: 3px 7px;
@@ -1896,6 +1902,21 @@ h4 {
   align-items: center;
   gap: 3px;
   min-width: 0;
+}
+/* Recent view: the project a row belongs to, since no folder header sits above it. */
+.session-folder {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  color: var(--fg-muted);
+}
+.session-folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 110px;
 }
 .session-worktree-name {
   overflow: hidden;

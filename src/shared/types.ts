@@ -1274,6 +1274,9 @@ export interface FolderSessionDefaults {
   acpAgent?: string;
 }
 
+/** Sidebar session list layout: `folders` groups rows under project folders; `recent` is one flat list, most recent first. */
+export type SidebarView = 'folders' | 'recent';
+
 export interface AppSettings {
   /** User-approved execution presets. Missing on older settings means Mission is unconfigured. */
   mission?: MissionConfig;
@@ -1354,6 +1357,8 @@ export interface AppSettings {
   folderOrder?: string[];
   /** Project roots whose sidebar folder block is collapsed. */
   collapsedFolders?: string[];
+  /** How the sidebar lists sessions: grouped under their folders, or one list across folders by recency. */
+  sidebarView?: SidebarView;
   /** Extra keyboard shortcuts keyed by canonical accelerator (e.g. 'Ctrl+Alt+A'); see shared/shortcuts.ts. */
   customShortcuts?: Record<string, ShortcutCommand>;
   /**

@@ -1,0 +1,105 @@
+// The sidebar's Recent view: one list across every folder, most recent first, toggled from the
+// Sessions header and persisted through settings:update (settings.sidebarView).
+/** @vitest-environment jsdom */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+// settings:update writes the patch back into the store, as the main process push would.
+const invokeMock = vi.fn().mockImplementation((channel: string, args?: Partial<AppSettings>) => {
+  const settings = useStore.getState().settings;
+  if (channel === 'settings:update' && settings && args) useStore.setState({ settings: { ...settings, ...args } });
+  return Promise.resolve({});
+});
+(window as unknown as { harness: unknown }).harness = {
+  platform: 'win32',
+  invoke: invokeMock,
+  on: vi.fn().mockReturnValue(() => undefined),
+};
+
+import { act, cleanup, fireEvent, render } from '@testing-library/react';
+import { Sidebar } from '../src/renderer/src/components/Sidebar';
+import { useStore } from '../src/renderer/src/store';
+import type { AppSettings, SessionMeta } from '../src/shared/types';
+
+afterEach(async () => {
+  invokeMock.mockClear();
+  await act(async () => { cleanup(); });
+});
+
+const baseSettings = {
+  folders: ['G:/proj/empty'],
+  folderStyles: { 'G:/proj/b': { color: '#f472b6', icon: 'rocket' } },
+  folderOrder: ['G:/proj/a', 'G:/proj/b', 'G:/proj/empty'],
+  collapsedFolders: ['G:/proj/b'],
+  sidebarWidth: 280,
+  panelWidth: 420
+} as unknown as AppSettings;
+
+const session = (root: string, id: string, lastUserMessageAt: number, over: Partial<SessionMeta> = {}): SessionMeta => ({
+  id,
+  title: `Session ${id}`,
+  cwd: root,
+  config: { projectRoot: root, harness: 'native' },
+  status: 'idle',
+  archived: false,
+  pinned: false,
+  createdAt: 1,
+  updatedAt: 1000,
+  lastUserMessageAt,
+  usage: { costUsd: 0 },
+  ...over
+} as unknown as SessionMeta);
+
+const sessions = [
+  session('G:/proj/a', 'a-old', 100),
+  session('G:/proj/b', 'b-new', 500),
+  session('G:/proj/a', 'a-new', 400),
+  session('G:/proj/b', 'b-mid', 300),
+  session('G:/proj/a', 'a-gone', 900, { archived: true })
+];
+
+const rowIds = (container: HTMLElement) => [...container.querySelectorAll('[data-testid="session-row"]')].map((el) => el.getAttribute('data-session-id'));
+
+function mount(list: SessionMeta[], view?: 'folders' | 'recent') {
+  useStore.setState({ sessions: list, settings: { ...baseSettings, sidebarView: view } as AppSettings, activeId: null, view: 'chat' });
+  return render(<Sidebar />);
+}
+
+describe('sidebar Recent view', () => {
+  it('defaults to folder groups and switches to one recency-ordered list across folders, persisting the choice', async () => {
+    const { container, getByTestId } = mount(sessions);
+    // Folder view: grouped under headers; collapsed folder b hides its rows.
+    expect([...container.querySelectorAll('.project-title')].map((el) => el.textContent)).toEqual(['a', 'b', 'empty']);
+    expect(rowIds(container)).toEqual(['a-new', 'a-old']);
+    expect(container.querySelector('[data-testid="session-folder"]')).toBeNull();
+
+    const toggle = getByTestId('sidebar-recent');
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    await act(async () => { fireEvent.click(toggle); });
+    expect(invokeMock).toHaveBeenCalledWith('settings:update', { sidebarView: 'recent' });
+
+    // Recent view: no folder headers, every live row (collapsed folders too) by the user's last message.
+    expect(container.querySelectorAll('.project-header')).toHaveLength(0);
+    expect(rowIds(container)).toEqual(['b-new', 'a-new', 'b-mid', 'a-old']);
+    expect(getByTestId('sidebar-recent').getAttribute('aria-pressed')).toBe('true');
+    expect(getByTestId('sidebar-recent').classList.contains('active')).toBe(true);
+
+    // Each row names its folder, in the folder's own colour.
+    const chip = container.querySelector('[data-session-id="b-new"] [data-testid="session-folder"]') as HTMLElement;
+    expect(chip.textContent).toBe('b');
+    expect(chip.title).toBe('G:/proj/b');
+    expect(chip.style.color).toBe('rgb(244, 114, 182)');
+
+    // Toggling back restores the grouped layout.
+    await act(async () => { fireEvent.click(getByTestId('sidebar-recent')); });
+    expect(invokeMock).toHaveBeenCalledWith('settings:update', { sidebarView: 'folders' });
+    expect(rowIds(container)).toEqual(['a-new', 'a-old']);
+  });
+
+  it('keeps pinned rows on top and lists archived rows by recency in the Archived view', async () => {
+    const list = [...sessions, session('G:/proj/a', 'a-pin', 1, { pinned: true, pinnedAt: 5 }), session('G:/proj/b', 'b-gone', 800, { archived: true })];
+    const { container, getByText } = mount(list, 'recent');
+    expect(rowIds(container)).toEqual(['a-pin', 'b-new', 'a-new', 'b-mid', 'a-old']);
+    await act(async () => { fireEvent.click(getByText('Archived')); });
+    expect(rowIds(container)).toEqual(['a-gone', 'b-gone']);
+  });
+});
