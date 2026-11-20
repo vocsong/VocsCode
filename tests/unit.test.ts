@@ -1345,7 +1345,10 @@ describe('custom status label settings', () => {
 });
 
 describe('SessionManager PR state refresh', () => {
-  it('flips a pr session to merged when refreshGitState runs after /merge', async () => {
+  it.each([
+    { when: 'the first check finds the merge', unchangedPolls: 0 },
+    { when: 'the PR stays open across multiple checks', unchangedPolls: 2 }
+  ])('updates the sidebar to merged when $when', async ({ unchangedPolls }) => {
     vi.useFakeTimers();
     const session: SessionMeta = {
       id: 'pr_session',
@@ -1360,7 +1363,7 @@ describe('SessionManager PR state refresh', () => {
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
     };
     const upsert = vi.fn();
-    const published: SessionMeta[][] = [];
+    const published: SessionMeta['status'][] = [];
     const store = {
       list: () => [session],
       get: (id: string) => (id === session.id ? session : undefined),
@@ -1373,20 +1376,30 @@ describe('SessionManager PR state refresh', () => {
       analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn(), recordUserMessage: vi.fn() } as unknown as AnalyticsStore,
       getSecret: async () => undefined,
       pushEvent: vi.fn(),
-      pushSessions: (list) => published.push(list),
+      pushSessions: ([meta]) => published.push(meta!.status),
       notify: vi.fn(),
       log: vi.fn()
     });
-    vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: true });
+    const check = vi.mocked(branchGitState).mockClear();
+    for (let i = 0; i < unchangedPolls; i++) check.mockResolvedValueOnce({ pr: true, merged: false });
+    check.mockResolvedValue({ pr: false, merged: true });
     try {
       manager.refreshGitState(session.id);
       expect(session.status).toBe('pr'); // not flipped synchronously
       await vi.advanceTimersByTimeAsync(2_000); // 1s check delay + the 300ms debounced persist
+      for (let i = 0; i < unchangedPolls; i++) {
+        expect(session.status).toBe('pr');
+        expect(published).toEqual([]);
+        expect(check).toHaveBeenCalledTimes(i + 1);
+        await vi.advanceTimersByTimeAsync(120_000);
+      }
       expect(session.status).toBe('merged');
-      expect(published.length).toBeGreaterThan(0);
-      expect(upsert).toHaveBeenCalled();
+      expect(published).toEqual(['merged']);
+      expect(upsert).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(check).toHaveBeenCalledTimes(unchangedPolls + 1);
     } finally {
-      vi.mocked(branchGitState).mockResolvedValue({ pr: false, merged: false });
+      check.mockReset().mockResolvedValue({ pr: false, merged: false });
       vi.useRealTimers();
     }
   });
