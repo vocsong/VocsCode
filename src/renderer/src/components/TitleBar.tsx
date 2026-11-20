@@ -10,7 +10,7 @@ import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
 import { Icon, MenuItem } from './ui';
 import { ForkIntoItems } from './ForkInto';
-import { basename } from '../format';
+import { formatSessionLabel } from '../format';
 import { openSettings } from './SettingsView';
 import { VestaLauncher } from './Vesta';
 import { setUiMode, useMinimalUi, useUiMode } from '../ui-mode';
@@ -35,8 +35,7 @@ export function TitleBar() {
   const navForward = useStore((s) => s.navForward);
   const view = useStore((s) => s.view);
   const session = useActiveSession();
-  // The open session is named with its project first, so same-titled sessions in different repos read apart.
-  const sessionLabel = session ? `${basename(session.config.projectRoot)} | ${session.title}` : null;
+  const sessionLabel = session ? formatSessionLabel(session) : null;
   const title = view === 'settings' ? 'Settings · Vocs Code' : sessionLabel ? `${sessionLabel} · Vocs Code` : 'Vocs Code';
 
   return (
