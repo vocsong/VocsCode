@@ -1,5 +1,5 @@
 /** Top-level layout: sidebar, transcript, composer and the right-hand panel. */
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { invoke } from './api';
 import { useActiveSession, useStore, toastError } from './store';
 import { Vesta } from './components/Vesta';
@@ -25,8 +25,10 @@ import { applyTheme, applyUiMode } from './theme';
 import { isTopLevelSession, pauseMissionSession } from './missions';
 import { useReportDesktopFocus, useSessionViewing } from './desktop-focus';
 import { activeComposer } from './panes';
+import { GitPanelCache } from './git-panel-cache';
 
 export function App() {
+  const [gitPanelCache] = useState(() => new GitPanelCache());
   const booted = useStore((s) => s.booted);
   const bootError = useStore((s) => s.bootError);
   const boot = useStore((s) => s.boot);
@@ -204,7 +206,7 @@ export function App() {
             <SessionPanes empty={<Welcome />} />
           )}
         </main>
-        {panelOpen && session && view === 'chat' && <RightPanel session={session} />}
+        {panelOpen && session && view === 'chat' && <RightPanel session={session} gitPanelCache={gitPanelCache} />}
       </div>
       {newSessionOpen && <NewSessionDialog />}
       {(onboardingOpen || (!settings.onboardingDone && !onboardingDismissed)) && <OnboardingWizard initialHarness={onboardingHarness ?? undefined} onClose={() => useStore.getState().dismissOnboarding()} />}
