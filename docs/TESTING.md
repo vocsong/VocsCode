@@ -91,7 +91,7 @@ credentials or deployment are available, report the live tier as unverified.
 ## Opt-in Electron suites (no provider key)
 
 ```bash
-npm run build && npm run test:e2e:ci       # all twenty-four no-provider suites; fails if any reports skipped
+npm run build && npm run test:e2e:ci       # all twenty-six no-provider suites; fails if any reports skipped
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:themes
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:models
@@ -113,6 +113,7 @@ npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.layout.test.ts test
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.split.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.processes.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.dictation.test.ts   # Chromium's fake microphone, a local fake speech server
+npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.ui-modes.test.ts   # Standard / Zen interface switching
 npm run build && HARNESS_E2E=1 npm run test:e2e:terminal
 # Vesta on the real pi runtime, offline scripted model (installed Pi 0.85.1; HARNESS_E2E_EXE for the packaged app).
 npm run build && VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/e2e.vesta.test.ts
@@ -123,7 +124,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.subagents.test.ts
 ```
 
-`npm run test:e2e:ci` runs twenty-four no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation` and the
+`npm run test:e2e:ci` runs twenty-six no-provider suites (including `e2e.layout`, `e2e.split`, `e2e.processes`, `e2e.dictation`, `e2e.ui-modes` and the
 seeded `e2e.subagents` panel tier) and fails if any of them reports *skipped*. The real-Pi test inside
 `e2e.subagents` is registered only with `VOCS_CODE_PI_INTEGRATION=1` and remains opt-in. The
 `tests/test-inventory.test.ts` gate requires every `e2e.*.test.ts` file to be in that CI list or
@@ -151,7 +152,8 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 | Usage panel, `src/renderer/src/session-usage.ts` | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx` + `e2e.usage` |
 | Analytics dashboard, `src/main/analytics*.ts`, `src/shared/analytics/**` | `tests/analytics*.test.ts(x)` + `e2e.vision` |
 | Settings navigation/search, `settings-catalog.ts`, `SettingsPrimitives.tsx`, `components/settings.css` | `tests/settings-navigation.test.tsx`, `tests/branch-prefix-settings-ui.test.tsx`, `tests/context-ui.test.tsx` + `e2e.layout`; update and run the affected section’s E2E below. The layout suite captures isolated light/dark review screenshots in `tests/artifacts/settings-redesign-*.png`; see [Settings UX](SETTINGS.md). |
-| Themes, `styles.css`, terminal colours | `e2e.themes` |
+| Themes, `styles.css`, terminal colours | `e2e.themes`, `e2e.ui-modes` (Zen restyles the standard tree, so a `styles.css` change can move it) |
+| Interface modes — `shared/ui-modes.ts`, `ui-zen.css`, `ui-mode.ts`, `applyUiMode` (`theme.ts`), Appearance → Interface, Zen's one-button title-bar menu, the CSS hooks on session rows and work chips (`data-status`, `data-tone`, `data-pinned`, `data-short`) | `tests/ui-modes.test.tsx`, `tests/ui-modes-settings.test.ts` + `e2e.ui-modes` (review screenshots `tests/artifacts/ui-modes-*.png`). A change to a component either mode restyles (sidebar, header, transcript, composer, side panel, settings) needs a look in Zen too |
 | Terminal panel, PTY, `terminal/host.ts` | `e2e.terminal` |
 | Approval cards and structured questions, `harness/permissions.ts` | `tests/approval-card.test.tsx`, `tests/pi-questions.test.ts`, `tests/claude-questions.test.ts`, `tests/codex-approvals.test.ts` + `e2e.transcript` (seeded question layout/state only), `e2e.pi-tools` (real question answer/context → Pi, Skip, and restart), `e2e.approval` (live). Pi question transport also requires `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-questions.integration.test.ts` (scripted provider, cancellation/stale reply recovery). |
 | Mission configuration, orchestration, controls or managed workspaces | `tests/mission-*.test.ts` + `e2e.mission-settings`, `e2e.mission`; managed or ordinary Pi process ownership also needs `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/mission-pi.integration.test.ts tests/mission-ordinary-pi.integration.test.ts`. Suites that need Windows Job Objects (`mission-check-job`, `mission-terminal-windows`, `mission-receipt-recovery`, `mission-ordinary-pi`, the app-death part of `mission-restart-recovery`) skip on macOS/Linux, so the ubuntu CI gate does not cover them. Live demonstrations: see below and `docs/MISSION-STATUS.md`. |

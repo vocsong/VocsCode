@@ -13,6 +13,7 @@ import { applyMissionProjectOverride, createDefaultMissionConfig, MissionConfigE
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
+import { DEFAULT_UI_MODE, isUiModeId } from '../shared/ui-modes';
 import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
 import { mcpIdIssues } from '../shared/mcp-ids';
@@ -209,6 +210,7 @@ export function defaultSettings(): AppSettings {
     mission: createDefaultMissionConfig(),
     missionProjects: {},
     theme: 'system',
+    uiMode: DEFAULT_UI_MODE,
     defaultHarness: 'pi',
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
@@ -505,6 +507,8 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     ...stored,
     // A theme removed from the catalogue (or hand-edited into settings.json) falls back to 'system'.
     theme: isThemeId(stored.theme) ? stored.theme : d.theme,
+    // Same for an interface mode this build does not know: the full layout is always safe.
+    uiMode: isUiModeId(stored.uiMode) ? stored.uiMode : d.uiMode,
     autoCompactionThreshold: isAutoCompactionThreshold(stored.autoCompactionThreshold) ? stored.autoCompactionThreshold : undefined,
     // An effort level removed from the app (or a harness-specific value written by an older build) falls back to the harness default.
     defaultEffort: isEffortLevel(stored.defaultEffort) ? stored.defaultEffort : undefined,

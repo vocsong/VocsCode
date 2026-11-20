@@ -24,7 +24,8 @@ export const SETTINGS_PAGES = [
     { label: 'Notifications', description: 'Desktop alerts when a turn finishes or needs your approval.', keywords: 'notification unfocused background', anchor: 'general-notifications' },
     { label: 'External editor', description: 'Choose the command used by Open in editor.', keywords: 'vscode code editor command', anchor: 'general-editor' },
   ] },
-  { id: 'appearance', label: 'Appearance', icon: 'palette', group: 'Workspace', description: 'Find your focus with a theme that feels right.', saveHint: 'Theme changes apply immediately', topics: [
+  { id: 'appearance', label: 'Appearance', icon: 'palette', group: 'Workspace', description: 'Find your focus with a layout and a theme that feel right.', saveHint: 'Interface and theme changes apply immediately', topics: [
+    { label: 'Interface', description: 'Standard, or the minimalist Zen layout.', keywords: 'layout minimal minimalist zen focus compact clean simple distraction ui ux chrome', anchor: 'appearance-interface' },
     { label: 'Color theme', description: 'System, light, dark and expressive themes with a live preview.', keywords: 'colors colour midnight navy abyss blueprint admiral nebula ultraviolet magma solarium blossom citrine cappuccino meadow porcelain lavender evergreen graphite ember lagoon fjord claret contrast', anchor: 'appearance-theme' },
   ] },
   { id: 'shortcuts', label: 'Shortcuts', icon: 'keyboard', group: 'Workspace', description: 'Less reaching for the mouse. More staying in flow.', saveHint: 'Use Add to save a new shortcut', topics: [
