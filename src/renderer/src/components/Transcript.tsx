@@ -13,6 +13,7 @@ import { useMarkdownImages } from '../use-markdown-images';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
 import { DiffView } from './DiffView';
 import { ImageLightbox, type LightboxImage } from './ImageLightbox';
+import { HarnessPill } from './SessionTitle';
 import { TranscriptFind } from './TranscriptFind';
 import { askConfirm, Badge, Button, Icon, Spinner } from './ui';
 import { MissionCompletion } from './mission/MissionCompletion';
@@ -978,7 +979,7 @@ export function ApprovalCard({ item, sessionId }: { item: Extract<TranscriptItem
           <span className="approval-title">{req.title}</span>
           {req.description && <span className="approval-desc">{req.description}</span>}
         </span>
-        <Badge tone="neutral">{req.harness}</Badge>
+        <HarnessPill harness={req.harness} />
         {decided && <Badge tone={/deny|reject|cancel/.test(decisionKind) ? 'red' : 'green'}>{labelFor(req, item.decision!.optionId)}</Badge>}
       </div>
       {req.command !== undefined && (

@@ -102,8 +102,10 @@ describe.runIf(enabled)('electron e2e: split view', () => {
     await expect.poll(() => pane(win, 1).innerText()).toContain('Open a session in this pane');
     const choices = pane(win, 1).getByRole('listitem');
     await expect.poll(() => choices.count()).toBe(2);
-    await expect.poll(() => choices.getByText('other-project | Integration tests', { exact: true }).count()).toBe(1);
-    await choices.getByText('project | Integration tests', { exact: true }).click();
+    await expect.poll(() => choices.locator('.session-label').allTextContents()).toEqual(expect.arrayContaining([
+      'Codex other-project | Integration tests', 'Codex project | Integration tests'
+    ]));
+    await choices.getByText('Codex project | Integration tests', { exact: true }).click();
     await expect.poll(() => pane(win, 1).locator('.transcript').innerText(), { timeout: 15_000 }).toContain('Run the integration tests');
     expect(await pane(win, 0).locator('.transcript').innerText()).toContain('Design the state machine');
     expect(await win.locator('.composer textarea').count(), 'each pane has its own composer').toBe(2);

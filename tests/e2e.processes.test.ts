@@ -109,7 +109,7 @@ describe.runIf(enabled)('electron e2e: processes', () => {
     const leftoverRow = leftBehind.locator(`[data-testid="process-row"][data-pid="${leftover}"]`);
     await leftoverRow.waitFor({ timeout: 30_000 });
     expect(await leftoverRow.innerText()).toContain('earlier run');
-    expect(await leftoverRow.innerText()).toContain('from Nightly batch');
+    expect(await leftoverRow.locator('.session-label').textContent()).toBe('Native project | Nightly batch');
 
     // A shell opened in the session's terminal is the app's process, listed under that session.
     await win.click('.panel-tab:has-text("Terminal")');
@@ -122,7 +122,7 @@ describe.runIf(enabled)('electron e2e: processes', () => {
     // One row per open shell, each named for its tab.
     await expect.poll(async () => shellRows.count(), { timeout: 30_000 }).toBe(tabs);
     const shellRow = shellRows.first();
-    expect(await sessionGroup.innerText()).toContain('Nightly batch');
+    expect(await sessionGroup.locator('.process-group-title .session-label').textContent()).toBe('Native project | Nightly batch');
     const shellPid = Number(await shellRow.getAttribute('data-pid'));
     expect(alive(shellPid)).toBe(true);
 

@@ -778,6 +778,7 @@ describe('Mission navigation, inspection and workspace safety', () => {
     useStore.setState({ missions: { mission: record }, transcripts: { worker: ['permission', 'command', 'file_change', 'question'].map((kind) => approval(kind as Parameters<typeof approval>[0])) }, loaded: { worker: true } });
     render(<MissionPanel session={owned('lead')} />);
     const cards = screen.getByTestId('mission-worker-approvals');
+    expect([...cards.querySelectorAll('.session-label')].map((label) => label.textContent)).toEqual(Array(3).fill('Native project | Hidden specialist'));
     expect(within(cards).queryByText('Worker question request')).toBeNull();
     expect(within(cards).getAllByRole('button', { name: 'Allow once' })).toHaveLength(3);
     fireEvent.click(within(cards).getAllByRole('button', { name: 'Allow once' })[0]);
@@ -799,7 +800,9 @@ describe('Mission navigation, inspection and workspace safety', () => {
     expect(screen.getByTestId('mission-usage').textContent).toContain('$1.25');
     expect(screen.getByTestId('mission-usage').textContent).toContain('not a complete billing total');
     expect(useStore.getState().sessions.find((s) => s.id === 'lead')?.usage.costUsd).toBe(0);
-    fireEvent.click(screen.getByRole('button', { name: 'Source discussion: Discussion source' }));
+    const discussion = screen.getByRole('button', { name: 'Source discussion: Native project | Discussion source' });
+    expect(discussion.querySelector('.harness-pill')?.getAttribute('data-harness')).toBe('native');
+    fireEvent.click(discussion);
     await waitFor(() => expect(useStore.getState().activeId).toBe('source'));
     expect(useStore.getState().drafts.source).toBe('Keep my discussion draft');
   });

@@ -167,19 +167,19 @@ describe('command palette', () => {
 });
 
 describe('markup the minimalist layouts read', () => {
-  it('tags each session row with its status, harness tone and pin, and names it on hover only when the title is cut', () => {
+  it('tags each session row with its status, harness and pin, and names it on hover in Zen', () => {
     const sessions = [session('s1', { title: 'Add rate limiting', status: 'awaiting', pinned: true }), session('s2', { title: 'Fix flaky test', config: { harness: 'codex', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] })];
     useStore.setState({ sessions, activeId: 's1' });
     const { container, unmount } = render(<Sidebar />);
     const row = (id: string) => container.querySelector(`[data-session-id="${id}"]`) as HTMLElement;
-    expect(row('s1').dataset).toMatchObject({ status: 'awaiting', tone: 'amber', pinned: '' });
-    expect(row('s2').dataset.tone).toBe('green');
+    expect(row('s1').dataset).toMatchObject({ status: 'awaiting', harness: 'claude', pinned: '' });
+    expect(row('s2').dataset.harness).toBe('codex');
     expect(row('s2').hasAttribute('data-pinned')).toBe(false);
     expect(row('s1').getAttribute('title')).toBeNull();
     unmount();
     useStore.setState({ settings: withMode('zen') });
     const zen = render(<Sidebar />);
-    expect((zen.container.querySelector('[data-session-id="s1"]') as HTMLElement).getAttribute('title')).toBe('Add rate limiting');
+    expect((zen.container.querySelector('[data-session-id="s1"]') as HTMLElement).getAttribute('title')).toBe('Claude a | Add rate limiting');
     expect(zen.getByRole('button', { name: 'Analytics' }).getAttribute('title')).toBe('Analytics');
   });
 

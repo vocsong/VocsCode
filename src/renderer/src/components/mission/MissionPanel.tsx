@@ -9,6 +9,7 @@ import { activeComposer } from '../../panes';
 import { invoke, isWeb } from '../../api';
 import { fmtCost, fmtTokens } from '../../format';
 import { DiffView } from '../DiffView';
+import { SessionTitle } from '../SessionTitle';
 import { ApprovalCard } from '../Transcript';
 import { Badge, Button, Spinner } from '../ui';
 import { MissionDeliveryIdentity } from './MissionCompletion';
@@ -57,7 +58,12 @@ export function MissionHeaderControls({ record }: { record: MissionRecord }) {
     </div>
     <div className="small">T5 principal engineer: <strong>{record.leadPreset.name}</strong> · {HARNESS_BY_ID[record.leadPreset.harnessId].name} · {record.leadPreset.model.connectionId ?? record.leadPreset.model.provider}/{record.leadPreset.model.model} · {record.leadPreset.reasoning.kind === 'default' ? 'Runtime default reasoning' : record.leadPreset.reasoning.value}</div>
     {record.archived && <p role="status">Archived Mission — read-only. Restore the Mission from Archived before resuming or changing it.</p>}
-    {record.originSessionId && <div><Button size="sm" variant="ghost" disabled={!source} onClick={() => void useStore.getState().setActive(record.originSessionId!)}>Source discussion{source ? `: ${source.title}` : ' unavailable'}</Button><span className="muted small">{record.sourceCutoffId ? ` · retained through ${record.sourceCutoffId}` : ''}{!source && record.sourceSnapshotId ? ' · source evidence remains retained with the Mission' : ''}</span></div>}
+    {record.originSessionId && <div>
+      <Button className="mission-source-link" size="sm" variant="ghost" disabled={!source} onClick={() => void useStore.getState().setActive(record.originSessionId!)}>
+        {source ? <>Source discussion: <SessionTitle session={source} /></> : 'Source discussion unavailable'}
+      </Button>
+      <span className="muted small">{record.sourceCutoffId ? ` · retained through ${record.sourceCutoffId}` : ''}{!source && record.sourceSnapshotId ? ' · source evidence remains retained with the Mission' : ''}</span>
+    </div>}
     <details><summary>Lead handover and configuration</summary>
       <p className="muted small">Presets are pinned. Pause and wait for all work to settle before a T5-only handover; no automatic model or effort switch.</p>
       <div className="row gap8 wrap"><select aria-label="Replacement T5 principal engineer" value={replacement} onChange={(e) => setReplacement(e.target.value)}><option value="">Choose a T5 preset</option>{presets.filter((p) => p.id !== record.leadPreset.id).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
@@ -171,13 +177,18 @@ const EMPTY: TranscriptItem[] = [];
 /** Human permission decisions are the existing approval channel, never a second worker chat. */
 function MissionWorkerApprovals({ record }: { record: MissionRecord }) {
   const transcripts = useStore((s) => s.transcripts);
+  const sessions = useStore((s) => s.sessions);
   const workers = useMemo(() => [...new Set(record.attempts.filter((a) => a.sessionId !== record.leadSessionId && a.status !== 'terminal').map((a) => a.sessionId))], [record.attempts, record.leadSessionId]);
   useEffect(() => { for (const id of workers) void useStore.getState().loadTranscript(id); }, [workers]);
   const pending = workers.flatMap((sessionId) => (transcripts[sessionId] ?? EMPTY).flatMap((item) => item.kind === 'approval' && !item.decision && ['permission', 'command', 'file_change'].includes(item.request.kind) && !item.request.questions?.length ? [{ sessionId, item }] : []));
   if (record.archived || !pending.length) return null;
   return <section data-testid="mission-worker-approvals"><h3>Specialist permissions</h3><p className="muted small">Approve or deny the requested operation. Instructions and questions still go only to the principal engineer.</p>{pending.map(({ sessionId, item }) => {
     const attempt = record.attempts.find((a) => a.sessionId === sessionId && a.status !== 'terminal');
-    return <div key={`${sessionId}:${item.id}`}><p><strong>{attempt?.profile?.name ?? attempt?.taskId ?? 'Specialist'}</strong> · {sessionId}</p><ApprovalCard item={item} sessionId={sessionId} /></div>;
+    const worker = sessions.find((session) => session.id === sessionId);
+    return <div key={`${sessionId}:${item.id}`}>
+      <p><strong>{attempt?.profile?.name ?? attempt?.taskId ?? 'Specialist'}</strong> · {worker ? <SessionTitle session={worker} /> : sessionId}</p>
+      <ApprovalCard item={item} sessionId={sessionId} />
+    </div>;
   })}</section>;
 }
 

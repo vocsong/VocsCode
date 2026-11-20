@@ -1,12 +1,14 @@
 /** Command palette for slash commands and quick navigation. */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { sessionTitleText } from '../../../shared/session-title';
+import type { SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
-import { harnessShort } from '../format';
 import { useStore } from '../store';
 import { isTopLevelSession, MISSION_MANAGED_REASON, pauseMissionSession } from '../missions';
 import { createTerminal } from '../terminal/host';
 import { canSplit, sessionPanes } from '../panes';
 import { Icon } from './ui';
+import { SessionTitle } from './SessionTitle';
 import { setUiMode } from '../ui-mode';
 import { UI_MODES } from '../../../shared/ui-modes';
 
@@ -18,6 +20,7 @@ interface Cmd {
   icon: string;
   run: () => void;
   disabled?: boolean;
+  session?: SessionMeta;
 }
 
 export function CommandPalette() {
@@ -76,7 +79,9 @@ export function CommandPalette() {
         { id: 'pane-close', label: 'Close pane (session keeps running)', icon: 'x', run: () => st.closePane(layout.activePaneId) }
       );
     }
-    for (const s of sessions.filter((s) => !s.archived && isTopLevelSession(s))) base.push({ id: `s:${s.id}`, label: s.title, hint: `${harnessShort(s.config.harness)} · ${s.config.projectRoot.split(/[\\/]/).pop()}`, icon: 'sparkles', run: () => void st.setActive(s.id) });
+    for (const session of sessions.filter((s) => !s.archived && isTopLevelSession(s))) {
+      base.push({ id: `s:${session.id}`, label: sessionTitleText(session), session, icon: 'sparkles', run: () => void st.setActive(session.id) });
+    }
     return base;
   }, [sessions, activeId]);
 
@@ -112,7 +117,7 @@ export function CommandPalette() {
           {filtered.slice(0, 40).map((c, i) => (
             <button key={c.id} type="button" disabled={c.disabled} className={`palette-item ${i === idx ? 'active' : ''}`} onMouseEnter={() => setIdx(i)} onClick={() => { close(); c.run(); }}>
               <Icon name={c.icon} size={14} />
-              <span>{c.label}</span>
+              {c.session ? <SessionTitle session={c.session} /> : <span>{c.label}</span>}
               <span className="spacer" />
               {c.hint && <span className="muted small">{c.hint}</span>}
             </button>
