@@ -109,7 +109,9 @@
   width: var(--zen-rail);
   /* Over the conversation when open, under the title bar so its menus drop over the rail. */
   z-index: 29;
-  overflow: hidden;
+  /* clip, not hidden: a hidden box still scrolls, so focusing a button past the closed rail (focus
+     handed back when a dialog closes) slid the whole rail sideways and left it showing row ends. */
+  overflow: clip;
   background: var(--bg);
   border-right: none;
   box-shadow: none;
