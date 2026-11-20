@@ -53,11 +53,12 @@ afterEach(async () => {
 });
 
 describe('title bar', () => {
-  it('names the open session and opens the command palette', () => {
+  it('names the open session after its project and opens the command palette', () => {
     useStore.setState({ sessions: [session('s1', { title: 'Add rate limiting' })], activeId: 's1' });
     const { container } = render(<TitleBar />);
     const search = container.querySelector('.titlebar-search') as HTMLElement;
-    expect(search.textContent).toContain('Add rate limiting');
+    expect(container.querySelector('.titlebar-search-text')?.textContent).toBe('a | Add rate limiting');
+    expect(search.title).toMatch(/^a \| Add rate limiting · Vocs Code/);
     expect(search.textContent).toContain('Ctrl+K');
     fireEvent.click(search);
     expect(useStore.getState().paletteOpen).toBe(true);
