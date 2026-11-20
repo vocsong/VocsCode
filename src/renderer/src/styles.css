@@ -1830,7 +1830,12 @@ h4 {
   flex: 1;
   min-width: 0;
 }
-/* Status pill and last-updated time close the meta line, so the title above gets the full width. */
+.session-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* Status pill and last-updated time close the meta line. */
 .session-side {
   display: inline-flex;
   align-items: center;
@@ -1844,6 +1849,7 @@ h4 {
   white-space: nowrap;
 }
 .session-title {
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1945,6 +1951,7 @@ h4 {
   max-width: 130px;
 }
 .session-rename {
+  flex: 1;
   padding: 2px 6px;
 }
 .row-menu-btn {
@@ -1967,27 +1974,30 @@ h4 {
 .row-menu-btn:hover {
   background: var(--bg-active);
 }
-/* Row action icons: fork / archive (restore / delete while archived); the pin lives on the left.
-   A small floating toolbar over the row's top-right corner, so revealing it never re-wraps the title. */
+/* The hover actions share the title's line. They fit in the row's vertical padding. */
 .row-actions {
-  position: absolute;
-  top: 3px;
-  right: 6px;
-  display: flex;
+  display: none;
+  flex-shrink: 0;
   align-items: center;
   gap: 1px;
+  margin-block: -5px;
   padding: 1px;
   border-radius: 7px;
   background: var(--bg-elev);
   box-shadow: 0 0 0 1px var(--border), var(--shadow-sm);
-  visibility: hidden;
-  opacity: 0;
-  transition: opacity 0.1s ease, visibility 0.1s ease;
 }
 .session-row:hover .row-actions,
 .row-actions:focus-within {
-  visibility: visible;
-  opacity: 1;
+  display: flex;
+}
+/* Anchor the fork menu to the row edge so labels beside the toolbar leave room for the menu. */
+.row-actions > .dropdown {
+  position: static;
+}
+.row-actions > .dropdown > .dropdown-menu {
+  top: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 .row-act-btn {
   display: inline-flex;
