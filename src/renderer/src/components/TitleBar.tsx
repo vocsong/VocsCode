@@ -10,6 +10,7 @@ import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
 import { Icon, MenuItem } from './ui';
 import { ForkIntoItems } from './ForkInto';
+import { basename } from '../format';
 import { openSettings } from './SettingsView';
 import { VestaLauncher } from './Vesta';
 import { setUiMode, useMinimalUi, useUiMode } from '../ui-mode';
@@ -34,7 +35,9 @@ export function TitleBar() {
   const navForward = useStore((s) => s.navForward);
   const view = useStore((s) => s.view);
   const session = useActiveSession();
-  const title = view === 'settings' ? 'Settings · Vocs Code' : session ? `${session.title} · Vocs Code` : 'Vocs Code';
+  // The open session is named with its project first, so same-titled sessions in different repos read apart.
+  const sessionLabel = session ? `${basename(session.config.projectRoot)} | ${session.title}` : null;
+  const title = view === 'settings' ? 'Settings · Vocs Code' : sessionLabel ? `${sessionLabel} · Vocs Code` : 'Vocs Code';
 
   return (
     <div className={`titlebar ${isMac ? 'titlebar-mac' : ''} ${isWeb ? 'titlebar-web' : ''}`}>
@@ -48,7 +51,7 @@ export function TitleBar() {
       <div className="titlebar-title">
         <button type="button" className="titlebar-search" title={`${title} — search sessions and commands (${modKey}+K)`} onClick={() => useStore.getState().openPalette(true)}>
           <Icon name="search" size={13} />
-          <span className="titlebar-search-text">{view === 'settings' ? 'Settings' : session ? session.title : 'Search sessions and commands'}</span>
+          <span className="titlebar-search-text">{view === 'settings' ? 'Settings' : sessionLabel ?? 'Search sessions and commands'}</span>
           <kbd className="kbd">{modKey}+K</kbd>
         </button>
       </div>
