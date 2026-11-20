@@ -2422,12 +2422,13 @@ h4 {
   flex-direction: column;
 }
 .transcript {
+  --transcript-gap: 8px;
   flex: 1;
   overflow-y: auto;
-  padding: 22px 24px 32px;
+  padding: 16px 24px 24px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--transcript-gap);
 }
 .transcript > * {
   max-width: var(--reading);
@@ -2443,7 +2444,7 @@ h4 {
   gap: 0;
 }
 .transcript.virtual > .transcript-row {
-  padding-bottom: 14px;
+  padding-bottom: var(--transcript-gap);
 }
 .transcript-spacer {
   pointer-events: none;
