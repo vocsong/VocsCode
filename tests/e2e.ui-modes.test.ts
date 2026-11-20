@@ -64,6 +64,10 @@ async function seedProject(dir: string): Promise<void> {
 
 function transcript(): TranscriptItem[] {
   return [
+    // Enough history to use the windowed transcript when switching modes.
+    ...Array.from({ length: 150 }, (_, i): TranscriptItem => ({
+      id: `earlier-${i}`, kind: 'assistant', ts: T - 150 + i, text: `Earlier progress update ${i + 1}.`
+    })),
     { id: 'u1', kind: 'user', ts: T, text: 'Add rate limiting to the public API.' },
     { id: 't1', kind: 'tool', ts: T + 1, name: 'Edit', hint: 'edit', summary: 'src/server.ts', status: 'done', changes: [{ path: 'src/server.ts', kind: 'update', diff: '--- a/src/server.ts\n+++ b/src/server.ts\n@@ -1 +1,2 @@\n export const port = 3000;\n+export const limit = 100;' }] },
     { id: 't2', kind: 'tool', ts: T + 2, name: 'shell', hint: 'execute', summary: 'npm test', status: 'done', exitCode: 0, durationMs: 4200, output: '6 passed' },
@@ -193,6 +197,13 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await expect.poll(() => modelPill.evaluate((el) => getComputedStyle(el.closest('.dropdown')!).opacity)).toBe('0');
     expect(await style(win, '.pane.active .composer .send-btn', 'opacity')).toBe('1');
     await shot(win, 'zen-session');
+    const [workBottom, replyTop] = await Promise.all([
+      win.locator('.transcript.virtual .work-head').evaluate((el) => el.getBoundingClientRect().bottom),
+      win.getByText('Rate limiting is in place', { exact: false }).evaluate((el) => el.getBoundingClientRect().top)
+    ]);
+    expect(replyTop - workBottom).toBeGreaterThanOrEqual(0);
+    expect(replyTop - workBottom).toBeLessThanOrEqual(12);
+
     const composerBox = win.locator('.pane.active .composer-box');
     await composerBox.hover();
     await expect.poll(() => modelPill.evaluate((el) => getComputedStyle(el.closest('.dropdown')!).opacity)).toBe('1');
