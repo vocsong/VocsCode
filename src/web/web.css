@@ -545,9 +545,6 @@ button {
 
 .w-session-row-title {
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .w-session-row-meta {
@@ -740,6 +737,18 @@ button {
   font-size: 14px;
 }
 
+.w-snackbar-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.w-snackbar .btn {
+  flex: none;
+}
+
 .w-field-row {
   display: flex;
   align-items: center;
@@ -783,14 +792,14 @@ button {
 
 .w-session-name {
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .w-session-path {
   color: var(--fg-muted);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .w-session .transcript-wrap {
@@ -1116,10 +1125,22 @@ button {
 
 .w-nudge-text {
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   min-width: 0;
+}
+
+.w-nudge-title {
+  min-width: 0;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.w-nudge-message {
+  flex: none;
 }
 
 .w-nudge-cta {

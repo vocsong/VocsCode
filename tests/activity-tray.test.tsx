@@ -161,8 +161,8 @@ describe('the tray', () => {
     const tray = screen.getByTestId('activity-tray');
     expect([...tray.querySelectorAll('.activity-section-label')].map((el) => el.textContent)).toEqual(['Needs you', 'Done · not viewed']);
     const rows = screen.getAllByTestId('activity-row');
-    expect(rows.map((r) => r.querySelector('.activity-row-title')?.textContent)).toEqual(['Needs approval', 'Finished work']);
-    expect(rows[1].querySelector('.activity-row-meta')?.textContent).toBe('beta · Claude');
+    expect(rows.map((r) => r.querySelector('.activity-row-title')?.textContent)).toEqual(['Claude alpha | Needs approval', 'Claude beta | Finished work']);
+    expect(rows[1].querySelector('.harness-pill')?.getAttribute('data-harness')).toBe('claude');
     expect(rows[1].querySelector('.activity-row-time')?.textContent).toBe('12m ago');
   });
 

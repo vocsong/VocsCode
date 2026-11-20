@@ -3,6 +3,7 @@
  *  connection and the active computer change. */
 import { useEffect, useRef, useState } from 'react';
 import { TranscriptCapabilitiesProvider } from '@renderer/capabilities';
+import { SessionTitle } from '@renderer/components/SessionTitle';
 import { Button, ConfirmHost, Icon, Spinner, Toggle } from '@renderer/components/ui';
 import { useStore } from '@renderer/store';
 import type { RelayClient } from '../../../relay/src/web-client';
@@ -289,6 +290,9 @@ export function WebApp({ client, transport, account, initialCode, connectHash }:
   }
 
   const hostId = credentials.hostDeviceId;
+  const nudgedSession = nudge && sessions.find((session) => session.id === nudge.id);
+  const followSessionId = follow.snackbar?.sessionId;
+  const followedSession = followSessionId && sessions.find((session) => session.id === followSessionId);
   return (
     <TranscriptCapabilitiesProvider value={WEB_CAPABILITIES}>
       <div className="w-app" ref={appRef} data-connection={connection}>
@@ -307,7 +311,10 @@ export function WebApp({ client, transport, account, initialCode, connectHash }:
           <div className="w-nudge" role="status" data-testid="approval-nudge">
             <button type="button" className="w-nudge-main" onClick={() => { setNudge(null); navigate({ name: 'session', host: hostId, session: nudge.id }); }}>
               <span className="w-nudge-dot" aria-hidden />
-              <span className="w-nudge-text"><strong>{nudge.title}</strong> needs you</span>
+              <span className="w-nudge-text">
+                {nudgedSession ? <SessionTitle session={nudgedSession} className="w-nudge-title" /> : <strong className="w-nudge-title">{nudge.title}</strong>}{' '}
+                <span className="w-nudge-message">needs you</span>
+              </span>
               <span className="w-nudge-cta">Review</span>
             </button>
             <button type="button" className="w-icon-btn" aria-label="Dismiss" onClick={() => setNudge(null)}><Icon name="x" size={14} /></button>
@@ -377,7 +384,10 @@ export function WebApp({ client, transport, account, initialCode, connectHash }:
 
         {follow.snackbar && (
           <div className="w-snackbar" role="status" data-testid="follow-snackbar">
-            <span>Your computer moved to “{follow.snackbar.title}”</span>
+            <span className="w-snackbar-text">
+              <span>Your computer moved to</span>{' '}
+              {followedSession ? <SessionTitle session={followedSession} /> : <span>“{follow.snackbar.title}”</span>}
+            </span>
             <Button size="sm" variant="primary" onClick={follow.followNow}>Follow</Button>
             <Button size="sm" variant="ghost" onClick={follow.dismiss}>Dismiss</Button>
           </div>

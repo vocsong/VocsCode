@@ -275,13 +275,8 @@
   margin-right: 10px;
   padding: 5px 8px 5px 0;
   border-radius: 0 10px 10px 0;
-  --zen-dot: var(--fg-faint);
+  --zen-dot: color-mix(in srgb, var(--harness-ink, var(--fg-faint)) 60%, var(--harness-fill, var(--fg-faint)));
 }
-:root[data-ui='zen'] .session-row[data-tone='amber'] { --zen-dot: var(--amber); }
-:root[data-ui='zen'] .session-row[data-tone='green'] { --zen-dot: var(--green); }
-:root[data-ui='zen'] .session-row[data-tone='blue'] { --zen-dot: var(--blue); }
-:root[data-ui='zen'] .session-row[data-tone='purple'] { --zen-dot: var(--purple); }
-:root[data-ui='zen'] .session-row[data-tone='red'] { --zen-dot: var(--red); }
 :root[data-ui='zen'] .session-row.active {
   background: var(--bg-hover);
   box-shadow: none;
@@ -353,19 +348,23 @@
     transform: scale(1.5);
   }
 }
-/* One line per session: title and hover actions, with the status pill at the end. */
+/* Keep the title, hover actions and status on one line so hover cannot shift the scroll position. */
 :root[data-ui='zen'] .session-main {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 :root[data-ui='zen'] .session-heading {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
 }
 :root[data-ui='zen'] .session-title {
   font-weight: 450;
   color: var(--fg-muted);
+  overflow: hidden;
+}
+:root[data-ui='zen'] .session-title .session-label-project {
+  flex-shrink: 1;
 }
 :root[data-ui='zen'] .session-row.active .session-title,
 :root[data-ui='zen'] .session-row.unseen .session-title {
@@ -420,7 +419,6 @@
   font-size: 13px;
   color: var(--fg-muted);
 }
-:root[data-ui='zen'] .header-title > .badge,
 :root[data-ui='zen'] .header-crumbs,
 :root[data-ui='zen'] .header-divider,
 :root[data-ui='zen'] .header-status {

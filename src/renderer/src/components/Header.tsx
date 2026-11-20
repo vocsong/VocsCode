@@ -1,19 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { GitSummary, SessionMeta } from '../../../shared/types';
-import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
-import { basename, harnessShort, harnessTone } from '../format';
+import { basename } from '../format';
 import { archiveSession } from '../sessionActions';
 import { useGitSummary } from '../gitReads';
 import { useStore } from '../store';
-import { Badge, Button, Icon, StatusDot } from './ui';
+import { Button, Icon, StatusDot } from './ui';
 import { ForkIntoDropdown } from './ForkInto';
+import { SessionTitle } from './SessionTitle';
 import { MissionHeaderControls, useMission } from './mission/MissionPanel';
 import { openMission } from '../missions';
 import { canClosePane, canSplit } from '../panes';
 
 /**
- * One row: who the session is (status, title, harness, folder, branch) on the left, what it changed
+ * One row: the session's status, title and working-tree crumbs on the left, what it changed
  * and the view actions on the right. The run controls — model, effort, mode, Fast, spend — sit under
  * the composer (SessionControls), where a change applies to the next message.
  *
@@ -34,7 +34,8 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
   const split = useStore((s) => !!paneId && canClosePane(s.layout, paneId));
   const { data: summary } = useGitSummary(session.id, changesVersion);
   const branch = summary?.branch;
-  const h = HARNESS_BY_ID[session.config.harness];
+  const folder = basename(session.cwd);
+  const distinctFolder = folder !== basename(session.config.projectRoot);
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
   const ref = useRef<HTMLElement>(null);
   const width = useHeaderWidth(ref);
@@ -43,18 +44,11 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
     <header className="header" ref={ref} data-width={width}>
       <div className="header-title">
         <StatusDot status={session.status} />
-        <span className="header-name" data-testid="session-title" title={session.title}>
-          {session.title}
-        </span>
-        {!session.mission && (
-          <Badge tone={harnessTone(session.config.harness)} title={h.name}>
-            {harnessShort(session.config.harness)}
-            {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
-          </Badge>
-        )}
+        <SessionTitle session={session} className="header-name" nameTestId="session-title" />
         <span className="header-crumbs">
-          <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
-            <Icon name="folder" size={12} /> <span>{basename(session.cwd)}</span>
+          <button type="button" className="header-path" title={session.cwd} aria-label="Open session folder" onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
+            <Icon name="folder" size={12} />
+            {distinctFolder && <span>{folder}</span>}
           </button>
           {branch && (
             <button type="button" className="header-path" title={`Branch ${branch} — open the Git panel`} onClick={() => setPanelTab('branches')}>
@@ -105,7 +99,7 @@ export function Header({ session, paneId }: { session: SessionMeta; paneId?: str
 /**
  * How much of the one-row header fits: a split pane can be as narrow as 360px. Measured on the
  * header itself (a container query on the pane would trap the transcript's fixed lightbox), so the
- * row sheds the folder/branch crumbs first, then the harness badge and line totals, then the
+ * row sheds the folder/branch crumbs first, then the line totals, then the
  * changes button — the title, the actions and the pane controls stay.
  */
 type HeaderWidth = 'wide' | 'compact' | 'narrow' | 'tiny';

@@ -40,6 +40,7 @@ src/main
 src/preload       contextBridge (window.harness)
 src/renderer      React 19 + zustand UI
   components/     sidebar, transcript, composer, diff view, terminal panel, settings, command palette
+    SessionTitle.tsx  shared desktop and web session label with a harness pill and project | session name
     analytics/    the usage dashboard: tabs, view model (model.ts) and the SVG chart primitives (charts.tsx)
     mission/      Mission settings, launch dialog, panel, workspace inspector and completion report
   terminal/       xterm.js instances kept alive outside React (host.ts)

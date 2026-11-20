@@ -18,6 +18,7 @@ import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from 'playwright-core';
 import { MCP_BUILTIN_IDS, type ProviderConfig, type SessionMeta, type TranscriptItem } from '../src/shared/types';
+import { HARNESSES } from '../src/shared/harness-meta';
 import type { PushPayloads } from '../src/shared/ipc';
 import { expectQuietWindow, isolatedEnv, openNewSession, seedSettings } from './e2e-ui';
 
@@ -77,6 +78,17 @@ const usage = (patch: Partial<SessionMeta['usage']> = {}): SessionMeta['usage'] 
 
 /** Overflow of an element's content past its own box, in px; 0 when everything fits. */
 const overflowX = (win: Page, selector: string) => win.locator(selector).evaluateAll((els) => els.map((el) => el.scrollWidth - el.clientWidth));
+
+async function expectSessionLabel(container: Locator, expected: { harness: SessionMeta['config']['harness']; pill: string; project: string; name: string }) {
+  const label = container.locator('.session-label');
+  const pill = label.locator(`:scope > .harness-pill[data-harness="${expected.harness}"]`);
+  await pill.waitFor({ timeout: 10_000 });
+  expect(await label.locator(':scope > span').allTextContents()).toEqual([expected.pill, expected.project, '|', expected.name]);
+  return pill.evaluate((el) => {
+    const { color, backgroundColor } = getComputedStyle(el);
+    return { color, backgroundColor };
+  });
+}
 
 async function expectMenuLeft(menu: Locator, target: Locator): Promise<void> {
   await menu.waitFor();
@@ -299,6 +311,17 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
         usage: usage()
       }
     ];
+    for (const { id, name } of HARNESSES) {
+      if (id === 'claude' || id === 'native') continue;
+      sessions.push({
+        ...sessions[1]!,
+        id: `s_view_${id}`,
+        title: `Existing ${name} session`,
+        updatedAt: T - 2000,
+        lastUserMessageAt: T - 2000,
+        config: { harness: id, projectRoot: project, permissionMode: 'ask' }
+      });
+    }
     await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
     for (const s of sessions) {
       await fs.mkdir(path.join(userData, 'sessions', s.id), { recursive: true });
@@ -310,14 +333,28 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     // Wide enough for every header item: 1600 − sidebar − side panel leaves the pane ~900px.
     await win.setViewportSize({ width: 1600, height: 1000 });
     await fs.mkdir(shots, { recursive: true });
-    await win.locator(`[data-session-id="${SID}"]`).click();
+    const claude = { harness: 'claude', pill: 'Claude', project: 'project', name: sessions[0]!.title } as const;
+    const native = { harness: 'native', pill: 'Native', project: 'project', name: sessions[1]!.title } as const;
+    const claudeRow = win.locator(`[data-session-id="${SID}"]`);
+    const nativeRow = win.locator(`[data-session-id="${OTHER}"]`);
+    await claudeRow.click();
     await win.locator('.work-head').waitFor({ timeout: 30_000 });
+    const claudeColors = await expectSessionLabel(claudeRow, claude);
+    const nativeColors = await expectSessionLabel(nativeRow, native);
+    const projectClipping = await claudeRow.locator('.session-label-project').evaluate((el) => el.scrollWidth - el.clientWidth);
+    expect(projectClipping, 'project stays readable with a long session name and hover actions').toBeLessThanOrEqual(1);
+    const palette = await win.locator('.session-row .harness-pill').evaluateAll((pills) => pills.map((pill) => {
+      const { color, backgroundColor } = getComputedStyle(pill);
+      return { harness: pill.getAttribute('data-harness'), color, backgroundColor };
+    }));
+    expect(palette.map((pill) => pill.harness).sort()).toEqual(HARNESSES.map((harness) => harness.id).sort());
+    expect(new Set(palette.map((pill) => pill.backgroundColor)).size).toBe(HARNESSES.length);
+    expect(new Set(palette.map((pill) => pill.color)).size).toBe(HARNESSES.length);
 
     // One header row: identity on the left, the working tree's changes and the actions on the right.
     const head = win.locator('.pane.active .header');
     const titleRow = head.locator('.header-title');
-    await titleRow.getByTestId('session-title').waitFor();
-    expect(await titleRow.locator('.badge').first().innerText()).toBe('Claude');
+    expect(await expectSessionLabel(titleRow, claude)).toEqual(claudeColors);
     // innerText reads a hidden element's text too, so every header item is first waited on as visible.
     const crumbs = titleRow.locator('.header-crumbs');
     await crumbs.waitFor({ state: 'visible', timeout: 30_000 });
@@ -387,11 +424,13 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.locator('.panel-tab.active', { hasText: 'Usage' }).waitFor({ timeout: 10_000 });
     await win.keyboard.press('Escape');
 
-    // The title bar names the session after its project and opens the command palette.
+    // The title bar and the palette it opens use the same labels as the sidebar.
     const search = win.locator('.titlebar-search');
-    expect(await search.locator('.titlebar-search-text').innerText()).toBe('project | Add rate limiting to the public API');
+    expect(await expectSessionLabel(search, claude)).toEqual(claudeColors);
     await search.click();
     await win.getByPlaceholder('Type a command or session name…').waitFor({ timeout: 10_000 });
+    expect(await expectSessionLabel(win.locator('.palette-item', { hasText: claude.name }), claude)).toEqual(claudeColors);
+    expect(await expectSessionLabel(win.locator('.palette-item', { hasText: native.name }), native)).toEqual(nativeColors);
     await win.keyboard.press('Escape');
     await expect.poll(() => win.locator('.palette').count()).toBe(0);
 
@@ -411,13 +450,17 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await expect.poll(() => win.getByRole('dialog', { name: 'Vesta' }).count()).toBe(0);
     expect(await win.locator('.vesta').count()).toBe(0);
 
-    // Split right: each pane is ~450px, so its header sheds the folder/branch crumbs, the harness badge
-    // and the line totals, and still fits its row; the title, the actions and the pane controls stay.
+    // The split picker and narrow pane headers keep session labels as the folder and branch controls fold away.
     await win.getByRole('button', { name: 'Split right' }).click();
     await win.locator('.pane-picker').waitFor({ timeout: 10_000 });
-    await win.locator('.pane-picker-item', { hasText: 'Fix flaky auth refresh test' }).click();
-    await expect.poll(() => win.locator('.pane .header').count()).toBe(2);
-    await expect.poll(async () => (await win.locator('.pane .header').evaluateAll((els) => els.map((el) => el.getAttribute('data-width')))).every((w) => w !== 'wide')).toBe(true);
+    const pickNative = win.locator('.pane-picker-item', { hasText: native.name });
+    expect(await expectSessionLabel(pickNative, native)).toEqual(nativeColors);
+    await pickNative.click();
+    const paneHeaders = win.locator('.pane .header');
+    await expect.poll(() => paneHeaders.count()).toBe(2);
+    await expect.poll(async () => (await paneHeaders.evaluateAll((els) => els.map((el) => el.getAttribute('data-width')))).every((w) => w !== 'wide')).toBe(true);
+    expect(await expectSessionLabel(paneHeaders.filter({ hasText: claude.name }), claude)).toEqual(claudeColors);
+    expect(await expectSessionLabel(paneHeaders.filter({ hasText: native.name }), native)).toEqual(nativeColors);
     expect(await win.locator('.pane .header-crumbs:visible').count()).toBe(0);
     await expect.poll(async () => (await overflowX(win, '.pane .header-title')).every((over) => over <= 1)).toBe(true);
     await expect.poll(async () => (await overflowX(win, '.pane .composer-actions')).every((over) => over <= 1)).toBe(true);
@@ -596,8 +639,8 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await tray.waitFor();
     expect(await tray.locator('.activity-section-label').allTextContents()).toEqual(['Done · not viewed']);
     const row = tray.getByTestId('activity-row');
-    expect(await row.locator('.activity-row-title').textContent()).toBe('Migrate the billing tables');
-    expect(await row.locator('.activity-row-meta').textContent()).toBe('beta · Native');
+    const done = { harness: 'native', pill: 'Native', project: 'beta', name: 'Migrate the billing tables' } as const;
+    const trayColors = await expectSessionLabel(row, done);
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'session-view-06-activity-tray.png') });
 
@@ -609,8 +652,8 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await tray.waitFor({ state: 'hidden' });
     // The folder unfolded and the session is open in the active pane.
     const listRow = win.locator(`[data-session-id="${DONE}"]`);
-    await listRow.waitFor();
-    await expect.poll(() => win.locator('.pane.active .header').textContent()).toContain('Migrate the billing tables');
+    expect(await expectSessionLabel(listRow, done)).toEqual(trayColors);
+    expect(await expectSessionLabel(win.locator('.pane.active .header'), done)).toEqual(trayColors);
 
     // On screen alone is not viewed: with the window unfocused the mark stays.
     await win.waitForTimeout(2_500);

@@ -1,10 +1,10 @@
 /** Session list grouped by project, with live status badges per harness. */
 import React, { useMemo, useRef, useState } from 'react';
 import type { AppSettings, SessionMeta } from '../../../shared/types';
-import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { modelRefName } from '../../../shared/model-names';
+import { sessionTitleText } from '../../../shared/session-title';
 import { invoke, modKey } from '../api';
-import { basename, harnessShort, harnessTone, relTime } from '../format';
+import { basename, relTime } from '../format';
 import { archiveSession, removeFolder } from '../sessionActions';
 import { isTopLevelSession } from '../missions';
 import { activitySections } from '../activity';
@@ -17,6 +17,7 @@ import { isEditableTarget, showContextMenu, type ContextMenuItem } from './Conte
 import { FolderBranch } from './FolderBranch';
 import { ActivityMenu } from './ActivityTray';
 import { ForkIntoDropdown } from './ForkInto';
+import { SessionTitle } from './SessionTitle';
 import { askConfirm, Badge, Button, Dropdown, Icon, Kbd, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
 
 /** Sessions in a folder whose last turn finished while nobody was looking. */
@@ -489,7 +490,6 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(s.title);
   const renameAction = useRef<'idle' | 'committed' | 'cancelled'>('idle');
-  const h = HARNESS_BY_ID[s.config.harness];
   // Zen's rail hides the title, so the row names itself on hover there.
   const minimal = useMinimalUi();
   const startRename = () => {
@@ -564,9 +564,9 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
       data-testid="session-row"
       data-session-id={s.id}
       data-status={archiving ? 'archiving' : s.status}
-      data-tone={harnessTone(s.config.harness)}
+      data-harness={s.config.harness}
       data-pinned={s.pinned ? '' : undefined}
-      title={minimal && !renaming ? s.title : undefined}
+      title={minimal && !renaming ? sessionTitleText(s) : undefined}
       draggable={canDrag}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move';
@@ -629,7 +629,7 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
           ) : (
             <div className="session-title">
               {s.unseenAt !== undefined && <span className="session-unseen-dot" data-testid="session-unseen-dot" title="Finished since you last looked" />}
-              <span title="Click to rename" onClick={(e) => { e.stopPropagation(); startRename(); }}>{s.title}</span>
+              <SessionTitle session={s} onRename={startRename} />
             </div>
           )}
           <div className="row-actions" onClick={(e) => e.stopPropagation()}>
@@ -654,9 +654,6 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
         </div>
         <div className="session-meta">
           {s.mission && <Badge tone="purple">Mission</Badge>}
-          <span className={`session-harness tone-${harnessTone(s.config.harness)}`} title={h?.name}>
-            {harnessShort(s.config.harness)}
-          </span>
           {s.activeModel && (
             <span className="session-model" title={modelRefName(s.activeModel)}>
               {modelRefName(s.activeModel)}

@@ -3,10 +3,9 @@ import React, { useMemo, useState } from 'react';
 import type { AnalyticsSummary, UsageSessionRecord } from '../../../../shared/types';
 import { modelName } from '../../../../shared/model-names';
 import { speedTps } from '../../../../shared/usage-rollup';
-import { basename, fmtCost, fmtTokens, relTime } from '../../format';
+import { fmtCost, fmtTokens, harnessShort, relTime } from '../../format';
 import { useStore } from '../../store';
-import { harnessShort } from '../../format';
-import { Badge } from '../ui';
+import { SessionTitle } from '../SessionTitle';
 import { Segmented } from './charts';
 import { fmtCompact, fmtMs, fmtTps, plural, SESSION_SORTS, sessionMatches, sessionTokens, sortSessions, type Scope, type SessionSort } from './model';
 import { Footnotes } from './tiles';
@@ -60,7 +59,7 @@ export function SessionList({ sessions, compact }: { sessions: UsageSessionRecor
   const live = useStore((s) => s.sessions);
   const setActive = useStore((s) => s.setActive);
   if (sessions.length === 0) return <div className="chart-empty">No sessions in this range.</div>;
-  const liveIds = new Set(live.map((s) => s.id));
+  const liveById = new Map(live.map((s) => [s.id, s]));
   return (
     <div className={`slist ${compact ? 'compact' : ''}`} role="table">
       {!compact && (
@@ -75,15 +74,14 @@ export function SessionList({ sessions, compact }: { sessions: UsageSessionRecor
         </div>
       )}
       {sessions.map((s) => {
-        const isLive = liveIds.has(s.id);
+        const open = liveById.get(s.id);
+        const isLive = !!open;
         return (
           <div key={s.id} className={`slist-row ${isLive ? 'live' : 'gone'}`} role="row" tabIndex={isLive ? 0 : -1} onClick={() => isLive && void setActive(s.id)} onKeyDown={(e) => e.key === 'Enter' && isLive && void setActive(s.id)} title={isLive ? 'Open session' : 'Session was deleted; its usage is kept'}>
             <span className="slist-main">
-              <span className="slist-title">{s.title}</span>
+              <SessionTitle session={open ?? { title: s.title, config: s }} className="slist-title" />
               <span className="slist-meta">
-                <Badge tone="neutral">{harnessShort(s.harness)}</Badge>
                 {s.model && <span className="mono">{s.provider ? modelName(s.provider, s.model) : s.model}</span>}
-                <span>{basename(s.projectRoot)}</span>
                 <span>{relTime(s.updatedAt)}</span>
                 {!isLive && <span className="slist-gone">deleted</span>}
               </span>
