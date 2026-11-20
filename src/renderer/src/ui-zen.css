@@ -129,7 +129,8 @@
 /* Every row keeps its full-width layout; the rail is just its left edge, so opening never reflows. */
 :root[data-ui='zen'] .sidebar > :not(.resizer),
 :root[data-ui='zen'] .sidebar-nav > *,
-:root[data-ui='zen'] .sidebar-section > .sidebar-archived {
+:root[data-ui='zen'] .sidebar-section > .sidebar-archived,
+:root[data-ui='zen'] .sidebar-section > .sidebar-recent {
   flex-shrink: 0;
   width: var(--sidebar);
 }
@@ -163,6 +164,7 @@
 :root[data-ui='zen'] .sidebar-new,
 :root[data-ui='zen'] .sidebar-views .sidebar-link,
 :root[data-ui='zen'] .sidebar-archived,
+:root[data-ui='zen'] .sidebar-recent,
 :root[data-ui='zen'] .sidebar-bottom .sidebar-link {
   justify-content: flex-start;
   gap: 0;
@@ -179,6 +181,7 @@
 :root[data-ui='zen'] .sidebar-new > .icon,
 :root[data-ui='zen'] .sidebar-views .sidebar-link > .icon,
 :root[data-ui='zen'] .sidebar-archived > .icon,
+:root[data-ui='zen'] .sidebar-recent > .icon,
 :root[data-ui='zen'] .sidebar-bottom .sidebar-link > .icon {
   width: var(--zen-rail);
   height: 16px;
@@ -187,6 +190,7 @@
 :root[data-ui='zen'] .sidebar-new:hover,
 :root[data-ui='zen'] .sidebar-views .sidebar-link:hover,
 :root[data-ui='zen'] .sidebar-archived:hover,
+:root[data-ui='zen'] .sidebar-recent:hover,
 :root[data-ui='zen'] .sidebar-bottom .sidebar-link:hover,
 :root[data-ui='zen'] .sidebar-link.active {
   background: var(--bg-hover);
@@ -219,6 +223,7 @@
   flex-direction: column;
   gap: 0;
 }
+:root[data-ui='zen'] .sidebar-recent,
 :root[data-ui='zen'] .sidebar-archived {
   order: 3;
 }
@@ -380,7 +385,20 @@
   margin: 0;
   min-height: 0;
 }
-:root[data-ui='zen'] .session-meta > :not(.session-side) {
+:root[data-ui='zen'] .session-meta > :not(.session-side):not(.session-folder) {
+  display: none;
+}
+/* The Recent view keeps the row's folder name (no icon) beside its status: no header names it. */
+:root[data-ui='zen'] .session-folder {
+  /* Shrinks before the status pill does, so a label like MERGED stays readable. */
+  flex: 0 4 auto;
+  min-width: 28px;
+  font-size: 11.5px;
+}
+:root[data-ui='zen'] .session-folder-name {
+  max-width: 84px;
+}
+:root[data-ui='zen'] .session-folder > .icon {
   display: none;
 }
 :root[data-ui='zen'] .session-side,

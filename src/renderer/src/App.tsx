@@ -11,7 +11,7 @@ import { QuickSessionPicker } from './components/QuickSessionPicker';
 import { RightPanel } from './components/RightPanel';
 import { SearchModal } from './components/SearchModal';
 import { SettingsView } from './components/SettingsView';
-import { nextFolderTarget, nextSessionTarget, sidebarNavModel, Sidebar } from './components/Sidebar';
+import { nextFolderTarget, nextSessionTarget, sidebarNavModel, sidebarViewOf, Sidebar } from './components/Sidebar';
 import { McpView } from './components/McpView';
 import { SkillsView } from './components/SkillsView';
 import { SessionPanes } from './components/SessionPanes';
@@ -109,7 +109,8 @@ export function App() {
         const model = sidebarNavModel(st.sessions, st.settings);
         const target = e.shiftKey ? nextFolderTarget(model, st.activeId, down) : nextSessionTarget(model, st.activeId, down);
         if (target) {
-          const collapsed = st.settings?.collapsedFolders ?? [];
+          // A collapsed folder hides the row only in the folder view; the Recent view lists it anyway.
+          const collapsed = sidebarViewOf(st.settings) === 'folders' ? st.settings?.collapsedFolders ?? [] : [];
           if (collapsed.includes(target.root)) void invoke('settings:update', { collapsedFolders: collapsed.filter((r) => r !== target.root) });
           void st.setActive(target.sessionId).catch(toastError);
           // The sidebar row may not be in view (long list, or folder just expanded above).

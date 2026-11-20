@@ -3,7 +3,8 @@
  * tree's changes, the compact context readout and options menus under the composer, a turn's work behind one
  * chip with its plan still on screen, the title bar's search and Vesta launcher, the sidebar's New
  * session entry, a header that sheds detail in a narrow split pane instead of overflowing it, and the
- * sidebar's activity tray reaching a session that finished unviewed in a collapsed folder.
+ * sidebar's activity tray reaching a session that finished unviewed in a collapsed folder, and the
+ * sidebar's Recent view listing every folder's sessions in one recency order across a restart.
  * Layout cases use seeded sessions and transcripts. The title refresh case runs native chat against
  * a scripted loopback provider. No provider keys; screenshots land in tests/artifacts/session-view-*.png.
  * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
@@ -670,4 +671,58 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
       return { unseen: 'unseenAt' in done, viewed: typeof done.lastViewedAt };
     }, { timeout: 10_000 }).toEqual({ unseen: false, viewed: 'number' });
   }, 120_000);
+
+  it('switches the sidebar to one Recent list across folders, names each row’s folder, and keeps the view after a restart', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-recent-'));
+    const userData = path.join(tmp, 'userData');
+    const alpha = path.join(tmp, 'alpha');
+    const beta = path.join(tmp, 'beta');
+    for (const dir of [userData, alpha, beta]) await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(alpha, { folders: [alpha, beta], recentProjects: [alpha, beta], folderOrder: [alpha, beta] }));
+    // Recency interleaves the two folders; the folder view groups them, the Recent view must not.
+    const meta = (id: string, title: string, projectRoot: string, at: number): SessionMeta => ({
+      id, title, createdAt: T, updatedAt: T, lastUserMessageAt: at,
+      config: { harness: 'native', projectRoot, permissionMode: 'ask' }, cwd: projectRoot, status: 'idle', harnessRef: {}, usage: usage()
+    });
+    const sessions = [
+      meta('s_recent_a_old', 'Alpha oldest', alpha, T + 1_000),
+      meta('s_recent_b_new', 'Beta newest', beta, T + 4_000),
+      meta('s_recent_a_new', 'Alpha newer', alpha, T + 3_000),
+      meta('s_recent_b_mid', 'Beta middle', beta, T + 2_000)
+    ];
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
+    for (const s of sessions) {
+      await fs.mkdir(path.join(userData, 'sessions', s.id), { recursive: true });
+      await fs.writeFile(path.join(userData, 'sessions', s.id, 'transcript.jsonl'), JSON.stringify({ id: 'u1', kind: 'user', ts: T, text: s.title }) + '\n');
+    }
+    const rowIds = (win: Page) => win.locator('.sidebar-list [data-testid="session-row"]').evaluateAll((els) => els.map((el) => el.getAttribute('data-session-id')));
+
+    let win = await launch(userData);
+    await win.setViewportSize({ width: 1280, height: 800 });
+    await expect.poll(() => rowIds(win)).toEqual(['s_recent_a_new', 's_recent_a_old', 's_recent_b_new', 's_recent_b_mid']);
+    const toggle = win.getByTestId('sidebar-recent');
+    expect(await toggle.getAttribute('aria-pressed')).toBe('false');
+    await toggle.click();
+    await expect.poll(() => rowIds(win)).toEqual(['s_recent_b_new', 's_recent_a_new', 's_recent_b_mid', 's_recent_a_old']);
+    expect(await win.locator('.sidebar-list .project-header').count()).toBe(0);
+    expect(await win.locator('.sidebar-list [data-testid="session-folder"]').allTextContents()).toEqual(['beta', 'alpha', 'beta', 'alpha']);
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'session-view-07-sidebar-recent.png') });
+    await expect.poll(async () => (JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8')) as { sidebarView?: string }).sidebarView).toBe('recent');
+
+    // Ctrl+ArrowDown follows the Recent order, crossing folders on every step.
+    await win.locator(`[data-session-id="s_recent_b_new"]`).click();
+    await win.keyboard.press('Control+ArrowDown');
+    await expect.poll(() => win.locator('.pane.active .header').textContent()).toContain('Alpha newer');
+
+    await app!.close();
+    app = null;
+    win = await launch(userData);
+    await expect.poll(() => rowIds(win)).toEqual(['s_recent_b_new', 's_recent_a_new', 's_recent_b_mid', 's_recent_a_old']);
+    expect(await win.getByTestId('sidebar-recent').getAttribute('aria-pressed')).toBe('true');
+
+    // And back to folders.
+    await win.getByTestId('sidebar-recent').click();
+    await expect.poll(() => rowIds(win)).toEqual(['s_recent_a_new', 's_recent_a_old', 's_recent_b_new', 's_recent_b_mid']);
+  }, 180_000);
 });
