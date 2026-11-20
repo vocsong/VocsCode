@@ -340,6 +340,69 @@ describe('per-folder new-session defaults', () => {
     expect(screen.getByLabelText('Branch prefix')).toBeTruthy();
   });
 
+  it('switches the folder from the header, re-applying that folder\'s choices but keeping the draft', async () => {
+    const OTHER = 'G:/other';
+    seedSettings(settingsWith({
+      folders: [ROOT, OTHER],
+      folderSessionDefaults: { [OTHER]: { harness: 'claude', permissionMode: 'plan', useWorktree: true, modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } } }
+    }));
+    render(<NewSessionDialog />);
+    const start = screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+    expect(document.querySelector('.harness-card.active')?.textContent).toContain('Pi');
+    fireEvent.change(screen.getByPlaceholderText('What should the agent do?'), { target: { value: 'Keep this draft' } });
+
+    fireEvent.click(screen.getByTitle(`${ROOT} — change folder`));
+    const choices = screen.getAllByRole('menuitemradio');
+    // The sidebar's folders in the sidebar's order (alphabetical without a saved order), the current one checked.
+    expect(choices.map((c) => c.textContent)).toEqual([`other${OTHER}`, `Vocs-Code${ROOT}`]);
+    expect(choices.map((c) => c.getAttribute('aria-checked'))).toEqual(['false', 'true']);
+    fireEvent.click(choices[0]);
+
+    await waitFor(() => expect(document.querySelector('.ns-root')?.textContent).toBe(OTHER));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.querySelector('.harness-card.active')?.textContent).toContain('Claude Agent SDK');
+    expect((screen.getByText('Permissions').closest('.field')!.querySelector('select') as HTMLSelectElement).value).toBe('plan');
+    expect((screen.getByPlaceholderText('What should the agent do?') as HTMLTextAreaElement).value).toBe('Keep this draft');
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git:folderIsRepo', { projectRoot: OTHER }));
+    await waitFor(() => expect(start.disabled).toBe(false));
+    fireEvent.click(start);
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({
+      config: expect.objectContaining({ projectRoot: OTHER, harness: 'claude', permissionMode: 'plan', useWorktree: true }),
+      initialPrompt: 'Keep this draft'
+    })));
+  });
+
+  it('picks a folder outside the list with the native folder picker', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'harness:models') return harnessModels();
+      if (channel === 'git:folderIsRepo') return { isRepo: false };
+      if (channel === 'app:pickFolder') return { path: 'D:/elsewhere' };
+      return {};
+    });
+    render(<NewSessionDialog />);
+    fireEvent.click(screen.getByTitle(`${ROOT} — change folder`));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Choose another folder…' }));
+
+    await waitFor(() => expect(document.querySelector('.ns-root')?.textContent).toBe('D:/elsewhere'));
+    expect(invoke).toHaveBeenCalledWith('app:pickFolder', { defaultPath: ROOT });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git:folderIsRepo', { projectRoot: 'D:/elsewhere' }));
+  });
+
+  it('closes the folder menu on Escape before it closes the dialog', async () => {
+    render(<NewSessionDialog />);
+    fireEvent.click(screen.getByTitle(`${ROOT} — change folder`));
+    expect(screen.getByRole('menu')).toBeTruthy();
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(useStore.getState().openNewSession).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(useStore.getState().openNewSession).toHaveBeenCalledWith(false);
+  });
+
   it('starts a quick session on the folder\'s remembered choices', async () => {
     seedSettings(settingsWith({ folderSessionDefaults: { [ROOT]: { harness: 'claude', permissionMode: 'plan', useWorktree: true, branchPrefix: 'chore', modelByHarness: { claude: { provider: 'anthropic', model: 'claude-opus-5' } } } } }));
 

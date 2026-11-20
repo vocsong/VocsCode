@@ -279,6 +279,8 @@ export function Modal({ title, onClose, children, width = 720, footer }: { title
       // Setup can open above a drafted new session; only the top dialog owns Escape/Tab.
       if (!dialog || dialogs[dialogs.length - 1] !== dialog || e.defaultPrevented) return;
       if (e.key === 'Escape') {
+        // An open menu inside the dialog (a Dropdown) closes first; the next Escape closes the dialog.
+        if (dialog.querySelector('[role="menu"]')) return;
         e.stopPropagation();
         onClose();
         return;
@@ -448,12 +450,12 @@ export function Field({ label, hint, children, inline }: { label: React.ReactNod
  * at once: the track colour, a check/cross glyph riding inside the thumb, and an On/Off word next
  * to it. Position is then only a confirmation, never the sole cue.
  */
-export function Toggle({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label?: React.ReactNode; disabled?: boolean }) {
+export function Toggle({ checked, onChange, label, disabled, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; label?: React.ReactNode; disabled?: boolean; /** Names a switch whose visible label sits outside it (a field heading). */ ariaLabel?: string }) {
   return (
     <label className={`toggle ${checked ? 'is-on' : 'is-off'} ${disabled ? 'disabled' : ''}`}>
       {/* The On/Off word lives inside the label, so without this the accessible name would become
           "Off Auto-compaction" and shift every time the switch flips. */}
-      <input type="checkbox" aria-label={typeof label === 'string' ? label : undefined} checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <input type="checkbox" aria-label={ariaLabel ?? (typeof label === 'string' ? label : undefined)} checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       <span className="toggle-track" aria-hidden="true">
         <span className="toggle-thumb">
           <svg className="toggle-glyph" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
