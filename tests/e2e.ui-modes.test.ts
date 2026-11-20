@@ -263,6 +263,32 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await expect.poll(() => activeRow(win)).toBe('s_modes_extra_39');
   }, 120_000);
 
+  it('keeps Zen’s rail on its dots after the new-session dialog hands focus back to a button in it', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-focus-'));
+    const { userData } = await seed(tmp, 'zen');
+    const win = await launch(userData);
+    await expect.poll(() => uiMode(win)).toBe('zen');
+    await park(win);
+    await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(52);
+    const dotX = () => rect(win, `[data-session-id="${FIRST}"] .session-pin`).then((r) => r.x);
+    const restingDot = await dotX();
+    // The folder's + sits at the open rail's right edge, far outside the closed rail.
+    await win.mouse.move(26, 420);
+    await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(280);
+    await win.locator('.project-new-btn').first().click();
+    const dialog = win.locator('.modal[role="dialog"]');
+    await dialog.waitFor();
+    // The pointer leaves the rail for the dialog, so the rail closes behind it; closing the dialog
+    // restores focus to the + (a mouse close, so no focus ring reopens the rail).
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect.poll(() => dialog.count()).toBe(0);
+    await park(win);
+    await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(52);
+    // Focusing a clipped button must not scroll the rail sideways and leave it showing row ends.
+    expect(await win.locator('.sidebar').evaluate((el) => el.scrollLeft)).toBe(0);
+    expect(await dotX()).toBe(restingDot);
+  }, 120_000);
+
   it('reopens in the interface it was closed in', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-restart-'));
     const { userData } = await seed(tmp);
