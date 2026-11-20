@@ -2322,8 +2322,7 @@ h4 {
 .run-controls .pill-model {
   color: var(--fg);
   font-weight: 500;
-  max-width: 300px;
-  width: 100%;
+  max-width: 100%;
 }
 .run-controls .pill-model > .icon:first-child {
   color: var(--accent);
@@ -2333,9 +2332,6 @@ h4 {
   flex: none;
   color: var(--fg-muted);
   font-weight: 400;
-}
-.model-menu {
-  width: 320px;
 }
 .model-menu:not(.model-menu-wide) .menu-item {
   padding-block: 5px;
@@ -2350,9 +2346,6 @@ h4 {
   min-width: 0;
   max-width: none;
   text-align: right;
-}
-.model-menu-wide {
-  width: 380px;
 }
 .model-menu .menu-item > .icon:last-child:not([data-icon='check']) {
   color: var(--fg-faint);
@@ -2395,7 +2388,8 @@ h4 {
   border-radius: 8px;
   cursor: pointer;
 }
-.session-meter:hover {
+.session-meter:hover,
+.session-meter[aria-expanded='true'] {
   background: var(--bg-hover);
   color: var(--fg-muted);
 }
@@ -3629,12 +3623,29 @@ h4 {
   max-width: 100%;
   white-space: normal;
 }
-.composer-actions .model-menu {
-  max-width: calc(100cqw - 12px);
+/* Keep the footer as the popup's containing block so it can constrain either menu. */
+.composer-actions .run-controls > .dropdown {
+  anchor-scope: --run-control;
+}
+.composer-actions .run-controls .pill {
+  anchor-name: --run-control;
+}
+.composer-actions .run-controls .dropdown-menu {
+  --run-menu-width: 300px;
+  width: var(--run-menu-width);
+  min-width: 0;
+  left: clamp(0px, anchor(--run-control left, 0px), calc(100% - var(--run-menu-width)));
+}
+.composer-actions .run-controls .dropdown-menu:has(.model-menu) {
+  --run-menu-width: 330px;
+}
+.composer-actions .run-controls .dropdown-menu:has(.model-menu-wide) {
+  --run-menu-width: 390px;
 }
 .composer-actions .run-controls > .dropdown:first-child {
-  flex: 0 1 300px;
+  flex: 0 1 auto;
   min-width: 38px;
+  max-width: 300px;
 }
 .composer-actions .run-controls > .dropdown:last-child:not(:first-child) {
   flex: none;
@@ -3656,10 +3667,11 @@ h4 {
   .composer-actions .run-controls .pill { padding-inline: 5px; }
 }
 @container (max-width: 440px) {
-  /* These actions remain in Composer options; permission and send/stop never disappear. */
+  /* Keep the meter visible if opening Usage was what narrowed the composer. */
   .composer-actions > .composer-attach,
-  .composer-actions > .session-meter,
+  .composer-actions > .session-meter:not([aria-expanded='true']),
   .composer-actions > .queued-hint { display: none; }
+  .composer-actions > .session-meter { padding-inline: 3px; }
 }
 @container (max-width: 340px) {
   .composer-send-label { display: none; }
