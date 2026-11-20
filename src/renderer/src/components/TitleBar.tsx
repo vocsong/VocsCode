@@ -13,9 +13,6 @@ import { ForkIntoItems } from './ForkInto';
 import { openSettings } from './SettingsView';
 import { VestaLauncher } from './Vesta';
 import { setUiMode, useMinimalUi, useUiMode } from '../ui-mode';
-import { ActivityMenu } from './ActivityTray';
-import { activitySections } from '../activity';
-import { isTopLevelSession } from '../missions';
 import { UI_MODES } from '../../../shared/ui-modes';
 
 const REPO = 'https://github.com/vocsong/VocsCode';
@@ -38,61 +35,28 @@ export function TitleBar() {
   const view = useStore((s) => s.view);
   const session = useActiveSession();
   const title = view === 'settings' ? 'Settings · Vocs Code' : session ? `${session.title} · Vocs Code` : 'Vocs Code';
-  // Paper has no sidebar: the bar's middle names the session and drops the session switcher instead.
-  const paper = useUiMode() === 'paper';
-  const switcherOpen = useStore((s) => s.switcherOpen);
-  const toggleSwitcher = () => useStore.getState().openSwitcher(!useStore.getState().switcherOpen);
 
   return (
     <div className={`titlebar ${isMac ? 'titlebar-mac' : ''} ${isWeb ? 'titlebar-web' : ''}`}>
       <div className="titlebar-lead">
-        {/* Paper has no sidebar to toggle: its session switcher is the title in the middle of the bar. */}
-        {!paper && <TitleBarButton icon="sidebar" label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} hint={`${modKey}+B`} onClick={toggleSidebar} />}
+        <TitleBarButton icon="sidebar" label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} hint={`${modKey}+B`} onClick={toggleSidebar} />
         <TitleBarButton icon="arrowLeft" label="Back" hint={isMac ? '⌘[' : 'Alt+←'} disabled={!canBack} onClick={() => void navBack()} />
         <TitleBarButton icon="arrowRight" label="Forward" hint={isMac ? '⌘]' : 'Alt+→'} disabled={!canForward} onClick={() => void navForward()} />
         <MenuBar />
       </div>
       {/* The middle of the bar names where you are and doubles as the way to go anywhere else. */}
       <div className="titlebar-title">
-        {paper ? (
-          <button type="button" className={`titlebar-search titlebar-switch ${switcherOpen ? 'open' : ''}`} title={`${title} — switch session (${modKey}+B) · commands (${modKey}+K)`} aria-haspopup="true" aria-expanded={switcherOpen} onClick={toggleSwitcher}>
-            <span className="titlebar-search-text">{view === 'settings' ? 'Settings' : session ? session.title : 'Sessions'}</span>
-            <Icon name="chevron" size={12} />
-          </button>
-        ) : (
-          <button type="button" className="titlebar-search" title={`${title} — search sessions and commands (${modKey}+K)`} onClick={() => useStore.getState().openPalette(true)}>
-            <Icon name="search" size={13} />
-            <span className="titlebar-search-text">{view === 'settings' ? 'Settings' : session ? session.title : 'Search sessions and commands'}</span>
-            <kbd className="kbd">{modKey}+K</kbd>
-          </button>
-        )}
+        <button type="button" className="titlebar-search" title={`${title} — search sessions and commands (${modKey}+K)`} onClick={() => useStore.getState().openPalette(true)}>
+          <Icon name="search" size={13} />
+          <span className="titlebar-search-text">{view === 'settings' ? 'Settings' : session ? session.title : 'Search sessions and commands'}</span>
+          <kbd className="kbd">{modKey}+K</kbd>
+        </button>
       </div>
       <div className="titlebar-trail">
-        {paper && <SessionActivity />}
         <VestaLauncher />
       </div>
       <div className="titlebar-tail">{isWeb && <span className="web-badge">web</span>}</div>
     </div>
-  );
-}
-
-/**
- * Paper's stand-in for the sidebar's status badges: what is running, waiting on you or finished
- * unseen, as numbers by the title, opening the same activity tray.
- */
-function SessionActivity() {
-  const sessions = useStore((s) => s.sessions);
-  const running = sessions.filter((s) => isTopLevelSession(s) && s.status === 'running').length;
-  const awaiting = sessions.filter((s) => isTopLevelSession(s) && s.status === 'awaiting').length;
-  const done = activitySections(sessions, null).done.length;
-  if (!running && !awaiting && !done) return null;
-  const parts = [running && `${running} running`, awaiting && `${awaiting} awaiting approval`, done && `${done} finished since you last looked`].filter(Boolean).join(', ');
-  return (
-    <ActivityMenu className="titlebar-activity" triggerClassName="titlebar-activity-trigger" label={`Session activity: ${parts}`} title={parts}>
-      {running > 0 && <span className="activity-count activity-running">{running}</span>}
-      {awaiting > 0 && <span className="activity-count activity-awaiting">{awaiting}</span>}
-      {done > 0 && <span className="activity-count activity-done">{done}</span>}
-    </ActivityMenu>
   );
 }
 
@@ -106,7 +70,7 @@ function TitleBarButton({ icon, label, hint, onClick, disabled }: { icon: string
 
 /**
  * Click to open, then hover to walk across the menus — the way a native menu bar behaves. The
- * minimalist interface modes fold the four words into one button whose panel switches between the
+ * minimalist Zen interface folds the four words into one button whose panel switches between the
  * same menus by icon, so every item stays reachable without the labels on the bar.
  */
 function MenuBar() {
@@ -301,15 +265,9 @@ function ViewMenu({ close }: { close: () => void }) {
   };
   return (
     <>
-      {uiMode === 'paper' ? (
-        <MenuItem hint={`${modKey}+B`} onClick={run(() => st.openSwitcher(true))}>
-          Sessions
-        </MenuItem>
-      ) : (
-        <MenuItem active={sidebarOpen} hint={`${modKey}+B`} onClick={run(st.toggleSidebar)}>
-          Sidebar
-        </MenuItem>
-      )}
+      <MenuItem active={sidebarOpen} hint={`${modKey}+B`} onClick={run(st.toggleSidebar)}>
+        Sidebar
+      </MenuItem>
       <MenuItem active={panelOpen} hint={`${modKey}+J`} onClick={run(() => st.togglePanel())}>
         Side panel
       </MenuItem>

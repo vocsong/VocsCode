@@ -34,7 +34,6 @@ export function App() {
   const view = useStore((s) => s.view);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
-  const switcherOpen = useStore((s) => s.switcherOpen);
   const panelOpen = useStore((s) => s.panelOpen);
   const newSessionOpen = useStore((s) => s.newSessionOpen);
   const onboardingOpen = useStore((s) => s.onboardingOpen);
@@ -58,8 +57,6 @@ export function App() {
 
   useEffect(() => {
     applyUiMode(settings?.uiMode);
-    // Paper's switcher is a transient popover: a mode change never brings it back open.
-    useStore.getState().openSwitcher(false);
   }, [settings?.uiMode]);
 
   useEffect(() => {
@@ -89,9 +86,7 @@ export function App() {
         st.openSearch(true);
       } else if (mod && e.key.toLowerCase() === 'b') {
         e.preventDefault();
-        // Paper has no sidebar: the same key opens its session switcher.
-        if (st.settings?.uiMode === 'paper') st.openSwitcher(!st.switcherOpen);
-        else st.toggleSidebar();
+        st.toggleSidebar();
       } else if (mod && e.key.toLowerCase() === 'j') {
         e.preventDefault();
         st.togglePanel();
@@ -138,10 +133,6 @@ export function App() {
           st.setPanelTab('terminal');
           st.focusTerminal();
         }
-      } else if (e.key === 'Escape' && st.switcherOpen) {
-        // Closing Paper's session switcher is all Escape does while it is open.
-        e.preventDefault();
-        st.openSwitcher(false);
       } else if (handleCustomShortcut(e)) {
         // A custom shortcut bound in Settings → Shortcuts consumed the key; the fixed
         // shortcuts above keep priority.
@@ -194,16 +185,12 @@ export function App() {
     );
   }
 
-  // Paper has no sidebar column: the same list drops from the title bar as a switcher, only while open.
-  const paper = settings.uiMode === 'paper';
-  const showSidebar = paper ? switcherOpen : sidebarOpen;
   return (
     <div className="shell">
       <TitleBar />
       <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px`, ['--panel-split' as string]: `${Math.min(0.8, Math.max(0.2, settings.panelSplit ?? 0.62))}` }}>
-        {sidebarOpen && !paper && <div className="sidebar-backdrop" onClick={toggleSidebar} />}
-        {paper && switcherOpen && <div className="switcher-backdrop" onClick={() => useStore.getState().openSwitcher(false)} />}
-        {showSidebar && <Sidebar />}
+        {sidebarOpen && <div className="sidebar-backdrop" onClick={toggleSidebar} />}
+        {sidebarOpen && <Sidebar />}
         <main className="main">
           {view === 'settings' ? (
             <SettingsView />

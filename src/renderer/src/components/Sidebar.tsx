@@ -1,5 +1,5 @@
 /** Session list grouped by project, with live status badges per harness. */
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import type { AppSettings, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { modelRefName } from '../../../shared/model-names';
@@ -10,7 +10,7 @@ import { isTopLevelSession } from '../missions';
 import { activitySections } from '../activity';
 import { sortSessionRows } from '../sessionOrder';
 import { useStore, toastError } from '../store';
-import { useMinimalUi, useUiMode } from '../ui-mode';
+import { useMinimalUi } from '../ui-mode';
 import { canSplit, paneShowing, SESSION_DRAG_TYPE } from '../panes';
 import { Resizer } from './Resizer';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
@@ -265,20 +265,12 @@ export function Sidebar() {
   const running = sessions.filter((s) => isTopLevelSession(s) && s.status === 'running').length;
   const done = activitySections(sessions, null).done.length;
   const plural = (n: number) => `${n} ${n === 1 ? 'session' : 'sessions'}`;
-  // Zen and Paper keep only the icons of these links; their names move into tooltips.
+  // Zen keeps only the icons of these links; their names move into tooltips.
   const minimal = useMinimalUi();
   const tip = (label: string) => (minimal ? label : undefined);
-  // Paper shows this list as a switcher dropping from the title bar: it opens on the session you are
-  // in, however long the list is.
-  const paper = useUiMode() === 'paper';
-  const list = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!paper || !activeId) return;
-    list.current?.querySelector(`[data-session-id="${CSS.escape(activeId)}"]`)?.scrollIntoView?.({ block: 'nearest' });
-  }, [paper, activeId]);
 
   return (
-    <aside className="sidebar" aria-label={paper ? 'Sessions' : undefined}>
+    <aside className="sidebar">
       <div className="sidebar-top">
         <div className="brand">
           <Icon name="logo" size={22} />
@@ -333,7 +325,6 @@ export function Sidebar() {
       </div>
       <div
         className="sidebar-list"
-        ref={list}
         onDragOver={(e) => {
           // Only the empty space below the last group lands here (group handlers stop
           // propagation); treat it as "move to the end".
@@ -499,7 +490,7 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
   const [title, setTitle] = useState(s.title);
   const renameAction = useRef<'idle' | 'committed' | 'cancelled'>('idle');
   const h = HARNESS_BY_ID[s.config.harness];
-  // Zen's rail hides the title and Paper's switcher cuts it short, so the row names itself on hover.
+  // Zen's rail hides the title, so the row names itself on hover there.
   const minimal = useMinimalUi();
   const startRename = () => {
     setTitle(s.title);

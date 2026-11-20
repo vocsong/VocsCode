@@ -14,8 +14,9 @@ describe('interface mode in settings', () => {
     expect(normalizeSettings({}).uiMode).toBe('standard');
     expect(normalizeSettings({ theme: 'dark' }).uiMode).toBe('standard');
     for (const m of UI_MODES) expect(normalizeSettings({ uiMode: m.id }).uiMode).toBe(m.id);
-    // 'mono' was a mode in an unreleased build of this branch; it falls back like any unknown value.
-    for (const junk of ['Zen', 'compact', 'mono', '', 42, null, { id: 'zen' }]) {
+    // 'mono' and 'paper' were modes in unreleased builds of this branch; they fall back like any
+    // unknown value.
+    for (const junk of ['Zen', 'compact', 'mono', 'paper', '', 42, null, { id: 'zen' }]) {
       expect(isUiModeId(junk)).toBe(false);
       expect(normalizeSettings({ uiMode: junk as never }).uiMode).toBe('standard');
     }
@@ -27,11 +28,11 @@ describe('interface mode in settings', () => {
       const store = new SettingsStore(dir);
       await store.load();
       await store.update({ theme: 'blueprint' });
-      expect((await store.update({ uiMode: 'paper' })).uiMode).toBe('paper');
+      expect((await store.update({ uiMode: 'zen' })).uiMode).toBe('zen');
       const onDisk = JSON.parse(await fs.readFile(path.join(dir, 'settings.json'), 'utf8')) as AppSettings;
-      expect(onDisk).toMatchObject({ uiMode: 'paper', theme: 'blueprint' });
+      expect(onDisk).toMatchObject({ uiMode: 'zen', theme: 'blueprint' });
       const reloaded = new SettingsStore(dir);
-      expect((await reloaded.load()).uiMode).toBe('paper');
+      expect((await reloaded.load()).uiMode).toBe('zen');
       expect((await reloaded.update({ uiMode: 'bogus' as never })).uiMode).toBe('standard');
       const final = JSON.parse(await fs.readFile(path.join(dir, 'settings.json'), 'utf8')) as AppSettings;
       expect(final).toMatchObject({ uiMode: 'standard', theme: 'blueprint' });

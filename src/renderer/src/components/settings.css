@@ -239,12 +239,3 @@
 .ui-mini-column { flex: 0 0 54%; margin: 0 auto; padding-top: 14px; }
 .ui-mini-column b { height: 4px; margin-bottom: 7px; }
 .ui-mini-pill { position: absolute; left: 50%; bottom: 9px; width: 50%; height: 13px; transform: translateX(-50%); border-radius: 999px; background: var(--bg-elev); box-shadow: 0 0 0 1px var(--border), 0 4px 12px -4px rgb(0 0 0 / 0.4); }
-/* Paper: no sidebar, the session named in the title, a page of text over a ruled line, a sheet below. */
-.ui-mini-paper { flex-direction: column; border-radius: 4px; }
-.ui-mini-title { display: flex; flex: 0 0 13px; align-items: center; justify-content: center; }
-.ui-mini-title i { width: 38%; height: 5px; border-radius: 3px; background: color-mix(in srgb, var(--fg) 22%, transparent); }
-.ui-mini-page { display: flex; flex: 1; flex-direction: column; width: 62%; margin: 0 auto; padding-top: 7px; }
-.ui-mini-page b { height: 3px; margin-bottom: 6px; border-radius: 1px; }
-.ui-mini-page b.user { height: 4px; margin-left: 0; background: color-mix(in srgb, var(--fg) 40%, transparent); }
-.ui-mini-rule { margin-top: auto; margin-bottom: 6px; height: 1px; background: var(--border-strong); }
-.ui-mini-sheet { flex: 0 0 22px; border-top: 1px solid var(--border-strong); background: var(--bg-elev); }

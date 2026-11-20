@@ -29,11 +29,10 @@ function ownsComposerFocus(sessionId: string): boolean {
 /** Where the pane hands files dropped anywhere on it; set only while a writable composer is mounted. */
 export type AttachFilesRef = React.MutableRefObject<((files: File[]) => void) | null>;
 
-/** The idle prompt's hint, shorter in the minimalist modes. */
+/** The idle prompt's hint, shorter in the minimalist Zen interface. */
 const IDLE_PLACEHOLDER = {
   standard: 'Message the agent… @ files · / commands · ! shell',
-  zen: 'Ask anything…',
-  paper: 'Write…'
+  zen: 'Ask anything…'
 } as const;
 
 export function Composer({ session, attachRef }: { session: SessionMeta; attachRef?: AttachFilesRef }) {

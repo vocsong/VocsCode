@@ -695,7 +695,7 @@ h4 {
   background: var(--border);
 }
 
-/* The minimalist interfaces' one-button menu (TitleBar.tsx): icon tabs over the chosen menu. */
+/* Zen's one-button menu (TitleBar.tsx): icon tabs over the chosen menu. */
 .menubar-tabs {
   display: flex;
   gap: 2px;

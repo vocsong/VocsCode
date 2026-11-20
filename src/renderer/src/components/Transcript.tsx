@@ -762,7 +762,7 @@ export function WorkGroup({ chunk, sessionId, canEdit = false, showThinking, onI
     <div className={`work-group ${running ? 'work-running' : ''} ${expanded ? 'work-open' : ''}`}>
       <button type="button" className="work-head" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
         <Icon name={running ? 'activity' : 'layers'} size={13} className="work-icon" />
-        {/* data-short carries the same facts without the words, for the Zen and Paper interfaces. */}
+        {/* data-short carries the same facts without the words, for the Zen interface. */}
         <span className="work-label" data-short={running ? '…' : durationMs ? fmtDuration(durationMs) : '✓'}>{running ? 'Working…' : durationMs ? `Worked for ${fmtDuration(durationMs)}` : 'Worked'}</span>
         {tools.length > 0 && <span className="work-stat work-steps" data-short={String(tools.length)}>{tools.length} step{tools.length === 1 ? '' : 's'}</span>}
         {files.size > 0 && <span className="work-stat work-files" data-short={`±${files.size}`}>{files.size} file{files.size === 1 ? '' : 's'} changed</span>}

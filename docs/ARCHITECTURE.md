@@ -44,8 +44,8 @@ src/renderer      React 19 + zustand UI
     mission/      Mission settings, launch dialog, panel, workspace inspector and completion report
   terminal/       xterm.js instances kept alive outside React (host.ts)
   theme.ts        injects the data-driven palettes and applies the active theme to <html>
-  ui-mode.ts      the interface mode (Standard, Zen, Paper) as React reads it; theme.ts applies it as <html data-ui>
-  ui-zen.css      the Zen layout and ui-paper.css the Paper one: CSS over the standard component tree, so a switch never remounts a session pane (docs/INTERFACE-MODES.md)
+  ui-mode.ts      the interface mode (Standard or Zen) as React reads it; theme.ts applies it as <html data-ui>
+  ui-zen.css      the Zen layout: CSS over the standard component tree, so a switch never remounts anything (docs/INTERFACE-MODES.md)
   store.ts        session state; api.ts wraps the preload bridge
   panes.ts        the split view's pane model (which session each pane shows, plus a file preview pane); components/SessionPanes.tsx renders it
   file-open.ts    where a session's files are read from (Mission workspaces) and how outside paths are only revealed; components/FilePreviewPane.tsx previews

@@ -73,7 +73,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
   // Until one of its tabs is opened the lower half is only its tab strip, so the workspace view
   // above gets the whole height instead of sitting over an empty pane.
   const bottomIdle = opened.length === 0;
-  // Zen and Paper draw the tabs as icons alone; the name moves to a tooltip.
+  // Zen draws the tabs as icons alone; the name moves to a tooltip.
   const minimal = useMinimalUi();
   return (
     <aside className={`panel ${bottomIdle ? 'panel-bottom-idle' : ''}`}>
