@@ -21,7 +21,7 @@ import { Welcome } from './components/Welcome';
 import { ContextMenuHost } from './components/ContextMenu';
 import { handleCustomShortcut } from './shortcuts';
 import { createTerminal } from './terminal/host';
-import { applyTheme } from './theme';
+import { applyTheme, applyUiMode } from './theme';
 import { isTopLevelSession, pauseMissionSession } from './missions';
 import { useReportDesktopFocus, useSessionViewing } from './desktop-focus';
 import { activeComposer } from './panes';
@@ -54,6 +54,10 @@ export function App() {
   useEffect(() => {
     applyTheme(settings?.theme ?? 'system');
   }, [settings?.theme]);
+
+  useEffect(() => {
+    applyUiMode(settings?.uiMode);
+  }, [settings?.uiMode]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

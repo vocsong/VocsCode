@@ -10,6 +10,7 @@ import { isTopLevelSession } from '../missions';
 import { activitySections } from '../activity';
 import { sortSessionRows } from '../sessionOrder';
 import { useStore, toastError } from '../store';
+import { useMinimalUi } from '../ui-mode';
 import { canSplit, paneShowing, SESSION_DRAG_TYPE } from '../panes';
 import { Resizer } from './Resizer';
 import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
@@ -264,6 +265,9 @@ export function Sidebar() {
   const running = sessions.filter((s) => isTopLevelSession(s) && s.status === 'running').length;
   const done = activitySections(sessions, null).done.length;
   const plural = (n: number) => `${n} ${n === 1 ? 'session' : 'sessions'}`;
+  // Zen keeps only the icons of these links; their names move into tooltips.
+  const minimal = useMinimalUi();
+  const tip = (label: string) => (minimal ? label : undefined);
 
   return (
     <aside className="sidebar">
@@ -302,20 +306,20 @@ export function Sidebar() {
           <Icon name="sessionPlus" size={15} /> <span>New session</span> <Kbd>{modKey}+N</Kbd>
         </button>
         <div className="sidebar-views">
-          <button type="button" className={`sidebar-link ${view === 'analytics' ? 'active' : ''}`} onClick={() => setView('analytics')}>
+          <button type="button" className={`sidebar-link ${view === 'analytics' ? 'active' : ''}`} title={tip('Analytics')} onClick={() => setView('analytics')}>
             <Icon name="chart" size={14} /> Analytics
           </button>
-          <button type="button" className={`sidebar-link ${view === 'skills' ? 'active' : ''}`} onClick={() => setView('skills')}>
+          <button type="button" className={`sidebar-link ${view === 'skills' ? 'active' : ''}`} title={tip('Skills')} onClick={() => setView('skills')}>
             <Icon name="puzzle" size={14} /> Skills
           </button>
-          <button type="button" className={`sidebar-link ${view === 'mcp' ? 'active' : ''}`} onClick={() => setView('mcp')}>
+          <button type="button" className={`sidebar-link ${view === 'mcp' ? 'active' : ''}`} title={tip('MCP')} onClick={() => setView('mcp')}>
             <Icon name="server" size={14} /> MCP
           </button>
         </div>
       </div>
       <div className="sidebar-section">
         <span className="sidebar-section-label">{showArchived ? 'Archived sessions' : 'Sessions'}</span>
-        <button type="button" className={`sidebar-link sidebar-archived ${showArchived ? 'active' : ''}`} onClick={() => setShowArchived((v) => !v)}>
+        <button type="button" className={`sidebar-link sidebar-archived ${showArchived ? 'active' : ''}`} title={tip(showArchived ? 'Show active' : 'Archived')} onClick={() => setShowArchived((v) => !v)}>
           <Icon name={showArchived ? 'arrowLeft' : 'clock'} size={13} /> {showArchived ? 'Show active' : 'Archived'}
         </button>
       </div>
@@ -417,7 +421,7 @@ export function Sidebar() {
         })}
       </div>
       <div className="sidebar-bottom">
-        <button type="button" className={`sidebar-link ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>
+        <button type="button" className={`sidebar-link ${view === 'settings' ? 'active' : ''}`} title={tip('Settings')} onClick={() => setView('settings')}>
           <Icon name="settings" size={14} /> Settings
         </button>
         <UpdatePill />
@@ -486,6 +490,8 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
   const [title, setTitle] = useState(s.title);
   const renameAction = useRef<'idle' | 'committed' | 'cancelled'>('idle');
   const h = HARNESS_BY_ID[s.config.harness];
+  // Zen's rail hides the title, so the row names itself on hover there.
+  const minimal = useMinimalUi();
   const startRename = () => {
     setTitle(s.title);
     renameAction.current = 'idle';
@@ -557,6 +563,10 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
       className={`session-row ${active ? 'active' : ''}${inPane ? ' in-pane' : ''}${s.unseenAt !== undefined ? ' unseen' : ''}${dragClass}${indicator}`}
       data-testid="session-row"
       data-session-id={s.id}
+      data-status={archiving ? 'archiving' : s.status}
+      data-tone={harnessTone(s.config.harness)}
+      data-pinned={s.pinned ? '' : undefined}
+      title={minimal && !renaming ? s.title : undefined}
       draggable={canDrag}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move';

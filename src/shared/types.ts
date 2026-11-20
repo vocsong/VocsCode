@@ -4,6 +4,7 @@
  */
 import type { TerminalSettings } from './terminal';
 import type { ThemeId } from './themes';
+import type { UiModeId } from './ui-modes';
 import type { ShortcutCommand } from './shortcuts';
 import type { KnowledgeSettings } from './knowledge';
 import type { DictationSettings } from './dictation';
@@ -1283,6 +1284,8 @@ export interface AppSettings {
   missionProjects?: Record<string, MissionProjectOverride>;
   version: 1;
   theme: ThemeId;
+  /** Interface layout, independent of the color theme (shared/ui-modes.ts). Absent means Standard. */
+  uiMode?: UiModeId;
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
   /** Remote access (docs/REMOTE-ACCESS.md): outbound relay connection, off by default. */
