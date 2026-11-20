@@ -74,7 +74,8 @@ function transcript(): TranscriptItem[] {
 
 const usage = (): SessionMeta['usage'] => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 });
 
-async function seed(tmp: string, uiMode?: string): Promise<{ userData: string; project: string }> {
+/** `extra` adds that many idle sessions, enough of them to overflow the window's height. */
+async function seed(tmp: string, uiMode?: string, extra = 0): Promise<{ userData: string; project: string }> {
   const userData = path.join(tmp, 'userData');
   const project = path.join(tmp, 'project');
   await fs.mkdir(userData, { recursive: true });
@@ -82,7 +83,8 @@ async function seed(tmp: string, uiMode?: string): Promise<{ userData: string; p
   await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { theme: 'dark', windowBounds: { width: 1280, height: 860 }, ...(uiMode ? { uiMode } : {}) }));
   const sessions: SessionMeta[] = [
     { id: FIRST, title: 'Add rate limiting to the public API', createdAt: T, updatedAt: T + 10, lastUserMessageAt: T, config: { harness: 'claude', projectRoot: project, permissionMode: 'accept-edits', model: { provider: 'anthropic', model: 'claude-opus-5-5' } }, cwd: project, status: 'idle', harnessRef: {}, usage: usage() },
-    { id: SECOND, title: 'Fix flaky auth refresh test', createdAt: T - 1000, updatedAt: T - 1000, lastUserMessageAt: T - 1000, config: { harness: 'native', projectRoot: project, permissionMode: 'ask' }, cwd: project, status: 'idle', harnessRef: {}, usage: usage() }
+    { id: SECOND, title: 'Fix flaky auth refresh test', createdAt: T - 1000, updatedAt: T - 1000, lastUserMessageAt: T - 1000, config: { harness: 'native', projectRoot: project, permissionMode: 'ask' }, cwd: project, status: 'idle', harnessRef: {}, usage: usage() },
+    ...Array.from({ length: extra }, (_, i): SessionMeta => ({ id: `s_modes_extra_${i}`, title: `Backlog item ${i + 1}`, createdAt: T - 2000 - i, updatedAt: T - 2000 - i, lastUserMessageAt: T - 2000 - i, config: { harness: 'native', projectRoot: project, permissionMode: 'ask' }, cwd: project, status: 'idle', harnessRef: {}, usage: usage() }))
   ];
   await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
   for (const s of sessions) {
@@ -226,6 +228,40 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     expect(await win.locator('.panel').count()).toBe(1);
     expect((await win.evaluate(() => window.harness.invoke('settings:get', undefined))).uiMode).toBe('standard');
   }, 180_000);
+
+  it('scrolls a session list longer than the window in Zen’s rail, open or closed, keeping its foot on screen', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-scroll-'));
+    const { userData } = await seed(tmp, 'zen', 40);
+    const win = await launch(userData);
+    await expect.poll(() => uiMode(win)).toBe('zen');
+    const viewport = win.viewportSize()!;
+    const list = win.locator('.sidebar-list');
+    const last = win.locator('[data-session-id="s_modes_extra_39"]');
+    const listBox = () => rect(win, '.sidebar-list');
+    // Closed: the list is bounded by the window, overflows, and the gear at the rail's foot stays on screen.
+    await park(win);
+    await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(52);
+    const scroll = () => list.evaluate((el) => ({ top: el.scrollTop, height: el.scrollHeight, client: el.clientHeight }));
+    expect((await scroll()).height).toBeGreaterThan((await scroll()).client);
+    const box = await listBox();
+    expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+    const gear = await rect(win, '.sidebar-bottom .sidebar-link');
+    expect(gear.y + gear.height).toBeLessThanOrEqual(viewport.height);
+    // A wheel over the closed rail scrolls it (the rail opens under the pointer as it does so).
+    await win.mouse.move(26, box.y + box.height / 2);
+    await win.mouse.wheel(0, 4000);
+    await expect.poll(async () => (await scroll()).top).toBeGreaterThan(0);
+    // Open: scrolled to the end, the last session is inside the list's visible box, and it opens.
+    await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(280);
+    await expect.poll(async () => {
+      const [row, l] = [await rect(win, '[data-session-id="s_modes_extra_39"]'), await listBox()];
+      return row.y >= l.y && row.y + row.height <= l.y + l.height;
+    }).toBe(true);
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'ui-modes-zen-rail-scrolled.png') });
+    await last.locator('.session-pin').click();
+    await expect.poll(() => activeRow(win)).toBe('s_modes_extra_39');
+  }, 120_000);
 
   it('reopens in the interface it was closed in', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-restart-'));
