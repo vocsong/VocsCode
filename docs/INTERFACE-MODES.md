@@ -25,7 +25,8 @@ File / Edit / View / Help menu bar.
 - The title bar keeps only the menu, where you are and Vesta. File / Edit / View / Help fold into one
   menu button whose panel switches menus by icon. Back and forward appear when the bar is pointed
   at. Labels the layout drops become tooltips, so no destination disappears.
-- Settings becomes an icon rail with an expanding search.
+- Settings becomes an icon rail. Hover over it or tab to a section to reveal the full menu
+  over the page.
 
 ## How it is built
 
