@@ -155,11 +155,13 @@ option with no level the app models stays unknown too.
 The desktop composer footer stays on one row, including narrow split panes. Its model pill uses
 catalog display text (or the model id), with the full `provider/model` identity in its accessible
 label, tooltip and menu. The menu shows Favourite models, the available Reasoning Effort levels,
-and Fast Mode On/Off together; More models opens the searchable catalog. Permissions remain visible.
-Steer is primary while running, with Queue in its adjacent menu; queue-only harnesses get one Queue
-button. Composer options holds dictation's Cloud/Local selector, attachments, cost/context details
-and queued-message counts. Container queries move the inline attachment/context/count controls into
-that menu at narrow widths without changing send or permission semantics.
+and Fast Mode On/Off together; More models opens the searchable catalog. Model and permission
+buttons fit their labels. Their popups align to the button's left edge unless the edge of the
+composer leaves too little room. Steer is primary while running, with Queue in its adjacent menu;
+queue-only harnesses get one Queue button. Composer options holds dictation's Cloud/Local selector,
+attachments, cost/context details and queued-message counts. Narrow widths rely on that menu for
+secondary controls, but the context meter stays visible while Usage is selected so it can close the
+panel again.
 
 **Fast mode is a separate, per-session premium-speed preference**, not a reasoning level. The
 New Session dialog and composer's model menu expose `SessionConfig.fastMode` (off by default), with a
