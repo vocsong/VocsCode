@@ -98,3 +98,35 @@ describe('nextFolderTarget (Ctrl+Shift+Arrow)', () => {
     expect(nextFolderTarget(model(), null, true)).toEqual({ sessionId: 'b-new', root: 'G:/proj/b' });
   });
 });
+
+describe('Recent view nav model', () => {
+  const recent = { ...settings, sidebarView: 'recent' } as AppSettings;
+  // Interleaved recency across two folders: the user's own last message decides, pins still lead.
+  const mixed = [
+    session('G:/proj/a', 'a1', { updatedAt: 100, lastUserMessageAt: 400 }),
+    session('G:/proj/b', 'b1', { updatedAt: 100, lastUserMessageAt: 300 }),
+    session('G:/proj/b', 'b2', { updatedAt: 9_000, lastUserMessageAt: 200 }),
+    session('G:/proj/a', 'a2', { updatedAt: 100, lastUserMessageAt: 100 }),
+    session('G:/proj/a', 'a-pin', { updatedAt: 50, pinned: true, pinnedAt: 10 }),
+    session('G:/proj/b', 'b-archived', { updatedAt: 9_999, lastUserMessageAt: 9_999, archived: true }),
+  ];
+  const recentModel = () => sidebarNavModel(mixed, recent);
+
+  it('lists every folder in one recency order, split into runs of the same folder', () => {
+    expect(recentModel()).toEqual([
+      { root: 'G:/proj/a', sessionIds: ['a-pin', 'a1'] },
+      { root: 'G:/proj/b', sessionIds: ['b1', 'b2'] },
+      { root: 'G:/proj/a', sessionIds: ['a2'] },
+    ]);
+  });
+
+  it('walks rows in that order with Ctrl+Arrow, ignoring folderOrder', () => {
+    expect(nextSessionTarget(recentModel(), 'a1', true)).toEqual({ sessionId: 'b1', root: 'G:/proj/b' });
+    expect(nextSessionTarget(recentModel(), 'b2', true)).toEqual({ sessionId: 'a2', root: 'G:/proj/a' });
+  });
+
+  it('jumps to the next row from a different folder with Ctrl+Shift+Arrow', () => {
+    expect(nextFolderTarget(recentModel(), 'a-pin', true)).toEqual({ sessionId: 'b1', root: 'G:/proj/b' });
+    expect(nextFolderTarget(recentModel(), 'b2', true)).toEqual({ sessionId: 'a2', root: 'G:/proj/a' });
+  });
+});
