@@ -1,6 +1,6 @@
 import React, { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalDecision, ApprovalRequest, FileChange, SessionMeta, TranscriptItem } from '../../../shared/types';
-import { invoke } from '../api';
+import { invoke, isWeb } from '../api';
 import { useCanInvoke, useTranscriptCapabilities } from '../capabilities';
 import { fmtCost, fmtDuration, fmtRate, fmtTokens } from '../format';
 import { installMarkdownHandlers } from '../markdown';
@@ -182,8 +182,12 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    return installMarkdownHandlers(el, (url) => void invoke('app:openExternal', { url }), caps.openFile ? openFile : undefined);
-  }, [openFile, caps.openFile]);
+    const openLink = (url: string) => {
+      if (!isWeb && !session.mission && useStore.getState().openPullRequestLink(session.id, url)) return;
+      void invoke('app:openExternal', { url });
+    };
+    return installMarkdownHandlers(el, openLink, caps.openFile ? openFile : undefined);
+  }, [openFile, caps.openFile, session.id, session.mission]);
 
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
