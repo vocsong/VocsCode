@@ -9,7 +9,8 @@
  * turn is not asserted, since no provider key is configured.
  * The Branches view runs against a real bare remote: a branch pushed and then deleted server-side
  * reads as live until Refresh re-syncs remote-tracking refs, and says "Deleted on origin" after.
- * The session is seeded on disk so no harness and no provider key is involved. Requires
+ * Switching sessions keeps loaded Git rows visible and tracks the current linked worktree.
+ * Sessions are seeded on disk so no harness and no provider key is involved in switching. Requires
  * `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
@@ -20,6 +21,7 @@ import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { UiModeId } from '../src/shared/ui-modes';
 import { expectQuietWindow, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -71,11 +73,15 @@ const GH_CMD = [
 
 /**
  * Seeds a repository and session with the fake gh, launches the app and lands on the Git tab.
- * `seedRepo` runs after the initial commit, still before the app starts, so a test can add a remote
- * and branches for the panel to read.
+ * `seedRepo` runs after the initial commit so a test can add remotes, branches, and sessions.
  */
 async function seedAndLaunch(
-  { tag, panelWidth, seedRepo }: { tag: string; panelWidth: number; seedRepo?: (project: string, git: (...args: string[]) => void) => void }
+  { tag, panelWidth, uiMode, seedRepo }: {
+    tag: string;
+    panelWidth: number;
+    uiMode?: UiModeId;
+    seedRepo?: (project: string, git: (...args: string[]) => void) => Pick<SessionMeta, 'title' | 'cwd' | 'worktreeBranch'>[] | void;
+  }
 ): Promise<{ app: ElectronApplication; win: Page }> {
   const tmp = path.join(os.tmpdir(), `vocs-code-git-${Date.now()}-${tag}`);
   const userData = path.join(tmp, 'userData');
@@ -93,10 +99,10 @@ async function seedAndLaunch(
   git('init', '-q');
   git('add', '-A');
   git('-c', 'user.email=e2e@example.com', '-c', 'user.name=e2e', 'commit', '-qm', 'init');
-  seedRepo?.(project, git);
+  const additionalSessions = seedRepo?.(project, git) ?? [];
 
   // A dismissed setup banner keeps the panel to its tables.
-  await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { gitSetupSkipped: [project], panelWidth }));
+  await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { gitSetupSkipped: [project], panelWidth, uiMode }));
 
   const sid = 's_git_e2e';
   const session = {
@@ -115,7 +121,10 @@ async function seedAndLaunch(
     { id: 'u1', kind: 'user', ts: Date.now(), text: 'Hello' },
     { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'Hi' }
   ];
-  await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
+  const sessions = [session, ...additionalSessions.map((meta, i) => ({
+    ...session, ...meta, id: `${sid}-${i}`, updatedAt: session.updatedAt - i - 1
+  }))];
+  await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
   await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
   await fs.writeFile(path.join(userData, 'sessions', sid, 'transcript.jsonl'), items.map((i) => JSON.stringify(i)).join('\n') + '\n');
 
@@ -137,7 +146,8 @@ async function seedAndLaunch(
   // The suite runs off-screen and inactive so it does not disturb the desktop; assert the window itself.
   await expectQuietWindow(app);
 
-  await win.locator('.panel-tab', { hasText: 'Git' }).click();
+  const gitTab = uiMode === 'zen' ? win.locator('.panel-tab[title="Git"]') : win.locator('.panel-tab', { hasText: 'Git' });
+  await gitTab.click();
   return { app, win };
 }
 
@@ -281,6 +291,43 @@ describe.runIf(enabled)('git panel PR review session', () => {
 });
 
 describe.runIf(enabled)('git panel branch state', () => {
+  it.each<UiModeId>(['standard', 'zen'])('keeps loaded branches visible while switching sessions in %s', async (uiMode) => {
+    const worktreeBranch = 'feature/session-switch';
+    const { app, win } = await seedAndLaunch({
+      tag: `switch-${uiMode}`,
+      panelWidth: 420,
+      uiMode,
+      seedRepo: (project, git) => {
+        const cwd = path.join(path.dirname(project), 'linked-worktree');
+        git('worktree', 'add', '-q', '-b', worktreeBranch, cwd);
+        return [{ title: 'Same checkout', cwd: project }, { title: 'Linked worktree', cwd, worktreeBranch }];
+      }
+    });
+    const switchTo = async (title: string) => {
+      const row = win.getByTestId('session-row').filter({ hasText: title });
+      await (uiMode === 'zen' ? row.locator('.session-pin') : row).click();
+      await expect.poll(() => win.getByTestId('session-title').getAttribute('title')).toBe(title);
+    };
+    const table = win.locator('.panel-top .branches-table');
+    const currentBranch = table.locator('.branch-row').filter({ has: win.getByText('Current', { exact: true }) }).locator('.branch-name > .mono');
+    const initialBranch = await currentBranch.innerText({ timeout: 30_000 });
+    const initialTable = await table.elementHandle();
+
+    await switchTo('Same checkout');
+    expect(await initialTable.evaluate((node) => node.isConnected)).toBe(true);
+    expect(await currentBranch.innerText()).toBe(initialBranch);
+
+    await switchTo('Linked worktree');
+    await expect.poll(() => currentBranch.innerText({ timeout: 1_000 }), { timeout: 30_000 }).toBe(worktreeBranch);
+    const worktreeTable = await table.elementHandle();
+
+    await switchTo('Git panel');
+    expect(await worktreeTable.evaluate((node) => node.isConnected)).toBe(true);
+    expect(await currentBranch.innerText()).toBe(initialBranch);
+
+    await app.close();
+  }, 180_000);
+
   it('re-syncs on refresh and marks a branch deleted on the server', async () => {
     const { app, win } = await launchBranchesPanel();
     const ghostRow = win.locator('.branch-row', { hasText: 'feature/ghost' });

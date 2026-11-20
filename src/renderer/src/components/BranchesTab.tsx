@@ -1,8 +1,9 @@
 /** Git panel tab: GitHub-style branch overview, worktree housekeeping and the repo's pull requests and issues (pulled via gh). */
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { GitBranchOverview, GitBranchOverviewItem, GitComment, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, GitSetupStatus, GitWorktreeInfo, SessionMeta } from '../../../shared/types';
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import type { GitBranchOverviewItem, GitComment, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, GitSetupStatus, GitWorktreeInfo, SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { basename, relTime } from '../format';
+import type { GitPanelCache, GitPanelRead, GitPanelReadOptions } from '../git-panel-cache';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore, type GitPanelView } from '../store';
 import { GitSetup, remoteWebUrl } from './GitSetup';
@@ -53,38 +54,36 @@ function underPath(dir: string, cwd: string): boolean {
   return norm(cwd) === norm(dir) || norm(cwd).startsWith(`${norm(dir)}/`);
 }
 
-export function BranchesTab({ session }: { session: SessionMeta }) {
+export function BranchesTab({ session, cache }: { session: SessionMeta; cache: GitPanelCache }) {
   const toast = useStore((s) => s.toast);
   const sessions = useStore((s) => s.sessions);
   const setActive = useStore((s) => s.setActive);
-  const [data, setData] = useState<GitBranchOverview | null>(null);
+  const { id: sessionId, cwd } = session;
+  const setupKey = `${sessionId}:${cwd}`;
+  const reads = useMemo(() => cache.checkout(cwd), [cache, cwd]);
+  const { data } = useSyncExternalStore(reads.overview.subscribe, reads.overview.getSnapshot);
+  const { data: prData = null, loading: prLoading } = useSyncExternalStore(reads.prs.subscribe, reads.prs.getSnapshot);
+  const { data: issueData = null, loading: issueLoading } = useSyncExternalStore(reads.issues.subscribe, reads.issues.getSnapshot);
   /** Guided-setup state reported by GitSetup, for the housekeeping menu's "Set up GitHub" entry. */
   const [setup, setSetup] = useState<GitSetupStatus | null>(null);
-  // The selected view outlives this component: the panel is unmounted and mounted again when the
-  // active session changes — starting a session from a PR row does it — and coming back to Branches
-  // instead of the list the user was reading would be a regression, not a reset.
+  // The selected view survives a panel remount, including when a PR row starts a new session.
   const view = useStore((s) => s.gitPanelView);
   const setView = useStore((s) => s.setGitPanelView);
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
-  /** Pull requests are pulled from GitHub separately (slower, needs gh); loaded on open and kept fresh by the background poll. */
-  const [prData, setPrData] = useState<GitPullRequestList | null>(null);
-  const [prLoading, setPrLoading] = useState(false);
   const [prFilter, setPrFilter] = useState<PrFilter>('open');
   const [prQuery, setPrQuery] = useState('');
-  /** Issues likewise come from gh; loaded on open and kept fresh by the background poll. */
-  const [issueData, setIssueData] = useState<GitIssueList | null>(null);
-  const [issueLoading, setIssueLoading] = useState(false);
   const [issueFilter, setIssueFilter] = useState<IssueFilter>('open');
   const [issueQuery, setIssueQuery] = useState('');
   const [selectedIssue, setSelectedIssue] = useState<GitIssue | null>(null);
   const [selectedPr, setSelectedPr] = useState<GitPullRequest | null>(null);
-  /** The session this instance belongs to; async responses for other sessions are dropped. */
-  const liveId = useRef(session.id);
-  /** Inputs the background poll reads; refreshed every render so the interval never acts on stale state. */
-  const pollState = useRef({ isRepo: false, ghMissing: false });
-  pollState.current = { isRepo: !!data?.isRepo, ghMissing: !!data?.ghMissing || !!prData?.ghMissing || !!issueData?.ghMissing };
-  const pollInFlight = useRef(false);
+  const visit = useMemo(() => ({ sessionId, cwd }), [sessionId, cwd]);
+  const liveVisit = useRef<typeof visit | null>(null);
+  const isCurrentVisit = liveVisit.current === visit;
+  const reportSetup = (status: GitSetupStatus) => {
+    if (liveVisit.current === visit) setSetup(status);
+  };
+  const pollInFlight = useRef<typeof visit | null>(null);
   const lastPollAt = useRef(0);
   const activityTimer = useRef<number | null>(null);
   /** Previous turn status, so the panel can refresh once a turn ends (the app-level "git hook"). */
@@ -97,50 +96,31 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
    * ref and reads as live, so re-reading alone looks like a refresh that did nothing. Only an explicit refresh pays
    * for the round trip; the minute poll stays local.
    */
-  const refresh = async (opts: { background?: boolean; remote?: boolean } = {}) => {
-    const sid = session.id;
+  const load = async <T extends { error?: string }>(read: GitPanelRead<T>, fetch: () => Promise<T>, opts: GitPanelReadOptions) => {
+    try {
+      await read.load(fetch, opts);
+    } catch (e) {
+      if (liveVisit.current === visit && !opts.background) toast(String((e as Error).message ?? e), 'error');
+    }
+  };
+  const refresh = async (opts: GitPanelReadOptions & { remote?: boolean } = { force: true }) => {
     if (opts.remote) {
       try {
-        const f = await invoke('git:fetchPrune', { sessionId: sid });
-        if (liveId.current !== sid) return;
+        const f = await invoke('git:fetchPrune', { sessionId });
+        if (liveVisit.current !== visit) return;
         // The branch list is still worth showing, so a failed fetch reports itself instead of aborting the refresh.
         if (!f.ok) toast(f.output || 'Could not reach the remote — showing local branch state.', 'error');
       } catch (e) {
-        if (liveId.current !== sid) return;
+        if (liveVisit.current !== visit) return;
         toast(String((e as Error).message ?? e), 'error');
       }
     }
-    try {
-      const r = await invoke('git:branchesOverview', { sessionId: sid });
-      if (liveId.current === sid) setData(r);
-    } catch (e) {
-      if (liveId.current === sid && !opts.background) toast(String((e as Error).message ?? e), 'error');
-    }
+    await load(reads.overview, () => invoke('git:branchesOverview', { sessionId }), opts);
   };
-  const refreshPrs = async (opts: { background?: boolean } = {}) => {
-    const sid = session.id;
-    if (!opts.background) setPrLoading(true);
-    try {
-      const r = await invoke('git:pullRequests', { sessionId: sid });
-      if (liveId.current === sid) setPrData(r);
-    } catch (e) {
-      if (liveId.current === sid && !opts.background) toast(String((e as Error).message ?? e), 'error');
-    } finally {
-      if (liveId.current === sid && !opts.background) setPrLoading(false);
-    }
-  };
-  const refreshIssues = async (opts: { background?: boolean } = {}) => {
-    const sid = session.id;
-    if (!opts.background) setIssueLoading(true);
-    try {
-      const r = await invoke('git:issues', { sessionId: sid });
-      if (liveId.current === sid) setIssueData(r);
-    } catch (e) {
-      if (liveId.current === sid && !opts.background) toast(String((e as Error).message ?? e), 'error');
-    } finally {
-      if (liveId.current === sid && !opts.background) setIssueLoading(false);
-    }
-  };
+  const refreshPrs = (opts: GitPanelReadOptions = { force: true }) =>
+    load(reads.prs, () => invoke('git:pullRequests', { sessionId }), opts);
+  const refreshIssues = (opts: GitPanelReadOptions = { force: true }) =>
+    load(reads.issues, () => invoke('git:issues', { sessionId }), opts);
 
   /**
    * GitHub-side PR/issue changes cannot be pushed to a desktop app, so the only way to see them
@@ -148,49 +128,55 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
    * non-repo folder skips it, and gh-less folders skip the two GitHub calls.
    */
   const poll = async () => {
-    const { isRepo, ghMissing } = pollState.current;
-    if (pollInFlight.current || document.visibilityState === 'hidden' || !isRepo) return;
-    pollInFlight.current = true;
+    if (liveVisit.current !== visit || pollInFlight.current === visit || document.visibilityState === 'hidden' || !data?.isRepo) return;
+    pollInFlight.current = visit;
     lastPollAt.current = Date.now();
     try {
       const jobs = [refresh({ background: true })];
+      const ghMissing = data.ghMissing || prData?.ghMissing || issueData?.ghMissing;
       if (!ghMissing) jobs.push(refreshPrs({ background: true }), refreshIssues({ background: true }));
       await Promise.all(jobs);
     } finally {
-      pollInFlight.current = false;
+      if (pollInFlight.current === visit) pollInFlight.current = null;
     }
   };
+  const latestPoll = useRef(poll);
+  latestPoll.current = poll;
 
   useEffect(() => {
-    liveId.current = session.id;
+    liveVisit.current = visit;
     prevStatus.current = session.status;
-    setData(null);
-    setPrData(null);
-    setIssueData(null);
+    setSetup(null);
     setSelectedIssue(null);
     setSelectedPr(null);
+    return () => { liveVisit.current = null; };
+  }, [visit]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    cache.remember(cwd, reads);
     lastPollAt.current = Date.now();
-    void refresh();
-    void refreshPrs();
-    void refreshIssues();
-  }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    void refresh({ background: !!data });
+    void refreshPrs({ background: !!prData, reuseFor: POLL_MS });
+    void refreshIssues({ background: !!issueData, reuseFor: POLL_MS });
+  }, [cache, cwd, reads, visit]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Remote changes arrive between turns, so poll every minute while the tab is open. A hidden
   // window skips the tick and catches up on focus/visibility instead, like the sidebar's folder branch.
   useEffect(() => {
-    const timer = window.setInterval(() => void poll(), POLL_MS);
-    const onWake = () => {
-      if (document.visibilityState !== 'hidden') void poll();
-    };
+    const onWake = () => void latestPoll.current();
+    const timer = window.setInterval(onWake, POLL_MS);
     window.addEventListener('focus', onWake);
     document.addEventListener('visibilitychange', onWake);
     return () => {
       window.clearInterval(timer);
       window.removeEventListener('focus', onWake);
       document.removeEventListener('visibilitychange', onWake);
-      if (activityTimer.current !== null) window.clearTimeout(activityTimer.current);
+      if (activityTimer.current !== null) {
+        window.clearTimeout(activityTimer.current);
+        activityTimer.current = null;
+      }
     };
-  }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [reads]);
 
   // The app-level equivalent of a git hook: a finished turn is when the agent's commit / push /
   // `gh pr create` has settled, so refresh shortly after — throttled so a chatty session cannot
@@ -203,7 +189,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
     const wait = Math.max(2_000, ACTIVITY_REFRESH_MIN_MS - (Date.now() - lastPollAt.current));
     activityTimer.current = window.setTimeout(() => {
       activityTimer.current = null;
-      void poll();
+      void latestPoll.current();
     }, wait);
   }, [session.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -386,7 +372,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   if (data && !data.isRepo) {
     return (
       <div className="branches">
-        <GitSetup variant="page" session={session} onChanged={() => void refresh()} onStatus={setSetup} />
+        <GitSetup key={setupKey} variant="page" session={session} onChanged={() => void refresh()} onStatus={reportSetup} />
       </div>
     );
   }
@@ -405,7 +391,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
 
   return (
     <div className="branches">
-      <GitSetup variant="banner" session={session} onChanged={() => void refresh()} onStatus={setSetup} />
+      <GitSetup key={setupKey} variant="banner" session={session} onChanged={() => void refresh()} onStatus={reportSetup} />
       {data.error && (
         <div className="callout warn" role="status">
           {data.error}
@@ -433,11 +419,12 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           trigger={() => <Button variant="ghost" size="sm" icon="more" title="Housekeeping" aria-label="Housekeeping actions" />}
         >
           {(close) => {
-            const root = setup?.mainRoot ?? setup?.root ?? session.cwd;
+            const status = isCurrentVisit ? setup : null;
+            const root = status?.mainRoot ?? status?.root ?? cwd;
             const skipped = useStore.getState().settings?.gitSetupSkipped ?? [];
             // The panel lists this checkout's branches; the server's own list is the cross-check, so keep
             // a way out of the app within reach of the list it disagrees with.
-            const repoUrl = setup?.remote ? remoteWebUrl(setup.remote) : undefined;
+            const repoUrl = status?.remote ? remoteWebUrl(status.remote) : undefined;
             return (
               <>
                 {repoUrl && (
@@ -451,7 +438,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
                     Open branches on GitHub
                   </MenuItem>
                 )}
-                {setup?.isRepo && !setup.published && skipped.includes(root) && (
+                {status?.isRepo && !status.published && skipped.includes(root) && (
                   <MenuItem
                     onClick={() => {
                       close();
@@ -491,7 +478,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           disabled={prLoading || issueLoading}
           onClick={() => {
             lastPollAt.current = Date.now();
-            void refresh({ remote: true });
+            void refresh({ remote: true, force: true });
             void refreshPrs();
             void refreshIssues();
           }}
@@ -597,7 +584,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           ))}
         </div>
       )}
-      {selectedIssue && (
+      {isCurrentVisit && selectedIssue && (
         <IssueDialog
           issue={selectedIssue}
           sessionId={session.id}
@@ -612,7 +599,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           }}
         />
       )}
-      {selectedPr && (
+      {isCurrentVisit && selectedPr && (
         <PrDialog
           pr={selectedPr}
           sessionId={session.id}
@@ -622,7 +609,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
             void invoke('app:openExternal', { url: selectedPr.url });
           }}
           onMerge={async () => {
-            if (await mergeListedPr(selectedPr)) setSelectedPr(null);
+            if (await mergeListedPr(selectedPr) && liveVisit.current === visit) setSelectedPr(null);
           }}
         />
       )}

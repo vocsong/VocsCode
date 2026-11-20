@@ -1,9 +1,8 @@
 /** @vitest-environment jsdom */
 /**
  * The Git panel's PR/issue data is stale by nature: GitHub-side changes are invisible until
- * something asks again. These tests pin that asking — eager load on open, a minute tick, a
- * hidden window that skips the tick and catches up on visibility, a turn-end refresh, and
- * silent failures that never wipe the last list.
+ * something asks again. These tests cover checkout reuse, the initial reads, polling,
+ * refresh on visibility and turn completion, and failures that leave the displayed list intact.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -16,6 +15,7 @@ const invokeMock = vi.fn();
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
+import { GitPanelCache } from '../src/renderer/src/git-panel-cache';
 import { useStore } from '../src/renderer/src/store';
 import type { GitBranchOverview, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, SessionMeta } from '../src/shared/types';
 
@@ -41,21 +41,25 @@ const issue = (n: number): GitIssue => ({ number: n, title: `Issue ${n}`, state:
 
 let prs: GitPullRequest[] = [];
 let issues: GitIssue[] = [];
-let failPrs = false;
+let prFailure: 'reject' | 'result' | undefined;
 
 beforeEach(() => {
   vi.useFakeTimers();
   invokeMock.mockReset();
   prs = [];
   issues = [];
-  failPrs = false;
+  prFailure = undefined;
   overview = OVERVIEW;
   setupStatus = {};
   useStore.setState({ panelTab: 'branches', gitPanelView: 'branches', toasts: [] });
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
   invokeMock.mockImplementation((channel: string) => {
     if (channel === 'git:branchesOverview') return Promise.resolve(overview);
-    if (channel === 'git:pullRequests') return failPrs ? Promise.reject(new Error('gh exploded')) : Promise.resolve({ prs: [...prs], fetchedAt: Date.now() } satisfies GitPullRequestList);
+    if (channel === 'git:pullRequests') {
+      if (prFailure === 'reject') return Promise.reject(new Error('gh exploded'));
+      if (prFailure === 'result') return Promise.resolve({ prs: [], fetchedAt: Date.now(), error: 'gh exploded' } satisfies GitPullRequestList);
+      return Promise.resolve({ prs: [...prs], fetchedAt: Date.now() } satisfies GitPullRequestList);
+    }
     if (channel === 'git:issues') return Promise.resolve({ issues: [...issues], fetchedAt: Date.now() } satisfies GitIssueList);
     if (channel === 'git:setupStatus') return Promise.resolve(setupStatus);
     return Promise.resolve({});
@@ -73,6 +77,76 @@ const prTab = () => screen.getByTitle('Pull requests on GitHub (via gh)');
 const issueTab = () => screen.getByTitle('Issues on GitHub (via gh)');
 
 describe('Git panel background refresh', () => {
+  it('keeps the issue rows and refreshes the branch overview when switching sessions in one checkout', async () => {
+    issues = [issue(7)];
+    const active = session();
+    const panel = render(<RightPanel session={active} />);
+    await act(async () => {});
+    fireEvent.click(issueTab());
+    const row = screen.getByRole('button', { name: 'Read issue #7: Issue 7' });
+    overview = { ...OVERVIEW, branches: [{ ...OVERVIEW.branches[0], name: 'changed-branch' }] };
+
+    panel.rerender(<RightPanel session={{ ...active, id: 's2' }} />);
+
+    expect(screen.getByRole('button', { name: 'Read issue #7: Issue 7' })).toBe(row);
+    await act(async () => {});
+    expect(calls('git:branchesOverview')).toBe(2);
+    expect(invokeMock).toHaveBeenCalledWith('git:branchesOverview', { sessionId: 's2' });
+    expect(calls('git:pullRequests')).toBe(1);
+    expect(calls('git:issues')).toBe(1);
+    fireEvent.click(screen.getByRole('button', { name: /^Branches/ }));
+    expect(screen.getByText('changed-branch')).toBeTruthy();
+  });
+
+  it('shows each worktree’s last branches immediately and shares an in-flight refresh on return', async () => {
+    const a = session();
+    const b = { ...a, id: 's2', cwd: 'G:/proj/a/.vocs-code/worktrees/second' };
+    const branch = (name: string): GitBranchOverview => ({
+      isRepo: true, branches: [{ name, current: true, isBase: true, merged: false }], worktrees: []
+    });
+    let finish!: (value: GitBranchOverview) => void;
+    const pending = new Promise<GitBranchOverview>((resolve) => { finish = resolve; });
+    let aReads = 0;
+    invokeMock.mockImplementation((channel: string, request: { sessionId: string }) => {
+      if (channel === 'git:branchesOverview') {
+        if (request.sessionId === b.id) return Promise.resolve(branch('second-worktree'));
+        return ++aReads === 1 ? Promise.resolve(branch('first-worktree')) : pending;
+      }
+      if (channel === 'git:pullRequests') return Promise.resolve({ prs: [], fetchedAt: Date.now() });
+      if (channel === 'git:issues') return Promise.resolve({ issues: [], fetchedAt: Date.now() });
+      return Promise.resolve({});
+    });
+    const panel = render(<RightPanel session={a} />);
+    await act(async () => {});
+    expect(screen.getByText('first-worktree')).toBeTruthy();
+
+    panel.rerender(<RightPanel session={b} />);
+    expect(screen.queryByText('first-worktree')).toBeNull();
+    await act(async () => {});
+    expect(screen.getByText('second-worktree')).toBeTruthy();
+
+    await act(async () => panel.rerender(<RightPanel session={a} />));
+    expect(screen.getByText('first-worktree')).toBeTruthy();
+    expect(screen.queryByText('second-worktree')).toBeNull();
+    expect(aReads).toBe(2);
+
+    panel.rerender(<RightPanel session={b} />);
+    expect(screen.getByText('second-worktree')).toBeTruthy();
+    await act(async () => panel.rerender(<RightPanel session={a} />));
+    expect(aReads).toBe(2);
+    expect(calls('git:pullRequests')).toBe(2);
+    expect(calls('git:issues')).toBe(2);
+
+    panel.rerender(<RightPanel session={b} />);
+    await act(async () => finish(branch('first-worktree-updated')));
+    expect(screen.getByText('second-worktree')).toBeTruthy();
+    expect(screen.queryByText('first-worktree-updated')).toBeNull();
+
+    panel.rerender(<RightPanel session={a} />);
+    expect(screen.getByText('first-worktree-updated')).toBeTruthy();
+    expect(screen.queryByText('first-worktree')).toBeNull();
+  });
+
   it('loads the PR and issue counts on open and re-pulls them on the minute tick', async () => {
     prs = [pr(1), pr(2), pr(3, 'MERGED')];
     issues = [issue(7), issue(8)];
@@ -128,11 +202,11 @@ describe('Git panel background refresh', () => {
     expect(prTab().textContent).toContain('2');
   });
 
-  it('keeps the last list when a background pull fails, without an error toast', async () => {
+  it.each(['reject', 'result'] as const)('keeps the last list when a background pull fails (%s)', async (failure) => {
     prs = [pr(1)];
     render(<RightPanel session={session()} />);
     await act(async () => {});
-    failPrs = true;
+    prFailure = failure;
     await act(async () => {
       vi.advanceTimersByTime(60_000);
     });
@@ -216,21 +290,20 @@ describe('Git panel background refresh', () => {
 
   it('comes back on the GitHub list the user was reading when the panel is mounted again', async () => {
     issues = [issue(7)];
-    const panel = render(<RightPanel session={session()} />);
+    const cache = new GitPanelCache();
+    const panel = render(<RightPanel session={session()} gitPanelCache={cache} />);
     await act(async () => {});
     await act(async () => {
       issueTab().click();
     });
     expect(screen.getByRole('button', { name: 'Read issue #7: Issue 7' })).toBeTruthy();
 
-    // A session switch can unmount the panel for a frame: the started session becomes active before
-    // the store has been told about it, so the panel has no session and is dropped. Whatever the
-    // user was looking at has to be there when it comes back — starting a session from a PR row
-    // must not silently send the Git panel back to Branches.
+    // Starting a session can unmount the panel before its metadata reaches the renderer.
     panel.unmount();
-    render(<RightPanel session={session()} />);
-    await act(async () => {});
+    render(<RightPanel session={session()} gitPanelCache={cache} />);
     expect(issueTab().className).toContain('active');
     expect(screen.getByRole('button', { name: 'Read issue #7: Issue 7' })).toBeTruthy();
+    await act(async () => {});
+    expect(calls('git:issues')).toBe(1);
   });
 });
