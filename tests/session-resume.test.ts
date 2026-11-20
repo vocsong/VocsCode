@@ -333,10 +333,31 @@ describe('session resume persistence', () => {
 // 2. Per-adapter resume seams / stale-resume fallback.
 // ---------------------------------------------------------------------------------------------
 
-describe('codex app-server stale resume', () => {
+describe('codex app-server resume', () => {
   beforeEach(() => {
     mocks.spawnChildren.length = 0;
     mocks.spawnCalls.length = 0;
+  });
+
+  it('accepts restored usage while the resume handshake is pending', async ({ onTestFinished }) => {
+    const threadId = 'saved-thread';
+    const h = makeAdapterCtx({ harness: 'codex', ref: { codexThreadId: threadId }, runtime: { resolve: () => ({ name: 'codex', path: 'C:/fake/codex.exe' }) } });
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    const server = new FakeJsonRpcServer(child).on('thread/resume', () => {
+      const tokenUsage = {
+        total: { inputTokens: 10, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 0 },
+        last: { totalTokens: 15 }, modelContextWindow: 1000
+      };
+      child.stdout.write(JSON.stringify({ method: 'thread/tokenUsage/updated', params: { threadId, tokenUsage } }) + '\n');
+      return { thread: { id: threadId }, model: 'gpt-5', modelProvider: 'openai', reasoningEffort: null };
+    });
+    const adapter = new CodexAppServerAdapter(h.ctx);
+    onTestFinished(() => adapter.dispose());
+    await adapter.start();
+
+    expect(server.requests.some((r) => r.method === 'thread/start')).toBe(false);
+    expect(h.events.filter((e) => e.type === 'usage')).toMatchObject([{ totals: { inputTokens: 10, outputTokens: 5, contextTokens: 15 } }]);
   });
 
   it('warns and starts a fresh thread when thread/resume is rejected', async () => {
