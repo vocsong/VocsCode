@@ -20,6 +20,7 @@ import type {
   GitBranchOverview,
   GitCommentList,
   GitIssueList,
+  GitPullRequestDetail,
   GitPullRequestList,
   GitSetupStatus,
   GitSummary,
@@ -431,6 +432,8 @@ export interface IpcContract {
   'git:fetchPrune': [{ sessionId: string }, { ok: boolean; output: string }];
   /** Pulls the repo's pull requests (all states) from GitHub through gh, for the Git panel's PR view. */
   'git:pullRequests': [{ sessionId: string }, GitPullRequestList];
+  /** Loads the exact GitHub pull request and conversation named by a desktop transcript link. */
+  'git:pullRequest': [{ sessionId: string; url: string }, GitPullRequestDetail];
   /** Pulls the repo's issues (all states) from GitHub through gh, for the Git panel's Issues view. */
   'git:issues': [{ sessionId: string }, GitIssueList];
   /** Pulls one issue's conversation comments through gh, for the Git panel's issue preview. */

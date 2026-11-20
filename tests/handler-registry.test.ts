@@ -12,6 +12,7 @@ import { PUSH_CHANNELS } from '../src/shared/ipc';
 import { agentChannels } from '../src/shared/agent-manifest';
 import { isRemoteChannel, isRemotePushChannel } from '../src/shared/remote-channels';
 import type { AnalyticsStore } from '../src/main/analytics';
+import * as runtime from '../src/main/runtime';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
 import { providerSecrets } from '../src/main/secret-ids';
@@ -324,6 +325,41 @@ describe('handler registry', () => {
     const channels = registry.channels();
     for (const c of ['sessions:list', 'settings:get', 'terminal:input', 'git:summary', 'fs:read', 'fs:resolve', 'approvals:respond', 'analytics:summary', 'window:zoom']) {
       expect(channels).toContain(c);
+    }
+  });
+
+  it('reads a linked PR by its GitHub URL after the session worktree was removed', async () => {
+    const { registry, deps } = stubDeps();
+    const removedCheckout = path.join(ws, 'removed-worktree');
+    const archived = { ...deps.sessions.get('s_test')!, id: '_archived', archived: true, cwd: removedCheckout };
+    const getSession = vi.spyOn(deps.sessions, 'get').mockImplementation((id) => id === archived.id ? archived : undefined);
+    const channel = 'git:pullRequest';
+    const url = 'https://github.com/other/project/pull/42';
+    const comment = { body: 'Ready to ship' };
+    const pr = { number: 42, title: 'Ship it', state: 'MERGED', url };
+    const which = vi.spyOn(runtime, 'which').mockReturnValue('fake-gh');
+    const capture = vi.spyOn(runtime, 'runCapture').mockImplementation(async (_cmd, _args, opts) => (
+      opts?.cwd === removedCheckout
+        ? { code: null, stdout: '', stderr: 'spawn gh ENOENT' }
+        : { code: 0, stdout: JSON.stringify({ ...pr, comments: [comment] }), stderr: '' }
+    ));
+    try {
+      await expect(registry.invoke(channel, { sessionId: 's_missing', url }, 'desktop')).rejects.toThrow('Session not found');
+      await expect(registry.invoke(channel, { sessionId: archived.id, url, cwd: 'caller-supplied' }, 'desktop')).rejects.toThrow();
+      for (const invalidUrl of ['https://github.com.invalid/other/project/pull/42', `${url}/files`, 'https://github.com/other/project/pull/0']) {
+        await expect(registry.invoke(channel, { sessionId: archived.id, url: invalidUrl }, 'desktop')).resolves.toEqual({ error: 'Invalid GitHub pull request link.' });
+      }
+      expect(capture).not.toHaveBeenCalled();
+
+      await expect(registry.invoke(channel, { sessionId: archived.id, url: `${url}?source=chat#issuecomment-1` }, 'desktop'))
+        .resolves.toEqual({ pr: { ...pr, comments: 1 }, comments: [comment] });
+      expect(capture).toHaveBeenCalledExactlyOnceWith('fake-gh', ['pr', 'view', url, '--json', expect.stringContaining('comments')], expect.objectContaining({ cwd: undefined }));
+      expect(isRemoteChannel(channel)).toBe(false);
+      expect(agentChannels()).not.toContain(channel);
+    } finally {
+      capture.mockRestore();
+      which.mockRestore();
+      getSession.mockRestore();
     }
   });
 

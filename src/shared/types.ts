@@ -1470,7 +1470,7 @@ export interface GitPrInfo {
   title?: string;
 }
 
-/** One pull request of the session's GitHub repo, as `gh pr list` reports it (PR view of the Git panel). */
+/** One GitHub pull request shown in the Git panel. */
 export interface GitPullRequest {
   number: number;
   title: string;
@@ -1502,6 +1502,11 @@ export interface GitPullRequestList {
   ghMissing?: boolean;
   error?: string;
 }
+
+/** The PR and conversation loaded on demand when a transcript links to it. */
+export type GitPullRequestDetail =
+  | { pr: GitPullRequest; comments: GitComment[]; error?: never }
+  | { pr?: never; comments?: never; error: string };
 
 /** One issue of the session's GitHub repo, as `gh issue list` reports it (Issues view of the Git panel). */
 export interface GitIssue {

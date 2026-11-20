@@ -2,7 +2,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_BRANCH_PREFIX, branchSlug, normalizeBranchPrefix } from '../shared/branch-prefix';
-import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitComment, GitCommentList, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSetupStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
+import { parseGitHubPullRequestUrl } from '../shared/github-pull-request';
+import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitComment, GitCommentList, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestDetail, GitPullRequestList, GitSetupStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
 import type { Logger } from './log';
 import { runCapture, which, type CaptureResult } from './runtime';
@@ -587,13 +588,15 @@ export async function gitCreateGitHubRepo(cwd: string, name: string, isPrivate: 
 
 type PrResult = { ok: boolean; url?: string; output?: string };
 
-const noGh = (): PrResult => ({ ok: false, output: 'GitHub CLI (gh) is required — install it and run `gh auth login`.' });
+const GH_REQUIRED = 'GitHub CLI (gh) is required — install it and run `gh auth login`.';
+const noGh = (): PrResult => ({ ok: false, output: GH_REQUIRED });
 
-async function gh(cwd: string, args: string[], timeoutMs = 120_000): Promise<CaptureResult> {
+async function gh(cwd: string | undefined, args: string[], timeoutMs = 120_000): Promise<CaptureResult> {
   const r = await runCapture(ghBin() ?? 'gh', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
   // gh talks to GitHub: a timeout or a non-zero exit here is the reason a PR badge or list is missing.
-  if (timedOut(r)) gitLog('warn', `gh ${describeArgs(args)} in ${cwd} timed out after ${timeoutMs}ms`);
-  else if (r.code !== 0) gitLog('debug', `gh ${describeArgs(args)} in ${cwd} exited ${r.code ?? 'null'}: ${failure(r).split('\n')[0].slice(0, 300)}`);
+  const location = cwd ? ` in ${cwd}` : '';
+  if (timedOut(r)) gitLog('warn', `gh ${describeArgs(args)}${location} timed out after ${timeoutMs}ms`);
+  else if (r.code !== 0) gitLog('debug', `gh ${describeArgs(args)}${location} exited ${r.code ?? 'null'}: ${failure(r).split('\n')[0].slice(0, 300)}`);
   return r;
 }
 
@@ -709,7 +712,7 @@ export async function gitPrMap(cwd: string): Promise<{ prs?: Record<string, GitP
   }
 }
 
-const PR_LIST_FIELDS = 'number,title,state,isDraft,headRefName,baseRefName,url,author,createdAt,updatedAt,mergedAt,reviewDecision,additions,deletions,body,labels,comments';
+const PR_DETAILS_FIELDS = 'number,title,state,isDraft,headRefName,baseRefName,url,author,createdAt,updatedAt,mergedAt,reviewDecision,additions,deletions,body,labels,comments';
 
 const isoMs = (v: unknown): number | undefined => {
   if (typeof v !== 'string' || !v) return undefined;
@@ -733,44 +736,68 @@ function ghCommentCount(v: unknown): number | undefined {
   return typeof v === 'number' ? v : undefined;
 }
 
+function ghPullRequest(p: Record<string, unknown>): GitPullRequest | undefined {
+  if (!p || typeof p.number !== 'number' || typeof p.url !== 'string') return;
+  const state = p.state === 'MERGED' || p.state === 'CLOSED' ? p.state : 'OPEN';
+  const author = p.author && typeof p.author === 'object' ? (p.author as { login?: string; name?: string }) : undefined;
+  const pr: GitPullRequest = { number: p.number, title: typeof p.title === 'string' ? p.title : '', state, url: p.url };
+  if (p.isDraft === true) pr.isDraft = true;
+  if (typeof p.headRefName === 'string') pr.headRefName = p.headRefName;
+  if (typeof p.baseRefName === 'string') pr.baseRefName = p.baseRefName;
+  if (author?.login || author?.name) pr.author = author.login || author.name;
+  const created = isoMs(p.createdAt), updated = isoMs(p.updatedAt), merged = isoMs(p.mergedAt);
+  if (created !== undefined) pr.createdAt = created;
+  if (updated !== undefined) pr.updatedAt = updated;
+  if (merged !== undefined) pr.mergedAt = merged;
+  if (typeof p.reviewDecision === 'string' && p.reviewDecision) pr.reviewDecision = p.reviewDecision;
+  if (typeof p.additions === 'number') pr.additions = p.additions;
+  if (typeof p.deletions === 'number') pr.deletions = p.deletions;
+  if (typeof p.body === 'string') pr.body = p.body;
+  const labels = ghLabels(p.labels);
+  if (labels) pr.labels = labels;
+  const comments = ghCommentCount(p.comments);
+  if (comments !== undefined) pr.comments = comments;
+  return pr;
+}
+
 /** Pulls the repo's pull requests from GitHub (`gh pr list`, every state, newest first) for the Git panel's PR view. */
 export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> {
   const fetchedAt = Date.now();
   if (!ghBin()) return { prs: [], fetchedAt, ghMissing: true };
   const root = await gitRoot(cwd);
   if (!root) return { prs: [], fetchedAt, error: 'Not a git repository' };
-  const r = await gh(root, ['pr', 'list', '--state', 'all', '--limit', '100', '--json', PR_LIST_FIELDS], 30_000);
+  const r = await gh(root, ['pr', 'list', '--state', 'all', '--limit', '100', '--json', PR_DETAILS_FIELDS], 30_000);
   if (r.code !== 0 || r.truncated) return { prs: [], fetchedAt, error: r.truncated ? 'gh pr list response was truncated' : (r.stderr || r.stdout).trim() || 'gh pr list failed' };
   try {
     const list = JSON.parse(r.stdout.trim()) as Record<string, unknown>[];
     const prs: GitPullRequest[] = [];
     for (const p of list) {
-      if (typeof p.number !== 'number' || typeof p.url !== 'string') continue;
-      const state = p.state === 'MERGED' || p.state === 'CLOSED' ? p.state : 'OPEN';
-      const author = p.author && typeof p.author === 'object' ? (p.author as { login?: string; name?: string }) : undefined;
-      const pr: GitPullRequest = { number: p.number, title: typeof p.title === 'string' ? p.title : '', state, url: p.url };
-      if (p.isDraft === true) pr.isDraft = true;
-      if (typeof p.headRefName === 'string') pr.headRefName = p.headRefName;
-      if (typeof p.baseRefName === 'string') pr.baseRefName = p.baseRefName;
-      if (author?.login || author?.name) pr.author = author.login || author.name;
-      const created = isoMs(p.createdAt), updated = isoMs(p.updatedAt), merged = isoMs(p.mergedAt);
-      if (created !== undefined) pr.createdAt = created;
-      if (updated !== undefined) pr.updatedAt = updated;
-      if (merged !== undefined) pr.mergedAt = merged;
-      if (typeof p.reviewDecision === 'string' && p.reviewDecision) pr.reviewDecision = p.reviewDecision;
-      if (typeof p.additions === 'number') pr.additions = p.additions;
-      if (typeof p.deletions === 'number') pr.deletions = p.deletions;
-      if (typeof p.body === 'string') pr.body = p.body;
-      const labels = ghLabels(p.labels);
-      if (labels) pr.labels = labels;
-      const comments = ghCommentCount(p.comments);
-      if (comments !== undefined) pr.comments = comments;
-      prs.push(pr);
+      const pr = ghPullRequest(p);
+      if (pr) prs.push(pr);
     }
     prs.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || b.number - a.number);
     return { prs, fetchedAt };
   } catch {
     return { prs: [], fetchedAt, error: 'gh pr list returned something that is not JSON' };
+  }
+}
+
+/** The URL supplies the repo even when the transcript's checkout has been removed. */
+export async function gitPullRequest(url: string): Promise<GitPullRequestDetail> {
+  const link = parseGitHubPullRequestUrl(url);
+  if (!link) return { error: 'Invalid GitHub pull request link.' };
+  if (!ghBin()) return { error: GH_REQUIRED };
+  const r = await gh(undefined, ['pr', 'view', link.url, '--json', PR_DETAILS_FIELDS], 30_000);
+  if (r.code !== 0 || r.truncated) {
+    return { error: r.truncated ? 'gh pr view response was truncated' : (r.stderr || r.stdout).trim() || 'gh pr view failed' };
+  }
+  try {
+    const data = JSON.parse(r.stdout.trim()) as Record<string, unknown>;
+    const pr = ghPullRequest(data);
+    if (!pr || pr.number !== link.number) return { error: 'GitHub did not return the linked pull request.' };
+    return { pr, comments: ghComments(data.comments) };
+  } catch {
+    return { error: 'gh pr view returned something that is not JSON' };
   }
 }
 
