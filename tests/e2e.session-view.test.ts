@@ -16,7 +16,7 @@ import { promises as fs } from 'node:fs';
 import { createServer, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
-import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
+import { _electron as electron, type ElectronApplication, type Locator, type Page } from 'playwright-core';
 import { MCP_BUILTIN_IDS, type ProviderConfig, type SessionMeta, type TranscriptItem } from '../src/shared/types';
 import type { PushPayloads } from '../src/shared/ipc';
 import { expectQuietWindow, isolatedEnv, openNewSession, seedSettings } from './e2e-ui';
@@ -77,6 +77,13 @@ const usage = (patch: Partial<SessionMeta['usage']> = {}): SessionMeta['usage'] 
 
 /** Overflow of an element's content past its own box, in px; 0 when everything fits. */
 const overflowX = (win: Page, selector: string) => win.locator(selector).evaluateAll((els) => els.map((el) => el.scrollWidth - el.clientWidth));
+
+async function expectMenuLeft(menu: Locator, target: Locator): Promise<void> {
+  await menu.waitFor();
+  const [popup, edge] = await Promise.all([menu.boundingBox(), target.boundingBox()]);
+  expect(Math.abs(popup!.x - edge!.x), 'popup aligns with its trigger’s left edge').toBeLessThanOrEqual(1);
+  expect(popup!.y + popup!.height, 'popup opens above the trigger').toBeLessThanOrEqual(edge!.y + 1);
+}
 
 async function launch(userData: string): Promise<Page> {
   const home = path.join(userData, 'home');
@@ -346,14 +353,29 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.locator('.panel-tab.active', { hasText: 'Changes' }).waitFor({ timeout: 10_000 });
     await win.locator('.changes').waitFor({ timeout: 10_000 });
     const composer = win.locator('.pane.active .composer');
-    const model = composer.locator('.run-controls .pill[title="Model"]');
+    const model = composer.getByRole('button', { name: /^Model:/ });
     expect(await model.locator('.pill-text').innerText()).toMatch(/^anthropic\/(claude-opus-5-5|Opus 5\.5)/i);
     expect(await model.locator('.pill-effort').innerText()).toBe('default');
     expect(await model.getAttribute('aria-label')).toContain('anthropic/claude-opus-5-5');
     const meter = composer.getByRole('button', { name: 'Session usage' });
     expect(await meter.innerText()).toBe('32%');
     expect(await composer.getByRole('button', { name: 'More session controls' }).count()).toBe(0);
-    await composer.getByRole('button', { name: 'Permission mode: Edits' }).click();
+    const permission = composer.getByRole('button', { name: 'Permission mode: Edits' });
+    for (const pill of [model, permission]) {
+      const endGap = await pill.evaluate((el) => el.getBoundingClientRect().right - el.lastElementChild!.getBoundingClientRect().right);
+      expect(endGap, 'only padding follows the chevron on a wide composer').toBeLessThanOrEqual(12);
+    }
+    const menu = composer.getByRole('menu');
+    await model.click();
+    await expectMenuLeft(menu, model);
+    await win.screenshot({ path: path.join(shots, 'session-view-08-model-menu.png') });
+    await menu.getByRole('menuitem', { name: 'More models' }).click();
+    await menu.getByRole('textbox', { name: 'Search models' }).waitFor();
+    await expectMenuLeft(menu, model);
+    await win.keyboard.press('Escape');
+    await menu.waitFor({ state: 'hidden' });
+    await permission.click();
+    await expectMenuLeft(menu, permission);
     await win.screenshot({ path: path.join(shots, 'session-view-05-permission.png') });
     await composer.getByRole('menuitem', { name: /Ask before acting/ }).click();
     await expect.poll(async () => (await win.evaluate(() => window.harness.invoke('sessions:list', undefined))).find((s: SessionMeta) => s.id === SID)?.config.permissionMode).toBe('ask');
@@ -456,7 +478,8 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
       await expect.poll(() => modelPill.locator('.pill-text').innerText()).toBe(`${model.provider}/${displayName}`);
       expect(await modelPill.locator('.pill-effort').innerText()).toBe('high');
       expect(await modelPill.getAttribute('aria-label')).toBe(`Model: ${model.provider}/${model.model} · Effort: high · Fast on`);
-      await footer.getByRole('button', { name: 'Permission mode: Full', exact: true }).waitFor();
+      const permission = footer.getByRole('button', { name: 'Permission mode: Full', exact: true });
+      await permission.waitFor();
 
       for (const width of [780, 520, 440, 320]) {
         // Exercise the real container-query layout, independently of the CI screen's maximum size.
@@ -489,6 +512,21 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
         }), { message: `${theme} composer at ${width}px` }).toEqual({ nowrap: true, overflow: true, centred: true, contained: true, separate: true });
         await box.screenshot({ path: path.join(shots, `session-view-07-crowded-${theme}-${width}.png`) });
 
+        if (theme === 'dark' && width === 320) {
+          // Full-width menus must not overflow a split pane just to keep their left edges aligned.
+          const menu = footer.getByRole('menu');
+          for (const pill of [modelPill, permission]) {
+            await pill.click();
+            await menu.waitFor();
+            const [popup, row, button] = await Promise.all([menu.boundingBox(), footer.boundingBox(), pill.boundingBox()]);
+            expect(popup!.x).toBeGreaterThanOrEqual(row!.x - 1);
+            expect(popup!.x).toBeLessThan(button!.x);
+            expect(Math.abs((popup!.x + popup!.width) - (row!.x + row!.width))).toBeLessThanOrEqual(1);
+            await win.keyboard.press('Escape');
+            await menu.waitFor({ state: 'hidden' });
+          }
+        }
+
         await sendOptions.click();
         const queue = win.getByRole('menuitem', { name: /Queue/ });
         await queue.waitFor();
@@ -513,6 +551,10 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
         await usageItem.click();
         await win.locator('.panel-tab.active', { hasText: 'Usage' }).waitFor();
         await usageItem.waitFor({ state: 'hidden' });
+        // The active meter remains a direct way to close Usage even in a narrow busy composer.
+        await expect.poll(() => meter.isVisible()).toBe(true);
+        await expect.poll(() => footer.evaluate((el) => el.scrollWidth - el.clientWidth), { message: `${theme} composer at ${width}px with Usage open` }).toBeLessThanOrEqual(1);
+        await win.locator('.panel-top').getByRole('button', { name: 'Changes', exact: true }).click();
       }
     }
     const saved = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));

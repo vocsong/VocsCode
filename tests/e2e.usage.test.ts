@@ -51,7 +51,7 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     const project = path.join(tmp, 'project');
     await fs.mkdir(userData, { recursive: true });
     await fs.mkdir(project, { recursive: true });
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { uiMode: 'standard', sidebarWidth: 280, panelWidth: 420 }));
 
     const session: SessionMeta = {
       id: SID,
@@ -78,11 +78,54 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     const win: Page = await app.firstWindow();
     await win.waitForSelector('.brand', { timeout: 60_000 });
     await expectQuietWindow(app);
+    const wideViewport = { width: 1440, height: 900 };
+    await win.setViewportSize(wideViewport);
 
-    await win.click('.panel-tab:has-text("Usage")');
-    const panel = win.getByTestId('usage-panel');
+    const rightPanel = win.locator('aside.panel');
+    const panel = rightPanel.getByTestId('usage-panel');
+    const composer = win.locator('.composer');
+    const meter = composer.getByRole('button', { name: 'Session usage', exact: true });
+    expect(await meter.innerText()).toBe('60%');
+
+    // Start closed, then use the context ring to open, close, and reopen Usage.
+    await rightPanel.getByRole('button', { name: 'Close panel', exact: true }).click();
+    await rightPanel.waitFor({ state: 'detached', timeout: 10_000 });
+    await meter.click();
     await panel.waitFor({ timeout: 30_000 });
+    await meter.click();
+    await rightPanel.waitFor({ state: 'detached', timeout: 10_000 });
+    await meter.click();
+    await panel.waitFor({ timeout: 10_000 });
 
+    // With another tab open, the ring switches to Usage without closing the panel.
+    const goalTab = rightPanel.getByRole('button', { name: 'Goal', exact: true });
+    await goalTab.click();
+    await goalTab.and(rightPanel.locator('.panel-tab.active')).waitFor({ timeout: 10_000 });
+    await meter.click();
+    await panel.waitFor({ timeout: 10_000 });
+
+    // The Usage tab itself is still open-only.
+    await rightPanel.getByRole('button', { name: 'Usage', exact: true }).click();
+    await panel.waitFor({ timeout: 10_000 });
+
+    // Opening Usage can squeeze the composer below the cutoff that normally hides the ring.
+    // The expanded ring must still be visible and clickable so it can close the panel.
+    await meter.click();
+    await rightPanel.waitFor({ state: 'detached', timeout: 10_000 });
+    await win.setViewportSize({ width: 1080, height: 760 });
+    await meter.click();
+    await panel.waitFor({ timeout: 10_000 });
+    expect(await composer.locator('.composer-box').evaluate((el) => el.clientWidth)).toBeLessThanOrEqual(440);
+    await meter.waitFor({ timeout: 10_000 });
+    expect(await meter.innerText()).toBe('60%');
+    expect(await meter.getAttribute('aria-expanded')).toBe('true');
+    await meter.click();
+    await rightPanel.waitFor({ state: 'detached', timeout: 10_000 });
+    expect(await meter.getAttribute('aria-expanded')).toBe('false');
+
+    await win.setViewportSize(wideViewport);
+    await meter.click();
+    await panel.waitFor({ timeout: 10_000 });
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'usage-00-summary.png') });
 
