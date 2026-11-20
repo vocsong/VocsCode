@@ -1,4 +1,6 @@
-/** Display formatters for relative time, cost, token counts, durations and paths. */
+/** Display formatters for relative time, cost, token counts, durations, paths and session labels. */
+import type { SessionMeta } from '../../shared/types';
+
 export function relTime(ts: number): string {
   const diff = Date.now() - ts;
   const s = Math.round(diff / 1000);
@@ -61,6 +63,10 @@ export function speedOfTurns(turns: { status: string; durationMs?: number; usage
 export function basename(p: string): string {
   const parts = p.replace(/[\\/]+$/, '').split(/[\\/]/);
   return parts[parts.length - 1] || p;
+}
+
+export function formatSessionLabel(session: SessionMeta): string {
+  return `${basename(session.config.projectRoot)} | ${session.title}`;
 }
 
 export function clamp(s: string, n: number): string {
