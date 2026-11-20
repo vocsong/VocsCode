@@ -1,13 +1,15 @@
 /**
  * Electron end-to-end for the interface modes (Settings → Appearance → Interface): Standard and the
- * two minimalist layouts, Zen and Mono. It switches live through all three ways in (the Appearance
+ * two minimalist layouts, Zen and Paper. It switches live through all three ways in (the Appearance
  * picker, the command palette and the minimalist title bar's one-button menu) and checks that
  * - each mode really re-lays the window out: Zen's sidebar is a 52px rail that opens over the
- *   conversation on hover and its side panel a floating drawer; Mono's sessions are a row of tabs
- *   across the top and its composer a full-width prompt line; Standard comes back exactly;
+ *   conversation on hover and its side panel a floating drawer; Paper has no sidebar at all (the
+ *   title drops a session switcher), sets the page in a serif and docks the side panel as a sheet
+ *   along the bottom; Standard comes back exactly;
  * - nothing is lost on a switch: the open session, its unsent draft and the open side panel stay;
- * - each layout still works: a rail dot and a Mono tab each open their session (a tab never starts
- *   a rename), and Zen's composer controls wait for the pointer;
+ * - each layout still works: a rail dot and a switcher row each open their session (a row never
+ *   starts a rename), the switcher closes on a pick, Escape or a click outside, and Zen's composer
+ *   controls wait for the pointer;
  * - the choice survives a restart.
  * Sessions, transcripts and a git checkout are seeded on disk, so no harness or provider key is
  * involved. Review screenshots land in tests/artifacts/ui-modes-*.png.
@@ -45,6 +47,8 @@ const FIRST = 's_modes_first';
 const SECOND = 's_modes_second';
 const T = Date.now() - 600_000;
 const DRAFT = 'A draft that has to survive every switch';
+const FIRST_TITLE = 'Add rate limiting to the public API';
+const SECOND_TITLE = 'Fix flaky auth refresh test';
 
 function git(cwd: string, ...args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'ignore' });
@@ -81,8 +85,8 @@ async function seed(tmp: string, uiMode?: string): Promise<{ userData: string; p
   await seedProject(project);
   await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { theme: 'dark', windowBounds: { width: 1280, height: 860 }, ...(uiMode ? { uiMode } : {}) }));
   const sessions: SessionMeta[] = [
-    { id: FIRST, title: 'Add rate limiting to the public API', createdAt: T, updatedAt: T + 10, lastUserMessageAt: T, config: { harness: 'claude', projectRoot: project, permissionMode: 'accept-edits', model: { provider: 'anthropic', model: 'claude-opus-5-5' } }, cwd: project, status: 'idle', harnessRef: {}, usage: usage() },
-    { id: SECOND, title: 'Fix flaky auth refresh test', createdAt: T - 1000, updatedAt: T - 1000, lastUserMessageAt: T - 1000, config: { harness: 'native', projectRoot: project, permissionMode: 'ask' }, cwd: project, status: 'idle', harnessRef: {}, usage: usage() }
+    { id: FIRST, title: FIRST_TITLE, createdAt: T, updatedAt: T + 10, lastUserMessageAt: T, config: { harness: 'claude', projectRoot: project, permissionMode: 'accept-edits', model: { provider: 'anthropic', model: 'claude-opus-5-5' } }, cwd: project, status: 'idle', harnessRef: {}, usage: usage() },
+    { id: SECOND, title: SECOND_TITLE, createdAt: T - 1000, updatedAt: T - 1000, lastUserMessageAt: T - 1000, config: { harness: 'native', projectRoot: project, permissionMode: 'ask' }, cwd: project, status: 'idle', harnessRef: {}, usage: usage() }
   ];
   await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
   for (const s of sessions) {
@@ -110,7 +114,8 @@ async function launch(userData: string): Promise<Page> {
     timeout: 60_000
   });
   const win = await app.firstWindow();
-  await win.waitForSelector('.brand', { timeout: 60_000 });
+  // The booted shell, not the sidebar's wordmark: Paper boots with no sidebar on screen.
+  await win.waitForSelector('.shell > .app', { timeout: 60_000 });
   await expectQuietWindow(app);
   // A window cannot outgrow its screen and CI displays are small: pin the page, not the window.
   await win.setViewportSize({ width: 1280, height: 860 });
@@ -126,6 +131,9 @@ const rect = (win: Page, selector: string) => win.locator(selector).first().eval
 const style = (win: Page, selector: string, prop: string) => win.locator(selector).first().evaluate((el, p) => getComputedStyle(el).getPropertyValue(p), prop);
 const draft = (win: Page) => win.locator('.pane.active .composer textarea').inputValue();
 const activeRow = (win: Page) => win.locator('.sidebar .session-row.active').getAttribute('data-session-id');
+/** The session the title bar names: Paper's only on-screen trace of which session is open. */
+const activeTitle = (win: Page) => win.locator('.titlebar-search-text').innerText();
+const switcherShown = (win: Page) => win.locator('.sidebar').count();
 /** Far from the sidebar, the composer and the header, so no hover state leaks into an assertion. */
 const park = (win: Page) => win.mouse.move(640, 300);
 
@@ -146,7 +154,7 @@ async function shot(win: Page, name: string): Promise<void> {
 }
 
 describe.runIf(enabled)('electron e2e: interface modes', () => {
-  it('switches Standard → Zen → Mono → Standard live, re-laying the window out without losing the session, its draft or the panel', async () => {
+  it('switches Standard → Zen → Paper → Standard live, re-laying the window out without losing the session, its draft or the panel', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-'));
     const { userData } = await seed(tmp);
     const win = await launch(userData);
@@ -167,7 +175,7 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
     await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Appearance', exact: true }).click();
     const picker = win.getByRole('group', { name: 'Interface' });
-    await expect.poll(() => picker.getByRole('button').evaluateAll((cards) => cards.map((c) => c.getAttribute('aria-label')))).toEqual(['Standard interface', 'Zen interface', 'Mono interface']);
+    await expect.poll(() => picker.getByRole('button').evaluateAll((cards) => cards.map((c) => c.getAttribute('aria-label')))).toEqual(['Standard interface', 'Zen interface', 'Paper interface']);
     await picker.getByRole('button', { name: 'Zen interface' }).click();
     await expect.poll(() => uiMode(win)).toBe('zen');
     expect(await picker.getByRole('button', { name: 'Zen interface' }).getAttribute('aria-pressed')).toBe('true');
@@ -209,41 +217,59 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await expect.poll(() => activeRow(win)).toBe(FIRST);
     expect(await draft(win)).toBe(DRAFT);
 
-    // Command palette → Mono.
+    // Command palette → Paper.
     await park(win);
     await win.keyboard.press('Control+k');
-    await win.locator('.palette input').fill('Mono interface');
-    await win.locator('.palette-item', { hasText: 'Switch to the Mono interface' }).click();
-    await expect.poll(() => uiMode(win)).toBe('mono');
-    // Mono: sessions are one row of tabs across the window, under the title bar.
-    await expect.poll(() => rect(win, '.sidebar').then((r) => r.height)).toBe(34);
-    const strip = await rect(win, '.sidebar');
-    expect(strip.width).toBe(1280);
-    expect(strip.y).toBe((await rect(win, '.titlebar')).height);
-    const [a, b] = [await rect(win, `[data-session-id="${FIRST}"]`), await rect(win, `[data-session-id="${SECOND}"]`)];
-    expect(a.y).toBe(b.y);
-    expect(a.x).not.toBe(b.x);
-    expect(await style(win, '.panel', 'position')).not.toBe('fixed');
-    expect(await style(win, 'body', 'font-family')).toMatch(/Cascadia|JetBrains|Consolas|monospace/);
-    // The prompt line runs the pane's full width.
-    const pane = await rect(win, '.pane.active');
-    expect((await rect(win, '.pane.active .composer-box')).width).toBe(pane.width);
-    expect(await activeRow(win)).toBe(FIRST);
+    await win.locator('.palette input').fill('Paper interface');
+    await win.locator('.palette-item', { hasText: 'Switch to the Paper interface' }).click();
+    await expect.poll(() => uiMode(win)).toBe('paper');
+    // Paper: no sidebar at all. The page takes the full width and the side panel docks below it.
+    await expect.poll(() => switcherShown(win)).toBe(0);
+    expect(await activeTitle(win)).toBe(FIRST_TITLE);
+    const main = await rect(win, '.main');
+    expect(main.x).toBe(0);
+    expect(main.width).toBe(1280);
+    const sheet = await rect(win, '.panel');
+    expect(sheet.x).toBe(0);
+    expect(sheet.width).toBe(1280);
+    expect(Math.abs(sheet.y - (main.y + main.height))).toBeLessThanOrEqual(1);
+    expect(await style(win, '.pane.active .msg-assistant .md', 'font-family')).toMatch(/Iowan|Charter|Palatino|Georgia|serif/);
     expect(await draft(win)).toBe(DRAFT);
-    await shot(win, 'mono-session');
-    // A tab opens its session; clicking its title never starts a rename.
-    const second = win.locator(`[data-session-id="${SECOND}"]`);
-    await second.click();
-    await expect.poll(() => activeRow(win)).toBe(SECOND);
+    await shot(win, 'paper-session');
+    // The title drops the switcher: the same sessions, one under the other, centred under the title.
+    const title = win.locator('.titlebar-switch');
+    await title.click();
+    await win.locator('.sidebar').waitFor();
+    expect(await title.getAttribute('aria-expanded')).toBe('true');
+    const [a, b] = [await rect(win, `[data-session-id="${FIRST}"]`), await rect(win, `[data-session-id="${SECOND}"]`)];
+    expect(a.x).toBe(b.x);
+    expect(b.y).toBeGreaterThan(a.y);
+    const list = await rect(win, '.sidebar');
+    expect(Math.abs(list.x + list.width / 2 - 640)).toBeLessThanOrEqual(1);
+    await shot(win, 'paper-switcher');
+    // Picking a row opens it and closes the switcher; clicking its title never starts a rename.
+    await win.locator(`[data-session-id="${SECOND}"] .session-title`).click();
+    await expect.poll(() => activeTitle(win)).toBe(SECOND_TITLE);
+    await expect.poll(() => switcherShown(win)).toBe(0);
     expect(await win.locator('.session-rename').count()).toBe(0);
+    // Ctrl+B opens it too; Escape and a click outside close it.
+    await win.keyboard.press('Control+b');
+    await win.locator('.sidebar').waitFor();
+    await win.keyboard.press('Escape');
+    await expect.poll(() => switcherShown(win)).toBe(0);
+    await title.click();
+    await win.locator('.sidebar').waitFor();
+    await win.mouse.click(1200, 640);
+    await expect.poll(() => switcherShown(win)).toBe(0);
+    await title.click();
     await win.locator(`[data-session-id="${FIRST}"]`).click();
-    await expect.poll(() => activeRow(win)).toBe(FIRST);
-    expect(await win.locator('.session-rename').count()).toBe(0);
+    await expect.poll(() => activeTitle(win)).toBe(FIRST_TITLE);
+    expect(await draft(win)).toBe(DRAFT);
 
     // The one-button menu → View → Standard interface.
     await win.getByRole('button', { name: 'Menu', exact: true }).click();
     await win.getByRole('tablist', { name: 'Menus' }).getByRole('tab', { name: 'View', exact: true }).hover();
-    await shot(win, 'mono-menu').catch(() => undefined);
+    await shot(win, 'paper-menu').catch(() => undefined);
     await win.getByRole('button', { name: 'Standard interface', exact: true }).click();
     await expect.poll(() => uiMode(win)).toBe('standard');
 
@@ -265,15 +291,16 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await park(win);
     await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(52);
     await win.keyboard.press('Control+k');
-    await win.locator('.palette input').fill('Mono interface');
-    await win.locator('.palette-item', { hasText: 'Switch to the Mono interface' }).click();
-    await expect.poll(() => uiMode(win)).toBe('mono');
+    await win.locator('.palette input').fill('Paper interface');
+    await win.locator('.palette-item', { hasText: 'Switch to the Paper interface' }).click();
+    await expect.poll(() => uiMode(win)).toBe('paper');
     await app!.close();
     app = null;
 
     win = await launch(userData);
-    await expect.poll(() => uiMode(win)).toBe('mono');
-    await expect.poll(() => rect(win, '.sidebar').then((r) => r.height)).toBe(34);
-    expect(JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8')).uiMode).toBe('mono');
+    await expect.poll(() => uiMode(win)).toBe('paper');
+    await win.locator('.titlebar-switch').waitFor();
+    expect(await switcherShown(win)).toBe(0);
+    expect(JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8')).uiMode).toBe('paper');
   }, 180_000);
 });

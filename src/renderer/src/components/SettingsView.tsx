@@ -89,7 +89,7 @@ export function SettingsView() {
   const update = (patch: Partial<AppSettings>) => void invoke('settings:update', patch).catch((error: unknown) => {
     toast(`Could not save settings: ${error instanceof Error ? error.message : String(error)}`, 'error');
   });
-  // Zen and Mono show the section nav as icons, so each one carries its name as a tooltip.
+  // Zen shows the section nav as icons and Paper as plain text, so each one carries its name as a tooltip.
   const minimal = useMinimalUi();
   return (
     <div className="settings" onKeyDown={(e) => {
@@ -307,13 +307,12 @@ function UiModeMiniature({ id }: { id: UiModeId }) {
       </span>
     );
   }
-  if (id === 'mono') {
+  if (id === 'paper') {
     return (
-      <span className="ui-mini ui-mini-mono" aria-hidden="true">
-        <span className="ui-mini-tabs"><i className="on" /><i /><i /><i /></span>
-        <span className="ui-mini-status" />
-        <span className="ui-mini-log"><b className="w50 user" /><b className="w90" /><b className="w70" /><b className="w80" /></span>
-        <span className="ui-mini-prompt" />
+      <span className="ui-mini ui-mini-paper" aria-hidden="true">
+        <span className="ui-mini-title"><i /></span>
+        <span className="ui-mini-page"><b className="w50 user" /><b className="w90" /><b className="w85" /><b className="w60" /><span className="ui-mini-rule" /></span>
+        <span className="ui-mini-sheet" />
       </span>
     );
   }

@@ -8,7 +8,7 @@ import { installThemeStyles } from './theme';
 import './styles.css';
 // The minimalist interface modes, keyed on <html data-ui>; after styles.css so they win ties.
 import './ui-zen.css';
-import './ui-mono.css';
+import './ui-paper.css';
 
 // Before the first render, so a non-default theme never paints with the fallback palette.
 installThemeStyles();

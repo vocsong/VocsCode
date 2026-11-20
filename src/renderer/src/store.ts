@@ -100,6 +100,12 @@ interface State {
   analyticsTab: AnalyticsTab;
   analyticsRange: AnalyticsRange;
   sidebarOpen: boolean;
+  /**
+   * The Paper interface's session switcher, which drops down from the title bar in place of a
+   * sidebar. Transient and separate from `sidebarOpen`, so switching interfaces never changes
+   * whether the Standard and Zen sidebars show.
+   */
+  switcherOpen: boolean;
   panelOpen: boolean;
   panelTab: PanelTab;
   panelBottomTab: PanelBottomTab;
@@ -188,6 +194,7 @@ interface State {
   navBack(): Promise<void>;
   navForward(): Promise<void>;
   toggleSidebar(): void;
+  openSwitcher(open: boolean): void;
   togglePanel(open?: boolean): void;
   setPanelTab(t: PanelTab | 'mcp'): void;
   setGitPanelView(v: GitPanelView): void;
@@ -426,6 +433,7 @@ export const useStore = create<State>((set, get) => ({
   analyticsTab: 'overview',
   analyticsRange: 30,
   sidebarOpen: true,
+  switcherOpen: false,
   panelOpen: true,
   panelTab: 'changes',
   panelBottomTab: 'mcp',
@@ -527,7 +535,7 @@ export const useStore = create<State>((set, get) => ({
       return;
     }
     if (target?.mission) void get().loadMission(target.mission.missionId);
-    set((s) => ({ activeId: id, view: 'chat', layout: panes.openSession(s.layout, id) }));
+    set((s) => ({ activeId: id, view: 'chat', layout: panes.openSession(s.layout, id), switcherOpen: false }));
     pushHistory(set, get, { view: 'chat', sessionId: id });
     if (id) await get().loadTranscript(id);
   },
@@ -995,7 +1003,7 @@ export const useStore = create<State>((set, get) => ({
     set({ newSessionOpen: true, newSessionRoot: root, newSessionKind: 'mission', newMissionSourceId: sourceId ?? null });
   },
   setView(view) {
-    set({ view });
+    set({ view, switcherOpen: false });
     pushHistory(set, get, { view, sessionId: get().activeId });
   },
   setAnalyticsView(patch) {
@@ -1003,6 +1011,9 @@ export const useStore = create<State>((set, get) => ({
   },
   toggleSidebar() {
     set((s) => ({ sidebarOpen: !s.sidebarOpen }));
+  },
+  openSwitcher(switcherOpen) {
+    set({ switcherOpen });
   },
   togglePanel(open) {
     set((s) => ({ panelOpen: open ?? !s.panelOpen }));
@@ -1072,10 +1083,10 @@ export const useStore = create<State>((set, get) => ({
       if (!r.path) return;
       root = r.path;
     }
-    set({ newSessionOpen: true, newSessionRoot: root, newSessionKind: 'normal', newMissionSourceId: null });
+    set({ newSessionOpen: true, newSessionRoot: root, newSessionKind: 'normal', newMissionSourceId: null, switcherOpen: false });
   },
   openQuickSession(quickSessionOpen, quickSessionPrefill) {
-    set(quickSessionOpen ? { quickSessionOpen, quickSessionPrefill } : { quickSessionOpen, quickSessionPrefill: undefined });
+    set(quickSessionOpen ? { quickSessionOpen, quickSessionPrefill, switcherOpen: false } : { quickSessionOpen, quickSessionPrefill: undefined });
   },
   async createQuickSession(root, first) {
     const settings = get().settings;
@@ -1108,10 +1119,10 @@ export const useStore = create<State>((set, get) => ({
     }
   },
   openPalette(paletteOpen) {
-    set({ paletteOpen });
+    set(paletteOpen ? { paletteOpen, switcherOpen: false } : { paletteOpen });
   },
   openSearch(searchOpen) {
-    set({ searchOpen });
+    set(searchOpen ? { searchOpen, switcherOpen: false } : { searchOpen });
   },
   jumpToSearchMatch(sessionId, itemId) {
     set((s) => ({ searchOpen: false, searchJump: itemId ? { sessionId, itemId, n: (s.searchJump?.n ?? 0) + 1 } : null }));

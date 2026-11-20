@@ -1,7 +1,7 @@
 # Interface modes
 
 Settings → Appearance → **Interface** picks how the window is laid out: **Standard**, or one of two
-minimalist layouts, **Zen** and **Mono**. It is a separate choice from the color theme. Every theme
+minimalist layouts, **Zen** and **Paper**. It is a separate choice from the color theme. Every theme
 works in every mode, and View in the menu bar and the command palette ("Switch to the … interface")
 switch it too.
 
@@ -26,18 +26,21 @@ File / Edit / View / Help menu bar.
 - The title bar keeps only the menu, where you are and Vesta. Back and forward appear when the bar is
   pointed at. Settings becomes an icon rail with an expanding search.
 
-**Mono** — a terminal-like grid.
+**Paper** — a page, not an app. Flat surfaces, hairline rules, no cards.
 
-- Monospace type, square corners and hairline rules throughout.
-- Sessions are tabs across the top, grouped under `folder/` prefixes. Each tab leads with a state
-  glyph: `○` idle, `●` open, `◆` running, `!` waiting on you, `×` failed. A mouse wheel scrolls the
-  strip sideways and the open session's tab is kept in view. Clicking a tab opens it; rename by
-  double-click or the context menu.
-- The session header is a one-line status bar: title, `[harness]`, `~/folder`, branch and changes.
-- The transcript is a log: your lines carry a `❯` prompt glyph, work is `▸ 2m 34s · 4 · ±2`, and
-  each turn ends in a rule with its time, duration and cost.
-- The composer is a full-width prompt line along the foot of the pane.
-- Settings is a plain lowercase menu beside the page.
+- There is no sidebar. The title bar names the session you are in; clicking it (or Ctrl+B, or View →
+  Sessions) drops the session list down beneath it as a switcher. The list keeps every action the
+  sidebar has: new session, the other places as icons, archived, settings, search and new folder,
+  with one line per session (a state dot, the title, its age). Picking a session, Escape or a click
+  outside closes it. Clicking a title opens that session; rename by double-click or the menu.
+- What is running, waiting on you or finished elsewhere shows as three coloured numbers by Vesta,
+  opening the same activity tray.
+- The conversation is set like a printed page under a small-caps dateline (folder · branch): your
+  words open each exchange as a sans line under a hairline rule, the agent's answer is in a book
+  serif, and a turn's work and footer are quiet lines of figures.
+- The composer is a single ruled line written in the same serif.
+- The side panel is a sheet along the bottom of the window, its two halves side by side.
+- Settings is a contents list beside a serif page.
 
 Both minimalist modes fold File / Edit / View / Help into one menu button whose panel switches menus
 by icon. Labels the layout drops become tooltips, so no destination disappears.
@@ -46,21 +49,24 @@ by icon. Labels the layout drops become tooltips, so no destination disappears.
 
 - `src/shared/ui-modes.ts` is the catalogue; `AppSettings.uiMode` stores the choice, and
   `normalizeSettings` turns anything unknown back into `standard`.
-- `applyUiMode` (`src/renderer/src/theme.ts`) sets `<html data-ui>`. `ui-zen.css` and `ui-mono.css`
-  are scoped to `:root[data-ui='zen']` / `:root[data-ui='mono']` and restyle the **standard**
-  component tree. Switching therefore changes one attribute: nothing remounts, so the open
-  session, an unsent draft, a running turn, terminals and the side panel all survive a switch.
+- `applyUiMode` (`src/renderer/src/theme.ts`) sets `<html data-ui>`. `ui-zen.css` and
+  `ui-paper.css` are scoped to `:root[data-ui='zen']` / `:root[data-ui='paper']` and restyle the
+  **standard** component tree. Switching changes one attribute and never remounts a session pane, so
+  the open session, an unsent draft, a running turn, terminals and the side panel all survive a
+  switch.
 - React reads the mode (`src/renderer/src/ui-mode.ts`) only where a layout needs different markup:
-  the one-button menu, tooltips for labels the layout hides, the composer placeholder and Mono's
-  sideways wheel scrolling. The CSS also reads a few data hooks:
+  the one-button menu, tooltips for labels the layout hides, the composer placeholder, and Paper's
+  switcher. Paper renders the sidebar only while the store's transient `switcherOpen` is set. That
+  flag is separate from `sidebarOpen`, so a mode switch never changes whether the Standard or Zen
+  sidebar shows. The CSS also reads a few data hooks:
   - `data-status`, `data-tone` and `data-pinned` on session rows;
   - `data-short` on the work chip (its facts without words);
   - the `turn-*` span classes on turn footers.
 - Tokens are overridden on `:root[data-ui=…][data-theme]` so they outrank the injected theme blocks.
 
 When you change a component either mode restyles (sidebar, header, transcript, composer, side panel,
-settings), look at it in Zen and Mono too. `tests/e2e.ui-modes.test.ts` covers switching, each
-layout's geometry, state surviving a switch and restart persistence; see
+settings), look at it in Zen and Paper too. `tests/e2e.ui-modes.test.ts` covers switching, each
+layout's geometry, Paper's switcher, state surviving a switch and restart persistence; see
 [TESTING.md](TESTING.md) for the change → suite row.
 
 ## Review screenshots
@@ -84,21 +90,23 @@ credentials), dark theme unless noted.
 
 ![Zen: the welcome screen](images/ui-modes-zen-welcome.png)
 
-### Mono
+### Paper
 
-![Mono: sessions as tabs, a status-line header, a log and a prompt line](images/ui-modes-mono-session.png)
+![Paper: no sidebar; the session named in the title, the page in a serif, the composer one ruled line](images/ui-modes-paper-session.png)
 
-![Mono: with the side panel](images/ui-modes-mono-panel.png)
+![Paper: the title drops the session switcher](images/ui-modes-paper-switcher.png)
 
-![Mono: the one-button menu, switching menus by icon](images/ui-modes-mono-menu.png)
+![Paper: the side panel as a sheet along the bottom](images/ui-modes-paper-sheet.png)
 
-![Mono: a split view](images/ui-modes-mono-split.png)
+![Paper: the one-button menu; View lists Sessions and the three interfaces](images/ui-modes-paper-menu.png)
 
-![Mono: Settings as a plain menu](images/ui-modes-mono-settings.png)
+![Paper: a split view](images/ui-modes-paper-split.png)
 
-![Mono in the Blueprint light theme](images/ui-modes-mono-light.png)
+![Paper: Settings as a contents list beside a serif page](images/ui-modes-paper-settings.png)
 
-![Mono: the welcome screen](images/ui-modes-mono-welcome.png)
+![Paper in the Blueprint light theme](images/ui-modes-paper-light.png)
+
+![Paper: the welcome screen as a title page](images/ui-modes-paper-welcome.png)
 
 ### Where the choice lives
 

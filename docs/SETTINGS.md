@@ -29,7 +29,7 @@ availability/sign-in only; **Check for updates** checks CLI versions.
 | System | Import chats, Remote access, About & doctor |
 
 General is the starting point for daily preferences and common destinations. Appearance owns the
-interface mode (Standard, or the minimalist Zen and Mono layouts), the live theme preview and the
+interface mode (Standard, or the minimalist Zen and Paper layouts), the live theme preview and the
 theme catalogue; the interface and the color theme are independent, and every theme works in every
 mode. See [Interface modes](INTERFACE-MODES.md). Session defaults owns new-session defaults, compaction,
 goals and worktree branch prefixes. Remembered per-project choices still take precedence for
@@ -56,9 +56,9 @@ an important setting, including user-facing synonyms. Search only indexes static
 never configuration values, credentials, user files or model account details. An optional `anchor`
 should name the actual visible settings group. `openSettings()` remains the public deep-link entry;
 View → Theme opens Appearance directly; View also lists the three interfaces, and the command palette
-offers "Switch to the … interface" for the two not in use. Zen and Mono restyle this page too: Zen
-shows the section nav as an icon rail with tooltips and an expanding search, Mono as a plain lowercase
-menu. Both keep the compact-pane section selector below 650px.
+offers "Switch to the … interface" for the two not in use. Zen and Paper restyle this page too: Zen
+shows the section nav as an icon rail with tooltips and an expanding search, Paper as a plain text
+contents list beside a serif page. Both keep the compact-pane section selector below 650px.
 
 `SettingsPrimitives.tsx` provides titled, accessible groups and informational notes. Settings-specific
 styles live in `components/settings.css`, scoped to `.settings` so other app surfaces are unaffected.

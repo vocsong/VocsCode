@@ -11,7 +11,7 @@ export function useUiMode(): UiModeId {
   return useStore((s) => s.settings?.uiMode ?? DEFAULT_UI_MODE);
 }
 
-/** True in Zen and Mono, where labels give way to icons and glyphs. */
+/** True in Zen and Paper, where labels give way to icons and glyphs. */
 export function useMinimalUi(): boolean {
   return useStore((s) => isMinimalUiMode(s.settings?.uiMode));
 }

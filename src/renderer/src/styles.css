@@ -695,6 +695,35 @@ h4 {
   background: var(--border);
 }
 
+/* The minimalist interfaces' one-button menu (TitleBar.tsx): icon tabs over the chosen menu. */
+.menubar-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px 2px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.menubar-tab {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.menubar-tab:hover,
+.menubar-tab.active {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.menubar-tab.active {
+  color: var(--accent);
+}
+
 /* Buttons */
 .btn {
   display: inline-flex;

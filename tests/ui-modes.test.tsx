@@ -1,5 +1,5 @@
 // The interface modes (Settings → Appearance → Interface): Standard and the two minimalist layouts,
-// Zen and Mono. The layouts themselves are CSS keyed on <html data-ui>, driven end to end by
+// Zen and Paper. The layouts themselves are CSS keyed on <html data-ui>, driven end to end by
 // tests/e2e.ui-modes.test.ts, and the stored setting is covered by tests/ui-modes-settings.test.ts;
 // this covers the renderer side: applying a mode, the picker, the one-button menu, the palette
 // commands and the hooks the CSS reads.
@@ -58,17 +58,17 @@ afterEach(async () => {
 
 describe('interface mode setting', () => {
   it('catalogues Standard first and two distinct minimalist modes', () => {
-    expect(UI_MODES.map((m) => m.id)).toEqual(['standard', 'zen', 'mono']);
+    expect(UI_MODES.map((m) => m.id)).toEqual(['standard', 'zen', 'paper']);
     expect(new Set(UI_MODES.map((m) => m.name)).size).toBe(3);
-    expect(UI_MODES.filter((m) => isMinimalUiMode(m.id)).map((m) => m.id)).toEqual(['zen', 'mono']);
+    expect(UI_MODES.filter((m) => isMinimalUiMode(m.id)).map((m) => m.id)).toEqual(['zen', 'paper']);
   });
 
   it('applies a mode as one attribute on <html>, falling back to Standard', () => {
     applyUiMode('zen');
     expect(document.documentElement.getAttribute('data-ui')).toBe('zen');
     expect(activeUiMode()).toBe('zen');
-    applyUiMode('mono');
-    expect(activeUiMode()).toBe('mono');
+    applyUiMode('paper');
+    expect(activeUiMode()).toBe('paper');
     applyUiMode(undefined);
     expect(document.documentElement.getAttribute('data-ui')).toBe('standard');
     applyUiMode('bogus' as never);
@@ -88,7 +88,7 @@ describe('Appearance → Interface picker', () => {
     useStore.setState({ settings: withMode('zen') });
     const picker = openAppearance();
     const cards = picker.getAllByRole('button');
-    expect(cards.map((c) => c.getAttribute('aria-label'))).toEqual(['Standard interface', 'Zen interface', 'Mono interface']);
+    expect(cards.map((c) => c.getAttribute('aria-label'))).toEqual(['Standard interface', 'Zen interface', 'Paper interface']);
     expect(cards.map((c) => c.getAttribute('aria-pressed'))).toEqual(['false', 'true', 'false']);
     // The theme picker is still its own group: choosing a layout never offers a palette, nor the reverse.
     expect(within(screen.getByRole('region', { name: 'Color theme' })).queryByRole('button', { name: 'Zen interface' })).toBeNull();
@@ -98,8 +98,8 @@ describe('Appearance → Interface picker', () => {
   it('saves the picked layout and nothing else', () => {
     const picker = openAppearance();
     expect(picker.getByRole('button', { name: 'Standard interface' }).getAttribute('aria-pressed')).toBe('true');
-    fireEvent.click(picker.getByRole('button', { name: 'Mono interface' }));
-    expect(updates()).toEqual([{ uiMode: 'mono' }]);
+    fireEvent.click(picker.getByRole('button', { name: 'Paper interface' }));
+    expect(updates()).toEqual([{ uiMode: 'paper' }]);
   });
 
   it('is found by searching for what it does', () => {
@@ -111,7 +111,7 @@ describe('Appearance → Interface picker', () => {
   });
 
   it('names its sections in tooltips once the nav shows icons only', () => {
-    useStore.setState({ view: 'settings', settings: withMode('mono') });
+    useStore.setState({ view: 'settings', settings: withMode('paper') });
     render(<SettingsView />);
     const nav = within(screen.getByRole('navigation', { name: 'Settings sections' }));
     expect(nav.getByRole('button', { name: 'Appearance' }).getAttribute('title')).toBe('Appearance');
@@ -154,9 +154,9 @@ describe('title bar menu', () => {
 
 describe('command palette', () => {
   it('offers the other two interfaces and switches to the one picked', () => {
-    useStore.setState({ settings: withMode('mono'), paletteOpen: true });
+    useStore.setState({ settings: withMode('paper'), paletteOpen: true });
     render(<CommandPalette />);
-    expect(screen.queryByRole('button', { name: /Switch to the Mono interface/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Switch to the Paper interface/ })).toBeNull();
     expect(screen.getByRole('button', { name: /Switch to the Standard interface/ })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /Switch to the Zen interface/ }));
     expect(updates()).toEqual([{ uiMode: 'zen' }]);
@@ -175,13 +175,13 @@ describe('markup the minimalist layouts read', () => {
     expect(row('s2').hasAttribute('data-pinned')).toBe(false);
     expect(row('s1').getAttribute('title')).toBeNull();
     unmount();
-    useStore.setState({ settings: withMode('mono') });
-    const mono = render(<Sidebar />);
-    expect((mono.container.querySelector('[data-session-id="s1"]') as HTMLElement).getAttribute('title')).toBe('Add rate limiting');
-    expect(mono.getByRole('button', { name: 'Analytics' }).getAttribute('title')).toBe('Analytics');
+    useStore.setState({ settings: withMode('paper') });
+    const paper = render(<Sidebar />);
+    expect((paper.container.querySelector('[data-session-id="s1"]') as HTMLElement).getAttribute('title')).toBe('Add rate limiting');
+    expect(paper.getByRole('button', { name: 'Analytics' }).getAttribute('title')).toBe('Analytics');
   });
 
-  it('keeps the open session’s tab in view in Mono, and leaves the vertical list alone elsewhere', () => {
+  it('opens Paper’s switcher on the session you are in, and leaves the list’s scroll alone elsewhere', () => {
     const scrolled: string[] = [];
     const proto = Element.prototype as unknown as { scrollIntoView?: unknown };
     const original = proto.scrollIntoView;
@@ -191,36 +191,87 @@ describe('markup the minimalist layouts read', () => {
       const { unmount } = render(<Sidebar />);
       expect(scrolled).toEqual([]);
       unmount();
-      useStore.setState({ settings: withMode('mono') });
+      useStore.setState({ settings: withMode('paper') });
       render(<Sidebar />);
       expect(scrolled).toEqual(['s2']);
-      act(() => useStore.setState({ activeId: 's1' }));
-      expect(scrolled).toEqual(['s2', 's1']);
     } finally {
       proto.scrollIntoView = original;
     }
   });
 
-  it('scrolls Mono’s tab strip sideways with the mouse wheel, and leaves the list alone elsewhere', () => {
-    useStore.setState({ sessions: [session('s1')], settings: withMode('mono') });
-    const { container, unmount } = render(<Sidebar />);
-    const list = container.querySelector('.sidebar-list') as HTMLElement;
-    fireEvent.wheel(list, { deltaY: 120 });
-    expect(list.scrollLeft).toBe(120);
-    unmount();
-    useStore.setState({ settings: withMode('zen') });
-    const zen = render(<Sidebar />);
-    const zenList = zen.container.querySelector('.sidebar-list') as HTMLElement;
-    fireEvent.wheel(zenList, { deltaY: 120 });
-    expect(zenList.scrollLeft).toBe(0);
-  });
-
-  it('carries the work chip’s facts without words, for Zen and Mono to show', () => {
+  it('carries the work chip’s facts without words, for Zen and Paper to show', () => {
     let seq = 0;
     const tool = (over: Partial<Extract<TranscriptItem, { kind: 'tool' }>> = {}): TranscriptItem => ({ id: `t${++seq}`, kind: 'tool', ts: 0, name: 'Edit', hint: 'edit', status: 'done', ...over });
     const entries = [tool({ changes: [{ path: 'src/a.ts', kind: 'update' }] }), tool({ changes: [{ path: 'src/b.ts', kind: 'add' }] }), tool({ name: 'bash', hint: 'execute' })];
     const { container } = render(<WorkGroup chunk={{ kind: 'work', id: 't1', entries, turn: { status: 'completed', durationMs: 154_000 } }} sessionId="s" showThinking={false} onImageExpand={() => undefined} />);
     const short = [...container.querySelectorAll('.work-head [data-short]')].map((el) => [el.textContent, el.getAttribute('data-short')]);
     expect(short).toEqual([['Worked for 2m 34s', '2m 34s'], ['3 steps', '3'], ['2 files changed', '±2']]);
+  });
+});
+
+describe('Paper’s session switcher', () => {
+  it('replaces the sidebar toggle with the title, which drops and closes the switcher', () => {
+    useStore.setState({ settings: withMode('paper'), sessions: [session('s1', { title: 'Add rate limiting' })], activeId: 's1', switcherOpen: false });
+    const { unmount } = render(<TitleBar />);
+    expect(screen.queryByRole('button', { name: /sidebar/ })).toBeNull();
+    const title = screen.getByRole('button', { name: /Add rate limiting/ });
+    expect(title.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(title);
+    expect(useStore.getState().switcherOpen).toBe(true);
+    expect(title.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(title);
+    expect(useStore.getState().switcherOpen).toBe(false);
+    unmount();
+    // Standard keeps both: the sidebar toggle, and a title that opens the command palette.
+    useStore.setState({ settings: withMode('standard') });
+    render(<TitleBar />);
+    expect(screen.getByRole('button', { name: 'Hide sidebar' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Add rate limiting/ }));
+    expect(useStore.getState()).toMatchObject({ paletteOpen: true, switcherOpen: false });
+  });
+
+  it('closes when a session or a view is chosen, or a dialog opens over it, without touching the sidebar setting', async () => {
+    useStore.setState({ settings: withMode('paper'), sessions: [session('s1'), session('s2')], activeId: 's1', sidebarOpen: true, switcherOpen: true });
+    await act(async () => { await useStore.getState().setActive('s2'); });
+    expect(useStore.getState()).toMatchObject({ activeId: 's2', switcherOpen: false, sidebarOpen: true });
+    for (const open of [
+      () => useStore.getState().setView('analytics'),
+      () => useStore.getState().openPalette(true),
+      () => useStore.getState().openSearch(true),
+      () => useStore.getState().openQuickSession(true)
+    ]) {
+      useStore.setState({ switcherOpen: true });
+      open();
+      expect(useStore.getState().switcherOpen).toBe(false);
+    }
+    expect(useStore.getState().sidebarOpen).toBe(true);
+  });
+
+  it('turns View → Sidebar and the palette’s sidebar command into ways to open the switcher', () => {
+    useStore.setState({ settings: withMode('paper'), sessions: [session('s1')], activeId: 's1', switcherOpen: false, sidebarOpen: true });
+    const { unmount } = render(<TitleBar />);
+    fireEvent.click(screen.getByRole('button', { name: 'Menu' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'View' }));
+    expect(screen.queryByRole('button', { name: /^Sidebar/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^Sessions/ }));
+    expect(useStore.getState()).toMatchObject({ switcherOpen: true, sidebarOpen: true });
+    unmount();
+    useStore.setState({ switcherOpen: false, paletteOpen: true });
+    render(<CommandPalette />);
+    expect(screen.queryByRole('button', { name: /Toggle left sidebar/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Show sessions/ }));
+    expect(useStore.getState()).toMatchObject({ switcherOpen: true, sidebarOpen: true, paletteOpen: false });
+  });
+
+  it('shows what is running, waiting or finished elsewhere by the title, and nothing when all is quiet', () => {
+    useStore.setState({ settings: withMode('paper'), sessions: [session('s1')], activeId: 's1' });
+    const { container, unmount } = render(<TitleBar />);
+    expect(container.querySelector('.titlebar-activity')).toBeNull();
+    unmount();
+    useStore.setState({ sessions: [session('s1', { status: 'running' }), session('s2', { status: 'awaiting' }), session('s3', { status: 'awaiting' })] });
+    render(<TitleBar />);
+    const trigger = screen.getByRole('button', { name: /Session activity/ });
+    expect(trigger.getAttribute('aria-label')).toBe('Session activity: 1 running, 2 awaiting approval');
+    expect([...trigger.querySelectorAll('.activity-count')].map((el) => [el.className.replace('activity-count ', ''), el.textContent])).toEqual([['activity-running', '1'], ['activity-awaiting', '2']]);
   });
 });

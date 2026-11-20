@@ -265,20 +265,20 @@ export function Sidebar() {
   const running = sessions.filter((s) => isTopLevelSession(s) && s.status === 'running').length;
   const done = activitySections(sessions, null).done.length;
   const plural = (n: number) => `${n} ${n === 1 ? 'session' : 'sessions'}`;
-  // Zen and Mono keep only the icons of these links; their names move into tooltips.
+  // Zen and Paper keep only the icons of these links; their names move into tooltips.
   const minimal = useMinimalUi();
   const tip = (label: string) => (minimal ? label : undefined);
-  // Mono lays the session list out as one row of tabs: a mouse wheel scrolls it sideways, and the
-  // open session's tab is kept in view however it was opened (palette, Ctrl+1…9, a split pane).
-  const mono = useUiMode() === 'mono';
+  // Paper shows this list as a switcher dropping from the title bar: it opens on the session you are
+  // in, however long the list is.
+  const paper = useUiMode() === 'paper';
   const list = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!mono || view !== 'chat' || !activeId) return;
-    list.current?.querySelector(`[data-session-id="${CSS.escape(activeId)}"]`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-  }, [mono, activeId, view]);
+    if (!paper || !activeId) return;
+    list.current?.querySelector(`[data-session-id="${CSS.escape(activeId)}"]`)?.scrollIntoView?.({ block: 'nearest' });
+  }, [paper, activeId]);
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" aria-label={paper ? 'Sessions' : undefined}>
       <div className="sidebar-top">
         <div className="brand">
           <Icon name="logo" size={22} />
@@ -334,7 +334,6 @@ export function Sidebar() {
       <div
         className="sidebar-list"
         ref={list}
-        onWheel={mono ? (e) => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY; } : undefined}
         onDragOver={(e) => {
           // Only the empty space below the last group lands here (group handlers stop
           // propagation); treat it as "move to the end".
@@ -500,7 +499,7 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
   const [title, setTitle] = useState(s.title);
   const renameAction = useRef<'idle' | 'committed' | 'cancelled'>('idle');
   const h = HARNESS_BY_ID[s.config.harness];
-  // Zen's rail and Mono's tabs hide or cut the title, so the row names itself on hover there.
+  // Zen's rail hides the title and Paper's switcher cuts it short, so the row names itself on hover.
   const minimal = useMinimalUi();
   const startRename = () => {
     setTitle(s.title);

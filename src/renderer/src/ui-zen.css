@@ -76,33 +76,9 @@
   background: var(--accent-soft);
 }
 
-/* The one-button menu: icon tabs over the chosen menu. */
-:root[data-ui='zen'] .menubar-tabs {
-  display: flex;
-  gap: 2px;
-  padding: 2px 2px 6px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--border);
-}
+/* The one-button menu's tabs (base styles in styles.css) take Zen's round shape. */
 :root[data-ui='zen'] .menubar-tab {
-  display: inline-flex;
-  flex: 1;
-  align-items: center;
-  justify-content: center;
-  height: 28px;
-  border: none;
   border-radius: 999px;
-  background: none;
-  color: var(--fg-muted);
-  cursor: pointer;
-}
-:root[data-ui='zen'] .menubar-tab:hover,
-:root[data-ui='zen'] .menubar-tab.active {
-  background: var(--bg-hover);
-  color: var(--fg);
-}
-:root[data-ui='zen'] .menubar-tab.active {
-  color: var(--accent);
 }
 
 /* ---------- Layout: rail, column, floating drawer ---------- */

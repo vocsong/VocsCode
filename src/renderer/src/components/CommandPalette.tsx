@@ -40,12 +40,15 @@ export function CommandPalette() {
       { id: 'skills', label: 'Open skills', icon: 'puzzle', run: () => st.setView('skills') },
       { id: 'mcp', label: 'Open MCP servers', icon: 'server', run: () => st.setView('mcp') },
       { id: 'panel', label: 'Toggle right side panel', hint: 'Ctrl+J', icon: 'layout', run: () => st.togglePanel() },
-      { id: 'sidebar', label: 'Toggle left sidebar', hint: 'Ctrl+B', icon: 'sidebar', run: () => st.toggleSidebar() },
+      // Paper has no sidebar: the same command drops its session switcher.
+      st.settings?.uiMode === 'paper'
+        ? { id: 'sidebar', label: 'Show sessions', hint: 'Ctrl+B', icon: 'list', run: () => st.openSwitcher(true) }
+        : { id: 'sidebar', label: 'Toggle left sidebar', hint: 'Ctrl+B', icon: 'sidebar', run: () => st.toggleSidebar() },
       { id: 'changes', label: 'Show changes', icon: 'diff', run: () => st.setPanelTab('changes') },
       { id: 'goal', label: active?.mission ? 'Show Mission' : 'Show goal', icon: 'target', run: () => st.setPanelTab('goal') },
       { id: 'terminal', label: 'Show terminal', hint: 'Ctrl+`', icon: 'terminal', run: () => { st.setPanelTab('terminal'); st.focusTerminal(); } },
       { id: 'thinking', label: 'Toggle thinking visibility', icon: 'brain', run: () => st.toggleThinking() },
-      // The interface mode is one keystroke away from anywhere, so trying Zen or Mono costs nothing.
+      // The interface mode is one keystroke away from anywhere, so trying Zen or Paper costs nothing.
       ...UI_MODES.filter((m) => m.id !== (st.settings?.uiMode ?? 'standard')).map((m) => ({ id: `ui:${m.id}`, label: `Switch to the ${m.name} interface`, hint: m.tagline, icon: 'layout', run: () => setUiMode(m.id) }))
     ];
     if (activeId) {

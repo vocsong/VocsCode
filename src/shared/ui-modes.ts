@@ -1,14 +1,14 @@
 /**
  * The app's interface modes: how the window is laid out, independent of its color theme.
  *
- * `standard` is the full layout. `zen` and `mono` are the two minimalist alternatives. Each one
+ * `standard` is the full layout. `zen` and `paper` are the two minimalist alternatives. Each one
  * re-lays the same component tree out with CSS keyed on `<html data-ui>`
- * (`src/renderer/src/ui-zen.css`, `ui-mono.css`). Switching therefore never remounts anything, so a
- * draft, a running turn, a terminal or an open panel survive the switch. Every theme works in
+ * (`src/renderer/src/ui-zen.css`, `ui-paper.css`). Switching therefore never remounts a session pane,
+ * so a draft, a running turn, a terminal or an open panel survive the switch. Every theme works in
  * every mode.
  */
 
-export type UiModeId = 'standard' | 'zen' | 'mono';
+export type UiModeId = 'standard' | 'zen' | 'paper';
 
 export interface UiModeDescriptor {
   id: UiModeId;
@@ -35,10 +35,10 @@ export const UI_MODES: readonly UiModeDescriptor[] = [
     description: 'Sessions become a rail of dots that opens on hover, the conversation sits in one centered column, the composer floats and the side panel slides over as a drawer. Controls show up when you reach for them.'
   },
   {
-    id: 'mono',
-    name: 'Mono',
-    tagline: 'A terminal-like grid',
-    description: 'Monospace type and hairline rules, sessions as tabs across the top, a status-line header, a full-width prompt line and glyphs in place of labels.'
+    id: 'paper',
+    name: 'Paper',
+    tagline: 'A page, not an app',
+    description: 'No sidebar: sessions drop down from the title. The conversation reads like a printed page in serif type, the composer is a single ruled line, and the side panel becomes a sheet along the bottom.'
   }
 ];
 
@@ -48,5 +48,5 @@ export function isUiModeId(value: unknown): value is UiModeId {
 
 /** True for the minimalist modes, which share the compact menu and icon-only chrome. */
 export function isMinimalUiMode(id: UiModeId | undefined): boolean {
-  return id === 'zen' || id === 'mono';
+  return id === 'zen' || id === 'paper';
 }
