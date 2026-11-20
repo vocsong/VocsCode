@@ -1067,6 +1067,23 @@ describe('external control owner boundary', () => {
     expect(setEnabled).not.toHaveBeenCalled(); expect(grant).not.toHaveBeenCalled(); expect(revoke).not.toHaveBeenCalled();
     for (const channel of ['control:get', 'control:enable', 'control:grant', 'control:revoke']) expect(isRemoteChannel(channel)).toBe(false);
   });
+
+  it('does not route local grant setup through browser access or an agent', async () => {
+    const state = { supported: true, projects: [], approvedProjectIds: [], target: null };
+    const ownerState = vi.fn(async () => state), enable = vi.fn(async () => state), disable = vi.fn(async () => state);
+    const { registry } = stubDeps({ localControl: { ownerState, enable, disable } });
+    for (const channel of ['control:local:get', 'control:local:enable', 'control:local:disable']) {
+      expect(isRemoteChannel(channel)).toBe(false);
+      for (const actor of [undefined, 'user', 'agent'] as const) {
+        await expect(registry.invoke(channel, { actor: 'desktop', projectIds: ['some-project'] }, actor)).rejects.toThrow('local desktop owner');
+      }
+    }
+    expect(ownerState).not.toHaveBeenCalled();
+    expect(enable).not.toHaveBeenCalled();
+    expect(disable).not.toHaveBeenCalled();
+    await expect(registry.invoke('control:local:get', undefined, 'desktop')).resolves.toEqual(state);
+    expect(ownerState).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('remote sign-in handlers', () => {

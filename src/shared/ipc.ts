@@ -1,6 +1,7 @@
 import type { VocsAccountSignInRequest, VocsAccountState } from './vocs-account';
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type { ControlGrantInput, ControlOwnerState } from './control';
+import type { LocalControlOwnerState } from './local-control';
 import type { HarnessSetupStatus, LoginHarnessId } from './harness-setup';
 import type {
   AnalyticsSummary,
@@ -385,6 +386,9 @@ export interface IpcContract {
   'control:enable': [{ enabled: boolean }, ControlOwnerState];
   'control:grant': [ControlGrantInput, ControlOwnerState];
   'control:revoke': [{ grantId: string }, ControlOwnerState];
+  'control:local:get': [void, LocalControlOwnerState];
+  'control:local:enable': [{ projectIds: string[] }, LocalControlOwnerState];
+  'control:local:disable': [void, LocalControlOwnerState];
 
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   /** Pre-session probe for a folder the dialog is configuring: worktree isolation needs a git repository. */
