@@ -365,9 +365,9 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.locator('.panel-tab.active', { hasText: 'Usage' }).waitFor({ timeout: 10_000 });
     await win.keyboard.press('Escape');
 
-    // The title bar names the session and opens the command palette.
+    // The title bar names the session after its project and opens the command palette.
     const search = win.locator('.titlebar-search');
-    expect(await search.innerText()).toContain('Add rate limiting to the public API');
+    expect(await search.locator('.titlebar-search-text').innerText()).toBe('project | Add rate limiting to the public API');
     await search.click();
     await win.getByPlaceholder('Type a command or session name…').waitFor({ timeout: 10_000 });
     await win.keyboard.press('Escape');
