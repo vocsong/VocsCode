@@ -4,6 +4,7 @@ import { nativeGoalCommands } from '../../../shared/goal-driver';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke, invokeErrorMessage } from '../api';
 import { useGitDiff, useGitSummary } from '../gitReads';
+import { GitPanelCache } from '../git-panel-cache';
 import { workspaceRelativePath } from '../file-refs';
 import { clamp, relTime } from '../format';
 import { useStore, type FileReveal, type PanelBottomTab, type PanelTab } from '../store';
@@ -44,7 +45,8 @@ const BOTTOM_TABS: { id: PanelBottomTab; label: string; icon: string }[] = [
   { id: 'processes', label: 'Processes', icon: 'activity' }
 ];
 
-export function RightPanel({ session }: { session: SessionMeta }) {
+export function RightPanel({ session, gitPanelCache }: { session: SessionMeta; gitPanelCache?: GitPanelCache }) {
+  const cache = useMemo(() => gitPanelCache ?? new GitPanelCache(), [gitPanelCache]);
   const { record: mission } = useMission(session);
   const [workspace, setWorkspace] = useState({ sessionId: session.id, id: '' });
   const reveal = useStore((s) => s.fileReveal);
@@ -92,7 +94,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
           {session.mission && (tab === 'changes' || tab === 'files') && (mission ? <MissionWorkspacePicker record={mission} value={workspaceId} onChange={(id) => setWorkspace({ sessionId: session.id, id })} /> : <div className="pad muted">Loading Mission workspace state…</div>)}
           {tab === 'changes' && (session.mission ? mission && <MissionChanges record={mission} workspaceId={workspaceId} /> : <ChangesTab session={session} />)}
           {tab === 'files' && (!session.mission || mission) && <FilesTab key={`${session.id}:${workspaceId}:${fileSession.cwd}`} session={fileSession} missionWorkspaceId={workspaceId || undefined} />}
-          {tab === 'branches' && (session.mission ? <div className="pad muted">Mission integration and delivery are managed by the principal engineer. Inspect the delivery target and result in Mission; generic Git publish controls are unavailable.</div> : <BranchesTab session={session} />)}
+          {tab === 'branches' && (session.mission ? <div className="pad muted">Mission integration and delivery are managed by the principal engineer. Inspect the delivery target and result in Mission; generic Git publish controls are unavailable.</div> : <BranchesTab session={session} cache={cache} />)}
           {tab === 'goal' && (session.mission ? <MissionPanel session={session} /> : <GoalTab session={session} />)}
           {tab === 'usage' && <>{mission && <div className="pad"><MissionUsage record={mission} /><p className="muted small">The breakdown below is this lead session only, not the Mission total.</p></div>}<UsageTabPanel session={session} /></>}
           {tab === 'terminal' && (session.mission && (session.archived || mission?.archived) ? <div className="pad muted">Archived Mission — terminals are closed. Restore the Mission to use its lead terminal.</div> : <>{session.mission && <div className="mission-ui mission-workspace"><strong>Lead interactive terminal</strong><p className="mono small">{session.cwd}</p><p className="muted small">Actual lead tool cwd. Integration and specialist workspaces have no writable terminal here.</p></div>}<TerminalPanel session={session} /></>)}
