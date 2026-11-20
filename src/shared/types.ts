@@ -815,14 +815,10 @@ export interface SessionMeta {
   /** Stable provenance for local chat imports; also prevents importing the same conversation twice. */
   importedFrom?: { source: 'claude' | 'codex'; sessionId: string };
   title: string;
-  /**
-   * The title is still the truncated-prompt stand-in, so the one-shot title model may replace it.
-   * A session created from a dialog prompt or a goal is named before its first message is sent, so
-   * the title alone cannot say whether anyone chose it: without this flag such a session keeps its
-   * six-word cut of the prompt forever. Cleared by a real title, by a rename, or by `title` given
-   * at creation. Absent on sessions written before it existed.
-   */
+  /** The title is a temporary stand-in, eligible for opening-prompt naming. */
   titleIsPlaceholder?: boolean;
+  /** Whether the app owns the title. Absent for older titles of unknown origin. */
+  titleIsAutomatic?: boolean;
   createdAt: number;
   updatedAt: number;
   /**

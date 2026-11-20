@@ -240,7 +240,7 @@ const MAX_TITLE_ATTEMPTS = 2;
  * existed carry no flag, so the old marker — the untouched default title — still counts.
  */
 function isPlaceholderTitle(meta: SessionMeta): boolean {
-  return meta.titleIsPlaceholder === true || meta.title === 'New session';
+  return meta.titleIsAutomatic !== false && (meta.titleIsPlaceholder === true || (meta.titleIsAutomatic === undefined && meta.title === 'New session'));
 }
 
 export class SessionManager {
@@ -278,8 +278,8 @@ export class SessionManager {
    * none of them should pay for a title model that is not answering.
    */
   private titleAttempts = new Map<string, number>();
-  /** Sessions with a title call out right now, so two quick messages cannot fire two of them. */
-  private titleInFlight = new Set<string>();
+  /** The latest title request for each session; a newer completed turn supersedes it. */
+  private titleInFlight = new Map<string, symbol>();
   /** Event sequence, monotonic for the lifetime of this manager; see `publish`. */
   private seq = 0;
 
@@ -714,12 +714,14 @@ export class SessionManager {
     const titleSeed = req.initialPrompt ?? objective;
     // Only a title the caller chose is the session's real name. A title derived here is a stand-in
     // for one nobody has written yet, so flag it: the first message replaces it with a model's.
-    const title = req.title?.trim() || (titleSeed ? titleFromPrompt(titleSeed) : 'New session');
+    const chosenTitle = req.title?.trim();
+    const title = chosenTitle || (titleSeed ? titleFromPrompt(titleSeed) : 'New session');
     const meta: SessionMeta = {
       id,
       ...(controlCreation ? { controlCreation } : {}),
       title,
-      titleIsPlaceholder: req.title?.trim() ? undefined : true,
+      titleIsPlaceholder: chosenTitle ? undefined : true,
+      titleIsAutomatic: !chosenTitle,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       config: { ...cfg, model: cfg.model ?? s.defaultModelByHarness[cfg.harness] },
@@ -778,15 +780,15 @@ export class SessionManager {
     if (meta.nativeGoal) {
       // A slash command has to open its message, so the objective rides along as its argument. The
       // harness's own goal takes it from there — no kickoff prompt, no app-side continuation.
-      if (!req.title?.trim()) this.scheduleLlmTitle(id, title, promptText || objective);
+      if (!chosenTitle) this.scheduleLlmTitle(id, { prompt: promptText || objective });
       void this.sendAs(id, { text: `/${meta.nativeGoal} ${objective}` }, 'user', undefined, '').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
       if (promptText || initialImages || initialFiles) {
         void this.send(id, { text: promptText, images: initialImages, files: initialFiles }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
       }
     } else if (promptText || initialImages || initialFiles) {
       // A user-supplied title stands; otherwise the prompt-derived one is only a placeholder
-      // until the one-shot LLM title call lands.
-      if (!req.title?.trim() && promptText) this.scheduleLlmTitle(id, title, promptText);
+      // until the LLM title call lands.
+      if (!chosenTitle && promptText) this.scheduleLlmTitle(id, { prompt: promptText });
       const prompt = meta.goal && promptText ? `${promptText}\n\nActive goal: ${meta.goal.objective}` : promptText;
       void this.sendAs(id, { text: prompt, images: initialImages, files: initialFiles }, 'user', undefined, promptText).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     } else if (meta.goal) {
@@ -900,6 +902,7 @@ export class SessionManager {
     await this.preserveUserInputs(meta, await this.deps.store.readTranscript(id));
     this.cancelPersist(id);
     this.titleAttempts.delete(id);
+    this.titleInFlight.delete(id);
     const tStop = Date.now();
     if (meta.worktreeBranch && removeWt) {
       try {
@@ -928,7 +931,7 @@ export class SessionManager {
       throw new Error('Mission ownership and execution state cannot be changed through session patch');
     }
     // A rename is the user naming the session: no title model may overwrite it afterwards.
-    const named = patch.title !== undefined && patch.titleIsPlaceholder === undefined ? { titleIsPlaceholder: undefined } : {};
+    const named = patch.title !== undefined ? { titleIsPlaceholder: undefined, titleIsAutomatic: false } : {};
     Object.assign(meta, patch, named, { updatedAt: Date.now() });
     await this.deps.store.upsert(meta);
     this.pushSessions();
@@ -1659,7 +1662,7 @@ export class SessionManager {
       const seed = (source === 'goal' && meta.goal?.objective?.trim()) || input.text;
       meta.title = placeholder;
       meta.titleIsPlaceholder = true;
-      this.scheduleLlmTitle(id, placeholder, seed);
+      this.scheduleLlmTitle(id, { prompt: seed });
     }
     this.schedulePersist(meta);
     this.pushSessions();
@@ -1809,32 +1812,41 @@ export class SessionManager {
     await this.deps.store.upsert(meta);
   }
 
-  /**
-   * Replaces a prompt-derived placeholder title with an LLM-generated one, as long as the
-   * user has not renamed (or deleted) the session while the call was in flight.
-   */
-  private scheduleLlmTitle(id: string, placeholder: string, prompt: string): void {
-    const attempts = this.titleAttempts.get(id) ?? 0;
-    if (attempts >= MAX_TITLE_ATTEMPTS || this.titleInFlight.has(id)) return;
-    this.titleAttempts.set(id, attempts + 1);
-    this.titleInFlight.add(id);
-    // The cheap utility model is for background chores like this; the session's own model is
-    // the fallback so titling still works before the user picks a utility model.
+  /** Opening-prompt naming is best-effort. Turn-end refreshes use only the configured utility model. */
+  private scheduleLlmTitle(id: string, source: { prompt: string } | { turnReply: string }): void {
     const meta = this.get(id);
-    const preferred = this.settings().utilityModel ?? meta?.activeModel;
-    void generateSessionTitle(prompt, this.settings().providers, this.deps.getSecret, preferred, this.deps.log, id)
+    if (!meta || meta.archived || meta.titleIsAutomatic === false) return;
+    const { utilityModel, providers } = this.settings();
+    const currentTitle = meta.title;
+    const turnReply = 'turnReply' in source ? source.turnReply : undefined;
+    let candidates = providers;
+    if (turnReply !== undefined) {
+      if (!utilityModel || (!meta.titleIsAutomatic && !isPlaceholderTitle(meta))) return;
+      candidates = providers.filter((p) => p.id === utilityModel.provider);
+    } else {
+      const attempts = this.titleAttempts.get(id) ?? 0;
+      if (attempts >= MAX_TITLE_ATTEMPTS || this.titleInFlight.has(id)) return;
+      this.titleAttempts.set(id, attempts + 1);
+    }
+    const request = Symbol();
+    this.titleInFlight.set(id, request);
+    const prompt = 'prompt' in source ? source.prompt : currentTitle;
+    void generateSessionTitle(prompt, candidates, this.deps.getSecret, utilityModel ?? meta.activeModel, this.deps.log, id, turnReply)
       .then((title) => {
-        if (!title || title === placeholder) return;
-        const meta = this.get(id);
-        if (!meta || meta.title !== placeholder) return;
-        meta.title = title;
-        // The session has a real name now; a later message must not re-title it.
-        meta.titleIsPlaceholder = undefined;
-        this.schedulePersist(meta);
+        if (!title || this.titleInFlight.get(id) !== request) return;
+        const current = this.get(id);
+        if (!current || current.archived || current.titleIsAutomatic === false || current.title !== currentTitle) return;
+        if (title === currentTitle && current.titleIsAutomatic && !current.titleIsPlaceholder) return;
+        current.title = title;
+        current.titleIsPlaceholder = undefined;
+        current.titleIsAutomatic = true;
+        this.schedulePersist(current);
         this.pushSessions();
       })
       .catch(() => undefined)
-      .finally(() => this.titleInFlight.delete(id));
+      .finally(() => {
+        if (this.titleInFlight.get(id) === request) this.titleInFlight.delete(id);
+      });
   }
 
   /** Denies every pending approval and records the decision on its transcript card. */
@@ -2752,6 +2764,7 @@ export class SessionManager {
     const text = active?.lastAssistantText ?? '';
     if (active) active.lastAssistantText = '';
     if (meta.mission || this.controlled.has(meta.id)) return;
+    if (active && turn.status === 'completed') this.scheduleLlmTitle(meta.id, { turnReply: text });
     const goal = meta.goal;
     if (!goal || goal.status !== 'active' || !active) return;
     // This reply began before the new goal was submitted. Its token (or lack of one) says
@@ -3031,6 +3044,7 @@ export class SessionManager {
       title,
       // The fork suffix names which session this came from; a title model would drop that.
       titleIsPlaceholder: undefined,
+      titleIsAutomatic: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       status: 'idle',
