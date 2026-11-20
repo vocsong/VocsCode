@@ -405,7 +405,7 @@ function BackgroundModelFields({ settings, update }: { settings: AppSettings; up
   return (
     <div className="settings-section">
       <SettingsGroup id="assistant-models" title="Utility model" icon="bolt" description="Small, fast chores shouldn’t need your most powerful model.">
-      <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions and worktree branches. Falls back to the session's own model when unset.">
+      <Field label="Utility model" hint="A fast model for background tasks. After each completed turn, it uses an excerpt of the reply to refresh automatic session titles. Opening titles and worktree names can still use the session's model when unset.">
         {error && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {error}</span></div>}
         <div className="onboarding-model-picker">
           <ModelPicker

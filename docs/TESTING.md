@@ -144,6 +144,7 @@ no-provider `e2e.*` suite. Suites marked live or opt-in are still run by hand wh
 | --- | --- |
 | Transcript file mentions and links, the file preview pane (`FilePreviewPane.tsx`, `file-open.ts`, `markdown.ts` links), Files tab, workspace file resolution | `tests/file-refs.test.ts`, `tests/file-links.test.tsx`, `tests/markdown-cache.test.ts`, `tests/workspace-files.test.ts`, `tests/handler-registry.test.ts` + `e2e.files`; Mission-scoped file resolution also needs `tests/mission-handlers.test.ts`, `tests/mission-ui.test.tsx` + `e2e.mission` |
 | Sidebar, New Session dialog, session lifecycle | `e2e.terminal` (no key) + `e2e.electron` (live) |
+| Automatic session titles (`session-title.ts`, `SessionManager.scheduleLlmTitle`) | `tests/session-title-rename.test.ts` + `e2e.session-view` (loopback utility model, turn completion and sidebar/header updates) |
 | Activity tray and "done · not viewed" — the header trigger, `ActivityTray.tsx`, `activity.ts`, the viewing dwell (`useSessionViewing`), `DesktopFocusTracker`'s visible set, `SessionManager.markViewed` / turn-end marking | `tests/activity-tray.test.tsx`, `tests/session-viewing.test.tsx`, `tests/session-unseen.test.ts`, `tests/desktop-focus.test.ts` + `e2e.session-view` (review screenshot `tests/artifacts/session-view-06-activity-tray.png`) |
 | Right-click menus (`components/ContextMenu.tsx`), folder removal | `tests/context-menus.test.tsx`, `tests/folder-remove.test.ts` + `e2e.context-menu` |
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
