@@ -250,6 +250,34 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     expect((await win.evaluate(() => window.harness.invoke('settings:get', undefined))).uiMode).toBe('standard');
   }, 180_000);
 
+  it('edits a session label and title while its Zen row actions are showing', async ({ onTestFinished }) => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-label-'));
+    onTestFinished(() => fs.rm(tmp, { recursive: true, force: true, maxRetries: 3 }));
+    const { userData } = await seed(tmp, 'zen');
+    const win = await launch(userData);
+    const row = win.locator(`[data-session-id="${FIRST}"]`);
+    const railDot = { position: { x: 26, y: 10 } };
+    await row.hover(railDot);
+    await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(280);
+
+    const fork = row.getByRole('button', { name: 'Fork session', exact: true });
+    await fork.waitFor();
+    await row.getByText('Idle', { exact: true }).click({ timeout: 5_000 });
+    await row.getByRole('menuitem', { name: 'Merged', exact: true }).click();
+    await row.getByText('Merged', { exact: true }).waitFor();
+
+    await row.hover(railDot);
+    await fork.click();
+    await row.getByRole('menuitem', { name: 'Fork into', exact: true }).waitFor();
+    await win.keyboard.press('Escape');
+    await row.getByRole('button', { name: 'Archive session', exact: true }).click({ trial: true });
+    await row.getByTitle('Click to rename').click();
+    const title = row.getByRole('textbox');
+    await title.fill('Rename from the Zen sidebar');
+    await title.press('Enter');
+    await row.getByText('Rename from the Zen sidebar', { exact: true }).waitFor();
+  }, 60_000);
+
   it('scrolls a session list longer than the window in Zen’s rail, open or closed, keeping its foot on screen', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-ui-modes-scroll-'));
     const { userData } = await seed(tmp, 'zen', 40);
