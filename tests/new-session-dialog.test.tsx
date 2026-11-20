@@ -113,6 +113,37 @@ describe('NewSessionDialog', () => {
     );
   });
 
+  it('puts focus in the first prompt when it opens, not in the model search', async () => {
+    render(<NewSessionDialog />);
+    const prompt = screen.getByRole('textbox', { name: 'First prompt (optional)' });
+    expect(document.activeElement).toBe(prompt);
+    // Still there once the model list has loaded and every mount effect has run.
+    await waitFor(() => expect((screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement).disabled).toBe(false));
+    expect(document.activeElement).toBe(prompt);
+  });
+
+  it('heads Fast mode like the selects beside it, with the switch under the heading', () => {
+    render(<NewSessionDialog />);
+    const group = screen.getByRole('group', { name: 'Fast mode' });
+    const toggle = screen.getByRole('checkbox', { name: 'Fast mode' });
+    const heading = group.querySelector(':scope > .field-label');
+    expect(heading?.textContent).toBe('Fast mode');
+    expect(heading!.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(group.querySelector('.toggle-label')).toBeNull();
+  });
+
+  it('shows every harness card as one name line over one status line', () => {
+    useStore.setState({ availability: { claude: { available: true, authenticated: true, authMethod: 'subscription' } } } as never);
+    render(<NewSessionDialog />);
+    const cards = [...document.querySelectorAll('.harness-card')];
+    expect(cards.length).toBeGreaterThan(1);
+    for (const card of cards) {
+      expect([...card.children].map((c) => c.className)).toEqual(['harness-card-name', 'harness-card-status']);
+    }
+    const claude = cards.find((c) => c.textContent?.startsWith('Claude Agent SDK'))!;
+    expect(claude.querySelector('.harness-card-status .badge')?.getAttribute('title')).toBe('Subscription sign-in detected');
+  });
+
   it('shows Enter as the start shortcut', () => {
     render(<NewSessionDialog />);
     const start = screen.getByTitle('Start from the prompt area with Enter');
