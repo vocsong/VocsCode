@@ -107,6 +107,15 @@ Absolute paths outside the session are never remapped into it. Mission resolutio
 use the same selected workspace; no sibling checkout or project-root fallback is allowed.
 Transports without `fs:resolve` retain exact-path opening.
 
+## Transcript pull request links
+
+In a desktop session with the Git panel, a GitHub PR overview link opens Git → PR and shows the
+linked request's description and conversation. `git:pullRequest` validates the URL in the main
+process and uses `gh pr view` with the canonical URL, independent of the session's checkout and
+its 100-item PR list. The link preview offers **Open on GitHub** and leaves merge actions with
+the repo's own PR rows. Pending results are discarded when the preview closes or its session
+loses the Git panel.
+
 ## Harness matrix
 
 | Harness | Engine | Approvals | Models | MCP |

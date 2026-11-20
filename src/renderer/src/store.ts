@@ -2,12 +2,13 @@
 import { create } from 'zustand';
 import type { AgentState } from '../../shared/agent';
 import { EMPTY_AGENT_STATE } from '../../shared/agent';
-import type { AppSettings, DesktopFocus, HarnessAvailability, HarnessId, ImageAttachment, FileAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
+import { parseGitHubPullRequestUrl } from '../../shared/github-pull-request';
+import type { AppSettings, DesktopFocus, GitPullRequestDetail, HarnessAvailability, HarnessId, ImageAttachment, FileAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import type { MissionRecord } from '../../shared/mission';
 import type { ProcessSummary } from '../../shared/processes';
 import { resolveNewSessionDefaults } from '../../shared/session-defaults';
-import { invoke, on, canInvoke } from './api';
+import { invoke, invokeErrorMessage, on, canInvoke } from './api';
 import { recencyAt, sortSessionRows } from './sessionOrder';
 import * as panes from './panes';
 import type { DropZone, FilePreviewTarget, PaneLayout, PaneOrientation, PaneSide } from './panes';
@@ -115,6 +116,7 @@ interface State {
    * and a local state would drop the user back on Branches every time.
    */
   gitPanelView: GitPanelView;
+  gitPullRequestPreview: { sessionId: string; url: string; number: number; detail: GitPullRequestDetail | null } | null;
   /** One-shot request to show a folder in the Files tab, set by transcript folder links. */
   fileReveal: FileReveal | null;
   /** One-shot request to open one subagent run, set by a subagent tool card. */
@@ -191,6 +193,8 @@ interface State {
   togglePanel(open?: boolean): void;
   setPanelTab(t: PanelTab | 'mcp'): void;
   setGitPanelView(v: GitPanelView): void;
+  openPullRequestLink(sessionId: string, url: string): boolean;
+  closePullRequestPreview(): void;
   setPanelBottomTab(t: PanelBottomTab): void;
   /**
    * Opens a path a session names (workspace-relative, shortened, or absolute inside its folder). A
@@ -431,6 +435,7 @@ export const useStore = create<State>((set, get) => ({
   panelBottomTab: 'mcp',
   panelBottomOpened: [],
   gitPanelView: 'branches',
+  gitPullRequestPreview: null,
   fileReveal: null,
   subagentReveal: null,
   newSessionOpen: false,
@@ -1015,6 +1020,22 @@ export const useStore = create<State>((set, get) => ({
   setGitPanelView(gitPanelView) {
     set({ gitPanelView });
   },
+  openPullRequestLink(sessionId, url) {
+    if (get().activeId !== sessionId) return false;
+    const link = parseGitHubPullRequestUrl(url);
+    if (!link) return false;
+    const preview = { sessionId, url, number: link.number, detail: null };
+    set({ panelOpen: true, panelTab: 'branches', gitPanelView: 'prs', gitPullRequestPreview: preview });
+    // A different link, dismissal, or session switch takes precedence over this response.
+    const settle = (detail: GitPullRequestDetail) => {
+      set((s) => s.gitPullRequestPreview === preview ? { gitPullRequestPreview: { ...preview, detail } } : s);
+    };
+    void invoke('git:pullRequest', { sessionId, url: link.url }).then(settle, (error) => settle({ error: invokeErrorMessage(error) }));
+    return true;
+  },
+  closePullRequestPreview() {
+    set({ gitPullRequestPreview: null });
+  },
   setPanelBottomTab(panelBottomTab) {
     set((s) => ({ panelBottomTab, panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, panelBottomTab), panelOpen: true }));
   },
@@ -1278,6 +1299,9 @@ useStore.subscribe((s, prev) => {
   }
   // The split is remembered for the next launch; boot turns this on once it has restored the last one.
   if (persistLayout && s.layout !== prev.layout) panes.saveLayout(s.layout);
+  if (s.gitPullRequestPreview && (s.activeId !== s.gitPullRequestPreview.sessionId || s.view !== 'chat' || !s.panelOpen || s.panelTab !== 'branches' || s.gitPanelView !== 'prs')) {
+    useStore.setState({ gitPullRequestPreview: null });
+  }
 });
 
 /** Reports a rejected fire-and-forget action as an error toast instead of an unhandled rejection. */
