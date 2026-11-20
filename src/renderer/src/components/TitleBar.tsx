@@ -5,12 +5,13 @@
  * reserves that space; on macOS the traffic lights sit in the padded left edge instead.
  */
 import React, { useEffect, useRef, useState } from 'react';
+import { sessionTitleText } from '../../../shared/session-title';
 import { invoke, isMac, isWeb, modKey } from '../api';
 import { useActiveSession, useStore } from '../store';
 import type { PanelTab } from '../store';
 import { Icon, MenuItem } from './ui';
 import { ForkIntoItems } from './ForkInto';
-import { formatSessionLabel } from '../format';
+import { SessionTitle } from './SessionTitle';
 import { openSettings } from './SettingsView';
 import { VestaLauncher } from './Vesta';
 import { setUiMode, useMinimalUi, useUiMode } from '../ui-mode';
@@ -35,8 +36,7 @@ export function TitleBar() {
   const navForward = useStore((s) => s.navForward);
   const view = useStore((s) => s.view);
   const session = useActiveSession();
-  const sessionLabel = session ? formatSessionLabel(session) : null;
-  const title = view === 'settings' ? 'Settings · Vocs Code' : sessionLabel ? `${sessionLabel} · Vocs Code` : 'Vocs Code';
+  const title = view === 'settings' ? 'Settings · Vocs Code' : session ? `${sessionTitleText(session)} · Vocs Code` : 'Vocs Code';
 
   return (
     <div className={`titlebar ${isMac ? 'titlebar-mac' : ''} ${isWeb ? 'titlebar-web' : ''}`}>
@@ -50,7 +50,9 @@ export function TitleBar() {
       <div className="titlebar-title">
         <button type="button" className="titlebar-search" title={`${title} — search sessions and commands (${modKey}+K)`} onClick={() => useStore.getState().openPalette(true)}>
           <Icon name="search" size={13} />
-          <span className="titlebar-search-text">{view === 'settings' ? 'Settings' : sessionLabel ?? 'Search sessions and commands'}</span>
+          {session && view !== 'settings'
+            ? <SessionTitle session={session} className="titlebar-search-text" />
+            : <span className="titlebar-search-text">{view === 'settings' ? 'Settings' : 'Search sessions and commands'}</span>}
           <kbd className="kbd">{modKey}+K</kbd>
         </button>
       </div>

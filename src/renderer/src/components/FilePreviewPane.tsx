@@ -14,6 +14,7 @@ import { fileManagerName, fileScope } from '../file-open';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import type { SessionPane } from '../panes';
 import { useStore } from '../store';
+import { SessionTitle } from './SessionTitle';
 import { Button, Icon, Spinner } from './ui';
 
 interface Preview {
@@ -157,7 +158,7 @@ export function FilePreviewPane({ pane, size, split }: { pane: SessionPane; size
       <div className="file-preview-head">
         <Icon name="file" size={13} />
         <span className="mono file-preview-path" title={title}>{title}</span>
-        <span className="muted small file-preview-session" title={session.title}>{session.title}</span>
+        <SessionTitle session={session} className="muted small file-preview-session" />
         <span className="spacer" />
         {preview && isMd && (
           <Button size="sm" variant="ghost" icon={mdView ? 'file' : 'eye'} onClick={() => setMdView((v) => !v)} title={mdView ? 'Show source' : 'Show markdown preview'} />

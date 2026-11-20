@@ -190,8 +190,10 @@ describe('analytics dashboard', () => {
     expect(useStore.getState().analyticsTab).toBe('sessions');
     const rows = container.querySelectorAll('.slist-row:not(.slist-head)');
     expect(rows).toHaveLength(3);
+    expect(rows[0].querySelector('.slist-title')?.textContent).toBe('Claude a | Session s1');
     // s3 was deleted: it stays in the history, marked, and cannot be opened.
     expect(container.querySelectorAll('.slist-row.gone')).toHaveLength(1);
+    expect(rows[2].querySelector('.slist-title')?.textContent).toBe('Pi a | Session s3');
     fireEvent.click(rows[0]);
     await waitFor(() => expect(useStore.getState().activeId).toBe('s1'));
   });

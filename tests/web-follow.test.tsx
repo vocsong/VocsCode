@@ -53,7 +53,8 @@ describe('follow my computer', () => {
   it('offers a snackbar instead of moving, and never follows over a typed draft', async () => {
     const shells = await mountFollowing();
     for (const listener of shells.pushes) listener('push:desktopFocus', { sessionId: 's2', at: 2, windowFocused: true });
-    await rtl.screen.findByTestId('follow-snackbar');
+    const snackbar = await rtl.screen.findByTestId('follow-snackbar');
+    expect(snackbar.textContent).toContain('Claude repo | Second');
     // Still on the first session: the snackbar is an offer, not a move.
     expect(rtl.screen.getAllByText('First').length).toBeGreaterThan(0);
 

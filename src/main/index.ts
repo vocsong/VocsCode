@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, Notification, app, nativeTheme, net, screen, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
+import { sessionTitleText } from '../shared/session-title';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
 import { AnalyticsStore } from './analytics';
@@ -312,7 +313,12 @@ async function main(): Promise<void> {
       if (!settings.get().notifications) return;
       if (mainWindow?.isFocused()) return;
       if (!Notification.isSupported()) return;
-      const n = new Notification({ title, body: body.slice(0, 200), silent: !settings.get().soundOnApproval });
+      const session = store.get(sessionId);
+      const n = new Notification({
+        title: session ? sessionTitleText({ title, config: session.config }) : title,
+        body: body.slice(0, 200),
+        silent: !settings.get().soundOnApproval
+      });
       n.on('click', () => {
         mainWindow?.show();
         mainWindow?.focus();

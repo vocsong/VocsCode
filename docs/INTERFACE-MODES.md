@@ -39,7 +39,7 @@ File / Edit / View / Help menu bar.
 - React reads the mode (`src/renderer/src/ui-mode.ts`) only where the layout needs different markup:
   the one-button menu, tooltips for labels the layout hides and the composer placeholder. The CSS
   also reads a few data hooks:
-  - `data-status`, `data-tone` and `data-pinned` on session rows;
+  - `data-status`, `data-harness` and `data-pinned` on session rows;
   - `data-short` on the work chip (its facts without words);
   - the `turn-*` span classes on turn footers.
 - Tokens are overridden on `:root[data-ui='zen'][data-theme]` so they outrank the injected theme

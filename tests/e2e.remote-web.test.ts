@@ -14,7 +14,7 @@ import { promises as fs } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
+import { _electron as electron, type ElectronApplication, type Locator, type Page } from 'playwright-core';
 import { RemoteHost } from '../src/main/remote/host';
 import { suggestedName } from '../src/web/device-name';
 import type { HandlerRegistry } from '../src/main/handlers';
@@ -129,9 +129,9 @@ app.on('window-all-closed', () => app.quit());
 `;
 
 const ZERO_USAGE = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
-const meta = (id: string, title: string): SessionMeta => ({
+const meta = (id: string, title: string, harness: SessionMeta['config']['harness'] = 'claude'): SessionMeta => ({
   id, title, createdAt: 1, updatedAt: 1,
-  config: { harness: 'claude', permissionMode: 'ask', projectRoot: '/repo' },
+  config: { harness, permissionMode: 'ask', projectRoot: '/repo' },
   cwd: '/repo', status: 'idle', harnessRef: {}, usage: { ...ZERO_USAGE }
 });
 
@@ -184,7 +184,7 @@ async function desk(name: string, origin: string, enrollToken: string, opts: { e
         case 'settings:get':
           return { remote: { viewOnly: false }, folders: [] };
         case 'sessions:list':
-          return [meta(`${name}-s1`, `${name} session`), meta(second, `${name} second`)];
+          return [meta(`${name}-s1`, `${name} session`), meta(second, `${name} second`, 'acp')];
         case 'sessions:transcriptPage':
           return { items, start: 0, total: items.length, seq: 5 };
         case 'sessions:send':
@@ -462,7 +462,13 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
 
     // A phone viewport: 390x844, as a real device reports it.
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setBounds({ x: 0, y: 0, width: 390, height: 844 }));
-    await page.locator('.w-session-name').getByText('Phone session').waitFor({ timeout: 30_000 });
+    const headerTitle = page.locator('.w-session-head .session-label');
+    await expect.poll(() => headerTitle.textContent(), { timeout: 30_000 }).toBe('Claude repo | Phone session');
+    const pillColors = (pill: Locator) => pill.evaluate((el) => {
+      const { color, backgroundColor } = getComputedStyle(el);
+      return [color, backgroundColor];
+    });
+    const claudeColors = await pillColors(headerTitle.locator('.harness-pill[data-harness="claude"]'));
     // This fixture has more rows than the initial transcript page and virtual window. Explicitly
     // load earlier history and scroll to it rather than relying on a transient initial scroll.
     const earlier = page.getByRole('button', { name: 'Load earlier' });
@@ -475,7 +481,7 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     // .w-app clips its overflow, so the page width alone cannot see a pane wider than the phone:
     // the session pane and every control a thumb needs must lie inside the screen.
     const outside = await page.evaluate(() => {
-      const selectors = ['.w-session', '.w-session-head [aria-label="Back to sessions"]', '.w-session-head [aria-label="Session actions"]', 'textarea[aria-label="Message"]', '[aria-label="Attach files"]', '[data-testid="session-controls"]'];
+      const selectors = ['.w-session', '.w-session-head .harness-pill', '.w-session-head [aria-label="Back to sessions"]', '.w-session-head [aria-label="Session actions"]', 'textarea[aria-label="Message"]', '[aria-label="Attach files"]', '[data-testid="session-controls"]'];
       return selectors.flatMap((selector) => {
         const el = document.querySelector(selector);
         if (!el) return [`${selector}: missing`];
@@ -488,9 +494,15 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     // The control chips are reachable under the header.
     await expect.poll(async () => page.locator('[data-testid="session-controls"] button').count(), { timeout: 20_000 }).toBeGreaterThan(2);
 
-    // The sessions home groups by what the user has to do.
+    // The sessions home shows the same title and pill as the header, with a distinct pill for ACP.
     await page.getByRole('button', { name: 'Back to sessions' }).click();
-    await page.getByTestId('on-your-computer').waitFor({ timeout: 20_000 });
+    const continueTitle = page.getByTestId('on-your-computer').locator('.session-label');
+    await expect.poll(() => continueTitle.textContent(), { timeout: 20_000 }).toBe('Claude repo | Phone session');
+    expect(await pillColors(continueTitle.locator('.harness-pill[data-harness="claude"]'))).toEqual(claudeColors);
+    const secondTitle = page.locator('[data-session-id="Phone-s2"] .session-label');
+    expect(await secondTitle.textContent()).toBe('ACP repo | Phone second');
+    const acpColors = await pillColors(secondTitle.locator('.harness-pill[data-harness="acp"]'));
+    expect(acpColors).not.toEqual(claudeColors);
 
     // Follow my computer: switching it on makes the shell follow the desktop focus push.
     await page.getByRole('button', { name: 'Menu' }).click();
@@ -501,7 +513,8 @@ describe.runIf(enabled)('remote web shell in a real browser', () => {
     await page.locator('.w-sheet-backdrop').click({ position: { x: 8, y: 8 } });
     await pushEvent(phone.host, 'Phone-s2', 6, { type: 'item.delta', id: 'never', textDelta: 'ignored' });
     await phone.host.broadcastPush('push:desktopFocus', { sessionId: 'Phone-s2', at: 5, windowFocused: true });
-    await page.locator('.w-session-name').getByText('Phone second').waitFor({ timeout: 20_000 });
+    await expect.poll(() => headerTitle.textContent(), { timeout: 20_000 }).toBe('ACP repo | Phone second');
+    expect(await pillColors(headerTitle.locator('.harness-pill[data-harness="acp"]'))).toEqual(acpColors);
 
     // An approval shows a banner that takes the reader to the card.
     const approval: TranscriptItem = {
