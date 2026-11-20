@@ -17,7 +17,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 import { expectQuietWindow, seedSettings } from './e2e-ui';
@@ -50,7 +50,7 @@ const ISSUE_VIEW_JSON =
 const GH_SH = [
   '#!/bin/sh',
   'case "$1 $2" in',
-  `  'pr list') echo '${PR_JSON}' ;;`,
+  '  \'pr list\') echo list >> "$VOCS_CODE_E2E_PR_LOG"; cat "$VOCS_CODE_E2E_PR_LIST" ;;',
   `  'pr view') echo '${PR_VIEW_JSON}' ;;`,
   `  'issue list') echo '${ISSUE_JSON}' ;;`,
   `  'issue view') echo '${ISSUE_VIEW_JSON}' ;;`,
@@ -61,7 +61,8 @@ const GH_SH = [
 
 const GH_CMD = [
   '@echo off',
-  `if /i "%~1"=="pr" if /i "%~2"=="list" echo ${PR_JSON}`,
+  'if /i "%~1"=="pr" if /i "%~2"=="list" echo list>>"%VOCS_CODE_E2E_PR_LOG%"',
+  'if /i "%~1"=="pr" if /i "%~2"=="list" type "%VOCS_CODE_E2E_PR_LIST%"',
   `if /i "%~1"=="pr" if /i "%~2"=="view" echo ${PR_VIEW_JSON}`,
   `if /i "%~1"=="issue" if /i "%~2"=="list" echo ${ISSUE_JSON}`,
   `if /i "%~1"=="issue" if /i "%~2"=="view" echo ${ISSUE_VIEW_JSON}`,
@@ -75,15 +76,22 @@ const GH_CMD = [
  * and branches for the panel to read.
  */
 async function seedAndLaunch(
-  { tag, panelWidth, seedRepo }: { tag: string; panelWidth: number; seedRepo?: (project: string, git: (...args: string[]) => void) => void }
-): Promise<{ app: ElectronApplication; win: Page }> {
+  { tag, panelWidth, seedRepo, sessionPatch, openGit = true, assistantText = 'Hi', prList = PR_JSON }: {
+    tag: string; panelWidth: number; seedRepo?: (project: string, git: (...args: string[]) => void) => void;
+    sessionPatch?: Partial<SessionMeta>; openGit?: boolean; assistantText?: string; prList?: string;
+  }
+): Promise<{ app: ElectronApplication; win: Page; prListFile: string; prLogFile: string }> {
   const tmp = path.join(os.tmpdir(), `vocs-code-git-${Date.now()}-${tag}`);
   const userData = path.join(tmp, 'userData');
   const project = path.join(tmp, 'project');
   const bin = path.join(tmp, 'bin');
+  const prListFile = path.join(tmp, 'pr-list.json');
+  const prLogFile = path.join(tmp, 'pr-list.log');
   await fs.mkdir(userData, { recursive: true });
   await fs.mkdir(project, { recursive: true });
   await fs.mkdir(bin, { recursive: true });
+  await fs.writeFile(prListFile, prList);
+  await fs.writeFile(prLogFile, '');
   await fs.writeFile(path.join(project, 'README.md'), '# git panel project\n');
   const gh = path.join(bin, isWin ? 'gh.cmd' : 'gh');
   await fs.writeFile(gh, isWin ? GH_CMD : GH_SH);
@@ -109,11 +117,12 @@ async function seedAndLaunch(
     status: 'idle',
     harnessRef: {},
     usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
-    queued: 0
+    queued: 0,
+    ...sessionPatch
   } as SessionMeta;
   const items: TranscriptItem[] = [
     { id: 'u1', kind: 'user', ts: Date.now(), text: 'Hello' },
-    { id: 'a1', kind: 'assistant', ts: Date.now(), text: 'Hi' }
+    { id: 'a1', kind: 'assistant', ts: Date.now(), text: assistantText }
   ];
   await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
   await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
@@ -128,6 +137,8 @@ async function seedAndLaunch(
   }
   env.PATH = `${bin}${path.delimiter}${env.PATH ?? ''}`;
   env.VOCS_CODE_USER_DATA = userData;
+  env.VOCS_CODE_E2E_PR_LIST = prListFile;
+  env.VOCS_CODE_E2E_PR_LOG = prLogFile;
 
   const packaged = process.env.HARNESS_E2E_EXE;
   const app = await electron.launch({ executablePath: packaged || (require('electron') as string), args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js')], env, timeout: 60_000 });
@@ -137,8 +148,8 @@ async function seedAndLaunch(
   // The suite runs off-screen and inactive so it does not disturb the desktop; assert the window itself.
   await expectQuietWindow(app);
 
-  await win.locator('.panel-tab', { hasText: 'Git' }).click();
-  return { app, win };
+  if (openGit) await win.locator('.panel-tab', { hasText: 'Git' }).click();
+  return { app, win, prListFile, prLogFile };
 }
 
 /** Lands on the PR view of a seeded repo. */
@@ -177,6 +188,34 @@ async function launchBranchesPanel(): Promise<{ app: ElectronApplication; win: P
   await win.locator('.branch-row', { hasText: 'feature/ghost' }).waitFor({ timeout: 30_000 });
   return { app, win };
 }
+
+describe.runIf(enabled)('sidebar PR status refresh', () => {
+  it('follows the latest PR through an unchanged check and merge, despite an older open PR', async () => {
+    const prList = JSON.stringify([
+      ...JSON.parse(PR_JSON),
+      { number: 6, state: 'OPEN', headRefName: 'feature/older', url: 'https://github.com/acme/repo/pull/6' }
+    ]);
+    const { app, win, prListFile, prLogFile } = await seedAndLaunch({
+      tag: 'sidebar-poll', panelWidth: 420, openGit: false, prList,
+      assistantText: 'Earlier https://github.com/acme/repo/pull/6. Current https://github.com/acme/repo/pull/7.',
+      sessionPatch: { status: 'pr', worktreeBranch: 'feature/older' },
+      seedRepo: (_project, git) => {
+        git('checkout', '-qb', 'feature/widget');
+        git('remote', 'add', 'origin', 'https://github.com/acme/repo.git');
+      }
+    });
+    const badge = win.getByTestId('session-row').filter({ hasText: 'Git panel' }).locator('.session-status');
+    await badge.getByText('PR', { exact: true }).waitFor({ timeout: 10_000 });
+    // Allow the boot check to finish with OPEN. The next poll must survive that unchanged result.
+    await vi.waitFor(async () => expect((await fs.readFile(prLogFile, 'utf8')).trim()).not.toBe(''), { timeout: 20_000 });
+    await win.waitForTimeout(1_000);
+    expect(await badge.innerText()).toBe('PR');
+    await fs.writeFile(prListFile, prList.replace('"state":"OPEN"', '"state":"MERGED"'));
+    await badge.getByText('Merged', { exact: true }).waitFor({ timeout: 140_000 });
+    expect(await win.getByTestId('session-row').count()).toBe(1);
+    await app.close();
+  }, 180_000);
+});
 
 describe.runIf(enabled)('git panel PR details', () => {
   it('opens a pull request dialog from its row and keeps the issue dialog working', async () => {

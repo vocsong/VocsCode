@@ -188,6 +188,15 @@ describe('sessionPrRefs transcript caching', () => {
       { repo: 'other/repo', number: 7 }
     ]);
     expect(readSpy).toHaveBeenCalledTimes(2);
+
+    // Returning to an earlier PR makes it current again; duplicate mentions do not pin
+    // the label to whichever PR happened to appear last for the first time.
+    await fs.appendFile(file, JSON.stringify({ kind: 'assistant', text: 'Merged https://github.com/vocsong/VocsCode/pull/12' }) + '\n');
+    expect(await manager.sessionPrRefs(session.id)).toEqual([
+      { repo: 'other/repo', number: 7 },
+      { repo: 'vocsong/VocsCode', number: 12 }
+    ]);
+    expect(readSpy).toHaveBeenCalledTimes(3);
   });
 
   it('answers missing transcripts and invalid session ids with no refs', async () => {

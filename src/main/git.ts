@@ -143,6 +143,8 @@ export async function gitSummary(cwd: string): Promise<GitSummary> {
 export interface BranchGitState {
   pr: boolean;
   merged: boolean;
+  /** Lookup could not establish PR state; callers must not replace a known label. */
+  unknown?: boolean;
 }
 
 const BASE_BRANCHES = ['develop', 'master', 'main'];
@@ -165,7 +167,7 @@ export interface PrRef {
 
 /** How a session's PR is resolved, shared by the sidebar label check and /merge. */
 export interface SessionPrQuery {
-  /** PRs the session itself referenced (the agent's report links them) — strongest signal. */
+  /** PRs the session referenced, oldest to most recently mentioned — strongest signal. */
   prRefs?: PrRef[];
   /** Branches directly tied to the session: its worktree branch plus the checked-out HEAD. */
   branches?: string[];
@@ -180,9 +182,10 @@ export interface SessionPrQuery {
 
 const PR_FIELDS = 'number,state,headRefName,baseRefName,url,title';
 
-async function listPrs(opts: { cwd: string; repo?: string }): Promise<PrInfo[]> {
+/** Undefined means the lookup failed, not that the repository has no PRs. */
+async function listPrs(opts: { cwd: string; repo?: string }): Promise<PrInfo[] | undefined> {
   const gh = which('gh');
-  if (!gh) return [];
+  if (!gh) return undefined;
   const args = ['pr', 'list', '--state', 'all', '--limit', '50', '--json', PR_FIELDS];
   if (opts.repo) args.push('-R', opts.repo);
   const r = await runCapture(gh, args, {
@@ -190,11 +193,13 @@ async function listPrs(opts: { cwd: string; repo?: string }): Promise<PrInfo[]> 
     timeoutMs: 15_000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
   });
-  if (r.code !== 0 || r.truncated) return [];
+  if (r.code !== 0 || r.truncated || timedOut(r)) return undefined;
   try {
-    return JSON.parse(r.stdout) as PrInfo[];
+    const prs = JSON.parse(r.stdout);
+    if (!Array.isArray(prs) || !prs.every((p) => p && typeof p === 'object' && ['OPEN', 'CLOSED', 'MERGED'].includes(p.state))) return undefined;
+    return prs as PrInfo[];
   } catch {
-    return [];
+    return undefined;
   }
 }
 
@@ -228,11 +233,18 @@ export async function repoSlug(root: string): Promise<string | undefined> {
  * - `fallback`: repo-wide matches — head is a local, non-base branch not owned by another
  *   session, tip committed within the session's activity window. Callers must refuse to
  *   act when the fallback alone is ambiguous.
+ * `incomplete` marks failed lookups without discarding PRs resolved by successful ones.
  */
-export async function findSessionPrs(root: string, q: SessionPrQuery = {}): Promise<{ refs: PrInfo[]; direct: PrInfo[]; fallback: PrInfo[] }> {
+export async function findSessionPrs(root: string, q: SessionPrQuery = {}): Promise<{ refs: PrInfo[]; direct: PrInfo[]; fallback: PrInfo[]; incomplete?: boolean }> {
+  let incomplete = false;
+  const lookup = async (opts: { cwd: string; repo?: string }): Promise<PrInfo[]> => {
+    const prs = await listPrs(opts);
+    if (prs === undefined) incomplete = true;
+    return prs ?? [];
+  };
   const localSlug = await repoSlug(root);
   const prRefs = q.prRefs ?? [];
-  const prs = await listPrs({ cwd: root });
+  const prs = await lookup({ cwd: root });
   const refs: PrInfo[] = [];
   for (const r of prRefs) {
     // A ref aimed at this repo resolves from the local list; same numbers in other repos
@@ -246,10 +258,10 @@ export async function findSessionPrs(root: string, q: SessionPrQuery = {}): Prom
   const localNumbers = new Set(prs.map((p) => p.number));
   for (const r of prRefs) {
     if (!r.repo || r.repo === localSlug || localNumbers.has(r.number)) continue;
-    let found = (await listPrs({ cwd: root, repo: r.repo })).find((p) => p.number === r.number);
+    let found = (await lookup({ cwd: root, repo: r.repo })).find((p) => p.number === r.number);
     if (!found) {
       for (const extra of q.extraRoots ?? []) {
-        found = (await listPrs({ cwd: extra })).find((p) => p.number === r.number);
+        found = (await lookup({ cwd: extra })).find((p) => p.number === r.number);
         if (found) break;
       }
     }
@@ -257,7 +269,7 @@ export async function findSessionPrs(root: string, q: SessionPrQuery = {}): Prom
   }
   const known = new Set(q.branches?.filter(Boolean).filter((b) => !BASE_BRANCHES.includes(b)) ?? []);
   const direct = prs.filter((p) => p.headRefName !== undefined && known.has(p.headRefName));
-  if (!prs.length) return { refs, direct, fallback: [] };
+  if (!prs.length) return { refs, direct, fallback: [], ...(incomplete ? { incomplete: true } : {}) };
   const exclude = new Set([...(q.excludeBranches ?? []), ...BASE_BRANCHES]);
   const branches = await localBranches(root);
   const fallback: PrInfo[] = [];
@@ -272,28 +284,45 @@ export async function findSessionPrs(root: string, q: SessionPrQuery = {}): Prom
     }
     fallback.push(p);
   }
-  return { refs, direct, fallback };
+  return { refs, direct, fallback, ...(incomplete ? { incomplete: true } : {}) };
 }
 
 /**
  * Classifies a session branch: open PR ('pr') or already merged into a base branch
  * ('merged'). Uses `gh` when available (also catches squash merges); otherwise falls
- * back to merge-commit ancestry, and to remote tracking (a fully pushed branch means
- * the PR was opened in this workflow).
+ * back to merge-commit ancestry. Remote tracking retains the pushed-branch heuristic
+ * for compatibility, but cannot confirm PR state and is marked unknown.
  */
 export async function branchGitState(cwd: string, branch: string, q: SessionPrQuery = {}): Promise<BranchGitState> {
   const root = await gitRoot(cwd);
-  if (!root) return { pr: false, merged: false };
+  if (!root) return { pr: false, merged: false, unknown: true };
   const state: BranchGitState = { pr: false, merged: false };
-  if (which('gh')) {
+  const hasGh = !!which('gh');
+  if (hasGh) {
     // The agent may have checked its own branch out inside the worktree, so the
     // worktree's current HEAD joins the stored branch as a direct match.
     const head = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
-    const { refs, direct, fallback } = await findSessionPrs(root, { ...q, branches: [branch, head, ...(q.branches ?? [])] });
-    // PRs the session itself referenced win; a mention with no open PR falls through.
-    if (refs.length) {
-      if (refs.some((p) => p.state === 'OPEN')) return { pr: true, merged: false };
-      if (refs.every((p) => p.state === 'MERGED')) return { pr: false, merged: true };
+    // A session can deliver several PRs over time, on different branches. Its latest
+    // reference owns the label; an older still-open PR must not mask a newer merge.
+    const { refs, direct, fallback, incomplete } = await findSessionPrs(root, {
+      ...q, prRefs: q.prRefs?.slice(-1), branches: [branch, head, ...(q.branches ?? [])]
+    });
+    if (incomplete) state.unknown = true;
+    if (refs.length) return { pr: refs[0].state === 'OPEN', merged: refs[0].state === 'MERGED' };
+    const latestRef = q.prRefs?.at(-1);
+    if (latestRef) {
+      // A known PR may have fallen outside the bounded repo list. Query it directly
+      // rather than falling back to an older PR on the session's original branch.
+      const r = await gh(root, ['pr', 'view', String(latestRef.number), '--json', PR_FIELDS, ...(latestRef.repo ? ['-R', latestRef.repo] : [])], 15_000);
+      if (r.code === 0 && !r.truncated && !timedOut(r)) {
+        try {
+          const pr = JSON.parse(r.stdout) as PrInfo;
+          if (pr.number === latestRef.number && ['OPEN', 'CLOSED', 'MERGED'].includes(pr.state)) {
+            return { pr: pr.state === 'OPEN', merged: pr.state === 'MERGED' };
+          }
+        } catch { /* Unavailable is not evidence for an older branch's PR. */ }
+      }
+      return { pr: false, merged: false, unknown: true };
     }
     if (direct.some((p) => p.state === 'MERGED')) return { pr: false, merged: true };
     if (direct.some((p) => p.state === 'OPEN')) return { pr: true, merged: false };
@@ -317,8 +346,9 @@ export async function branchGitState(cwd: string, branch: string, q: SessionPrQu
       }
     }
   }
-  if (!which('gh')) {
-    // Without gh, a fully pushed branch stands in for "PR created".
+  if (!hasGh) {
+    state.unknown = true;
+    // Without gh, retain the pushed-branch heuristic, but it cannot prove PR state.
     const remote = await git(root, ['rev-parse', '--verify', '--quiet', `origin/${branch}`]);
     if (remote.code === 0) {
       const ahead = await git(root, ['rev-list', '--count', `origin/${branch}..${branch}`]);
