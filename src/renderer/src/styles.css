@@ -5458,6 +5458,39 @@ body.resizing {
 .ns-header-root {
   min-width: 0;
   max-width: 46%;
+  font-weight: 400;
+}
+.ns-header-root > .dropdown,
+.ns-header-root > .dropdown > div {
+  min-width: 0;
+  max-width: 100%;
+}
+/* The header's folder is a menu button: the sidebar's folders, then the native picker. */
+.ns-root-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.ns-root-btn:hover,
+.ns-root-btn[aria-expanded='true'] {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--fg);
+}
+.ns-root-btn > svg {
+  flex-shrink: 0;
+}
+.ns-header-root .dropdown-menu {
+  max-height: 60vh;
+  overflow-y: auto;
 }
 .ns-attachments {
   max-width: none;
@@ -5482,10 +5515,14 @@ body.resizing {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* Trim long paths from the start (keep the leaf folder visible) while rendering the text itself LTR. */
+  /* Trim long paths from the start (keep the leaf folder visible): the box is RTL so the ellipsis
+     lands on the left, and the path inside is an LTR isolate so it still reads left to right. */
   direction: rtl;
-  unicode-bidi: plaintext;
   text-align: left;
+}
+.ns-root > bdi {
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 .ns-col {
   min-width: 0;
@@ -5535,12 +5572,20 @@ body.resizing {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.2fr);
   gap: 8px 12px;
+  /* Each column keeps its own height, so a long Fast mode hint cannot push the others' hints down. */
+  align-items: start;
   border-top: 1px solid var(--border);
   padding-top: 8px;
 }
 .ns-run-options .field,
 .ns-fast-mode .toggle {
   margin: 0;
+}
+/* Same shape as the two selects beside it: heading, then a control row of the selects' height. */
+.ns-fast-mode-control {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
 }
 /* Workspace row: worktree isolation spans both columns below a divider; turning it on opens the
    branch panel (prefix chip joined to the name, the base branch, and a preview of what is created). */
@@ -5645,11 +5690,10 @@ body.resizing {
 }
 .harness-card {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  align-content: center;
-  gap: 2px 6px;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  gap: 2px;
   min-width: 0;
   min-height: 32px;
   text-align: left;
@@ -5666,13 +5710,29 @@ body.resizing {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
+.harness-card-name,
 .harness-card .badge {
-  max-width: 100%;
-  white-space: normal;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .harness-card-name {
   font-weight: 600;
   font-size: 12.5px;
+}
+/* The status line keeps its height while availability is still being checked (a spinner). */
+.harness-card-status {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 15px;
+}
+.harness-card .badge {
+  padding: 0;
+  background: transparent;
+  font-size: 11px;
 }
 .advanced {
   border-left: 2px solid var(--border);

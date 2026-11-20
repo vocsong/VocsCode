@@ -6,12 +6,14 @@ import { HARNESSES, PERMISSION_MODE_LABELS, effortOptionsFor } from '../../../sh
 import { harnessNeedsSetup, harnessStatus } from '../../../shared/harness-setup';
 import { FAST_MODE_COST_WARNING, fastModeSupport } from '../../../shared/fast-mode';
 import { rememberedModel, resolveNewSessionDefaults, withFolderSessionDefaults } from '../../../shared/session-defaults';
-import { invoke } from '../api';
+import { canInvoke, invoke } from '../api';
+import { basename } from '../format';
 import { FileAttachmentChips, readAttachments } from '../attachments';
 import { rememberEffort, rememberWithoutEffort } from '../sessionActions';
 import { useStore } from '../store';
-import { Badge, Button, Field, Icon, Kbd, Modal, Spinner, Toggle } from './ui';
+import { Badge, Button, Dropdown, Field, Icon, Kbd, MenuItem, Modal, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
+import { sidebarNavModel } from './Sidebar';
 import { MissionLaunch } from './mission/MissionLaunch';
 
 /** The prefix select's "Custom…" option; never a valid prefix itself (`:` cannot be in a ref). */
@@ -39,10 +41,11 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const toast = useStore((s) => s.toast);
   const activeSession = useStore((s) => s.sessions.find((x) => x.id === s.activeId));
 
-  // The folder is chosen before the dialog opens (sidebar button or per-folder +); the dialog only
-  // configures harness, model and options for that folder. What it opens on is the folder's own
-  // remembered choices, falling back field by field to the app-wide defaults (see session-defaults).
+  // The folder is chosen before the dialog opens (sidebar button or per-folder +) and can be switched
+  // from the header. What the dialog shows is the folder's own remembered choices, falling back field
+  // by field to the app-wide defaults (see session-defaults).
   const projectRoot = useStore((s) => s.newSessionRoot) ?? activeSession?.config.projectRoot ?? '';
+  const sessions = useStore((s) => s.sessions);
   const initial = resolveNewSessionDefaults(settings, projectRoot);
   const [harness, setHarness] = useState<HarnessId>(initial.harness);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -87,6 +90,38 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const promptId = useId();
   const permissionsHintId = useId();
+  const fastModeLabelId = useId();
+
+  // Switching folders re-applies that folder's remembered choices; the drafted prompt, goal, title
+  // and branch name stay, since they describe the work rather than the folder.
+  const appliedRoot = useRef(projectRoot);
+  useEffect(() => {
+    if (appliedRoot.current === projectRoot) return;
+    appliedRoot.current = projectRoot;
+    const next = resolveNewSessionDefaults(useStore.getState().settings ?? settings, projectRoot);
+    setHarness(next.harness);
+    setEffort(next.effort);
+    setMode(next.permissionMode);
+    setUseWorktree(next.useWorktree);
+    setPrefixChoice(next.branchPrefix);
+    setCustomPrefix('');
+    if (next.acpAgent) setAcpAgent(next.acpAgent);
+    setFolderBranches({ branches: [] });
+    setBase('');
+  }, [projectRoot]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The folders the sidebar shows, in its order; the current one is listed even before it has a session.
+  const folderChoices = sidebarNavModel(sessions, settings).map((f) => f.root);
+  if (projectRoot && !folderChoices.includes(projectRoot)) folderChoices.unshift(projectRoot);
+  const chooseRoot = (root: string) => useStore.setState({ newSessionRoot: root });
+  const browseRoot = async () => {
+    try {
+      const r = await invoke('app:pickFolder', { defaultPath: projectRoot || undefined });
+      if (r.path) chooseRoot(r.path);
+    } catch (e) {
+      toast(String((e as Error).message ?? e), 'error');
+    }
+  };
 
   // `git worktree add` needs a repository; without one the toggle would only produce a failed
   // session creation, so the folder is probed before the toggle is offered.
@@ -308,9 +343,31 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
       <span className="row gap8">
         <Icon name="plus" /> New session
       </span>
-      <span className="ns-header-root row gap6" title={projectRoot}>
-        <Icon name="folder" size={13} />
-        <span className="ns-root">{projectRoot || 'No folder selected'}</span>
+      <span className="ns-header-root">
+        <Dropdown
+          align="right"
+          width={340}
+          trigger={() => (
+            <button type="button" className="ns-root-btn" title={projectRoot ? `${projectRoot} — change folder` : 'Choose a folder'}>
+              <Icon name="folder" size={13} />
+              <span className="ns-root"><bdi>{projectRoot || 'No folder selected'}</bdi></span>
+              <Icon name="chevron" size={12} />
+            </button>
+          )}
+        >
+          {(closeMenu) => (
+            <>
+              {folderChoices.map((root) => (
+                <MenuItem key={root} checked={root === projectRoot} hint={root} onClick={() => { closeMenu(); chooseRoot(root); }}>
+                  {basename(root)}
+                </MenuItem>
+              ))}
+              {canInvoke('app:pickFolder') && (
+                <MenuItem onClick={() => { closeMenu(); void browseRoot(); }}>Choose another folder…</MenuItem>
+              )}
+            </>
+          )}
+        </Dropdown>
       </span>
     </span>
   );
@@ -350,9 +407,11 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
                 const av = availability[h.id];
                 const status = harnessStatus(h.id, av);
                 return (
+                  // Two fixed lines, name over status, each cut with an ellipsis (full text on hover),
+                  // so every card has the same shape whatever its name or sign-in state says.
                   <button key={h.id} type="button" className={`harness-card ${harness === h.id ? 'active' : ''}`} aria-pressed={harness === h.id} title={h.tagline} onClick={() => setHarness(h.id)}>
-                    <span className="harness-card-name">{h.name}</span>
-                    {av ? <Badge tone={status.tone}>{status.label}</Badge> : !availabilityError && <Spinner size={10} />}
+                    <span className="harness-card-name" title={h.name}>{h.name}</span>
+                    <span className="harness-card-status">{av ? <Badge tone={status.tone} title={status.label}>{status.label}</Badge> : !availabilityError && <Spinner size={10} />}</span>
                   </button>
                 );
               })}
@@ -397,6 +456,8 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
               loading={modelsLoading}
               error={modelsError}
               selected={model}
+              // The first prompt takes focus on open, so the dialog can be typed into straight away.
+              autoFocus={false}
               clearOption={{ label: harness === 'acp' ? 'Agent default (choose after start)' : 'Harness default' }}
               // No onSelectCustom here: a new session starts on a listed model only; an unlisted id is switched in the header afterwards.
               onSelect={(m) => setModel(m ? { provider: m.provider, model: m.id } : undefined)}
@@ -427,8 +488,11 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
               </label>
               <span id={permissionsHintId} className="field-hint">{PERMISSION_MODE_LABELS[mode].description}</span>
             </div>
-            <div className="field ns-fast-mode">
-              <Toggle checked={fastSupport.supported && fastMode} onChange={setFastMode} disabled={creating || modelsLoading || !fastSupport.supported} label="Fast mode" />
+            <div className="field ns-fast-mode" role="group" aria-labelledby={fastModeLabelId}>
+              <span id={fastModeLabelId} className="field-label">Fast mode</span>
+              <div className="ns-fast-mode-control">
+                <Toggle checked={fastSupport.supported && fastMode} onChange={setFastMode} disabled={creating || modelsLoading || !fastSupport.supported} ariaLabel="Fast mode" />
+              </div>
               <span className="field-hint">{FAST_MODE_COST_WARNING}</span>
               {!fastSupport.supported && <span className="field-hint">{fastSupport.reason ?? 'Fast mode is not supported on this route.'}</span>}
             </div>
@@ -453,7 +517,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
             )}
             <FileAttachmentChips files={files} onRemove={(i) => setFiles((current) => current.filter((_, j) => j !== i))} />
             <div className="ns-prompt-box">
-              <textarea id={promptId} ref={promptRef} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
+              <textarea id={promptId} ref={promptRef} autoFocus rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="What should the agent do?" />
               <label className="icon-btn ns-attach" title="Attach files">
                 <Icon name="file" size={14} />
                 <input type="file" multiple hidden onChange={(e) => { if (e.target.files) void addFiles([...e.target.files]); e.target.value = ''; }} />

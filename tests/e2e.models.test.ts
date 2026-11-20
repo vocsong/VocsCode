@@ -156,6 +156,16 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await cards.first().waitFor({ state: 'visible' });
     await expect.poll(() => cards.locator('.badge').count(), { timeout: 75_000 }).toBe(await cards.count());
     await win.evaluate(() => document.fonts.ready.then(() => undefined));
+    // Typing starts in the first prompt: it has focus on open, scrolled into view in a short dialog.
+    const prompt = dialog.getByRole('textbox', { name: 'First prompt (optional)', exact: true });
+    expect(await prompt.evaluate((el) => el === document.activeElement), 'first prompt is focused on open').toBe(true);
+    expect(await prompt.evaluate((el) => {
+      const body = el.closest('.modal-body')!.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      return r.top >= body.top - 1 && r.bottom <= body.bottom + 1;
+    }), 'first prompt is visible on open').toBe(true);
+    // The layout checks below measure from the top of the dialog body.
+    await dialog.locator('.modal-body').evaluate((el) => { el.scrollTop = 0; });
 
     const geometry = () => dialog.evaluate((el) => {
       const body = el.querySelector<HTMLElement>('.modal-body')!;
@@ -196,8 +206,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     expect(before.search.bottom).toBeLessThanOrEqual(before.list.top + 1);
     expect(before.footer.top, 'footer is below the scrolling dialog body').toBeGreaterThanOrEqual(before.body.bottom - 1);
     expect(before.footer.bottom, 'footer fits inside the viewport').toBeLessThanOrEqual(viewport.height + 1);
-    expect(before.body.scrollTop, 'opening the dialog does not scroll to the prompt').toBe(0);
-    expect(await search.evaluate((el) => el === document.activeElement)).toBe(true);
+    expect(await search.evaluate((el) => el === document.activeElement), 'the model search no longer takes focus on open').toBe(false);
     if (size === 'short') {
       await fs.mkdir(shots, { recursive: true });
       await win.screenshot({ path: path.join(shots, 'models-06-short-new-session.png') });
@@ -228,7 +237,6 @@ describe.runIf(enabled)('model picker before the first message', () => {
 
     // A keyboard user can skip the catalog rows and start typing without scrolling manually.
     await dialog.getByRole('button', { name: 'Jump to first prompt', exact: true }).press('Enter');
-    const prompt = dialog.getByRole('textbox', { name: 'First prompt (optional)', exact: true });
     expect(await prompt.evaluate((el) => el === document.activeElement)).toBe(true);
     if (size === 'short') expect((await geometry()).body.scrollTop).toBeGreaterThan(0);
     await apps[apps.length - 1]!.close();
@@ -859,10 +867,15 @@ describe.runIf(enabled)('first-run setup through real desktop boundaries', () =>
       expect(await win.locator('.ns-grid').evaluate((grid) => {
         for (const badge of grid.querySelectorAll('.harness-card .badge')) badge.textContent = 'Subscription sign-in detected';
         const col = grid.querySelector('.ns-col')!.getBoundingClientRect();
-        return [...grid.querySelectorAll<HTMLElement>('.harness-card')].filter((card) => {
+        // Every card is one name line over one status line, however long either text is.
+        const oneLine = (el: Element | null) => !!el && el.getBoundingClientRect().height <= parseFloat(getComputedStyle(el).fontSize) * 1.6;
+        const cards = [...grid.querySelectorAll<HTMLElement>('.harness-card')];
+        const heights = new Set(cards.map((card) => Math.round(card.getBoundingClientRect().height)));
+        return cards.filter((card) => {
           const r = card.getBoundingClientRect();
-          return r.left < col.left - 1 || r.right > col.right + 1 || card.scrollWidth > card.clientWidth + 1;
-        }).length;
+          return r.left < col.left - 1 || r.right > col.right + 1 || card.scrollWidth > card.clientWidth + 1
+            || !oneLine(card.querySelector('.harness-card-name')) || !oneLine(card.querySelector('.harness-card .badge'));
+        }).length + (heights.size === 1 ? 0 : 100);
       })).toBe(0);
       const setupButton = win.getByRole('button', { name: 'Set up / sign in', exact: true });
       // A ready harness with a catalog hides the setup entry point.
