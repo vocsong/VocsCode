@@ -1,6 +1,6 @@
 /** Session list grouped by project, with live status badges per harness. */
 import React, { useMemo, useRef, useState } from 'react';
-import type { AppSettings, SessionMeta } from '../../../shared/types';
+import type { AppSettings, FolderStyle, SessionMeta, SidebarView } from '../../../shared/types';
 import { modelRefName } from '../../../shared/model-names';
 import { sessionTitleText } from '../../../shared/session-title';
 import { invoke, modKey } from '../api';
@@ -54,13 +54,32 @@ export interface SidebarNavFolder {
   sessionIds: string[];
 }
 
+/** The sidebar's list layout; anything but an explicit `recent` is the folder-grouped default. */
+export const sidebarViewOf = (settings: AppSettings | null): SidebarView => (settings?.sidebarView === 'recent' ? 'recent' : 'folders');
+
 /**
- * Sidebar display order (folders by saved order, sessions by sortSessionRows) mirrored as a pure
- * model so keyboard navigation (Ctrl+Arrow) matches what the sidebar renders. Always reflects the
- * default view: non-archived sessions, no search filter.
+ * The Recent view as nav entries: one flat recency order (sortSessionRows over every folder),
+ * cut into runs of consecutive rows from the same folder, so Ctrl+Shift+Arrow jumps to the next
+ * row that belongs to a different folder.
+ */
+function recentNavModel(visible: SessionMeta[]): SidebarNavFolder[] {
+  const runs: SidebarNavFolder[] = [];
+  for (const s of sortSessionRows(visible)) {
+    const last = runs[runs.length - 1];
+    if (last?.root === s.config.projectRoot) last.sessionIds.push(s.id);
+    else runs.push({ root: s.config.projectRoot, sessionIds: [s.id] });
+  }
+  return runs;
+}
+
+/**
+ * Sidebar display order mirrored as a pure model so keyboard navigation (Ctrl+Arrow) matches what
+ * the sidebar renders: folders by saved order with sessions by sortSessionRows, or — in the Recent
+ * view — one recency order across folders. Always reflects non-archived sessions, no search filter.
  */
 export function sidebarNavModel(sessions: SessionMeta[], settings: AppSettings | null): SidebarNavFolder[] {
   const visible = sessions.filter((s) => !s.archived && isTopLevelSession(s));
+  if (sidebarViewOf(settings) === 'recent') return recentNavModel(visible);
   const byProject = new Map<string, SessionMeta[]>();
   for (const s of visible) byProject.set(s.config.projectRoot, [...(byProject.get(s.config.projectRoot) ?? []), s]);
   const model = [...byProject.entries()].map(([root, list]) => ({
@@ -124,9 +143,16 @@ export function Sidebar() {
   const [showArchived, setShowArchived] = useState(false);
   // Drag-to-reorder state: which folder block is being dragged, and where it currently hovers.
   const [drag, setDrag] = useState<{ root: string; over: string | null; after: boolean } | null>(null);
+  const sidebarView = sidebarViewOf(settings);
+
+  const visible = useMemo(
+    () => sessions.filter((s) => isTopLevelSession(s) && (showArchived ? s.archived : !s.archived)),
+    [sessions, showArchived]
+  );
+  // Recent view: one list across every folder, by the same comparator a folder's rows use.
+  const recentRows = useMemo(() => (sidebarView === 'recent' ? sortSessionRows(visible) : []), [visible, sidebarView]);
 
   const groups = useMemo(() => {
-    const visible = sessions.filter((s) => isTopLevelSession(s) && (showArchived ? s.archived : !s.archived));
     const byProject = new Map<string, SessionMeta[]>();
     for (const s of visible) {
       const key = s.config.projectRoot;
@@ -154,7 +180,7 @@ export function Sidebar() {
     };
     groups.sort((a, b) => pos(a.root) - pos(b.root) || basename(a.root).localeCompare(basename(b.root)));
     return groups;
-  }, [sessions, settings, showArchived]);
+  }, [visible, settings, showArchived]);
 
   const folderStyles = settings?.folderStyles ?? {};
   const collapsed = settings?.collapsedFolders ?? [];
@@ -320,6 +346,17 @@ export function Sidebar() {
       </div>
       <div className="sidebar-section">
         <span className="sidebar-section-label">{showArchived ? 'Archived sessions' : 'Sessions'}</span>
+        {/* A pressed toggle: lit while the list is one recency order, off for folder groups. */}
+        <button
+          type="button"
+          className={`sidebar-link sidebar-recent ${sidebarView === 'recent' ? 'active' : ''}`}
+          data-testid="sidebar-recent"
+          aria-pressed={sidebarView === 'recent'}
+          title={sidebarView === 'recent' ? 'Group sessions by folder' : 'Sort sessions by recent, across folders'}
+          onClick={() => void invoke('settings:update', { sidebarView: sidebarView === 'recent' ? 'folders' : 'recent' }).catch(toastError)}
+        >
+          <Icon name="list" size={13} /> Recent
+        </button>
         <button type="button" className={`sidebar-link sidebar-archived ${showArchived ? 'active' : ''}`} title={tip(showArchived ? 'Show active' : 'Archived')} onClick={() => setShowArchived((v) => !v)}>
           <Icon name={showArchived ? 'arrowLeft' : 'clock'} size={13} /> {showArchived ? 'Show active' : 'Archived'}
         </button>
@@ -341,8 +378,25 @@ export function Sidebar() {
           setDrag(null);
         }}
       >
-        {groups.length === 0 && <div className="sidebar-empty">{showArchived ? 'No archived sessions.' : 'No sessions yet. Create one to start.'}</div>}
-        {groups.map((g) => {
+        {(sidebarView === 'recent' ? recentRows.length === 0 : groups.length === 0) && (
+          <div className="sidebar-empty">{showArchived ? 'No archived sessions.' : 'No sessions yet. Create one to start.'}</div>
+        )}
+        {sidebarView === 'recent' && recentRows.map((s) => (
+          <SessionRow
+            key={s.id}
+            session={s}
+            folder={{ root: s.config.projectRoot, style: folderStyles[s.config.projectRoot] }}
+            active={s.id === activeId && view === 'chat'}
+            inPane={!!paneSessions && view === 'chat' && s.id !== activeId && paneSessions.some((p) => p.sessionId === s.id)}
+            customLabels={settings?.customLabels ?? []}
+            archiving={!!archiving[s.id]}
+            onSelect={() => void setActive(s.id).catch(toastError)}
+            toast={toast}
+            dnd={dnd}
+            dndHandlers={dndHandlers}
+          />
+        ))}
+        {sidebarView === 'folders' && groups.map((g) => {
           const isCollapsed = collapsed.includes(g.root);
           const dropMark = drag && drag.over === g.root && drag.root !== g.root ? (drag.after ? 'drop-after' : 'drop-before') : '';
           return (
@@ -474,8 +528,10 @@ type DndHandlers = {
   drop: (id: string) => void;
 };
 
-function SessionRow({ session: s, active, inPane = false, customLabels, archiving, onSelect, toast, dnd, dndHandlers }: {
+function SessionRow({ session: s, folder, active, inPane = false, customLabels, archiving, onSelect, toast, dnd, dndHandlers }: {
   session: SessionMeta;
+  /** Set in the Recent view, where no folder header says which project the row belongs to. */
+  folder?: { root: string; style?: FolderStyle };
   active: boolean;
   /** Shown in a split pane that is not the active one. */
   inPane?: boolean;
@@ -653,6 +709,12 @@ function SessionRow({ session: s, active, inPane = false, customLabels, archivin
           </div>
         </div>
         <div className="session-meta">
+          {folder && (
+            <span className="session-folder" data-testid="session-folder" title={folder.root} style={folder.style?.color ? { color: folder.style.color } : undefined}>
+              <Icon name={folder.style?.icon ?? 'folder'} size={11} />
+              <span className="session-folder-name">{basename(folder.root)}</span>
+            </span>
+          )}
           {s.mission && <Badge tone="purple">Mission</Badge>}
           {s.activeModel && (
             <span className="session-model" title={modelRefName(s.activeModel)}>
