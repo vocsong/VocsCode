@@ -172,7 +172,10 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
 
     // Settings → Appearance → Interface → Zen.
     await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
-    await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Appearance', exact: true }).click();
+    const sections = win.getByRole('navigation', { name: 'Settings sections' });
+    const appearance = sections.getByRole('button', { name: 'Appearance', exact: true });
+    await appearance.click();
+    const fullSettingsWidth = (await rect(win, '.settings-nav')).width;
     const picker = win.getByRole('group', { name: 'Interface' });
     await expect.poll(() => picker.getByRole('button').evaluateAll((cards) => cards.map((c) => c.getAttribute('aria-label')))).toEqual(['Standard interface', 'Zen interface']);
     await picker.getByRole('button', { name: 'Zen interface' }).click();
@@ -180,6 +183,41 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     expect(await picker.getByRole('button', { name: 'Zen interface' }).getAttribute('aria-pressed')).toBe('true');
     expect((await win.evaluate(() => window.harness.invoke('settings:get', undefined))).uiMode).toBe('zen');
     await shot(win, 'zen-settings');
+
+    const labels = sections.locator('.settings-nav-label, .settings-link > span');
+    const visibleLabels = () => labels.filter({ visible: true }).count();
+    const labelCount = await labels.count();
+    const closedNav = await rect(win, '.settings-nav');
+    const settingsPage = await rect(win, '.settings-main');
+    expect(await visibleLabels()).toBe(0);
+
+    await appearance.hover();
+    await expect.poll(visibleLabels).toBe(labelCount);
+    await expect.poll(() => rect(win, '.settings-nav').then((r) => r.width)).toBe(fullSettingsWidth);
+    expect(await rect(win, '.settings-main')).toEqual(settingsPage);
+    await win.screenshot({ path: path.join(shots, 'ui-modes-zen-settings-open.png') });
+
+    // The label can be clicked beyond the edge of the closed rail.
+    const defaults = sections.getByText('Session defaults', { exact: true });
+    const label = (await defaults.boundingBox())!;
+    expect(label.x + label.width / 2).toBeGreaterThan(closedNav.x + closedNav.width);
+    await defaults.click();
+    await win.getByRole('heading', { name: 'Session defaults', exact: true }).waitFor();
+    await park(win);
+    await expect.poll(() => rect(win, '.settings-nav')).toEqual(closedNav);
+    expect(await visibleLabels()).toBe(0);
+
+    // Keyboard navigation reveals the same labels. Search stays usable away from the rail.
+    await win.keyboard.press('Tab');
+    await expect.poll(visibleLabels).toBe(labelCount);
+    await win.keyboard.press('Control+f');
+    await win.keyboard.type('color theme');
+    await win.getByRole('heading', { name: 'Find a setting', exact: true }).waitFor();
+    await expect.poll(() => rect(win, '.settings-nav')).toEqual(closedNav);
+    expect(await style(win, '.settings-search input', 'opacity')).toBe('1');
+    await win.getByRole('button', { name: 'Clear search' }).click();
+    await win.getByRole('heading', { name: 'Session defaults', exact: true }).waitFor();
+
     await win.keyboard.press('Control+,');
     await win.locator('.pane.active .composer textarea').waitFor();
 

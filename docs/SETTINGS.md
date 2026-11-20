@@ -56,9 +56,9 @@ an important setting, including user-facing synonyms. Search only indexes static
 never configuration values, credentials, user files or model account details. An optional `anchor`
 should name the actual visible settings group. `openSettings()` remains the public deep-link entry;
 View → Theme opens Appearance directly; View also lists both interfaces, and the command palette offers
-"Switch to the … interface" for the one not in use. Zen restyles this page too: the section nav
-becomes an icon rail with tooltips and an expanding search, and the compact-pane section selector
-still takes over below 650px.
+"Switch to the … interface" for the one not in use. In Zen, hovering the icon rail or tabbing to a
+section opens the full menu over the settings page. The compact-pane section selector takes over
+at 650px and below.
 
 `SettingsPrimitives.tsx` provides titled, accessible groups and informational notes. Settings-specific
 styles live in `components/settings.css`, scoped to `.settings` so other app surfaces are unaffected.
