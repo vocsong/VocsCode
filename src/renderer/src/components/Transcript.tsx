@@ -80,27 +80,20 @@ export function Transcript({ session, active = true }: { session: SessionMeta; a
   const canEdit = caps.editAndResend && !session.mission && session.config.harness === 'native' && session.status === 'idle';
 
   const chunks = useMemo(() => {
-    const grouped = groupTranscript(items);
+    const grouped = groupTranscript(items, showThinking);
     if (mission?.status !== 'completed' || !mission.completionReport) return grouped;
     // Completion precedes later answer-only questions. Do not append it after each new answer
     // or forge an assistant item; this host projection has its own measured virtual-list row.
     const nextQuestion = grouped.findIndex((chunk) => chunk.kind === 'single' && chunk.item.kind === 'user' && chunk.item.ts > mission.completionReport!.completedAt);
     grouped.splice(nextQuestion < 0 ? grouped.length : nextQuestion, 0, { kind: 'mission-completion', record: mission });
     return grouped;
-  }, [items, mission]);
+  }, [items, mission, showThinking]);
   const running = session.status === 'running' || session.status === 'starting';
-  // The in-flight turn's work stays open while it runs; finished work collapses to its header.
+  // Work in flight stays open: that is the stretch nothing has followed yet. Once the next message
+  // starts, the stretch is finished and collapses to its header, like every earlier one.
   const liveWorkId = useMemo(() => {
-    if (!running) return null;
-    let lastUser = -1;
-    chunks.forEach((chunk, i) => {
-      if (chunk.kind === 'single' && chunk.item.kind === 'user') lastUser = i;
-    });
-    for (let i = chunks.length - 1; i > lastUser; i--) {
-      const chunk = chunks[i]!;
-      if (chunk.kind === 'work') return chunk.id;
-    }
-    return null;
+    const last = chunks[chunks.length - 1];
+    return running && last?.kind === 'work' ? last.id : null;
   }, [chunks, running]);
 
   // Track the viewport so the window can be sized. jsdom reports 0 and simply disables windowing.
@@ -603,22 +596,30 @@ export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: 
 }
 
 function AssistantMessage({ item, sessionId, showThinking, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'assistant' }>; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
-  const [open, setOpen] = useState(false);
+  // open === null means the user has not toggled; then reasoning shows only while it is being written.
+  const [open, setOpen] = useState<boolean | null>(null);
   const html = useStreamingMarkdown(item.text, item.streaming);
   const cwd = useStore((s) => s.sessions.find((session) => session.id === sessionId)?.cwd);
   const body = useMarkdownImages(html, sessionId, cwd, onImageExpand);
+  // A deep-search jump into a row that is only reasoning matched that reasoning: show it.
+  const jumpHere = useStore((s) => !!s.searchJump && s.searchJump.sessionId === sessionId && s.searchJump.itemId === item.id);
+  const proseless = !item.text;
+  useEffect(() => { if (jumpHere && proseless) setOpen(true); }, [jumpHere, proseless]);
   // With thinking hidden a thinking-only item has nothing left to show; rendering it anyway would
   // leave an empty row in the transcript.
   if (!item.text && !(item.thinking && showThinking)) return null;
-  const onlyThinking = !item.text && !!item.thinking;
+  // Reasoning is the same control wherever a harness puts it — on a message's row or a row of its
+  // own: open while it streams with no prose yet, one collapsed toggle once it is done.
+  const thinkingLive = !item.text && !!item.thinking && !!item.streaming;
+  const expanded = open ?? thinkingLive;
   return (
-    <div className={`msg msg-assistant ${item.phase === 'plan' ? 'msg-plan' : ''} ${item.phase === 'commentary' ? 'msg-commentary' : ''}`}>
+    <div className={`msg msg-assistant ${item.phase === 'plan' ? 'msg-plan' : ''}`}>
       {item.thinking && showThinking && (
-        <div className={`thinking ${open || onlyThinking ? 'open' : ''}`}>
-          <button type="button" className="thinking-toggle" onClick={() => setOpen((o) => !o)}>
-            <Icon name="brain" size={13} /> {item.streaming && onlyThinking ? 'Thinking…' : 'Thinking'} <Icon name={open || onlyThinking ? 'chevron' : 'chevronRight'} size={12} />
+        <div className={`thinking ${expanded ? 'open' : ''}`}>
+          <button type="button" className="thinking-toggle" aria-expanded={expanded} onClick={() => setOpen(!expanded)}>
+            <Icon name="brain" size={13} /> {thinkingLive ? 'Thinking…' : 'Thinking'} <Icon name={expanded ? 'chevron' : 'chevronRight'} size={12} />
           </button>
-          {(open || onlyThinking) && <div className="thinking-body">{item.thinking}</div>}
+          {expanded && <div className="thinking-body">{item.thinking}</div>}
         </div>
       )}
       {item.text && <div key={`${sessionId}:${cwd}`} ref={body} className={`md ${item.streaming ? 'streaming' : ''}`} dangerouslySetInnerHTML={{ __html: html }} />}
@@ -634,72 +635,77 @@ type ToolItem = Extract<TranscriptItem, { kind: 'tool' }>;
 export const isRunningEntry = (item: TranscriptItem): boolean =>
   (item.kind === 'tool' && item.status === 'running') || (item.kind === 'assistant' && !!item.streaming);
 
+/** An assistant row that carries no prose: reasoning only, or a stream that has not produced text yet. */
+const isThinkingOnly = (item: TranscriptItem): boolean => item.kind === 'assistant' && item.text.trim() === '';
+
+/** A step the agent took, as opposed to a line that merely sits beside the steps. */
+const isStep = (item: TranscriptItem): boolean => item.kind === 'tool' || item.kind === 'approval' || item.kind === 'plan';
+
 /**
- * Whether an item is part of a turn's work (collapsed behind its "Worked for …" header) rather
- * than something that must stay visible: the answer, warnings and user turns. Approvals are work
- * too, but the header stays open while one is undecided; plans are work that `WorkGroup` keeps on
- * screen as one card under its header, so a plan update no longer splits a turn's work in two.
- * `laterToolInSegment` says whether a tool call still follows before the next reply boundary,
- * which is what makes unlabelled assistant text commentary instead of an answer.
+ * Whether an item is machinery (it may collapse behind a work header) rather than something
+ * written for the reader. Everything the model says in prose is a message and stays on screen,
+ * whatever phase the harness gave it and whether or not more tool calls follow: only tool calls,
+ * reasoning with no prose, info-level notices, approvals and plans are work. Approvals keep their
+ * header open while undecided; plans are work that `WorkGroup` keeps on screen as one card under
+ * its header, so a plan update does not split a stretch of work in two.
  */
-export function isWorkItem(item: TranscriptItem, laterToolInSegment: boolean): boolean {
-  if (item.kind === 'tool' || item.kind === 'approval' || item.kind === 'plan') return true;
+export function isWorkItem(item: TranscriptItem): boolean {
+  if (isStep(item)) return true;
   // Warnings and errors are signals, not work: they stay on screen when the group is collapsed.
   if (item.kind === 'info') return item.level === 'info';
-  if (item.kind !== 'assistant') return false;
-  if (item.phase === 'final' || item.phase === 'plan') return false;
-  if (item.phase === 'commentary') return true;
-  return item.text.trim() === '' || laterToolInSegment;
+  return isThinkingOnly(item);
 }
 
 /**
- * Collapses runs of tool calls, commentary, thinking, plans and approvals into `work` chunks,
- * keeping replies, warnings and turn rows standalone. The duration shown by the last work
- * header comes off the turn row that closes it.
+ * Collapses each stretch of steps between two messages into a `work` chunk, together with the
+ * thinking and notices that sit among them, and keeps every message, warning and turn row
+ * standalone. Harnesses differ in what they emit — some label prose as commentary or final, some
+ * do not; some put reasoning on the message's own row, some on a row of its own — and none of
+ * that changes what is shown, so a turn reads the same on all of them: message, work, message,
+ * work, answer.
+ *
+ * A header needs a step behind it. Thinking or a notice with no step beside it stays a row of its
+ * own (the same collapsed "Thinking" toggle a message carries; a one-line notice) instead of a
+ * "Worked" header over nothing. With `showThinking` off a thinking-only row has nothing to render,
+ * so it makes no row at all.
  */
-export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
-  const laterTool = new Array<boolean>(items.length).fill(false);
-  let seenTool = false;
-  for (let i = items.length - 1; i >= 0; i--) {
-    const item = items[i]!;
-    // Pi can look up a background result after replying, without a phase or turn marker. Treat
-    // the lookup as a boundary for inferring commentary, but keep the lookup itself collapsible.
-    if (item.kind === 'user' || item.kind === 'turn' || (item.kind === 'tool' && item.name === 'subagent_result')) {
-      seenTool = false;
-      continue;
-    }
-    laterTool[i] = seenTool;
-    if (item.kind === 'tool') seenTool = true;
-  }
-
+export function groupTranscript(items: TranscriptItem[], showThinking = true): RenderChunk[] {
   const chunks: RenderChunk[] = [];
   let work: TranscriptItem[] = [];
-  const flush = () => {
+  /** Where the current turn's chunks begin: just past the last user or turn row. */
+  let turnStart = 0;
+  const flush = (closedBy?: TranscriptItem) => {
     if (!work.length) return;
-    chunks.push({ kind: 'work', id: work[0]!.id, entries: work });
+    // Reasoning that leads straight into a message belongs with that message, not with the steps
+    // before it: a harness that reasons on a row of its own then reads like one that reasons on
+    // the message's row. Until the message arrives it stays with the live work.
+    let end = work.length;
+    if (closedBy?.kind === 'assistant') while (end > 0 && isThinkingOnly(work[end - 1]!)) end--;
+    const entries = work.slice(0, end);
+    if (entries.some(isStep)) chunks.push({ kind: 'work', id: entries[0]!.id, entries });
+    else end = 0;
+    for (const item of work.slice(end)) chunks.push({ kind: 'single', item });
     work = [];
   };
+  /**
+   * A turn's duration belongs on a work header only when that header stands for the whole turn's
+   * work. With several stretches of work in one turn no single header can claim it, and the turn
+   * row carries it instead.
+   */
   const attachTurn = (turn: Extract<TranscriptItem, { kind: 'turn' }>) => {
-    for (let i = chunks.length - 1; i >= 0; i--) {
-      const chunk = chunks[i]!;
-      if (chunk.kind === 'work') {
-        chunk.turn = { status: turn.status, durationMs: turn.durationMs };
-        return;
-      }
-      // Only the answer (or a warning line) may stand between the work and its turn row.
-      if (chunk.kind === 'single' && (chunk.item.kind === 'assistant' || chunk.item.kind === 'info')) continue;
-      return;
-    }
+    const stretches = chunks.slice(turnStart).filter((c): c is Extract<RenderChunk, { kind: 'work' }> => c.kind === 'work');
+    if (stretches.length === 1) stretches[0]!.turn = { status: turn.status, durationMs: turn.durationMs };
   };
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i]!;
-    if (isWorkItem(item, laterTool[i]!)) {
+  for (const item of items) {
+    if (item.kind === 'assistant' && isThinkingOnly(item) && !(showThinking && item.thinking)) continue;
+    if (isWorkItem(item)) {
       work.push(item);
       continue;
     }
-    flush();
+    flush(item);
     if (item.kind === 'turn') attachTurn(item);
     chunks.push({ kind: 'single', item });
+    if (item.kind === 'turn' || item.kind === 'user') turnStart = chunks.length;
   }
   flush();
   return chunks;
@@ -710,7 +716,7 @@ type CommandChunk = { kind: 'run'; id: string; entries: ToolItem[] } | { kind: '
 
 /**
  * Consecutive shell commands become one "Ran n commands" row (per nesting parent); every other
- * entry keeps its own row. Commentary breaks a run: it belongs beside the commands, not inside.
+ * entry keeps its own row. Thinking or a notice breaks a run: it belongs beside the commands, not inside.
  */
 export function groupCommands(entries: TranscriptItem[]): CommandChunk[] {
   const isCmd = (item: TranscriptItem): item is ToolItem => item.kind === 'tool' && item.hint === 'execute';
@@ -737,7 +743,7 @@ export function groupCommands(entries: TranscriptItem[]): CommandChunk[] {
   return chunks;
 }
 
-/** One turn's work behind a "Worked for …" header; the answer itself stays outside. */
+/** One stretch of work behind a "Worked …" header; the messages around it stay outside. */
 export function WorkGroup({ chunk, sessionId, canEdit = false, showThinking, onImageExpand, live = false }: { chunk: Extract<RenderChunk, { kind: 'work' }>; sessionId: string; canEdit?: boolean; showThinking: boolean; onImageExpand: OnImageExpand; live?: boolean }) {
   // open === null means the user has not toggled; then follow the turn so live activity stays visible.
   const [open, setOpen] = useState<boolean | null>(null);
