@@ -4,20 +4,22 @@
  * chip with its plan still on screen, the title bar's search and Vesta launcher, the sidebar's New
  * session entry, a header that sheds detail in a narrow split pane instead of overflowing it, and the
  * sidebar's activity tray reaching a session that finished unviewed in a collapsed folder.
- * Sessions, transcripts and a git checkout with uncommitted work are seeded on disk, so no harness
- * and no provider key are involved; review screenshots land in tests/artifacts/session-view-*.png.
+ * Layout cases use seeded sessions and transcripts. The title refresh case runs native chat against
+ * a scripted loopback provider. No provider keys; screenshots land in tests/artifacts/session-view-*.png.
  * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { once } from 'node:events';
 import { promises as fs } from 'node:fs';
+import { createServer, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import type { SessionMeta, TranscriptItem } from '../src/shared/types';
+import { MCP_BUILTIN_IDS, type ProviderConfig, type SessionMeta, type TranscriptItem } from '../src/shared/types';
 import type { PushPayloads } from '../src/shared/ipc';
-import { expectQuietWindow, isolatedEnv, seedSettings } from './e2e-ui';
+import { expectQuietWindow, isolatedEnv, openNewSession, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -123,6 +125,137 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     expect(after.defaultModelByHarness).toEqual(before.defaultModelByHarness);
     expect(await win.evaluate(() => window.harness.invoke('sessions:list', undefined))).toEqual([]);
   }, 60_000);
+
+  it('refreshes the automatic session title after each successful native turn using the utility model', async ({ onTestFinished }) => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-session-title-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    const providerId = 'title-fixture';
+    const chatModel = 'fixture-chat';
+    const utilityModel = 'fixture-utility';
+    type Completion = { model: string; stream?: boolean; messages: { role: string; content: string }[] };
+    const requests: { body: Completion; response: ServerResponse }[] = [];
+    // Hold replies until the test has observed the state that precedes each one.
+    const server = createServer((req, response) => {
+      if (req.method !== 'POST' || req.url !== '/v1/chat/completions') {
+        response.writeHead(404).end();
+        return;
+      }
+      let json = '';
+      req.setEncoding('utf8').on('data', (chunk: string) => { json += chunk; });
+      req.on('end', () => {
+        try {
+          requests.push({ body: JSON.parse(json) as Completion, response });
+        } catch {
+          response.writeHead(400).end();
+        }
+      });
+    });
+    onTestFinished(async () => {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 3 });
+    });
+    const listening = once(server, 'listening');
+    server.listen(0, '127.0.0.1');
+    await listening;
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Title fixture did not bind a TCP address');
+    const provider: ProviderConfig = {
+      id: providerId, kind: 'lmstudio', name: 'Scripted title fixture', enabled: true, hasApiKey: false,
+      baseUrl: `http://127.0.0.1:${address.port}/v1`,
+      models: [chatModel, utilityModel].map((id) => ({ id, provider: providerId, displayName: id }))
+    };
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, {
+      defaultHarness: 'native', defaultModelByHarness: { native: { provider: providerId, model: chatModel } },
+      providers: [provider], utilityModel: { provider: providerId, model: utilityModel },
+      agent: { enabled: false }, knowledge: { prime: false, autoDistill: false }, mcpDisabledBuiltins: MCP_BUILTIN_IDS
+    }));
+    const win = await launch(userData);
+    const row = win.getByTestId('session-row');
+    const header = win.getByTestId('session-title');
+    const expectTitle = async (title: string) => {
+      await header.and(win.getByText(title, { exact: true })).waitFor({ timeout: 10_000 });
+      await row.getByText(title, { exact: true }).waitFor({ timeout: 10_000 });
+    };
+    const request = async (model: string, count: number) => {
+      const matching = () => requests.filter(({ body }) => body.model === model);
+      await expect.poll(() => matching().length, { timeout: 10_000, message: `${model} request ${count}` }).toBe(count);
+      return matching()[count - 1]!;
+    };
+    const reply = ({ body, response }: (typeof requests)[number], text: string) => {
+      if (body.stream) {
+        const chunk = (delta: Record<string, string>, finish_reason: 'stop' | null) =>
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end(chunk({ role: 'assistant', content: text }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n');
+      } else {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: text }, finish_reason: 'stop' }] }));
+      }
+    };
+
+    const firstPrompt = 'Please investigate the settings panel rendering issue';
+    const openingTitle = 'Investigate settings rendering';
+    await openNewSession(win);
+    await win.getByPlaceholder('What should the agent do?').fill(firstPrompt);
+    await win.getByRole('button', { name: /^Start session/ }).click({ timeout: 20_000 });
+    await expectTitle('Please investigate the settings panel rendering…');
+    const id = await row.getAttribute('data-session-id');
+    if (!id) throw new Error('New session row has no session id');
+    const opening = await request(utilityModel, 1);
+    expect(opening.body.stream).not.toBe(true);
+    expect(opening.body.messages).toContainEqual({ role: 'user', content: firstPrompt });
+    reply(opening, openingTitle);
+    await expectTitle(openingTitle);
+
+    const turns = [
+      { prompt: firstPrompt, replyText: 'The orange badge uses the wrong color.', title: 'Fix orange badge color' },
+      { prompt: 'Now look at the banner', replyText: 'The green banner needs a visual test.', title: 'Test green banner' }
+    ];
+    let previousTitle = openingTitle;
+    for (const [i, turn] of turns.entries()) {
+      if (i > 0) {
+        await win.getByPlaceholder(/^Message the agent/).fill(turn.prompt);
+        await win.getByRole('button', { name: 'Send', exact: true }).click();
+      }
+      const chat = await request(chatModel, i + 1);
+      expect(chat.body.stream).toBe(true);
+      expect(chat.body.messages.at(-1)).toEqual({ role: 'user', content: turn.prompt });
+      // No refresh can have been requested while this turn is still waiting for its assistant reply.
+      expect(requests.filter(({ body }) => body.model === utilityModel)).toHaveLength(i + 1);
+      reply(chat, turn.replyText);
+
+      // A held utility response must not delay the turn's transition to idle.
+      await expect.poll(() => win.evaluate(async (sessionId) => {
+        const meta = await window.harness.invoke('sessions:get', { id: sessionId });
+        const items = await window.harness.invoke('sessions:transcript', { id: sessionId });
+        return {
+          status: meta?.status,
+          turns: items.flatMap((item) => item.kind === 'turn' ? [item.status] : []),
+          replies: items.flatMap((item) => item.kind === 'assistant' ? [item.text] : [])
+        };
+      }, id), { timeout: 10_000 }).toEqual({
+        status: 'idle', turns: turns.slice(0, i + 1).map(() => 'completed'),
+        replies: turns.slice(0, i + 1).map(({ replyText }) => replyText)
+      });
+      const refresh = await request(utilityModel, i + 2);
+      expect(refresh.body.stream).not.toBe(true);
+      expect(refresh.body.messages.find(({ role }) => role === 'system')?.content).toMatch(/\btitle\b.*\b(?:concise|short|\d+ words)\b|\b(?:concise|short)\b.*\btitle\b/i);
+      expect(refresh.body.messages).toContainEqual({
+        role: 'user', content: `Current title: ${previousTitle}\nLatest assistant reply: ${turn.replyText}`
+      });
+      await expectTitle(previousTitle);
+      reply(refresh, turn.title);
+      await expectTitle(turn.title);
+      previousTitle = turn.title;
+    }
+    expect(requests.map(({ body }) => body.model)).toHaveLength(5);
+  }, 90_000);
 
   it('carries changes, run controls, plan, search, Vesta and New session where the redesign puts them, and fits a narrow pane', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-session-view-'));

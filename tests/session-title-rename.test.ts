@@ -12,13 +12,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HarnessAdapter, HarnessContext } from '../src/main/harness/types';
-import type { HarnessId, ProviderConfig, UserInput } from '../src/shared/types';
+import type { HarnessId, ProviderConfig, TranscriptItem, UserInput } from '../src/shared/types';
 import { defaultSettings } from '../src/main/settings';
 import { SessionStore } from '../src/main/store';
 import type { SessionManagerDeps } from '../src/main/session-manager';
 import { SessionManager } from '../src/main/session-manager';
 
-const mocks = vi.hoisted(() => ({ sent: [] as { harness: HarnessId; input: UserInput }[] }));
+const mocks = vi.hoisted(() => ({ sent: [] as { harness: HarnessId; input: UserInput; ctx: HarnessContext }[] }));
 
 vi.mock('../src/main/harness/registry', () => ({
   createAdapter: (id: HarnessId, ctx: HarnessContext) =>
@@ -29,7 +29,7 @@ vi.mock('../src/main/harness/registry', () => ({
       },
       start: async () => undefined,
       send: async (input: UserInput) => {
-        mocks.sent.push({ harness: id, input });
+        mocks.sent.push({ harness: id, input, ctx });
       },
       interrupt: async () => undefined,
       setModel: async () => undefined,
@@ -41,17 +41,21 @@ vi.mock('../src/main/harness/registry', () => ({
 }));
 
 /** A title endpoint that answers every request with `reply`, and counts the calls it got. */
-async function titleServer(reply: () => unknown): Promise<{ url: string; calls: number; close: () => Promise<void> }> {
+async function titleServer(reply: (prompt: string) => unknown | Promise<unknown>) {
   const state = { url: '', calls: 0, close: async () => undefined as void };
-  const server: Server = createServer((_req: IncomingMessage, res: ServerResponse) => {
+  const server: Server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const { messages } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     state.calls++;
+    const response = await reply(messages.at(-1).content);
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify(reply()));
+    res.end(JSON.stringify(response));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   state.url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   state.close = () => new Promise<void>((r) => server.close(() => r()));
-  return state as { url: string; calls: number; close: () => Promise<void> };
+  return state;
 }
 
 const answer = (content: string) => ({ choices: [{ message: { content }, finish_reason: 'stop' }] });
@@ -71,14 +75,18 @@ afterEach(() => {
   delete process.env.CLAUDE_CONFIG_DIR;
 });
 
-async function makeManager(baseUrl: string, kind: ProviderConfig['kind'] = 'openai-compatible'): Promise<{ manager: SessionManager; store: SessionStore; asked: () => string[]; settled: () => string[] }> {
-  const store = new SessionStore(path.join(tmpRoot, `store${++counter}`));
+async function makeManager(
+  baseUrl: string,
+  kind: ProviderConfig['kind'] = 'openai-compatible',
+  utility = true,
+  store = new SessionStore(path.join(tmpRoot, `store${++counter}`))
+) {
   await store.load();
   const log = vi.fn();
   const providers: ProviderConfig[] = [
     { id: 'fake', kind, name: 'Fake', enabled: true, hasApiKey: true, baseUrl, models: [{ id: 'cheap', provider: 'fake', displayName: 'Cheap' }] }
   ];
-  const settings = { ...defaultSettings(), providers, utilityModel: { provider: 'fake', model: 'cheap' } };
+  const settings = { ...defaultSettings(), providers, utilityModel: utility ? { provider: 'fake', model: 'cheap' } : undefined };
   const deps: SessionManagerDeps = {
     store,
     settings: { get: () => settings, update: vi.fn(async () => settings) } as never,
@@ -98,6 +106,13 @@ async function makeManager(baseUrl: string, kind: ProviderConfig['kind'] = 'open
 
 const create = (manager: SessionManager, extra: Record<string, unknown> = {}) =>
   manager.create({ config: { harness: 'native', projectRoot: path.join(tmpRoot, 'proj'), permissionMode: 'ask' }, ...extra } as never);
+
+function finishTurn(status: Extract<TranscriptItem, { kind: 'turn' }>['status'], text: string): void {
+  const { ctx } = mocks.sent.at(-1)!;
+  ctx.emit({ type: 'item.upsert', item: { id: `reply-${mocks.sent.length}`, kind: 'assistant', ts: Date.now(), text, streaming: false } });
+  ctx.emit({ type: 'item.upsert', item: { id: `turn-${mocks.sent.length}`, kind: 'turn', ts: Date.now(), status } });
+  ctx.emit({ type: 'status', status: 'idle' });
+}
 
 describe('message files', () => {
   it('sends a first-prompt upload to the adapter and retains only a file reference in the transcript', async () => {
@@ -119,6 +134,108 @@ describe('message files', () => {
     const restored = (await reopened.readTranscript(meta.id)).find((i) => i.kind === 'user');
     expect(restored?.kind === 'user' && restored.files?.[0]?.path).toBe(filePath);
     expect(await fs.readFile(filePath, 'utf8')).toBe('hello from upload');
+  });
+});
+
+describe('refreshing automatic titles after a turn', () => {
+  it('refines a title after each completed turn and keeps doing so after restart', async () => {
+    const server = await titleServer((prompt) => answer(
+      prompt.includes('The orange badge uses') ? 'Fix the orange badge' : prompt.includes('The green banner needs') ? 'Test the green banner' : 'Investigate rendering'
+    ));
+    try {
+      const first = await makeManager(server.url);
+      const meta = await create(first.manager, { initialPrompt: 'look at the rendering issue' });
+      await vi.waitFor(() => expect(first.manager.get(meta.id)?.title).toBe('Investigate rendering'));
+      await vi.waitFor(() => expect(mocks.sent).toHaveLength(1));
+      finishTurn('completed', 'The orange badge uses the wrong color.');
+      await vi.waitFor(() => expect(first.manager.get(meta.id)?.title).toBe('Fix the orange badge'));
+      await first.manager.stop(meta.id);
+      await first.manager.flushPendingPersists();
+
+      const reopened = new SessionStore(path.dirname(path.dirname(first.store.sessionDir(meta.id))));
+      const restarted = await makeManager(server.url, 'openai-compatible', true, reopened);
+      expect(restarted.manager.get(meta.id)?.title).toBe('Fix the orange badge');
+      await restarted.manager.send(meta.id, { text: 'move on to the banner' });
+      finishTurn('completed', 'The green banner needs a visual test.');
+      await vi.waitFor(() => expect(restarted.manager.get(meta.id)?.title).toBe('Test the green banner'));
+      expect(server.calls).toBe(3);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('does not let a slow opening title overwrite the completed-turn title', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const server = await titleServer(async (prompt) => {
+      if (prompt.includes('Resolved the rendering bug')) return answer('Fix settings rendering');
+      await hold;
+      return answer('Investigate settings');
+    });
+    try {
+      const { manager, settled } = await makeManager(server.url);
+      const meta = await create(manager, { initialPrompt: 'look at the rendering issue' });
+      await vi.waitFor(() => expect(server.calls).toBe(1));
+      await vi.waitFor(() => expect(mocks.sent).toHaveLength(1));
+      finishTurn('completed', 'Resolved the rendering bug');
+      await vi.waitFor(() => expect(manager.get(meta.id)?.title).toBe('Fix settings rendering'));
+      release();
+      await vi.waitFor(() => expect(settled()).toHaveLength(2));
+      expect(manager.get(meta.id)?.title).toBe('Fix settings rendering');
+    } finally {
+      release();
+      await server.close();
+    }
+  });
+
+  it('ignores failed and interrupted turns and keeps a manual rename over a late reply', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const server = await titleServer(async (prompt) => {
+      if (!prompt.includes('Finished work')) return answer('Investigate rendering');
+      await hold;
+      return answer('Late automatic title');
+    });
+    try {
+      const { manager, asked, settled } = await makeManager(server.url);
+      const meta = await create(manager, { initialPrompt: 'look at the rendering issue' });
+      await vi.waitFor(() => expect(manager.get(meta.id)?.title).toBe('Investigate rendering'));
+      await vi.waitFor(() => expect(mocks.sent).toHaveLength(1));
+      finishTurn('failed', 'Failed work');
+      await manager.send(meta.id, { text: 'stop this one' });
+      finishTurn('interrupted', 'Interrupted work');
+      expect(asked()).toHaveLength(1);
+
+      await manager.send(meta.id, { text: 'finish this one' });
+      finishTurn('completed', 'Finished work');
+      await vi.waitFor(() => expect(server.calls).toBe(2));
+      // A same-title rename still makes the name the user's choice.
+      await manager.patch(meta.id, { title: 'Investigate rendering' });
+      release();
+      await vi.waitFor(() => expect(settled()).toHaveLength(2));
+      expect(manager.get(meta.id)?.title).toBe('Investigate rendering');
+      await manager.send(meta.id, { text: 'one more' });
+      finishTurn('completed', 'Completed more work');
+      expect(asked()).toHaveLength(2);
+    } finally {
+      release();
+      await server.close();
+    }
+  });
+
+  it('keeps opening-prompt naming without a utility model but does not refresh on completion', async () => {
+    const server = await titleServer(() => answer('Investigate rendering'));
+    try {
+      const { manager, asked } = await makeManager(server.url, 'openai-compatible', false);
+      const meta = await create(manager, { initialPrompt: 'look at the rendering issue' });
+      await vi.waitFor(() => expect(manager.get(meta.id)?.title).toBe('Investigate rendering'));
+      await vi.waitFor(() => expect(mocks.sent).toHaveLength(1));
+      finishTurn('completed', 'A different topic');
+      expect(asked()).toHaveLength(1);
+      expect(manager.get(meta.id)?.title).toBe('Investigate rendering');
+    } finally {
+      await server.close();
+    }
   });
 });
 
@@ -188,6 +305,7 @@ describe('naming a session', () => {
       const meta = await create(manager, { title: 'Fix issue #230', initialPrompt: 'fix the crash reported in issue 230' });
       expect(meta.titleIsPlaceholder).toBeUndefined();
       await vi.waitFor(() => expect(mocks.sent).toHaveLength(1));
+      finishTurn('completed', 'Fixed the crash');
       expect(manager.get(meta.id)?.title).toBe('Fix issue #230');
       expect(server.calls).toBe(0);
     } finally {
