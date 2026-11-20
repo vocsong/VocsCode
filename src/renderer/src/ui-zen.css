@@ -131,6 +131,13 @@
   flex-shrink: 0;
   width: var(--sidebar);
 }
+/* …except the session list, which takes the height the rest leaves and scrolls when it holds more
+   sessions than fit. (Not shrinking it let the list grow past the window, clipping its end.) */
+:root[data-ui='zen'] .sidebar > .sidebar-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
 :root[data-ui='zen'] .sidebar-nav,
 :root[data-ui='zen'] .sidebar-section {
   display: contents;
@@ -196,10 +203,14 @@
 }
 :root[data-ui='zen'] .sidebar-list {
   order: 2;
-  flex: 1 1 auto;
   padding: 8px 0;
   overflow-x: hidden;
   scrollbar-width: none;
+}
+/* Open, the list shows a thin scrollbar so a long list reads as scrollable; the closed rail stays bare. */
+:root[data-ui='zen'] .sidebar:hover .sidebar-list,
+:root[data-ui='zen'] .sidebar:has(:focus-visible) .sidebar-list {
+  scrollbar-width: thin;
 }
 :root[data-ui='zen'] .sidebar-views {
   order: 3;
