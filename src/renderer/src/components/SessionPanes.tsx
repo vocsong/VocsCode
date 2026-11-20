@@ -7,7 +7,7 @@
  * follow state, and a pane re-renders only when its own session's transcript or metadata changes.
  */
 import React, { useEffect, useRef, useState } from 'react';
-import { formatSessionLabel, harnessShort } from '../format';
+import { sessionTitleText } from '../../../shared/session-title';
 import { isTopLevelSession } from '../missions';
 import { SESSION_DRAG_TYPE, dropZoneAt, filePane, paneMinPx, visiblePaneSessions, type DropZone, type PaneLayout, type SessionPane } from '../panes';
 import { sortSessionRows } from '../sessionOrder';
@@ -15,6 +15,7 @@ import { toastError, useStore } from '../store';
 import { Composer } from './Composer';
 import { FilePreviewPane } from './FilePreviewPane';
 import { Header } from './Header';
+import { SessionTitle } from './SessionTitle';
 import { Transcript } from './Transcript';
 import { Button, StatusDot } from './ui';
 
@@ -138,7 +139,7 @@ function PaneView({ pane, active, split, size, empty }: { pane: SessionPane; act
       className={`pane${active ? ' active' : ''}`}
       data-pane-id={pane.id}
       data-testid="session-pane"
-      aria-label={split ? `${session?.title ?? 'Empty pane'}${active ? ' (active pane)' : ''}` : undefined}
+      aria-label={split ? `${session ? sessionTitleText(session) : 'Empty pane'}${active ? ' (active pane)' : ''}` : undefined}
       style={split ? { flexGrow: grow(size) } : undefined}
       onPointerDownCapture={focus}
       onFocusCapture={focus}
@@ -185,16 +186,13 @@ function PanePicker({ pane }: { pane: SessionPane }) {
       <p className="muted small">Pick one below, click one in the sidebar, or drag it here. Each pane keeps its own session running.</p>
       {choices.length > 0 ? (
         <div className="pane-picker-list" role="list">
-          {choices.map((session) => {
-            const label = formatSessionLabel(session);
-            return (
-              <button key={session.id} type="button" role="listitem" className="pane-picker-item" onClick={() => open(session.id)}>
-                <StatusDot status={session.status} />
-                <span className="pane-picker-name" title={label}>{label}</span>
-                <span className="muted small">{harnessShort(session.config.harness)}{session.worktreeBranch ? ` · ${session.worktreeBranch}` : ''}</span>
-              </button>
-            );
-          })}
+          {choices.map((session) => (
+            <button key={session.id} type="button" role="listitem" className="pane-picker-item" onClick={() => open(session.id)}>
+              <StatusDot status={session.status} />
+              <SessionTitle session={session} className="pane-picker-name" />
+              {session.worktreeBranch && <span className="muted small pane-picker-branch" title={session.worktreeBranch}>{session.worktreeBranch}</span>}
+            </button>
+          ))}
         </div>
       ) : (
         <p className="muted small">Every other session is already on screen.</p>

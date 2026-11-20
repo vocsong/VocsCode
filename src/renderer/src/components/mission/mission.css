@@ -9,6 +9,7 @@
 .mission-header { display: flex; flex: 1; flex-direction: column; gap: 8px; font-size: 12px; }
 .mission-header details { max-width: 100%; }
 .mission-header summary { cursor: pointer; color: var(--text-muted); }
+.mission-source-link { max-width: 100%; }
 .mission-launch .field { margin: 14px 0; }
 .mission-workspace { padding: 12px; border-bottom: 1px solid var(--border); }
 .mission-workspace label { display: flex; flex-direction: column; gap: 6px; }

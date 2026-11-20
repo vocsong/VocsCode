@@ -5,9 +5,10 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { SessionMeta } from '../../../shared/types';
 import { activitySections } from '../activity';
 import { invoke } from '../api';
-import { basename, harnessShort, relTime } from '../format';
+import { relTime } from '../format';
 import { toastError, useStore } from '../store';
 import { StatusDot } from './ui';
+import { SessionTitle } from './SessionTitle';
 
 const OPEN_DELAY_MS = 250;
 const CLOSE_DELAY_MS = 300;
@@ -131,10 +132,7 @@ function ActivityTray({ onClose }: { onClose: () => void }) {
           <button key={s.id} type="button" className="activity-row" data-testid="activity-row" onClick={() => void openSession(s)}>
             {/* A failed turn has usually returned the session to idle; the dot says how it ended. */}
             <StatusDot status={s.unseenAt !== undefined && s.unseenFailed ? 'error' : s.status} />
-            <span className="activity-row-main">
-              <span className="activity-row-title">{s.title}</span>
-              <span className="activity-row-meta">{`${basename(s.config.projectRoot)} · ${harnessShort(s.config.harness)}`}</span>
-            </span>
+            <SessionTitle session={s} className="activity-row-title" />
             <span className="activity-row-time">{time(s)}</span>
           </button>
         ))}

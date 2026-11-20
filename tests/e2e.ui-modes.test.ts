@@ -169,6 +169,10 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     expect(standardSidebar.width).toBe(280);
     expect(await style(win, '.panel', 'position')).not.toBe('fixed');
     expect(await win.getByRole('button', { name: 'File', exact: true }).count()).toBe(1);
+    const titlebarPill = '.titlebar-search .harness-pill[data-harness="claude"]';
+    const sidebarPill = `[data-session-id="${FIRST}"] .harness-pill[data-harness="claude"]`;
+    const pillColors = (selector: string) => Promise.all(['color', 'background-color'].map((property) => style(win, selector, property)));
+    const standardPillColors = await pillColors(titlebarPill);
 
     // Settings → Appearance → Interface → Zen.
     await win.click('.sidebar-bottom .sidebar-link:has-text("Settings")');
@@ -227,6 +231,10 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     expect(await style(win, '.panel', 'position')).toBe('fixed');
     expect(await activeRow(win)).toBe(FIRST);
     expect(await draft(win)).toBe(DRAFT);
+    await win.locator(titlebarPill).waitFor();
+    expect(await win.locator('.titlebar-search .session-label > span').allTextContents()).toEqual(['Claude', 'project', '|', 'Add rate limiting to the public API']);
+    expect(await pillColors(titlebarPill)).toEqual(standardPillColors);
+    expect(await win.locator('.pane.active .header .session-label').isVisible()).toBe(false);
     // The title bar's words fold into one menu.
     expect(await win.getByRole('button', { name: 'File', exact: true }).count()).toBe(0);
     expect(await win.getByRole('button', { name: 'Menu', exact: true }).count()).toBe(1);
@@ -259,6 +267,8 @@ describe.runIf(enabled)('electron e2e: interface modes', () => {
     await win.mouse.move(26, 420);
     await expect.poll(() => rect(win, '.sidebar').then((r) => r.width)).toBe(280);
     expect(await rect(win, '.pane.active')).toEqual(paneBefore);
+    await win.locator(sidebarPill).waitFor();
+    expect(await pillColors(sidebarPill)).toEqual(standardPillColors);
     await win.waitForTimeout(300);
     await fs.mkdir(shots, { recursive: true });
     await win.screenshot({ path: path.join(shots, 'ui-modes-zen-rail-open.png') });

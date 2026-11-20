@@ -75,7 +75,10 @@ beforeEach(() => {
     if (channel === 'mcp:project') return Promise.resolve(null);
     return Promise.resolve({});
   });
-  useStore.setState({ sessions: [session('s1', 'Fix login'), session('s2', 'Batch import')], toasts: [], panelTab: 'goal', panelBottomTab: 'mcp', panelBottomOpened: [], processSummary: null });
+  const other = session('s2', 'Batch import');
+  other.config = { ...other.config, harness: 'codex-exec', projectRoot: 'D:\\proj\\batch\\' };
+  other.cwd = 'D:\\proj\\batch\\.vocs-code\\worktrees\\s2';
+  useStore.setState({ sessions: [session('s1', 'Fix login'), other], toasts: [], panelTab: 'goal', panelBottomTab: 'mcp', panelBottomOpened: [], processSummary: null });
 });
 afterEach(cleanup);
 
@@ -91,10 +94,11 @@ describe('Processes tab', () => {
     expect(leftBehind.getByText('Left behind')).toBeTruthy();
     expect(leftBehind.getByText('server.js')).toBeTruthy();
     expect(groups[0].textContent).toContain('earlier run');
-    expect(groups[0].textContent).toContain('from Batch import');
+    expect(groups[0].textContent).toContain('from Codex·exec batch | Batch import');
+    expect(groups[0].querySelector('.process-meta .harness-pill')?.getAttribute('data-harness')).toBe('codex-exec');
 
     // The active session comes next, its dev server nested under the harness that started it.
-    expect(groups[1].textContent).toContain('Fix login');
+    expect(groups[1].querySelector('.process-group-title .session-label')?.textContent).toBe('Native a | Fix login');
     expect(groups[1].textContent).toContain('(this session)');
     expect(groups[1].textContent).toContain('vocscode/s1');
     const rows = within(groups[1]).getAllByTestId('process-row');
@@ -106,6 +110,7 @@ describe('Processes tab', () => {
     expect(within(groups[1]).getAllByTestId('process-detached')).toHaveLength(1);
     expect(groups[0].textContent).not.toContain('npm run update');
 
+    expect(within(groups[2]).getByRole('button', { name: 'Codex·exec batch | Batch import' })).toBeTruthy();
     expect(groups[2].textContent).toContain('Terminal · PowerShell');
     expect(groups[3].textContent).toContain('GitNexus server');
     expect(screen.getByTestId('processes-summary').textContent).toContain('7 processes');

@@ -9,7 +9,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
-import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
+import { _electron as electron, type ElectronApplication, type Locator, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 import { isolatedEnv, seedSettings } from './e2e-ui';
 
@@ -217,6 +217,16 @@ describe.runIf(enabled)('file mentions preview in the split view', () => {
     expect(await win.locator('[data-testid="session-pane"].active').count()).toBe(1);
     expect(await win.getByTestId('session-pane').isVisible()).toBe(true);
     expect(await win.locator('.panel-tab.active').first().innerText()).toBe(activeTab);
+    const pillColors = (label: Locator) => label.locator('.harness-pill[data-harness="native"]').evaluate((el) => {
+      const { color, backgroundColor } = getComputedStyle(el);
+      return { color, backgroundColor };
+    });
+    const sessionLabel = ['Native', 'project', '|', session.title];
+    const previewLabel = filePane.locator('.file-preview-head .session-label');
+    await previewLabel.waitFor();
+    expect(await previewLabel.locator(':scope > span').allTextContents()).toEqual(sessionLabel);
+    const conversationColors = await pillColors(win.locator('.pane.active .header .session-label'));
+    expect(await pillColors(previewLabel)).toEqual(conversationColors);
     // The mention carried a line number, so the preview scrolled it into view instead of staying at the top.
     const scrollTop = await filePane.locator('.file-preview pre').evaluate((el) => el.scrollTop);
     expect(scrollTop).toBeGreaterThan(0);
@@ -299,13 +309,18 @@ describe.runIf(enabled)('file mentions preview in the split view', () => {
     // Deep search temporarily reveals history, then returns to a bounded list at the match.
     await win.getByRole('button', { name: 'Search sessions', exact: true }).click();
     await win.getByPlaceholder('Search titles, goals and full transcripts…').fill('PerformanceNeedle');
-    await win.getByRole('button', { name: /PerformanceNeedle/ }).click();
+    const result = win.getByRole('button', { name: /PerformanceNeedle/ });
+    const resultLabel = result.locator('.session-label');
+    await resultLabel.waitFor();
+    expect(await resultLabel.locator(':scope > span').allTextContents()).toEqual(sessionLabel);
+    expect(await pillColors(resultLabel)).toEqual(conversationColors);
+    await result.click();
     const match = win.locator('[data-item-id="history200"]');
     await match.waitFor({ state: 'visible', timeout: 10_000 });
     await expect.poll(() => win.locator('.transcript.virtual').count(), { timeout: 10_000 }).toBe(1);
     expect(await win.locator('.transcript-row').count()).toBeLessThan(80);
     await match.getByRole('link', { name: 'src/hello.ts:300' }).click();
-    expect(await win.locator('.file-preview pre').innerText()).toBe(body);
+    await expect.poll(() => win.locator('.file-preview pre').innerText(), { timeout: 10_000 }).toBe(body);
 
     // The Files tab browses; opening the PNG from it previews in the same pane, as a decoded picture.
     await win.locator('.file-preview-head button[title="Close preview"]').click();

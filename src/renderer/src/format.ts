@@ -1,6 +1,4 @@
-/** Display formatters for relative time, cost, token counts, durations, paths and session labels. */
-import type { SessionMeta } from '../../shared/types';
-
+/** Display formatters for relative time, cost, token counts, durations and paths. */
 export function relTime(ts: number): string {
   const diff = Date.now() - ts;
   const s = Math.round(diff / 1000);
@@ -59,37 +57,10 @@ export function speedOfTurns(turns: { status: string; durationMs?: number; usage
   return acc;
 }
 
-/** Last path segment for both Windows and POSIX separators. */
-export function basename(p: string): string {
-  const parts = p.replace(/[\\/]+$/, '').split(/[\\/]/);
-  return parts[parts.length - 1] || p;
-}
-
-export function formatSessionLabel(session: SessionMeta): string {
-  return `${basename(session.config.projectRoot)} | ${session.title}`;
-}
+export { basename, harnessShort } from '../../shared/session-title';
 
 export function clamp(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
-}
-
-/** Short display name for a harness id (sidebar badges, menus, analytics). */
-export function harnessShort(id: string): string {
-  return { claude: 'Claude', codex: 'Codex', 'codex-exec': 'Codex·exec', cursor: 'Cursor', pi: 'Pi', acp: 'ACP', native: 'Native' }[id] ?? id;
-}
-
-/** Badge tone per harness, so the header label matches the sidebar session row. */
-export function harnessTone(id: string): 'neutral' | 'green' | 'amber' | 'red' | 'blue' | 'purple' {
-  const tones: Record<string, 'neutral' | 'green' | 'amber' | 'red' | 'blue' | 'purple'> = {
-    claude: 'amber',
-    codex: 'green',
-    'codex-exec': 'green',
-    cursor: 'blue',
-    pi: 'purple',
-    acp: 'blue',
-    native: 'neutral'
-  };
-  return tones[id] ?? 'neutral';
 }
 
 /** A byte count as `512 KB`, `48 MB` or `1.2 GB`. */

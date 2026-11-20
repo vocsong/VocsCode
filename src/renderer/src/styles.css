@@ -358,10 +358,6 @@ h4 {
 }
 .file-pane .file-preview-session {
   flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .file-pane .file-preview pre {
   background: var(--bg);
@@ -489,7 +485,9 @@ h4 {
 }
 .pane-picker-name {
   flex: 1;
-  min-width: 0;
+}
+.pane-picker-branch {
+  max-width: 30%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -616,6 +614,9 @@ h4 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.titlebar-search-text.session-label {
+  justify-content: safe center;
 }
 .titlebar-search .kbd {
   font-size: 10px;
@@ -1400,27 +1401,13 @@ h4 {
   background: var(--bg-hover);
   outline: none;
 }
-.activity-row-main {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-}
-.activity-row-title,
-.activity-row-meta {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .activity-row-title {
+  flex: 1;
   font-weight: 500;
 }
-.activity-row-meta,
 .activity-row-time {
   color: var(--fg-muted);
   font-size: 11.5px;
-}
-.activity-row-time {
   flex-shrink: 0;
 }
 .activity-empty {
@@ -1853,11 +1840,9 @@ h4 {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
   font-weight: 500;
   line-height: 1.35;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .session-row.active .session-title,
 .session-row.unseen .session-title {
@@ -1871,44 +1856,11 @@ h4 {
   border-radius: 50%;
   background: var(--accent);
 }
-/* The harness as a tinted square and its name, quieter than a filled badge. */
-.session-harness {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-  color: var(--fg-muted);
-  font-weight: 500;
-}
-.session-harness::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
-  background: var(--fg-faint);
-}
-.session-harness.tone-amber::before {
-  background: var(--amber);
-}
-.session-harness.tone-green::before {
-  background: var(--green);
-}
-.session-harness.tone-blue::before {
-  background: var(--blue);
-}
-.session-harness.tone-purple::before {
-  background: var(--purple);
-}
-.session-harness.tone-red::before {
-  background: var(--red);
-}
-.session-title span {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.session-title .session-label-name {
   cursor: text;
   border-radius: 3px;
 }
-.session-row:hover .session-title span {
+.session-row:hover .session-label-name {
   text-decoration: underline dotted;
   text-underline-offset: 3px;
   text-decoration-color: var(--fg-muted);
@@ -2129,14 +2081,7 @@ h4 {
   font-weight: 600;
   font-size: 14px;
   letter-spacing: -0.005em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 60px;
   max-width: 42vw;
-}
-.header-title > .badge {
-  flex-shrink: 0;
 }
 /* Folder and branch read as a breadcrumb trail after the title. */
 .header-crumbs {
@@ -2216,8 +2161,6 @@ h4 {
 .header:not([data-width='wide']) .header-crumbs {
   display: none;
 }
-.header[data-width='narrow'] .header-title > .badge,
-.header[data-width='tiny'] .header-title > .badge,
 .header[data-width='narrow'] .header-changes .add,
 .header[data-width='narrow'] .header-changes .del {
   display: none;
@@ -5952,15 +5895,20 @@ body.resizing {
 }
 .search-title {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   font-weight: 600;
   min-width: 0;
 }
-.search-title .qs-root {
+.search-meta {
   font-weight: 400;
   color: var(--fg-muted);
-  flex: 1;
+  font-size: 11.5px;
+  min-width: 0;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .search-snippet {
   color: var(--fg-muted);
@@ -7159,7 +7107,7 @@ body.resizing {
   outline: none;
 }
 .slist-row.gone {
-  opacity: 0.75;
+  color: var(--fg-muted);
 }
 .slist-main {
   min-width: 0;
@@ -7169,9 +7117,6 @@ body.resizing {
 }
 .slist-title {
   font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .slist-meta {
   display: flex;
@@ -8679,6 +8624,7 @@ body.resizing {
   text-overflow: ellipsis;
 }
 .process-session-link {
+  max-width: 100%;
   border: none;
   background: none;
   padding: 0;
