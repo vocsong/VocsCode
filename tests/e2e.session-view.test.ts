@@ -436,11 +436,14 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.keyboard.press('Escape');
     await expect.poll(() => win.locator('.palette').count()).toBe(0);
 
-    // The sidebar's New session opens the quick folder picker.
+    // The sidebar's New session opens the Ctrl+Shift+N dialog on the open session's folder. That the
+    // dialog mounts at all proves no native folder picker was raised (it would block app:pickFolder).
     await win.locator('.sidebar-new').click();
-    await win.locator('.palette', { hasText: 'New session in…' }).waitFor({ timeout: 10_000 });
-    await win.keyboard.press('Escape');
-    await expect.poll(() => win.locator('.palette').count()).toBe(0);
+    await win.waitForSelector('.ns-root', { timeout: 10_000 });
+    expect((await win.locator('.ns-root').innerText()).replace(/\\/g, '/')).toBe(project.replace(/\\/g, '/'));
+    expect(await win.locator('.palette').count()).toBe(0);
+    await win.locator('.modal').getByRole('button', { name: 'Cancel' }).click();
+    await win.waitForSelector('.modal', { state: 'detached', timeout: 10_000 });
 
     // Vesta opens from, and minimizes back to, the title bar; nothing of it floats while minimized.
     const launcher = win.locator('.titlebar-vesta');
