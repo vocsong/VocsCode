@@ -286,6 +286,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (channel.startsWith('vocsAccount:') && actor !== 'desktop') throw new Error('Vocs account sign-in requires the local desktop owner.');
     if (channel.startsWith('control:') && actor !== 'desktop') throw new Error('External control grants require the local desktop owner.');
     if (channel === 'harness:login' && actor !== 'desktop') throw new Error('Harness sign-in requires the local desktop owner.');
+    if (channel === 'harness:antigravityQuota' && actor !== 'desktop') throw new Error('Antigravity quota requires the local desktop owner.');
     const fn = handlers.get(channel as IpcChannel);
     if (!fn) {
       deps.log('warn', `ipc: unknown channel ${channel}`);
@@ -523,8 +524,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   function guardMissionBoundary(channel: string, input: unknown, actor: 'user' | 'agent'): Promise<void> | undefined {
     if (actor === 'agent' && (channel.startsWith('missions:') || channel === 'app:fileSaveAs')) throw new Error('User export and Mission actions cannot originate from an agent tool.');
     const req = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    if (actor === 'agent' && channel === 'sessions:send' && typeof req.id === 'string' && sessions.get(req.id)?.config.harness === 'antigravity') {
+      throw new Error('Antigravity sessions are driven by direct user prompts.');
+    }
     if (channel === 'sessions:create') {
       const config = req.config && typeof req.config === 'object' ? req.config as Record<string, unknown> : {};
+      if (actor === 'agent' && config.harness === 'antigravity') throw new Error('Antigravity sessions are driven by direct user prompts.');
       if (['mission', 'missionId', 'missionRole', 'ownership', 'activeAttemptId'].some((key) => key in req || key in config)) throw new Error('Mission ownership is host-only; use missions:create.');
     }
     if (MISSION_TERMINAL_IO.has(channel)) {
@@ -938,11 +943,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return readHarnessSetup(runtime, settings.get(), harness);
   });
   handle('harness:login', async (input) => {
-    const { harness, device } = z.strictObject({ harness: z.enum(['claude', 'codex', 'pi']), device: z.boolean().optional() }).parse(input);
+    const { harness, device } = z.strictObject({ harness: z.enum(['claude', 'codex', 'pi', 'antigravity']), device: z.boolean().optional() }).parse(input);
     const result = await openHarnessLogin(runtime, harness, device);
     invalidateAvailability();
     return result;
   });
+  handle('harness:antigravityQuota', () => runtime.antigravityQuota());
   handle('harness:availability', async (req) => {
     if (req?.id !== undefined) assertHarnessId(req.id);
     if (req?.refresh) invalidateAvailability();

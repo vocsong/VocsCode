@@ -34,7 +34,7 @@ export const APP_INSTRUCTION_HINTS: Record<AppInstructionScope, string> = {
   claude: 'Added for Claude Agent SDK sessions only, after the shared text.',
   codex: 'Added for both Codex harnesses (app-server and exec), after the shared text.',
   cursor: 'Added for Cursor sessions only, after the shared text.',
-  acp: 'Added for every ACP agent session, after the shared text.',
+  acp: 'Added for ACP agents and Google Antigravity, after the shared text.',
   native: 'Added for the native loop only, after the shared text.'
 };
 
@@ -44,6 +44,8 @@ export function appInstructionScope(harness: HarnessId): AppInstructionScope {
     case 'codex':
     case 'codex-exec':
       return 'codex';
+    case 'antigravity':
+      return 'acp';
     default:
       return harness;
   }

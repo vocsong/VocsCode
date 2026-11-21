@@ -257,6 +257,8 @@ export class SessionManager {
   private importQueue: Promise<void> = Promise.resolve();
   /** No turn or second settings change may race a premium-speed transition. */
   private fastModeUpdates = new Set<string>();
+  /** Hold turn admission while Antigravity acknowledges and persists a permission change. */
+  private antigravityModeUpdates = new Set<string>();
   /** Reserve send-first dispatches before startup/preamble awaits expose an idle gap. */
   private configDispatches = new Map<string, number>();
   /** Last runtime created per session. An ordinary runtime is fenced only once a newer one exists. */
@@ -659,6 +661,10 @@ export class SessionManager {
     if (req.config.fastMode !== undefined && typeof req.config.fastMode !== 'boolean') throw new Error('Fast mode must be a boolean');
     const settings = this.settings();
     let cfg = { ...req.config, fastMode: req.config.fastMode === true };
+    if (cfg.harness === 'antigravity') {
+      if (!HARNESS_BY_ID.antigravity.capabilities.permissionModes.includes(cfg.permissionMode)) throw new Error('Antigravity supports Ask and Plan modes.');
+      if (controlCreation || req.goal?.trim()) throw new Error('Antigravity sessions are driven by direct user prompts.');
+    }
     if (cfg.fastMode) {
       const support = fastModeSupport(cfg.harness, cfg.model ?? settings.defaultModelByHarness[cfg.harness], settings.providers);
       if (!support.supported || cfg.codexModelProvider) throw new Error(support.reason ?? 'Fast mode is not supported by this custom Codex provider.');
@@ -1361,6 +1367,7 @@ export class SessionManager {
   /** Covers awaits before ordinary sends and destructive/configuration edits as well as dispatch. */
   private async withoutControlled<T>(id: string, operation: () => Promise<T>): Promise<T> {
     this.assertNotControlled(id);
+    if (this.antigravityModeUpdates.has(id)) throw new Error('Wait for the Antigravity permission update to finish.');
     this.configDispatches.set(id, (this.configDispatches.get(id) ?? 0) + 1);
     try {
       return await operation();
@@ -1379,6 +1386,7 @@ export class SessionManager {
     this.assertNotControlled(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    if (meta.config.harness === 'antigravity') throw new Error('Antigravity sessions are driven by direct user prompts.');
     if (!input.text.trim() || /^\s*\//.test(input.text)) throw new Error('Controlled input must be a nonempty text turn, not a harness command');
     if (!control.operationId || !/^[A-Za-z0-9_-]+$/.test(control.inputId)) throw new Error('Invalid control identity');
     const previous = this.active.get(id);
@@ -1631,6 +1639,7 @@ export class SessionManager {
   private async sendUncontrolled(id: string, input: UserInput, source: 'user' | 'goal' | 'mission', generation?: number, originalText = input.text): Promise<void> {
     const meta = source === 'mission' ? this.managedMeta(id, generation!) : this.get(id);
     if (!meta) throw new Error('Session not found');
+    if (meta.config.harness === 'antigravity' && source !== 'user') throw new Error('Antigravity sessions are driven by direct user prompts.');
     if (this.fastModeUpdates.has(id)) throw new Error('Wait for the Fast mode update to finish.');
     if (source !== 'mission') this.assertUnmanaged(id);
     // A Mission owns its own immutable user-input receipts; ordinary file uploads cannot bypass them.
@@ -2221,7 +2230,15 @@ export class SessionManager {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    const antigravity = meta.config.harness === 'antigravity';
     const active = this.active.get(id);
+    if (antigravity) {
+      if (!HARNESS_BY_ID.antigravity.capabilities.permissionModes.includes(mode)) throw new Error('Antigravity supports Ask and Plan modes.');
+      if ((this.configDispatches.get(id) ?? 0) > 1 || active?.starting || active?.turnPending || active?.adapter.busy || meta.queued) {
+        throw new Error('Wait for the current Antigravity activity before changing permissions.');
+      }
+      this.antigravityModeUpdates.add(id);
+    }
     const apply = async () => {
       if (active && (this.active.get(id) !== active || active.tearingDown)) throw new Error('Session runtime changed before permission update.');
       // Persist ownership before making a previously read-only runtime writable. The workspace
@@ -2229,13 +2246,23 @@ export class SessionManager {
       if (active && mode !== 'plan') await this.claimWorkspaceWriter(meta, active);
       if (active && (this.active.get(id) !== active || active.tearingDown)) throw new Error('Session runtime changed before permission update.');
       // Permission changes are the one setting worth an audit trail: they decide what runs unasked.
+      if (antigravity) {
+        await active?.adapter.setPermissionMode(mode);
+        if (this.get(id) !== meta || this.active.get(id) !== active || active?.tearingDown) {
+          throw new Error('Session runtime changed before permission update.');
+        }
+      }
       this.deps.log('info', `[${id}] permission mode ${meta.config.permissionMode} → ${mode}`);
       meta.config.permissionMode = mode;
-      if (active) await active.adapter.setPermissionMode(mode);
+      if (!antigravity) await active?.adapter.setPermissionMode(mode);
       await this.deps.store.upsert(meta);
     };
-    if (active?.adapter.workspaceWriterState?.() !== undefined && mode !== 'plan' && this.admits(meta)) await this.deps.withWorkspaceDispatch!(meta, apply);
-    else await apply();
+    try {
+      if (active?.adapter.workspaceWriterState?.() !== undefined && mode !== 'plan' && this.admits(meta)) await this.deps.withWorkspaceDispatch!(meta, apply);
+      else await apply();
+    } finally {
+      if (antigravity) this.antigravityModeUpdates.delete(id);
+    }
     this.pushSessions();
     this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Permission mode set to ${mode}.` } });
     return meta;
@@ -2845,6 +2872,7 @@ export class SessionManager {
     this.assertUnmanaged(id);
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    if (meta.config.harness === 'antigravity') throw new Error('Antigravity sessions are driven by direct user prompts.');
     const s = this.settings();
     const active = this.active.get(id);
     if (action !== 'update' && active) {
@@ -3089,6 +3117,7 @@ export class SessionManager {
         acpAgent: undefined,
         codexModelProvider: undefined,
         fastMode: false,
+        permissionMode: target === 'antigravity' && src.config.permissionMode !== 'plan' ? 'ask' : src.config.permissionMode,
         useWorktree: !!own
       };
       meta.activeModel = meta.config.model;

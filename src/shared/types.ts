@@ -32,7 +32,7 @@ export interface SubagentRunUpdate {
   error?: string;
 }
 
-export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'native';
+export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'antigravity' | 'native';
 
 /** App-level permission modes, mapped per harness (see harness-meta.ts). */
 export type PermissionMode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-auto';
@@ -1310,6 +1310,7 @@ export interface AppSettings {
     dsh?: string;
     npx?: string;
     gemini?: string;
+    agy?: string;
     editor?: string;
     /** Explicit `cua-driver` path (empty = auto-detect on PATH or in Cua's install dirs). */
     cua?: string;

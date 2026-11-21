@@ -271,7 +271,8 @@ describe('Mission Settings user flows', () => {
     expect(harness.value).toBe('pi');
     expect([...harness.options].map((option) => option.textContent)).toEqual([
       'Pi', 'Claude Agent SDK', 'Codex (app-server) — not supported for Missions yet', 'Codex (exec SDK) — not supported for Missions yet',
-      'Cursor — not supported for Missions yet', 'ACP agent (DeepSeek Harness, ...) — not supported for Missions yet', 'Native loop — not supported for Missions yet'
+      'Cursor — not supported for Missions yet', 'Google Antigravity — not supported for Missions yet',
+      'ACP agent (DeepSeek Harness, ...) — not supported for Missions yet', 'Native loop — not supported for Missions yet'
     ]);
     fireEvent.click(screen.getByRole('button', { name: 'Cancel preset edit' }));
     // Editing a saved unsupported preset keeps its harness; nothing is silently rewritten to Pi.

@@ -837,9 +837,9 @@ function ProviderBaseUrl({ provider, onSave }: { provider: ProviderConfig; onSav
   );
 }
 
-/** The harnesses this card manages: their own logins, and an npm package that can be updated here. */
-const LOGIN_HARNESSES = ['claude', 'codex', 'pi'] as const;
-type LoginHarness = (typeof LOGIN_HARNESSES)[number];
+const NPM_LOGIN_HARNESSES = ['claude', 'codex', 'pi'] as const;
+const LOGIN_HARNESSES = [...NPM_LOGIN_HARNESSES, 'antigravity'] as const;
+type NpmLoginHarness = (typeof NPM_LOGIN_HARNESSES)[number];
 
 /**
  * Login state for harnesses that bring their own credentials, shown next to the key vault. The same
@@ -853,16 +853,16 @@ function HarnessLogins() {
   const [refreshing, setRefreshing] = useState(false);
   const [checking, setChecking] = useState(false);
   const [updates, setUpdates] = useState<Partial<Record<HarnessId, HarnessUpdate>> | null>(null);
-  const [updating, setUpdating] = useState<LoginHarness | null>(null);
+  const [updating, setUpdating] = useState<NpmLoginHarness | null>(null);
   const refreshModels = useStore((s) => s.refreshModelCatalog);
-  const modelRefreshPending = useRef(new Set<LoginHarness>());
-  const [modelRefreshes, setModelRefreshes] = useState<Partial<Record<LoginHarness, { pending: boolean; text?: string; error?: boolean }>>>({});
+  const modelRefreshPending = useRef(new Set<NpmLoginHarness>());
+  const [modelRefreshes, setModelRefreshes] = useState<Partial<Record<HarnessId, { pending: boolean; text?: string; error?: boolean }>>>({});
   const credHome: Partial<Record<HarnessId, string>> = { claude: '~/.claude', codex: '~/.codex', pi: '~/.pi/agent' };
 
   const checkUpdates = async () => {
     setChecking(true);
     try {
-      setUpdates((await invoke('harness:checkUpdates', { ids: [...LOGIN_HARNESSES] })) ?? {});
+      setUpdates((await invoke('harness:checkUpdates', { ids: [...NPM_LOGIN_HARNESSES] })) ?? {});
     } catch (e) {
       toast(`Could not check for harness updates: ${(e as Error).message}`, 'error');
     } finally {
@@ -876,7 +876,7 @@ function HarnessLogins() {
     setRefreshing(false);
   };
 
-  const update = async (id: LoginHarness) => {
+  const update = async (id: NpmLoginHarness) => {
     setUpdating(id);
     try {
       const r = await invoke('harness:install', { id });
@@ -889,7 +889,7 @@ function HarnessLogins() {
     } finally { setUpdating(null); }
   };
 
-  const refreshRowModels = async (id: LoginHarness) => {
+  const refreshRowModels = async (id: NpmLoginHarness) => {
     // Ref guard covers a second click before React has committed the disabled button.
     if (modelRefreshPending.current.has(id)) return;
     modelRefreshPending.current.add(id);
@@ -939,17 +939,17 @@ function HarnessLogins() {
               <strong>{h.name}</strong>
               <Badge tone={harnessStatus(id, av).tone}>{harnessStatus(id, av).label}</Badge>
               <Button size="sm" variant="ghost" aria-label={`Sign in to ${h.name}`} onClick={() => useStore.getState().openOnboarding(id)}>Sign in / setup</Button>
-              <Button size="sm" variant="ghost" icon="refresh" aria-label={`Refresh ${h.name} models`} disabled={modelRefresh?.pending} onClick={() => void refreshRowModels(id)}>
+              {id !== 'antigravity' && <Button size="sm" variant="ghost" icon="refresh" aria-label={`Refresh ${h.name} models`} disabled={modelRefresh?.pending} onClick={() => void refreshRowModels(id)}>
                 {modelRefresh?.pending ? <Spinner size={11} /> : null} Refresh models
-              </Button>
+              </Button>}
               {modelRefresh && <span role="status" className={`muted small${modelRefresh.error ? ' info-error' : ''}`}>
                 {modelRefresh.pending ? 'Refreshing models…' : modelRefresh.text}
               </span>}
               <span className="muted small">
                 {av?.version ? `${av.version} · ` : ''}
-                uses its own credentials from {credHome[id]}
+                {id === 'antigravity' ? 'uses the Antigravity CLI’s Google sign-in' : <>uses its own credentials from {credHome[id]}</>}
               </span>
-              {upd?.newer && (
+              {id !== 'antigravity' && upd?.newer && (
                 <>
                   <span className="spacer" />
                   {upd.updatable ? (
@@ -1137,6 +1137,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
       {bin('dsh', 'dsh path override')}
       {bin('npx', 'npx path override')}
       {bin('gemini', 'gemini path override')}
+      {bin('agy', 'Antigravity CLI (agy) path override')}
       </SettingsGroup>
     </div>
   );

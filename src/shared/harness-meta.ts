@@ -148,6 +148,33 @@ export const HARNESSES: HarnessDescriptor[] = [
     }
   },
   {
+    id: 'antigravity',
+    name: 'Google Antigravity',
+    tagline: 'Gemini through your Google account',
+    vendor: 'Google',
+    description: 'Runs Google’s Antigravity CLI using its saved Google sign-in. Gemini models and reasoning options come from your account once the session starts.',
+    docsUrl: 'https://antigravity.google/docs/cli/acp/',
+    capabilities: {
+      streaming: true,
+      approvals: true,
+      steer: false,
+      queue: true,
+      interrupt: true,
+      liveModelSwitch: true,
+      effort: true,
+      images: true,
+      dropsUnsupportedImages: false,
+      resume: true,
+      fork: false,
+      plan: true,
+      costReporting: false,
+      systemPrompt: false,
+      mcp: 'inject',
+      permissionModes: ['ask', 'plan'],
+      modelSource: 'acp-config'
+    }
+  },
+  {
     id: 'acp',
     name: 'ACP agent (DeepSeek Harness, ...)',
     tagline: 'Any Agent Client Protocol agent',
