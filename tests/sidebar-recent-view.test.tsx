@@ -1,5 +1,6 @@
 // The sidebar's Recent view: one list across every folder, most recent first, toggled from the
-// Sessions header and persisted through settings:update (settings.sidebarView).
+// Projects | Recent switch at the top of the sidebar and persisted through settings:update
+// (settings.sidebarView).
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -72,6 +73,7 @@ describe('sidebar Recent view', () => {
     expect(rowIds(container)).toEqual(['a-new', 'a-old']);
     expect(container.querySelector('[data-testid="session-folder"]')).toBeNull();
 
+    expect(getByTestId('sidebar-folders').getAttribute('aria-pressed')).toBe('true');
     const toggle = getByTestId('sidebar-recent');
     expect(toggle.getAttribute('aria-pressed')).toBe('false');
     await act(async () => { fireEvent.click(toggle); });
@@ -82,6 +84,11 @@ describe('sidebar Recent view', () => {
     expect(rowIds(container)).toEqual(['b-new', 'a-new', 'b-mid', 'a-old']);
     expect(getByTestId('sidebar-recent').getAttribute('aria-pressed')).toBe('true');
     expect(getByTestId('sidebar-recent').classList.contains('active')).toBe(true);
+    expect(getByTestId('sidebar-folders').getAttribute('aria-pressed')).toBe('false');
+    // Picking the layout already shown writes nothing.
+    invokeMock.mockClear();
+    await act(async () => { fireEvent.click(getByTestId('sidebar-recent')); });
+    expect(invokeMock).not.toHaveBeenCalledWith('settings:update', expect.anything());
 
     // Each row names its folder, in the folder's own colour.
     const chip = container.querySelector('[data-session-id="b-new"] [data-testid="session-folder"]') as HTMLElement;
@@ -89,8 +96,8 @@ describe('sidebar Recent view', () => {
     expect(chip.title).toBe('G:/proj/b');
     expect(chip.style.color).toBe('rgb(244, 114, 182)');
 
-    // Toggling back restores the grouped layout.
-    await act(async () => { fireEvent.click(getByTestId('sidebar-recent')); });
+    // Projects restores the grouped layout.
+    await act(async () => { fireEvent.click(getByTestId('sidebar-folders')); });
     expect(invokeMock).toHaveBeenCalledWith('settings:update', { sidebarView: 'folders' });
     expect(rowIds(container)).toEqual(['a-new', 'a-old']);
   });
@@ -101,5 +108,17 @@ describe('sidebar Recent view', () => {
     expect(rowIds(container)).toEqual(['a-pin', 'b-new', 'a-new', 'b-mid', 'a-old']);
     await act(async () => { fireEvent.click(getByText('Archived')); });
     expect(rowIds(container)).toEqual(['a-gone', 'b-gone']);
+  });
+
+  it('puts the Projects | Recent switch at the top, apart from the nav links and the Archived toggle', () => {
+    const { container, getByTestId } = mount(sessions);
+    const sw = container.querySelector('.sidebar-viewswitch') as HTMLElement;
+    expect(sw.contains(getByTestId('sidebar-folders'))).toBe(true);
+    expect(sw.contains(getByTestId('sidebar-recent'))).toBe(true);
+    expect(sw.closest('.sidebar-views, .sidebar-section, .sidebar-bottom')).toBeNull();
+    // Before the list it lays out, right after the New session entry.
+    const order = [...(container.querySelector('.sidebar') as HTMLElement).children].map((el) => el.className.split(' ')[0]);
+    expect(order.indexOf('sidebar-viewswitch')).toBe(order.indexOf('sidebar-nav') + 1);
+    expect(order.indexOf('sidebar-viewswitch')).toBeLessThan(order.indexOf('sidebar-list'));
   });
 });

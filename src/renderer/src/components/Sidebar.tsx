@@ -344,19 +344,29 @@ export function Sidebar() {
           </button>
         </div>
       </div>
+      {/* The list's layout, picked at the top of the sidebar: folder groups or one recency order. */}
+      <div className="sidebar-viewswitch" role="group" aria-label="Session list layout">
+        <Icon name={sidebarView === 'recent' ? 'list' : 'folder'} size={15} className="sidebar-viewswitch-icon" />
+        <div className="segmented">
+          {([['folders', 'folder', 'Projects', 'Group sessions by project folder'], ['recent', 'list', 'Recent', 'Sort sessions by recent, across folders']] as const).map(([v, icon, label, title]) => (
+            <button
+              key={v}
+              type="button"
+              className={`segment ${sidebarView === v ? 'active' : ''}`}
+              data-testid={`sidebar-${v}`}
+              aria-pressed={sidebarView === v}
+              title={title}
+              onClick={() => {
+                if (sidebarView !== v) void invoke('settings:update', { sidebarView: v }).catch(toastError);
+              }}
+            >
+              <Icon name={icon} size={12} /> {label}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="sidebar-section">
         <span className="sidebar-section-label">{showArchived ? 'Archived sessions' : 'Sessions'}</span>
-        {/* A pressed toggle: lit while the list is one recency order, off for folder groups. */}
-        <button
-          type="button"
-          className={`sidebar-link sidebar-recent ${sidebarView === 'recent' ? 'active' : ''}`}
-          data-testid="sidebar-recent"
-          aria-pressed={sidebarView === 'recent'}
-          title={sidebarView === 'recent' ? 'Group sessions by folder' : 'Sort sessions by recent, across folders'}
-          onClick={() => void invoke('settings:update', { sidebarView: sidebarView === 'recent' ? 'folders' : 'recent' }).catch(toastError)}
-        >
-          <Icon name="list" size={13} /> Recent
-        </button>
         <button type="button" className={`sidebar-link sidebar-archived ${showArchived ? 'active' : ''}`} title={tip(showArchived ? 'Show active' : 'Archived')} onClick={() => setShowArchived((v) => !v)}>
           <Icon name={showArchived ? 'arrowLeft' : 'clock'} size={13} /> {showArchived ? 'Show active' : 'Archived'}
         </button>
