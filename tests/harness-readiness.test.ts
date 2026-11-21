@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openHarnessLogin } from '../src/main/harness-setup';
 import { parseAntigravityQuota } from '../src/main/harness/antigravity';
+import { listHarnessModels } from '../src/main/harness/registry';
 import { RuntimeResolver, clearRuntimeProbeCache, clearWhichCache } from '../src/main/runtime';
 import { defaultSettings } from '../src/main/settings';
 
@@ -48,6 +49,40 @@ function antigravityAccountProbe(methods: string[], errorCode?: number) {
       reply = { result: { sessions: [] } };
     } else {
       reply = { error: { code: method === 'session/list' ? errorCode : -32601, message: 'Fixture account response' } };
+    }
+    child.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, ...reply }) + '\n');
+  });
+  return child;
+}
+
+/** The CLI's catalog is session config options: base model ids plus a separate thinking level. */
+const antigravityConfigOptions = [
+  { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'gemini-4-neon', options: [
+    { value: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+    { value: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+    { value: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+    { value: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
+  ] },
+  { id: 'thought_level', name: 'Thinking Level', category: 'thought_level', type: 'select', currentValue: 'high', options: [
+    { value: 'low', name: 'Low' }, { value: 'medium', name: 'Medium' }, { value: 'high', name: 'High' }, { value: 'xhigh', name: 'Extra' }
+  ] },
+  { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: 'default', options: [{ value: 'default', name: 'Default' }] }
+];
+
+function antigravityCatalogProbe(methods: string[], signedOut = false) {
+  const child = pipedChild();
+  createInterface({ input: child.stdin }).on('line', (line) => {
+    const { id, method, params } = JSON.parse(line) as { id: number; method: string; params: { protocolVersion?: number } };
+    methods.push(method);
+    let reply;
+    if (method === 'initialize') {
+      reply = { result: { protocolVersion: params.protocolVersion, agentCapabilities: { sessionCapabilities: { list: {}, close: {} } } } };
+    } else if (method === 'session/new') {
+      reply = signedOut ? { error: { code: -32000, message: 'Authentication required' } } : { result: { sessionId: 'catalog-probe', configOptions: antigravityConfigOptions } };
+    } else if (method === 'session/close') {
+      reply = { result: {} };
+    } else {
+      reply = { error: { code: -32601, message: `Fixture does not answer ${method}` } };
     }
     child.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, ...reply }) + '\n');
   });
@@ -167,6 +202,40 @@ describe('harness setup checks', () => {
       expect(options.cwd).toBe(runtime.runtimePaths.appRuntimeDir);
       for (const key of credentialKeys) expect(options.env).not.toHaveProperty(key);
     }
+  });
+
+  it('lists the Google account’s Antigravity models before a session starts, without prompting a model', async () => {
+    const { runtime, settings } = await resolver();
+    const credentialKeys = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'AGY_ADC_AUTH', 'GOOGLE_APPLICATION_CREDENTIALS'];
+    for (const key of credentialKeys) vi.stubEnv(key, 'fixture-credential');
+    const methods: string[] = [];
+    spawnTool.mockImplementation(() => antigravityCatalogProbe(methods));
+    const efforts = ['low', 'medium', 'high', 'xhigh'];
+    const result = await listHarnessModels({ harness: 'antigravity', settings, runtime, getApiKey: async () => undefined });
+    expect(result).toEqual({ models: [
+      { id: 'gemini-4-neon', provider: 'antigravity', displayName: 'Gemini 4 Neon', supportedEfforts: efforts, isDefault: true },
+      { id: 'gemini-4-argon', provider: 'antigravity', displayName: 'Gemini 4 Argon', supportedEfforts: efforts, isDefault: false },
+      { id: 'gemini-3.8-flash', provider: 'antigravity', displayName: 'Gemini 3.8 Flash', supportedEfforts: efforts, isDefault: false },
+      { id: 'gpt-oss-120b-medium', provider: 'antigravity', displayName: 'GPT-OSS 120B (Medium)', supportedEfforts: efforts, isDefault: false }
+    ] });
+    expect(methods).toEqual(['initialize', 'session/new', 'session/close']);
+    expect(runtime.resolve).toHaveBeenCalledExactlyOnceWith('agy');
+    expect(spawnTool).toHaveBeenCalledOnce();
+    const [, args, options] = spawnTool.mock.calls[0]!;
+    expect(args).toEqual(['--settings', expect.any(String), 'acp']);
+    expect(JSON.parse(args[1])).toMatchObject({ toolPermission: 'strict', allowNonWorkspaceAccess: false });
+    expect(options.cwd).toBe(runtime.runtimePaths.appRuntimeDir);
+    for (const key of credentialKeys) expect(options.env).not.toHaveProperty(key);
+  });
+
+  it('reports Google sign-in for the Antigravity model list of a signed-out account', async () => {
+    const { runtime, settings } = await resolver();
+    const methods: string[] = [];
+    spawnTool.mockImplementation(() => antigravityCatalogProbe(methods, true));
+    const result = await listHarnessModels({ harness: 'antigravity', settings, runtime, getApiKey: async () => undefined });
+    expect(result.models).toEqual([]);
+    expect(result.error).toMatch(/Sign in with Google/);
+    expect(methods).toEqual(['initialize', 'session/new']);
   });
 
   it('rejects Antigravity usage output when the vendor reports a model turn', () => {
