@@ -26,6 +26,7 @@ import { CodexAppServerAdapter } from '../src/main/harness/codex-app-server';
 import { PiAdapter } from '../src/main/harness/pi';
 import { ClaudeAdapter } from '../src/main/harness/claude';
 import { NativeAdapter } from '../src/main/harness/native';
+import { deferred } from '../src/main/util/async';
 
 type AnyRecord = Record<string, any>;
 
@@ -268,6 +269,7 @@ const REFS_BY_HARNESS: Record<HarnessId, HarnessRef> = {
   cursor: { cursorAgentId: 'cursor-agent-1' },
   pi: { piSessionFile: '/sessions/pi/pi-session-1.jsonl' },
   acp: { acpSessionId: 'acp-session-1' },
+  antigravity: { acpSessionId: 'antigravity-session-1' },
   native: { nativeHistory: true }
 };
 
@@ -311,7 +313,7 @@ describe('session resume persistence', () => {
     // A restart is a brand-new store reading the same on-disk index.
     const freshStore = new SessionStore(dir);
     const loaded = await freshStore.load();
-    expect(loaded).toHaveLength(7);
+    expect(loaded).toHaveLength(Object.keys(REFS_BY_HARNESS).length);
     for (const [harness, ref] of Object.entries(REFS_BY_HARNESS) as [HarnessId, HarnessRef][]) {
       expect(loaded.find((s) => s.config.harness === harness)?.harnessRef).toEqual(ref);
     }
@@ -326,6 +328,57 @@ describe('session resume persistence', () => {
       expect(mocks.adapterCalls[0].id).toBe(harness);
       expect(mocks.adapterCalls[0].ctx.session().harnessRef).toEqual(ref);
     }
+  });
+
+  it('keeps automated turns and unsupported modes out of Antigravity dispatch', async () => {
+    const store = new SessionStore(path.join(tmpRoot, 'antigravity-interactive'));
+    await store.load();
+    const meta = persistedMeta('antigravity', REFS_BY_HARNESS.antigravity);
+    await store.upsert(meta);
+    const manager = new SessionManager(makeManagerDeps(store));
+    const control = {
+      operationId: 'test', inputId: 'u_test', beforeStart: vi.fn(), startAllowed: vi.fn(), beforeDispatch: vi.fn()
+    };
+    mocks.adapterCalls.length = 0;
+
+    await expect(manager.runControlled(meta.id, { text: 'Say hello' }, control)).rejects.toThrow('direct user prompts');
+    await expect(manager.goal(meta.id, 'set', { objective: 'Say hello' })).rejects.toThrow('direct user prompts');
+    await expect(manager.setPermissionMode(meta.id, 'full-auto')).rejects.toThrow('Ask and Plan');
+    expect(control.beforeStart).not.toHaveBeenCalled();
+    expect(mocks.adapterCalls).toHaveLength(0);
+    expect(await manager.transcript(meta.id)).toEqual([]);
+    expect(manager.get(meta.id)).toMatchObject({ config: { permissionMode: 'ask' }, status: 'idle' });
+  });
+
+  it('holds Antigravity turn admission until a permission change is saved', async () => {
+    const store = new SessionStore(path.join(tmpRoot, 'antigravity-permissions'));
+    await store.load();
+    const meta = persistedMeta('antigravity', REFS_BY_HARNESS.antigravity);
+    await store.upsert(meta);
+    const manager = new SessionManager(makeManagerDeps(store));
+    const writing = deferred<void>();
+    const finish = deferred<void>();
+    const upsert = store.upsert.bind(store);
+    vi.spyOn(store, 'upsert').mockImplementationOnce(async (value) => {
+      writing.resolve();
+      await finish.promise;
+      return upsert(value);
+    });
+    mocks.adapterCalls.length = 0;
+
+    const change = manager.setPermissionMode(meta.id, 'plan');
+    await writing.promise;
+    try {
+      await expect(manager.send(meta.id, { text: 'While permissions change' })).rejects.toThrow('permission update');
+      expect(mocks.adapterCalls).toHaveLength(0);
+      expect(await manager.transcript(meta.id)).toEqual([]);
+    } finally {
+      finish.resolve();
+    }
+    expect((await change).config.permissionMode).toBe('plan');
+    await manager.send(meta.id, { text: 'After permissions change' });
+    expect(mocks.adapterCalls).toHaveLength(1);
+    expect(mocks.adapterCalls[0].ctx.permissionMode()).toBe('plan');
   });
 });
 

@@ -2,12 +2,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { HarnessId } from '../../../shared/types';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
-import { harnessStatus, type HarnessSetupStatus } from '../../../shared/harness-setup';
+import { harnessStatus, type AntigravityQuota, type HarnessSetupStatus, type LoginHarnessId } from '../../../shared/harness-setup';
 import { invoke } from '../api';
 import { useStore } from '../store';
 import { Badge, Button, Icon, Spinner } from './ui';
 
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const loginLabels: Record<LoginHarnessId, string> = {
+  claude: 'Sign in with Claude', codex: 'Sign in with ChatGPT', pi: 'Open Pi sign-in', antigravity: 'Sign in with Google'
+};
 
 export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
   harness: HarnessId;
@@ -15,7 +18,8 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
   onChange: (status: HarnessSetupStatus | null, pending?: boolean) => void;
 }) {
   const [status, setStatus] = useState<HarnessSetupStatus | null>(null);
-  const [busy, setBusy] = useState<'check' | 'install' | 'login' | null>(null);
+  const [busy, setBusy] = useState<'check' | 'install' | 'login' | 'quota' | null>(null);
+  const [quota, setQuota] = useState<AntigravityQuota | null>(null);
   const [awaitingLogin, setAwaitingLogin] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -27,6 +31,7 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
   const check = async () => {
     const request = ++generation.current;
     setBusy('check'); setStatus(null); setAwaitingLogin(false);
+    setQuota(null);
     setProblem(null);
     change.current(null, true);
     try {
@@ -73,6 +78,7 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
     if (!status?.loginId || busy) return;
     const request = ++generation.current;
     setBusy('login'); setProblem(null); setNotice(null);
+    setQuota(null);
     change.current(null, true);
     let launched = false;
     try {
@@ -90,21 +96,48 @@ export function HarnessSetup({ harness, refreshToken = 0, onChange }: {
     }
   };
 
+  const checkQuota = async () => {
+    if (busy) return;
+    const request = ++generation.current;
+    setBusy('quota'); setProblem(null); setQuota(null);
+    try {
+      const result = await invoke('harness:antigravityQuota', undefined);
+      if (request === generation.current) setQuota(result);
+    } catch (error) {
+      if (request === generation.current) setProblem(message(error));
+    } finally {
+      if (request === generation.current) setBusy(null);
+    }
+  };
+
   const badge = awaitingLogin ? { label: 'Recheck sign-in', tone: 'amber' as const } : harnessStatus(harness, status?.availability);
   return <section className="setup-checks" aria-label={`${HARNESS_BY_ID[harness].name} setup`} aria-busy={!!busy}>
     <div className="row gap8">
       <strong>Runtime and sign-in</strong><Badge tone={badge.tone}>{badge.label}</Badge><span className="spacer" />
       <Button size="sm" variant="ghost" disabled={!!busy} icon="refresh" onClick={() => void check()}>Recheck setup</Button>
     </div>
-    {busy && <p role="status"><Spinner size={13} /> {busy === 'install' ? 'Installing into Vocs Code’s private runtime folder. This can take a few minutes…' : busy === 'login' ? 'Opening the vendor sign-in…' : 'Checking this machine…'}</p>}
+    {busy && <p role="status"><Spinner size={13} /> {busy === 'install' ? 'Installing into Vocs Code’s private runtime folder. This can take a few minutes…' : busy === 'login' ? 'Opening the vendor sign-in…' : busy === 'quota' ? 'Checking Antigravity quota…' : 'Checking this machine…'}</p>}
     {problem && <div className="callout warn" role="alert">{problem}</div>}
     {notice && <p className="callout" role="status">{notice}</p>}
     {status && <>
       <p className="muted small">{status.availability.detail}</p>
       {status.availability.binaryPath && <p className="small setup-path"><strong>{status.availability.source === 'bundled' ? 'Included with the app' : 'Selected runtime'}:</strong> <code>{status.availability.binaryPath}</code>{status.availability.version && <> · {status.availability.version}</>}</p>}
       {status.availability.available && status.loginId && <div className="row gap8 wrap">
-        <Button disabled={!!busy} onClick={() => void login()}>{status.loginId === 'claude' ? 'Sign in with Claude' : status.loginId === 'codex' ? 'Sign in with ChatGPT' : 'Open Pi sign-in'}</Button>
+        <Button disabled={!!busy} onClick={() => void login()}>{loginLabels[status.loginId]}</Button>
         {status.loginId === 'codex' && <Button disabled={!!busy} variant="ghost" onClick={() => void login(true)}>Use device sign-in</Button>}
+        {harness === 'antigravity' && status.availability.authenticated === true && !awaitingLogin &&
+          <Button disabled={!!busy} variant="ghost" onClick={() => void checkQuota()}>Check Antigravity quota</Button>}
+      </div>}
+      {quota && <div aria-live="polite" aria-label="Antigravity account quota">
+        {quota.groups.map((group) => <div key={group.name}>
+          <strong>{group.name}</strong>
+          <ul>
+            {group.buckets.map((bucket) => <li key={bucket.name}>
+              {bucket.name} · <span>{Math.round(bucket.remainingFraction * 100)}% remaining</span>
+              {bucket.resetAt && <> · Resets {new Date(bucket.resetAt).toLocaleString()}</>}
+            </li>)}
+          </ul>
+        </div>)}
       </div>}
       {status.availability.authMethod === 'api-key' && <p className="callout warn">API credentials are configured. API usage is billed separately from a Claude or ChatGPT subscription.</p>}
       {!status.availability.available && <>

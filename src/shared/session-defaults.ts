@@ -44,11 +44,12 @@ export function resolveNewSessionDefaults(settings: AppSettings, root: string | 
   const folder = folderSessionDefaults(settings, root);
   const harness = folder?.harness ?? settings.defaultHarness;
   const prefix = folder?.branchPrefix;
+  const mode = folder?.permissionMode ?? settings.defaultPermissionMode;
   return {
     harness,
     model: rememberedModel(settings, root, harness),
     effort: (folder?.effort ?? settings.defaultEffort) ?? '',
-    permissionMode: folder?.permissionMode ?? settings.defaultPermissionMode,
+    permissionMode: harness === 'antigravity' && mode !== 'plan' ? 'ask' : mode,
     useWorktree: folder?.useWorktree ?? false,
     branchPrefix: prefix && branchPrefixOptions(settings.customBranchPrefixes).includes(prefix) ? prefix : DEFAULT_BRANCH_PREFIX,
     acpAgent: folder?.acpAgent ?? settings.acpAgents[0]?.id

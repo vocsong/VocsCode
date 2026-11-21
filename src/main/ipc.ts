@@ -145,9 +145,14 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     desktop: desktopBridge(deps)
   });
   for (const channel of registry.channels()) ipcMain.handle(channel, (event, req: unknown) => {
-    if (channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel === 'harness:login') {
+    if (channel.startsWith('control:') || channel.startsWith('vocsAccount:') || channel === 'harness:login' || channel === 'harness:antigravityQuota') {
       const contents = deps.getWindow()?.webContents;
-      if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) throw new Error(channel.startsWith('vocsAccount:') ? 'Vocs account sign-in requires the local desktop owner.' : channel === 'harness:login' ? 'Harness sign-in requires the local desktop owner.' : 'External control grants require the local desktop owner.');
+      if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) {
+        if (channel.startsWith('vocsAccount:')) throw new Error('Vocs account sign-in requires the local desktop owner.');
+        if (channel === 'harness:login') throw new Error('Harness sign-in requires the local desktop owner.');
+        if (channel === 'harness:antigravityQuota') throw new Error('Antigravity quota requires the local desktop owner.');
+        throw new Error('External control grants require the local desktop owner.');
+      }
     }
     return registry.invoke(channel, req, 'desktop');
   });

@@ -8,13 +8,14 @@ Technical reference moved out of the README. For the friendly overview, read the
 src/shared        types, IPC contract, harness metadata, diff parser, theme catalogue + terminal palette, interface modes (no runtime deps);
                   mission*.ts hold the Mission record, preset/config and command contracts
 src/main
-  harness/        one adapter per harness → normalized SessionEvent stream
+  harness/        adapters → normalized SessionEvent stream
     claude.ts     Agent SDK query() with streaming input, canUseTool approvals, file-change hooks
     codex-app-server.ts + jsonrpc.ts   Codex app-server client (thread/turn/item notifications, approval requests)
     codex-exec.ts SDK fallback
     cursor.ts     @cursor/sdk, local runtime; sandbox + plan-mode allowlist instead of approvals
     pi.ts         pi RPC protocol; resources/pi/vocs-code-approvals.ts is the extension that adds approvals
-    acp.ts        Agent Client Protocol client (DeepSeek Harness and friends)
+    acp.ts        Agent Client Protocol client (Google Antigravity and generic ACP agents)
+    antigravity.ts  Antigravity CLI settings, account probe and quota decoding
     native/       provider-neutral agent loop, tools, Anthropic + OpenAI-compatible drivers
   mission/        durable Mission coordination (service/state/store), scoped tools, scheduling,
                   workspaces, verification, delivery and restart recovery (docs/MISSIONS.md)
@@ -125,6 +126,7 @@ loses the Git panel.
 | **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | all pages of Codex's dynamic `model/list` via a short-lived app-server probe (static fallback only) | injected (`config.mcp_servers`; secrets via the environment) — Codex declines MCP tool calls under this adapter's `approvalPolicy: never` |
 | **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan | inherited — Cursor reads its own `mcp.json`; import/export only |
 | **Pi** | `pi --mode rpc` + bundled approvals and MCP-bridge extensions | interactive | pi's registry plus the app's bundled catalogs for every provider pi already lists (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, OpenCode Go, Ollama, custom) | injected — the bridge extension registers each MCP tool with pi |
+| **Google Antigravity** | Google's `agy acp` over stdio, using the saved Google sign-in | Ask and Plan through ACP and the CLI's strict tool policy | account-advertised Gemini models and thinking levels after connection | stdio servers injected through `session/new.mcpServers` |
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
 
@@ -260,7 +262,7 @@ audit is requested only once the goal is achieved and verified.
 Layering is enforced by convention and by `tsconfig` project boundaries:
 
 - `src/shared` — types, IPC contract, harness metadata, diff parser. **No runtime deps, no Electron imports**; importable from every process.
-- `src/main` — all privileged work. `harness/` holds one adapter per harness; `models/` provider clients; `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
+- `src/main` — all privileged work. `harness/` holds the adapters, `models/` holds provider clients, and `util/` has no Electron imports so adapters stay unit-testable in Node. `handlers.ts` is the Electron-free IPC handler registry and `ipc.ts` binds it to Electron.
 - `src/preload` — the only bridge. Renderer calls go through `window.harness`; channels and payloads are defined once in `src/shared/ipc.ts`.
 - `src/renderer` — React 19 + zustand. **Never touches Node or Electron directly.** `terminal/host.ts` keeps xterm.js instances alive outside React.
 - `src/web` — the browser shell. It may import `src/renderer/src`, `src/shared` and `relay/src/web-client.ts`; it must **never** import `src/main`, Electron or `terminal/host` (xterm). It binds its own `window.harness` before any renderer module loads (`install-transport.ts`).
@@ -325,6 +327,13 @@ Touch all of these: add an adapter in `src/main/harness/<id>.ts`, register the c
 `src/main/harness/registry.ts`, add the id to `HarnessId` in `src/shared/types.ts`, add its
 descriptor/capabilities in `src/shared/harness-meta.ts`, and wire detection/install/doctor in
 `src/main/runtime.ts`. Permission modes must map through the shared model (see the table below).
+
+Antigravity and the generic ACP choice share one adapter. Antigravity uses the CLI's strict tool
+policy and sets the vendor session mode explicitly. Ask uses `default` and presents one-time
+approvals. Plan uses `plan` and denies mutations through the ACP callback. The app keeps the
+ACP session identifier for resume and receives context usage through `usage_update`.
+The account route only accepts human-driven turns. The app goal loop, Missions and external
+controllers cannot dispatch Antigravity prompts. [Google ACP guidance](https://antigravity.google/docs/ide/extensions/acp/) · [Interactive use and quota](https://github.com/google-antigravity/antigravity-cli/issues/1493#issuecomment-6814901159)
 
 ## Permission mode mapping
 

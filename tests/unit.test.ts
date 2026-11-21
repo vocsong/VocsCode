@@ -855,7 +855,7 @@ describe('model capability overrides', () => {
   });
 
   it('lists Pi first in the harness pickers', () => {
-    expect(HARNESSES.map((h) => h.id)).toEqual(['pi', 'claude', 'codex', 'codex-exec', 'cursor', 'acp', 'native']);
+    expect(HARNESSES.map((h) => h.id)).toEqual(['pi', 'claude', 'codex', 'codex-exec', 'cursor', 'antigravity', 'acp', 'native']);
   });
 
   it('marks pi as the only harness that strips images itself', () => {
