@@ -30,6 +30,8 @@ export function createAdapter(id: HarnessId, ctx: HarnessContext): HarnessAdapte
       return new PiAdapter(ctx);
     case 'acp':
       return new AcpAdapter(ctx);
+    case 'antigravity':
+      return new AcpAdapter(ctx, 'antigravity');
     case 'native':
       return new NativeAdapter(ctx);
   }
@@ -102,6 +104,8 @@ async function listHarnessModelsRaw(opts: {
       }
       case 'acp':
         return { models: [], error: 'ACP agents advertise their models once the session starts; pick one from the header afterwards.' };
+      case 'antigravity':
+        return { models: [], error: 'Antigravity lists the models for your Google account after the session starts.' };
       case 'native': {
         const out: ModelInfo[] = [];
         for (const p of settings.providers.filter((p) => p.enabled)) {

@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { AppSettings, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
-import { INSTALL_HARNESS, LOGIN_HARNESS, type HarnessSetupStatus, type LoginHarnessId } from '../shared/harness-setup';
+import { ANTIGRAVITY_INSTALL_URL, ANTIGRAVITY_MIN_VERSION, INSTALL_HARNESS, LOGIN_HARNESS, type HarnessSetupStatus, type LoginHarnessId } from '../shared/harness-setup';
 import { clearRuntimeProbeCache, parseVersion, compareVersions, runCapture, which, type RuntimeResolver } from './runtime';
 import { withProcessOwner } from './process-context';
 
@@ -32,6 +32,19 @@ export async function readHarnessSetup(runtime: RuntimeResolver, settings: AppSe
   assertHarnessId(harness);
   clearRuntimeProbeCache();
   const availability = withAppCredentials(harness, await runtime.availability(harness), settings);
+  const providers = settings.providers.map((p) => ({
+    id: p.id,
+    source: p.hasApiKey ? 'stored' as const : p.envKey && process.env[p.envKey]?.trim() ? 'environment' as const : ['ollama', 'lmstudio'].includes(p.kind) ? 'local' as const : 'none' as const
+  }));
+  if (harness === 'antigravity') {
+    return {
+      harness, availability, providers, canInstall: false, loginId: 'antigravity',
+      requirements: [{
+        id: 'runtime', name: 'Antigravity CLI', available: availability.available,
+        detail: `Google’s Antigravity CLI ${ANTIGRAVITY_MIN_VERSION} or newer. Install it, then recheck setup.`, url: ANTIGRAVITY_INSTALL_URL
+      }]
+    };
+  }
   const sdk = SDKS[harness];
   let sdkAvailable = true;
   if (sdk) {
@@ -45,10 +58,6 @@ export async function readHarnessSetup(runtime: RuntimeResolver, settings: AppSe
   const version = nodeProbe?.code === 0 ? parseVersion(nodeProbe.stdout) : null;
   // Current Pi requires 22.19+, rather than simply any executable named node.
   const nodeReady = !!version && (harness !== 'pi' || compareVersions(version, '22.19.0') >= 0);
-  const providers = settings.providers.map((p) => ({
-    id: p.id,
-    source: p.hasApiKey ? 'stored' as const : p.envKey && process.env[p.envKey]?.trim() ? 'environment' as const : ['ollama', 'lmstudio'].includes(p.kind) ? 'local' as const : 'none' as const
-  }));
   if (!sdkAvailable) {
     availability.available = false;
     availability.detail = `The ${sdk} SDK shipped with Vocs Code is missing. Repair or reinstall Vocs Code; installing another CLI will not repair this SDK.`;
@@ -80,6 +89,7 @@ export function loginArgs(harness: LoginHarnessId, device = false): string[] {
   if (harness === 'claude') return ['auth', 'login', '--claudeai'];
   if (harness === 'codex') return device ? ['login', '--device-auth'] : ['login'];
   if (harness === 'pi') return ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes'];
+  if (harness === 'antigravity') return ['acp', '--login'];
   throw new Error('Unsupported sign-in');
 }
 
@@ -91,7 +101,7 @@ export async function openHarnessLogin(
   deps: { platform?: NodeJS.Platform; spawn?: typeof spawn; which?: typeof which } = {}
 ): Promise<{ ok: boolean; error?: string }> {
   const args = loginArgs(harness, device); // validates before resolving or creating anything
-  const binary = runtime.resolve(harness);
+  const binary = runtime.resolve(harness === 'antigravity' ? 'agy' : harness);
   if (!binary) return { ok: false, error: 'Install or repair this runtime first, then recheck setup.' };
   const platform = deps.platform ?? process.platform;
   const locate = deps.which ?? which;

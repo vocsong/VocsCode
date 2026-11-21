@@ -5,16 +5,18 @@
  * dispatch are exercised; only the child process is fake.
  */
 import { EventEmitter } from 'node:events';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as acp from '@agentclientprotocol/sdk';
-import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
+import type { ApprovalDraft, HarnessAdapter, HarnessContext } from '../src/main/harness/types';
 import type { ResolvedServer } from '../src/main/mcp/effective';
 import type { HarnessRef, PermissionMode, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { emptyUsage } from '../src/main/models/static-models';
 import { defaultSettings } from '../src/main/settings';
-import { AcpAdapter } from '../src/main/harness/acp';
+import { createAdapter } from '../src/main/harness/registry';
 
 type AnyRecord = Record<string, any>;
 
@@ -120,7 +122,7 @@ class FakeAcpAgent {
 }
 
 interface Harness {
-  adapter: AcpAdapter;
+  adapter: HarnessAdapter;
   agent: FakeAcpAgent;
   child: AnyRecord;
   ctx: HarnessContext;
@@ -132,8 +134,15 @@ interface Harness {
 }
 
 const created: Harness[] = [];
+const antigravityBin = path.join(os.tmpdir(), 'fake-agy.exe');
+const antigravityModes: acp.SessionModeState = {
+  currentModeId: 'auto',
+  availableModes: [{ id: 'auto', name: 'Auto' }, { id: 'default', name: 'Default' }, { id: 'plan', name: 'Plan' }]
+};
 
-function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode } = {}): Harness {
+function makeHarness(opts: { harness?: 'acp' | 'antigravity'; ref?: HarnessRef; permissionMode?: PermissionMode; cwd?: string } = {}): Harness {
+  const harness = opts.harness ?? 'acp';
+  const cwd = opts.cwd ?? '/proj';
   const child = makeFakeChild();
   spawnState.children.push(child);
   const agent = new FakeAcpAgent(child);
@@ -149,8 +158,8 @@ function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode }
     title: 't',
     createdAt: 0,
     updatedAt: 0,
-    config: { harness: 'acp', projectRoot: '/proj', permissionMode: opts.permissionMode ?? 'auto', acpAgent: 'test-agent' },
-    cwd: '/proj',
+    config: { harness, projectRoot: cwd, permissionMode: opts.permissionMode ?? 'auto', acpAgent: 'test-agent' },
+    cwd,
     status: 'idle',
     harnessRef: { ...(opts.ref ?? {}) },
     usage: emptyUsage()
@@ -159,7 +168,10 @@ function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode }
     sessionId: meta.id,
     session: () => meta,
     settings: () => settings,
-    runtime: { runtimePaths: { appRuntimeDir: '/tmp' }, resolve: () => null } as never,
+    runtime: {
+      runtimePaths: { appRuntimeDir: '/tmp' },
+      resolve: vi.fn((id: string) => id === 'agy' ? { path: antigravityBin } : null)
+    },
     sessionDir: '/tmp/s1',
     permissionMode: () => meta.config.permissionMode,
     effort: () => undefined,
@@ -189,7 +201,7 @@ function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode }
     mcpServers: async () => [],
     ownedMcpIds: () => []
   } as unknown as HarnessContext;
-  const adapter = new AcpAdapter(ctx);
+  const adapter = createAdapter(harness, ctx);
   const h: Harness = { adapter, agent, child, ctx, meta, events, items, approvals, logs };
   created.push(h);
   return h;
@@ -214,12 +226,107 @@ describe('acp adapter', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     for (const h of created) {
       await h.adapter.dispose().catch(() => undefined);
       h.child.stdin.destroy();
       h.child.stdout.destroy();
       h.child.stderr.destroy();
     }
+  });
+
+  it('uses the official Antigravity account launch and resumes an existing session', async () => {
+    const credentialVars = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'AGY_ADC_AUTH', 'GOOGLE_APPLICATION_CREDENTIALS'];
+    for (const name of credentialVars) vi.stubEnv(name, 'fake-credential-setting');
+    vi.stubEnv('VOCS_ACP_TEST_MARKER', 'keep');
+    const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask', ref: { acpSessionId: 'agy-saved' } });
+    const getApiKey = vi.fn(async () => 'fake-vault-key');
+    h.ctx.getApiKey = getApiKey;
+    scriptBasics(h, { sessionCapabilities: { resume: {} } });
+    h.agent.on('session/resume', () => ({ modes: antigravityModes }));
+    h.agent.on('session/set_mode', () => ({}));
+
+    await h.adapter.start();
+
+    expect(h.ctx.runtime.resolve).toHaveBeenCalledExactlyOnceWith('agy');
+    expect(getApiKey).not.toHaveBeenCalled();
+    expect(spawnState.spawnCalls).toHaveLength(1);
+    const [{ file, args, opts }] = spawnState.spawnCalls;
+    expect(file).toBe(antigravityBin);
+    expect(args).toEqual(['--settings', expect.any(String), 'acp']);
+    expect(JSON.parse(args[1])).toMatchObject({ modelProvider: '', toolPermission: 'strict', allowNonWorkspaceAccess: false });
+    expect(opts.env.VOCS_ACP_TEST_MARKER).toBe('keep');
+    for (const name of credentialVars) expect(opts.env).not.toHaveProperty(name);
+    expect(h.agent.requests.map((r) => r.method)).toEqual(['initialize', 'session/resume', 'session/set_mode']);
+    expect(h.agent.requests[1].params.sessionId).toBe('agy-saved');
+    expect(h.meta.harnessRef.acpSessionId).toBe('agy-saved');
+    expect(h.events.at(-1)).toEqual({ type: 'status', status: 'idle' });
+  });
+
+  it.each([
+    { mode: 'ask', modeId: 'default', stopReason: 'end_turn', turnStatus: 'completed', approvalCount: 1 },
+    { mode: 'plan', modeId: 'plan', stopReason: 'cancelled', turnStatus: 'interrupted', approvalCount: 0 }
+  ] as const)('honors Antigravity $mode during a tool request and records the turn', async ({ mode, modeId, stopReason, turnStatus, approvalCount }) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-antigravity-acp-'));
+    let finishCancelled!: () => void;
+    const cancelled = new Promise<void>((resolve) => { finishCancelled = resolve; });
+    try {
+      const marker = path.join(cwd, 'command-marker.txt');
+      const h = makeHarness({ harness: 'antigravity', permissionMode: mode, cwd });
+      const decide = vi.fn(async (_draft: ApprovalDraft) => ({ optionId: 'deny' }));
+      h.ctx.requestApproval = decide;
+      scriptBasics(h);
+      h.agent.on('session/new', () => ({ sessionId: 'sess-1', modes: antigravityModes }));
+      h.agent.on('session/set_mode', () => ({}));
+      const toolResponses: unknown[] = [];
+      h.agent.on('session/prompt', async ({ sessionId }) => {
+        const response = await h.agent.serverRequest('session/request_permission', {
+          sessionId,
+          toolCall: { toolCallId: 'write-marker', kind: 'execute', title: 'Write test marker', rawInput: { command: 'write-marker' } },
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }, { optionId: 'deny', name: 'Deny', kind: 'reject_once' }]
+        });
+        if (response.result?.outcome?.optionId === 'allow') await fs.writeFile(marker, 'command ran');
+        h.agent.notify('session/update', { sessionId, update: { sessionUpdate: 'usage_update', used: 37, size: 2_000 } });
+        toolResponses.push(response.result);
+        if (stopReason === 'cancelled') await cancelled;
+        else h.agent.notify('session/update', { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'PONG' } } });
+        return { stopReason };
+      });
+
+      await h.adapter.start();
+      expect(h.agent.requests.filter((r) => r.method === 'session/set_mode').map((r) => r.params)).toEqual([{ sessionId: 'sess-1', modeId }]);
+      await h.adapter.send({ text: 'Check the command approval.' });
+      await vi.waitFor(() => expect(toolResponses).toEqual([{ outcome: { outcome: 'selected', optionId: 'deny' } }]));
+      expect(decide).toHaveBeenCalledTimes(approvalCount);
+      await expect(fs.stat(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+      if (stopReason === 'cancelled') {
+        await h.adapter.interrupt();
+        await vi.waitFor(() => expect(h.agent.requests.filter((r) => r.method === 'session/cancel').map((r) => r.params)).toEqual([{ sessionId: 'sess-1' }]));
+        finishCancelled();
+      }
+      await vi.waitFor(() => expect(h.adapter.busy).toBe(false));
+
+      expect(turnItems(h.items).map((item) => item.status)).toEqual([turnStatus]);
+      const assistants = [...h.items.values()].filter((i) => i.kind === 'assistant');
+      expect(assistants.map((i) => i.text)).toEqual(stopReason === 'cancelled' ? [] : ['PONG']);
+      const usage = h.events.filter((e) => e.type === 'usage');
+      expect(usage.map(({ totals }) => [totals.contextTokens, totals.contextWindow])).toEqual([[37, 2_000], [37, 2_000]]);
+      expect(h.events.filter((e) => e.type === 'status').map((e) => e.status)).toEqual(['idle', 'running', 'idle']);
+    } finally {
+      finishCancelled();
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves the Antigravity session when Google sign-in is required to resume it', async () => {
+    const h = makeHarness({ harness: 'antigravity', permissionMode: 'ask', ref: { acpSessionId: 'agy-saved' } });
+    scriptBasics(h, { sessionCapabilities: { resume: {} } });
+    h.agent.on('session/resume', () => { throw new Error('Authentication required'); });
+
+    await expect(h.adapter.start()).rejects.toThrow(/sign in with google/i);
+    expect(h.agent.requests.map((r) => r.method)).toEqual(['initialize', 'session/resume']);
+    expect(h.meta.harnessRef.acpSessionId).toBe('agy-saved');
+    expect(infoTexts(h.items, 'warn')).toEqual([]);
   });
 
   it('initializes and creates a session when no ref is stored', async () => {

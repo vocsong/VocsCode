@@ -64,12 +64,12 @@ export const SETTINGS_PAGES = [
   ] },
   { id: 'providers', label: 'Providers & keys', icon: 'key', group: 'Connections', description: 'Connect your models. Keep credentials in the OS keychain, not in configuration.', saveHint: 'Keys and new providers have explicit Save actions', topics: [
     { label: 'Providers & API keys', description: 'Enable providers, save or test keys and configure endpoints.', keywords: 'openai anthropic openrouter deepseek ollama lmstudio api key secrets base url custom', anchor: 'providers-catalog' },
-    { label: 'Harness logins', description: 'Refresh models, check agent login status and available CLI updates.', keywords: 'login authentication credentials updates codex claude pi catalog reload', anchor: 'providers-logins' },
+    { label: 'Harness logins', description: 'Refresh models, check agent login status and available CLI updates.', keywords: 'login authentication credentials updates codex claude pi catalog reload google antigravity gemini quota', anchor: 'providers-logins' },
     { label: 'Model capability overrides', description: 'Correct whether a model accepts image attachments.', keywords: 'vision images models override capability', anchor: 'providers-overrides' },
   ] },
   { id: 'harnesses', label: 'Harnesses', icon: 'cpu', group: 'Connections', description: 'Your agent runtimes, in one place. Check availability, install and configure.', saveHint: AUTO, topics: [
-    { label: 'Installed runtimes', description: 'Availability and installation for all seven agent harnesses.', keywords: 'agents sdk runtime cli install update cursor native claude codex pi acp', anchor: 'harnesses-installed' },
-    { label: 'Runtime configuration', description: 'Bundled vs system runtimes, binary paths and extra arguments.', keywords: 'binary path override extra arguments npx dsh gemini runtime', anchor: 'harnesses-config' },
+    { label: 'Installed runtimes', description: 'Availability and installation for agent harnesses.', keywords: 'agents sdk runtime cli install update cursor native claude codex pi acp antigravity', anchor: 'harnesses-installed' },
+    { label: 'Runtime configuration', description: 'Bundled vs system runtimes, binary paths and extra arguments.', keywords: 'binary path override extra arguments npx dsh gemini agy antigravity runtime', anchor: 'harnesses-config' },
   ] },
   { id: 'pi', label: 'Pi', icon: 'puzzle', group: 'Connections', description: 'Fine-tune Pi’s own configuration, extensions and agent tools.', saveHint: 'File editors have explicit Save actions', topics: [
     { label: 'Pi configuration', description: 'Models, packages, prompts, skills and extension settings.', keywords: 'packages extensions subagents concurrency skills prompts compaction retry thinking steering followup pi' },

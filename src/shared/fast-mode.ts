@@ -10,7 +10,7 @@ export interface FastModeSupport {
 /** Conservative candidates, not account entitlement or proof that a request used a fast tier. */
 export function fastModeSupport(harness: HarnessId, model: ModelRef | undefined, providers: ProviderConfig[] = []): FastModeSupport {
   const no = (reason: string): FastModeSupport => ({ supported: false, reason });
-  if (harness === 'cursor' || harness === 'acp') return no('This harness does not expose Fast mode.');
+  if (harness === 'cursor' || harness === 'acp' || harness === 'antigravity') return no('This harness does not expose Fast mode.');
   if (!model) return harness === 'codex' || harness === 'codex-exec'
     ? { supported: true }
     : no('Choose a supported OpenAI or Claude Opus model to use Fast mode.');

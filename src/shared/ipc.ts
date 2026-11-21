@@ -1,7 +1,7 @@
 import type { VocsAccountSignInRequest, VocsAccountState } from './vocs-account';
 /** The IPC contract shared by main, preload and renderer. Single source of truth for channels, payloads and the exposed API shape. */
 import type { ControlGrantInput, ControlOwnerState } from './control';
-import type { HarnessSetupStatus, LoginHarnessId } from './harness-setup';
+import type { AntigravityQuota, HarnessSetupStatus, LoginHarnessId } from './harness-setup';
 import type {
   AnalyticsSummary,
   AppInstructionFile,
@@ -203,6 +203,8 @@ export interface IpcContract {
   'harness:setup': [{ harness: HarnessId }, HarnessSetupStatus];
   /** Desktop-owner action only. Opens the selected runtime's vendor login in a terminal. */
   'harness:login': [{ harness: LoginHarnessId; device?: boolean }, { ok: boolean; error?: string }];
+  /** Desktop-owner action only. Returns account quota bars, never credentials or raw CLI output. */
+  'harness:antigravityQuota': [void, AntigravityQuota];
   'harness:models': [
     { harness: HarnessId; acpAgent?: string; projectRoot?: string },
     { models: ModelInfo[]; error?: string }
