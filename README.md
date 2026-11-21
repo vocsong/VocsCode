@@ -55,9 +55,11 @@ That installs everything (including dev dependencies, even if your environment s
 
 ## What you get
 
-**Run every agent in one app.** Claude, Codex, Pi, DeepSeek, Gemini CLI, or any OpenAI-compatible model — switch per session, and everything works the same way through one unified interface.
+**Run every agent in one app.** Switch per session between Claude, Codex, Google Antigravity, Pi, DeepSeek, Gemini CLI, or any OpenAI-compatible model.
 
-**Your agents can work hands-off.** Pick a permission mode per session — Ask, Accept edits, Plan, Auto, or Full access — and every harness respects it the same way. Dangerous commands always ask first.
+**Use your Antigravity quota.** Install the Antigravity CLI and open **Settings → Providers & keys → Harness logins → Google Antigravity** to sign in with Google or check your remaining quota. Select **Google Antigravity** in New Session and send a prompt. The model picker lists your account’s Gemini models once the session connects. [Setup instructions](docs/ONBOARDING.md#subscription-and-api-routes)
+
+**Choose permissions per session.** Each harness offers the modes it supports. Antigravity offers Ask and Plan for interactive Gemini sessions.
 
 **Nothing gets lost.** Threads grouped by project, isolated git worktrees per session, diff review with per-file revert and commit, steer a running turn or queue your next message, `/goal` with an iteration guard. Each project remembers how you start it — harness, model, permission mode and whether sessions isolate in a worktree.
 

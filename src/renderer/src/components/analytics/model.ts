@@ -166,7 +166,7 @@ export const METRICS: Record<Metric, MetricDef> = {
 };
 
 /** Fixed colour slot per harness, so a harness keeps its colour whichever others are on screen. */
-export const HARNESS_ORDER = ['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'acp', 'native'];
+export const HARNESS_ORDER = ['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'antigravity', 'acp', 'native'];
 
 /** Rank of a harness in the shared slot order; an unknown one sorts last, onto the fallback slot. */
 export function harnessIndex(id: string): number {

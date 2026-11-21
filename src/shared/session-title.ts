@@ -15,6 +15,7 @@ const HARNESS_LABELS: Readonly<Record<HarnessId, string>> = {
   'codex-exec': 'Codex·exec',
   cursor: 'Cursor',
   pi: 'Pi',
+  antigravity: 'Antigravity',
   acp: 'ACP',
   native: 'Native'
 };

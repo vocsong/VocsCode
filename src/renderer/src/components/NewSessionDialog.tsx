@@ -167,6 +167,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
 
   const descriptor = HARNESSES.find((h) => h.id === harness)!;
   const modes = descriptor.capabilities.permissionModes;
+  const modelsAfterStart = descriptor.capabilities.modelSource === 'acp-config';
 
   useEffect(() => {
     if (!modes.includes(mode)) setMode(modes.includes('ask') ? 'ask' : modes[0]);
@@ -303,7 +304,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
         initialPrompt: prompt.trim() || undefined,
         initialImages: images.length ? images : undefined,
         initialFiles: files.length ? files : undefined,
-        goal: goal.trim() || undefined,
+        goal: harness === 'antigravity' ? undefined : goal.trim() || undefined,
         // The name is sent as previewed, so the branch is the one the dialog showed; the
         // checked-out branch is where an unspecified worktree starts anyway.
         ...(isolate && (branchName.trim() || autoSlug) ? { worktreeName: branchName.trim() || autoSlug } : {}),
@@ -380,7 +381,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
       footer={
         <>
           <span className="muted small ns-summary">
-            {descriptor.name} · {selectedModel?.displayName ?? model?.model ?? (harness === 'acp' ? 'Agent default' : 'Harness default')}
+            {descriptor.name} · {selectedModel?.displayName ?? model?.model ?? (modelsAfterStart ? 'Agent default' : 'Harness default')}
             {isolate && branchPreview && <> · <code>{branchPreview}</code></>}
           </span>
           <span className="spacer" />
@@ -450,7 +451,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
               <span className="field-label">Model</span>
               <Button size="sm" variant="ghost" icon="refresh" disabled={modelsLoading} onClick={() => { setModelRefresh((v) => v + 1); void refreshAvailability(); }}>Recheck models and sign-in</Button>
             </div>
-            {modelsError && <p className="muted small ns-model-notice">Any listed suggestions may be fallbacks, not verified account access. Use Set up / sign in to repair the connection.</p>}
+            {modelsError && !modelsAfterStart && <p className="muted small ns-model-notice">Any listed suggestions may be fallbacks, not verified account access. Use Set up / sign in to repair the connection.</p>}
             <ModelPicker
               models={models}
               loading={modelsLoading}
@@ -458,7 +459,7 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
               selected={model}
               // The first prompt takes focus on open, so the dialog can be typed into straight away.
               autoFocus={false}
-              clearOption={{ label: harness === 'acp' ? 'Agent default (choose after start)' : 'Harness default' }}
+              clearOption={{ label: modelsAfterStart ? 'Agent default (choose after start)' : 'Harness default' }}
               // No onSelectCustom here: a new session starts on a listed model only; an unlisted id is switched in the header afterwards.
               onSelect={(m) => setModel(m ? { provider: m.provider, model: m.id } : undefined)}
             />
@@ -525,12 +526,12 @@ function NormalSessionDialog({ choices }: { choices: React.ReactNode }) {
             </div>
             <span className="field-hint">Paste or attach files and images — they are sent with the first message.</span>
           </div>
-          <Field
+          {harness !== 'antigravity' && <Field
             label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>}
             hint="A persistent objective. The session keeps continuing until the agent proves it is done or the iteration guard trips. On a harness that has its own /goal command, the objective is handed to that harness instead and the guard does not apply."
           >
             <textarea rows={2} value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="e.g. Make the test suite pass and open a PR" />
-          </Field>
+          </Field>}
         </section>
 
         <section className="ns-span2 ns-workspace">

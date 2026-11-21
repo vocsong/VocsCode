@@ -1,10 +1,20 @@
 /** First-run terminology and read-only setup results. No credentials cross this boundary. */
 import type { HarnessAvailability, HarnessId } from './types';
+import { HARNESS_BY_ID } from './harness-meta';
 
 export type InstallableHarnessId = 'claude' | 'codex' | 'pi' | 'dsh';
-export type LoginHarnessId = 'claude' | 'codex' | 'pi';
+export type LoginHarnessId = 'claude' | 'codex' | 'pi' | 'antigravity';
+export const ANTIGRAVITY_INSTALL_URL = 'https://antigravity.google/docs/getting-started?tab=cli';
+export const ANTIGRAVITY_MIN_VERSION = '1.5.12';
+
+export interface AntigravityQuota {
+  groups: {
+    name: string;
+    buckets: { name: string; remainingFraction: number; resetAt?: string }[];
+  }[];
+}
 export interface SetupRequirement {
-  id: 'sdk' | 'node' | 'npm' | 'git';
+  id: 'sdk' | 'node' | 'npm' | 'git' | 'runtime';
   name: string;
   available: boolean;
   detail: string;
@@ -32,7 +42,7 @@ export const INSTALL_HARNESS: Partial<Record<HarnessId, InstallableHarnessId>> =
   claude: 'claude', codex: 'codex', 'codex-exec': 'codex', pi: 'pi', acp: 'dsh'
 };
 export const LOGIN_HARNESS: Partial<Record<HarnessId, LoginHarnessId>> = {
-  claude: 'claude', codex: 'codex', 'codex-exec': 'codex', pi: 'pi'
+  claude: 'claude', codex: 'codex', 'codex-exec': 'codex', pi: 'pi', antigravity: 'antigravity'
 };
 
 /** A runnable binary and an unknown login must never be presented as a ready account. */
@@ -51,6 +61,6 @@ export function harnessNeedsSetup(harness: HarnessId, status: HarnessAvailabilit
   if (!status) return false;
   if (harnessStatus(harness, status).tone !== 'green' && harness !== 'native') return true;
   if (!status.available) return true;
-  if (catalog.loading || harness === 'acp') return false;
+  if (catalog.loading || HARNESS_BY_ID[harness].capabilities.modelSource === 'acp-config') return false;
   return !!catalog.error || catalog.count === 0;
 }

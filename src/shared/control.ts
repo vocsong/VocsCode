@@ -1,9 +1,11 @@
 /** Narrow, versioned automation API. Never accept an IPC channel, filesystem path or approval decision. */
 import { z } from 'zod';
+import type { HarnessId } from './types';
 
 export const CONTROL_VERSION = 1;
 export const CONTROL_MAX_BYTES = 256 * 1024;
 export const CONTROL_SCOPES = ['control:discover', 'control:read', 'control:create', 'control:send', 'control:interrupt'] as const;
+export const CONTROL_HARNESSES = ['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'acp', 'native'] as const;
 export type ControlScope = typeof CONTROL_SCOPES[number];
 export const controlScopeSchema = z.enum(CONTROL_SCOPES);
 export const controlIdSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/);
@@ -76,7 +78,7 @@ export interface ControlGrant {
   projectIds: string[];
   scopes: ControlScope[];
   permissionModes: Array<'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-auto'>;
-  harnesses: Array<'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'native'>;
+  harnesses: HarnessId[];
   expiresAt: number;
   revokedAt?: number;
 }
@@ -86,7 +88,7 @@ export const controlGrantInputSchema = z.strictObject({
   name: z.string().trim().min(1).max(100), projectIds: z.array(controlIdSchema).min(1).max(100),
   scopes: z.array(controlScopeSchema).min(1).max(CONTROL_SCOPES.length),
   permissionModes: z.array(z.enum(['ask', 'accept-edits', 'plan', 'auto', 'full-auto'])).min(1).max(5),
-  harnesses: z.array(z.enum(['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'acp', 'native'])).min(1).max(7),
+  harnesses: z.array(z.enum(CONTROL_HARNESSES)).min(1).max(CONTROL_HARNESSES.length),
   expiresAt: z.number().int().positive(),
 });
 export type ControlGrantInput = z.infer<typeof controlGrantInputSchema>;

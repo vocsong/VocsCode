@@ -5,6 +5,7 @@
  * PONG and asserts the adapter produced an assistant item containing it plus a turn item.
  * HARNESS_SMOKE_ONLY=mcp drives one harness (HARNESS_SMOKE_MCP_HARNESS, default claude) with an
  * injected MCP server and asserts it actually called a tool from it.
+ * HARNESS_SMOKE_ANTIGRAVITY_BIN can point to an absolute path to the official Antigravity CLI.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -23,6 +24,11 @@ const only = (process.env.HARNESS_SMOKE_ONLY ?? '').split(',').map((s) => s.trim
 const want = (id: string) => enabled && (only.length === 0 || only.includes(id));
 // Resume round-trips cost a second turn per harness, so they stay behind their own flag.
 const wantResume = (id: string) => want(id) && process.env.HARNESS_SMOKE_RESUME === '1';
+const smokeModelProviders: Partial<Record<HarnessId, string>> = {
+  antigravity: 'antigravity',
+  claude: 'anthropic',
+  pi: 'openai-codex',
+};
 
 const appRoot = path.resolve(__dirname, '..');
 const tmpRoot = path.join(os.tmpdir(), `vocs-code-smoke-${Date.now()}`);
@@ -38,6 +44,11 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
   await fs.mkdir(cwd, { recursive: true });
   await fs.writeFile(path.join(cwd, 'README.md'), '# smoke\n');
   const settings = defaultSettings();
+  const antigravityBin = process.env.HARNESS_SMOKE_ANTIGRAVITY_BIN;
+  if (harness === 'antigravity' && antigravityBin) {
+    if (!path.isAbsolute(antigravityBin)) throw new Error('HARNESS_SMOKE_ANTIGRAVITY_BIN must be an absolute path.');
+    settings.binaries.agy = antigravityBin;
+  }
   const runtime = new RuntimeResolver({ appRuntimeDir: path.join(tmpRoot, 'runtime'), resourcesDir: path.join(appRoot, 'resources'), appRoot }, () => settings);
   const meta: SessionMeta = {
     id: `smoke_${harness}`,
@@ -48,7 +59,7 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
       harness, projectRoot: cwd, permissionMode: 'auto', ...extra,
       ...(process.env.HARNESS_SMOKE_FAST_MODE === '1' ? { fastMode: true } : {}),
       ...(process.env.HARNESS_SMOKE_MODEL ? { model: {
-        provider: extra.model?.provider ?? (harness === 'pi' ? 'openai-codex' : harness === 'claude' ? 'anthropic' : 'openai'),
+        provider: extra.model?.provider ?? smokeModelProviders[harness] ?? 'openai',
         model: process.env.HARNESS_SMOKE_MODEL,
       } } : {}),
     },
@@ -309,6 +320,28 @@ describe('live harness smoke', () => {
     assertSuccessfulTurn(items, events, 'PONG');
   });
 
+  it.runIf(want('antigravity'))('Antigravity reads quota through the signed-in CLI', async () => {
+    const { ctx } = await makeCtx('antigravity');
+    const quota = await ctx.runtime.antigravityQuota();
+    expect(quota.groups.length).toBeGreaterThan(0);
+    expect(quota.groups[0].buckets[0]).toMatchObject({ name: expect.any(String), remainingFraction: expect.any(Number) });
+  });
+
+  it.runIf(want('antigravity'))('Antigravity lists Gemini models and answers a prompt', async () => {
+    const { ctx, items, events, waitTurn, meta } = await makeCtx('antigravity', { permissionMode: 'ask' });
+    const adapter = createAdapter('antigravity', ctx);
+    cleanups.push(() => adapter.dispose());
+    await adapter.start();
+    expect(meta.harnessRef.acpSessionId).toBeTruthy();
+    const models = await adapter.listModels!();
+    expect(models).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: 'antigravity', id: expect.stringMatching(/\S/), displayName: expect.stringMatching(/\bGemini\b/i) }),
+    ]));
+    await adapter.send({ text: PROMPT });
+    await waitTurn(170_000);
+    assertSuccessfulTurn(items, events, 'PONG');
+  });
+
   it.runIf(want('native'))('native loop answers a prompt through an OpenAI-compatible provider', async () => {
     const provider = process.env.DEEPSEEK_API_KEY ? 'deepseek' : process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : null;
     if (!provider) throw new Error('Native smoke requested but no DEEPSEEK_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY is available.');
@@ -366,6 +399,10 @@ describe('live harness smoke', () => {
 
   it.runIf(wantResume('acp'))('acp resumes after dispose', async () => {
     await resumeRoundTrip('acp', 'acpSessionId', { acpAgent: process.env.HARNESS_SMOKE_ACP_AGENT ?? 'dsh' });
+  });
+
+  it.runIf(wantResume('antigravity'))('Antigravity resumes after dispose', async () => {
+    await resumeRoundTrip('antigravity', 'acpSessionId', { permissionMode: 'ask' });
   });
 
   it.runIf(wantResume('native'))('native resumes after dispose', async () => {

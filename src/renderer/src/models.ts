@@ -1,5 +1,6 @@
 /** Session model pickers combine process-reported metadata with newly discovered catalog entries. */
 import { useEffect, useMemo } from 'react';
+import { HARNESS_BY_ID } from '../../shared/harness-meta';
 import type { HarnessId, ModelInfo, SessionMeta } from '../../shared/types';
 import { useStore, type ModelCatalogEntry } from './store';
 
@@ -21,7 +22,7 @@ export function pickSessionModels(reported: ModelInfo[] | undefined, catalog: Mo
   if (reported?.length) {
     // Claude/Codex are endpoint-pinned; Pi retains launch-time provider credentials. A global
     // probe may discover providers usable only in NEW sessions, not this process.
-    if (harness === 'acp') return { models: reported, loading: false };
+    if (harness && HARNESS_BY_ID[harness].capabilities.modelSource === 'acp-config') return { models: reported, loading: false };
     const pinned = harness === 'claude' || harness === 'codex' || harness === 'codex-exec' || harness === 'pi';
     const providers = new Set(reported.map((m) => m.provider));
     const known = new Set(reported.map((m) => JSON.stringify([m.provider, m.id])));

@@ -2,6 +2,8 @@
 
 Working agreements for agents in this repo: how to work, what to verify, what to leave alone. Seven harness adapters (Claude Agent SDK, Codex app-server, Codex exec SDK, Cursor, Pi, ACP, native) all emit one normalized `SessionEvent` stream — keep it that way.
 
+Google Antigravity uses the ACP adapter.
+
 This file is loaded by pi and other agents at startup, so it stays short: behavioral rules and pointers only. The memory guide below is the deliberate exception — which layer owns a question decides the opening move of every task, so it earns the space the rest does not. Commands, suites, layout, invariants and conventions live in `docs/` (see [Reference docs](#reference-docs)) — update those docs when those things change.
 
 ## Working style

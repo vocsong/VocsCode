@@ -10,7 +10,7 @@ sign-in failure.
 
 ## Five steps
 
-1. **Choose an agent.** Claude and Codex support eligible vendor subscriptions; Native uses an API
+1. **Choose an agent.** Claude, Codex and Google Antigravity support eligible vendor subscriptions. Native uses an API
    key or local server; Pi supports its provider sign-ins and API credentials. Other engines are
    under advanced choices. A consumer subscription and an API account are different products.
 2. **Connect.** Inspect the selected executable, app SDK and prerequisites. Install only what is
@@ -43,6 +43,13 @@ visits to Import within the guide; dismissing the guide does not persist those d
 - **Pi:** The guide launches Pi without sessions, extensions, skills, prompt templates or themes.
   Run `/login` there, finish the provider flow, then return and recheck. A Pi installation currently
   requires Node.js 22.19+ and npm. Its provider/model availability depends on that installation.
+- **Google Antigravity.** Install Antigravity CLI (`agy`) 1.5.12 or newer. Open **Sign in with
+  Google** to run `agy acp --login` in the vendor's terminal flow, then select **Recheck setup**.
+  A saved CLI login is detected automatically. **Check Antigravity quota** shows the account's
+  reported remaining quota and reset times. Choose **Google Antigravity** in New Session, send your
+  first prompt on the default Gemini model, then pick from the account's advertised models.
+  If the app cannot find an installed CLI, set its executable under **Settings → Harnesses →
+  Runtime configuration**. [Google's install guide](https://antigravity.google/docs/getting-started?tab=cli)
 - **Native/local:** Choose a configured API provider or local server. Local servers do not require
   a cloud key. Start the server and expose its model catalog; retry when it becomes available.
   Endpoint/model customization remains in Settings → Providers & keys.
@@ -83,6 +90,11 @@ directories and authority fields are rejected, and remote/agent channel allowlis
 it. Main chooses the resolved runtime, fixed vendor arguments and a private, non-project working
 directory. Windows quoting uses encoded PowerShell; macOS uses a quoted, self-removing launcher;
 Linux passes separate executable/argument entries to a terminal.
+
+Antigravity keeps Google credentials in its own login store. The app checks the active account with
+an ACP session-list request. On demand, `harness:antigravityQuota` runs the CLI's read-only `/usage`
+command and returns model groups, remaining fractions and reset times to the desktop owner's main
+frame. Setup and quota checks send zero model prompts.
 
 Rechecks invalidate PATH/probe caches. Runtime, main availability, renderer availability and
 catalog request ordering prevent discarded in-flight results from reviving stale setup failures.
