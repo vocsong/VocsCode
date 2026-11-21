@@ -1478,14 +1478,29 @@ h4 {
   text-transform: uppercase;
   color: var(--fg-faint);
 }
-.sidebar-section .sidebar-recent {
-  flex: 0 0 auto;
-  margin-left: auto;
-  padding: 3px 7px;
-  font-size: 11.5px;
+/* Projects | Recent: the session list's layout, above the list and apart from the nav links. */
+.sidebar-viewswitch {
+  display: flex;
+  align-items: center;
+  padding: 0 10px 10px;
+}
+.sidebar-viewswitch-icon {
+  display: none;
+}
+.sidebar-viewswitch .segmented {
+  display: flex;
+  flex: 1;
+}
+.sidebar-viewswitch .segment {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
 }
 .sidebar-section .sidebar-archived {
   flex: 0 0 auto;
+  margin-left: auto;
   padding: 3px 7px;
   font-size: 11.5px;
 }
