@@ -4,7 +4,8 @@
  * chip with its plan still on screen, the title bar's search and Vesta launcher, the sidebar's New
  * session entry, a header that sheds detail in a narrow split pane instead of overflowing it, and the
  * sidebar's activity tray reaching a session that finished unviewed in a collapsed folder, and the
- * sidebar's Recent view listing every folder's sessions in one recency order across a restart.
+ * sidebar's Recent view listing every folder's sessions in one recency order across a restart, picked
+ * from a Projects | Recent switch at the top of the sidebar (Standard and Zen).
  * Layout cases use seeded sessions and transcripts. The title refresh case runs native chat against
  * a scripted loopback provider. No provider keys; screenshots land in tests/artifacts/session-view-*.png.
  * Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
@@ -672,7 +673,7 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     }, { timeout: 10_000 }).toEqual({ unseen: false, viewed: 'number' });
   }, 120_000);
 
-  it('switches the sidebar to one Recent list across folders, names each row’s folder, and keeps the view after a restart', async () => {
+  it('switches the sidebar to one Recent list across folders from the top switch, names each row’s folder, and keeps the view after a restart', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-recent-'));
     const userData = path.join(tmp, 'userData');
     const alpha = path.join(tmp, 'alpha');
@@ -715,14 +716,28 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await win.keyboard.press('Control+ArrowDown');
     await expect.poll(() => win.locator('.pane.active .header').textContent()).toContain('Alpha newer');
 
+    // Relaunch in Zen, where the nav links stack at the bottom of the rail: the switch must stay on top.
     await app!.close();
     app = null;
+    const saved = JSON.parse(await fs.readFile(path.join(userData, 'settings.json'), 'utf8')) as Record<string, unknown>;
+    await fs.writeFile(path.join(userData, 'settings.json'), JSON.stringify({ ...saved, uiMode: 'zen' }));
     win = await launch(userData);
+    await win.setViewportSize({ width: 1280, height: 800 });
     await expect.poll(() => rowIds(win)).toEqual(['s_recent_b_new', 's_recent_a_new', 's_recent_b_mid', 's_recent_a_old']);
     expect(await win.getByTestId('sidebar-recent').getAttribute('aria-pressed')).toBe('true');
+    await win.locator('.sidebar').hover();
+    const top = async (sel: string) => (await win.locator(sel).first().boundingBox())!.y;
+    await expect.poll(async () => {
+      const [fresh, sw, list, analytics, archived] = await Promise.all(['.sidebar-new', '.sidebar-viewswitch', '.sidebar-list', '.sidebar-views', '.sidebar-archived'].map(top));
+      return fresh < sw && sw < list && list < analytics && list < archived;
+    }).toBe(true);
+    // The rail opens on hover after a short delay; shoot it open so the review image shows the switch.
+    await expect.poll(async () => (await win.locator('.sidebar').boundingBox())!.width, { timeout: 5_000 }).toBeGreaterThan(200);
+    await win.waitForTimeout(400);
+    await win.screenshot({ path: path.join(shots, 'session-view-08-sidebar-recent-zen.png') });
 
     // And back to folders.
-    await win.getByTestId('sidebar-recent').click();
+    await win.getByTestId('sidebar-folders').click();
     await expect.poll(() => rowIds(win)).toEqual(['s_recent_a_new', 's_recent_a_old', 's_recent_b_new', 's_recent_b_mid']);
   }, 180_000);
 });
