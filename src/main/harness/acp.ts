@@ -13,16 +13,7 @@ import { shutdownChild, spawnTool } from './spawn';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { ANTIGRAVITY_ACP_ARGS, ANTIGRAVITY_SIGN_IN_MESSAGE, antigravityAccountEnv, connectAcp, isAntigravityAuthRequired } from './antigravity';
-
-interface ConfigOptionLike {
-  id: string;
-  name: string;
-  description?: string | null;
-  category?: string | null;
-  type: 'select' | 'boolean';
-  currentValue: string | boolean;
-  options?: { value?: string; name: string; description?: string | null; group?: string; options?: { value: string; name: string; description?: string | null; group?: string }[] }[];
-}
+import { acpModelCatalog, decodeAcpModelValue, findEffortOption, findModelOption, flattenSelect, type ConfigOptionLike } from './acp-config';
 
 const ACP_ENV_KEYS: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
@@ -35,26 +26,6 @@ const ACP_ENV_KEYS: Record<string, string> = {
   xai: 'XAI_API_KEY',
   mistral: 'MISTRAL_API_KEY'
 };
-
-function flattenSelect(opt: ConfigOptionLike): { value: string; name: string; description?: string | null; group?: string }[] {
-  const out: { value: string; name: string; description?: string | null; group?: string }[] = [];
-  for (const o of opt.options ?? []) {
-    if (Array.isArray(o.options)) for (const g of o.options) out.push({ ...g, group: g.group ?? o.group });
-    else if (typeof o.value === 'string') out.push({ value: o.value, name: o.name, description: o.description, group: o.group });
-  }
-  return out;
-}
-
-/** dsh-style agents advertise model choices as JSON `[provider, model]` tuples; decode them. */
-function decodeAcpModelValue(value: string): { provider: string; model: string } | null {
-  try {
-    const v = JSON.parse(value) as unknown;
-    if (!Array.isArray(v) || v.length !== 2 || !v.every((x) => typeof x === 'string' && x.length > 0)) return null;
-    return { provider: v[0] as string, model: v[1] as string };
-  } catch {
-    return null;
-  }
-}
 
 export class AcpAdapter implements HarnessAdapter {
   private child: ChildProcess | null = null;
@@ -232,36 +203,21 @@ export class AcpAdapter implements HarnessAdapter {
   }
 
   private modelOption(): ConfigOptionLike | undefined {
-    return this.configOptions.find((o) => o.type === 'select' && (o.category === 'model' || o.id === 'model' || /model/i.test(o.id)));
+    return findModelOption(this.configOptions);
   }
 
   private effortOption(): ConfigOptionLike | undefined {
-    return this.configOptions.find((o) => o.type === 'select' && (o.category === 'thought_level' || /effort|thinking|reasoning/i.test(o.id)));
+    return findEffortOption(this.configOptions);
   }
 
   private publishModels(): void {
     const opt = this.modelOption();
     if (!opt) return;
     const eff = this.effortOption();
-    // Agents can advertise values the app does not model (none, auto, numeric levels); drop them at the boundary.
-    // An option left with none is not a claim that the model takes no effort (`[]`), so it stays unknown.
-    const levels = eff ? flattenSelect(eff).map((o) => o.value).filter(isEffortLevel) : [];
-    const efforts = levels.length ? levels : undefined;
     this.modelValues.clear();
-    const models: ModelInfo[] = flattenSelect(opt).map((o) => {
-      // dsh-style agents advertise the route as a JSON [provider, model] tuple; expose the bare
-      // model id and real provider so model refs stay clean, and keep the raw value for setting.
-      const decoded = decodeAcpModelValue(o.value);
-      const info: ModelInfo = {
-        id: decoded?.model ?? o.value,
-        provider: decoded?.provider ?? this.preset?.id ?? 'acp',
-        displayName: o.name || decoded?.model || o.value,
-        description: o.description ?? undefined,
-        supportedEfforts: efforts,
-        isDefault: o.value === opt.currentValue
-      };
-      this.modelValues.set(`${info.provider}\u0000${info.id}`, o.value);
-      return info;
+    const models: ModelInfo[] = acpModelCatalog(this.configOptions, this.preset?.id ?? 'acp').map(({ model, value }) => {
+      this.modelValues.set(`${model.provider}\u0000${model.id}`, value);
+      return model;
     });
     this.ctx.emit({ type: 'models', models });
     const currentValue = typeof opt.currentValue === 'string' ? opt.currentValue : undefined;
