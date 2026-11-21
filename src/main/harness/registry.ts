@@ -1,4 +1,5 @@
 /** Maps a harness id to its adapter factory and to the model list that harness can reach. */
+import { promises as fs } from 'node:fs';
 import type { AppSettings, HarnessId, ModelInfo } from '../../shared/types';
 import { applyModelOverrides } from '../../shared/model-overrides';
 import { errorMessage } from '../util/async';
@@ -8,6 +9,7 @@ import { claudeNativeModels, mergeClaudeCatalog, withSavedClaudeModels } from '.
 import { mergeCodexCatalog } from '../models/codex-catalog';
 import { mergePiCatalog } from '../models/pi-catalog';
 import { AcpAdapter } from './acp';
+import { listAntigravityModels } from './antigravity';
 import { ClaudeAdapter, listClaudeModels, resolveClaudeProviderEnv } from './claude';
 import { CodexAppServerAdapter, listCodexModels } from './codex-app-server';
 import { CursorAdapter, listCursorModels } from './cursor';
@@ -104,8 +106,18 @@ async function listHarnessModelsRaw(opts: {
       }
       case 'acp':
         return { models: [], error: 'ACP agents advertise their models once the session starts; pick one from the header afterwards.' };
-      case 'antigravity':
-        return { models: [], error: 'Antigravity lists the models for your Google account after the session starts.' };
+      case 'antigravity': {
+        const bin = runtime.resolve('agy');
+        if (!bin) return { models: [], error: 'Antigravity CLI (agy) was not found; install it to list your Google account’s models.' };
+        const cwd = runtime.runtimePaths.appRuntimeDir;
+        await fs.mkdir(cwd, { recursive: true });
+        try {
+          const models = await listAntigravityModels(bin.path, cwd);
+          return models.length ? { models } : { models, error: 'Antigravity CLI reported no models; pick one from the session header after it starts.' };
+        } catch (e) {
+          return { models: [], error: `Antigravity model discovery failed (${errorMessage(e)}).` };
+        }
+      }
       case 'native': {
         const out: ModelInfo[] = [];
         for (const p of settings.providers.filter((p) => p.enabled)) {
