@@ -3,7 +3,9 @@ import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
 import { z } from 'zod';
 import type { AntigravityQuota } from '../../shared/harness-setup';
+import type { ModelInfo } from '../../shared/types';
 import { withTimeout } from '../util/async';
+import { acpModelCatalog, type ConfigOptionLike } from './acp-config';
 import { shutdownChild, spawnTool } from './spawn';
 
 // Ask the ACP client about every tool. A vendor allowlist or saved Auto preference must not
@@ -53,6 +55,37 @@ export async function checkAntigravityAccount(binary: string, cwd: string): Prom
     return await withTimeout(check(), 12_000, 'Antigravity sign-in check');
   } catch (error) {
     return isAntigravityAuthRequired(error) ? false : 'unknown';
+  } finally {
+    await shutdownChild(child);
+  }
+}
+
+/**
+ * Reads the account's model catalog for New Session. The CLI offers models only as session
+ * config options, so this opens a session, reads them and closes it. It never sends a prompt,
+ * and a session without a prompt is not kept in the CLI's history.
+ */
+export async function listAntigravityModels(binary: string, cwd: string): Promise<ModelInfo[]> {
+  const child = spawnTool(binary, [...ANTIGRAVITY_ACP_ARGS], { cwd, env: antigravityAccountEnv() });
+  child.on('error', () => undefined);
+  child.stderr?.resume();
+  try {
+    const connection = connectAcp(child, () => ({
+      requestPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      sessionUpdate: async () => undefined
+    }));
+    const read = async () => {
+      const init = await connection.initialize({ protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+      const session = await connection.newSession({ cwd, mcpServers: [] });
+      if (init.agentCapabilities?.sessionCapabilities?.close) {
+        await connection.closeSession({ sessionId: session.sessionId }).catch(() => undefined);
+      }
+      return acpModelCatalog((session.configOptions ?? []) as ConfigOptionLike[], 'antigravity').map(({ model }) => model);
+    };
+    return await withTimeout(read(), 30_000, 'Antigravity model list');
+  } catch (error) {
+    if (isAntigravityAuthRequired(error)) throw new Error(ANTIGRAVITY_SIGN_IN_MESSAGE);
+    throw error;
   } finally {
     await shutdownChild(child);
   }

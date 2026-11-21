@@ -57,7 +57,7 @@ That installs everything (including dev dependencies, even if your environment s
 
 **Run every agent in one app.** Switch per session between Claude, Codex, Google Antigravity, Pi, DeepSeek, Gemini CLI, or any OpenAI-compatible model.
 
-**Use your Antigravity quota.** Install the Antigravity CLI and open **Settings → Providers & keys → Harness logins → Google Antigravity** to sign in with Google or check your remaining quota. Select **Google Antigravity** in New Session and send a prompt. The model picker lists your account’s Gemini models once the session connects. [Setup instructions](docs/ONBOARDING.md#subscription-and-api-routes)
+**Use your Antigravity quota.** Install the Antigravity CLI and open **Settings → Providers & keys → Harness logins → Google Antigravity** to sign in with Google or check your remaining quota. Select **Google Antigravity** in New Session, pick one of your account’s Gemini models, and send a prompt. [Setup instructions](docs/ONBOARDING.md#subscription-and-api-routes)
 
 **Choose permissions per session.** Each harness offers the modes it supports. Antigravity offers Ask and Plan for interactive Gemini sessions.
 
