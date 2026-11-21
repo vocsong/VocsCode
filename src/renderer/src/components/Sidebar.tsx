@@ -329,8 +329,18 @@ export function Sidebar() {
         </div>
       </div>
       <div className="sidebar-nav">
-        <button type="button" className="sidebar-new" onClick={() => useStore.getState().openQuickSession(true)} title="Start a session in a recent folder">
-          <Icon name="sessionPlus" size={15} /> <span>New session</span> <Kbd>{modKey}+N</Kbd>
+        {/* Same as Ctrl+Shift+N: the full new-session dialog, seeded with the open session's folder
+            (the folder picker first when no session is open). */}
+        <button
+          type="button"
+          className="sidebar-new"
+          onClick={() => {
+            const st = useStore.getState();
+            void st.startNewSession(st.sessions.find((x) => x.id === st.activeId)?.config.projectRoot);
+          }}
+          title={`New session in this folder (${modKey}+Shift+N)`}
+        >
+          <Icon name="sessionPlus" size={15} /> <span>New session</span> <Kbd>{modKey}+Shift+N</Kbd>
         </button>
         <div className="sidebar-views">
           <button type="button" className={`sidebar-link ${view === 'analytics' ? 'active' : ''}`} title={tip('Analytics')} onClick={() => setView('analytics')}>

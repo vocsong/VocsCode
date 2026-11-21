@@ -65,6 +65,11 @@
   --harness-fill: #e9d7fb;
 }
 
+:is(.harness-pill, .session-row)[data-harness='antigravity'] {
+  --harness-ink: #5f5300;
+  --harness-fill: #f3e9a6;
+}
+
 :is(.harness-pill, .session-row)[data-harness='acp'] {
   --harness-ink: #06545a;
   --harness-fill: #c3eaeb;
