@@ -82,12 +82,28 @@ describe('title bar', () => {
 });
 
 describe('sidebar navigation', () => {
-  it('leads with New session, which opens the quick folder picker', () => {
+  it('leads with New session, which opens the Ctrl+Shift+N dialog on the open session’s folder', async () => {
+    useStore.setState({ sessions: [session('s1')], activeId: 's1', newSessionOpen: false, newSessionRoot: null });
     const { container } = render(<Sidebar />);
     const button = container.querySelector('.sidebar-nav .sidebar-new') as HTMLElement;
     expect(button.textContent).toContain('New session');
-    fireEvent.click(button);
-    expect(useStore.getState().quickSessionOpen).toBe(true);
+    expect(button.querySelector('.kbd')?.textContent).toBe('Ctrl+Shift+N');
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(useStore.getState()).toMatchObject({ newSessionOpen: true, newSessionRoot: 'G:/proj/a', newSessionKind: 'normal', quickSessionOpen: false });
+    expect(invokeMock).not.toHaveBeenCalledWith('app:pickFolder', expect.anything());
+  });
+
+  it('asks for a folder first when no session is open, like Ctrl+Shift+N', async () => {
+    invokeMock.mockImplementation(async (channel: string) => (channel === 'app:pickFolder' ? { path: 'G:/proj/b' } : {}));
+    useStore.setState({ settings: { ...settings, recentProjects: ['G:/proj/a'] } as AppSettings, newSessionOpen: false, newSessionRoot: null });
+    const { container } = render(<Sidebar />);
+    await act(async () => {
+      fireEvent.click(container.querySelector('.sidebar-new') as HTMLElement);
+    });
+    expect(invokeMock).toHaveBeenCalledWith('app:pickFolder', expect.anything());
+    expect(useStore.getState()).toMatchObject({ newSessionOpen: true, newSessionRoot: 'G:/proj/b', quickSessionOpen: false });
   });
 
   it('keeps the views at the top, the Archived toggle on the Sessions heading and Settings at the foot', () => {
