@@ -64,6 +64,7 @@ interface AntigravitySetupFixture {
   openedUrls: string[];
   signIns: unknown[];
   quotaChecks: number;
+  modelLists: number;
   sends: number;
 }
 type AntigravityFixtureGlobal = typeof globalThis & { __vocsAntigravitySetupFixture: AntigravitySetupFixture };
@@ -821,9 +822,19 @@ describe.runIf(enabled)('first-run setup through real desktop boundaries', () =>
       // Keep the production preload, setup UI, model picker and session persistence. Script the
       // vendor boundaries so neither installation, OAuth nor quota traffic leaves the machine.
       await app.evaluate(({ ipcMain }, installUrl) => {
-        const fixture: AntigravitySetupFixture = { state: 'missing', openedUrls: [], signIns: [], quotaChecks: 0, sends: 0 };
+        const fixture: AntigravitySetupFixture = { state: 'missing', openedUrls: [], signIns: [], quotaChecks: 0, modelLists: 0, sends: 0 };
         (globalThis as AntigravityFixtureGlobal).__vocsAntigravitySetupFixture = fixture;
-        for (const channel of ['harness:setup', 'harness:login', 'harness:antigravityQuota', 'app:openExternal', 'sessions:send']) ipcMain.removeHandler(channel);
+        for (const channel of ['harness:setup', 'harness:login', 'harness:antigravityQuota', 'harness:models', 'app:openExternal', 'sessions:send']) ipcMain.removeHandler(channel);
+        // The account's catalog as the CLI's session config options report it (see harness-readiness.test.ts).
+        ipcMain.handle('harness:models', (_event, request: { harness: string }) => {
+          if (request.harness !== 'antigravity') return { models: [], error: 'Only Antigravity is configured in this fixture' };
+          fixture.modelLists++;
+          return { models: [
+            { id: 'gemini-4-neon', provider: 'antigravity', displayName: 'Gemini 4 Neon', supportedEfforts: ['low', 'medium', 'high', 'xhigh'], isDefault: true },
+            { id: 'gemini-4-argon', provider: 'antigravity', displayName: 'Gemini 4 Argon', supportedEfforts: ['low', 'medium', 'high', 'xhigh'], isDefault: false },
+            { id: 'gemini-3.8-flash', provider: 'antigravity', displayName: 'Gemini 3.8 Flash', supportedEfforts: ['low', 'medium', 'high', 'xhigh'], isDefault: false }
+          ] };
+        });
         ipcMain.handle('harness:setup', (_event, request: { harness: string }): HarnessSetupStatus => {
           if (request.harness !== 'antigravity') throw new Error('Expected Antigravity setup');
           const available = fixture.state !== 'missing';
@@ -887,16 +898,21 @@ describe.runIf(enabled)('first-run setup through real desktop boundaries', () =>
       await win.getByRole('button', { name: 'Back to workspace', exact: true }).click();
       await openNewSession(win);
       await pickHarness(win, /^Google Antigravity$/);
-      await win.getByRole('button', { name: /^Agent default/ }).waitFor();
+      // The Gemini models are offered before the session starts, not only after it connects.
+      const picker = win.locator('.ns-col-model .model-picker');
+      await expect.poll(async () => picker.locator('.mp-row .mp-name').evaluateAll((els) => els.map((el) => el.getAttribute('title')).sort()), { timeout: 30_000 })
+        .toEqual(['antigravity/gemini-3.8-flash', 'antigravity/gemini-4-argon', 'antigravity/gemini-4-neon']);
+      await pickModel(win, 'antigravity/gemini-4-argon');
       await win.getByRole('button', { name: /Start session/ }).click();
       await win.locator('.composer').waitFor();
       const sessions = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
       expect(sessions).toHaveLength(1);
       expect(sessions[0]).toMatchObject({ config: { harness: 'antigravity' }, status: 'idle', usage: { turns: 0 } });
       expect(sessions[0].harnessRef).toEqual({});
-      expect(sessions[0].config.model).toBeUndefined();
+      expect(sessions[0].config.model).toEqual({ provider: 'antigravity', model: 'gemini-4-argon' });
       const calls = await app.evaluate(() => (globalThis as AntigravityFixtureGlobal).__vocsAntigravitySetupFixture);
-      expect(calls).toEqual({ state: 'signed-in', openedUrls: [ANTIGRAVITY_INSTALL_URL], signIns: [{ harness: 'antigravity' }], quotaChecks: 1, sends: 0 });
+      expect(calls).toMatchObject({ state: 'signed-in', openedUrls: [ANTIGRAVITY_INSTALL_URL], signIns: [{ harness: 'antigravity' }], quotaChecks: 1, sends: 0 });
+      expect(calls.modelLists).toBeGreaterThan(0);
     } finally {
       await app.close();
     }
