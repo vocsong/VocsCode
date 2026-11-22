@@ -949,6 +949,26 @@ export function parseUpstreamTrack(track: string): { ahead?: number; behind?: nu
   };
 }
 
+async function readBranchOverviewRefs(root: string) {
+  const refs = await git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)%09%(objectname)']);
+  const rows = refs.stdout.split('\n').filter(Boolean).map((line) => line.split('\t'));
+  const base = pickBase(rows.map(([name]) => name).filter(Boolean));
+  const baseCommit = rows.find(([name]) => name === base)?.at(-1)?.trim();
+  const counts = new Map<string, { ahead: number; behind: number }>();
+  if (refs.code === 0 && !refs.truncated && !timedOut(refs) && rows.length > 1 && baseCommit && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(baseCommit)) {
+    // Git can walk all tips in one process. Join by object ID (not ref name) so a branch
+    // advanced between the two reads cannot lend its new counts to the older snapshot.
+    const batch = await git(root, ['for-each-ref', 'refs/heads', `--format=%(objectname)%09%(ahead-behind:${baseCommit})`]);
+    if (batch.code === 0 && !batch.truncated && !timedOut(batch)) {
+      for (const line of batch.stdout.split('\n')) {
+        const match = line.trimEnd().match(/^(\S+)\t(\d+) (\d+)$/);
+        if (match) counts.set(match[1], { ahead: Number(match[2]), behind: Number(match[3]) });
+      }
+    }
+  }
+  return { refs, rows, base, counts };
+}
+
 /**
  * GitHub-style branch overview for the Branches panel: age, ahead/behind vs base, merged state, worktree binding.
  * The list is the repo's LOCAL branches (`refs/heads`), which a server-side delete never removes — a branch
@@ -958,29 +978,27 @@ export function parseUpstreamTrack(track: string): { ahead?: number; behind?: nu
 export async function gitBranchesOverview(cwd: string): Promise<GitBranchOverview> {
   const root = await gitRoot(cwd);
   if (!root) return { isRepo: false, branches: [], worktrees: [] };
-  const [wt, refs, pr] = await Promise.all([
+  const [wt, { refs, rows, base, counts: batchCounts }, pr] = await Promise.all([
     gitWorktrees(cwd),
-    git(root, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)%09%(subject)%09%(upstream:short)%09%(upstream:track)']),
+    readBranchOverviewRefs(root),
     gitPrMap(cwd)
   ]);
   if (timedOut(refs)) {
     return { isRepo: true, branches: [], worktrees: wt.worktrees, error: 'git for-each-ref timed out — the branch list could not be loaded. Refresh to retry.' };
   }
-  const names = refs.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean);
-  const base = pickBase(names);
   const wtByBranch = new Map(wt.worktrees.filter((w) => w.branch).map((w) => [w.branch!, w.path]));
-  const lines = refs.stdout.split('\n').filter(Boolean);
-  const branches: GitBranchOverviewItem[] = new Array(lines.length);
+  const branches: GitBranchOverviewItem[] = new Array(rows.length);
   let next = 0;
-  // A repo can have hundreds of local refs; keep their child processes bounded.
-  await Promise.all(Array.from({ length: Math.min(4, lines.length) }, async () => {
-    while (next < lines.length) {
+  // Older Git or unobserved tips fall back to individual, bounded probes.
+  await Promise.all(Array.from({ length: Math.min(4, rows.length) }, async () => {
+    while (next < rows.length) {
       const index = next++;
-      const [name, date, subject, upstream, track] = lines[index].split('\t');
+      const row = rows[index];
+      const [name, date, subject, upstream, track] = row;
       const counts =
         name === base
           ? undefined
-          : await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
+          : batchCounts.get(row.at(-1)!.trim()) ?? await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
               if (r.code !== 0 || r.truncated || timedOut(r)) return undefined;
               const m = r.stdout.trim().match(/^(\d+)\s+(\d+)$/);
               return m ? { behind: Number(m[1]), ahead: Number(m[2]) } : undefined;
