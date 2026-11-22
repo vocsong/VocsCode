@@ -52,7 +52,14 @@ export interface HousekeepInventoryRow {
   location: string;
   branch?: string;
   locked?: boolean;
+  /** For registered checkouts: what the bounded filesystem scan could establish. */
+  diskState?: 'present' | 'missing' | 'unknown';
+  gitMarksStale?: boolean;
+  /** Session path matches on checkout rows; recorded refs on branch-only rows. */
   sessions: { title: string; archived: boolean }[];
+  /** Sessions that record the registered branch but don't match this checkout's path. */
+  branchSessions?: HousekeepInventoryRow['sessions'];
+  sessionLinksIncomplete?: boolean;
 }
 
 export interface HousekeepInventory {

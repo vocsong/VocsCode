@@ -135,6 +135,8 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     const strandedFile = path.join(stranded, 'notes.txt');
     const strandedContents = 'Keep this stranded data.\n';
     const retainedBranch = 'vocscode/stranded';
+    const stale = path.join(worktrees, 'stale');
+    const staleBranch = 'vocscode/stale';
     onTestFinished(async () => {
       await app?.close().catch(() => undefined);
       app = null;
@@ -156,6 +158,12 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await fs.mkdir(stranded);
     await fs.appendFile(path.join(project, '.git', 'info', 'exclude'), '\n/.vocs-code/worktrees/stranded/\n');
     await fs.writeFile(strandedFile, strandedContents);
+    git(project, 'worktree', 'add', '-qb', staleBranch, stale);
+    // Preserve the checkout and backlink bytes, but leave Git's recorded backlink path missing.
+    const backlink = path.join(stale, '.git');
+    const savedBacklink = path.join(stale, 'retained-backlink');
+    const backlinkBytes = await fs.readFile(backlink);
+    await fs.rename(backlink, savedBacklink);
     await fs.mkdir(userData, { recursive: true });
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
     const old = T - 9 * 86_400_000;
@@ -211,7 +219,21 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await inventory.getByText('Read-only:', { exact: true }).waitFor();
     const findings = inventory.getByRole('list', { name: 'Inventory findings', exact: true });
     expect(await findings.count()).toBe(0);
+    const listWorktrees = () => execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: project, encoding: 'utf8' });
+    const registrationsBeforeScan = listWorktrees();
+    const staleRegistration = registrationsBeforeScan.split('\0\0').map(record => record.split('\0'))
+      .find(([entry]) => entry.startsWith('worktree ') && path.normalize(entry.slice('worktree '.length)) === stale);
+    expect(staleRegistration, 'Git must mark the fixture registration at this path as prunable').toEqual(expect.arrayContaining([
+      `branch refs/heads/${staleBranch}`, expect.stringMatching(/^prunable(?: |$)/)
+    ]));
     await scan.click();
+    const staleRow = findings.getByRole('listitem').filter({ has: win.getByText(stale, { exact: true }) });
+    await staleRow.getByText('Stale registration', { exact: true }).waitFor();
+    await staleRow.getByText('Folder on disk: present', { exact: true }).waitFor();
+    await staleRow.getByText('Git marks this registration as stale.', { exact: true }).waitFor();
+    expect(listWorktrees()).toBe(registrationsBeforeScan);
+    expect(await fs.readFile(savedBacklink)).toEqual(backlinkBytes);
+    git(project, 'show-ref', '--verify', `refs/heads/${staleBranch}`);
     const folderRow = findings.getByRole('listitem').filter({ has: win.getByText('Unregistered folder', { exact: true }) });
     await folderRow.getByText('Unregistered folder', { exact: true }).waitFor();
     await folderRow.getByText(stranded, { exact: true }).waitFor();

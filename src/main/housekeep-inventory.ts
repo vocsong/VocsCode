@@ -84,7 +84,9 @@ async function readPlainDirectory(location: string): Promise<FolderPresence> {
   try {
     const stat = await fs.lstat(location);
     if (!stat.isDirectory() || stat.isSymbolicLink()) return 'unverified';
-    return key(await fs.realpath(location)) === key(location) ? 'directory' : 'unverified';
+    // If it disappears between probes, we observed a changing path, not reliable absence.
+    const resolved = await fs.realpath(location).catch(() => undefined);
+    return resolved && key(resolved) === key(location) ? 'directory' : 'unverified';
   } catch (cause) {
     return isMissing(cause) ? 'absent' : 'unverified';
   }
@@ -118,26 +120,30 @@ export async function scanHousekeepInventory(folders: readonly string[], session
     if (result.rows.length < MAX_ROWS) result.rows.push(row);
     else result.limited = true;
   };
-  if (sessions.length > MAX_SESSIONS) result.limited = true;
+  const sessionsLimited = sessions.length > MAX_SESSIONS;
+  if (sessionsLimited) result.limited = true;
   const claims = sessions.slice(0, MAX_SESSIONS).map((session): SessionClaim => ({
     title: session.title, archived: session.archived === true, cwd: session.cwd,
     branch: session.worktreeBranch, project: session.config.projectRoot
   }));
   const projects = [...new Map([...folders, ...claims.map(claim => claim.project)]
     .filter(absolute).map(project => [key(project), project])).values()];
-  if (projects.length > MAX_PROJECTS) result.limited = true;
+  const projectsLimited = projects.length > MAX_PROJECTS;
+  if (projectsLimited) result.limited = true;
+  let branchLinksIncomplete = sessionsLimited || projectsLimited || claims.some(claim => claim.branch && !absolute(claim.project));
 
   const discovered = await mapBatched(projects.slice(0, MAX_PROJECTS), async project => {
-    if (!mayContinue()) return null;
+    if (!mayContinue()) { branchLinksIncomplete = true; return null; }
     try {
       const cwd = await fs.realpath(project);
-      if (!mayContinue()) return null;
+      if (!mayContinue()) { branchLinksIncomplete = true; return null; }
       const git = await readGit(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
       if (git.code === 128 && !git.timedOut && !git.truncated && git.stderr.startsWith('fatal: not a git repository')) return null;
       const common = git.stdout.replace(/\r?\n$/, '');
       if (git.code !== 0 || git.timedOut || git.truncated || git.stderr || !absolute(common)) throw new Error('Missing Git root');
       return { project, cwd, common: key(await fs.realpath(common)) };
     } catch {
+      branchLinksIncomplete = true;
       warn(`Could not check project: ${project}`);
       return null;
     }
@@ -154,13 +160,14 @@ export async function scanHousekeepInventory(folders: readonly string[], session
 
   // Match checkout paths (including subdirectories and live aliases), not just branch names.
   const claimPaths = [...new Set(claims.map(claim => claim.cwd).filter(absolute))];
-  let missedAlias = false;
+  let missedAlias = claims.some(claim => !absolute(claim.cwd));
   const canonicalPaths = new Map(await mapBatched(claimPaths, async cwd => {
     if (!mayContinue()) return [cwd, cwd] as const;
     const resolved = await fs.realpath(cwd).catch(cause => { if (!isMissing(cause)) missedAlias = true; return cwd; });
     return [cwd, resolved] as const;
   }));
   if (missedAlias) warn('Some session paths could not be resolved; their recorded paths are shown as evidence only.');
+  const pathLinksIncomplete = sessionsLimited || missedAlias;
   const claimsByPath = new Map<string, Set<SessionClaim>>();
   for (const claim of claims) {
     if (!absolute(claim.cwd)) continue;
@@ -207,8 +214,10 @@ export async function scanHousekeepInventory(folders: readonly string[], session
     for (const checkoutRoot of knownRoots) {
       if (!mayContinue()) break;
       if (await readPlainDirectory(checkoutRoot) !== 'directory') {
+        uncertain.add(key(checkoutRoot));
         warn(`Project checkout is not an accessible, direct directory: ${checkoutRoot}`);
       } else {
+        present.add(key(checkoutRoot));
         for (const name of WORKTREE_CONTAINERS) {
           if (!mayContinue()) break;
           const parent = path.join(checkoutRoot, name);
@@ -235,7 +244,8 @@ export async function scanHousekeepInventory(folders: readonly string[], session
               if (state === 'unverified') uncertain.add(key(location));
               if (registered.has(key(location))) continue;
               const holdingStagedCheckout = name === '.vocs-code' && entry.name.startsWith('.housekeep-') && linked.some(wt => inDirectory(location, wt.location));
-              add({ projectRoot, location, kind: state === 'unverified' || holdingStagedCheckout ? 'unverified-path' : 'unregistered-folder', sessions: describeSessions(sessionsAt(location)) });
+              add({ projectRoot, location, kind: state === 'unverified' || holdingStagedCheckout ? 'unverified-path' : 'unregistered-folder',
+                sessions: describeSessions(sessionsAt(location)), ...(pathLinksIncomplete ? { sessionLinksIncomplete: true } : {}) });
             }
             if (complete) scanned.add(key(container));
           } catch { warn(`Could not finish reading worktree folders in: ${container}`); }
@@ -246,14 +256,21 @@ export async function scanHousekeepInventory(folders: readonly string[], session
     for (const registration of linked) {
       if (!mayContinue()) break;
       const { location, branch, locked, prunable } = registration;
-      const refs = sessionsAt(location);
-      const matched = [...new Set([...refs, ...(branch ? claimsByBranch.get(branch) ?? [] : [])])];
+      const refs = claimsByPath.get(key(location));
+      const pathMatches = refs ? [...refs] : [];
       const parent = key(path.dirname(location));
-      const kind = uncertain.has(key(location)) || uncheckedContainers.has(parent) ? 'unverified-path'
-        : (prunable || scanned.has(parent) && !present.has(key(location))) ? 'stale-registration'
-        : matched.some(claim => !claim.archived) ? undefined
-        : matched.length ? 'archived-worktree' : 'unlinked-worktree';
-      if (kind) add({ projectRoot, location, kind, branch, ...(locked ? { locked } : {}), sessions: describeSessions(matched) });
+      const pathUnverified = uncertain.has(key(location)) || uncheckedContainers.has(parent);
+      const diskState = pathUnverified ? 'unknown' : present.has(key(location)) ? 'present' : scanned.has(parent) ? 'missing' : 'unknown';
+      const kind = prunable || diskState === 'missing' ? 'stale-registration'
+        : pathUnverified ? 'unverified-path'
+        : pathMatches.some(claim => !claim.archived) ? undefined
+        : pathMatches.length ? 'archived-worktree' : 'unlinked-worktree';
+      if (!kind) continue;
+      const branchOnlyMatches = branch ? (claimsByBranch.get(branch) ?? []).filter(claim => !refs?.has(claim)) : [];
+      add({ projectRoot, location, kind, branch, diskState,
+        ...(locked ? { locked } : {}), ...(prunable ? { gitMarksStale: true } : {}), sessions: describeSessions(pathMatches),
+        ...(branchOnlyMatches.length ? { branchSessions: describeSessions(branchOnlyMatches) } : {}),
+        ...(pathLinksIncomplete ? { sessionLinksIncomplete: true } : {}) });
     }
 
     if (!mayContinue()) break;
@@ -271,7 +288,8 @@ export async function scanHousekeepInventory(folders: readonly string[], session
         // Generic feat/fix/custom prefixes aren't evidence. An exact recorded branch or the
         // app's current/legacy naming convention is a hint, never proof of ownership or merge.
         if (!matched.length && !APP_BRANCH_PREFIXES.some(prefix => branch.startsWith(`${prefix}/`))) continue;
-        add({ projectRoot, location: branch, kind: matched.length ? 'retained-branch' : 'unlinked-branch', sessions: describeSessions(matched) });
+        add({ projectRoot, location: branch, kind: matched.length ? 'retained-branch' : 'unlinked-branch', sessions: describeSessions(matched),
+          ...(branchLinksIncomplete ? { sessionLinksIncomplete: true } : {}) });
       }
     } catch { warn(`Could not read all local branches for: ${projectRoot}`); }
   }

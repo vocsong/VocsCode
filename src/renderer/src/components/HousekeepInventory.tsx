@@ -5,13 +5,16 @@ import { Badge, Button } from './ui';
 
 const FINDINGS = {
   'unregistered-folder': { label: 'Unregistered folder', reason: 'Git does not list this folder as a worktree.' },
-  'stale-registration': { label: 'Stale registration', reason: 'Git reports a stale registration, or the registered folder was not found.' },
-  'archived-worktree': { label: 'Archived session worktree', reason: 'This worktree or its branch is linked to an archived session.' },
-  'unlinked-worktree': { label: 'Unlinked worktree', reason: 'Git lists this worktree, but no session link was found.' },
+  'stale-registration': { label: 'Stale registration', reason: 'Git still lists this worktree.' },
+  'archived-worktree': { label: 'Archived session worktree', reason: 'An archived session records a path in this worktree.' },
+  'unlinked-worktree': { label: 'Unlinked worktree', reason: 'No matching checkout path was found in the session records.' },
   'unverified-path': { label: 'Unverified path', reason: 'The scan could not verify this path.' },
   'retained-branch': { label: 'Retained branch', reason: 'This local branch is linked to an archived session.' },
   'unlinked-branch': { label: 'Unlinked branch', reason: 'No session link was found for this local branch.' }
 } satisfies Record<HousekeepInventoryRow['kind'], { label: string; reason: string }>;
+
+const DISK_STATE = { present: 'present', missing: 'not found', unknown: 'not verified' } as const;
+const sessionNames = (sessions: HousekeepInventoryRow['sessions']) => sessions.map(({ title, archived }) => `${title} (${archived ? 'archived' : 'not archived'})`).join('; ');
 
 type ScanState = { step: 'idle' | 'scanning' } | { step: 'error'; message: string } | { step: 'result'; inventory: Inventory };
 
@@ -33,18 +36,23 @@ function InventoryFindings({ rows, warnings, limited }: Inventory) {
     {rows.length > 0 && <ul className="housekeep-list" aria-label="Inventory findings">
       {rows.map((row) => {
         const { label, reason } = FINDINGS[row.kind];
+        const linkUnknown = row.sessionLinksIncomplete && (row.kind === 'unlinked-worktree' || row.kind === 'unlinked-branch');
         return <li className="housekeep-row" key={JSON.stringify([row.projectRoot, row.kind, row.location])}>
           <div className="housekeep-inventory-labels">
-            <Badge>{label}</Badge>
+            <Badge>{linkUnknown ? 'Unverified session links' : label}</Badge>
             {row.locked && <Badge tone="amber">Locked</Badge>}
           </div>
           <strong><code>{row.location}</code></strong>
           <div className="muted small">Repository: <code>{row.projectRoot}</code></div>
           {row.branch && <div className="muted small">Branch: <code>{row.branch}</code></div>}
-          <div>{reason}</div>
+          {!linkUnknown && <div>{reason}</div>}
+          {row.diskState && <div>Folder on disk: {DISK_STATE[row.diskState]}</div>}
+          {row.gitMarksStale && <div>Git marks this registration as stale.</div>}
           {row.sessions.length > 0 && <div className="muted small">
-            Linked {row.sessions.length === 1 ? 'session' : 'sessions'}: {row.sessions.map(({ title, archived }) => `${title} (${archived ? 'archived' : 'not archived'})`).join('; ')}
+            Linked {row.sessions.length === 1 ? 'session' : 'sessions'}: {sessionNames(row.sessions)}
           </div>}
+          {!!row.branchSessions?.length && <div className="muted small">Sessions recording this branch at another path: {sessionNames(row.branchSessions)}</div>}
+          {row.sessionLinksIncomplete && <div className="muted small">Session links could not be fully checked.</div>}
         </li>;
       })}
     </ul>}

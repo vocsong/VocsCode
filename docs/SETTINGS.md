@@ -57,9 +57,11 @@ project folders or sessions, including archived ones. It compares Git registrati
 entries under `.vocs-code/worktrees`, legacy `.vocs-desk/worktrees`, and repo-relative
 `.claude/worktrees` and `.codex/worktrees` when present. It can also show retained local branches
 without a registered checkout when an archived session references them or when they use the
-`vocscode/` or legacy `harness/` naming convention. An unlinked folder or branch isn’t necessarily
-abandoned. The scan never reads checkout contents or scans home directories, never contacts a
-provider or Git remote, and never removes folders, prunes registrations, or deletes branches.
+`vocscode/` or legacy `harness/` naming convention. Git’s stale-registration flag is shown separately
+from whether the folder was found. A session that records the same branch elsewhere isn’t counted
+as a checkout path match. An unlinked folder or branch isn’t necessarily abandoned. The scan never
+reads checkout contents or scans home directories, never contacts a provider or Git remote, and
+never removes folders, prunes registrations, or deletes branches.
 
 - Search finds settings by topic and vocabulary, including controls inside other pages. Enter opens
   the first result; Down moves into results; Escape clears the query even from a focused result and
