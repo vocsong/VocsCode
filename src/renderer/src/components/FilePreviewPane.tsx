@@ -1,5 +1,5 @@
 /** The right-panel file drawer. Opening a file never takes space from the conversation layout. */
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { diffLines } from 'diff';
 import { imageMimeType, type WorkspaceImage } from '../../../shared/image-files';
 import { FILE_PREVIEW_MAX_BYTES } from '../../../shared/ipc';
@@ -12,9 +12,12 @@ import { useStore } from '../store';
 import { SessionTitle } from './SessionTitle';
 import { Button, Icon, Spinner } from './ui';
 
+const FileSourceEditor = lazy(() => import('./FileSourceEditor').then(({ FileSourceEditor }) => ({ default: FileSourceEditor })));
+
 interface Preview {
   path: string;
   content: string;
+  editorRevision: number;
   truncated: boolean;
   readOnly?: boolean;
   binary?: boolean;
@@ -33,7 +36,7 @@ const isMarkdown = (p: string) => /\.(?:md|markdown)$/i.test(p);
 const dirname = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
 const editorText = (content: string) => content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
 
-/** A textarea normalizes newlines. Keep the BOM and preserve the endings of unchanged lines. */
+/** The editor uses LF internally. Keep the BOM and preserve the endings of unchanged lines. */
 function restoreFileText(text: string, original: string): string {
   const bom = original.startsWith('\uFEFF') ? '\uFEFF' : '';
   const endings = original.match(/\r\n|\r|\n/g) ?? [];
@@ -79,12 +82,11 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
   const toast = useStore((s) => s.toast);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [mdView, setMdView] = useState(false);
-  const [scrollLine, setScrollLine] = useState<number | null>(null);
+  const [scrollLine, setScrollLine] = useState<{ line: number } | null>(null);
   const [matches, setMatches] = useState<{ reference: string; paths: string[]; line?: number } | null>(null);
   const [resolving, setResolving] = useState(false);
   const [reading, setReading] = useState(false);
   const mdBody = useRef<HTMLDivElement>(null);
-  const editor = useRef<HTMLTextAreaElement>(null);
   const shown = useRef<Preview | null>(null);
   shown.current = preview;
   const readSeq = useRef(0);
@@ -118,9 +120,13 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
         : await invoke('fs:read', { sessionId, path: rel, maxBytes: FILE_PREVIEW_MAX_BYTES, ...scope });
       if (!current(seq)) return;
       if (discard) updateDraft(key);
-      setPreview({ path, ...r, line });
+      // Don't carry undo history across files, an explicit discard, or a changed disk baseline.
+      setPreview((prior) => ({
+        path, ...r, line,
+        editorRevision: discard || prior?.path !== path || prior.content !== r.content ? seq : prior.editorRevision,
+      }));
       setMdView(false);
-      setScrollLine(line && line > 0 ? line : null);
+      setScrollLine(line && line > 0 ? { line } : null);
     } catch (err) {
       if (current(seq)) fail(invokeErrorMessage(err));
     } finally {
@@ -173,37 +179,29 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
   const text = draft?.text ?? (preview ? editorText(preview.content) : '');
   const dirty = !!draft;
 
-  const save = () => {
-    if (!preview || !editable || !draft || blocked || pendingWrites.has(pathKey)) return;
-    updateDraft(pathKey, { ...draft, saving: true });
+  const draftFor = (value: string, original: string): Draft | undefined =>
+    value === editorText(original) ? undefined : { original, text: value };
+
+  const save = (value?: string) => {
+    if (!preview || !editable || blocked || draft?.saving || pendingWrites.has(pathKey)) return;
+    const next = value === undefined ? draft : draftFor(value, draft?.original ?? preview.content);
+    if (!next) return;
+    updateDraft(pathKey, { ...next, saving: true });
     const write = async () => {
       try {
-        const content = restoreFileText(draft.text, draft.original);
-        await invoke('fs:writeText', { sessionId, path: preview.path, expectedContent: draft.original, content, ...scope });
+        const content = restoreFileText(next.text, next.original);
+        await invoke('fs:writeText', { sessionId, path: preview.path, expectedContent: next.original, content, ...scope });
         if (mounted.current) setPreview((current) => current?.path === preview.path ? { ...current, content } : current);
         updateDraft(pathKey);
         useStore.setState((s) => ({ changesVersion: s.changesVersion + 1 }));
         toast(`Saved ${preview.path}`, 'success');
       } catch (error) {
-        updateDraft(pathKey, draft);
+        updateDraft(pathKey, next);
         toast(invokeErrorMessage(error), 'error');
       }
     };
     pendingWrites.set(pathKey, write().finally(() => pendingWrites.delete(pathKey)).then(() => undefined));
   };
-
-  // Position the caret and scroll the requested line into view in the unwrapped source editor.
-  useEffect(() => {
-    const field = editor.current;
-    if (scrollLine === null || !field) return;
-    const lines = field.value.split('\n');
-    const line = Math.min(scrollLine, lines.length);
-    const offset = lines.slice(0, line - 1).reduce((sum, row) => sum + row.length + 1, 0);
-    field.setSelectionRange(offset, offset);
-    const lineHeight = Number.parseFloat(getComputedStyle(field).lineHeight) || 20;
-    field.scrollTop = Math.max(0, (line - 1) * lineHeight - field.clientHeight / 2);
-    setScrollLine(null);
-  }, [scrollLine, preview, mdView]);
 
   const isMd = isText && isMarkdown(preview.path);
   const mdPath = preview?.path ?? '';
@@ -241,7 +239,7 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
         <span className="mono file-preview-path" title={title}>{title}</span>
         <SessionTitle session={session} className="muted small file-preview-session" />
         <span className="spacer" />
-        {editable && <Button size="sm" variant={dirty ? 'primary' : 'ghost'} disabled={!dirty || draft.saving || blocked} onClick={save} title={`Save file (${modKey}+S)`}>{draft?.saving ? 'Saving…' : 'Save'}</Button>}
+        {editable && <Button size="sm" variant={dirty ? 'primary' : 'ghost'} disabled={!dirty || draft.saving || blocked} onClick={() => save()} title={`Save file (${modKey}+S)`}>{draft?.saving ? 'Saving…' : 'Save'}</Button>}
         {isMd && (
           <Button size="sm" variant="ghost" icon={mdView ? 'file' : 'eye'} onClick={() => setMdView((v) => !v)} title={mdView ? 'Show source' : 'Show markdown preview'} aria-label={mdView ? 'Show source' : 'Show markdown preview'} />
         )}
@@ -262,7 +260,7 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
           <Button size="sm" variant="ghost" onClick={cancel}>Cancel</Button>
         </div>
       ) : matches ? (
-        <section className="file-match-list" aria-label="Choose a file">
+        <section className={`file-match-list${preview ? ' file-match-list-with-preview' : ''}`} aria-label="Choose a file">
           <div className="pad">
             <strong>Choose a file</strong>
             <p className="muted small">More than one file matches <code>{matches.reference}</code>. Select the full path to open.</p>
@@ -280,7 +278,9 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
         </section>
       ) : !preview ? (
         <div className="pad row gap8" role="status"><Spinner /> Opening {target.path}…</div>
-      ) : (
+      ) : null}
+      {/* Keep the previous editor's viewport and history through failed or cancelled lookups. */}
+      {preview && (
         <div className="file-preview">
           {preview.image !== undefined ? (
             <div className="file-image">
@@ -302,23 +302,21 @@ function ScopedPreview({ target, session, root, scopeKey, drafts, updateDraft, p
           ) : isMd && mdView ? (
             <div ref={mdBody} className="md file-md" dangerouslySetInnerHTML={{ __html: mdHtml }} />
           ) : (
-            <textarea
-              key={preview.path}
-              ref={editor}
-              className="mono file-editor"
-              value={text}
-              aria-label="File contents"
-              autoCapitalize="off"
-              spellCheck={false}
-              wrap="off"
-              readOnly={!editable || draft?.saving || blocked}
-              onChange={(event) => {
-                if (!editable || draft?.saving || blocked) return;
-                const value = event.target.value;
-                const original = draft?.original ?? preview.content;
-                updateDraft(pathKey, value === editorText(original) ? undefined : { original, text: value });
-              }}
-            />
+            <Suspense fallback={<div className="pad row gap8" role="status"><Spinner /> Loading editor…</div>}>
+              <FileSourceEditor
+                key={preview.editorRevision}
+                path={preview.path}
+                text={text}
+                readOnly={!editable || !!draft?.saving || blocked}
+                scrollLine={scrollLine}
+                onLineRevealed={() => setScrollLine((current) => current === scrollLine ? null : current)}
+                onChange={(value) => {
+                  if (!editable || draft?.saving || blocked || pendingWrites.has(pathKey)) return;
+                  updateDraft(pathKey, draftFor(value, draft?.original ?? preview.content));
+                }}
+                onSave={save}
+              />
+            </Suspense>
           )}
           {isText && <div className="file-preview-status muted small">
             <span role="status">{reading ? 'Loading…' : preview.truncated ? 'Truncated preview · read-only' : !editable ? 'Read-only' : draft?.saving ? 'Saving…' : dirty ? 'Unsaved changes' : ''}</span>
