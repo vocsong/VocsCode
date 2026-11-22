@@ -51,7 +51,7 @@ The desktop app checks GitHub Releases at startup and every hour while open. It 
 git clone -b master https://github.com/vocsong/VocsCode.git && cd VocsCode && npm run setup
 ```
 
-That installs everything (including dev dependencies, even if your environment sets `NODE_ENV=production`) and launches the app in dev mode. `npm run update` later pulls, rebuilds, and relaunches.
+That installs everything (including dev dependencies, even if your environment sets `NODE_ENV=production`) and launches the app in dev mode. `npm run update` later pulls, rebuilds, and relaunches, downloading the Electron runtime if it is missing.
 
 ## What you get
 
