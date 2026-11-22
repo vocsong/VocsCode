@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, FileAttachment, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
 import { formatDoctorReport } from '../../../shared/doctor';
 import { HARNESS_BY_ID, SLASH_COMMANDS, effortOptionsFor } from '../../../shared/harness-meta';
+import { MAX_HOUSEKEEP_RECENT_DAYS } from '../../../shared/housekeep';
 import { modelName, parseTypedModel } from '../../../shared/model-names';
 import { canInvoke, invoke } from '../api';
 import { FileAttachmentChips, readAttachments } from '../attachments';
@@ -204,12 +205,16 @@ function SessionComposer({ session, attachRef }: { session: SessionMeta; attachR
     if (typedCommand === 'housekeep') {
       if (images.length || files.length) { toast('Housekeep cannot include attachments.', 'error'); return; }
       const arg = t.slice('/housekeep'.length).trim().toLowerCase();
-      if (arg && arg !== 'sessions' && arg !== 'settings') { toast('Usage: /housekeep [sessions|settings]', 'info'); return; }
+      const days = /^\d+$/.test(arg) ? Number(arg) : undefined;
+      if (arg && arg !== 'sessions' && arg !== 'settings' && (days === undefined || days > MAX_HOUSEKEEP_RECENT_DAYS)) {
+        toast(`Usage: /housekeep [days|sessions|settings]. Enter a whole number from 0 to ${MAX_HOUSEKEEP_RECENT_DAYS} for a one-time override.`, 'info');
+        return;
+      }
       if (!canHousekeepHere()) { toast('Housekeep is available in the desktop app.', 'info'); return; }
       clearDraft();
       setDraft(session.id, '');
       if (arg === 'settings') openSettings('housekeep');
-      else openHousekeep();
+      else openHousekeep(days);
       return;
     }
     // Mission owns its exact token before native /goal or harness command forwarding.

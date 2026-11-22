@@ -222,7 +222,7 @@ export function SkillsView() {
                 <span className="skills-preview-name">housekeep</span>
                 <Badge tone="purple">Built-in</Badge>
                 <span className="spacer" />
-                <Button size="sm" onClick={openHousekeep}>Run /housekeep</Button>
+                <Button size="sm" onClick={() => openHousekeep()}>Run /housekeep</Button>
               </div>
               <div className="md file-md skills-md" dangerouslySetInnerHTML={{ __html: builtinHtml }} />
             </>

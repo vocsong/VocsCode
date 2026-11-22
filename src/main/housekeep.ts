@@ -63,6 +63,7 @@ interface Candidate {
 }
 interface Plan {
   preview: HousekeepPreview;
+  recentDaysOverride?: number;
   createdAt: number;
   modelIdentity?: string;
   candidates: Map<string, Candidate>;
@@ -143,7 +144,10 @@ export class HousekeepService {
   constructor(private readonly deps: HousekeepDeps) {}
 
   private now(): number { return this.deps.now?.() ?? Date.now(); }
-  private days(): number { return normalizeHousekeepRecentDays(this.deps.settings().housekeepRecentDays); }
+  private days(recentDaysOverride?: number): number {
+    // An explicit override belongs to this preview. Ordinary reviews still recheck the live setting.
+    return recentDaysOverride ?? normalizeHousekeepRecentDays(this.deps.settings().housekeepRecentDays);
+  }
 
   private protection(session: SessionMeta, excluded: Set<string>, days: number, checkRuntime: () => boolean): string | null {
     if (session.archived) return 'Already archived.';
@@ -193,13 +197,13 @@ export class HousekeepService {
     if (this.deps.savingRecentDays?.()) throw new Error('Wait for the new Housekeep setting to finish saving.');
   }
 
-  preview(protectedIds: string[]): Promise<HousekeepPreview> {
+  preview(protectedIds: string[], recentDaysOverride?: number): Promise<HousekeepPreview> {
     return this.exclusive(async () => {
       this.plan = undefined;
       const reviewer = this.deps.reviewer();
       const plan: Plan = {
-        preview: { id: randomUUID(), recentDays: this.days(), reviewModel: reviewer?.label ?? null, rows: [] },
-        createdAt: this.now(), modelIdentity: reviewer?.identity, candidates: new Map(), protectedIds: new Set(protectedIds)
+        preview: { id: randomUUID(), recentDays: this.days(recentDaysOverride), reviewModel: reviewer?.label ?? null, rows: [] },
+        recentDaysOverride, createdAt: this.now(), modelIdentity: reviewer?.identity, candidates: new Map(), protectedIds: new Set(protectedIds)
       };
       const sessions = this.deps.sessions.list();
       const runningOwners = await this.deps.runningOwners?.();
@@ -222,9 +226,10 @@ export class HousekeepService {
           const evidence = housekeepEvidence(await this.deps.sessions.housekeepTranscript(id), session);
           if (typeof evidence === 'string') { row.reason = evidence; continue; }
           row.activityAt = Math.max(row.activityAt ?? 0, evidence.activityAt);
-          if (housekeepIsRecent(row.activityAt, this.now(), this.days())) { row.reason = 'Recent transcript activity.'; continue; }
+          const days = this.days(plan.recentDaysOverride);
+          if (housekeepIsRecent(row.activityAt, this.now(), days)) { row.reason = 'Recent transcript activity.'; continue; }
           const current = this.deps.sessions.get(id);
-          if (!current || fingerprint(current) !== signature || this.protection(current, plan.protectedIds, this.days(), () => this.deps.sessions.canHousekeep(id))) {
+          if (!current || fingerprint(current) !== signature || this.protection(current, plan.protectedIds, days, () => this.deps.sessions.canHousekeep(id))) {
             row.reason = 'Session changed during the scan.'; continue;
           }
           row.worktree = tree.kind === 'clean' ? 'remove' : tree.kind;
@@ -254,8 +259,9 @@ export class HousekeepService {
         const batch = rows.slice(start, start + REVIEW_BATCH).filter(row => {
           const session = this.deps.sessions.get(row.sessionId);
           const candidate = plan.candidates.get(row.sessionId);
-          if (candidate && session && !housekeepIsRecent(candidate.transcriptActivityAt, this.now(), this.days()) && fingerprint(session) === candidate.fingerprint &&
-              !this.protection(session, plan.protectedIds, this.days(), () => this.deps.sessions.canHousekeep(session.id))) return true;
+          const days = this.days(plan.recentDaysOverride);
+          if (candidate && session && !housekeepIsRecent(candidate.transcriptActivityAt, this.now(), days) && fingerprint(session) === candidate.fingerprint &&
+              !this.protection(session, plan.protectedIds, days, () => this.deps.sessions.canHousekeep(session.id))) return true;
           row.verdict = 'protected'; row.reason = 'Session changed after the preview.'; delete row.evidence;
           plan.candidates.delete(row.sessionId);
           return false;
@@ -297,10 +303,11 @@ export class HousekeepService {
             const current = (transcriptActivityAt = candidate.transcriptActivityAt) => {
               assertIdle();
               this.assertSettingsSettled();
-              if (housekeepIsRecent(transcriptActivityAt, this.now(), this.days())) throw new Error('Recent transcript activity.');
+              const days = this.days(plan.recentDaysOverride);
+              if (housekeepIsRecent(transcriptActivityAt, this.now(), days)) throw new Error('Recent transcript activity.');
               const session = this.deps.sessions.get(sessionId);
               if (!session) throw new Error('Session no longer exists.');
-              const reason = this.protection(session, excluded, this.days(), () => true);
+              const reason = this.protection(session, excluded, days, () => true);
               if (reason) throw new Error(reason);
               if (fingerprint(session) !== candidate.fingerprint) throw new Error('Session changed after the preview.');
               return session;
