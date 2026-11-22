@@ -131,6 +131,10 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     const worktrees = path.join(project, '.vocs-code', 'worktrees');
     const clean = path.join(worktrees, 'clean');
     const dirty = path.join(worktrees, 'dirty');
+    const stranded = path.join(worktrees, 'stranded');
+    const strandedFile = path.join(stranded, 'notes.txt');
+    const strandedContents = 'Keep this stranded data.\n';
+    const retainedBranch = 'vocscode/stranded';
     onTestFinished(async () => {
       await app?.close().catch(() => undefined);
       app = null;
@@ -147,6 +151,11 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     git(project, 'worktree', 'add', '-qb', 'vocscode/report', clean);
     git(project, 'worktree', 'add', '-qb', 'vocscode/draft', dirty);
     await fs.writeFile(path.join(dirty, 'draft.txt'), 'Keep this local file.\n');
+    // Leave a real local ref and an ignored directory, but no Git checkout for that branch.
+    git(project, 'branch', retainedBranch);
+    await fs.mkdir(stranded);
+    await fs.appendFile(path.join(project, '.git', 'info', 'exclude'), '\n/.vocs-code/worktrees/stranded/\n');
+    await fs.writeFile(strandedFile, strandedContents);
     await fs.mkdir(userData, { recursive: true });
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
     const old = T - 9 * 86_400_000;
@@ -154,12 +163,14 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
       id, title, cwd, worktreeBranch, status: 'idle', config: { projectRoot: project, harness: 'native', permissionMode: 'ask' },
       createdAt: ts, updatedAt: ts + 3, lastUserMessageAt: ts, usage: usage(), harnessRef: {}
     });
+    const archived = { ...make('s_housekeep_archived', 'Previously archived report', old, stranded, retainedBranch), archived: true };
     const rows = [
       make('s_housekeep_current', 'Current session', T),
       make('s_housekeep_recent', 'Recent report', T - 86_400_000),
       make('s_housekeep_five_days', 'Five-day report', T - 5 * 86_400_000),
       make('s_housekeep_old', 'Old finished report', old, clean, 'vocscode/report'),
-      make('s_housekeep_dirty', 'Old local draft', old, dirty, 'vocscode/draft')
+      make('s_housekeep_dirty', 'Old local draft', old, dirty, 'vocscode/draft'),
+      archived
     ];
     await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(rows));
     for (const row of rows) {
@@ -191,6 +202,33 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     await input.pressSequentially('sessions');
     await input.press('Enter');
     await dialog.getByText(/Activity within the last 7 days/).waitFor();
+
+    const inventoryName = 'Stranded worktrees and branches';
+    const inventory = dialog.getByRole('region', { name: inventoryName, exact: true });
+    await inventory.getByRole('heading', { name: inventoryName, exact: true }).waitFor();
+    const scan = inventory.getByRole('button', { name: 'Scan worktrees and branches', exact: true });
+    expect(await scan.isEnabled()).toBe(true);
+    await inventory.getByText('Read-only:', { exact: true }).waitFor();
+    const findings = inventory.getByRole('list', { name: 'Inventory findings', exact: true });
+    expect(await findings.count()).toBe(0);
+    await scan.click();
+    const folderRow = findings.getByRole('listitem').filter({ has: win.getByText('Unregistered folder', { exact: true }) });
+    await folderRow.getByText('Unregistered folder', { exact: true }).waitFor();
+    await folderRow.getByText(stranded, { exact: true }).waitFor();
+    const branchRow = findings.getByRole('listitem').filter({ has: win.getByText(retainedBranch, { exact: true }) });
+    await branchRow.getByText('Retained branch', { exact: true }).waitFor();
+    await branchRow.getByText(`Linked session: ${archived.title} (archived)`, { exact: true }).waitFor();
+    expect(await inventory.getByRole('checkbox', { includeHidden: true }).count()).toBe(0);
+
+    const archivedIds = async () => (await win.evaluate(() => window.harness.invoke('sessions:list', undefined)))
+      .filter(row => row.archived).map(row => row.id).sort();
+    const expectStrandedIntact = async () => {
+      expect(await fs.readFile(strandedFile, 'utf8')).toBe(strandedContents);
+      git(project, 'show-ref', '--verify', `refs/heads/${retainedBranch}`);
+    };
+    expect(await archivedIds()).toEqual([archived.id]);
+    await expectStrandedIntact();
+
     const fiveDayRow = dialog.getByRole('listitem').filter({ has: win.getByText('Five-day report', { exact: true }) });
     const fiveDayProtected = fiveDayRow.getByText('Protected', { exact: true });
     await fiveDayProtected.waitFor();
@@ -212,8 +250,8 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     expect(await fs.readFile(path.join(trashFixture, 'README.md'))).toEqual(originalReadme);
     expect(await fs.readFile(path.join(dirty, 'draft.txt'), 'utf8')).toBe('Keep this local file.\n');
     git(project, 'show-ref', '--verify', 'refs/heads/vocscode/report');
-    const saved = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
-    expect(saved.filter(row => row.archived).map(row => row.id)).toEqual(['s_housekeep_old']);
+    expect(await archivedIds()).toEqual([archived.id, 's_housekeep_old']);
+    await expectStrandedIntact();
     const current = await fs.readFile(path.join(userData, 'sessions', 's_housekeep_current', 'transcript.jsonl'), 'utf8');
     expect(current).not.toContain('/housekeep');
     expect(await fs.readFile(path.join(userData, 'sessions', 's_housekeep_old', 'transcript.jsonl'), 'utf8')).toContain('Delivered and verified.');
@@ -286,6 +324,14 @@ describe.runIf(enabled)('electron e2e: session view layout', () => {
     expect(after.defaultHarness).toBe(before.defaultHarness);
     expect(after.defaultModelByHarness).toEqual(before.defaultModelByHarness);
     expect(await win.evaluate(() => window.harness.invoke('sessions:list', undefined))).toEqual([]);
+
+    // The read-only inventory is also available when there are no sessions to archive.
+    await win.getByRole('button', { name: 'Skills', exact: true }).click();
+    await win.getByRole('button', { name: 'Run /housekeep', exact: true }).click();
+    const dialog = win.getByRole('dialog', { name: 'Housekeep sessions', exact: true });
+    await dialog.getByText('No sessions to review.', { exact: true }).waitFor();
+    const inventory = dialog.getByRole('region', { name: 'Stranded worktrees and branches', exact: true });
+    expect(await inventory.getByRole('button', { name: 'Scan worktrees and branches', exact: true }).isEnabled()).toBe(true);
   }, 60_000);
 
   it('refreshes the automatic session title after each successful native turn using the utility model', async ({ onTestFinished }) => {

@@ -51,6 +51,16 @@ Sessions with local files, including Git-ignored files, are left alone. Clean wo
 operating system’s Trash (Recycle Bin on Windows), never through permanent deletion. Existing
 branches and transcripts are retained. Housekeep is not available to paired browsers or agents.
 
+In the same dialog, choose **Scan worktrees and branches** under **Stranded worktrees and
+branches**. This is a read-only inventory of repositories known to this profile through saved
+project folders or sessions, including archived ones. It compares Git registrations with direct
+entries under `.vocs-code/worktrees`, legacy `.vocs-desk/worktrees`, and repo-relative
+`.claude/worktrees` and `.codex/worktrees` when present. It can also show retained local branches
+without a registered checkout when an archived session references them or when they use the
+`vocscode/` or legacy `harness/` naming convention. An unlinked folder or branch isn’t necessarily
+abandoned. The scan never reads checkout contents or scans home directories, never contacts a
+provider or Git remote, and never removes folders, prunes registrations, or deletes branches.
+
 - Search finds settings by topic and vocabulary, including controls inside other pages. Enter opens
   the first result; Down moves into results; Escape clears the query even from a focused result and
   returns focus to search. Each new query starts at the top of the result list. Ctrl/Cmd+F focuses

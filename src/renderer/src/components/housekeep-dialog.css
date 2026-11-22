@@ -30,6 +30,35 @@
   display: block;
 }
 
+.housekeep-inventory {
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+
+.housekeep-inventory > h3 {
+  margin: 0 0 4px;
+}
+
+.housekeep-inventory-actions,
+.housekeep-inventory-labels {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.housekeep-inventory > .callout {
+  margin: 8px 0 0;
+}
+
+.housekeep-inventory-warnings {
+  margin: 4px 0 0;
+  padding-inline-start: 20px;
+}
+
 .housekeep-list {
   list-style: none;
   padding: 0;
