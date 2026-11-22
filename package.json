@@ -23,7 +23,7 @@
     "build": "electron-vite build && npm run build:web",
     "build:web": "vite build --config vite.config.web.ts",
     "preview": "electron-vite preview",
-    "start": "electron-vite preview",
+    "start": "node -e \"if (!process.env.ELECTRON_EXEC_PATH) require('electron')\" && electron-vite preview",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",

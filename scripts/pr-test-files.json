@@ -3,6 +3,7 @@
   "tests/ci-workflow.test.ts",
   "tests/release-artifacts.test.ts",
   "tests/release-publish.test.ts",
+  "tests/update-script.test.ts",
   "tests/endpoint-policy.test.ts",
   "tests/endpoint-transport.test.ts",
   "tests/endpoint-adapters.test.ts",
